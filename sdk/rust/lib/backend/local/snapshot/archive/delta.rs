@@ -552,7 +552,7 @@ pub(super) async fn selection(
     let required = if let Some(base) = &opts.since {
         // Base archives carry buffered decoder/verification futures; keep them off the caller's
         // stack, including when this planner is nested inside a direct restore or SDK call.
-        let base = Box::pin(open_base(local, base)).await?;
+        let base = Box::pin(open_base(local, base, None)).await?;
         let baseline = physical_layers(
             base.snapshot.manifest(),
             base.snapshot.path(),
@@ -772,7 +772,7 @@ pub(super) async fn resolve(
         )
     })?;
     let fs_state_limit = local.config().fs_state_limit();
-    let base = Box::pin(open_base(local, base)).await?;
+    let base = Box::pin(open_base(local, base, None)).await?;
     let required_disks = dependencies
         .owned
         .iter()
@@ -1134,12 +1134,16 @@ fn physical_layers(
 pub(super) async fn open_base(
     local: &LocalBackend,
     input: &str,
+    mut budget: Option<&mut ImportBudget<'_>>,
 ) -> MicrosandboxResult<BaseSnapshot> {
     let path = Path::new(input);
     // Admission has already anchored archive filenames. A remaining bare selector
     // belongs to the snapshot store and must not be reclassified after a cwd change.
     if !store::looks_like_path(input) || !path.is_file() {
         let snapshot = store::open_snapshot_leased(local, input).await?;
+        if let Some(budget) = &budget {
+            budget.validate_manifest(snapshot.manifest())?;
+        }
         if matches!(snapshot.manifest().state, SnapshotState::File(_)) {
             Box::pin(snapshot.verify(local.config().fs_state_limit())).await?;
         }
@@ -1163,11 +1167,35 @@ pub(super) async fn open_base(
             ZstdDecoder::new(reader),
             &snapshots_dir,
             &cache_dir,
+            budget.as_deref_mut(),
         ))
         .await?
     } else {
-        Box::pin(unpack_archive(reader, &snapshots_dir, &cache_dir)).await?
+        Box::pin(unpack_archive(
+            reader,
+            &snapshots_dir,
+            &cache_dir,
+            budget.as_deref_mut(),
+        ))
+        .await?
     };
+    if let Some(budget) = &budget {
+        let complete = unpacked.inventory.as_ref().is_none_or(|inventory| {
+            inventory.completeness == "boot-complete"
+                && inventory.members.len() == unpacked.manifest_dirs.len()
+                && inventory.entries.iter().all(|entry| entry.included)
+        });
+        budget.validate_archive(unpacked.manifest_dirs.len(), complete)?;
+        if unpacked.inventory.is_some() {
+            for directory in &unpacked.manifest_dirs {
+                let manifest = Manifest::from_bytes(
+                    &tokio::fs::read(directory.join(DESCRIPTOR_FILENAME)).await?,
+                )
+                .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+                budget.validate_manifest(&manifest)?;
+            }
+        }
+    }
     if let Some(inventory) = &unpacked.inventory {
         if validate(inventory)?.is_some() {
             return Err(MicrosandboxError::InvalidConfig("the supplied base archive must be standalone; load dependent bases explicitly first".into()));
@@ -1309,7 +1337,7 @@ mod tests {
                 assert_eq!(group_selector, "group");
                 std::env::set_current_dir(&second).unwrap();
                 for selector in [&archive_selector, &group_selector] {
-                    let base = open_base(&local, selector).await.unwrap();
+                    let base = open_base(&local, selector, None).await.unwrap();
                     assert_eq!(base.snapshot.id(), &manifest.snapshot_id);
                 }
                 assert_eq!(

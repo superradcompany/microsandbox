@@ -45,6 +45,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use crate::backend::LocalBackend;
 use crate::backend::local::creation::CreationStorage;
+use crate::snapshot::import_budget::ImportBudget;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 pub use crate::snapshot::{LoadOpts, SaveOpts};
@@ -271,10 +272,17 @@ impl LocalBackend {
                 ZstdDecoder::new(buffered),
                 child_stage,
                 cache_stage.path(),
+                None,
             ))
             .await?
         } else {
-            Box::pin(unpack_archive(buffered, child_stage, cache_stage.path())).await?
+            Box::pin(unpack_archive(
+                buffered,
+                child_stage,
+                cache_stage.path(),
+                None,
+            ))
+            .await?
         };
 
         let unpack_us = unpack_started.elapsed().as_micros();
@@ -1560,7 +1568,7 @@ pub(super) async fn load_snapshot_with_options(
     archive: &Path,
     opts: LoadOpts,
 ) -> MicrosandboxResult<SnapshotHandle> {
-    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts).await?;
+    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts, None).await?;
     Ok(loaded.remove(0))
 }
 
@@ -1570,7 +1578,19 @@ pub(super) async fn load_snapshots(
     archives: &[PathBuf],
     opts: LoadOpts,
 ) -> MicrosandboxResult<Vec<SnapshotHandle>> {
-    batch::load(local, archives, opts).await
+    batch::load(local, archives, opts, None).await
+}
+
+pub(crate) async fn load_snapshot_with_limits(
+    local: &LocalBackend,
+    archive: &Path,
+    opts: LoadOpts,
+    budget: &mut ImportBudget<'_>,
+) -> MicrosandboxResult<SnapshotHandle> {
+    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts, Some(budget)).await?;
+    loaded
+        .pop()
+        .ok_or_else(|| MicrosandboxError::InvalidConfig("import returned no snapshot".into()))
 }
 
 /// Consume a current archive directly into a child sandbox's staging directory.
@@ -2553,6 +2573,7 @@ async fn unpack_archive<R>(
     reader: R,
     snapshots_dir: &Path,
     cache_dir: &Path,
+    mut budget: Option<&mut ImportBudget<'_>>,
 ) -> MicrosandboxResult<UnpackedArchive>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -2563,7 +2584,9 @@ where
     let mut extraction_targets = HashSet::new();
     let mut inventory_path = None;
     while let Some((header, path_in_archive)) = read_entry_header(&mut reader).await? {
-        crate::snapshot::import_budget::charge(&path_in_archive, &header)?;
+        if let Some(budget) = budget.as_mut() {
+            budget.charge(&path_in_archive, &header)?;
+        }
         let entry_type = header.entry_type();
         let components = normal_utf8_components(&path_in_archive)?;
         if entry_type == EntryType::Directory {
@@ -4540,7 +4563,7 @@ pub async fn fuzz_unpack_local_snapshot_archive(data: &[u8]) {
     let Ok(cache) = tempfile::tempdir() else {
         return;
     };
-    let _ = unpack_archive(data, snapshots.path(), cache.path()).await;
+    let _ = unpack_archive(data, snapshots.path(), cache.path(), None).await;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -4562,6 +4585,53 @@ mod tests {
 
     use super::*;
     use crate::Snapshot as PublicSnapshot;
+    use crate::snapshot::ImportLimits;
+    use crate::snapshot::bounded_import::RawDiskImport;
+
+    #[tokio::test]
+    async fn explicit_import_limits_use_the_supplied_policy_and_byte_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let manifest = grouped_archive_manifest(989, None);
+        let artifact = root.path().join("artifact");
+        write_grouped_archive_fixture(&artifact, &manifest);
+        let archive = root.path().join("archive.msb");
+        save_snapshot(
+            &local,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+
+        let policy = RawDiskImport::new(4096).unwrap();
+        let limits = ImportLimits {
+            expanded_bytes: 4095,
+            ..policy.limits()
+        };
+        let _scope = crate::backend::with_backend(local, async {
+            let error =
+                PublicSnapshot::load_with_limits(&archive, LoadOpts::default(), limits, &policy)
+                    .await
+                    .unwrap_err();
+            assert!(error.to_string().contains("expanded byte limit"), "{error}");
+
+            let imported = PublicSnapshot::load_with_limits(
+                &archive,
+                LoadOpts::default(),
+                policy.limits(),
+                &policy,
+            )
+            .await
+            .unwrap();
+            assert_eq!(imported.id(), manifest.snapshot_id.as_str());
+        })
+        .await;
+    }
 
     #[tokio::test]
     async fn bounded_import_limits_expansion_and_keeps_unbounded_import_compatible() {
@@ -4703,10 +4773,7 @@ mod tests {
                 PublicSnapshot::load_bounded(&archive, LoadOpts::default(), 64 * 1024 * 1024)
                     .await
                     .unwrap_err();
-            assert!(
-                error.to_string().contains("aggregate byte budget"),
-                "{error}"
-            );
+            assert!(error.to_string().contains("expanded byte limit"), "{error}");
         })
         .await;
     }

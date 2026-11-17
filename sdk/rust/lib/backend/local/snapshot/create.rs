@@ -19,6 +19,7 @@ use crate::backend::LocalBackend;
 use crate::backend::local::creation;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
+use crate::snapshot::bounded_import::peak_bytes as bounded_import_peak_bytes;
 use crate::{
     MicrosandboxError, MicrosandboxResult, Operation, PublishedSnapshotArtifact,
     SnapshotArtifactKind, SnapshotSourceRecoveryError, UnsupportedReason,
@@ -601,7 +602,7 @@ impl LocalBackend {
         out: &Path,
         maximum_disk_bytes: u64,
     ) -> MicrosandboxResult<SnapshotArchive> {
-        crate::snapshot::import_budget::peak_bytes(maximum_disk_bytes)?;
+        bounded_import_peak_bytes(maximum_disk_bytes)?;
         let out = std::path::absolute(out)?;
         create_snapshot_archive_inner(self, config, &out, true, Some(maximum_disk_bytes)).await
     }

@@ -1,7 +1,8 @@
 //! Local backend: One-pass archive staging and dependency resolution for a local group import.
 
-use super::*;
 use microsandbox_image::snapshot::{Manifest, SnapshotId};
+
+use super::*;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -22,6 +23,7 @@ pub(super) async fn load(
     local: &LocalBackend,
     archives: &[PathBuf],
     opts: LoadOpts,
+    mut budget: Option<&mut ImportBudget<'_>>,
 ) -> MicrosandboxResult<Vec<SnapshotHandle>> {
     if archives.is_empty() {
         return Err(MicrosandboxError::InvalidConfig(
@@ -43,21 +45,16 @@ pub(super) async fn load(
 
     let mut staged = Vec::with_capacity(archives.len());
     for archive in archives {
-        staged.push(unpack(archive, &snapshots_dir, &cache_tmp).await?);
+        staged.push(unpack(archive, &snapshots_dir, &cache_tmp, budget.as_deref_mut()).await?);
     }
-    if crate::snapshot::import_budget::active() {
+    if let Some(budget) = &budget {
         for item in &staged {
-            if item.unpacked.manifest_dirs.len() != 1
-                || item.unpacked.inventory.as_ref().is_some_and(|inventory| {
-                    inventory.completeness != "boot-complete"
-                        || inventory.members.len() != 1
-                        || inventory.entries.iter().any(|entry| !entry.included)
-                })
-            {
-                return Err(MicrosandboxError::InvalidConfig(
-                    "bounded import requires one complete snapshot without dependencies".into(),
-                ));
-            }
+            let complete = item.unpacked.inventory.as_ref().is_none_or(|inventory| {
+                inventory.completeness == "boot-complete"
+                    && inventory.members.len() == item.unpacked.manifest_dirs.len()
+                    && inventory.entries.iter().all(|entry| entry.included)
+            });
+            budget.validate_archive(item.unpacked.manifest_dirs.len(), complete)?;
         }
     }
     let unpack_us = started.elapsed().as_micros();
@@ -82,14 +79,18 @@ pub(super) async fn load(
             )
             .await?;
             for snapshot in verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await? {
-                crate::snapshot::import_budget::verify_manifest(snapshot.manifest())?;
+                if let Some(budget) = &budget {
+                    budget.validate_manifest(snapshot.manifest())?;
+                }
                 super::super::metadata::write(snapshot.path(), snapshot.labels()).await?;
                 normalize_imported_descriptor(&snapshot).await?;
             }
         }
-        if crate::snapshot::import_budget::active() && item.unpacked.inventory.is_some() {
+        if let Some(budget) = &budget
+            && item.unpacked.inventory.is_some()
+        {
             for directory in &item.unpacked.manifest_dirs {
-                crate::snapshot::import_budget::verify_manifest(&read_manifest(directory).await?)?;
+                budget.validate_manifest(&read_manifest(directory).await?)?;
             }
         }
         if has_dependencies {
@@ -138,7 +139,7 @@ pub(super) async fn load(
         }
         match opts.base.as_deref().filter(|_| !complete(&sources)) {
             Some(base) => {
-                let opened = Box::pin(delta::open_base(local, base)).await?;
+                let opened = Box::pin(delta::open_base(local, base, budget.as_deref_mut())).await?;
                 sources
                     .add(opened.snapshot.manifest(), opened.snapshot.path(), None)
                     .await?;
@@ -183,8 +184,10 @@ pub(super) async fn load(
             materialize_inventory_layers(inventory, item.snapshots.path()).await?;
         }
         let snapshots = verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await?;
-        for snapshot in &snapshots {
-            crate::snapshot::import_budget::verify_manifest(snapshot.manifest())?;
+        if let Some(budget) = &budget {
+            for snapshot in &snapshots {
+                budget.validate_manifest(snapshot.manifest())?;
+            }
         }
         if let Some(inventory) = &item.unpacked.inventory {
             validate_inventory_snapshot_bindings(
@@ -334,6 +337,7 @@ async fn unpack(
     archive: &Path,
     root: &Path,
     cache_tmp: &Path,
+    budget: Option<&mut ImportBudget<'_>>,
 ) -> MicrosandboxResult<StagedArchive> {
     let snapshots = tempfile::Builder::new()
         .prefix(".msb-snapshot-import-")
@@ -352,10 +356,17 @@ async fn unpack(
             ZstdDecoder::new(reader),
             snapshots.path(),
             cache.path(),
+            budget,
         ))
         .await?
     } else {
-        Box::pin(unpack_archive(reader, snapshots.path(), cache.path())).await?
+        Box::pin(unpack_archive(
+            reader,
+            snapshots.path(),
+            cache.path(),
+            budget,
+        ))
+        .await?
     };
     Ok(StagedArchive {
         source: archive.to_path_buf(),

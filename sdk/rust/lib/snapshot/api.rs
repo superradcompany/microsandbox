@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "local")]
-use super::DiskLayer;
+use super::bounded_import::RawDiskImport;
+#[cfg(feature = "local")]
+use super::import_budget::ImportBudget;
+#[cfg(feature = "local")]
+use super::{DiskLayer, ImportLimits, ImportPolicy};
 use super::{
     HeadUpdate, LoadOpts, Manifest, SaveOpts, SnapshotConfig, SnapshotCopyBuilder, SnapshotFormat,
     SnapshotId, SnapshotScope, SnapshotState, SnapshotVerifyReport,
@@ -723,7 +727,7 @@ impl Snapshot {
     /// `load_bounded`; both use the same calculation from the maximum disk size.
     #[cfg(feature = "local")]
     pub fn bounded_import_peak_bytes(maximum_disk_bytes: u64) -> MicrosandboxResult<u64> {
-        super::import_budget::peak_bytes(maximum_disk_bytes)
+        super::bounded_import::peak_bytes(maximum_disk_bytes)
     }
 
     /// Import a disk-only raw archive within its known maximum disk size.
@@ -743,7 +747,28 @@ impl Snapshot {
                     .into(),
             ));
         }
-        super::import_budget::scope(maximum_disk_bytes, Self::load_with_options(path, opts)).await
+        let policy = RawDiskImport::new(maximum_disk_bytes)?;
+        Self::load_with_limits(path, opts, policy.limits(), &policy).await
+    }
+    /// Import with caller-supplied expansion limits and format policy.
+    /// The caller separately reserves workspace for copies and publication.
+    #[cfg(feature = "local")]
+    pub async fn load_with_limits(
+        path: &Path,
+        opts: LoadOpts,
+        limits: ImportLimits,
+        policy: &dyn ImportPolicy,
+    ) -> MicrosandboxResult<SnapshotHandle> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(|| {
+            MicrosandboxError::InvalidConfig(
+                "limited snapshot import requires local storage".into(),
+            )
+        })?;
+        let mut budget = ImportBudget::new(limits, policy)?;
+        local
+            .import_with_limits(backend.clone(), path, opts, &mut budget)
+            .await
     }
     /// Validate all inputs before publication and return their heads in input order.
     pub async fn load_many(

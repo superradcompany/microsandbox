@@ -1,118 +1,132 @@
-//! Opt-in limits for a self-contained raw-disk archive. The ordinary importer
-//! keeps accepting its existing archive formats and dependency workflows.
+//! Explicit archive expansion limits and caller-owned import policy.
 
-use std::future::Future;
-use std::path::{Component, Path};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
 
 use microsandbox_types::SnapshotManifest;
-use microsandbox_types::snapshot::SnapshotFormat;
+use tokio_tar::Header;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
-
-//--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-const MAX_ENTRIES: usize = 256;
-const MAX_PATH_BYTES: usize = 4096;
-const MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
-const ENTRY_HEADROOM: u64 = 64 * 1024;
-// The supported archive has at most three metadata members (descriptor,
-// labels and inventory). Cover their maximum size plus every entry's fixed
-// allocation allowance, separately from the raw disk's copy allowance.
-const IMPORT_HEADROOM: u64 = 3 * MAX_METADATA_BYTES * 4 + MAX_ENTRIES as u64 * ENTRY_HEADROOM;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-struct ImportBudget {
+/// Limits enforced before writing each archive member.
+///
+/// These bound extracted logical bytes, including sparse holes, rather than
+/// compressed upload size or total temporary workspace usage. The caller must
+/// reserve space for any additional copies made during import and publication.
+#[derive(Clone, Copy, Debug)]
+pub struct ImportLimits {
+    /// Maximum sum of the logical sizes of all archive members.
+    pub expanded_bytes: u64,
+    /// Maximum size of an individual descriptor, labels file, or inventory.
+    pub metadata_bytes: u64,
+    /// Maximum number of archive members, including directories.
+    pub entries: usize,
+    /// Maximum length of an archive path in bytes.
+    pub path_bytes: usize,
+}
+
+/// Caller-owned restrictions checked before extraction and publication.
+///
+/// Cloud callers can restrict supported formats independently of byte limits.
+/// Checks must be read-only; descriptors have not been published or authorized
+/// for host filesystem access when they reach this policy.
+pub trait ImportPolicy: Send + Sync {
+    /// Check a member path and logical size before any of its data is written.
+    fn validate_entry(&self, path: &Path, logical_bytes: u64) -> MicrosandboxResult<()>;
+
+    /// Check the number of snapshots and whether the archive includes all dependencies.
+    fn validate_archive(&self, snapshots: usize, complete: bool) -> MicrosandboxResult<()>;
+
+    /// Check a descriptor before resolving dependencies or placing payloads.
+    fn validate_manifest(&self, manifest: &SnapshotManifest) -> MicrosandboxResult<()>;
+}
+
+pub(crate) struct ImportBudget<'a> {
+    limits: ImportLimits,
     remaining: u64,
-    maximum_disk: u64,
     entries: usize,
+    policy: &'a dyn ImportPolicy,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl ImportBudget {
-    fn charge(&mut self, path: &Path, header: &tokio_tar::Header) -> MicrosandboxResult<()> {
+impl ImportLimits {
+    /// Reject empty limits before opening or creating import files.
+    pub fn validate(&self) -> MicrosandboxResult<()> {
+        if self.expanded_bytes == 0
+            || self.metadata_bytes == 0
+            || self.entries == 0
+            || self.path_bytes == 0
+        {
+            return Err(invalid("snapshot import limits must be positive"));
+        }
+
+        Ok(())
+    }
+}
+
+impl<'a> ImportBudget<'a> {
+    pub(crate) fn new(
+        limits: ImportLimits,
+        policy: &'a dyn ImportPolicy,
+    ) -> MicrosandboxResult<Self> {
+        limits.validate()?;
+
+        Ok(Self {
+            limits,
+            remaining: limits.expanded_bytes,
+            entries: 0,
+            policy,
+        })
+    }
+
+    pub(crate) fn charge(&mut self, path: &Path, header: &Header) -> MicrosandboxResult<()> {
+        if self.entries == self.limits.entries {
+            return Err(invalid("snapshot import exceeds its archive entry limit"));
+        }
         self.entries += 1;
-        if self.entries > MAX_ENTRIES || path.as_os_str().len() > MAX_PATH_BYTES {
-            return Err(invalid(
-                "bounded snapshot import exceeds its entry or path limit",
-            ));
+
+        if path.as_os_str().len() > self.limits.path_bytes {
+            return Err(invalid("snapshot import exceeds its archive path limit"));
         }
-        let components: Vec<_> = path
-            .components()
-            .filter_map(|component| match component {
-                Component::Normal(name) => name.to_str(),
-                _ => None,
-            })
-            .collect();
-        if components.iter().any(|component| {
+
+        // GNU sparse members can encode a tiny payload with a huge logical size.
+        let logical_bytes = header.size()?;
+        self.policy.validate_entry(path, logical_bytes)?;
+
+        let metadata = path.file_name().is_some_and(|name| {
             matches!(
-                *component,
-                "cache" | "images" | "checkpoints" | "owned" | "owned-volumes"
+                name.to_str(),
+                Some("archive.json" | "snapshot.json" | "manifest.json" | "metadata.json")
             )
-        }) {
-            return Err(invalid(
-                "bounded snapshot import accepts disk-only payloads without bundled images or volumes",
-            ));
+        });
+        if metadata && logical_bytes > self.limits.metadata_bytes {
+            return Err(invalid("snapshot import exceeds its metadata size limit"));
         }
-        // Header::size reads the logical size of GNU sparse members. Using the
-        // encoded size here would allow a tiny archive to create a huge file.
-        let apparent = header.size()?;
-        let metadata = matches!(components.as_slice(), ["archive.json"])
-            || components.last().is_some_and(|name| {
-                matches!(*name, "snapshot.json" | "manifest.json" | "metadata.json")
-            });
-        let limit = if metadata {
-            MAX_METADATA_BYTES
-        } else {
-            self.maximum_disk
-        };
-        if apparent > limit {
-            return Err(invalid(
-                "snapshot import member exceeds the maximum disk size or metadata limit",
-            ));
-        }
-        // This profile admits exactly one raw layer and no dependency sources.
-        // Four copies cover extraction, layer placement, descriptor
-        // normalization and publication, without relying on reflink support.
-        let cost = apparent
-            .checked_mul(4)
-            .and_then(|bytes| bytes.checked_add(ENTRY_HEADROOM))
-            .ok_or_else(|| invalid("snapshot import byte bound overflow"))?;
+
         self.remaining = self
             .remaining
-            .checked_sub(cost)
-            .ok_or_else(|| invalid("snapshot import exceeds its aggregate byte budget"))?;
+            .checked_sub(logical_bytes)
+            .ok_or_else(|| invalid("snapshot import exceeds its expanded byte limit"))?;
+
         Ok(())
     }
 
-    fn verify_manifest(&self, manifest: &SnapshotManifest) -> MicrosandboxResult<()> {
-        let Some(file) = manifest.state.as_file() else {
-            return Err(invalid("bounded import requires a disk-only snapshot"));
-        };
-        if file.virtual_size == 0
-            || file.virtual_size > self.maximum_disk
-            || file.layers.len() != 1
-            || file.disk_format != SnapshotFormat::Raw
-            || file.layers.iter().any(|layer| {
-                layer.format != SnapshotFormat::Raw
-                    || layer.virtual_size != file.virtual_size
-                    || layer.backing.is_some()
-            })
-            || !manifest.owned_volumes()?.is_empty()
-        {
-            return Err(invalid(
-                "bounded import requires one self-contained raw disk within the maximum disk size",
-            ));
-        }
-        Ok(())
+    pub(crate) fn validate_archive(
+        &self,
+        snapshots: usize,
+        complete: bool,
+    ) -> MicrosandboxResult<()> {
+        self.policy.validate_archive(snapshots, complete)
+    }
+
+    pub(crate) fn validate_manifest(&self, manifest: &SnapshotManifest) -> MicrosandboxResult<()> {
+        self.policy.validate_manifest(manifest)
     }
 }
 
@@ -120,67 +134,6 @@ impl ImportBudget {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) fn active() -> bool {
-    BUDGET.try_with(|_| ()).is_ok()
-}
-
-pub(crate) fn peak_bytes(maximum_disk: u64) -> MicrosandboxResult<u64> {
-    if maximum_disk == 0 {
-        return Err(invalid("snapshot maximum disk size must be positive"));
-    }
-    maximum_disk
-        .checked_mul(4)
-        .and_then(|bytes| bytes.checked_add(IMPORT_HEADROOM))
-        .ok_or_else(|| invalid("snapshot import byte bound overflow"))
-}
-
-pub(crate) async fn scope<F, T>(maximum_disk: u64, operation: F) -> MicrosandboxResult<T>
-where
-    F: Future<Output = MicrosandboxResult<T>>,
-{
-    let bytes = peak_bytes(maximum_disk)?;
-    BUDGET
-        .scope(
-            Arc::new(Mutex::new(ImportBudget {
-                remaining: bytes,
-                maximum_disk,
-                entries: 0,
-            })),
-            operation,
-        )
-        .await
-}
-
-pub(crate) fn charge(path: &Path, header: &tokio_tar::Header) -> MicrosandboxResult<()> {
-    BUDGET
-        .try_with(|budget| {
-            budget
-                .lock()
-                .map_err(|_| invalid("snapshot import budget poisoned"))?
-                .charge(path, header)
-        })
-        .unwrap_or(Ok(()))
-}
-
-pub(crate) fn verify_manifest(manifest: &SnapshotManifest) -> MicrosandboxResult<()> {
-    BUDGET
-        .try_with(|budget| {
-            budget
-                .lock()
-                .map_err(|_| invalid("snapshot import budget poisoned"))?
-                .verify_manifest(manifest)
-        })
-        .unwrap_or(Ok(()))
-}
-
 fn invalid(message: &str) -> MicrosandboxError {
     MicrosandboxError::InvalidConfig(message.into())
-}
-
-//--------------------------------------------------------------------------------------------------
-// Macros
-//--------------------------------------------------------------------------------------------------
-
-tokio::task_local! {
-    static BUDGET: Arc<Mutex<ImportBudget>>;
 }

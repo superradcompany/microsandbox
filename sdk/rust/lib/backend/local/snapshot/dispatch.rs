@@ -10,6 +10,7 @@ use microsandbox_image::snapshot::SnapshotRootDisk;
 use super::{archive, artifact, copy, create, group, store, verify};
 use crate::backend::{Backend, LocalBackend, SnapshotBackend};
 use crate::sandbox::SandboxConfig;
+use crate::snapshot::import_budget::ImportBudget;
 use crate::snapshot::{
     HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
     SnapshotHandle, SnapshotReference, SnapshotVerifyReport,
@@ -21,6 +22,21 @@ use crate::{MicrosandboxError, MicrosandboxResult, Operation};
 //--------------------------------------------------------------------------------------------------
 
 impl LocalBackend {
+    pub(crate) async fn import_with_limits(
+        &self,
+        backend: Arc<dyn Backend>,
+        path: &Path,
+        mut opts: LoadOpts,
+        budget: &mut ImportBudget<'_>,
+    ) -> MicrosandboxResult<SnapshotHandle> {
+        let path = std::path::absolute(path)?;
+        opts.dest = opts.dest.map(std::path::absolute).transpose()?;
+        opts.base = opts.base.map(anchor_archive_selector).transpose()?;
+        let handle = archive::load_snapshot_with_limits(self, &path, opts, budget).await?;
+
+        Ok(from_handle(backend, handle))
+    }
+
     /// Inspect a restore source; caller options remain separate from resolved settings.
     pub(crate) async fn prepare_local_restore(
         &self,

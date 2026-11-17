@@ -605,3 +605,14 @@ opt-in embedding API; no CLI or other language SDK workflow selects it.
 The SDK snapshot suite exercises ordinary imports, current and legacy archives,
 delta exports/restores and private child disks. Real older-runtime launch
 validation and full-disk rewrite qualification remain separate release checks.
+
+## Caller-owned snapshot import policy
+
+This integration carries the additive `Snapshot::load_with_limits` API from
+#2058 without changing the cloud driver's existing backend interfaces. Callers
+supply extraction limits and an `ImportPolicy`; the budget is passed explicitly
+through archive and dependency extraction. The cloud chooses supported formats,
+maximum disk size and workspace reservation separately. The existing
+`load_bounded` and `bounded_import_peak_bytes` APIs retain their raw-only contract.
+Archive formats, persisted data, runtime protocols and existing image-writer
+budgets are unchanged.
