@@ -484,6 +484,43 @@ fn sandbox_response_accepts_omitted_spec() {
 }
 
 #[test]
+fn sandbox_response_decodes_recovery_and_unknown_statuses() {
+    let mut body = serde_json::json!({
+        "id": "00000000-0000-0000-0000-000000000002",
+        "org_id": "00000000-0000-0000-0000-000000000001",
+        "name": "agent-1",
+        "slug": "brave-otter",
+        "status": "running",
+        "status_reason": null,
+        "spec": null,
+        "ephemeral": false,
+        "created_at": "2026-05-17T12:00:00Z",
+        "started_at": "2026-05-17T12:00:01Z",
+        "stopped_at": null,
+        "last_failure_message": null
+    });
+
+    for (wire_status, expected) in [
+        (
+            "recovery_decision_required",
+            CloudSandboxStatus::RecoveryDecisionRequired,
+        ),
+        ("not_a_real_status", CloudSandboxStatus::Unknown),
+    ] {
+        body["status"] = serde_json::json!(wire_status);
+
+        let response: CloudCreateSandboxResponse = serde_json::from_value(body.clone()).unwrap();
+
+        assert_eq!(response.status, expected);
+    }
+
+    assert_eq!(
+        serde_json::to_value(CloudSandboxStatus::Unknown).unwrap(),
+        serde_json::json!("unknown")
+    );
+}
+
+#[test]
 fn snapshot_location_uses_internal_tagging() {
     assert_eq!(
         serde_json::to_value(CloudSnapshotLocation::Managed {
