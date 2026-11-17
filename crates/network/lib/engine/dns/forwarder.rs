@@ -50,6 +50,7 @@ use super::response_policy::filter_response;
 #[cfg(windows)]
 use super::windows_resolver::WindowsSystemResolver;
 use super::wire_names::expand_names;
+use crate::addr::normalize_ip_addr;
 use crate::netstack::{
     poll::GatewayIps,
     shared::{ResolvedHostnameFamily, SharedState},
@@ -117,6 +118,13 @@ pub(crate) struct DnsForwarder {
     config: Arc<NormalizedDnsConfig>,
 }
 
+/// Whether a lookup is answering the guest or refreshing a reconnect's DNS.
+#[derive(Clone, Copy)]
+enum DnsQueryPurpose {
+    GuestLookup,
+    Revalidation,
+}
+
 /// One configured upstream and its per-transport clients.
 struct ConfiguredUpstream {
     /// SocketAddr of this upstream — needed to build `tcp` on demand
@@ -173,6 +181,74 @@ enum UpstreamDecision {
 }
 
 impl DnsForwarder {
+    /// Check whether `hostname` still resolves to the IP the app wants to use.
+    ///
+    /// Reuse a cached answer if it has not expired. Otherwise, look up the name
+    /// using the sandbox's DNS rules and resolver settings. Return `false` if
+    /// the lookup fails, the answer is blocked, or it does not include `addr`.
+    pub(crate) async fn revalidate_hostname(&self, hostname: &str, addr: IpAddr) -> bool {
+        let addr = normalize_ip_addr(addr);
+        let Ok(name) = Name::from_ascii(hostname) else {
+            return false;
+        };
+        let family = match addr {
+            IpAddr::V4(_) => ResolvedHostnameFamily::Ipv4,
+            IpAddr::V6(_) => ResolvedHostnameFamily::Ipv6,
+        };
+        if self
+            .shared
+            .any_resolved_hostname(addr, |candidate| candidate == hostname)
+        {
+            return true;
+        }
+
+        let query = Self::build_address_query(name, family);
+        let Ok(raw) = query.to_bytes() else {
+            return false;
+        };
+        let Some(response) = self
+            .forward_query(
+                &raw,
+                None,
+                Transport::Udp,
+                None,
+                DnsQueryPurpose::Revalidation,
+            )
+            .await
+        else {
+            return false;
+        };
+        let Ok(mut response) = Message::from_bytes(&response) else {
+            return false;
+        };
+        if response.metadata.truncation {
+            let Some(bytes) = self
+                .forward_query(
+                    &raw,
+                    None,
+                    Transport::Tcp,
+                    None,
+                    DnsQueryPurpose::Revalidation,
+                )
+                .await
+            else {
+                return false;
+            };
+            let Ok(complete) = Message::from_bytes(&bytes) else {
+                return false;
+            };
+            response = complete;
+        }
+
+        extract_addrs_and_ttl(&response, family, hostname).is_some_and(|(addresses, _)| {
+            addresses
+                .into_iter()
+                .any(|ip| normalize_ip_addr(ip) == addr)
+        }) && self
+            .shared
+            .any_resolved_hostname(addr, |candidate| candidate == hostname)
+    }
+
     /// Process a single raw DNS query: parse, apply block list, select
     /// upstream, forward, apply rebind protection, optionally truncate
     /// for UDP, and return the wire response. Returns `None` only when
@@ -189,8 +265,14 @@ impl DnsForwarder {
         transport: Transport,
         sni: Option<&str>,
     ) -> Option<Bytes> {
-        self.forward_query(raw_query, original_dst, transport, sni)
-            .await
+        self.forward_query(
+            raw_query,
+            original_dst,
+            transport,
+            sni,
+            DnsQueryPurpose::GuestLookup,
+        )
+        .await
     }
 
     /// Resolves a proxy transport endpoint through the configured resolver.
@@ -246,17 +328,7 @@ impl DnsForwarder {
         name: Name,
         family: ResolvedHostnameFamily,
     ) -> io::Result<Vec<IpAddr>> {
-        let record_type = match family {
-            ResolvedHostnameFamily::Ipv4 => RecordType::A,
-            ResolvedHostnameFamily::Ipv6 => RecordType::AAAA,
-        };
-        let mut query = Message::new(0, MessageType::Query, OpCode::Query);
-        query.metadata.recursion_desired = true;
-        query.add_query(Query::query(name, record_type));
-        let mut edns = Edns::new();
-        edns.set_max_payload(4096);
-        query.edns = Some(edns);
-
+        let query = Self::build_address_query(name, family);
         let raw_query = query
             .to_bytes()
             .map_err(|error| io::Error::other(format!("failed to encode DNS query: {error}")))?;
@@ -269,13 +341,31 @@ impl DnsForwarder {
             .map_or_else(Vec::new, |(addresses, _)| addresses))
     }
 
-    /// Processes a guest DNS query through policy and response filtering.
+    /// Build an address lookup. The caller chooses how to send it and which
+    /// DNS rules apply; building a query does not bypass or apply any policy.
+    fn build_address_query(name: Name, family: ResolvedHostnameFamily) -> Message {
+        let record_type = match family {
+            ResolvedHostnameFamily::Ipv4 => RecordType::A,
+            ResolvedHostnameFamily::Ipv6 => RecordType::AAAA,
+        };
+        let mut query = Message::new(0, MessageType::Query, OpCode::Query);
+        query.metadata.recursion_desired = true;
+        query.add_query(Query::query(name, record_type));
+
+        let mut edns = Edns::new();
+        edns.set_max_payload(4096);
+        query.edns = Some(edns);
+        query
+    }
+
+    /// Handle a DNS lookup using the sandbox's DNS rules and resolver settings.
     async fn forward_query(
         &self,
         raw_query: &[u8],
         original_dst: Option<IpAddr>,
         transport: Transport,
         sni: Option<&str>,
+        purpose: DnsQueryPurpose,
     ) -> Option<Bytes> {
         let query_msg = Message::from_bytes(raw_query).ok()?;
         let guest_id = query_msg.metadata.id;
@@ -395,7 +485,9 @@ impl DnsForwarder {
                     tracing::debug!(domain = %domain, "DNS binding capacity exceeded");
                     return build_status_response(&query_msg, ResponseCode::ServFail);
                 }
-            } else {
+            } else if matches!(purpose, DnsQueryPurpose::GuestLookup) {
+                // Guest lookups keep their existing invalidation behavior.
+                // Reconnect failures must leave other valid answers alone.
                 self.shared.clear_resolved_hostname(&domain, family);
             }
         }
@@ -1494,6 +1586,426 @@ mod tests {
         })
         .await
         .expect("shortest address TTL must expire both second-answer addresses");
+    }
+
+    #[tokio::test]
+    async fn reconnect_revalidation_requires_fresh_policy_filtered_dns() {
+        use crate::policy::{EgressEvaluation, HostnameSource};
+
+        for source in [
+            HostnameSource::Sni("example.com"),
+            HostnameSource::CacheOnly,
+        ] {
+            for outcome in [
+                "same",
+                "changed",
+                "nxdomain",
+                "servfail",
+                "timeout",
+                "rebind",
+                "explicit-deny",
+                "unobserved",
+                "wrong-sni",
+                "suffix",
+            ] {
+                let source = if outcome == "wrong-sni" {
+                    HostnameSource::Sni("unlisted.example")
+                } else {
+                    source
+                };
+                let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let upstream = socket.local_addr().unwrap();
+                let address: IpAddr = "198.51.100.23".parse().unwrap();
+                let returned = if outcome == "changed" {
+                    Ipv4Addr::new(198, 51, 100, 24)
+                } else if outcome == "rebind" {
+                    Ipv4Addr::new(10, 0, 0, 7)
+                } else {
+                    Ipv4Addr::new(198, 51, 100, 23)
+                };
+                let hits = Arc::new(AtomicUsize::new(0));
+                let server_hits = hits.clone();
+                let rcode = match outcome {
+                    "nxdomain" => ResponseCode::NXDomain,
+                    "servfail" => ResponseCode::ServFail,
+                    _ => ResponseCode::NoError,
+                };
+                let silent = outcome == "timeout";
+                let server = tokio::spawn(async move {
+                    let mut buf = [0; 4096];
+                    loop {
+                        let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+                        server_hits.fetch_add(1, Ordering::SeqCst);
+                        if silent {
+                            continue;
+                        }
+                        let query = Message::from_bytes(&buf[..len]).unwrap();
+                        let mut response = make_response(&query);
+                        response.metadata.response_code = rcode;
+                        if rcode == ResponseCode::NoError {
+                            response.add_answer(Record::from_rdata(
+                                query.queries[0].name().clone(),
+                                60,
+                                RData::A(A::from(returned)),
+                            ));
+                        }
+                        socket
+                            .send_to(&response.to_bytes().unwrap(), peer)
+                            .await
+                            .unwrap();
+                    }
+                });
+                let mut forwarder = forwarder_over(&[upstream]).await;
+                let inner = Arc::get_mut(&mut forwarder).unwrap();
+                let mut policy = if outcome == "suffix" {
+                    NetworkPolicy::none()
+                        .allow_domain_suffix("example.com")
+                        .unwrap()
+                } else {
+                    NetworkPolicy::none().allow_domain("example.com").unwrap()
+                };
+                if outcome == "explicit-deny" {
+                    policy.rules.insert(
+                        0,
+                        Rule::deny_egress(Destination::Cidr("0.0.0.0/0".parse().unwrap())),
+                    );
+                }
+                inner.network_policy = Arc::new(policy.clone());
+                inner.config = Arc::new(NormalizedDnsConfig {
+                    rebind_protection: outcome == "rebind",
+                    nameservers: Vec::new(),
+                    query_timeout: Duration::from_millis(300),
+                });
+                let dst = SocketAddr::new(
+                    if outcome == "rebind" {
+                        returned.into()
+                    } else {
+                        address
+                    },
+                    443,
+                );
+                let (_sender, handle) = watch::channel(Some(forwarder.clone()));
+                if outcome != "unobserved" {
+                    // Let the live binding expire and clean it up. SNI must
+                    // be sufficient to revalidate without retaining DNS history.
+                    assert!(forwarder.shared.cache_resolved_hostname(
+                        "example.com",
+                        ResolvedHostnameFamily::Ipv4,
+                        [dst.ip()],
+                        Duration::from_millis(20)
+                    ));
+                    if !matches!(outcome, "explicit-deny" | "wrong-sni") {
+                        assert_eq!(
+                            policy
+                                .evaluate_tcp_egress(dst, &forwarder.shared, source, &handle)
+                                .await,
+                            EgressEvaluation::Allow
+                        );
+                        assert_eq!(
+                            hits.load(Ordering::SeqCst),
+                            0,
+                            "live bindings need no DNS refresh"
+                        );
+                    }
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        while forwarder
+                            .shared
+                            .any_resolved_hostname(dst.ip(), |name| name == "example.com")
+                        {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    forwarder.shared.cleanup_resolved_hostnames();
+                }
+                let syn = policy.evaluate_egress_with_source(
+                    dst,
+                    Protocol::Tcp,
+                    &forwarder.shared,
+                    HostnameSource::Deferred,
+                );
+                assert_eq!(
+                    syn,
+                    if outcome == "explicit-deny" {
+                        EgressEvaluation::Deny
+                    } else {
+                        EgressEvaluation::DeferUntilHostname
+                    },
+                    "SYN admission: {outcome}"
+                );
+                assert_eq!(
+                    policy.evaluate_egress_with_source(
+                        dst,
+                        Protocol::Tcp,
+                        &forwarder.shared,
+                        source
+                    ),
+                    EgressEvaluation::Deny,
+                    "a missing DNS binding cannot authorize by itself"
+                );
+
+                let result = policy
+                    .evaluate_tcp_egress(dst, &forwarder.shared, source, &handle)
+                    .await;
+                let has_sni = matches!(source, HostnameSource::Sni(_));
+                let allowed = has_sni && matches!(outcome, "same" | "suffix" | "unobserved");
+                assert_eq!(
+                    result,
+                    if allowed {
+                        EgressEvaluation::Allow
+                    } else {
+                        EgressEvaluation::Deny
+                    },
+                    "source={}, outcome={outcome}",
+                    source.label()
+                );
+                // No SNI means there is no hostname to revalidate. Explicit
+                // IP denies must also remain final without asking DNS.
+                if !has_sni || matches!(outcome, "explicit-deny" | "wrong-sni") {
+                    assert_eq!(hits.load(Ordering::SeqCst), 0);
+                } else {
+                    assert!(hits.load(Ordering::SeqCst) >= 1);
+                }
+                if has_sni && matches!(outcome, "nxdomain" | "servfail") {
+                    assert_eq!(
+                        policy
+                            .evaluate_tcp_egress(dst, &forwarder.shared, source, &handle)
+                            .await,
+                        EgressEvaluation::Deny
+                    );
+                    assert_eq!(
+                        hits.load(Ordering::SeqCst),
+                        2,
+                        "negative replies must permit a later revalidation attempt"
+                    );
+                }
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn negative_revalidation_keeps_a_concurrent_positive_answer() {
+        for guest_lookup in [false, true] {
+            for response_code in [
+                ResponseCode::NXDomain,
+                ResponseCode::ServFail,
+                ResponseCode::NoError,
+            ] {
+                let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let upstream = socket.local_addr().unwrap();
+                let address: IpAddr = "198.51.100.23".parse().unwrap();
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                let server = tokio::spawn(async move {
+                    let mut buf = [0; 4096];
+                    let (len, negative_peer) = socket.recv_from(&mut buf).await.unwrap();
+                    let negative_query = Message::from_bytes(&buf[..len]).unwrap();
+                    started_tx.send(()).unwrap();
+
+                    let (len, positive_peer) = socket.recv_from(&mut buf).await.unwrap();
+                    let positive_query = Message::from_bytes(&buf[..len]).unwrap();
+                    let mut positive = make_response(&positive_query);
+                    positive.add_answer(Record::from_rdata(
+                        positive_query.queries[0].name().clone(),
+                        60,
+                        RData::A(A::from(Ipv4Addr::new(198, 51, 100, 23))),
+                    ));
+                    socket
+                        .send_to(&positive.to_bytes().unwrap(), positive_peer)
+                        .await
+                        .unwrap();
+
+                    // The positive lookup has returned and cached its answer
+                    // before the negative response is allowed to arrive.
+                    release_rx.await.unwrap();
+                    let mut negative = make_response(&negative_query);
+                    negative.metadata.response_code = response_code;
+                    socket
+                        .send_to(&negative.to_bytes().unwrap(), negative_peer)
+                        .await
+                        .unwrap();
+                });
+                let forwarder = forwarder_over(&[upstream]).await;
+                let negative_forwarder = forwarder.clone();
+                let negative = tokio::spawn(async move {
+                    negative_forwarder
+                        .revalidate_hostname("example.com", address)
+                        .await
+                });
+                started_rx.await.unwrap();
+                if guest_lookup {
+                    assert_eq!(
+                        resolve_via_gateway(&forwarder).await,
+                        Some(Ipv4Addr::new(198, 51, 100, 23))
+                    );
+                } else {
+                    assert!(forwarder.revalidate_hostname("example.com", address).await);
+                }
+                release_tx.send(()).unwrap();
+
+                assert!(
+                    !negative.await.unwrap(),
+                    "a negative reply must deny its own reconnect"
+                );
+                assert!(
+                    forwarder
+                        .shared
+                        .any_resolved_hostname(address, |name| name == "example.com"),
+                    "negative revalidation erased the other lookup: guest={guest_lookup}, rcode={response_code:?}"
+                );
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_reconnects_all_remain_policy_checked() {
+        use crate::policy::{EgressEvaluation, HostnameSource};
+
+        let address = Ipv4Addr::new(198, 51, 100, 23);
+        let (upstream, hits) = responding_udp(address).await;
+        let forwarder = forwarder_over(&[upstream]).await;
+        let policy = NetworkPolicy::none().allow_domain("example.com").unwrap();
+        let (_sender, handle) = watch::channel(Some(forwarder.clone()));
+        forwarder.shared.cache_resolved_hostname(
+            "example.com",
+            ResolvedHostnameFamily::Ipv4,
+            [address.into()],
+            Duration::ZERO,
+        );
+        let dst = SocketAddr::new(address.into(), 443);
+        let results = futures::future::join_all((0..8).map(|_| {
+            policy.evaluate_tcp_egress(
+                dst,
+                &forwarder.shared,
+                HostnameSource::Sni("example.com"),
+                &handle,
+            )
+        }))
+        .await;
+
+        assert!(
+            results
+                .into_iter()
+                .all(|result| result == EgressEvaluation::Allow)
+        );
+        let dns_queries = hits.load(Ordering::SeqCst);
+        assert!((1..=8).contains(&dns_queries));
+    }
+
+    #[tokio::test]
+    async fn reconnect_revalidation_selects_the_normalized_address_family() {
+        use crate::policy::{EgressEvaluation, HostnameSource};
+
+        for address in ["2001:db8::23", "::ffff:198.51.100.23"] {
+            let address: IpAddr = address.parse().unwrap();
+            let normalized = normalize_ip_addr(address);
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let upstream = socket.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let mut buf = [0; 4096];
+                let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+                let query = Message::from_bytes(&buf[..len]).unwrap();
+                let (record_type, data) = match normalized {
+                    IpAddr::V4(ip) => (RecordType::A, RData::A(A::from(ip))),
+                    IpAddr::V6(ip) => (RecordType::AAAA, RData::AAAA(AAAA::from(ip))),
+                };
+                assert_eq!(query.queries[0].query_type(), record_type);
+                let mut response = make_response(&query);
+                response.add_answer(Record::from_rdata(
+                    query.queries[0].name().clone(),
+                    60,
+                    data,
+                ));
+                socket
+                    .send_to(&response.to_bytes().unwrap(), peer)
+                    .await
+                    .unwrap();
+            });
+            let mut forwarder = forwarder_over(&[upstream]).await;
+            Arc::get_mut(&mut forwarder).unwrap().gateway.ipv6 = Some("fd00::1".parse().unwrap());
+            forwarder.shared.cache_resolved_hostname(
+                "example.com",
+                ResolvedHostnameFamily::Ipv6,
+                [address],
+                Duration::ZERO,
+            );
+            let (_sender, handle) = watch::channel(Some(forwarder.clone()));
+            let policy = NetworkPolicy::none().allow_domain("example.com").unwrap();
+
+            assert_eq!(
+                policy
+                    .evaluate_tcp_egress(
+                        SocketAddr::new(address, 443),
+                        &forwarder.shared,
+                        HostnameSource::Sni("example.com"),
+                        &handle
+                    )
+                    .await,
+                EgressEvaluation::Allow
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_revalidation_retries_truncated_dns_over_tcp() {
+        use crate::policy::{EgressEvaluation, HostnameSource};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = udp.local_addr().unwrap();
+        let tcp = tokio::net::TcpListener::bind(address).await.unwrap();
+        let server = tokio::spawn(async move {
+            let mut buf = [0; 4096];
+            let (len, peer) = udp.recv_from(&mut buf).await.unwrap();
+            let query = Message::from_bytes(&buf[..len]).unwrap();
+            udp.send_to(&build_truncated_response(&query).unwrap(), peer)
+                .await
+                .unwrap();
+
+            let (mut stream, _) = tcp.accept().await.unwrap();
+            let len = stream.read_u16().await.unwrap();
+            let mut raw = vec![0; usize::from(len)];
+            stream.read_exact(&mut raw).await.unwrap();
+            let query = Message::from_bytes(&raw).unwrap();
+            let mut response = make_response(&query);
+            response.add_answer(Record::from_rdata(
+                query.queries[0].name().clone(),
+                60,
+                RData::A(A::from(Ipv4Addr::new(198, 51, 100, 23))),
+            ));
+            let raw = response.to_bytes().unwrap();
+            stream.write_u16(raw.len() as u16).await.unwrap();
+            stream.write_all(&raw).await.unwrap();
+        });
+        let forwarder = forwarder_over(&[address]).await;
+        let destination: SocketAddr = "198.51.100.23:443".parse().unwrap();
+        forwarder.shared.cache_resolved_hostname(
+            "example.com",
+            ResolvedHostnameFamily::Ipv4,
+            [destination.ip()],
+            Duration::ZERO,
+        );
+        let (_sender, handle) = watch::channel(Some(forwarder.clone()));
+        let policy = NetworkPolicy::none().allow_domain("example.com").unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            policy.evaluate_tcp_egress(
+                destination,
+                &forwarder.shared,
+                HostnameSource::Sni("example.com"),
+                &handle,
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, EgressEvaluation::Allow);
+        server.await.unwrap();
     }
 
     #[tokio::test]
