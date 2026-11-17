@@ -200,7 +200,6 @@ pub use microsandbox_types::{
     VsockSpec, VsockSpecPatch,
 };
 pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
-#[cfg(feature = "local")]
 pub use restore_builder::RestoreBuilder;
 #[cfg(feature = "local")]
 #[doc(hidden)]
