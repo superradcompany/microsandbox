@@ -98,6 +98,10 @@ An attacker who controls a domain can make it resolve to a public IP during the 
 
 Rebind protection catches this at the response level. microsandbox rewrites a private, loopback, or link-local answer to `NXDOMAIN` unless the first matching explicit, address-only egress rule permits the returned address. For example, the `private` profile allows private DNS answers while retaining protection against loopback, link-local, metadata, and unspecified addresses. Ordered address-specific denies still win; policy defaults, `Any` rules, and port-scoped rules do not disable the check. Disable rebind protection globally only when policy-aware exceptions cannot represent the intended access. See [DNS](/networking/dns).
 
+Through the gateway, private reverse lookups (`in-addr.arpa`, `ip6.arpa`) require explicit access to the address they describe. A zone covering both public and private addresses, such as `172.in-addr.arpa`, requires access to the entire zone. `.local` discovery requires broad private-network access, as provided by the `private` profile; allowing only one subnet does not enable it. Platform policy can further restrict these permissions. This prevents PTR, SRV and TXT queries from using the host resolver to discover networks the sandbox cannot access.
+
+Gateway replies are checked for restricted names and addresses in every record section, including aliases and configured NAT64 translations. Restricted extra records are removed only when a complete successful answer can stand on its own; otherwise the lookup returns `NXDOMAIN`. Replies changed by this filtering lose whole-message authentication and the DNSSEC authenticated-data flag, so clients that need those records may fail validation. Explicitly selected resolvers keep their existing routing and answer-address checks. Disabling rebinding protection disables these checks too.
+
 ## DNS-to-IP binding (TOCTOU)
 
 Even without rebinding, a time-of-check to time-of-use race exists: an allowed domain resolves to an allowed IP when policy is checked, then the guest looks it up again at connect time and reaches a different IP.

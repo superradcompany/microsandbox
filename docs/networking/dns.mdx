@@ -23,7 +23,7 @@ The `public`, `private`, and `host` profiles already allow DNS through the gatew
 
 DNS over TLS uses TCP port `853` and needs its own allow rule. It also requires [TLS inspection](/networking/tls).
 
-DNS rebinding protection is separate from query access. microsandbox rejects private or reserved answers unless an explicit address rule allows them. An allow-by-default policy does not disable this protection. See [Network defenses](/security/network) for the full policy behavior.
+DNS rebinding protection is separate from query access. microsandbox rejects private or reserved answers unless an explicit address rule allows them. An allow-by-default policy does not disable this protection. Through the gateway, it also blocks unauthorized private reverse lookups and requires broad private-network access for `.local` discovery; allowing one private subnet is not enough. See [Network defenses](/security/network) for the full policy behavior.
 
 ## Blocking domains
 

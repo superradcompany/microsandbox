@@ -41,13 +41,15 @@ use tokio::sync::{OnceCell, watch};
 
 use super::client::{Client, build_direct_client, build_tcp_client, build_udp_client};
 use super::common::config::NormalizedDnsConfig;
-use super::common::filter::{is_private_ipv4, is_private_ipv6};
 use super::common::transport::Transport;
+use super::name_policy::NamePolicy;
 #[cfg(not(windows))]
 use super::nameserver::read_host_dns_servers;
 use super::nameserver::resolve_nameservers;
+use super::response_policy::filter_response;
 #[cfg(windows)]
 use super::windows_resolver::WindowsSystemResolver;
+use super::wire_names::expand_names;
 use crate::netstack::{
     poll::GatewayIps,
     shared::{ResolvedHostnameFamily, SharedState},
@@ -319,6 +321,25 @@ impl DnsForwarder {
             return Some(response);
         }
 
+        // Local-network names describe the host's network: names in the
+        // multicast zones can reach multicast DNS, and reverse names of
+        // private addresses map internal hosts. Rebind protection only
+        // filters address records, so without this their PTR, SRV and TXT
+        // answers would reach a sandbox that may not reach that network.
+        let to_gateway = original_dst.is_none_or(|dst| self.gateway_ips.contains(&dst));
+        if to_gateway
+            && self.config.rebind_protection
+            && !NamePolicy::new(
+                &self.network_policy,
+                self.platform_policy.as_deref(),
+                &self.shared,
+            )
+            .allows_name(question.name())
+        {
+            tracing::debug!(domain = %domain, "local-network DNS name refused by network policy");
+            return build_status_response(&query_msg, ResponseCode::NXDomain);
+        }
+
         // Pick upstream based on where the guest aimed and the network
         // policy, then forward. On the configured path, walk the
         // upstreams in order so a timeout or transport failure falls
@@ -344,35 +365,22 @@ impl DnsForwarder {
             return build_status_response(&query_msg, ResponseCode::ServFail);
         };
 
-        // Rebind protection: reject responses containing private/reserved IPs.
-        if self.config.rebind_protection {
-            for record in &response_msg.answers {
-                let private_addr = match &record.data {
-                    RData::A(a) => {
-                        let addr = IpAddr::V4((*a).into());
-                        is_private_ipv4((*a).into()).then_some(addr)
-                    }
-                    RData::AAAA(aaaa) => {
-                        let addr = IpAddr::V6((*aaaa).into());
-                        is_private_ipv6((*aaaa).into()).then_some(addr)
-                    }
-                    _ => None,
-                };
-                if private_addr.is_some_and(|addr| {
-                    !policies_allow_rebind_address(
-                        &self.network_policy,
-                        self.platform_policy.as_deref(),
-                        &self.shared,
-                        addr,
-                    )
-                }) {
-                    tracing::debug!(
-                        domain = %domain,
-                        "DNS rebind protection: response contains private IP"
-                    );
-                    return build_status_response(&query_msg, ResponseCode::NXDomain);
-                }
-            }
+        // Validate before caching: rejected aliases must never authorize a later
+        // connection. All configured resolver backends converge here.
+        // Cache bindings may expire or change while upstream is pending. Take
+        // a fresh view for this synchronous authorization stage, including the
+        // question, rather than retaining the preflight snapshot across await.
+        let name_policy = NamePolicy::new(
+            &self.network_policy,
+            self.platform_policy.as_deref(),
+            &self.shared,
+        );
+        if self.config.rebind_protection
+            && ((to_gateway && !name_policy.allows_name(question.name()))
+                || !filter_response(&name_policy, &query_msg, &mut response_msg, to_gateway))
+        {
+            tracing::debug!(domain = %domain, "DNS response refused by network policy");
+            return build_status_response(&query_msg, ResponseCode::NXDomain);
         }
 
         // Cache the resolved addresses so policy `Domain` /
@@ -482,7 +490,10 @@ impl DnsForwarder {
             ConfiguredResolver::WindowsSystem(resolver) => {
                 match resolver.query(_raw_query, transport).await {
                     Ok(response) => match Message::from_bytes(&response) {
-                        Ok(response) => Some(response),
+                        Ok(mut message) => {
+                            expand_names(&mut message, &response)?;
+                            Some(message)
+                        }
                         Err(error) => {
                             tracing::warn!(
                                 domain = %domain,
@@ -522,7 +533,11 @@ impl DnsForwarder {
     ) -> Option<Message> {
         let mut send = client.send(DnsRequest::from(query_msg.clone()));
         match send.next().await {
-            Some(Ok(resp)) => Some(resp.into()),
+            Some(Ok(resp)) => {
+                let (mut message, wire) = resp.into_parts();
+                expand_names(&mut message, &wire)?;
+                Some(message)
+            }
             Some(Err(e)) => {
                 tracing::warn!(domain = %domain, error = %e, "upstream DNS send failed");
                 None
@@ -761,6 +776,7 @@ fn policy_allows_rebind_address(
 }
 
 /// Return whether both the platform floor and tenant policy admit a private answer.
+#[cfg(test)]
 fn policies_allow_rebind_address(
     policy: &NetworkPolicy,
     platform_policy: Option<&NetworkPolicy>,
@@ -1017,6 +1033,8 @@ fn build_truncated_response(query: &Message) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    mod security_tests;
+
     use super::*;
     use crate::policy::{Action, Destination, NetworkProfile, Protocol, Rule};
     use hickory_net::proto::op::{Edns, MessageType, OpCode, Query};
@@ -1138,6 +1156,173 @@ mod tests {
             RData::A(a) => Some(Ipv4Addr::from(*a)),
             _ => None,
         })
+    }
+
+    fn response_code(bytes: &Bytes) -> ResponseCode {
+        Message::from_bytes(bytes)
+            .expect("parse response")
+            .metadata
+            .response_code
+    }
+
+    async fn resolve_name_via_gateway(forwarder: &DnsForwarder, name: &str) -> ResponseCode {
+        let raw = make_query(name, RecordType::PTR)
+            .to_bytes()
+            .expect("encode query");
+        let gateway: IpAddr = "10.0.0.1".parse().unwrap();
+        let bytes = forwarder
+            .forward(&raw, Some(gateway), Transport::Udp, None)
+            .await
+            .expect("a response");
+        response_code(&bytes)
+    }
+
+    fn with_rebind_protection(forwarder: &mut Arc<DnsForwarder>) -> &mut DnsForwarder {
+        let forwarder_mut = Arc::get_mut(forwarder).expect("unique test forwarder");
+        forwarder_mut.config = Arc::new(NormalizedDnsConfig {
+            rebind_protection: true,
+            nameservers: Vec::new(),
+            query_timeout: Duration::from_millis(300),
+        });
+        forwarder_mut
+    }
+
+    fn egress_rule(cidr: &str, action: Action) -> Rule {
+        Rule {
+            direction: crate::policy::Direction::Egress,
+            destination: Destination::Cidr(cidr.parse().unwrap()),
+            protocols: Vec::new(),
+            ports: Vec::new(),
+            action,
+        }
+    }
+
+    /// A sandbox limited to public egress must not learn about the host's
+    /// local network through multicast DNS or private reverse lookups.
+    #[tokio::test]
+    async fn local_network_names_are_refused_without_local_network_access() {
+        let (upstream, hits) = responding_udp(Ipv4Addr::new(192, 0, 2, 7)).await;
+        let mut forwarder = forwarder_over(&[upstream]).await;
+        with_rebind_protection(&mut forwarder);
+
+        for name in [
+            "_services._dns-sd._udp.local.",
+            "Printer.LOCAL.",
+            "1.0.254.169.in-addr.arpa.",
+            "1.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa.",
+            "4.3.2.10.in-addr.arpa.",
+            "10.in-addr.arpa.",
+            "1.0.16.172.in-addr.arpa.",
+            "1.0.168.192.in-addr.arpa.",
+            "10.50.168.192.IN-ADDR.ARPA.",
+            "1.2.64.100.in-addr.arpa.",
+            "1.0.0.0.d.f.ip6.arpa.",
+            "db._dns-sd._udp.0.0.254.169.in-addr.arpa.",
+            "x.1.0.254.169.in-addr.arpa.",
+            "_services._dns-sd._udp.8.e.f.ip6.arpa.",
+            "b._dns-sd._udp.0.1.168.192.in-addr.arpa.",
+        ] {
+            assert_eq!(
+                resolve_name_via_gateway(&forwarder, name).await,
+                ResponseCode::NXDomain,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no query reaches the upstream"
+        );
+
+        for name in [
+            "local.example.com.",
+            "8.8.8.8.in-addr.arpa.",
+            "1.1.1.172.in-addr.arpa.",
+            "1.0.0.2.ip6.arpa.",
+        ] {
+            resolve_name_via_gateway(&forwarder, name).await;
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 4, "other names still resolve");
+    }
+
+    /// Only a whole local range opens the gate: a rule for one subnet or
+    /// host must not expose the rest of the host's network.
+    #[tokio::test]
+    async fn narrow_local_rules_do_not_open_the_local_network_gate() {
+        let (upstream, hits) = responding_udp(Ipv4Addr::new(192, 168, 0, 20)).await;
+        for cidr in ["192.168.0.1/32", "192.168.0.0/24", "10.0.0.0/16"] {
+            let mut forwarder = forwarder_over(&[upstream]).await;
+            let mut policy = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+            policy.rules.push(egress_rule(cidr, Action::Allow));
+            with_rebind_protection(&mut forwarder).network_policy = Arc::new(policy);
+            assert_eq!(
+                resolve_name_via_gateway(&forwarder, "_services._dns-sd._udp.local.").await,
+                ResponseCode::NXDomain,
+                "{cidr}"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    /// Reverse lookups are allowed exactly where the forward answer would
+    /// be: an allowed corporate range does not open a denied home LAN.
+    #[tokio::test]
+    async fn reverse_names_follow_the_addresses_they_name() {
+        let (upstream, hits) = responding_udp(Ipv4Addr::new(192, 0, 2, 7)).await;
+        let mut forwarder = forwarder_over(&[upstream]).await;
+        let mut policy = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        policy
+            .rules
+            .push(egress_rule("192.168.0.0/16", Action::Deny));
+        policy.rules.push(egress_rule("10.0.0.0/8", Action::Allow));
+        with_rebind_protection(&mut forwarder).network_policy = Arc::new(policy);
+
+        assert_eq!(
+            resolve_name_via_gateway(&forwarder, "5.1.168.192.in-addr.arpa.").await,
+            ResponseCode::NXDomain
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            resolve_name_via_gateway(&forwarder, "5.1.0.10.in-addr.arpa.").await,
+            ResponseCode::NoError
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn local_network_names_resolve_with_local_network_access() {
+        let (upstream, hits) = responding_udp(Ipv4Addr::new(192, 168, 1, 20)).await;
+        let mut forwarder = forwarder_over(&[upstream]).await;
+        with_rebind_protection(&mut forwarder).network_policy =
+            Arc::new(NetworkPolicy::from_profiles([
+                NetworkProfile::Public,
+                NetworkProfile::Private,
+            ]));
+
+        for name in ["printer.local.", "10.50.168.192.in-addr.arpa."] {
+            assert_eq!(
+                resolve_name_via_gateway(&forwarder, name).await,
+                ResponseCode::NoError,
+                "{name}"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// Disabling rebind protection also opts out of the local-network check.
+    #[tokio::test]
+    async fn local_network_names_resolve_without_rebind_protection() {
+        let (upstream, hits) = responding_udp(Ipv4Addr::new(192, 168, 1, 20)).await;
+        let forwarder = forwarder_over(&[upstream]).await;
+
+        for name in ["printer.local.", "10.50.168.192.in-addr.arpa."] {
+            assert_eq!(
+                resolve_name_via_gateway(&forwarder, name).await,
+                ResponseCode::NoError,
+                "{name}"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

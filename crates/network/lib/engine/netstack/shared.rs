@@ -4,6 +4,7 @@
 //! All inter-thread communication flows through [`SharedState`], which holds
 //! lock-free frame queues and cross-platform [`WakePipe`] notifications.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -353,6 +354,18 @@ impl SharedState {
         self.resolved_hostnames
             .read()
             .member_matches(&addr, Instant::now(), |key| predicate(&key.hostname))
+    }
+
+    /// Snapshot live hostname bindings for a DNS range authorization decision.
+    /// Holding one read lock prevents a concurrent DNS answer from introducing
+    /// an unsampled hostname-policy exception halfway through that decision.
+    pub(crate) fn resolved_hostname_snapshot(&self) -> HashMap<IpAddr, Vec<String>> {
+        let mut result: HashMap<IpAddr, Vec<String>> = HashMap::new();
+        let index = self.resolved_hostnames.read();
+        index.visit_live_bindings(Instant::now(), |key, addr| {
+            result.entry(*addr).or_default().push(key.hostname.clone());
+        });
+        result
     }
 
     /// Best-effort expiry maintenance for resolved hostnames.
