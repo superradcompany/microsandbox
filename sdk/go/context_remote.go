@@ -2,16 +2,31 @@ package microsandbox
 
 import "time"
 
+// ComputeType selects the machine type for newly created remote sandboxes.
+type ComputeType string
+
+const (
+	ComputeStandard ComputeType = "standard"
+	ComputeShared   ComputeType = "shared"
+)
+
 // RemoteContextOption overrides one captured setting when deriving a remote context.
 // Omitted options preserve their values; no profile or environment is resolved again.
 type RemoteContextOption func(*remoteContextOverrides)
 
 type remoteContextOverrides struct {
-	URL              *string `json:"url,omitempty"`
-	APIKey           *string `json:"apiKey,omitempty"`
-	RequestTimeoutMS *uint64 `json:"requestTimeoutMs,omitempty"`
-	UserAgent        *string `json:"userAgent,omitempty"`
+	ComputeType      *ComputeType `json:"computeType,omitempty"`
+	URL              *string      `json:"url,omitempty"`
+	APIKey           *string      `json:"apiKey,omitempty"`
+	RequestTimeoutMS *uint64      `json:"requestTimeoutMs,omitempty"`
+	UserAgent        *string      `json:"userAgent,omitempty"`
 	err              error
+}
+
+// WithRemoteComputeType selects the machine type for new sandboxes.
+// Existing sandboxes keep their original type.
+func WithRemoteComputeType(computeType ComputeType) RemoteContextOption {
+	return func(o *remoteContextOverrides) { o.ComputeType = &computeType }
 }
 
 // WithRemoteURL selects the derived context's endpoint. An empty URL is invalid.

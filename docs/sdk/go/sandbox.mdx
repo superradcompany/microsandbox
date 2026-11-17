@@ -154,42 +154,6 @@ Look up an existing sandbox without connecting or starting it. Returns `*Sandbox
   </div>
 </div>
 
-#### <span className="msb-recv">m.</span><span className="msb-hn">RecoverStorage()</span>
-
-```go
-func RecoverStorage(
-    ctx context.Context, name string, options StorageRecoveryOptions,
-) (StorageRecovery, error)
-```
-
-Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
-
-<p className="msb-label">Options</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>Selections</code><span className="msb-type">[]StorageRecoverySelection</span></div>
-    <div className="msb-param-desc">Exact IDs from storage diagnosis, with <code>DiskID</code> and <code>CandidateID</code> strings. Leave empty to import or resume the validated current view.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>AcceptSelectedView</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>LegacyWritersStopped</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>StorageRecovery</code></div>
-    <div className="msb-param-desc"><code>Name</code> (string) identifies the sandbox. <code>Ready</code> (boolean) confirms protected storage is ready, and <code>OriginalsRetained</code> (boolean) confirms the original disks were retained.</div>
-  </div>
-</div>
-
 #### <span className="msb-recv">m.</span><span className="msb-hn">ListSandboxes()</span>
 
 ```go
@@ -206,7 +170,9 @@ if err != nil {
 for _, h := range page.Sandboxes {
     defer h.Close()
     status, err := h.Status(ctx)
-    if err != nil { return err }
+    if err != nil {
+        return err
+    }
     fmt.Printf("%s - %s\n", h.Name(), status)
 }
 ```
@@ -360,7 +326,7 @@ Delete a stopped sandbox by name. See [Destroy or remove](/sandboxes/lifecycle#d
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">AllSandboxMetrics()</span>
 
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error)
@@ -399,19 +365,47 @@ See [Runtime setup](/sdk/setup#resolve-check-install-and-ensure) for runtime ins
 
 ### Live inspection and preparation
 
+`Info(ctx)` returns identity, status, optional failure message, and creation/update timestamps. `Name()` and `ID()` require no I/O; mutable state is fetched on each inspection call. Execution starts stopped sandboxes as needed. Call `Close()` when finished. See [lifecycle](/sandboxes/lifecycle).
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">EnsureRunning()</span>
+
 ```go
 func (s *Sandbox) EnsureRunning(ctx context.Context) error
+```
+
+Start the sandbox if needed. This never creates a missing sandbox or switches to a replacement with the same name.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Info()</span>
+
+```go
 func (s *Sandbox) Info(ctx context.Context) (*SandboxInfo, error)
+```
+
+Fetch the current identity, status, failure message, and timestamps without starting the sandbox.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Status()</span>
+
+```go
 func (s *Sandbox) Status(ctx context.Context) (SandboxStatus, error)
+```
+
+Fetch the current lifecycle status without starting the sandbox.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">LastFailureMessage()</span>
+
+```go
 func (s *Sandbox) LastFailureMessage(ctx context.Context) (*string, error)
+```
+
+Fetch the latest failure message, or `nil` when none is available.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Config()</span>
+
+```go
 func (s *Sandbox) Config(ctx context.Context) (*SandboxConfig, error)
 ```
 
-`EnsureRunning` connects to an existing run or starts a stopped resource; the receiver retains any new local run. `Info` returns identity, observed name, status, optional failure message and optional creation/update timestamps in one lookup. `Name()` and `ID()` remain synchronous and require no backend I/O.
-
-Each inspection method performs a fresh backend lookup without starting the resource. A failed lookup raises or returns an error; it never substitutes cached data. Use `info` when several related fields are needed together. Configuration is the latest persisted settings, which may differ from settings applied to the current run. Retain the returned value when you want a snapshot.
-
-A sandbox resource with stable identity and retained context, safe for concurrent use. Lookup and listing do not establish a runtime connection.
+Fetch the saved configuration. Some settings require a restart to take effect.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Name()</span>
 
@@ -490,7 +484,7 @@ Return an SSH accessor for opening a native in-process SSH client or preparing a
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Logs()</span>
 
-<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Bounded log reads are not available on managed cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Logs(ctx context.Context, opts LogOptions) ([]LogEntry, error)
@@ -531,7 +525,7 @@ Read persisted output from the sandbox's `exec.log`. Backed by an on-disk file, 
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">LogStream()</span>
 
-<Tooltip tip="On microsandbox cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On managed cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) LogStream(ctx context.Context, opts LogStreamOptions) (*LogStreamHandle, error)
@@ -578,7 +572,7 @@ Start a streaming log subscription against a live sandbox. Pass `LogStreamOption
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Ping()</span>
 
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Ping(ctx context.Context) (*SandboxPingResult, error)
@@ -609,7 +603,7 @@ Check that the running sandbox's guest agent is reachable without refreshing idl
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Touch()</span>
 
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Touch(ctx context.Context) (*SandboxTouchResult, error)
@@ -640,7 +634,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Modify()</span>
 
-<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On managed cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error)
@@ -730,7 +724,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Metrics()</span>
 
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error)
@@ -759,7 +753,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">MetricsStream()</span>
 
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) MetricsStream(ctx context.Context, interval time.Duration) (*MetricsStreamHandle, error)
@@ -947,7 +941,7 @@ Request graceful shutdown and return once the request is sent, without waiting f
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Kill()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Kill(ctx context.Context, opts ...KillOption) error
@@ -974,7 +968,7 @@ Force-terminate the sandbox with SIGKILL and wait until stopped state is observe
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">RequestKill()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) RequestKill(ctx context.Context) error
@@ -984,7 +978,7 @@ Request force termination and return once the request is sent, without waiting f
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">RequestDrain()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) RequestDrain(ctx context.Context) error
@@ -1062,7 +1056,7 @@ Disarm automatic shutdown without releasing the native handle. Repeated detach a
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Close()</span>
 
-<Tooltip tip="On microsandbox cloud this does not stop the sandbox; the cloud handle does not own the host process, so call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On managed cloud this does not stop the sandbox; the cloud handle does not own the host process, so call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Close() error
@@ -1211,7 +1205,9 @@ Require every supplied label. Repeated selectors are AND-matched.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithImage()</span>
 
-<Tooltip tip="Microsandbox cloud accepts OCI root filesystems only; host-directory and disk-image roots are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```go
 func WithImage(image string) SandboxOption
@@ -1275,13 +1271,11 @@ Deprecated alias for `WithRootDisk(RootDisk.Managed(mebibytes))`.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithImageDisk()</span>
 
-<Tooltip tip="Disk-image root filesystems are not available on microsandbox cloud; use an OCI image."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```go
 func WithImageDisk(path string, fstype string) SandboxOption
 ```
 
-Use a disk image as the root filesystem and optionally provide the inner filesystem type, e.g. `"ext4"`. The disk format is inferred from the path extension (`.qcow2`, `.raw`, or `.vmdk`).
+Use a disk image as the root filesystem and optionally provide the inner filesystem type, e.g. `"ext4"`. The disk format is inferred from the path extension (`.qcow2`, `.raw`, or `.vmdk`). On our managed cloud, the path refers to your organization's host volume.
 
 <p className="msb-label">Parameters</p>
 
@@ -1318,7 +1312,7 @@ Set the guest memory limit in MiB. This is a limit, not an upfront reservation. 
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithMaxMemory()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on managed cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithMaxMemory(mebibytes uint32) SandboxOption
@@ -1371,7 +1365,7 @@ Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithMaxCPUs()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on managed cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithMaxCPUs(cpus uint8) SandboxOption
@@ -1496,7 +1490,7 @@ Attach a single label. Shorthand for [`WithLabels`](#withlabels) with one entry.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithHostname()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud; the platform assigns the hostname."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on managed cloud; the platform assigns the hostname."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithHostname(hostname string) SandboxOption
@@ -1532,7 +1526,7 @@ Set the default guest user (UID or name) for all commands.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithReplace()</span>
 
-<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Replace-on-create is not available on managed cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithReplace() SandboxOption
@@ -1542,7 +1536,7 @@ Replace any existing sandbox with the same name. Sends SIGTERM, waits up to 10s 
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithReplaceWithTimeout()</span>
 
-<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Replace-on-create is not available on managed cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithReplaceWithTimeout(timeout time.Duration) SandboxOption
@@ -1764,7 +1758,7 @@ Pull a public image without credentials, even when stale credentials for its reg
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithRegistryInsecure()</span>
 
-<Tooltip tip="Plain-HTTP registry pulls are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Plain-HTTP registry pulls are not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithRegistryInsecure() SandboxOption
@@ -1774,7 +1768,7 @@ Use plain HTTP for the registry instead of HTTPS, for local or self-hosted regis
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithRegistryCACerts()</span>
 
-<Tooltip tip="Custom registry CA certificates are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Custom registry CA certificates are not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithRegistryCACerts(pem []byte) SandboxOption
@@ -1793,7 +1787,7 @@ Trust additional PEM-encoded CA certificates when pulling, for registries served
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithRegistryCACertsPath()</span>
 
-<Tooltip tip="Custom registry CA certificates are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Custom registry CA certificates are not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithRegistryCACertsPath(path string) SandboxOption
@@ -1812,7 +1806,7 @@ Like [`WithRegistryCACerts`](#withregistrycacerts) but reads the PEM bundle from
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithPorts()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithPorts(ports map[uint16]uint16) SandboxOption
@@ -1831,7 +1825,7 @@ Publish guest TCP ports onto host ports (map key = host port, value = guest port
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithPortsUDP()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithPortsUDP(ports map[uint16]uint16) SandboxOption
@@ -1850,7 +1844,7 @@ Publish guest UDP ports onto host ports. The default host bind address is `127.0
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithPortBindings()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithPortBindings(bindings ...PortBinding) SandboxOption
@@ -2062,7 +2056,7 @@ Set how long `Destroy` waits for graceful shutdown before it times out. The defa
 func WithKillTimeout(timeout time.Duration) KillOption
 ```
 
-Set how long [`Kill`](#sb-kill) waits for stopped-state observation. The default is five seconds. This is a `KillOption`; pass it to [`Kill`](#sb-kill).
+Set how long [`Kill`](#sb-kill) waits for confirmation that the sandbox stopped. The default is five seconds. This is a `KillOption`; pass it to [`Kill`](#sb-kill).
 
 <p className="msb-label">Parameters</p>
 
@@ -2262,7 +2256,9 @@ Create a symlink at `link` pointing to `target`. Only `opts.Replace` is honored.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">CopyFile()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```go
 func (patchFactory) CopyFile(src, dst string, opts PatchOptions) PatchConfig
@@ -2289,7 +2285,9 @@ Copy a single host file at `src` into the guest rootfs at `dst`.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">CopyDir()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```go
 func (patchFactory) CopyDir(src, dst string, opts PatchOptions) PatchConfig
@@ -3114,3 +3112,41 @@ See [Runtime setup](/sdk/setup#customize-installation) for the setup-only `Insta
 ```go
 sandbox, err := microsandbox.CreateSandbox(ctx, "nested", microsandbox.WithImage("alpine"), microsandbox.WithNestedVirt(true))
 ```
+
+## Storage recovery
+
+#### <span className="msb-recv">m.</span><span className="msb-hn">RecoverStorage()</span>
+
+```go
+func RecoverStorage(
+    ctx context.Context, name string, options StorageRecoveryOptions,
+) (StorageRecovery, error)
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Options</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Selections</code><span className="msb-type">[]StorageRecoverySelection</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with <code>DiskID</code> and <code>CandidateID</code> strings. Leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>AcceptSelectedView</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>LegacyWritersStopped</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>Name</code> (string) identifies the sandbox. <code>Ready</code> (boolean) confirms protected storage is ready, and <code>OriginalsRetained</code> (boolean) confirms the original disks were retained.</div>
+  </div>
+</div>

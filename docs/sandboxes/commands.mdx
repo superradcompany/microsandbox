@@ -493,7 +493,7 @@ msb exec -t worker -e DEBUG=1 -w /app -- python
 
 ## Write stdin
 
-TypeScript, Rust, Python, and Ruby can pass input bytes with the command. Ruby does not expose a streaming stdin writer; Go uses a pipe to supply input and collect the result.
+Pass input with the command, or stream it through a pipe:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -532,6 +532,7 @@ fmt.Print(output.Stdout())
 ```
 
 ```ruby Ruby
+# Input is buffered; streaming stdin is not supported.
 output = sandbox.exec("cat", stdin: "hello\n")
 puts output.stdout
 ```

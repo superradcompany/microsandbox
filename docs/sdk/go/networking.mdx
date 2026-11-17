@@ -439,7 +439,7 @@ MaxInboundTCPConnections *uint
 HTTP *HTTPConfig
 ```
 
-<Tooltip tip="Readable HTTP denial responses are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Readable HTTP denial responses are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Omitting `HTTP` enables JSON denial responses locally. When supplying `HTTPConfig`,
 set `DenyResponse: true` to keep them enabled; `false` disables them. An empty format
@@ -582,7 +582,7 @@ Host-scoped upstream certificate verification override.
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.RateLimiter</a></p>
 
-<Tooltip tip="Host-side network rate limiting is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Host-side network rate limiting is not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 type NetworkRateLimiterConfig struct {

@@ -42,11 +42,16 @@ pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use context::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
-    CloudVolumeKind, CloudVolumeStatus, Context, ContextInfo, ContextKind, ContextSelectionSource,
-    Profile, ProfileKind, SandboxInner, SandboxOps, SandboxRecordCloudState, SandboxRecordInner,
-    SandboxRemoteState, Sandboxes, Snapshots, VolumeInner, VolumeOps, VolumeRemoteState, Volumes,
-    default_local_context, resolve_default_backend,
+    CloudVolumeKind, CloudVolumeStatus, ComputeType, Context, ContextInfo, ContextKind,
+    ContextSelectionSource, Profile, ProfileKind, SandboxInner, SandboxOps,
+    SandboxRecordCloudState, SandboxRecordInner, SandboxRemoteState, Sandboxes, Snapshots,
+    VolumeInner, VolumeOps, VolumeRemoteState, Volumes, default_local_context,
+    resolve_default_backend,
 };
+/// Previous name for [`ComputeType`].
+#[deprecated(note = "use ComputeType instead")]
+pub use microsandbox_types::CloudComputeType;
+
 #[cfg(feature = "cloud")]
 pub use context::{DEFAULT_CLOUD_API_URL, RemoteContext, RemoteContextBuilder};
 #[cfg(feature = "local")]

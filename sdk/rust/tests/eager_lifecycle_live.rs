@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use microsandbox::sandbox::SandboxStatus;
 use microsandbox::{CreationProgress, MicrosandboxError, Sandbox, StartupPhase};
 use microsandbox_db::entity::sandbox as sandbox_row;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -92,13 +94,7 @@ async fn prove_runtime_cleanup(name: &str, pid: u64) {
             .unwrap();
             if ownership.is_some() && !PathBuf::from(format!("/proc/{pid}")).exists() {
                 match handle {
-                    Ok((handle, status))
-                        if matches!(
-                            status,
-                            microsandbox::sandbox::SandboxStatus::Stopped
-                                | microsandbox::sandbox::SandboxStatus::Crashed
-                        ) =>
-                    {
+                    Ok((handle, SandboxStatus::Stopped | SandboxStatus::Crashed)) => {
                         drop(ownership);
                         handle.destroy().await.unwrap();
                         break;

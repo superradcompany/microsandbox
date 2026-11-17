@@ -1,10 +1,10 @@
 ---
 title: Configuration
 "og:title": Ruby SDK Configuration reference
-description: Select a backend and configure the local runtime with the Ruby SDK.
+description: Configure local or remote connections and runtime settings with the Ruby SDK.
 ---
 
-See [Runtime setup](/sdk/setup) and [Cloud](/cloud/overview) for setup examples.
+See [Runtime setup](/sdk/setup) and [managed cloud](/cloud/overview) for setup examples.
 
 ## Microsandbox
 
@@ -126,15 +126,15 @@ Capture a local destination. Construction does not start a VM. Collections and r
 #### new
 
 ```ruby
-Microsandbox::RemoteContext.new(url: nil, api_key: nil, profile: nil, request_timeout_ms: nil, user_agent: nil) # => RemoteContext
+Microsandbox::RemoteContext.new(url: nil, api_key: nil, profile: nil, request_timeout_ms: nil, user_agent: nil, compute_type: nil) # => RemoteContext
 ```
 
-Capture a remote API destination using explicit credentials or a named profile. `request_timeout_ms` must be a nonnegative integer.
+Capture a remote API destination using explicit credentials or a named profile. `request_timeout_ms` must be a nonnegative integer. `compute_type` accepts `"standard"` or `"shared"` for new sandboxes; omission uses the server default. See [compute types](/cloud/pricing#choose-a-compute-type).
 
 #### with_url
 
 ```ruby
-Microsandbox::RemoteContext.with_url(url, api_key, request_timeout_ms: nil, user_agent: nil) # => RemoteContext
+Microsandbox::RemoteContext.with_url(url, api_key, request_timeout_ms: nil, user_agent: nil, compute_type: nil) # => RemoteContext
 ```
 
 Select an explicit compatible remote endpoint. An empty URL is invalid. Key-only `new(api_key: ...)` uses the hosted endpoint. Options use the same validation as `new`.
@@ -142,10 +142,10 @@ Select an explicit compatible remote endpoint. An empty URL is invalid. Key-only
 #### with
 
 ```ruby
-remote.with(url: nil, api_key: nil, request_timeout_ms: nil, user_agent: nil) # => RemoteContext
+remote.with(url: nil, api_key: nil, request_timeout_ms: nil, user_agent: nil, compute_type: nil) # => RemoteContext
 ```
 
-Return an independent context using keyword overrides. Nil retains the captured value. Profiles, environment and configuration files are not read again; existing resources keep their destination. Empty URLs/keys and invalid timeouts fail. See [derivation examples](/operations/backends#deriving-a-remote-context).
+Return an independent context using keyword overrides. Nil retains the captured value. Profiles, environment and configuration files are not read again; existing resources keep their destination. Empty URLs/keys and invalid timeouts fail. See [derivation examples](/cloud/connect#deriving-a-remote-context).
 
 #### from_env / from_profile
 
@@ -166,4 +166,4 @@ context.volumes   # => Volumes
 context.snapshots # => Snapshots
 ```
 
-Return collections bound to this destination. See [context usage](/operations/backends#sdk-contexts).
+Return collections bound to this destination. See [context usage](/cloud/connect#sdk-contexts).

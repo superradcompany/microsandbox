@@ -7,7 +7,7 @@ use std::{path::PathBuf, sync::Arc};
 use serde::Deserialize;
 
 use super::Context;
-use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{ComputeType, MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -25,6 +25,7 @@ struct ContextOptions {
     profile: Option<String>,
     request_timeout_ms: Option<u64>,
     user_agent: Option<String>,
+    compute_type: Option<ComputeType>,
 }
 
 /// Only explicit overrides cross the binding boundary; captured credentials stay in Rust.
@@ -36,6 +37,7 @@ struct RemoteOverrides {
     api_key: Option<String>,
     request_timeout_ms: Option<u64>,
     user_agent: Option<String>,
+    compute_type: Option<ComputeType>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -55,6 +57,7 @@ pub fn from_options_json(json: &str) -> MicrosandboxResult<Arc<dyn Context>> {
                 || options.profile.is_some()
                 || options.request_timeout_ms.is_some()
                 || options.user_agent.is_some()
+                || options.compute_type.is_some()
             {
                 return Err(invalid("remote options cannot configure a local context"));
             }
@@ -84,6 +87,7 @@ pub fn from_options_json(json: &str) -> MicrosandboxResult<Arc<dyn Context>> {
                         || options.api_key.is_some()
                         || options.request_timeout_ms.is_some()
                         || options.user_agent.is_some()
+                        || options.compute_type.is_some()
                     {
                         return Err(invalid(
                             "a profile cannot be combined with explicit remote options",
@@ -104,6 +108,9 @@ pub fn from_options_json(json: &str) -> MicrosandboxResult<Arc<dyn Context>> {
                 }
                 if let Some(agent) = options.user_agent {
                     builder = builder.user_agent(agent);
+                }
+                if let Some(compute_type) = options.compute_type {
+                    builder = builder.compute_type(compute_type);
                 }
                 Ok(builder.build()?.clone_shared())
             }
@@ -143,6 +150,9 @@ pub fn derive_remote_from_options_json(
         }
         if let Some(agent) = overrides.user_agent {
             builder = builder.user_agent(agent);
+        }
+        if let Some(compute_type) = overrides.compute_type {
+            builder = builder.compute_type(compute_type);
         }
         Ok(builder.build()?.clone_shared())
     }

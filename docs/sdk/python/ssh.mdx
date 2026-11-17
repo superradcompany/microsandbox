@@ -42,7 +42,7 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 
 SSH operations for a sandbox.
 
-The idle SSH facade performs no startup and retains no local shutdown owner. Creating a client or prepared server endpoint prepares the receiving Sandbox and retains its selected local run. Commands and SFTP on that endpoint reuse the established run rather than reconnecting to a later generation. A helper whose original receiver group has been released returns an error. Explicit stop can interrupt active sessions.
+The idle SSH helper does not start a sandbox or take ownership of shutdown. Creating a client or prepared server endpoint starts or connects to the sandbox and keeps using that run. Commands and SFTP on that endpoint reuse the same run. After you release the original sandbox handles, the helper returns an error. Explicit stop can interrupt active sessions.
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">open_client()</span>
 
@@ -99,7 +99,7 @@ Connect a native in-process SSH client to this sandbox. Generates an ephemeral c
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">prepare_server()</span>
 
-<Tooltip tip="On microsandbox cloud, serving works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, serving works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def prepare_server(

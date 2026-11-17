@@ -1,20 +1,27 @@
 """Give a repaired full wheel shared core wrappers without relinking its native payload."""
+
 import argparse
 import base64
 import csv
 import hashlib
 import io
-from pathlib import Path
 import zipfile
+from pathlib import Path
 
 from stage_distributions import VERSION, full_wrapper_files
 
 
 def rewrite(path):
     with zipfile.ZipFile(path) as archive:
-        entries = {entry.filename: (entry, archive.read(entry.filename)) for entry in archive.infolist()}
+        entries = {
+            entry.filename: (entry, archive.read(entry.filename)) for entry in archive.infolist()
+        }
     for name in list(entries):
-        if name.startswith("microsandbox/") and name.count("/") == 1 and (name.endswith((".py", ".pyi")) or name.endswith("py.typed")):
+        if (
+            name.startswith("microsandbox/")
+            and name.count("/") == 1
+            and (name.endswith((".py", ".pyi")) or name.endswith("py.typed"))
+        ):
             del entries[name]
     for name, content in full_wrapper_files().items():
         entry = zipfile.ZipInfo(name)
@@ -40,7 +47,7 @@ def rewrite(path):
     entries[record_name] = entries[record_name][0], record.getvalue().encode()
     temporary = path.with_suffix(".rewritten")
     with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, (entry, content) in sorted(entries.items()):
+        for _name, (entry, content) in sorted(entries.items()):
             archive.writestr(entry, content, compress_type=zipfile.ZIP_DEFLATED)
     temporary.replace(path)
 

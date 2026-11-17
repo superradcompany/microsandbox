@@ -5,11 +5,13 @@ keywords: ["microVM sandboxes", "sandbox configuration", "sandbox lifecycle"]
 icon: "circle-info"
 ---
 
-A sandbox is a microVM with its own Linux kernel, filesystem, and network stack. Your application or the `msb` CLI starts it as a child process on your machine or on [microsandbox cloud](/cloud/overview), then talks to the guest agent to run commands, move files, and control lifecycle.
+A sandbox is a microVM with its own Linux kernel, filesystem, and network stack. Run it on your machine by default, or on [our managed cloud](/cloud/overview) when you need hosted compute. The same SDKs and CLI let you run commands, move files, and manage sandboxes in either place.
 
 The security boundary is hardware virtualization, not Linux namespaces. That makes sandboxes a good fit for untrusted workloads: user-submitted code, AI agent actions, plugins, dependency installs, CI jobs, scrapers, and tools that should not inherit the host process's full privileges.
 
 ## Create a sandbox
+
+The SDK examples use the default local helpers. To run remotely, [use a remote context](/cloud/connect); the CLI follows its connection settings. Existing sandboxes and data stay where you created them.
 
 At minimum, a sandbox needs a name and an image. Everything else has defaults: 1 vCPU, 512 MiB memory, public-only networking, and `/bin/sh` as the default shell.
 
@@ -48,7 +50,7 @@ Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
 ## Common configuration
 
-<Tooltip tip="max_cpus and max_memory are not carried on microsandbox cloud; set the CPU and memory you need at creation and recreate the sandbox to resize."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="max_cpus and max_memory are not carried on managed cloud; set the CPU and memory you need at creation and recreate the sandbox to resize."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
 ```typescript TypeScript
@@ -156,7 +158,9 @@ actions, metric attribution, and OCI image labels.
 
 Most sandboxes start from an OCI image. You can also use a host directory as the root filesystem, or boot from a disk image. Select one source:
 
-<Tooltip tip="Host-directory and disk-image root filesystems are local-only; microsandbox cloud supports OCI root filesystems."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 <CodeGroup>
 ```typescript TypeScript
@@ -205,7 +209,7 @@ See [Images](/images/overview) for the full OCI and disk image model.
 
 ## Naming conflicts
 
-<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first, then create the replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Replace-on-create is not available on managed cloud; remove the existing sandbox first, then create the replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Creating a sandbox fails if another sandbox already has the same name. Use [`connect_or_create`](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) when you want to reuse the current persisted identity and its configuration. Use replace when you explicitly want a fresh sandbox with that name:
 

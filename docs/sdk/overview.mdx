@@ -6,7 +6,9 @@ keywords: ["microsandbox SDK", "Python SDK", "TypeScript SDK", "Rust SDK", "Go S
 icon: "play"
 ---
 
-The SDK runs microsandbox directly from your application. Running locally, creating a sandbox spawns a VM as a child process; there is no daemon to install and no server to connect to. Use an explicit `RemoteContext` to run sandboxes on [microsandbox cloud](/cloud/overview) or another compatible remote API. See [contexts](/operations/backends#sdk-contexts) for destination selection.
+Run microsandbox from your application. Locally, each sandbox runs as a child VM process; there is no daemon to install.
+
+Run workloads on your machine with a local context, or use a remote context to run on [our managed cloud](/cloud/overview). Your sandbox workflow stays the same, and you can switch back to local execution whenever you need to. Default SDK helpers always run locally. A remote context does not move local sandboxes or data. See [remote connections](/cloud/connect) for connection settings.
 
 ## Installation
 
@@ -32,86 +34,9 @@ gem install microsandbox
 ```
 </CodeGroup>
 
-<Accordion title="Provisioning the runtime separately">
-
-All five SDKs can use a separately provisioned runtime. See [Runtime setup](/sdk/setup#bring-your-own-runtime) for code tabs covering each SDK’s packaging and setup requirements.
-
-</Accordion>
-
-## Select a smaller distribution
-
-The package layouts below are part of the SDK revamp and require its release. They are not available in v0.7.15. See [distribution migration](/migrations/sdk-distributions) before changing an existing installation.
-
-The full `microsandbox` package remains available. TypeScript and Python have separate local and remote packages that include only their selected native binding. These lean packages do not include `msb`, firmware, a runtime launcher, or an automatic runtime download during installation.
-
-For a remote API:
-
-<CodeGroup>
-```bash TypeScript
-npm install @microsandbox/remote
-```
-
-```bash Python
-pip install microsandbox-remote
-```
-</CodeGroup>
-
-<CodeGroup>
-```typescript TypeScript
-import { RemoteContext } from "@microsandbox/remote";
-
-const remote = RemoteContext.builder()
-  .url("https://api.microsandbox.dev")
-  .apiKey(process.env.MSB_API_KEY!)
-  .build();
-const sb = await remote.sandboxes.get("worker");
-console.log(await sb.status());
-```
-
-```python Python
-import asyncio
-import os
-from microsandbox_remote import RemoteContext
-
-async def main():
-    remote = RemoteContext(api_key=os.environ["MSB_API_KEY"])
-    sb = await remote.sandboxes.get("worker")
-    print(await sb.status())
-
-asyncio.run(main())
-```
-</CodeGroup>
-
-For local execution with a [separately provisioned runtime](/sdk/setup#bring-your-own-runtime), install `@microsandbox/local` or `microsandbox-local`. Import `Sandbox` from that package and use the ordinary default-local factories shown below. Explicit `LocalContext` is needed only for custom local configuration.
-
-Go also supports thin `sdk/go/local` and `sdk/go/remote` modules over the common `sdk/go/core` module. They do not embed the FFI. Provision the selected native library explicitly before constructing a context:
-
-```bash
-go get github.com/superradcompany/microsandbox/sdk/go/remote
-# Use the exact SDK version, artifact URL and SHA-256 from the trusted release.
-go run github.com/superradcompany/microsandbox/sdk/go/core/cmd/ffi-setup@VERSION \
-  --kind remote --source EXACT_ARTIFACT_URL --sha256 TRUSTED_SHA256
-```
-
-```go
-import (
-    "context"
-    "os"
-
-    "github.com/superradcompany/microsandbox/sdk/go/remote"
-)
-
-// An empty path selects the verified install cache; a path selects a trusted offline library.
-destination, err := remote.NewContext("", os.Getenv("MSB_API_KEY"))
-if err != nil { return err }
-sb, err := destination.Sandboxes().Get(context.Background(), "worker")
-if err != nil { return err }
-defer sb.Close()
-```
-
-Go setup accepts an offline native file through `--source` too. `--target` permits cross-target provisioning without loading the library. Neither module installation, import, nor first use downloads FFI or runtime files. Local execution still needs a separately provisioned runtime pair.
-
-Both providers can be installed in one application. They share the public `Sandbox`, `Volume`, `Snapshot`, configuration and error types; each resource retains its selected provider. Installing a remote provider does not redirect default-local factories. A missing provider produces an installation error when selected.
+<Note>
+Local sandboxes need a runtime. See [runtime setup](/sdk/setup) for installation and packaging details. Remote connections need only an API key.
+</Note>
 
 ## Small example
 
@@ -129,8 +54,7 @@ try {
     const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
     console.log("Output:", output.stdout());
 } finally {
-    await sb.stop();
-    await Sandbox.remove("hello");
+    await sb.destroy();
 }
 ```
 
@@ -149,8 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let output = sb.exec("python", ["-c", "print('Hello, World!')"]).await?;
     println!("{}", output.stdout()?);
 
-    sb.stop().await?;
-    Sandbox::remove("hello").await?;
+    sb.destroy().await?;
     Ok(())
 }
 ```
@@ -160,16 +83,12 @@ import asyncio
 from microsandbox import Sandbox
 
 async def main():
-    sb = await Sandbox.create(
-        "hello",
-        image="python",
-    )
-
-    output = await sb.exec("python", ["-c", "print('Hello, World!')"])
-    print("Output:", output.stdout_text)
-
-    await sb.stop()
-    await Sandbox.remove("hello")
+    sb = await Sandbox.create("hello", image="python")
+    try:
+        output = await sb.exec("python", ["-c", "print('Hello, World!')"])
+        print(output.stdout_text)
+    finally:
+        await sb.destroy()
 
 asyncio.run(main())
 ```
@@ -203,9 +122,8 @@ func run() error {
         return err
     }
     defer func() {
-        _ = sb.Stop(context.Background())
+        _ = sb.Destroy(context.Background())
         _ = sb.Close()
-        _ = m.RemoveSandbox(context.Background(), "hello")
     }()
 
     out, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello, World!')"})
@@ -230,6 +148,96 @@ Microsandbox::Sandbox.remove("hello")
 ```
 
 </CodeGroup>
+
+## Connect remotely
+
+Set `MSB_API_KEY`, then use a `RemoteContext`. These examples inspect an existing sandbox named `worker`.
+
+<CodeGroup>
+```typescript TypeScript
+import { RemoteContext } from "microsandbox";
+
+const remote = RemoteContext.fromEnv();
+const sb = await remote.sandboxes.get("worker");
+console.log(await sb.status());
+```
+
+```rust Rust
+use microsandbox::{Context, RemoteContext};
+
+let remote = RemoteContext::from_env()?;
+let sb = remote.sandboxes().get("worker").await?;
+println!("{:?}", sb.status().await?);
+```
+
+```python Python
+from microsandbox import RemoteContext
+
+remote = RemoteContext.from_env()
+sb = await remote.sandboxes.get("worker")
+print(await sb.status())
+```
+
+```go Go
+remote, err := m.RemoteContextFromEnv()
+if err != nil {
+    return err
+}
+sb, err := remote.Sandboxes().Get(ctx, "worker")
+if err != nil {
+    return err
+}
+defer sb.Close()
+
+status, err := sb.Status(ctx)
+if err != nil {
+    return err
+}
+fmt.Println(status)
+```
+
+```ruby Ruby
+require "microsandbox"
+
+remote = Microsandbox::RemoteContext.from_env
+sb = remote.sandboxes.get("worker")
+puts sb.status
+```
+</CodeGroup>
+
+<Tip>
+Choose the context at application startup to [switch between local and cloud](/cloud/connect#choose-at-startup). CLI settings do not redirect SDK calls.
+</Tip>
+
+## Select a smaller distribution
+
+<Note>
+Smaller packages are unreleased and are not included in v0.7.15.
+</Note>
+
+TypeScript and Python offer separate local and remote packages:
+
+<CodeGroup>
+```bash TypeScript
+npm install @microsandbox/local
+# Or, for remote connections:
+npm install @microsandbox/remote
+```
+
+```bash Python
+pip install microsandbox-local
+# Or, for remote connections:
+pip install microsandbox-remote
+```
+</CodeGroup>
+
+Change the package you import; the same sandbox methods still work.
+
+See [distribution choices](/migrations/sdk-distributions) for imports, native-library setup, and options for every SDK.
+
+<Note>
+Smaller local packages need a [separately installed runtime](/sdk/setup#bring-your-own-runtime). Remote packages need no local runtime.
+</Note>
 
 ## Reference
 

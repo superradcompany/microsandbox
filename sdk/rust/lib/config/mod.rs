@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn test_saved_patch_preserves_values_across_all_sections() {
         let expected = serde_json::json!({
-            "allowed_backends": ["local", "cloud"],
+            "allowed_backends": ["local", "remote"],
             "active_profile": "work",
             "profiles": {"work": {
                 "kind": "remote",
@@ -905,7 +905,9 @@ mod tests {
             "metrics": {"capacity": 128},
             "snapshots": {"max_filesystem_state_mib": 64}
         });
-        let config: GlobalConfig = serde_json::from_value(expected.clone()).unwrap();
+        let mut previous = expected.clone();
+        previous["allowed_backends"] = serde_json::json!(["local", "cloud"]);
+        let config: GlobalConfig = serde_json::from_value(previous).unwrap();
         let patch: GlobalConfigPatch = saved_patch(&config);
         let mut resolved = GlobalConfig::default();
         patch.apply_to(&mut resolved);

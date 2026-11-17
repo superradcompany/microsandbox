@@ -491,7 +491,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("local backend selected by MSB_BACKEND is disabled"));
-            assert!(error.contains("allowed backends: cloud"));
+            assert!(error.contains("allowed backends: remote"));
             if managed {
                 assert!(error.contains("managed config"));
                 assert!(error.contains("contact your administrator"));
