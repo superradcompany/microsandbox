@@ -2,6 +2,8 @@
 
 #![warn(missing_docs)]
 
+extern crate self as microsandbox_types;
+
 mod cloud;
 mod command;
 mod domain;
@@ -15,6 +17,9 @@ mod guest_flush;
 pub mod helpers;
 pub mod modify;
 mod registry;
+mod secret;
+#[doc(hidden)]
+pub mod secret_plan;
 pub mod snapshot;
 mod validation;
 
@@ -28,15 +33,23 @@ pub mod typescript;
 pub use microsandbox_types_macros::ConfigPatch;
 
 pub use cloud::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
-    CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
-    CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
-    CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
-    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
-    CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
-    CloudVolumeMount,
+    CLOUD_MODIFICATION_FAILED, CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_REFUSED,
+    CLOUD_MODIFICATION_UNSUPPORTED, CloudChangeKind, CloudConfigPlannedChange,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
+    CloudCreateSnapshotRequest, CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails,
+    CloudHostPattern, CloudMessageResponse, CloudModificationConflict,
+    CloudModificationDisposition, CloudModificationRejection, CloudModificationWarning,
+    CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPlannedChange, CloudPullPolicy,
+    CloudResourceConvergenceState, CloudResourceKind, CloudResourceResizeStatus, CloudRlimit,
+    CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlan,
+    CloudSandboxModificationPlanRequest, CloudSandboxResources, CloudSandboxRuntimeOptions,
+    CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason, CloudSecretApplyEntry,
+    CloudSecretChangeKind, CloudSecretEntry, CloudSecretMaterial, CloudSecretPlanEntry,
+    CloudSecretPlannedChange, CloudSecretSource, CloudSecretValue, CloudSecretsConfig,
+    CloudService, CloudServiceStatus, CloudServiceTarget, CloudSnapshot, CloudSnapshotDetails,
+    CloudSnapshotKind, CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus,
+    CloudSnapshotSpec, CloudUpdateServiceRequest, CloudViolationAction, CloudVolumeMount,
 };
 #[doc(hidden)]
 pub use command::{CommandResolutionError, ResolvedCommand, resolve_default_command};
@@ -45,20 +58,21 @@ pub use domain::{
     DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, DeploymentProfile, Destination,
     DestinationGroup, Direction, DiskImageFormat, DnsConfig, DnsConfigPatch, EnvVar, FlatClone,
     GuestClockPolicy, HandoffInit, HostPattern, HostPermissions, HttpConfig, HttpConfigPatch,
-    HttpDenyResponseFormat, InterceptCaConfig, InterfaceOverrides, InterfaceOverridesPatch,
-    LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MemoryPlacement, MountOptions, NamedVolumeCreate,
-    NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection, NetworkRateLimiterConfig,
-    NetworkRateLimiterConfigPatch, NetworkSpec, NetworkSpecPatch, NumaPlacement, OciRootfsSource,
-    OutboundProxy, OwnedVolumeStorage, Patch, PlacementProfile, PortProtocol, PortRange, Protocol,
-    PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig, Rlimit, RlimitResource,
-    RootDisk, RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxPolicyPatch,
-    SandboxResources, SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch,
-    SandboxSpec, SandboxSpecPatch, ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError,
-    SecretEntry, SecretSubstitution, SecretViolationAction, SecretsConfig, SecretsConfigPatch,
-    SecurityProfile, SnapshotSpec, Socks5Credentials, StatVirtualization, TlsConfig,
-    TlsConfigPatch, TokenBucketConfig, TransparentHugePagePolicy, VolumeKind, VolumeMount,
-    VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec, VsockSpecPatch,
-    WELL_KNOWN_NAT64_PREFIX, canonicalize_volume_mounts, owned_volume_mount_id,
+    HttpConnectCredentials, HttpDenyResponseFormat, InterceptCaConfig, InterfaceOverrides,
+    InterfaceOverridesPatch, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MemoryPlacement,
+    MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection,
+    NetworkRateLimiterConfig, NetworkRateLimiterConfigPatch, NetworkSpec, NetworkSpecPatch,
+    NumaPlacement, OciRootfsSource, OutboundProxy, OwnedVolumeStorage, Patch, PlacementProfile,
+    PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError,
+    RateLimiterConfig, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel,
+    SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
+    SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec, SandboxSpecPatch,
+    ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretSubstitution,
+    SecretViolationAction, SecretsConfig, SecretsConfigPatch, SecurityProfile, SnapshotSpec,
+    Socks5Credentials, StatVirtualization, TlsConfig, TlsConfigPatch, TokenBucketConfig,
+    TransparentHugePagePolicy, VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec,
+    VsockSocketType, VsockSpec, VsockSpecPatch, WELL_KNOWN_NAT64_PREFIX,
+    canonicalize_volume_mounts, owned_volume_mount_id,
 };
 pub use error::{SnapshotManifestError, SnapshotManifestResult, TypesError, TypesResult};
 pub use exec::{EXEC_OUTPUT_EVENT_OVERHEAD, ExecLimits};
@@ -70,6 +84,7 @@ pub use modify::{
     SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
 pub use registry::RegistryAuth;
+pub use secret::SecretValue;
 pub use snapshot::manifest::Manifest as SnapshotManifest;
 pub use snapshot::{
     DiskCompactionDiskResult, DiskCompactionResult, DiskCompactionTarget,

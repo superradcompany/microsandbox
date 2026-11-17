@@ -63,6 +63,12 @@ pub struct LiveMetric {
     pub net_rx_bytes: u64,
     /// Cumulative guest-facing network bytes transmitted.
     pub net_tx_bytes: u64,
+    /// Published TCP admission rejections; absent on older runtimes.
+    pub net_inbound_tcp_rejected: Option<u64>,
+    /// Outbound TCP cap rejections; absent on older runtimes.
+    pub net_outbound_tcp_rejected: Option<u64>,
+    /// Outbound UDP session-cap evictions; absent on older runtimes.
+    pub net_outbound_udp_evicted: Option<u64>,
     /// Guest-visible OCI upper filesystem used bytes when available.
     pub upper_used_bytes: Option<u64>,
     /// Guest-visible OCI upper filesystem free bytes when available.
@@ -97,6 +103,12 @@ pub struct SandboxMetrics {
     pub net_rx_bytes: u64,
     /// Cumulative network bytes transmitted from the guest into the runtime.
     pub net_tx_bytes: u64,
+    /// Published TCP admission rejections; absent on older runtimes.
+    pub net_inbound_tcp_rejected: Option<u64>,
+    /// Outbound TCP cap rejections; absent on older runtimes.
+    pub net_outbound_tcp_rejected: Option<u64>,
+    /// Outbound UDP session-cap evictions; absent on older runtimes.
+    pub net_outbound_udp_evicted: Option<u64>,
     /// Guest-visible OCI upper filesystem used bytes when available.
     pub upper_used_bytes: Option<u64>,
     /// Guest-visible OCI upper filesystem free bytes when available.
@@ -147,6 +159,9 @@ impl From<LiveMetric> for SandboxMetricSnapshot {
                 disk_write_bytes: live.disk_write_bytes,
                 net_rx_bytes: live.net_rx_bytes,
                 net_tx_bytes: live.net_tx_bytes,
+                net_inbound_tcp_rejected: live.net_inbound_tcp_rejected,
+                net_outbound_tcp_rejected: live.net_outbound_tcp_rejected,
+                net_outbound_udp_evicted: live.net_outbound_udp_evicted,
                 upper_used_bytes: live.upper_used_bytes,
                 upper_free_bytes: live.upper_free_bytes,
                 upper_host_allocated_bytes: live.upper_host_allocated_bytes,

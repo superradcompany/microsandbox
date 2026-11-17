@@ -181,6 +181,79 @@ func TestSandboxModifyDryRun(t *testing.T) {
 	}
 }
 
+// TestSandboxModifySecretPolicy plans a policy-only secret edit on both the
+// live Sandbox and the name-addressed handle. A Substitution without
+// HeaderFields must still reach the core as a valid rule.
+func TestSandboxModifySecretPolicy(t *testing.T) {
+	ctx := integrationCtx(t)
+	name := "go-sdk-modify-" + t.Name()
+	const secretName = "MY_API_KEY"
+
+	sb, err := createSandbox(t, ctx, name,
+		microsandbox.WithImage(goIntegrationImage),
+		microsandbox.WithSecrets(microsandbox.Secret.Env(
+			secretName,
+			"dummy-secret-value",
+			microsandbox.SecretEnvOptions{Allow: []string{"api.example.com"}},
+		)),
+	)
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sb.Stop(stopCtx)
+		_ = sb.Close()
+		_ = microsandbox.RemoveSandbox(context.Background(), name)
+	})
+
+	requirePolicyChange := func(t *testing.T, label string, plan *microsandbox.SandboxModificationPlan) {
+		t.Helper()
+		if plan.Sandbox != name || plan.Applied || len(plan.Conflicts) > 0 {
+			t.Fatalf("%s plan = %+v", label, plan)
+		}
+		for _, change := range plan.Changes {
+			if change.Kind == "config" &&
+				change.Field == "secret."+secretName+".policy" &&
+				change.Disposition == "requires restart" {
+				return
+			}
+		}
+		t.Fatalf("%s changes = %+v, want secret.%s.policy requiring restart", label, plan.Changes, secretName)
+	}
+
+	plan, err := sb.Modify(ctx, microsandbox.ModifyOptions{
+		Secrets: map[string]microsandbox.SecretModifySpec{
+			secretName: {Substitution: &microsandbox.SecretSubstitution{
+				HeaderFields: []string{"authorization"},
+			}},
+		},
+		Policy: microsandbox.ModificationPolicyRestart,
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("Sandbox.Modify: %v", err)
+	}
+	requirePolicyChange(t, "Sandbox.Modify", plan)
+
+	handle, err := microsandbox.GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	handlePlan, err := handle.Modify(ctx, microsandbox.ModifyOptions{
+		Secrets: map[string]microsandbox.SecretModifySpec{
+			secretName: {Substitution: &microsandbox.SecretSubstitution{Query: true}},
+		},
+		Policy: microsandbox.ModificationPolicyRestart,
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("SandboxHandle.Modify: %v", err)
+	}
+	requirePolicyChange(t, "SandboxHandle.Modify", handlePlan)
+}
+
 // TestSandboxRemove removes the persisted state of a stopped sandbox.
 func TestSandboxRemove(t *testing.T) {
 	ctx := integrationCtx(t)

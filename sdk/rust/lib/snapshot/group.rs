@@ -170,6 +170,29 @@ impl Snapshot {
             .await
     }
 
+    /// Authenticate an encrypted archive set before publishing it to a local history.
+    #[cfg(feature = "local")]
+    pub async fn load_encrypted(
+        group: &str,
+        files: &[PathBuf],
+        identity: &Path,
+        configure: impl FnOnce(SnapshotImportOptions) -> SnapshotImportOptions,
+    ) -> MicrosandboxResult<SnapshotImportResult> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(|| {
+            MicrosandboxError::InvalidConfig("encrypted archives require the local backend".into())
+        })?;
+        local
+            .import_encrypted(
+                backend.clone(),
+                group,
+                files,
+                configure(SnapshotImportOptions::default()).into_load_opts(),
+                identity,
+            )
+            .await
+    }
+
     /// Local history name.
     pub fn name(&self) -> &str {
         &self.name

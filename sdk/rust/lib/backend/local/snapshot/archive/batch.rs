@@ -36,12 +36,21 @@ pub(super) async fn load(
     archives: &[PathBuf],
     opts: LoadOpts,
 ) -> MicrosandboxResult<ImportedBatch> {
+    load_with_identities(local, archives, opts, None).await
+}
+
+pub(super) async fn load_with_identities(
+    local: &LocalBackend,
+    archives: &[PathBuf],
+    opts: LoadOpts,
+    keys: Option<Arc<Vec<age::x25519::Identity>>>,
+) -> MicrosandboxResult<ImportedBatch> {
     let mut progress = ImportProgress {
         operation_id: format!("{:032x}", rand::random::<u128>()),
         group_path: None,
         outcome: Arc::new(AtomicU8::new(SnapshotImportOutcome::NotCommitted as u8)),
     };
-    load_inner(local, archives, opts, &mut progress)
+    load_inner(local, archives, opts, keys, &mut progress)
         .await
         .map_err(|source| {
             let phase = progress.outcome.load(Ordering::Acquire);
@@ -67,6 +76,7 @@ async fn load_inner(
     local: &LocalBackend,
     archives: &[PathBuf],
     opts: LoadOpts,
+    keys: Option<Arc<Vec<age::x25519::Identity>>>,
     progress: &mut ImportProgress,
 ) -> MicrosandboxResult<ImportedBatch> {
     if archives.is_empty() {
@@ -95,7 +105,7 @@ async fn load_inner(
 
     let mut staged = Vec::with_capacity(archives.len());
     for archive in archives {
-        staged.push(unpack(archive, &snapshots_dir, &cache_tmp).await?);
+        staged.push(unpack(archive, &snapshots_dir, &cache_tmp, keys.clone()).await?);
     }
     let unpack_us = started.elapsed().as_micros();
     let has_dependencies = staged.iter().try_fold(false, |found, item| {
@@ -205,6 +215,7 @@ async fn load_inner(
     }
     // Keep all original source paths intact until every borrowing read is done. Materializing
     // file snapshots below consumes their archive-shared layer directories.
+    let mut verified_signers = std::collections::BTreeSet::new();
     let mut imported = Vec::new();
     let mut candidates = Vec::with_capacity(archives.len());
     let mut aliases = BTreeMap::new();
@@ -220,6 +231,14 @@ async fn load_inner(
                 &snapshots,
                 local.config().fs_state_limit(),
             )?;
+        }
+        if let Some(inventory) = &item.unpacked.inventory {
+            verified_signers.extend(encryption::import_credentials(
+                local,
+                inventory,
+                &snapshots,
+                keys.as_deref().map(Vec::as_slice),
+            )?);
         }
         let head_index = match item.unpacked.head.as_deref() {
             Some(head) => snapshots
@@ -289,6 +308,19 @@ async fn load_inner(
             let target = publication.path().join(snapshot.id().as_str());
             if !target.exists() {
                 tokio::fs::rename(snapshot.path(), target).await?;
+            } else {
+                // Identical descriptors can arrive from a plain and an encrypted
+                // archive in either order. Preserve the validated signer in this
+                // unpublished batch without touching an installed member.
+                #[cfg(feature = "net")]
+                {
+                    let name = microsandbox_runtime::checkpoint::tls_receipt::SIDECAR;
+                    let source = snapshot.path().join(name);
+                    let destination = target.join(name);
+                    if source.try_exists()? && !destination.try_exists()? {
+                        tokio::fs::rename(source, destination).await?;
+                    }
+                }
             }
         }
     }
@@ -330,7 +362,11 @@ async fn load_inner(
             &aliases,
             &publish_candidates,
             set_head,
-            super::super::group::IndexedPublication { operation, outcome },
+            super::super::group::IndexedPublication {
+                operation,
+                outcome,
+                verified_signers,
+            },
             writer.clone(),
         )
         .await?;
@@ -406,6 +442,7 @@ async fn unpack(
     archive: &Path,
     root: &Path,
     cache_tmp: &Path,
+    keys: Option<std::sync::Arc<Vec<age::x25519::Identity>>>,
 ) -> MicrosandboxResult<StagedArchive> {
     let snapshots = tempfile::Builder::new()
         .prefix(".msb-snapshot-import-")
@@ -413,7 +450,16 @@ async fn unpack(
     let cache = tempfile::Builder::new()
         .prefix("snapshot-import-")
         .tempdir_in(cache_tmp)?;
-    let file = tokio::fs::File::open(archive).await?;
+    let file = if let Some(keys) = keys {
+        let path = archive.to_path_buf();
+        let tmp = cache_tmp.to_path_buf();
+        let plain = tokio::task::spawn_blocking(move || encryption::decrypt(&path, &keys, &tmp))
+            .await
+            .map_err(|e| MicrosandboxError::Custom(format!("archive decryption worker: {e}")))??;
+        tokio::fs::File::from_std(plain)
+    } else {
+        tokio::fs::File::open(archive).await?
+    };
     let mut reader = BufReader::with_capacity(1024 * 1024, file);
     let compressed = reader
         .fill_buf()

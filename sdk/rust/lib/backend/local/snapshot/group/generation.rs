@@ -243,6 +243,24 @@ fn publish_with_flush(
         .ok_or_else(|| integrity("group has no parent".into()))?;
     check(parent)?;
     let prepared = Generation::prepare(group, input, aliases, head)?;
+    #[cfg(feature = "net")]
+    for id in &operation.verified_signers {
+        let staged = &incoming
+            .get(id)
+            .ok_or_else(|| integrity(format!("verified signer has no incoming checkpoint {id}")))?
+            .path;
+        let member = prepared.path().join(id);
+        let destination = member.join(microsandbox_runtime::checkpoint::tls_receipt::SIDECAR);
+        if !super::path_exists(&destination)? {
+            // Attach only in the private generation. The exchange publishes all signers,
+            // members and the head together, including after a process crash.
+            fs::hard_link(
+                staged.join(microsandbox_runtime::checkpoint::tls_receipt::SIDECAR),
+                destination,
+            )?;
+            sync_directory(&member)?;
+        }
+    }
     super::transaction::stage_generation_index(prepared.path(), incoming, operation)?;
     // Persist both names before the atomic swap. On interruption, either complete
     // generation is recoverable; no old reader needs to understand our journal.

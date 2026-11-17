@@ -20,6 +20,10 @@ mod config_patch;
 /// from the patch without changing the target. Other fields are atomic: absence leaves the target
 /// unchanged and presence replaces the field, including vectors and maps.
 ///
+/// Use `#[config_patch(serde_lossless)]` to serialize an existing Rust patch without changing its
+/// optional-field shape. Explicit `nullable` fields keep clears; fields marked `serde(skip)`
+/// or `serde(skip_serializing)` on the source are excluded from persisted patches.
+///
 /// Opt into JSON input and output with `#[config_patch(serde)]`. Generated patches derive
 /// `Serialize` and `Deserialize`, omit absent fields, and ignore unknown input fields.
 /// Atomic values retain their own deserialization and validation rules.

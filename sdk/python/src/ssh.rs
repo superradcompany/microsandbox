@@ -313,7 +313,7 @@ impl PySftpClient {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             let data = sftp.read(path).await.map_err(sftp_py_err)?;
-            Ok(Python::with_gil(|py| PyBytes::new(py, &data).unbind()))
+            Ok(Python::attach(|py| PyBytes::new(py, &data).unbind()))
         })
     }
 

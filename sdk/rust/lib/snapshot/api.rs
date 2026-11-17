@@ -388,6 +388,24 @@ impl Checkpoint {
         backend.snapshots().save(reference, out, opts).await
     }
 
+    /// Export this immutable local checkpoint for the specified age recipients.
+    #[cfg(feature = "local")]
+    pub async fn save_encrypted(
+        &self,
+        out: &Path,
+        opts: SaveOpts,
+        recipients: &[String],
+    ) -> MicrosandboxResult<()> {
+        let local = self.backend.as_local().ok_or_else(|| {
+            crate::MicrosandboxError::InvalidConfig(
+                "encrypted archives require the local backend".into(),
+            )
+        })?;
+        local
+            .export_encrypted(self.reference(), self.digest(), out, opts, recipients)
+            .await
+    }
+
     /// Unpack a snapshot archive into the active backend's snapshot store.
     ///
     /// This artifact-file operation is currently local-only. Other backends

@@ -271,11 +271,6 @@ pub struct CpuTarget {
     pub online: u32,
 }
 
-/// Secret material that is redacted in diagnostics and cleared on drop.
-#[derive(Clone, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
-#[serde(transparent)]
-pub struct SecretValue(pub String);
-
 /// One ordered host secret modification, preserving the JSON operation tags.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "change", rename_all = "snake_case")]
@@ -429,11 +424,7 @@ impl ControlError {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Trait Implementations
+// Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-impl std::fmt::Debug for SecretValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[redacted]")
-    }
-}
+pub use microsandbox_types::SecretValue;

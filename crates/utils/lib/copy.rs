@@ -35,7 +35,7 @@ use std::path::Path;
 use std::ptr;
 
 #[cfg(windows)]
-use crate::extent::{ExtentMap, mark_sparse};
+use crate::extent::{mark_sparse, visit_allocated_ranges};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(windows)]
@@ -172,6 +172,81 @@ fn sparse_copy_impl(src: &Path, dst: &Path, sync_destination: bool) -> io::Resul
         .truncate(true)
         .open(dst)?;
     sparse_copy_files(&src_file, &dst_file, sync_destination)
+}
+
+/// Copy between already acquired distinct regular files without reopening either pathname.
+///
+/// The caller owns an empty private destination and excludes source writers. The destination is
+/// flushed before success. Linux and Windows try handle-based CoW cloning first; other Unix
+/// systems use allocated-extent copying (callers may perform a handle-based clone beforehand).
+pub fn copy_file_handles(src: &File, dst: &File) -> io::Result<(u64, FastCopyStrategy)> {
+    let source = src.metadata()?;
+    let target = dst.metadata()?;
+    if !source.is_file() || !target.is_file() || target.len() != 0 {
+        return Err(io::Error::other(
+            "capture requires regular source and empty private destination",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if source.dev() == target.dev() && source.ino() == target.ino() {
+            return Err(io::Error::other(
+                "capture source and destination are the same file",
+            ));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // FICLONE preserves independent inode identity and never consults a source pathname.
+        if unsafe {
+            libc::ioctl(
+                dst.as_raw_fd(),
+                0x4004_9409_u64 as libc::c_ulong,
+                src.as_raw_fd(),
+            )
+        } == 0
+        {
+            dst.sync_all()?;
+            return Ok((source.len(), FastCopyStrategy::Reflink));
+        }
+        let error = io::Error::last_os_error();
+        if !is_reflink_unsupported(&error) {
+            return Err(error);
+        }
+        dst.set_len(0)?;
+    }
+    #[cfg(windows)]
+    {
+        let mut source_file = src.try_clone()?;
+        let mut target_file = dst.try_clone()?;
+        match reflink_windows_files(&mut source_file, &mut target_file) {
+            Ok(()) => {
+                dst.sync_all()?;
+                return Ok((source.len(), FastCopyStrategy::Reflink));
+            }
+            Err(error) if is_reflink_unsupported(&error) => {}
+            Err(error) => return Err(error),
+        }
+        dst.set_len(0)?;
+        dst.set_len(source.len())?;
+        mark_sparse(dst)?;
+        source_file.seek(SeekFrom::Start(0))?;
+        copy_windows_sparse_data(&mut source_file, &mut target_file, 1024 * 1024)?;
+        dst.sync_all()?;
+        Ok((source.len(), FastCopyStrategy::SparseCopy))
+    }
+    #[cfg(unix)]
+    {
+        sparse_copy_files(src, dst, true).map(|bytes| (bytes, FastCopyStrategy::SparseCopy))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-based sparse capture is unavailable",
+        ))
+    }
 }
 
 /// Copy an ephemeral Linux memory generation between already-owned files, preserving holes.
@@ -495,14 +570,14 @@ fn copy_windows_sparse_data(
     dst: &mut File,
     buf_size: usize,
 ) -> io::Result<WindowsSparseCopyStrategy> {
-    if let Some(map) = ExtentMap::scan_file(src)? {
+    let source = src.try_clone()?;
+    let mut buf = vec![0u8; buf_size];
+    if visit_allocated_ranges(&source, |offset, length| {
+        copy_windows_range(src, dst, offset, length, &mut buf)
+    })? {
         // NTFS can enumerate the ranges that actually occupy filesystem blocks. Copy those ranges
         // wholesale: inspecting zero/non-zero byte runs inside an allocated extent turns raw disk
         // images into millions of tiny seeks and writes.
-        let mut buf = vec![0u8; buf_size];
-        for (offset, extent_len) in map.extents {
-            copy_windows_range(src, dst, offset, extent_len, &mut buf)?;
-        }
         Ok(WindowsSparseCopyStrategy::AllocatedRanges)
     } else {
         // Filesystems without FSCTL_QUERY_ALLOCATED_RANGES cannot expose their allocation map.
@@ -916,7 +991,10 @@ mod tests {
 
         make_sparse(&src, len, &[0, 4 * 1024 * 1024]).unwrap();
         let mut src_file = File::open(&src).unwrap();
-        if ExtentMap::scan_file(&src_file).unwrap().is_none() {
+        if crate::extent::ExtentMap::scan_file(&src_file)
+            .unwrap()
+            .is_none()
+        {
             eprintln!("filesystem cannot enumerate allocated ranges; strategy not exercised");
             return;
         }

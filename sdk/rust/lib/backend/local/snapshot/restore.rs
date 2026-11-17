@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 
 use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
 use microsandbox_image::snapshot::SnapshotRootDisk;
+use microsandbox_runtime::checkpoint;
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
 
+use crate::backend::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 use super::create::{copy_checkpoint_file, stage_checkpoint_closure};
@@ -50,22 +52,27 @@ pub(crate) struct CheckpointDiskMaterialization {
 /// Copy one validated installed closure into child staging and create its private disk successor.
 pub(crate) async fn materialize_checkpoint_for_child(
     source: &CheckpointRestoreConfig,
-    child_stage: &Path,
+    child_stage: &CreationStorage,
     root_disk: &SnapshotRootDisk,
     choices: &crate::sandbox::restore_resources::RestoreResources,
     fs_state_limit: usize,
 ) -> MicrosandboxResult<CheckpointChildMaterialization> {
     // Validate once after obtaining child-owned files. Validating the source first neither
     // protects against a later source mutation nor substitutes for validation of the child.
-    tokio::fs::create_dir_all(child_stage).await?;
     let closure_destination = child_stage.join(CHILD_CHECKPOINT_DIRECTORY);
     let source_path = source.closure.clone();
     let destination_for_copy = closure_destination.clone();
     let pin = super::lease::pin_source(&source_path)?;
-    tokio::task::spawn_blocking(move || {
-        let _lease = pin;
-        stage_checkpoint_closure(&source_path, &destination_for_copy)
-    })
+    {
+        let worker_storage = child_stage.clone();
+        tokio::task::spawn_blocking(move || {
+            let _storage = worker_storage;
+
+            let _lease = pin;
+            std::fs::create_dir_all(destination_for_copy.parent().expect("child staging"))?;
+            stage_checkpoint_closure(&source_path, &destination_for_copy)
+        })
+    }
     .await
     .map_err(|error| MicrosandboxError::Custom(format!("checkpoint child copy task: {error}")))??;
 
@@ -81,25 +88,23 @@ pub(crate) async fn materialize_checkpoint_for_child(
     .await
 }
 
-/// Materialize only the disk closure from an installed full snapshot.
+/// Materialize only the disk closure from an installed or extracted full snapshot.
 ///
 /// The source checkpoint is opened portably because memory and execution compatibility are
 /// irrelevant to a cold boot. Only referenced disk layers are copied into child staging.
 pub(crate) async fn materialize_checkpoint_disk_for_child(
-    source: &CheckpointRestoreConfig,
-    child_stage: &Path,
+    closure: &Path,
+    checkpoint_root: &str,
+    checkpoint_id: &str,
+    child_stage: &CreationStorage,
     root_disk: &SnapshotRootDisk,
     choices: &crate::sandbox::restore_resources::RestoreResources,
     fs_state_limit: usize,
 ) -> MicrosandboxResult<CheckpointDiskMaterialization> {
-    let expected = ObjectId::new(&source.checkpoint_root)
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let source_closure =
-        CheckpointClosure::open_portable(&source.closure, Some(&expected), fs_state_limit)
-            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    validate_checkpoint_identity(&source_closure, &source.checkpoint_id)?;
+        open_checkpoint_closure(closure, checkpoint_root, true, fs_state_limit).await?;
+    validate_checkpoint_identity(&source_closure, checkpoint_id)?;
     validate_root_disk_closure(&source_closure, root_disk, true)?;
-    tokio::fs::create_dir_all(child_stage).await?;
     let upper_layers =
         materialize_checkpoint_disk_layers(&source_closure, child_stage, root_disk).await?;
     let disk_mounts =
@@ -119,16 +124,14 @@ pub(crate) async fn materialize_checkpoint_child_state(
     closure_destination: &Path,
     checkpoint_root: &str,
     checkpoint_id: &str,
-    child_stage: &Path,
+    child_stage: &CreationStorage,
     root_disk: &SnapshotRootDisk,
     choices: &crate::sandbox::restore_resources::RestoreResources,
     fs_state_limit: usize,
 ) -> MicrosandboxResult<CheckpointChildMaterialization> {
-    let expected = ObjectId::new(checkpoint_root)
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let child_closure =
-        CheckpointClosure::open(closure_destination, Some(&expected), fs_state_limit)
-            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        open_checkpoint_closure(closure_destination, checkpoint_root, false, fs_state_limit)
+            .await?;
     validate_checkpoint_identity(&child_closure, checkpoint_id)?;
     validate_root_disk_closure(&child_closure, root_disk, false)?;
     let upper_layers =
@@ -139,7 +142,7 @@ pub(crate) async fn materialize_checkpoint_child_state(
     Ok(CheckpointChildMaterialization {
         restore: CheckpointRestoreConfig {
             memory_descriptor: false,
-            network_gateway_mac: microsandbox_runtime::checkpoint::captured_gateway_mac(
+            network_gateway_mac: checkpoint::captured_gateway_mac(
                 &child_closure.checkpoint().resources,
             )
             .map_err(MicrosandboxError::SnapshotIntegrity)?,
@@ -157,37 +160,11 @@ pub(crate) async fn materialize_checkpoint_child_state(
     })
 }
 
-/// Adopt an extracted checkpoint closure only long enough to materialize its disk state.
-pub(crate) async fn materialize_checkpoint_child_disk_state(
-    closure: &Path,
-    checkpoint_root: &str,
-    checkpoint_id: &str,
-    child_stage: &Path,
-    root_disk: &SnapshotRootDisk,
-    choices: &crate::sandbox::restore_resources::RestoreResources,
-    fs_state_limit: usize,
-) -> MicrosandboxResult<CheckpointDiskMaterialization> {
-    let expected = ObjectId::new(checkpoint_root)
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let child_closure = CheckpointClosure::open_portable(closure, Some(&expected), fs_state_limit)
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    validate_checkpoint_identity(&child_closure, checkpoint_id)?;
-    validate_root_disk_closure(&child_closure, root_disk, true)?;
-    let upper_layers =
-        materialize_checkpoint_disk_layers(&child_closure, child_stage, root_disk).await?;
-    let disk_mounts =
-        materialize_closure_disks(&child_closure, child_stage, root_disk, choices).await?;
-    Ok(CheckpointDiskMaterialization {
-        upper_layers,
-        disk_mounts,
-    })
-}
-
 /// Materialize installed file-snapshot layers into child-owned storage and add a writable head.
 pub(crate) async fn materialize_file_snapshot_for_child(
     sources: &[RootfsUpperLayerConfig],
     virtual_size: u64,
-    child_stage: &Path,
+    child_stage: &CreationStorage,
     root_disk: &SnapshotRootDisk,
 ) -> MicrosandboxResult<CheckpointDiskMaterialization> {
     if sources.is_empty() || matches!(root_disk, SnapshotRootDisk::Tmpfs { .. }) {
@@ -195,7 +172,6 @@ pub(crate) async fn materialize_file_snapshot_for_child(
             "file snapshot has no restorable disk closure".into(),
         ));
     }
-    tokio::fs::create_dir_all(child_stage).await?;
     let mut layers = Vec::with_capacity(sources.len() + 1);
     for (index, source) in sources.iter().enumerate() {
         let target = checkpoint_layer_target(child_stage, root_disk, index, &source.format)?;
@@ -205,14 +181,21 @@ pub(crate) async fn materialize_file_snapshot_for_child(
             .last()
             .map(|layer: &RootfsUpperLayerConfig| layer.path.clone());
         let pin = super::lease::pin_source(&source_path)?;
-        tokio::task::spawn_blocking(move || {
-            let _lease = pin;
-            copy_child_disk_layer(&source_path, &target_for_copy, predecessor.as_deref())
-        })
+        {
+            let worker_storage = child_stage.clone();
+            tokio::task::spawn_blocking(move || {
+                let _storage = worker_storage;
+
+                let _lease = pin;
+                std::fs::create_dir_all(target_for_copy.parent().expect("child staging"))?;
+                copy_child_disk_layer(&source_path, &target_for_copy, predecessor.as_deref())
+            })
+        }
         .await
         .map_err(|error| {
             MicrosandboxError::Custom(format!("snapshot layer copy task: {error}"))
         })??;
+
         layers.push(RootfsUpperLayerConfig {
             path: target,
             format: source.format.clone(),
@@ -229,7 +212,7 @@ pub(crate) async fn materialize_file_snapshot_for_child(
 pub(crate) async fn adopt_local_branch_for_child(
     sources: &[RootfsUpperLayerConfig],
     virtual_size: u64,
-    child_stage: &Path,
+    child_stage: &CreationStorage,
     root_disk: &SnapshotRootDisk,
 ) -> MicrosandboxResult<Vec<RootfsUpperLayerConfig>> {
     let directory = child_stage.join(".branch-restore").join("layers");
@@ -238,20 +221,28 @@ pub(crate) async fn adopt_local_branch_for_child(
             "local branch has no root layers".into(),
         ));
     }
-    for source in sources {
-        if source.path.parent() != Some(directory.as_path())
-            || !std::fs::symlink_metadata(&source.path)?.is_file()
-        {
-            return Err(MicrosandboxError::SnapshotIntegrity(
-                "local branch layer is not child-owned".into(),
-            ));
+    let owned_sources = sources.to_vec();
+    let worker_storage = child_stage.clone();
+    let backing_names = tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
+        for source in &owned_sources {
+            if source.path.parent() != Some(directory.as_path())
+                || !std::fs::symlink_metadata(&source.path)?.is_file()
+            {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "local branch layer is not child-owned".into(),
+                ));
+            }
         }
-    }
-    let backing_names = sources
-        .iter()
-        .skip(1)
-        .map(|layer| microsandbox_image::checkpoint::qcow2_backing_basename(&layer.path))
-        .collect::<std::io::Result<Vec<_>>>()?;
+        let names = owned_sources
+            .iter()
+            .skip(1)
+            .map(|layer| microsandbox_image::checkpoint::qcow2_backing_basename(&layer.path))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        Ok(names)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Runtime(format!("branch layer validation: {error}")))??;
     let mut layers: Vec<RootfsUpperLayerConfig> = Vec::with_capacity(sources.len() + 1);
     for (index, source) in sources.iter().enumerate() {
         let canonical = child_stage.join(source.path.file_name().expect("confined layer"));
@@ -263,10 +254,14 @@ pub(crate) async fn adopt_local_branch_for_child(
         } else {
             canonical.clone()
         };
-        if target.exists() || layers.iter().any(|layer| layer.path == target) {
+        if tokio::fs::try_exists(&target).await.unwrap_or(false)
+            || layers.iter().any(|layer| layer.path == target)
+        {
             target = canonical;
         }
-        if target.exists() || layers.iter().any(|layer| layer.path == target) {
+        if tokio::fs::try_exists(&target).await.unwrap_or(false)
+            || layers.iter().any(|layer| layer.path == target)
+        {
             return Err(MicrosandboxError::SnapshotIntegrity(
                 "local branch layer name conflicts".into(),
             ));
@@ -276,21 +271,23 @@ pub(crate) async fn adopt_local_branch_for_child(
             path.file_name().and_then(|name| name.to_str())
                 == Some(backing_names[index - 1].as_str())
         });
-        if unchanged_header {
-            tokio::fs::hard_link(&source.path, &target).await?;
-        } else {
-            // Old/imported names may conflict with the fixed cold-boot base or another owned
-            // filename. Relocate only that layer; never mutate a shared captured inode.
-            let source_path = source.path.clone();
-            let target_path = target.clone();
-            tokio::task::spawn_blocking(move || {
+        let source_path = source.path.clone();
+        let target_path = target.clone();
+        let worker_storage = child_stage.clone();
+        tokio::task::spawn_blocking(move || {
+            let _storage = worker_storage;
+            if unchanged_header {
+                std::fs::hard_link(&source_path, &target_path)
+            } else {
+                // Relocate conflicting names without mutating a shared captured inode.
                 copy_child_disk_layer(&source_path, &target_path, previous.as_deref())
-            })
-            .await
-            .map_err(|error| {
-                MicrosandboxError::Custom(format!("local disk relocation task: {error}"))
-            })??;
-        }
+            }
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Custom(format!("local disk relocation task: {error}"))
+        })??;
+
         layers.push(RootfsUpperLayerConfig {
             path: target,
             format: source.format.clone(),
@@ -316,7 +313,7 @@ pub(crate) fn root_device(root: &SnapshotRootDisk) -> Option<&'static str> {
 
 async fn materialize_closure_disks(
     closure: &CheckpointClosure,
-    child: &Path,
+    child: &CreationStorage,
     root: &SnapshotRootDisk,
     choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<Vec<microsandbox_types::VolumeMount>> {
@@ -340,6 +337,29 @@ async fn materialize_closure_disks(
         .await?,
     );
     Ok(mounts)
+}
+
+async fn open_checkpoint_closure(
+    path: &Path,
+    checkpoint_root: &str,
+    portable: bool,
+    fs_state_limit: usize,
+) -> MicrosandboxResult<CheckpointClosure> {
+    let expected = ObjectId::new(checkpoint_root)
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let opened = if portable {
+            CheckpointClosure::open_portable(&path, Some(&expected), fs_state_limit)
+        } else {
+            CheckpointClosure::open(&path, Some(&expected), fs_state_limit)
+        };
+
+        opened.map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Runtime(format!("checkpoint validation: {error}")))?
 }
 
 fn validate_checkpoint_identity(
@@ -390,7 +410,7 @@ fn validate_root_disk_closure(
 
 async fn materialize_checkpoint_disk_layers(
     closure: &CheckpointClosure,
-    child_stage: &Path,
+    child_stage: &CreationStorage,
     root_disk: &SnapshotRootDisk,
 ) -> MicrosandboxResult<Vec<RootfsUpperLayerConfig>> {
     if matches!(root_disk, SnapshotRootDisk::Tmpfs { .. }) {
@@ -414,14 +434,22 @@ async fn materialize_checkpoint_disk_layers(
             .last()
             .map(|layer: &RootfsUpperLayerConfig| layer.path.clone());
         let pin = super::lease::pin_source(&source_for_copy)?;
-        tokio::task::spawn_blocking(move || {
-            let _pin = pin;
-            copy_child_disk_layer(&source_for_copy, &target_for_copy, predecessor.as_deref())
-        })
+
+        {
+            let worker_storage = child_stage.clone();
+            tokio::task::spawn_blocking(move || {
+                let _storage = worker_storage;
+
+                let _pin = pin;
+                std::fs::create_dir_all(target_for_copy.parent().expect("child staging"))?;
+                copy_child_disk_layer(&source_for_copy, &target_for_copy, predecessor.as_deref())
+            })
+        }
         .await
         .map_err(|error| {
             MicrosandboxError::Custom(format!("checkpoint disk copy task: {error}"))
         })??;
+
         upper_layers.push(RootfsUpperLayerConfig {
             path: target,
             format: layer.format.clone(),
@@ -442,7 +470,7 @@ async fn materialize_checkpoint_disk_layers(
 async fn append_private_writable_head(
     layers: &mut Vec<RootfsUpperLayerConfig>,
     virtual_size: u64,
-    child_stage: &Path,
+    child_stage: &CreationStorage,
     root_disk: &SnapshotRootDisk,
 ) -> MicrosandboxResult<()> {
     let sealed_head = layers.last().ok_or_else(|| {
@@ -460,18 +488,23 @@ async fn append_private_writable_head(
     let writable_head_for_create = writable_head.clone();
     let sealed_path = sealed_head.path.clone();
     let sealed_format = sealed_head.format.clone();
-    tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        runtime.block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
-            &writable_head_for_create,
-            virtual_size,
-            &sealed_path,
-            &sealed_format,
-        ))?;
-        Ok(())
-    })
+    {
+        let worker_storage = child_stage.clone();
+        tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
+            let _storage = worker_storage;
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
+                &writable_head_for_create,
+                virtual_size,
+                &sealed_path,
+                &sealed_format,
+            ))?;
+            Ok(())
+        })
+    }
     .await
     .map_err(|error| {
         MicrosandboxError::Custom(format!("checkpoint overlay create task: {error}"))
@@ -534,6 +567,8 @@ mod tests {
         sparse_file_integrity,
     };
 
+    use crate::backend::local::creation::CreationStorage;
+
     use super::*;
 
     #[tokio::test]
@@ -579,20 +614,25 @@ mod tests {
                     .iter()
                     .map(|layer| std::fs::read(&layer.path).unwrap())
                     .collect::<Vec<_>>();
-                let result = adopt_local_branch_for_child(&sources, 131072, &child, &root_disk)
-                    .await
-                    .unwrap();
+                let result = adopt_local_branch_for_child(
+                    &sources,
+                    131072,
+                    &CreationStorage::for_test(&child),
+                    &root_disk,
+                )
+                .await
+                .unwrap();
                 assert_eq!(result.len(), sources.len() + 1);
                 assert_eq!(result[0].path, child.join(base_name));
                 assert_eq!(std::fs::read(&result[0].path).unwrap(), original[0]);
-                for ((source, bytes), owned) in sources.iter().zip(original).zip(&result) {
+                for ((source, bytes), _owned) in sources.iter().zip(original).zip(&result) {
                     assert_eq!(std::fs::read(&source.path).unwrap(), bytes);
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::MetadataExt;
                         assert_eq!(
                             std::fs::metadata(&source.path).unwrap().ino(),
-                            std::fs::metadata(&owned.path).unwrap().ino()
+                            std::fs::metadata(&_owned.path).unwrap().ino()
                         );
                     }
                 }
@@ -611,7 +651,7 @@ mod tests {
                 materialize_file_snapshot_for_child(
                     &result[..result.len() - 1],
                     131072,
-                    &restored,
+                    &CreationStorage::for_test(&restored),
                     &root_disk,
                 )
                 .await
@@ -736,8 +776,10 @@ mod tests {
         let disk_child = temp.path().join("disk-child");
 
         let disk_materialized = materialize_checkpoint_disk_for_child(
-            &restore,
-            &disk_child,
+            &restore.closure,
+            &restore.checkpoint_root,
+            &restore.checkpoint_id,
+            &CreationStorage::for_test(&disk_child),
             &SnapshotRootDisk::Flat,
             &Default::default(),
             crate::test_support::DEFAULT_FS_STATE_LIMIT,
@@ -764,7 +806,7 @@ mod tests {
 
         let materialized = materialize_checkpoint_for_child(
             &restore,
-            &child,
+            &CreationStorage::for_test(&child),
             &SnapshotRootDisk::Flat,
             &Default::default(),
             crate::test_support::DEFAULT_FS_STATE_LIMIT,

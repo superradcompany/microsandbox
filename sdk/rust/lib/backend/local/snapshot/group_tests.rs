@@ -166,6 +166,7 @@ async fn indexed_publication_distinguishes_preflight_rejection_from_committed() 
     let old_descriptor = fs::read(group.join(id(1).as_str()).join(DESCRIPTOR_FILENAME)).unwrap();
     let state = Arc::new(AtomicU8::new(SnapshotImportOutcome::NotCommitted as u8));
     let publish = || IndexedPublication {
+        verified_signers: Default::default(),
         operation: "00000000000000000000000000000001".into(),
         outcome: state.clone(),
     };

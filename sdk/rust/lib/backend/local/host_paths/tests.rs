@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
+use microsandbox_types::ExternalMountRestorePolicy;
 use microsandbox_types::{
-    DiskImageFormat, ExternalMountRestorePolicy, HostPermissions, InterceptCaConfig,
-    OciRootfsSource, OwnedVolumeStorage, Patch, RootDisk, RootfsSource, ScopedUpstreamCaCert,
-    StatVirtualization, TlsConfig, VolumeMount,
+    DiskImageFormat, HostPermissions, InterceptCaConfig, OciRootfsSource, OwnedVolumeStorage,
+    Patch, RootDisk, RootfsSource, ScopedUpstreamCaCert, StatVirtualization, TlsConfig,
+    VolumeMount,
 };
 
 use crate::SandboxConfig;

@@ -347,3 +347,82 @@ fn test_link_init_name_rejected() {
     );
     TestSandbox::assert_errno(result, LINUX_EACCES);
 }
+
+#[test]
+fn test_create_exclusive_truncate_and_handle_identity() {
+    let sb = TestSandbox::new();
+    let create = |flags| {
+        sb.fs.create(
+            sb.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("existing"),
+            0o644,
+            false,
+            flags,
+            0,
+            Extensions::default(),
+        )
+    };
+    // Linux O_EXCL is 0x80 even on macOS. A second CREATE must fail without
+    // changing the original contents; the initial successful handle stays usable.
+    let (entry, handle, _) = create(LINUX_O_RDWR | 0x80).unwrap();
+    let handle = handle.unwrap();
+    sb.fuse_write(entry.inode, handle, b"original", 0).unwrap();
+    assert_eq!(
+        create(LINUX_O_RDWR | 0x80).err().unwrap().raw_os_error(),
+        Some(LINUX_EEXIST)
+    );
+    assert_eq!(
+        std::fs::read(sb.root.join("existing")).unwrap(),
+        b"original"
+    );
+
+    // Replace the name after openat, before CREATE registers or returns. A
+    // path-based registration/reopen would now select the replacement inode.
+    let root = sb.root.clone();
+    BEFORE_CREATE_REGISTRATION.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(root.join("existing"), root.join("detached")).unwrap();
+            std::fs::write(root.join("existing"), b"replacement").unwrap();
+        }))
+    });
+    let (truncated, handle, _) = create(LINUX_O_RDWR | LINUX_O_TRUNC).unwrap();
+    let handle = handle.unwrap();
+    assert_eq!(truncated.inode, entry.inode);
+    assert_eq!(truncated.attr.st_size, 0);
+    // The returned stat and retained handle must both belong to the old inode.
+    sb.fuse_write(entry.inode, handle, b"retained", 0).unwrap();
+    assert_eq!(
+        std::fs::read(sb.root.join("detached")).unwrap(),
+        b"retained"
+    );
+    assert_eq!(
+        std::fs::read(sb.root.join("existing")).unwrap(),
+        b"replacement"
+    );
+}
+
+#[test]
+fn test_create_writeback_allows_reads_and_uses_supplied_write_offset() {
+    let sb = TestSandbox::new();
+    sb.fs.writeback.store(true, Ordering::Relaxed);
+    // Linux O_WRONLY | O_APPEND. Writeback must widen the fd and clear APPEND,
+    // just as OPEN does: the kernel owns the cached write position.
+    let (entry, handle, _) = sb
+        .fs
+        .create(
+            sb.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("writeback"),
+            0o644,
+            false,
+            1 | 0x400,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+    let handle = handle.unwrap();
+    sb.fuse_write(entry.inode, handle, b"abcd", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"XY", 0).unwrap();
+    assert_eq!(sb.fuse_read(entry.inode, handle, 4, 0).unwrap(), b"XYcd");
+}

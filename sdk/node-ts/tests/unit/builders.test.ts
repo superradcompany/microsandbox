@@ -438,6 +438,7 @@ describe("SandboxBuilder.build", () => {
       .cpuPlacement("spread")
       .placementProfile("latency")
       .thp("always")
+      .nestedVirt(false)
       .build();
     expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
     expect((cfg.resources as { maxMemoryMib: number }).maxMemoryMib).toBe(8192);
@@ -450,6 +451,7 @@ describe("SandboxBuilder.build", () => {
       (cfg.resources as { placementProfile: string }).placementProfile,
     ).toBe("latency");
     expect((cfg.resources as { thp: string }).thp).toBe("always");
+    expect((cfg.resources as { nestedVirt: boolean }).nestedVirt).toBe(false);
   });
 
   it("renders a configured outbound proxy in canonical form", async () => {
@@ -486,6 +488,29 @@ describe("SandboxBuilder.build", () => {
         password: {
           kind: "env",
           var: "SOCKS5_PASSWORD",
+        },
+      },
+    });
+  });
+
+  it("renders HTTP CONNECT credentials in canonical form", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .proxy((p) =>
+        p
+          .httpConnect("127.0.0.1:3128")
+          .credentials("sandbox", SecretSource.env("HTTP_CONNECT_PASSWORD")),
+      )
+      .build();
+
+    expect(cfg.network?.outboundProxy).toEqual({
+      protocol: "http_connect",
+      address: "127.0.0.1:3128",
+      credentials: {
+        username: "sandbox",
+        password: {
+          kind: "env",
+          var: "HTTP_CONNECT_PASSWORD",
         },
       },
     });

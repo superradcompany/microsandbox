@@ -251,6 +251,10 @@ pub struct SnapshotReindexArgs {
 /// Arguments for `msb snapshot export` (also available as `save`).
 #[derive(Debug, Args)]
 pub struct SnapshotSaveArgs {
+    /// Encrypt for an age X25519 public key (repeat for additional recipients).
+    #[arg(long, value_name = "AGE_RECIPIENT")]
+    pub recipient: Vec<String>,
+
     /// Archive reader target: current or 0.7.8; unsupported required behavior is refused.
     #[arg(long, default_value = "current")]
     pub compatibility: microsandbox::ArchiveCompatibility,
@@ -300,6 +304,10 @@ pub struct SnapshotSaveArgs {
 pub struct SnapshotLoadArgs {
     /// Destination snapshot group, created only when the complete batch commits.
     pub group: String,
+
+    /// Unlock the encrypted archive set with this age X25519 identity file.
+    #[arg(long, value_name = "FILE")]
+    pub identity: Option<PathBuf>,
 
     /// Archives to import together; dependencies are resolved regardless of argument order.
     #[arg(long = "file", required = true, num_args = 1.., value_name = "ARCHIVE")]
@@ -999,19 +1007,30 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
     // Pin the immutable member before export; a concurrent head change must not
     // change the artifact or dependencies selected by this operation.
     let checkpoint = select_checkpoint(&args.snapshot, args.checkpoint.as_deref()).await?;
-    checkpoint.save_to(&out, opts).await?;
+    if args.recipient.is_empty() {
+        checkpoint.save_to(&out, opts).await?;
+    } else {
+        checkpoint
+            .save_encrypted(&out, opts, &args.recipient)
+            .await?;
+    }
     println!("{}", out.display());
     Ok(())
 }
 
 async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
-    let result = SnapshotGroup::load_with(&args.group, &args.archives, |mut options| {
+    let configure = |mut options: microsandbox::SnapshotImportOptions| {
         options.dest = args.dest;
         options.base = args.base;
         options.set_head = args.set_head;
         options
-    })
-    .await?;
+    };
+    let result = match args.identity {
+        Some(identity) => {
+            SnapshotGroup::load_encrypted(&args.group, &args.archives, &identity, configure).await?
+        }
+        None => SnapshotGroup::load_with(&args.group, &args.archives, configure).await?,
+    };
     report_head_update(&result.head_update);
     for warning in &result.warnings {
         ui::warn(warning);

@@ -29,8 +29,7 @@ use microsandbox_protocol::core::{
     WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
     WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_BYTES,
     WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFailure, WorkloadFailureDisposition, WorkloadFreeze,
-    WorkloadFrozen, WorkloadThaw, WorkloadThawMode, WorkloadThawed, WorkloadTransportCredit,
-    WorkloadTransportPosition,
+    WorkloadFrozen, WorkloadThawed, WorkloadTransportCredit, WorkloadTransportPosition,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecOutputAck, ExecRequest, ExecResize, ExecSignal,
@@ -40,6 +39,9 @@ use microsandbox_protocol::exec::{
 use microsandbox_protocol::fs::{FS_CHUNK_SIZE, FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
 use microsandbox_protocol::message::{FRAME_HEADER_SIZE, Message, MessageType};
+use microsandbox_protocol::restore_transport::{
+    GuestReady, GuestThaw as WorkloadThaw, GuestThawMode as WorkloadThawMode,
+};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 use microsandbox_protocol::transport::{
     BULK_BINDING_SIZE, BulkTransportReady, CLIENT_INCARNATION_SIZE, ClientIncarnation,
@@ -155,7 +157,7 @@ struct AgentState {
     // Retain stdin/PTY and process registrations until inherited output readers finish.
     detached_sessions: HashMap<(u64, u32), ExecSession>,
     stdin_poll_offset: usize,
-    restored_attempt: Option<String>,
+    restored_attempt: Option<(String, WorkloadThawMode)>,
     client_incarnations: HashMap<u32, ClientIncarnation>,
     bulk_input_budget: Arc<Semaphore>,
     sessions: HashMap<u32, ExecSession>,
@@ -369,7 +371,8 @@ impl ActivityTracker {
 impl BulkInputState {
     fn new(file: File) -> AgentdResult<Self> {
         Ok(Self {
-            port: AsyncFd::new(file)?,
+            // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+            port: unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?,
             read_buf: vec![0u8; BULK_SERIAL_READ_BUF_SIZE],
             input: BytesMut::new(),
         })
@@ -491,7 +494,8 @@ pub async fn run(
     set_nonblocking(port_fd)?;
 
     // A single AsyncFd tracks both readable and writable readiness.
-    let async_port = AsyncFd::new(port_file)?;
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(port_file) }.map_err(std::io::Error::from)?;
 
     // A combined port carries full raw records; a dual-port control stream does not. Size the
     // allocation from the selected topology so combined throughput does not pay four reads per
@@ -540,20 +544,23 @@ pub async fn run(
     let ready_msg = Message::with_payload(
         MessageType::Ready,
         0,
-        &Ready {
-            boot_time_ns,
-            init_time_ns,
-            ready_time_ns,
-            agent_version: env!("CARGO_PKG_VERSION").to_string(),
-            bulk_transport: bulk_port
-                .as_ref()
-                .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
-            relay_lease: Some(RelayLeaseReady::range_lease_v1()),
-            // Shared arenas are negotiated only on the local SDK-to-runtime hop. Agentd speaks to
-            // the runtime over the guest consoles, so the runtime injects this capability later.
-            local_transport: None,
-            workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
-            exec_limits: config.exec_limits,
+        &GuestReady {
+            public: Ready {
+                boot_time_ns,
+                init_time_ns,
+                ready_time_ns,
+                agent_version: env!("CARGO_PKG_VERSION").to_string(),
+                bulk_transport: bulk_port
+                    .as_ref()
+                    .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
+                relay_lease: Some(RelayLeaseReady::range_lease_v1()),
+                // Shared arenas are negotiated only on the local SDK-to-runtime hop. Agentd speaks to
+                // the runtime over the guest consoles, so the runtime injects this capability later.
+                local_transport: None,
+                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+                exec_limits: config.exec_limits,
+            },
+            restore_tcp_reset_version: crate::network_reset::supported().then_some(1),
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -1260,7 +1267,8 @@ async fn bulk_writer_task(
     mut command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
     activity_tx: tokio::sync::mpsc::Sender<RawActivity>,
 ) -> AgentdResult<()> {
-    let async_port = AsyncFd::new(file)?;
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?;
     let mut generation = 0;
     let mut flows = HashMap::<(ClientIncarnation, u32), BulkWriteFlow>::new();
     let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
@@ -2794,16 +2802,59 @@ async fn handle_message_with_charge(
                 codec::encode_to_buf(&reply, out_buf)?;
                 return Ok(());
             }
-            if request.mode == WorkloadThawMode::Restore
-                && state.restored_attempt.as_deref() != Some(&request.attempt_id)
+            // A duplicate restore may arrive after workloads have already resumed.
+            // It may acknowledge only the cleanup mode actually performed for this cut.
+            if let Some((attempt, mode)) = &state.restored_attempt
+                && attempt == &request.attempt_id
+                && *mode != request.mode
+            {
+                encode_workload_error(
+                    &msg,
+                    &request.attempt_id,
+                    WorkloadLatchError::Conflict(
+                        "restore attempt already used a different thaw mode".into(),
+                    ),
+                    out_buf,
+                )?;
+                return Ok(());
+            }
+            if request.mode != WorkloadThawMode::Continue
+                && !state
+                    .restored_attempt
+                    .as_ref()
+                    .is_some_and(|(attempt, _)| attempt == &request.attempt_id)
             {
                 if let Err(error) = workload.require_frozen_attempt(&request.attempt_id) {
                     encode_workload_error(&msg, &request.attempt_id, error, out_buf)?;
                     return Ok(());
                 }
-                // Never call ordinary disconnect here: it kills the very processes we captured.
+                if request.mode == WorkloadThawMode::RestoreResetTcp {
+                    // Workloads remain frozen on failure. Never acknowledge connection
+                    // reset based only on the boot capability or a partially completed dump.
+                    let result =
+                        tokio::task::spawn_blocking(crate::network_reset::reset_external_tcp)
+                            .await
+                            .map_err(|error| {
+                                AgentdError::ExecSession(format!(
+                                    "restore TCP reset worker: {error}"
+                                ))
+                            })?;
+                    if let Err(error) = result {
+                        encode_workload_error(
+                            &msg,
+                            &request.attempt_id,
+                            WorkloadLatchError::Conflict(format!(
+                                "restore TCP reset failed; workloads remain frozen: {error}"
+                            )),
+                            out_buf,
+                        )?;
+                        return Ok(());
+                    }
+                }
+                // Delay client detachment until socket cleanup succeeds: a failed
+                // reset may be retried while the same transport cut is still frozen.
                 restore_client_state(state, root_session_tx).await?;
-                state.restored_attempt = Some(request.attempt_id.clone());
+                state.restored_attempt = Some((request.attempt_id.clone(), request.mode));
             }
             match workload.thaw(&request.attempt_id) {
                 Ok(()) => {
@@ -3892,8 +3943,8 @@ fn errno_name(code: i32) -> Option<String> {
 }
 
 fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
-    // Check if the request already specifies PATH.
-    if let Some(entry) = req.env.iter_mut().find(|e| e.starts_with("PATH=")) {
+    // Entries apply in order, so the child sees the request's last PATH.
+    if let Some(entry) = req.env.iter_mut().rfind(|e| e.starts_with("PATH=")) {
         let existing = &entry["PATH=".len()..];
         *entry = format!("PATH={}", scripts_path(Some(existing)));
     } else {
@@ -4249,7 +4300,7 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 
     // Foreign init owns both shutdown duration and filesystem teardown. No timer or
     // fallback signal may convert this graceful request into forced termination.
-    crate::handoff::signal_init_shutdown()
+    crate::handoff::request_init_shutdown()
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -5248,9 +5299,11 @@ mod tests {
 
         let (mut control_source, control) = UnixStream::pair().unwrap();
         control.set_nonblocking(true).unwrap();
-        let control = AsyncFd::new(control).unwrap();
+        // SAFETY: UnixStream owns a stable descriptor for the lifetime of AsyncFd.
+        let control = unsafe { AsyncFd::register(control) }.unwrap();
         let (pipe_reader, pipe_writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_NONBLOCK).unwrap();
-        let pipe_writer = AsyncFd::new(pipe_writer).unwrap();
+        // SAFETY: OwnedFd keeps the descriptor open and unchanged until AsyncFd drops it.
+        let pipe_writer = unsafe { AsyncFd::register(pipe_writer) }.unwrap();
         // Prime the reactor, then clear the pipe's cached writable event with a real EAGAIN.
         let mut writable = pipe_writer.writable().await.unwrap();
         loop {
@@ -6520,5 +6573,28 @@ mod tests {
         publish_bulk_activity(&sender, &mut pending).unwrap();
         assert_eq!(receiver.try_recv().unwrap().fs_bytes, 17);
         assert_eq!(pending.fs_bytes, 0);
+    }
+
+    #[test]
+    fn scripts_dir_goes_on_the_last_path_entry() {
+        let mut req = ExecRequest {
+            cmd: "/bin/true".into(),
+            args: vec![],
+            env: vec!["PATH=/first".into(), "PATH=/last".into()],
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: vec![],
+        };
+        prepend_scripts_to_path(&mut req);
+        assert_eq!(
+            req.env,
+            vec![
+                "PATH=/first".to_string(),
+                format!("PATH={}:/last", microsandbox_protocol::SCRIPTS_PATH),
+            ]
+        );
     }
 }

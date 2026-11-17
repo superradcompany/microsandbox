@@ -95,34 +95,75 @@ pub fn lock_exclusive(file: &File) -> io::Result<()> {
 
 /// Pins immutable data against cooperative exclusive eviction until the file closes.
 pub fn lock_shared(file: &File) -> io::Result<()> {
-    #[cfg(unix)]
+    lock_shared_inner(file, false).map(|_| ())
+}
+
+/// Attempts to acquire a shared process-held lock without blocking.
+///
+/// Returns `Ok(false)` only when another process currently owns an exclusive lock.
+pub fn try_lock_shared(file: &File) -> io::Result<bool> {
+    lock_shared_inner(file, true)
+}
+
+#[cfg(unix)]
+fn lock_shared_inner(file: &File, nonblocking: bool) -> io::Result<bool> {
+    let operation = if nonblocking {
+        libc::LOCK_SH | libc::LOCK_NB
+    } else {
+        libc::LOCK_SH
+    };
     loop {
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } == 0 {
-            return Ok(());
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+            return Ok(true);
         }
         let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
         }
-    }
-    #[cfg(windows)]
-    {
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            LockFileEx(
-                file.as_raw_handle() as HANDLE,
-                0,
-                0,
-                u32::MAX,
-                u32::MAX,
-                &mut overlapped,
+        if nonblocking
+            && matches!(
+                error.raw_os_error(),
+                Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
             )
-        };
-        if result == 0 {
-            return Err(io::Error::last_os_error());
+        {
+            return Ok(false);
         }
-        Ok(())
+        return Err(error);
     }
+}
+
+#[cfg(windows)]
+fn lock_shared_inner(file: &File, nonblocking: bool) -> io::Result<bool> {
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    let flags = if nonblocking {
+        LOCKFILE_FAIL_IMMEDIATELY
+    } else {
+        0
+    };
+    let result = unsafe {
+        LockFileEx(
+            file.as_raw_handle() as HANDLE,
+            flags,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    };
+    if result != 0 {
+        return Ok(true);
+    }
+
+    let error = io::Error::last_os_error();
+    if nonblocking
+        && matches!(
+            error.raw_os_error(),
+            Some(code) if code as u32 == ERROR_LOCK_VIOLATION || code as u32 == ERROR_IO_PENDING
+        )
+    {
+        return Ok(false);
+    }
+    Err(error)
 }
 
 /// Attempts to acquire an exclusive process-held lock without blocking.
@@ -253,5 +294,22 @@ mod tests {
         assert!(!try_lock_exclusive(&second).unwrap());
         unlock(&first).unwrap();
         assert!(try_lock_exclusive(&second).unwrap());
+    }
+
+    #[test]
+    fn shared_locks_are_compatible_and_exclude_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lease.lock");
+        let first_reader = open_lock_file(&path).unwrap();
+        let second_reader = open_lock_file(&path).unwrap();
+        let writer = open_lock_file(&path).unwrap();
+
+        assert!(try_lock_shared(&first_reader).unwrap());
+        assert!(try_lock_shared(&second_reader).unwrap());
+        assert!(!try_lock_exclusive(&writer).unwrap());
+        unlock(&first_reader).unwrap();
+        assert!(!try_lock_exclusive(&writer).unwrap());
+        unlock(&second_reader).unwrap();
+        assert!(try_lock_exclusive(&writer).unwrap());
     }
 }

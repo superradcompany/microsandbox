@@ -15,7 +15,9 @@ use tokio_tungstenite::{
 };
 
 use super::{CloudBackend, cloud_agent_tls_connector, default_user_agent};
-use crate::backend::{Backend, BackendInfo, BackendKind, SandboxBackend, VolumeBackend};
+use crate::backend::{
+    Backend, BackendInfo, BackendKind, SandboxBackend, ServiceBackend, VolumeBackend,
+};
 use crate::{MicrosandboxError, MicrosandboxResult, timing};
 
 //--------------------------------------------------------------------------------------------------
@@ -49,6 +51,10 @@ impl Backend for CloudBackend {
     }
 
     fn snapshots(&self) -> &dyn crate::backend::SnapshotBackend {
+        self
+    }
+
+    fn services(&self) -> &dyn ServiceBackend {
         self
     }
 

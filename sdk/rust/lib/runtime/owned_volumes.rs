@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use microsandbox_image::ext4::{Ext4FormatOptions, format_ext4};
 use microsandbox_types::{OwnedVolumeStorage, VolumeMount};
 
+use crate::backend::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -36,7 +37,7 @@ pub(crate) fn backing_path(
 
 /// Allocate only on initial creation. Restarts and restores must find their existing backing.
 pub(crate) async fn prepare(
-    sandbox_dir: &Path,
+    sandbox_dir: &CreationStorage,
     mounts: &[VolumeMount],
     restored: bool,
 ) -> MicrosandboxResult<()> {
@@ -59,54 +60,60 @@ pub(crate) async fn prepare(
             destination.display()
         )));
     }
-    tokio::fs::create_dir_all(sandbox_dir).await?;
-    let parent = sandbox_dir
-        .parent()
-        .ok_or_else(|| MicrosandboxError::InvalidConfig("sandbox directory has no parent".into()))?
-        .to_path_buf();
+    let parent = sandbox_dir.to_path_buf();
     // The blocking worker owns its operation-unique directory. Cancellation cannot
     // leave a late formatter writing into a replacement sandbox's name.
-    let stage = tokio::task::spawn_blocking(move || -> MicrosandboxResult<tempfile::TempDir> {
-        let stage = tempfile::Builder::new()
-            .prefix(".owned-volume-create-")
-            .tempdir_in(parent)?;
-        for mount in owned {
-            let VolumeMount::Owned { guest, storage, .. } = mount else {
-                unreachable!()
-            };
-            let directory = stage
-                .path()
-                .join(microsandbox_types::owned_volume_mount_id(&guest));
-            std::fs::create_dir(&directory)?;
-            match storage {
-                OwnedVolumeStorage::Directory { .. } => {
-                    std::fs::create_dir(directory.join("data"))?
-                }
-                OwnedVolumeStorage::Disk { capacity_mib } => {
-                    if capacity_mib == 0 {
-                        return Err(MicrosandboxError::InvalidConfig(
-                            "owned disk size must be positive".into(),
-                        ));
+    {
+        let worker_storage = sandbox_dir.clone();
+        tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
+            let _storage = worker_storage;
+
+            std::fs::create_dir_all(&parent)?;
+            let stage = tempfile::Builder::new()
+                .prefix(".owned-volume-create-")
+                .tempdir_in(parent)?;
+
+            for mount in owned {
+                let VolumeMount::Owned { guest, storage, .. } = mount else {
+                    unreachable!()
+                };
+
+                let directory = stage
+                    .path()
+                    .join(microsandbox_types::owned_volume_mount_id(&guest));
+
+                std::fs::create_dir(&directory)?;
+                match storage {
+                    OwnedVolumeStorage::Directory { .. } => {
+                        std::fs::create_dir(directory.join("data"))?
                     }
-                    format_ext4(
-                        &directory.join("disk.raw"),
-                        &Ext4FormatOptions {
-                            size_bytes: u64::from(capacity_mib) * 1024 * 1024,
-                            ..Default::default()
-                        },
-                    )
-                    .map_err(|error| {
-                        MicrosandboxError::Custom(format!("format owned disk {guest}: {error}"))
-                    })?;
+                    OwnedVolumeStorage::Disk { capacity_mib } => {
+                        if capacity_mib == 0 {
+                            return Err(MicrosandboxError::InvalidConfig(
+                                "owned disk size must be positive".into(),
+                            ));
+                        }
+
+                        format_ext4(
+                            &directory.join("disk.raw"),
+                            &Ext4FormatOptions {
+                                size_bytes: u64::from(capacity_mib) * 1024 * 1024,
+                                ..Default::default()
+                            },
+                        )
+                        .map_err(|error| {
+                            MicrosandboxError::Custom(format!("format owned disk {guest}: {error}"))
+                        })?;
+                    }
                 }
             }
-        }
-        Ok(stage)
-    })
+
+            std::fs::rename(stage.path(), &destination)?;
+            Ok(())
+        })
+    }
     .await
     .map_err(|error| MicrosandboxError::Custom(format!("owned volume preparation: {error}")))??;
-    // No await between publication and returning to the retained creation cleanup.
-    std::fs::rename(stage.path(), &destination)?;
     validate(sandbox_dir, mounts)
 }
 
@@ -518,9 +525,13 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let sandbox = home.path().join("source");
         let mount = MountBuilder::new("/data").owned().build().unwrap();
-        prepare(&sandbox, std::slice::from_ref(&mount), false)
-            .await
-            .unwrap();
+        prepare(
+            &CreationStorage::for_test(&sandbox),
+            std::slice::from_ref(&mount),
+            false,
+        )
+        .await
+        .unwrap();
         let path = backing_path(
             &sandbox,
             "/data",
@@ -531,12 +542,20 @@ mod tests {
         validate(&sandbox, std::slice::from_ref(&mount)).unwrap();
         assert_eq!(std::fs::read(path.join("kept")).unwrap(), b"persisted");
         assert!(
-            prepare(&sandbox, std::slice::from_ref(&mount), false)
+            prepare(
+                &CreationStorage::for_test(&sandbox),
+                std::slice::from_ref(&mount),
+                false
+            )
+            .await
+            .is_err()
+        );
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(
+            prepare(&CreationStorage::for_test(&sandbox), &[mount], true)
                 .await
                 .is_err()
         );
-        std::fs::remove_dir_all(&path).unwrap();
-        assert!(prepare(&sandbox, &[mount], true).await.is_err());
         assert!(
             !path.exists(),
             "missing data must not silently become an empty volume"
@@ -568,9 +587,13 @@ mod tests {
             .owned_with(|v| v.disk().size(256_u32))
             .build()
             .unwrap();
-        prepare(&sandbox, std::slice::from_ref(&mount), false)
-            .await
-            .unwrap();
+        prepare(
+            &CreationStorage::for_test(&sandbox),
+            std::slice::from_ref(&mount),
+            false,
+        )
+        .await
+        .unwrap();
         let path = backing_path(
             &sandbox,
             "/data",
@@ -588,9 +611,13 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let sandbox = home.path().join("source");
         let mount = MountBuilder::new("/data").owned().build().unwrap();
-        prepare(&sandbox, std::slice::from_ref(&mount), false)
-            .await
-            .unwrap();
+        prepare(
+            &CreationStorage::for_test(&sandbox),
+            std::slice::from_ref(&mount),
+            false,
+        )
+        .await
+        .unwrap();
         let path = backing_path(
             &sandbox,
             "/data",

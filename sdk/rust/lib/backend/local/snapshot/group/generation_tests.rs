@@ -562,10 +562,23 @@ async fn crash_cases(legacy_cli: Option<&Path>) {
                 add(&source, 1, None).await;
             }
             let destination = root.path().join("history");
-            let input = stage(
-                root.path(),
-                &[descriptor(2, (!fresh).then_some(1)), descriptor(3, Some(2))],
-            );
+            let mut batch = vec![descriptor(2, (!fresh).then_some(1)), descriptor(3, Some(2))];
+            #[cfg(feature = "net")]
+            if !fresh {
+                batch.push(descriptor(1, None));
+            }
+            let input = stage(root.path(), &batch);
+            #[cfg(feature = "net")]
+            if !fresh {
+                // Model the sealed output of age authentication. The pre-existing member
+                // and the two new members must all switch visibility at the same boundary.
+                let name = microsandbox_runtime::checkpoint::tls_receipt::SIDECAR;
+                fs::write(
+                    input.path().join(id(1).as_str()).join(name),
+                    b"sealed signer",
+                )
+                .unwrap();
+            }
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -729,6 +742,7 @@ async fn failed_durability_flush_keeps_complete_view_and_previous_generation() {
     );
     let outcome = Arc::new(AtomicU8::new(SnapshotImportOutcome::NotCommitted as u8));
     let operation = group::IndexedPublication {
+        verified_signers: Default::default(),
         operation: "00000000000000000000000000000042".into(),
         outcome: outcome.clone(),
     };
@@ -790,6 +804,15 @@ async fn released_reader_sees_atomic_production_publication_after_crash() {
     production_crash_cases(Some(Path::new(&executable))).await;
 }
 
+fn test_signers(input: &Path) -> std::collections::BTreeSet<String> {
+    let member = id(1);
+    let mut ids = std::collections::BTreeSet::new();
+    if input.join(member.as_str()).is_dir() {
+        ids.insert(member.to_string());
+    }
+    ids
+}
+
 async fn production_crash_cases(legacy_cli: Option<&Path>) {
     for fresh in [true, false] {
         for boundary in ["linking", "prepared", "exchanged", "committed"] {
@@ -804,10 +827,23 @@ async fn production_crash_cases(legacy_cli: Option<&Path>) {
                 add(&group, 1, None).await;
                 group
             };
-            let input = stage(
-                root.path(),
-                &[descriptor(2, (!fresh).then_some(1)), descriptor(3, Some(2))],
-            );
+            let mut batch = vec![descriptor(2, (!fresh).then_some(1)), descriptor(3, Some(2))];
+            #[cfg(feature = "net")]
+            if !fresh {
+                batch.push(descriptor(1, None));
+            }
+            let input = stage(root.path(), &batch);
+            #[cfg(feature = "net")]
+            if !fresh {
+                // Model the sealed output of age authentication. The pre-existing member
+                // and the two new members must all switch visibility at the same boundary.
+                let name = microsandbox_runtime::checkpoint::tls_receipt::SIDECAR;
+                fs::write(
+                    input.path().join(id(1).as_str()).join(name),
+                    b"sealed signer",
+                )
+                .unwrap();
+            }
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -839,6 +875,13 @@ async fn production_crash_cases(legacy_cli: Option<&Path>) {
             let published = matches!(boundary, "exchanged" | "committed");
             let expected = usize::from(!fresh) + if published { 2 } else { 0 };
             assert_eq!(read_members(&destination, true).unwrap().len(), expected);
+            #[cfg(feature = "net")]
+            if !fresh {
+                let signer = destination
+                    .join(id(1).as_str())
+                    .join(microsandbox_runtime::checkpoint::tls_receipt::SIDECAR);
+                assert_eq!(signer.exists(), published, "signer at {boundary}");
+            }
             if let Some(executable) = legacy_cli {
                 for number in [2, 3] {
                     let output = Command::new(executable)
@@ -858,7 +901,7 @@ async fn production_crash_cases(legacy_cli: Option<&Path>) {
             }
             if published {
                 let pending = group::pending_index(&destination).await.unwrap().unwrap();
-                assert_eq!(pending.snapshots.len(), 2);
+                assert_eq!(pending.snapshots.len(), batch.len());
                 pending.finish().await.unwrap();
             }
             {
@@ -878,6 +921,7 @@ async fn production_crash_cases(legacy_cli: Option<&Path>) {
             }
             // Retry the same batch after recovery; existing members are never duplicated.
             let operation = group::IndexedPublication {
+                verified_signers: test_signers(input.path()),
                 operation: "00000000000000000000000000000043".into(),
                 outcome: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
                     SnapshotImportOutcome::NotCommitted as u8,
@@ -914,6 +958,7 @@ async fn production_crash_worker() {
     let group = std::path::PathBuf::from(std::env::var_os("MSB_TEST_ATOMIC_GROUP").unwrap());
     let input = std::path::PathBuf::from(std::env::var_os("MSB_TEST_ATOMIC_INPUT").unwrap());
     let operation = group::IndexedPublication {
+        verified_signers: test_signers(&input),
         operation: "00000000000000000000000000000044".into(),
         outcome: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
             SnapshotImportOutcome::NotCommitted as u8,
@@ -933,6 +978,7 @@ async fn confirmed_publication_returns_cleanup_warning_without_losing_members() 
     let input = stage(root.path(), &[descriptor(2, Some(1))]);
     let outcome = Arc::new(AtomicU8::new(SnapshotImportOutcome::NotCommitted as u8));
     let operation = group::IndexedPublication {
+        verified_signers: Default::default(),
         operation: "00000000000000000000000000000043".into(),
         outcome: outcome.clone(),
     };

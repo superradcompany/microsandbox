@@ -251,6 +251,10 @@ pub(super) fn legacy_env(bootstrap: &GuestBootstrap) -> MicrosandboxResult<Vec<S
         .expect("LaunchConfig is an object")
         .remove("bootstrap");
     check.as_object_mut().unwrap().remove("execution");
+    check
+        .as_object_mut()
+        .unwrap()
+        .remove("protected_guest_state");
     check["env"] = json!(env);
     check["workdir"] = json!(bootstrap.default_cwd);
     let mut decoded = LaunchConfig::from_json(&serde_json::to_vec(&check)?)
