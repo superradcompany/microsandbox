@@ -33,7 +33,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 //--------------------------------------------------------------------------------------------------
 
 /// The apply route, as error messages name it.
-const APPLY_OP: &str = "PUT /v1/sandboxes/:id";
+const APPLY_OP: &str = "PATCH /v1/sandboxes/:id";
 
 /// One `apply()`: 180 s in all, 75 s per request. 180 s covers a crashed
 /// request's 90 s lock plus one full request, with margin.
@@ -154,7 +154,7 @@ impl CloudBackend {
             let timeout = budget
                 .per_request
                 .min(deadline.saturating_duration_since(Instant::now()));
-            let sent = read(self.put_modification(id, request, timeout).await).await;
+            let sent = read(self.patch_modification(id, request, timeout).await).await;
             let (class, at_deadline) = match classify(sent) {
                 Attempt::Done(plan) => return Ok(plan),
                 Attempt::Fail(error) => return Err(error),

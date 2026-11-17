@@ -518,9 +518,7 @@ mod tests {
         assert_eq!(plan.sandbox, "agent-1");
         assert_eq!(
             *lines.lock().unwrap(),
-            [format!(
-                "POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1"
-            )]
+            [format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1")]
         );
 
         let unbound = SandboxModificationBuilder::new(

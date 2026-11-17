@@ -216,39 +216,40 @@ impl CloudBackend {
         decode_json(resp, "POST /v1/sandboxes/:id/start").await
     }
 
-    /// `POST /v1/sandboxes/:id/modifications/plan`, a dry run whose body carries no secret value.
+    /// `POST /v1/sandboxes/:id/plan`, a dry run whose body carries no secret value.
     pub(in crate::backend) async fn post_modification_plan(
         &self,
         id: &str,
         req: &CloudSandboxModificationPlanRequest,
     ) -> MicrosandboxResult<SandboxModificationPlan> {
-        let url = format!(
-            "{}/v1/sandboxes/{}/modifications/plan",
-            self.url,
-            urlencoding(id)
-        );
+        let url = format!("{}/v1/sandboxes/{}/plan", self.url, urlencoding(id));
         let resp = self
             .http
             .post(&url)
             .json(req)
             .send()
             .await
-            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/modifications/plan", e))?;
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/plan", e))?;
         let plan: CloudSandboxModificationPlan =
-            decode_json(resp, "POST /v1/sandboxes/:id/modifications/plan").await?;
+            decode_json(resp, "POST /v1/sandboxes/:id/plan").await?;
         Ok(plan.into())
     }
 
-    /// `PUT /v1/sandboxes/:id`, sent once. The body is the only
+    /// `PATCH /v1/sandboxes/:id`, sent once. The body is the only
     /// place a secret value travels; the caller reads and classifies the outcome.
-    pub(in crate::backend) async fn put_modification(
+    pub(in crate::backend) async fn patch_modification(
         &self,
         id: &str,
         req: &CloudSandboxModificationApplyRequest,
         timeout: Duration,
     ) -> Result<Response, reqwest::Error> {
         let url = format!("{}/v1/sandboxes/{}", self.url, urlencoding(id));
-        self.http.put(&url).json(req).timeout(timeout).send().await
+        self.http
+            .patch(&url)
+            .json(req)
+            .timeout(timeout)
+            .send()
+            .await
     }
 
     /// `POST /v1/sandboxes/by-name/:name/stop`.
@@ -918,7 +919,7 @@ mod tests {
             r#"{"error":{"code":"modification_unsupported","message":"secrets: not supported"}}"#,
         )
         .unwrap();
-        let op = "PUT /v1/sandboxes/:id";
+        let op = "PATCH /v1/sandboxes/:id";
 
         assert!(matches!(
             cloud_http_error(409, Some(&unsupported), "", op),

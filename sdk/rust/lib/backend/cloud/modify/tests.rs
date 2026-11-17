@@ -172,11 +172,11 @@ fn error_json(code: &str, message: &str) -> serde_json::Value {
 }
 
 fn plan_line() -> String {
-    format!("POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1")
+    format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1")
 }
 
 fn apply_line() -> String {
-    format!("PUT /v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
+    format!("PATCH /v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
 }
 
 fn body(request: &Recorded) -> serde_json::Value {
@@ -557,7 +557,7 @@ async fn a_refused_proxy_is_sent_again() {
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].line,
-        format!("PUT http://cloud.example/v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
+        format!("PATCH http://cloud.example/v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
     );
 }
 
