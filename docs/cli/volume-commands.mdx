@@ -6,7 +6,7 @@ description: Create, mount, and manage persistent sandbox volumes with the micro
 icon: "hard-drive"
 ---
 
-Use mutually exclusive `--local` / `--remote` to select a destination for this command. Explicit flags override profile/environment selection while preserving managed backend restrictions; see [selection and credentials](/operations/backends#explicit-cli-selection).
+Use mutually exclusive `--local` / `--remote` to select a destination for this command. Explicit flags override profile/environment selection while preserving managed backend restrictions; see [selection and credentials](/cloud/connect#explicit-cli-selection).
 
 Named volumes persist independently of sandboxes. Local volumes default to `~/.microsandbox/volumes/`.
 
@@ -40,6 +40,8 @@ msb volumes -q               # Names only
 </CodeGroup>
 
 Expanded form: `msb volume ls`. The shorter plural alias `msb vols` is also available.
+
+Both aliases accept destination flags, for example `msb volumes --remote` and `msb vols --local`.
 
 | Flag | Description |
 |------|-------------|

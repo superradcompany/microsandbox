@@ -296,6 +296,8 @@ remote = Microsandbox::RemoteContext.from_profile("work")
 
 The default endpoint is `https://api.microsandbox.dev`. Set an explicit URL to use another compatible API; an empty URL is an error.
 
+Explicit `http://` endpoints are supported for deployments that manage transport protection separately, such as local development or an encrypted tunnel. HTTP itself does not encrypt the API key, request body or response. Use HTTPS when you need the SDK connection to provide transport encryption and server-certificate verification.
+
 <Accordion title="Set another endpoint">
 <CodeGroup>
 ```typescript TypeScript
@@ -408,14 +410,18 @@ Request timeouts and user agents can be set when constructing or deriving a cont
 
 <span id="cli-profiles" />
 <span id="precedence" />
+<span id="explicit-cli-selection" />
 <Accordion title="Which CLI setting wins?">
 CLI selection uses this order:
 
-1. Managed `active_profile`
-2. `MSB_BACKEND=local|remote`
-3. `MSB_PROFILE`
-4. Saved `active_profile`
-5. Local runtime
+1. Explicit `--local` or `--remote` on a supported resource command
+2. Managed `active_profile`
+3. `MSB_BACKEND=local|remote`
+4. `MSB_PROFILE`
+5. Saved `active_profile`
+6. Local runtime
+
+Explicit flags override a managed active profile but still enforce `allowed_backends`.
 
 Environment and managed settings can override `msb context use`; the command warns when they do. `reset` clears only the saved preference. Missing credentials or a blocked connection cause an error. The command will not run locally instead.
 

@@ -4,22 +4,16 @@ import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { Sandbox } from "../../../sdk/node-ts/dist/sandbox.js";
 import { Volume } from "../../../sdk/node-ts/dist/volume.js";
-import { Snapshot } from "../../../sdk/node-ts/dist/snapshot.js";
-import { RemoteContext } from "../../../sdk/node-ts/dist/context.js";
+import { AuditOperations } from "./operations.mjs";
 if (process.env.MSB_REMOTE_AUDIT !== "1") throw Error("opt-in required");
 const name = "audit-caps-" + randomUUID().slice(0, 8),
   rows = [],
   report = process.env.MSB_AUDIT_REPORT;
 writeFileSync(report + ".resources.json", JSON.stringify({ prefix: name }));
+const operations = new AuditOperations();
 async function check(feature, fn, expected = "success") {
-  let timer;
   try {
-    await Promise.race([
-      fn(),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(Error("audit timeout")), 90000);
-      }),
-    ]);
+    await operations.run(fn, 90000);
     rows.push({ feature, verdict: expected === "success" ? "PASS" : "FAIL" });
   } catch (e) {
     const message = String(e.message).replaceAll(
@@ -53,7 +47,6 @@ async function check(feature, fn, expected = "success") {
     });
     console.log("DIAGNOSTIC " + feature + " " + message);
   }
-  clearTimeout(timer);
   console.log(JSON.stringify(rows.at(-1)));
   writeFileSync(
     report,
@@ -168,8 +161,11 @@ try {
       feature === "host_bind" ? "success" : "unsupported",
     );
 } finally {
-  for (const resource of [...extras, isolated, sb].filter(Boolean))
+  await operations.settle();
+  for (const resource of [...extras, isolated, sb].filter(Boolean)) {
     await check("cleanup_" + resource.name, () => resource.destroy());
+    await operations.settle();
+  }
   await check("bind_directory_cleanup", async () => {
     const d = await v.getDefault();
     if (await d.fs().exists(name + "-bind")) {
@@ -177,6 +173,7 @@ try {
       await d.fs().removeDir(name + "-bind");
     }
   });
+  await operations.settle();
   await check("cleanup_verified", () => s.get(name), "not_found");
   if (isolated)
     await check(
@@ -186,4 +183,5 @@ try {
     );
 }
 
+await operations.settle();
 process.exitCode = rows.some((r) => r.verdict === "FAIL") ? 1 : 0;

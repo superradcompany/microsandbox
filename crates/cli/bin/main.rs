@@ -827,6 +827,7 @@ fn supports_destination_selector(command: &Commands) -> bool {
     match command {
         Commands::Sandbox(_)
         | Commands::Volume(_)
+        | Commands::Volumes(_)
         | Commands::Snapshot(_)
         | Commands::Snapshots(_) => true,
         Commands::Context(args) => args.command.is_none(),
@@ -865,6 +866,10 @@ mod command_tests {
             vec!["msb", "exec", "--remote", "worker", "--", "echo", "ok"],
             vec!["msb", "sandbox", "list", "--local"],
             vec!["msb", "volume", "list", "--remote"],
+            vec!["msb", "volumes", "--remote"],
+            vec!["msb", "vols", "--local"],
+            vec!["msb", "--local", "volumes"],
+            vec!["msb", "--remote", "vols"],
             vec!["msb", "snapshot", "list", "--local"],
         ] {
             let cli = Cli::try_parse_from(&arguments).unwrap();

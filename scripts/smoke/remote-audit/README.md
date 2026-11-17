@@ -17,6 +17,8 @@ cargo test -p microsandbox --no-default-features --features local,cloud,net --te
 
 The CLI scripts require `MSB_CLI` pointing to the candidate binary. The Python/Ruby import paths must select the rebuilt candidate bindings. TypeScript imports this checkout's built `sdk/node-ts/dist`. Each invocation needs its own report path; scripts overwrite that report incrementally.
 
+JavaScript audit deadlines record a timeout without cancelling the SDK operation. The audits retain unfinished operations and wait for them before collecting resource handles for cleanup. Cleanup also waits for a timed-out deletion before deleting dependent resources or checking absence. A provider operation that never settles can therefore delay cleanup; process termination still requires recovery using the recorded sidecar. Run `node --test scripts/smoke/remote-audit/operations.test.mjs` to check late creation, late rejection and completion behavior without a provider.
+
 For Go, set `MSB_SELECTOR_NATIVE_LIBRARY` to the rebuilt remote-capable native library, then run from `sdk/go`:
 
 ```sh

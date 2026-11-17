@@ -8,6 +8,7 @@ import { Sandbox } from "../../../sdk/node-ts/dist/sandbox.js";
 import { Volume } from "../../../sdk/node-ts/dist/volume.js";
 import { Snapshot } from "../../../sdk/node-ts/dist/snapshot.js";
 import { RemoteContext } from "../../../sdk/node-ts/dist/context.js";
+import { AuditOperations } from "./operations.mjs";
 if (process.env.MSB_REMOTE_AUDIT !== "1")
   throw Error("Explicit remote audit opt-in required");
 const prefix = "audit-ts-" + randomUUID().slice(0, 8),
@@ -41,15 +42,10 @@ function category(e) {
               ? "timeout"
               : e.constructor.name;
 }
+const operations = new AuditOperations();
 async function check(feature, fn, expect = "success", ms = 45000) {
-  let timer;
   try {
-    await Promise.race([
-      fn(),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(Error("audit timeout")), ms);
-      }),
-    ]);
+    await operations.run(fn, ms);
     rows.push({
       feature,
       verdict: expect === "success" ? "PASS" : "FAIL",
@@ -75,7 +71,6 @@ async function check(feature, fn, expect = "success", ms = 45000) {
       reason,
     });
   } finally {
-    clearTimeout(timer);
     console.log(JSON.stringify(rows.at(-1)));
     save();
   }
@@ -85,7 +80,7 @@ const ctx = RemoteContext.fromEnv(),
   sandboxes = Sandbox.remote(),
   volumes = Volume.remote(),
   snapshots = Snapshot.remote();
-let sb, vol, snap, restored;
+let sb, vol, snap, restored, forked;
 try {
   for (const [name, construct] of [
     [
@@ -423,7 +418,11 @@ try {
   await check("compact", () => sb.compact(), "unsupported");
   await check("pause", () => sb.pause(), "unsupported");
   await check("resume", () => sb.resume(), "unsupported");
-  await check("fork", () => sb.fork(prefix + "-fork"), "unsupported");
+  await check("fork", async () => {
+    // Keep the child if a provider adds support, even if the capability probe
+    // times out or fails its expected-unsupported verdict.
+    forked = await sb.fork(prefix + "-fork");
+  }, "unsupported");
   await check("detach_remote", async () => {
     await sb.detach();
     assert.equal(sb.ownsLifecycle, false);
@@ -518,22 +517,28 @@ try {
   });
   save();
 } finally {
+  await operations.settle();
   for (const [feature, obj] of [
+    ["fork_cleanup", forked],
     ["restore_cleanup", restored],
     ["snapshot_cleanup", snap],
     ["sandbox_cleanup", sb],
     ["volume_cleanup", vol],
-  ])
+  ]) {
     if (obj) await check(feature, () => obj.destroy(), "success", 420000);
+    await operations.settle();
+  }
   for (const [feature, c, n] of [
     ["sandbox_cleanup_verified", sandboxes, prefix],
     ["volume_cleanup_verified", volumes, prefix],
+    ...(forked ? [["fork_cleanup_verified", sandboxes, prefix + "-fork"]] : []),
     ...(snap ? [["snapshot_cleanup_verified", snapshots, snap.reference]] : []),
   ])
     await check(feature, () => c.get(n), "not_found");
   rmSync(files, { recursive: true, force: true });
   save();
 }
+await operations.settle();
 process.exitCode = rows.some(
   (r) => r.verdict === "FAIL" || r.verdict === "BLOCKED",
 )

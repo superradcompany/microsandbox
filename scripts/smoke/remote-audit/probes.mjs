@@ -6,20 +6,16 @@ import { Sandbox } from "../../../sdk/node-ts/dist/sandbox.js";
 import { Volume } from "../../../sdk/node-ts/dist/volume.js";
 import { Snapshot } from "../../../sdk/node-ts/dist/snapshot.js";
 import { RemoteContext } from "../../../sdk/node-ts/dist/context.js";
+import { AuditOperations } from "./operations.mjs";
 if (process.env.MSB_REMOTE_AUDIT !== "1") throw Error("opt-in required");
 const name = "audit-probe-" + randomUUID().slice(0, 8),
   rows = [],
   report = process.env.MSB_AUDIT_REPORT;
 writeFileSync(report + ".resources.json", JSON.stringify({ prefix: name }));
+const operations = new AuditOperations();
 async function check(feature, fn, expected = "success") {
-  let timer;
   try {
-    await Promise.race([
-      fn(),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(Error("audit timeout")), 90000);
-      }),
-    ]);
+    await operations.run(fn, 90000);
     rows.push({ feature, verdict: expected === "success" ? "PASS" : "FAIL" });
   } catch (e) {
     const message = String(e.message).replaceAll(
@@ -53,7 +49,6 @@ async function check(feature, fn, expected = "success") {
     });
     console.log("DIAGNOSTIC " + feature + " " + message);
   }
-  clearTimeout(timer);
   console.log(JSON.stringify(rows.at(-1)));
   writeFileSync(
     report,
@@ -250,12 +245,16 @@ try {
     assert.equal((await replacement.shell("printf alive")).stdout(), "alive"),
   );
 } finally {
+  await operations.settle();
   if (replacement)
     await check("replacement_cleanup", () => replacement.destroy());
   else if (sb) await check("sandbox_cleanup", () => sb.destroy());
+  await operations.settle();
   if (vol) await check("volume_cleanup", () => vol.destroy());
+  await operations.settle();
   await check("sandbox_cleanup_verified", () => s.get(name), "not_found");
   await check("volume_cleanup_verified", () => v.get(name), "not_found");
 }
 
+await operations.settle();
 process.exitCode = rows.some((r) => r.verdict === "FAIL") ? 1 : 0;

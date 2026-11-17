@@ -131,6 +131,7 @@ describe("creation result lifecycle ownership", () => {
     native.shutdownOwned.mockRejectedValueOnce(cleanup);
     try {
       await using sandbox = await Sandbox.builder("both-fail").create();
+      expect(sandbox.ownsLifecycle).toBe(true);
       throw body;
     } catch (error) {
       expect(error).toMatchObject({ error: cleanup, suppressed: body });

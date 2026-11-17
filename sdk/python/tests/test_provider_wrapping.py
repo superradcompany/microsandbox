@@ -114,7 +114,7 @@ async def test_cancelled_wrapper_wait_does_not_record_completion(wrappers):
     await asyncio.sleep(0)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await pending
+        _ = await pending
     assert execution._inner.completion is None
     execution._inner.ready.set()
     assert await execution.wait() == await execution.wait() == 7
