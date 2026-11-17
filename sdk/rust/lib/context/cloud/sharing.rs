@@ -196,6 +196,8 @@ mod tests {
             r#"{"profile":"reload"}"#,
             r#"{"apiKey":""}"#,
             r#"{"requestTimeoutMs":-1}"#,
+            r#"{"computeType":"turbo"}"#,
+            r#"{"computeType":3}"#,
         ] {
             assert!(crate::context::derive_remote_from_options_json(&source, invalid).is_err());
         }

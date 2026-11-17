@@ -26,21 +26,25 @@ Ordinary contained `..` paths remain supported. `RemoveAll(ctx, ".")` and `Remov
 
 #### <span className="msb-recv"></span><span className="msb-hn">GetDefaultVolume()</span>
 
-<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available only on our managed cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func GetDefaultVolume(ctx context.Context) (*Volume, error)
 ```
 
-Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `FS()`. The local backend returns `ErrUnsupportedOperation`; it never substitutes a directory from the caller's machine.
+Get your managed cloud organization's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `FS()`. The local backend returns `ErrUnsupportedOperation`; it never substitutes a directory from the caller's machine.
 
 <Accordion title="Example">
 
 ```go
 remote, err := m.RemoteContextFromEnv()
-if err != nil { return err }
+if err != nil {
+    return err
+}
 volume, err := remote.Volumes().GetDefault(ctx)
-if err != nil { return err }
+if err != nil {
+    return err
+}
 err = volume.FS().WriteString(ctx, "customers/acme.json", `{"active":true}`)
 contents, err := volume.FS().ReadString(ctx, "customers/acme.json")
 ```
@@ -49,7 +53,7 @@ contents, err := volume.FS().ReadString(ctx, "customers/acme.json")
 
 #### <span className="msb-recv"></span><span className="msb-hn">CreateVolume()</span>
 
-<Tooltip tip="Microsandbox cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="our managed cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volume, error)
@@ -217,7 +221,9 @@ The observation includes identity, kind, quota, optional usage/capacity, labels,
 
 ```go
 observation, err := vol.Info(ctx)
-if err != nil { return err }
+if err != nil {
+    return err
+}
 fmt.Println(observation.Name, observation.UsedBytes)
 ```
 
@@ -415,7 +421,7 @@ Functional options passed to [`CreateVolume`](#createvolume), plus the [`Mount`]
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithVolumeKind()</span>
 
-<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Disk-kind volumes are not available on our managed cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithVolumeKind(kind VolumeKind) VolumeOption
@@ -434,7 +440,7 @@ Select the [`VolumeKind`](#volumekind). Defaults to `VolumeKindDir`.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithVolumeSize()</span>
 
-<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Disk-kind volumes are not available on our managed cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithVolumeSize(mebibytes uint32) VolumeOption
@@ -453,7 +459,7 @@ Set disk volume capacity in MiB. Required when the kind is [`VolumeKindDisk`](#v
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithVolumeQuota()</span>
 
-<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithVolumeQuota(mebibytes uint32) VolumeOption
@@ -491,7 +497,9 @@ Attach key-value labels to the volume. When called repeatedly, the maps merge; l
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Bind()</span>
 
-<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```go
 func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig
@@ -554,7 +562,7 @@ Mount an existing named persistent volume. The volume must already exist (create
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">NamedWith()</span>
 
-<Tooltip tip="On microsandbox cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig
@@ -628,7 +636,9 @@ Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Disk()</span>
 
-<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```go
 func (mountFactory) Disk(hostPath string, opts DiskOptions) MountConfig

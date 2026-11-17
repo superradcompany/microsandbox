@@ -321,7 +321,7 @@ export class Sandbox implements AsyncDisposable {
     this.id = inner.id;
     // Client scopes never acquire remote runtime ownership. Local results carry
     // the actual launch mode, which may differ from the requested builder mode.
-    this.contextKind = inner.backendKind === "cloud" ? "remote" : "local";
+    this.contextKind = inner.backendKind === "local" ? "local" : "remote";
   }
 
   // -- statics ------------------------------------------------------------

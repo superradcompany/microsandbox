@@ -9,7 +9,7 @@
 //!   deferring its DB pool until first access. Used by the ambient `default_local_context()`
 //!   when no explicit backend is installed.
 //! - [`LocalContext::builder`] — programmatic config. `.build()`
-//!   constructs eagerly with all DB pools + config resolved up front.
+//!   validates configuration synchronously and opens its database on first use.
 //!
 //! Per D6.7 Layer 2a in the SDK local-cloud parity plan: this struct absorbs
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
@@ -90,8 +90,8 @@ struct LocalContextInner {
 
 /// Fluent builder for [`LocalContext`]. Construct via [`LocalContext::builder`].
 ///
-/// All fields are optional. [`build`](Self::build)`.await` produces a
-/// `LocalContext` whose DB pool has already been opened and migrated.
+/// All fields are optional. [`build`](Self::build) validates configuration
+/// synchronously. The database opens and migrates on the first operation that needs it.
 ///
 /// `build` overlays the builder's overrides on top of the persisted
 /// `~/.microsandbox/config.json` (honouring `MSB_CONFIG_PATH`). Persisted

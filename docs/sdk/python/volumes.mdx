@@ -15,7 +15,7 @@ Creation, lookup and list items return the same `Volume` type. Each resource ret
 
 `str`
 
-Opaque identity within the retained destination, available synchronously without I/O. A replacement with the same name has a different identity.
+An opaque identity for this connection. Reading it does not contact the backend. A replacement with the same name has a different identity.
 
 <p className="msb-member-group" id="instance-properties">Instance properties</p>
 
@@ -58,13 +58,13 @@ Use `Volume.owned()` to configure local storage allocated for one sandbox. It st
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get_default()</span>
 
-<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available only on our managed cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def get_default() -> Volume
 ```
 
-Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs`. The local backend raises a typed unsupported error; it never substitutes a directory from the caller's machine.
+Get your managed cloud organization's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs`. The local backend raises a typed unsupported error; it never substitutes a directory from the caller's machine.
 
 <Accordion title="Example">
 
@@ -79,7 +79,7 @@ print(await volume.fs.read_text("customers/acme.json"))
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">create()</span>
 
-<Tooltip tip="Microsandbox cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="our managed cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def create(
@@ -240,7 +240,9 @@ Static factory methods on `Volume` that build a [`MountConfig`](#mountconfig). P
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">bind()</span>
 
-<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```python
 def bind(
@@ -323,7 +325,7 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">named()</span>
 
-<Tooltip tip="On microsandbox cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 def named(
@@ -496,7 +498,9 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops.
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```python
 def disk(

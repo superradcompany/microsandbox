@@ -30,10 +30,17 @@ pub use local::fuzz_unpack_local_snapshot_archive;
 pub use local::snapshot_downgrade as local_snapshot_downgrade;
 #[cfg(feature = "local")]
 pub use local::{LocalContext, LocalContextBuilder};
+/// Compute capacity for new remote sandboxes.
+pub use microsandbox_types::CloudComputeType as ComputeType;
+
+/// Previous name for [`ComputeType`].
+#[deprecated(note = "use ComputeType instead")]
+pub use microsandbox_types::CloudComputeType;
 pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
 };
+
 pub use profile::{Profile, ProfileKind, resolve_cli_context, resolve_default_backend};
 pub use sandbox::{
     SandboxIdentity, SandboxInner, SandboxOps, SandboxRecordCloudState, SandboxRecordInner,

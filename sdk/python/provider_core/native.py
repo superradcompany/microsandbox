@@ -44,8 +44,16 @@ def _load(selection, kind):
     native = importlib.import_module(module_name)
     info = json.loads(native.provider_info())
     supported = info.get("local") and info.get("remote") if kind == "full" else info.get(kind)
-    if info.get("abi") != 1 or info.get("version") != version or version != VERSION or not supported:
-        raise ImportError(f"Incompatible microsandbox {kind} provider; reinstall matching core and provider versions")
+    if (
+        info.get("abi") != 1
+        or info.get("version") != version
+        or version != VERSION
+        or not supported
+    ):
+        raise ImportError(
+            f"Incompatible microsandbox {kind} provider; "
+            "reinstall matching core and provider versions"
+        )
     for name, wrapper in _wrappers.items():
         value = getattr(native, name, None)
         if isinstance(value, type):
@@ -80,7 +88,10 @@ def default_binding():
 def _unwrap(value, owner):
     if isinstance(value, NativeObject):
         if value._provider is not owner:
-            raise TypeError("Native objects from different microsandbox providers cannot be passed to each other; use configuration values or resource references")
+            raise TypeError(
+                "Native objects from different microsandbox providers cannot be passed "
+                "to each other; use configuration values or resource references"
+            )
         return value._inner
     if isinstance(value, list):
         return [_unwrap(item, owner) for item in value]
@@ -102,10 +113,12 @@ def _wrap(value, owner, receiver=None):
         object.__setattr__(result, "_provider", native)
         return result
     if inspect.isawaitable(value):
+
         async def resolve():
             # Cancellation propagates to the original future. The wrapper never
             # turns a cancelled observation into a terminal execution outcome.
             return _wrap(await value, owner, receiver)
+
         return resolve()
     if isinstance(value, list):
         return [_wrap(item, owner) for item in value]
@@ -125,7 +138,9 @@ class NativeType(type):
         if name.startswith("_"):
             raise AttributeError(name)
         if name == "ctx" and cls._native_name in ("Sandbox", "Volume", "Snapshot"):
-            collection = {"Sandbox": "sandboxes", "Volume": "volumes", "Snapshot": "snapshots"}[cls._native_name]
+            collection = {"Sandbox": "sandboxes", "Volume": "volumes", "Snapshot": "snapshots"}[
+                cls._native_name
+            ]
             return lambda context: getattr(context, collection)
 
         def invoke(*args, **kwargs):
@@ -135,6 +150,7 @@ class NativeType(type):
                 owner = default_binding()
             function = getattr(getattr(owner, cls._native_name), name)
             return _call(function, owner, args, kwargs)
+
         invoke.__name__ = name
         return invoke
 
@@ -157,7 +173,11 @@ class NativeObject(metaclass=NativeType):
             owner = default_binding()
         result = object.__new__(cls)
         object.__setattr__(result, "_provider", owner)
-        object.__setattr__(result, "_inner", getattr(owner, cls._native_name)(*_unwrap(args, owner), **_unwrap(kwargs, owner)))
+        object.__setattr__(
+            result,
+            "_inner",
+            getattr(owner, cls._native_name)(*_unwrap(args, owner), **_unwrap(kwargs, owner)),
+        )
         return result
 
     def __init__(self, *args, **kwargs):
@@ -167,8 +187,10 @@ class NativeObject(metaclass=NativeType):
     def __getattr__(self, name):
         value = getattr(self._inner, name)
         if callable(value):
+
             def invoke(*args, **kwargs):
                 return _call(value, self._provider, args, kwargs, self)
+
             invoke.__name__ = name
             return invoke
         return _wrap(value, self._provider, self)
@@ -183,6 +205,7 @@ class NativeObject(metaclass=NativeType):
 def _protocol(name):
     def invoke(self, *args, **kwargs):
         return _call(getattr(self._inner, name), self._provider, args, kwargs, self)
+
     invoke.__name__ = name
     return invoke
 
@@ -192,7 +215,7 @@ for _name, _protocols in CLASSES.items():
     _attributes.update({name: _protocol(name) for name in _protocols})
     _wrappers[_name] = NativeType(_name, (NativeObject,), _attributes)
     globals()[_name] = _wrappers[_name]
-BranchOutcome = ForkOutcome
+BranchOutcome = _wrappers["ForkOutcome"]
 
 
 def __getattr__(name):
@@ -204,5 +227,6 @@ def __getattr__(name):
     def invoke(*args, **kwargs):
         owner = default_binding()
         return _call(getattr(owner, name), owner, args, kwargs)
+
     invoke.__name__ = name
     return invoke

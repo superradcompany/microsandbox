@@ -153,7 +153,7 @@ fn prohibited_selection_is_visible_but_cannot_be_used() {
         assert!(!output.status.success());
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains("user config"), "{error}");
-        assert!(error.contains("allowed backends: cloud"), "{error}");
+        assert!(error.contains("allowed backends: remote"), "{error}");
         assert!(error.contains(path.to_str().unwrap()), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), config);
     }
@@ -191,12 +191,12 @@ fn cloud_context_uses_explicit_selection_without_contacting_the_endpoint() {
         }
 
         let context = success_json(command.output().unwrap());
-        assert_eq!(context["selected"]["kind"], "cloud");
+        assert_eq!(context["selected"]["kind"], "remote");
         assert!(
             context["selection_error"]
                 .as_str()
                 .unwrap()
-                .contains("requires a non-empty MSB_API_KEY or a cloud profile")
+                .contains("requires a non-empty MSB_API_KEY or a remote profile")
         );
     }
 
@@ -209,7 +209,7 @@ fn cloud_context_uses_explicit_selection_without_contacting_the_endpoint() {
     let context = success_json(output);
     assert_eq!(
         context,
-        json!({"kind":"cloud","api_url":"http://127.0.0.1:1","source":"MSB_BACKEND"})
+        json!({"kind":"remote","api_url":"http://127.0.0.1:1","source":"MSB_BACKEND"})
     );
 
     let context = success_json(
@@ -223,7 +223,7 @@ fn cloud_context_uses_explicit_selection_without_contacting_the_endpoint() {
         .unwrap(),
     );
     assert_eq!(context["saved_profile"], "personal");
-    assert_eq!(context["selected"]["kind"], "cloud");
+    assert_eq!(context["selected"]["kind"], "remote");
     assert_eq!(context["preference_overridden"], true);
     assert!(context["selection_error"].is_null());
     assert!(!dir.path().join("runtime").exists());
@@ -253,7 +253,7 @@ fn explicit_flags_override_ambient_selection_without_exposing_credentials() {
             .output()
             .unwrap(),
     );
-    assert_eq!(remote["kind"], "cloud"); // Existing diagnostic wire spelling stays compatible.
+    assert_eq!(remote["kind"], "remote");
     assert_eq!(remote["api_url"], "http://127.0.0.1:1");
     assert!(!remote.to_string().contains("NEVER_PRINT_THIS"));
     let missing = command(dir.path(), &["context", "--remote"])
@@ -301,7 +301,7 @@ fn remote_environment_spelling_preserves_cloud_alias() {
                 .output()
                 .unwrap(),
         );
-        assert_eq!(selected["kind"], "cloud");
+        assert_eq!(selected["kind"], "remote");
         assert_eq!(selected["source"], "MSB_BACKEND");
     }
 }

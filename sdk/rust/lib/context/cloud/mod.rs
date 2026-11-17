@@ -32,7 +32,7 @@ use tokio_tungstenite::Connector;
 use self::http::urlencoding;
 use super::{Context, ContextSelectionSource};
 use crate::config::layers::BackendConfig;
-use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{ComputeType, MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -89,6 +89,7 @@ struct RemoteContextInner {
     user_agent_header: Option<HeaderValue>,
     request_timeout: Duration,
     user_agent: Option<String>,
+    compute_type: Option<ComputeType>,
     custom_client: Option<reqwest::Client>,
     config: Arc<BackendConfig>,
     selection_source: ContextSelectionSource,
@@ -108,6 +109,7 @@ pub struct RemoteContextBuilder {
     api_key: Option<String>,
     request_timeout: Duration,
     user_agent: Option<String>,
+    compute_type: Option<ComputeType>,
     custom_client: Option<reqwest::Client>,
     shared_client: Option<reqwest::Client>,
     config: Option<Arc<BackendConfig>>,
@@ -263,6 +265,12 @@ impl RemoteContextBuilder {
         self
     }
 
+    /// Select the machine type for new sandboxes. Omission uses the server default.
+    pub fn compute_type(mut self, compute_type: ComputeType) -> Self {
+        self.compute_type = Some(compute_type);
+        self
+    }
+
     /// Set the per-request timeout for outbound HTTP calls.
     pub fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
@@ -350,6 +358,7 @@ impl RemoteContextBuilder {
                 user_agent_header,
                 request_timeout: self.request_timeout,
                 user_agent: self.user_agent,
+                compute_type: self.compute_type,
                 custom_client: self.custom_client,
                 config,
                 selection_source: ContextSelectionSource::Programmatic,
@@ -371,6 +380,7 @@ impl Default for RemoteContextBuilder {
             api_key: None,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             user_agent: None,
+            compute_type: None,
             custom_client: None,
             shared_client: None,
             config: None,
@@ -429,7 +439,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("cloud backend selected by programmatic is disabled")
+                    .contains("remote backend selected by programmatic is disabled")
             );
         }
     }

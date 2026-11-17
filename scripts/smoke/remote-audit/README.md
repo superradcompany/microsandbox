@@ -1,0 +1,39 @@
+# Opt-in hosted remote qualification
+
+These audits exercise the rebuilt SDK against a real provider. They create uniquely named, disposable sandboxes, volumes and snapshots, then delete them and check absence. They are not ordinary unit tests and may consume provider quota. Do not run against an account where disposable resources are prohibited.
+
+Supply `MSB_REMOTE_AUDIT=1`, `MSB_API_KEY`, `MSB_API_URL`, and an absolute `MSB_AUDIT_REPORT` path through the environment. Never put credentials in arguments, fixtures or committed logs. Use an isolated `MSB_HOME`/`MSB_CONFIG_PATH`. Setting `MSB_BACKEND=local` deliberately verifies that explicit remote selectors and flags override ambient selection. The scripts write incremental JSON outcomes and a `.resources.json` sidecar (Python/CLI use a sibling suffix) so interrupted runs can be cleaned up by exact recorded name. Never delete resources by a broad prefix search.
+
+Run from the repository root after building/installing the candidate bindings:
+
+```sh
+node scripts/smoke/remote-audit/typescript.mjs
+python scripts/smoke/remote-audit/python.py
+ruby scripts/smoke/remote-audit/ruby.rb
+python scripts/smoke/remote-audit/cli.py
+python scripts/smoke/remote-audit/flags.py
+cargo test -p microsandbox --no-default-features --features local,cloud,net --test remote_api_live remote_api_live -- --exact --ignored --nocapture
+```
+
+The CLI scripts require `MSB_CLI` pointing to the candidate binary. The Python/Ruby import paths must select the rebuilt candidate bindings. TypeScript imports this checkout's built `sdk/node-ts/dist`. Each invocation needs its own report path; scripts overwrite that report incrementally.
+
+For Go, set `MSB_SELECTOR_NATIVE_LIBRARY` to the rebuilt remote-capable native library, then run from `sdk/go`:
+
+```sh
+go run ../../scripts/smoke/remote-audit/go.go
+```
+
+Additional investigations use separate disposable resources and report paths:
+
+```sh
+node scripts/smoke/remote-audit/probes.mjs
+node scripts/smoke/remote-audit/capabilities.mjs
+node scripts/smoke/remote-audit/permissions.mjs
+cargo test -p microsandbox --no-default-features --features local,cloud,net --test remote_api_live remote_transport_probe -- --exact --ignored --nocapture
+```
+
+`probes.mjs` checks byte-transfer sizes, mounted storage, configured execution defaults, explicit execution timeout, SSH client opening, non-starting inspection and stale-identity rejection. `capabilities.mjs` checks progress completion, actual SFTP, following logs, outbound HTTPS, disabled networking and host-specific option boundaries. Provider bind paths are relative to the organization's storage, not the SDK client's host filesystem; the test removes its own empty bind directory. `permissions.mjs` compares API-created/replaced files with guest-created files under strict and relaxed mount presentation. It does not change account policies or suggest weakening production policy. `remote_transport_probe` records the negotiated agent version and direct-transfer sizes.
+
+`PASS` means the particular operation/assertion completed; it is not every option combination or old/new parity. `UNSUPPORTED` records an observed capability rejection, not implemented functionality. A reported `FAIL` makes the finalized scripts exit nonzero. The CLI records an already absent cleanup target as `ABSENT` only after a separate not-found observation. Diagnostics may contain test resource identifiers but redact the supplied key. Do not distribute raw provider/account responses.
+
+The 2026-11-17 qualification report in the planning repository contains the per-case ledger, initial harness mistakes, corrected attempts, artifact provenance, capability matrix and remaining gaps. Production SDK/provider behavior is unchanged by these audit additions.

@@ -610,3 +610,54 @@ remain in force. See `docs/migrations/v0.8.mdx` for call-site changes.
 The SDK snapshot suite exercises ordinary imports, current and legacy archives,
 delta exports/restores and private child disks. Real older-runtime launch
 validation and full-disk rewrite qualification remain separate release checks.
+
+## Remote context compute selection
+
+The SDK exposes `ComputeType`; `CloudComputeType` remains a deprecated SDK
+re-export for existing callers. The shared HTTP contract type and its serialized
+values are unchanged.
+
+Remote contexts optionally capture `ComputeType` for new sandbox creates
+and snapshot restores. The HTTP create body sends `compute: {"type": "standard"}`
+or `compute: {"type": "shared"}` beside the nested `spec`. Unset contexts omit
+`compute`, preserving the server default. Derivation retains the captured choice
+unless explicitly overridden. Existing sandboxes, local launch contracts, saved
+sandbox configuration, catalogs, and snapshot formats are unchanged.
+
+This uses #2058's nested create contract, already supported by the Cloud request
+reader alongside previous flat requests. Servers that only accept flat requests
+cannot accept this candidate's nested create body; deploy the matching server
+first. There is no retry with a flat request or silently omitted compute choice.
+Binding JSON accepts only `standard` and `shared` and rejects compute options on
+local contexts. Older native bindings reject the new `computeType` option as an
+unknown field rather than dropping it. Local SDK/runtime compatibility is
+unaffected by this option; historical runtime validation is separate from the
+HTTP request tests.
+
+## Remote destination naming
+
+By explicit user direction, `remote` is the canonical `MSB_BACKEND` value,
+serialized `ContextKind`, CLI diagnostic kind, and `allowed_backends` value.
+Readers continue accepting `cloud` as an alias. Profile writers already use
+`kind: "remote"`; their existing `backend`/`cloud` reader aliases remain.
+Older SDKs and CLIs may reject newly written `remote` policy values or the new
+CLI spelling. Upgrade those consumers before sharing rewritten settings.
+This approved configuration/API naming change does not alter sandbox launch,
+agent protocols, catalogs, snapshots, or the HTTP API's `Cloud*` type names.
+
+## Managed Cloud root sources and mount owners
+
+The SDK now forwards bind-directory and disk-image root sources already handled
+by the Cloud API resolver and worker. Paths belong to the organization's host
+volume and are never resolved against the SDK client's filesystem. A bind root
+request to follow symlinks still refuses, because the Cloud source contract does
+not represent it and the worker deliberately disables it.
+
+By explicit user direction, remote mount owner IDs are enabled against current
+Managed Cloud support. The resolver and worker preserve `MountOptions` owner
+IDs and force strict stat virtualization for directory mounts. IDs change the
+guest metadata fallback, not host ownership or tenant path authority. The SDK
+still validates paired IDs and rejects owners on non-directory mounts. Earlier
+server deployments might ignore these optional fields; there are no self-hosted
+deployments in the user's supported fleet and this is an approved server-support
+requirement. Local runtime capability checks are unchanged.

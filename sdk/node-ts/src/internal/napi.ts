@@ -322,7 +322,7 @@ export interface NapiSandbox {
   execDetachedWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiJob>;
   getJob(id: string): Promise<NapiJob>;
   listJobs(all: boolean, limit: number, cursor?: string): Promise<string>;
-  readonly backendKind: "local" | "cloud";
+  readonly backendKind: "local" | "remote" | "cloud";
   readonly id: string;
   readonly ownsLifecycle: boolean;
   configJson(): Promise<string>;

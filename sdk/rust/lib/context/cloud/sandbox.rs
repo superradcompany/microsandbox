@@ -22,8 +22,8 @@ use crate::sandbox::{
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, NetworkSpec,
-    RootDisk, SandboxRuntimeOptions, TlsConfig,
+    CloudCompute, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus,
+    NetworkSpec, RootDisk, SandboxRuntimeOptions, TlsConfig,
 };
 use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
@@ -39,13 +39,12 @@ const DEFAULT_CLOUD_STOP_TIMEOUT: Duration = Duration::from_secs(360);
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Wire body for the cloud's create route: the shared create envelope with
-/// the cloud-only fields that ride beside it.
+/// Wire body for the cloud's create route: the shared sandbox spec, nested
+/// under `spec`, with the cloud-only create options beside it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(in crate::context) struct CloudCreateBody {
-    /// The shared sandbox spec, flattened onto the body.
-    #[serde(flatten)]
-    pub envelope: CloudCreateSandboxRequest,
+    /// The shared sandbox spec.
+    pub spec: CloudCreateSandboxRequest,
     /// Requested globally-unique slug; the cloud assigns one when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
@@ -54,6 +53,9 @@ pub(in crate::context) struct CloudCreateBody {
     /// stored credential configured for the image's registry host.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<CloudRegistrySelection>,
+    /// Machine type for this creation; omitted to retain the server default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute: Option<CloudCompute>,
 }
 
 /// Wire shape of the cloud's registry-credential selection.
@@ -132,7 +134,12 @@ impl RemoteContext {
         builder: SandboxBuilder,
     ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
         let config = self.build_sandbox_config(builder).await?;
-        cloud_create_body_and_config(config)
+        let (mut request, config) = cloud_create_body_and_config(config)?;
+        request.compute = self
+            .inner
+            .compute_type
+            .map(|compute_type| CloudCompute { compute_type });
+        Ok((request, config))
     }
 
     /// Resolve cloud request settings for both explicit build and immediate creation.
@@ -479,7 +486,7 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
             }
         };
 
-        let envelope = match config.snapshot_reference {
+        let spec = match config.snapshot_reference {
             None => {
                 validate_fresh_cloud_rootfs(&config.spec.image)?;
                 CloudCreateSandboxRequest::from(config.spec)
@@ -508,9 +515,10 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
         };
 
         Ok(Self {
+            spec,
             slug: config.slug,
             registry,
-            envelope,
+            compute: None,
         })
     }
 }
@@ -555,18 +563,16 @@ fn validate_fresh_cloud_rootfs(rootfs: &RootfsSource) -> MicrosandboxResult<()> 
                 ));
             }
         }
-        RootfsSource::Bind { .. } => {
+        RootfsSource::Bind {
+            follow_root_symlinks: true,
+            ..
+        } => {
             return Err(MicrosandboxError::unsupported(
                 Operation::SandboxCreate,
-                UnsupportedReason::ConfigField("host-directory rootfs"),
+                UnsupportedReason::ConfigField("rootfs follow_root_symlinks"),
             ));
         }
-        RootfsSource::DiskImage { .. } => {
-            return Err(MicrosandboxError::unsupported(
-                Operation::SandboxCreate,
-                UnsupportedReason::ConfigField("disk-image rootfs"),
-            ));
-        }
+        RootfsSource::Bind { .. } | RootfsSource::DiskImage { .. } => {}
     }
 
     Ok(())
@@ -677,22 +683,6 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     {
         return Err(unsupported("sandbox-owned volumes"));
     }
-    if config.spec.mounts.iter().any(|mount| {
-        let options = match mount {
-            microsandbox_types::VolumeMount::Bind { options, .. }
-            | microsandbox_types::VolumeMount::Owned { options, .. }
-            | microsandbox_types::VolumeMount::Named { options, .. }
-            | microsandbox_types::VolumeMount::Tmpfs { options, .. }
-            | microsandbox_types::VolumeMount::DiskImage { options, .. } => options,
-        };
-        options.override_uid.is_some() || options.override_gid.is_some()
-    }) {
-        // Mount ownership is currently a local host-filesystem presentation
-        // policy. Until the cloud control plane advertises this capability,
-        // sending it would let older servers silently ignore access semantics.
-        return Err(unsupported("mount owner"));
-    }
-
     if config.snapshot_upper_source.is_some() || config.snapshot_archive_source.is_some() {
         return Err(unsupported("from_snapshot"));
     }
@@ -850,7 +840,7 @@ pub(crate) fn sandbox_config_from_cloud_spec(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support;
+    use std::path::Path;
     use std::sync::Arc;
 
     use microsandbox_types::{
@@ -859,9 +849,11 @@ mod tests {
     };
 
     use super::*;
+    use crate::ComputeType;
     use crate::context::{Context, SandboxOps};
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
     use crate::snapshot::SnapshotReference;
+    use crate::test_support;
     use microsandbox_types::CloudSnapshotLocation;
     use microsandbox_types::HttpDenyResponseFormat;
 
@@ -931,14 +923,16 @@ mod tests {
             )
             .unwrap();
             std::fs::write(&managed, r#"{"version":1,"overrides":{"sandbox_defaults":{"cpus":2,"memory_mib":1024,"workdir":"/managed","shell":"/bin/admin"}}}"#).unwrap();
-            let backend = RemoteContext::builder()
+            let mut builder = RemoteContext::builder()
                 .url(url)
                 .api_key("test-token")
                 .config_sources(
                     crate::config::layers::BackendConfig::load_from(&user, Some(&managed)).unwrap(),
-                )
-                .build()
-                .unwrap();
+                );
+            if explicit_max {
+                builder = builder.compute_type(ComputeType::Shared);
+            }
+            let backend = builder.build().unwrap();
             // Existing backends keep captured policy. A new backend must fail on
             // these invalid files, but no create entry point should reload them.
             std::fs::write(&user, "invalid").unwrap();
@@ -1003,6 +997,12 @@ mod tests {
                 2
             );
             let body = server.await.unwrap();
+            if explicit_max {
+                assert_eq!(body["compute"], serde_json::json!({"type": "shared"}));
+            } else {
+                assert!(body.get("compute").is_none());
+            }
+            let body = &body["spec"];
             assert_eq!(body["resources"]["vcpus"], 2, "entry {entry}");
             assert_eq!(body["resources"]["memory_mib"], 1024, "entry {entry}");
             assert_eq!(body["runtime"]["workdir"], "/managed", "entry {entry}");
@@ -1201,7 +1201,7 @@ mod tests {
             reference,
             resources,
             ..
-        } = &req.envelope
+        } = &req.spec
         else {
             panic!("expected OCI create request");
         };
@@ -1240,7 +1240,7 @@ mod tests {
 
         assert_eq!(
             request
-                .envelope
+                .spec
                 .sandbox_spec()
                 .mounts
                 .iter()
@@ -1282,7 +1282,7 @@ mod tests {
             .map(VolumeMount::guest)
             .collect::<Vec<_>>();
         let sent = request
-            .envelope
+            .spec
             .sandbox_spec()
             .mounts
             .iter()
@@ -1299,8 +1299,52 @@ mod tests {
         assert_eq!(retained, sent);
     }
 
+    #[tokio::test]
+    async fn remote_compute_type_is_retained_and_overridden_for_new_sandboxes() {
+        let source = crate::context::from_options_json(
+            r#"{"kind":"remote","apiKey":"test-key","computeType":"shared"}"#,
+        )
+        .unwrap();
+        let retained =
+            crate::context::derive_remote_from_options_json(source.as_ref(), "{}").unwrap();
+        let standard = crate::context::derive_remote_from_options_json(
+            retained.as_ref(),
+            r#"{"computeType":"standard"}"#,
+        )
+        .unwrap();
+
+        for (context, expected) in [
+            (&source, "shared"),
+            (&retained, "shared"),
+            (&standard, "standard"),
+        ] {
+            for config in [
+                base_cloud_config(),
+                base_snapshot_cloud_config(SnapshotReference::id(
+                    "00000000-0000-0000-0000-000000000003",
+                )),
+            ] {
+                let (request, config) = context
+                    .as_cloud()
+                    .unwrap()
+                    .build_create_request(SandboxBuilder::from(config))
+                    .await
+                    .unwrap();
+                let json = serde_json::to_value(request).unwrap();
+                assert_eq!(json["compute"], serde_json::json!({"type": expected}));
+                assert!(json["spec"].get("compute").is_none());
+                assert!(
+                    serde_json::to_value(config)
+                        .unwrap()
+                        .get("compute")
+                        .is_none()
+                );
+            }
+        }
+    }
+
     #[test]
-    fn cloud_create_body_serializes_slug_and_registry_beside_spec() {
+    fn cloud_create_body_serializes_create_options_beside_spec() {
         let mut config = base_cloud_config();
         config.slug = Some("brave-otter".into());
         config.registry_auth = Some(RegistryAuth::Anonymous);
@@ -1308,18 +1352,19 @@ mod tests {
         let req = CloudCreateBody::try_from(config).unwrap();
         let json = serde_json::to_value(&req).unwrap();
 
-        // The envelope flattens onto the body; slug/registry ride beside it.
+        // The spec is nested under `spec`; the create options ride beside it.
         // An anonymous registry_auth converts to the anonymous selection.
-        assert_eq!(json["source"], "oci");
-        assert_eq!(json["name"], "agent-1");
-        assert_eq!(json["reference"], "python:3.12");
-        assert!(json.get("image").is_none());
+        assert_eq!(json["spec"]["source"], "oci");
+        assert_eq!(json["spec"]["name"], "agent-1");
+        assert_eq!(json["spec"]["reference"], "python:3.12");
+        assert!(json["spec"].get("image").is_none());
+        assert!(json.get("source").is_none());
         assert_eq!(json["slug"], "brave-otter");
         assert_eq!(json["registry"]["mode"], "anonymous");
     }
 
     #[test]
-    fn cloud_create_body_omits_unset_slug_and_registry() {
+    fn cloud_create_body_omits_unset_create_options() {
         let req = CloudCreateBody::try_from(base_cloud_config()).unwrap();
         let json = serde_json::to_value(&req).unwrap();
 
@@ -1335,11 +1380,12 @@ mod tests {
 
         let req = CloudCreateBody::try_from(config).unwrap();
         assert!(matches!(
-            req.envelope.disk_snapshot_ref().unwrap(),
+            req.spec.disk_snapshot_ref().unwrap(),
             CloudSnapshotLocation::Managed { id }
                 if id == "00000000-0000-0000-0000-000000000003"
         ));
         let json = serde_json::to_value(req).unwrap();
+        let json = &json["spec"];
         assert_eq!(json["source"], "disk_snapshot");
         assert!(json.get("image").is_none());
         assert!(json.get("patches").is_none());
@@ -1353,7 +1399,7 @@ mod tests {
 
             let req = CloudCreateBody::try_from(config).unwrap();
             assert!(matches!(
-                req.envelope.disk_snapshot_ref().unwrap(),
+                req.spec.disk_snapshot_ref().unwrap(),
                 CloudSnapshotLocation::HostVolume { path: actual } if actual == path
             ));
         }
@@ -1418,6 +1464,7 @@ mod tests {
 
         let request = CloudCreateBody::try_from(config).unwrap();
         let json = serde_json::to_value(request).unwrap();
+        let json = &json["spec"];
         assert_eq!(json["source"], "disk_snapshot");
         assert_eq!(json["resources"]["vcpus"], 2);
         assert_eq!(json["resources"]["memory_mib"], 1024);
@@ -1427,22 +1474,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cloud_create_request_rejects_disk_image_rootfs() {
-        let config = SandboxConfig {
-            spec: SandboxSpec {
-                name: "agent-1".into(),
-                image: RootfsSource::DiskImage {
-                    path: "rootfs.img".into(),
-                    format: crate::sandbox::DiskImageFormat::Raw,
-                    fstype: None,
+    async fn cloud_create_preserves_remote_root_paths_without_local_resolution() {
+        let cloud = test_support::cloud_backend("http://127.0.0.1:1", "test-key").unwrap();
+        for (rootfs, source, path) in [
+            (
+                RootfsSource::Bind {
+                    path: "missing-remote-root/../rootfs".into(),
+                    follow_root_symlinks: false,
                 },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+                "bind",
+                "missing-remote-root/../rootfs",
+            ),
+            (
+                RootfsSource::DiskImage {
+                    path: "remote-disks/rootfs.img".into(),
+                    format: crate::sandbox::DiskImageFormat::Raw,
+                    fstype: Some("ext4".into()),
+                },
+                "disk_image",
+                "remote-disks/rootfs.img",
+            ),
+        ] {
+            let mut config = base_cloud_config();
+            config.spec.image = rootfs;
+            let (request, config) = cloud
+                .build_create_request(SandboxBuilder::from(config))
+                .await
+                .unwrap();
+            let body = serde_json::to_value(request).unwrap();
+            assert_eq!(body["spec"]["source"], source);
+            assert_eq!(body["spec"]["path"], path);
+            match config.spec.image {
+                RootfsSource::Bind { path: retained, .. }
+                | RootfsSource::DiskImage { path: retained, .. } => {
+                    assert_eq!(retained, Path::new(path))
+                }
+                _ => panic!("remote root source changed"),
+            }
+        }
 
-        let err = CloudCreateBody::try_from(config).unwrap_err();
-        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+        let mut config = base_cloud_config();
+        config.spec.image = RootfsSource::Bind {
+            path: "rootfs".into(),
+            follow_root_symlinks: true,
+        };
+        assert_unsupported_config_field(config, "rootfs follow_root_symlinks");
     }
 
     #[test]
@@ -1523,7 +1599,7 @@ mod tests {
             resources,
             pull_policy,
             ..
-        } = &req.envelope
+        } = &req.spec
         else {
             panic!("expected OCI create request");
         };
@@ -1587,7 +1663,7 @@ mod tests {
             let expected = serde_json::to_value(&legacy.spec.network.secrets).unwrap();
             config.spec.network.secrets = legacy.spec.network.secrets;
             let request = CloudCreateBody::try_from(config).unwrap();
-            let secrets = &request.envelope.sandbox_spec().network.secrets;
+            let secrets = &request.spec.sandbox_spec().network.secrets;
             let wire = serde_json::to_value(secrets.as_ref().unwrap()).unwrap();
             let decoded: CloudSecretsConfig = serde_json::from_value(wire).unwrap();
             let domain = SecretsConfig::from(decoded);
@@ -1719,7 +1795,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_create_request_rejects_mount_owner_without_capability() {
+    fn cloud_create_request_preserves_mount_owner() {
         let mut config = base_cloud_config();
         config.spec.mounts.push(VolumeMount::Bind {
             host: "/host/data".into(),
@@ -1735,7 +1811,10 @@ mod tests {
             quota_mib: None,
         });
 
-        assert_unsupported_config_field(config, "mount owner");
+        let request = CloudCreateBody::try_from(config).unwrap();
+        let body = serde_json::to_value(request).unwrap();
+        assert_eq!(body["spec"]["mounts"][0]["options"]["override_uid"], 1000);
+        assert_eq!(body["spec"]["mounts"][0]["options"]["override_gid"], 1000);
     }
 
     #[test]
@@ -1763,7 +1842,7 @@ mod tests {
 
         let CloudCreateSandboxRequest::Oci {
             sandbox, resources, ..
-        } = &req.envelope
+        } = &req.spec
         else {
             panic!("expected OCI create request");
         };
@@ -1785,7 +1864,7 @@ mod tests {
         let req = CloudCreateBody::try_from(config).unwrap();
 
         assert_eq!(
-            req.envelope
+            req.spec
                 .sandbox_spec()
                 .network
                 .secrets
