@@ -363,12 +363,18 @@ impl SandboxBuilder {
         if cow_memory {
             self = self.forked();
         }
-        self.config.spec.mounts.get_or_insert_default();
+        let mounts = self.config.spec.mounts.get_or_insert_default();
         self.config.spec.network.ports.get_or_insert_default();
-        self.config
+        let resources = self
+            .config
             .restore_resources
-            .get_or_insert_with(Default::default)
-            .require_complete = true;
+            .get_or_insert_with(Default::default);
+        resources.require_complete = true;
+        // Config-file mounts are applied before the CLI selects a snapshot.
+        // Give them the same destination precedence as a subsequent --volume.
+        resources
+            .mapped
+            .extend(mounts.iter().map(|mount| mount.guest().to_owned()));
         self
     }
 
@@ -3571,6 +3577,21 @@ mod tests {
                 Some(1024)
             );
         }
+    }
+
+    #[test]
+    fn configured_mount_stays_mapped_when_inheriting_captured_disks() {
+        let builder = SandboxBuilder::new("child")
+            .volume("/data", |mount| mount.bind("/destination"))
+            .snapshot_launch_options(false, false)
+            .snapshot_resource_options(false, true, None);
+        let choices = builder.config.restore_resources.as_ref().unwrap();
+        assert!(choices.inherit && choices.mapped.contains("/data"));
+        // A later explicit captured selector can still replace the config mount.
+        let builder = builder.volume("/data", |mount| mount.captured());
+        let choices = builder.config.restore_resources.as_ref().unwrap();
+        assert!(!choices.mapped.contains("/data") && choices.captured.contains("/data"));
+        assert!(builder.config.spec.mounts.as_ref().unwrap().is_empty());
     }
 
     #[test]
