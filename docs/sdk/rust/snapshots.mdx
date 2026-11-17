@@ -412,7 +412,7 @@ Snapshot::save(
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
-async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Snapshot>
+async fn load(archive_path: &Path, options: LoadOptions) -> MicrosandboxResult<Snapshot>
 ```
 
 <Accordion title="Example">
@@ -420,7 +420,9 @@ async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Sn
 ```rust
 use std::path::Path;
 
-let h = Snapshot::load(Path::new("/tmp/baseline.msb"), None).await?;
+use microsandbox::{LoadOptions, Snapshot};
+
+let h = Snapshot::load(Path::new("/tmp/baseline.msb"), LoadOptions::default()).await?;
 println!("loaded {}", h.digest());
 ```
 
@@ -436,8 +438,8 @@ Unpack a snapshot archive (`.msb` or `.tar`, detected from magic bytes) into the
     <div className="msb-param-desc">Archive to unpack.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>dest</code><span className="msb-type">Option&lt;&amp;Path&gt;</span></div>
-    <div className="msb-param-desc">Destination directory. <code>None</code> uses the default snapshots directory.</div>
+    <div className="msb-param-key"><code>options</code><span className="msb-type">LoadOptions</span></div>
+    <div className="msb-param-desc">Import settings. Use <code>LoadOptions::default()</code> for the default snapshot store.</div>
   </div>
 </div>
 
@@ -455,7 +457,9 @@ Unpack a snapshot archive (`.msb` or `.tar`, detected from magic bytes) into the
 ```rust
 use std::path::Path;
 
-let h = Snapshot::load(Path::new("/tmp/baseline.msb"), None).await?;
+use microsandbox::{LoadOptions, Snapshot};
+
+let h = Snapshot::load(Path::new("/tmp/baseline.msb"), LoadOptions::default()).await?;
 println!("loaded {}", h.digest());
 ```
 
@@ -467,80 +471,17 @@ println!("loaded {}", h.digest());
 
 Methods on an opened [`Snapshot`](#snapshotopen) artifact.
 
-#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_with_base()</span>
-
-```rust
-async fn load_with_base(
-    path: &Path,
-    dest: Option<&Path>,
-    base: &str,
-) -> MicrosandboxResult<Snapshot>
-```
-
-Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
-
-#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_with_options()</span>
-
-```rust
-async fn load_with_options(
-    path: &Path,
-    opts: LoadOpts,
-) -> MicrosandboxResult<Snapshot>
-```
-
-Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
-
-#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_with_limits()</span>
-
-```rust
-async fn load_with_limits(
-    path: &Path,
-    opts: LoadOpts,
-    limits: ImportLimits,
-    policy: &dyn ImportPolicy,
-) -> MicrosandboxResult<Snapshot>
-```
-
-Import locally with caller-supplied limits and format rules. Also available as `context.snapshots().load_with_limits(...)`. Requires the `local` feature.
-
-`ImportLimits` sets `expanded_bytes`, `metadata_bytes`, `entries`, and `path_bytes`. Each limit must be positive. Expanded bytes count the logical size of every archive member, including sparse holes, before writing it. Reserve temporary space for copies and publication separately.
-
-Implement `ImportPolicy` to choose accepted formats and disk sizes:
-
-```rust
-fn validate_entry(&self, path: &Path, logical_bytes: u64) -> MicrosandboxResult<()>
-fn validate_archive(&self, snapshots: usize, complete: bool) -> MicrosandboxResult<()>
-fn validate_manifest(&self, manifest: &Manifest) -> MicrosandboxResult<()>
-```
-
-Entry checks run before writing payloads. Archive and descriptor checks run before resolving dependencies or placing layers. The importer still applies its normal integrity and path checks.
-
-#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_bounded()</span>
-
-```rust
-async fn load_bounded(
-    path: &Path,
-    opts: LoadOpts,
-    maximum_disk_bytes: u64,
-) -> MicrosandboxResult<Snapshot>
-```
-
-Import one self-contained raw disk locally, without bundled images, memory, owned volumes, or external dependencies. Use `load_with_limits` to supply your own policy.
-
-#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">bounded_import_peak_bytes()</span>
-
-```rust
-fn bounded_import_peak_bytes(maximum_disk_bytes: u64) -> MicrosandboxResult<u64>
-```
-
-Calculate the conservative workspace reservation for `load_bounded`, including temporary copies and metadata. This is separate from the accepted disk-size limit.
+<span id="snapshotloadwithbase" />
+<span id="snapshotloadwithoptions" />
+<span id="snapshotloadwithlimits" />
+<span id="snapshotloadbounded" />
 
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_many()</span>
 
 ```rust
 async fn load_many(
     paths: &[PathBuf],
-    opts: LoadOpts,
+    opts: LoadOptions,
 ) -> MicrosandboxResult<Vec<Snapshot>>
 ```
 
@@ -560,14 +501,19 @@ Read a group’s head, or select an exact member with `group:member`. Returns th
 
 ### Import options
 
-Options for `LoadOpts`.
+Build options with `LoadOptions::default()` and these methods. The options type is non-exhaustive so future settings can be added without changing your call sites.
 
-| Option | Purpose |
-| --- | --- |
-| `dest` | Parent directory containing groups. Defaults to the local snapshot store. |
-| `base` | External snapshot or standalone archive for missing dependencies. |
-| `group` | Destination group. Omit to create one group for the import. |
-| `set_head` | Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip. |
+```rust
+fn destination(self, path: impl Into<PathBuf>) -> Self
+fn base(self, reference: impl Into<String>) -> Self
+fn group(self, name: impl Into<String>) -> Self
+fn set_head(self, enabled: bool) -> Self
+fn maximum_disk_bytes(self, bytes: u64) -> Self
+```
+
+`destination` selects the parent directory for imported groups. `base` supplies missing dependencies. `group` selects a destination group; omission creates one. `set_head(true)` permits replacing a divergent head.
+
+`maximum_disk_bytes` limits the total logical payload bytes extracted across the import and its archive bases, including sparse holes, and each declared file-disk capacity. The limit must be positive. Omit it for unrestricted size. Metadata has a separate bounded allowance. Temporary copies and publication need additional workspace.
 
 With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
 

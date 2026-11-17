@@ -596,25 +596,26 @@ change adds no runtime/guest protocol requirement or catalog migration. Older
 SDKs keep their previous restore footprint; updating only the runtime binary
 does not change that SDK behavior. Snapshot source files remain immutable.
 
-The Rust SDK exposes `Snapshot::load_with_limits` and the corresponding
-context collection method for embedding callers. The caller supplies
-`ImportLimits` (expanded bytes, metadata size, entry count and path length) and
-an `ImportPolicy` for supported formats and declared disk sizes. The importer
-passes the budget explicitly through extraction and checks each member's logical
-size before writing, including sparse holes. Policy validation runs before
-layer placement and dependency resolution. Limits bound archive extraction;
-callers separately reserve workspace for copies and dependency materialization.
+For v0.8, snapshot imports use `Snapshot::load(path, LoadOptions)` and the
+matching context collection method. `LoadOptions` is non-exhaustive and offers
+builder methods; `maximum_disk_bytes` is optional and omitted by default.
+The SDK passes a size budget explicitly through extraction, including archive
+bases and sparse logical sizes. Cloud format restrictions and workspace
+reservations remain caller responsibilities; no public trait is required.
 
-Cloud admission owns its maximum disk size, supported formats and workspace
-reservation. Its current raw-only pipeline reserves four copies of the disk and
-metadata, plus a per-entry allocation allowance, without assuming reflinks.
-Changing that reservation does not change the accepted maximum disk size.
+The v0.8 source API change replaces `LoadOpts`, positional destinations,
+`load_with_base`, `load_with_options`, `load_bounded`, `load_with_limits`, and
+`bounded_import_peak_bytes`. Other SDK signatures remain unchanged; their existing options or keyword
+arguments gain the optional size limit. TypeScript checks for size-limit native
+entry points before forwarding the option; older Python bindings reject the
+unknown keyword. Native C entry points
+retain their ABI. Size-limited Go requests use a distinct operation so an old
+native library rejects them rather than silently ignoring the limit.
 
-Existing `load_bounded` and `bounded_import_peak_bytes` methods retain the
-raw-only embedding contract and reservation calculation for existing callers.
-Ordinary `load`, `load_with_options`, `LoadOpts`, archive formats, persisted
-state and runtime protocols remain unchanged. The new API is local Rust
-embedding functionality; no CLI or other language SDK workflow selects it.
+This source break is explicitly authorized for the v0.8 release. Snapshot
+archives, stored state, guest/control protocols and SDK/runtime launch contracts
+are unchanged. Historical compatibility requirements for those boundaries
+remain in force. See `docs/migrations/v0.8.mdx` for call-site changes.
 
 The SDK snapshot suite exercises ordinary imports, current and legacy archives,
 delta exports/restores and private child disks. Real older-runtime launch

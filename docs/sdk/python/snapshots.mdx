@@ -424,6 +424,7 @@ async def load(
     base: str | None = None,
     group: str | None = None,
     set_head: bool = False,
+    maximum_disk_bytes: int | None = None,
 ) -> Snapshot
 ```
 
@@ -472,6 +473,7 @@ async def load_many(
     base: str | None = None,
     group: str | None = None,
     set_head: bool = False,
+    maximum_disk_bytes: int | None = None,
 ) -> list[Snapshot]
 ```
 

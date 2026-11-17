@@ -73,6 +73,16 @@ describe("Snapshot native projections", () => {
     expect(handle.headUpdate).toEqual(headUpdate);
   });
 
+  it("refuses size limits when an older native binding cannot enforce them", async () => {
+    const options = { maximumDiskBytes: 4096 };
+    await expect(Snapshot.loadWithOptions("snapshot.msb", options)).rejects.toThrow(
+      "Snapshot size limits require an updated native SDK binding.",
+    );
+    await expect(Snapshot.loadMany(["snapshot.msb"], options)).rejects.toThrow(
+      "Snapshot size limits require an updated native SDK binding.",
+    );
+  });
+
   it("forwards a member selector for explicit head selection", async () => {
     vi.mocked(napi.Snapshot.groupHead).mockResolvedValue({
       group: "work", previous: "snapshot-2", head: "snapshot-1", reason: "selected", changed: true,

@@ -1569,7 +1569,7 @@ async fn unordered_batch_resolves_disk_and_ram_from_all_supplied_archives() {
         let loaded = load_snapshots(
             &local,
             &archives,
-            LoadOpts {
+            LoadOptions {
                 group: Some("received".into()),
                 ..Default::default()
             },
@@ -1626,7 +1626,7 @@ async fn automatic_group_sources_fill_ram_and_disks_without_base_flag() {
         )
         .await
         .unwrap();
-        let opts = LoadOpts {
+        let opts = LoadOptions {
             group: Some("received".into()),
             ..Default::default()
         };
@@ -1634,7 +1634,7 @@ async fn automatic_group_sources_fill_ram_and_disks_without_base_flag() {
             .await
             .unwrap();
         // The same dependent archive cannot search a different, unnamed group implicitly.
-        let error = load_snapshot_with_options(&local, &delta, LoadOpts::default())
+        let error = load_snapshot_with_options(&local, &delta, LoadOptions::default())
             .await
             .unwrap_err();
         assert!(
@@ -1681,7 +1681,7 @@ async fn missing_or_corrupt_borrowed_ram_never_publishes_target() {
     )
     .await
     .unwrap();
-    let opts = LoadOpts {
+    let opts = LoadOptions {
         group: Some("received".into()),
         ..Default::default()
     };

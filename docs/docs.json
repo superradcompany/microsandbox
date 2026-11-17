@@ -417,6 +417,7 @@
             "icon": "arrow-right-arrow-left",
             "pages": [
               "migrations/overview",
+              "migrations/v0.8",
               "migrations/v0.7",
               "migrations/sdk-contexts",
               "migrations/sdk-distributions",

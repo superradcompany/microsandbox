@@ -48,7 +48,7 @@ use crate::context::local::creation::CreationStorage;
 use crate::snapshot::import_budget::ImportBudget;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
-pub use crate::snapshot::{LoadOpts, SaveOpts};
+pub use crate::snapshot::{LoadOptions, SaveOpts};
 
 use super::{
     CHECKPOINT_DIRECTORY, Snapshot, SnapshotHandle, store, validate_checkpoint_owned_inventory,
@@ -1479,6 +1479,7 @@ where
 /// Unpack an archive into `dest` (defaults to the configured snapshots
 /// dir). Image-cache entries (`cache/...`) are routed into the global
 /// cache. Returns a handle for the head (last-listed) snapshot.
+#[cfg(test)]
 pub(super) async fn load_snapshot(
     local: &LocalContext,
     archive: &Path,
@@ -1487,6 +1488,7 @@ pub(super) async fn load_snapshot(
     load_snapshot_with_base(local, archive, dest, None).await
 }
 
+#[cfg(test)]
 pub(super) async fn load_snapshot_with_base(
     local: &LocalContext,
     archive: &Path,
@@ -1496,7 +1498,7 @@ pub(super) async fn load_snapshot_with_base(
     load_snapshot_with_options(
         local,
         archive,
-        LoadOpts {
+        LoadOptions {
             dest: dest.map(Path::to_path_buf),
             base: base.map(str::to_string),
             ..Default::default()
@@ -1505,12 +1507,13 @@ pub(super) async fn load_snapshot_with_base(
     .await
 }
 
+#[cfg(test)]
 pub(super) async fn load_snapshot_with_options(
     local: &LocalContext,
     archive: &Path,
-    opts: LoadOpts,
+    opts: LoadOptions,
 ) -> MicrosandboxResult<SnapshotHandle> {
-    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts, None).await?;
+    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts).await?;
     Ok(loaded.remove(0))
 }
 
@@ -1518,21 +1521,9 @@ pub(super) async fn load_snapshot_with_options(
 pub(super) async fn load_snapshots(
     local: &LocalContext,
     archives: &[PathBuf],
-    opts: LoadOpts,
+    opts: LoadOptions,
 ) -> MicrosandboxResult<Vec<SnapshotHandle>> {
-    batch::load(local, archives, opts, None).await
-}
-
-pub(crate) async fn load_snapshot_with_limits(
-    local: &LocalContext,
-    archive: &Path,
-    opts: LoadOpts,
-    budget: &mut ImportBudget<'_>,
-) -> MicrosandboxResult<SnapshotHandle> {
-    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts, Some(budget)).await?;
-    loaded
-        .pop()
-        .ok_or_else(|| MicrosandboxError::InvalidConfig("import returned no snapshot".into()))
+    batch::load(local, archives, opts).await
 }
 
 /// Consume a current archive directly into a child sandbox's staging directory.
@@ -2503,7 +2494,7 @@ async fn unpack_archive<R>(
     reader: R,
     snapshots_dir: &Path,
     cache_dir: &Path,
-    mut budget: Option<&mut ImportBudget<'_>>,
+    mut budget: Option<&mut ImportBudget>,
 ) -> MicrosandboxResult<UnpackedArchive>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -4515,142 +4506,6 @@ mod tests {
 
     use super::*;
     use crate::Context;
-    use crate::snapshot::{ImportLimits, ImportPolicy};
-
-    struct DiskSizePolicy {
-        maximum_disk_bytes: u64,
-    }
-
-    impl ImportPolicy for DiskSizePolicy {
-        fn validate_entry(&self, _path: &Path, _logical_bytes: u64) -> MicrosandboxResult<()> {
-            Ok(())
-        }
-
-        fn validate_archive(&self, _snapshots: usize, _complete: bool) -> MicrosandboxResult<()> {
-            Ok(())
-        }
-
-        fn validate_manifest(&self, manifest: &Manifest) -> MicrosandboxResult<()> {
-            let file = manifest.state.as_file().unwrap();
-            if file.virtual_size > self.maximum_disk_bytes {
-                return Err(MicrosandboxError::InvalidConfig(
-                    "disk exceeds caller limit".into(),
-                ));
-            }
-
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn explicit_import_limits_are_independent_and_enforced_before_publication() {
-        let root = tempfile::tempdir().unwrap();
-        let local = crate::test_support::local_backend_builder(root.path().join("home"))
-            .build()
-            .unwrap();
-        let manifest = grouped_archive_manifest(989, None);
-        let artifact = root.path().join("artifact");
-        write_grouped_archive_fixture(&artifact, &manifest);
-        let archive = root.path().join("archive.msb");
-        save_snapshot(
-            &local,
-            artifact.to_str().unwrap(),
-            &archive,
-            SaveOpts::default(),
-        )
-        .await
-        .unwrap();
-
-        let snapshots = local.snapshots();
-        let limits = ImportLimits {
-            expanded_bytes: 64 * 1024,
-            metadata_bytes: 16 * 1024,
-            entries: 32,
-            path_bytes: 1024,
-        };
-        let accepted = DiskSizePolicy {
-            maximum_disk_bytes: 4096,
-        };
-        let rejected = DiskSizePolicy {
-            maximum_disk_bytes: 2048,
-        };
-        let options = |group: &str| LoadOpts {
-            group: Some(group.into()),
-            ..Default::default()
-        };
-        let (small, large) = tokio::join!(
-            snapshots.load_with_limits(
-                &archive,
-                options("too-small"),
-                ImportLimits {
-                    expanded_bytes: 4095,
-                    ..limits
-                },
-                &accepted
-            ),
-            snapshots.load_with_limits(&archive, options("accepted"), limits, &accepted),
-        );
-        assert!(
-            small
-                .unwrap_err()
-                .to_string()
-                .contains("expanded byte limit")
-        );
-        assert_eq!(
-            large.unwrap().manifest().await.unwrap().snapshot_id,
-            manifest.snapshot_id
-        );
-
-        for (limited, message) in [
-            (
-                ImportLimits {
-                    metadata_bytes: 1,
-                    ..limits
-                },
-                "metadata size limit",
-            ),
-            (
-                ImportLimits {
-                    entries: 1,
-                    ..limits
-                },
-                "archive entry limit",
-            ),
-            (
-                ImportLimits {
-                    path_bytes: 1,
-                    ..limits
-                },
-                "archive path limit",
-            ),
-        ] {
-            let error = snapshots
-                .load_with_limits(&archive, options("quota-denied"), limited, &accepted)
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains(message), "{error}");
-            assert!(!local.snapshots_dir().join("quota-denied").exists());
-        }
-
-        let error = snapshots
-            .load_with_limits(&archive, options("policy-denied"), limits, &rejected)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("disk exceeds caller limit"));
-        for group in ["too-small", "policy-denied"] {
-            assert!(!local.snapshots_dir().join(group).exists());
-        }
-
-        for entry in std::fs::read_dir(local.snapshots_dir()).unwrap() {
-            let entry = entry.unwrap();
-            assert!(
-                !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".msb-snapshot-import-")
-            );
-        }
-    }
 
     #[tokio::test]
     async fn bounded_import_limits_expansion_and_keeps_unbounded_import_compatible() {
@@ -4674,13 +4529,11 @@ mod tests {
         {
             let snapshots = backend.snapshots();
             let loaded = snapshots
-                .load_bounded(
+                .load(
                     &archive,
-                    LoadOpts {
-                        group: Some("bounded".into()),
-                        ..Default::default()
-                    },
-                    4096,
+                    LoadOptions::default()
+                        .group("bounded")
+                        .maximum_disk_bytes(4096),
                 )
                 .await
                 .unwrap();
@@ -4689,13 +4542,12 @@ mod tests {
                 data.snapshot_id
             );
 
-            for (disk_limit, expected) in [
-                (0, "must be positive"),
-                (u64::MAX, "overflow"),
-                (2048, "maximum disk size"),
-            ] {
+            for (disk_limit, expected) in [(0, "must be positive"), (2048, "maximum disk size")] {
                 let error = snapshots
-                    .load_bounded(&archive, LoadOpts::default(), disk_limit)
+                    .load(
+                        &archive,
+                        LoadOptions::default().maximum_disk_bytes(disk_limit),
+                    )
                     .await
                     .unwrap_err();
                 assert!(error.to_string().contains(expected), "{error}");
@@ -4711,9 +4563,9 @@ mod tests {
                 );
             }
             snapshots
-                .load_with_options(
+                .load(
                     &archive,
-                    LoadOpts {
+                    LoadOptions {
                         group: Some("unbounded".into()),
                         ..Default::default()
                     },
@@ -4724,26 +4576,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_import_refuses_sparse_and_non_disk_payloads_before_creating_them() {
+    async fn bounded_import_counts_sparse_logical_sizes_before_extraction() {
         let root = tempfile::tempdir().unwrap();
         let backend = crate::test_support::local_backend_builder(root.path().join("home"))
             .build()
             .unwrap();
-        let names = [
-            ("cache/blobs/payload", "disk-only payloads"),
-            (
-                "snapshots/snap_00000000000000000000000000000001/owned/data/directory.bin",
-                "disk-only payloads",
-            ),
-            (
-                "checkpoints/snap_00000000000000000000000000000001/checkpoint.json",
-                "disk-only payloads",
-            ),
-            (
-                "files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/upper.ext4",
-                "maximum disk size",
-            ),
-        ];
+        let names = [(
+            "files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/upper.ext4",
+            "maximum disk size",
+        )];
         {
             let snapshots = backend.snapshots();
             for (index, (name, expected)) in names.into_iter().enumerate() {
@@ -4762,7 +4603,7 @@ mod tests {
                 bytes.resize(bytes.len() + 1024, 0);
                 std::fs::write(&archive, bytes).unwrap();
                 let error = snapshots
-                    .load_bounded(&archive, LoadOpts::default(), 4096)
+                    .load(&archive, LoadOptions::default().maximum_disk_bytes(4096))
                     .await
                     .unwrap_err();
                 assert!(error.to_string().contains(expected), "{error}");
@@ -4787,10 +4628,13 @@ mod tests {
             bytes.resize(bytes.len() + 1024, 0);
             std::fs::write(&archive, bytes).unwrap();
             let error = snapshots
-                .load_bounded(&archive, LoadOpts::default(), 64 * 1024 * 1024)
+                .load(
+                    &archive,
+                    LoadOptions::default().maximum_disk_bytes(64 * 1024 * 1024),
+                )
                 .await
                 .unwrap_err();
-            assert!(error.to_string().contains("expanded byte limit"), "{error}");
+            assert!(error.to_string().contains("maximum disk size"), "{error}");
         }
     }
 
@@ -4910,7 +4754,7 @@ mod tests {
             std::fs::create_dir(&target).unwrap();
             std::os::unix::fs::symlink(&target, &external).unwrap();
         }
-        let opts = LoadOpts {
+        let opts = LoadOptions {
             dest: Some(external.join("snapshots")),
             group: Some("imported".into()),
             ..Default::default()
@@ -4938,7 +4782,7 @@ mod tests {
         let other = load_snapshot_with_options(
             &local,
             &archive,
-            LoadOpts {
+            LoadOptions {
                 dest: Some(root.path().join("other")),
                 group: Some("imported".into()),
                 ..Default::default()
@@ -5107,30 +4951,15 @@ mod tests {
                         std::fs::read(snapshot.layer_path(layer)).unwrap(),
                         b"payload"
                     );
-                    let policy = DiskSizePolicy {
-                        maximum_disk_bytes: 6,
-                    };
-                    let mut budget = ImportBudget::new(
-                        ImportLimits {
-                            expanded_bytes: 64 * 1024,
-                            metadata_bytes: 16 * 1024,
-                            entries: 32,
-                            path_bytes: 1024,
-                        },
-                        &policy,
-                    )
-                    .unwrap();
+                    let mut budget = ImportBudget::new(6).unwrap();
                     let base =
                         delta::open_base(&local, archive.to_str().unwrap(), Some(&mut budget))
                             .await;
                     let error = match base {
                         Err(error) => error,
-                        Ok(_) => panic!("legacy base bypassed the caller's policy"),
+                        Ok(_) => panic!("legacy base bypassed the size limit"),
                     };
-                    assert!(
-                        error.to_string().contains("disk exceeds caller limit"),
-                        "{error}"
-                    );
+                    assert!(error.to_string().contains("maximum disk size"), "{error}");
                 } else {
                     assert!(
                         result.is_err(),
@@ -5360,25 +5189,13 @@ mod tests {
         )
         .await
         .unwrap();
-        // Expansion limits do not impose the cloud's single-snapshot policy.
-        let policy = DiskSizePolicy {
-            maximum_disk_bytes: 4096,
-        };
-        let loaded = local
-            .snapshots()
-            .load_with_limits(
-                &archive,
-                LoadOpts::default(),
-                ImportLimits {
-                    expanded_bytes: 64 * 1024,
-                    metadata_bytes: 16 * 1024,
-                    entries: 64,
-                    path_bytes: 1024,
-                },
-                &policy,
-            )
-            .await
-            .unwrap();
+        let loaded = load_snapshot_with_options(
+            &local,
+            &archive,
+            LoadOptions::default().maximum_disk_bytes(8192),
+        )
+        .await
+        .unwrap();
         let loaded_group = loaded.group().unwrap();
         assert_eq!(
             store::get_handle(&local, &format!("{loaded_group}:base"))
@@ -6585,7 +6402,7 @@ mod tests {
             let error = load_snapshot_with_options(
                 &receiving,
                 input,
-                LoadOpts {
+                LoadOptions {
                     group: Some("budget-rejected".into()),
                     ..Default::default()
                 },

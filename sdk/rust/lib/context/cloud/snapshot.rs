@@ -254,15 +254,6 @@ impl SnapshotOps for RemoteContext {
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move { Err(MicrosandboxError::local_only(Operation::SnapshotOps)) })
     }
-
-    fn load<'a>(
-        &'a self,
-        _backend: Arc<dyn Context>,
-        _archive: &'a Path,
-        _dest: Option<&'a Path>,
-    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
-        Box::pin(async move { Err(MicrosandboxError::local_only(Operation::SnapshotOps)) })
-    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -607,6 +598,7 @@ mod tests {
     use microsandbox_types::CloudSnapshotKind;
 
     use super::*;
+    use crate::snapshot::LoadOptions;
 
     fn assert_unsupported(result: MicrosandboxResult<impl Sized>) {
         assert!(matches!(result, Err(MicrosandboxError::Unsupported { .. })));
@@ -821,7 +813,13 @@ mod tests {
             .await,
         );
         assert_unsupported(
-            SnapshotOps::load(&cloud, backend, Path::new("snapshot.tar.zst"), None).await,
+            SnapshotOps::load_many(
+                &cloud,
+                backend,
+                &[PathBuf::from("snapshot.tar.zst")],
+                LoadOptions::default(),
+            )
+            .await,
         );
     }
 

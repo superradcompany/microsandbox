@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "local")]
-use super::{DiskLayer, ImportLimits, ImportPolicy};
+use super::DiskLayer;
 use super::{
-    HeadUpdate, LoadOpts, Manifest, SaveOpts, SnapshotConfig, SnapshotCopyBuilder, SnapshotFormat,
-    SnapshotId, SnapshotScope, SnapshotState, SnapshotVerifyReport,
+    HeadUpdate, LoadOptions, Manifest, SaveOpts, SnapshotConfig, SnapshotCopyBuilder,
+    SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, SnapshotVerifyReport,
 };
 use crate::MicrosandboxResult;
 use crate::context::Context;
@@ -371,11 +371,10 @@ impl Snapshot {
     ///
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
-    pub async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Snapshot> {
-        let backend = crate::context::default_local_context();
-        backend
-            .snapshot_ops()
-            .load(backend.clone(), archive_path, dest)
+    pub async fn load(archive_path: &Path, options: LoadOptions) -> MicrosandboxResult<Snapshot> {
+        let context = crate::context::default_local_context();
+        Self::ctx(context.as_ref())
+            .load(archive_path, options)
             .await
     }
 }
@@ -612,66 +611,11 @@ impl Snapshot {
             .create_archive(config, out.as_ref(), plain_tar)
             .await
     }
-    /// Import an archive with an explicit dependency base.
-    pub async fn load_with_base(
-        path: &Path,
-        dest: Option<&Path>,
-        base: &str,
-    ) -> MicrosandboxResult<Snapshot> {
-        Self::load_with_options(
-            path,
-            LoadOpts {
-                dest: dest.map(Path::to_path_buf),
-                base: Some(base.into()),
-                ..Default::default()
-            },
-        )
-        .await
-    }
-    /// Import into a local group with explicit dependency and head policy.
-    pub async fn load_with_options(path: &Path, opts: LoadOpts) -> MicrosandboxResult<Snapshot> {
-        let mut handles = Self::load_many(&[path.to_path_buf()], opts).await?;
-        Ok(handles.remove(0))
-    }
-
-    /// Maximum local writes for a bounded raw-disk import, including temporary
-    /// copies and metadata. Embedding workers reserve this amount before calling
-    /// `load_bounded`; both use the same calculation from the maximum disk size.
-    #[cfg(feature = "local")]
-    pub fn bounded_import_peak_bytes(maximum_disk_bytes: u64) -> MicrosandboxResult<u64> {
-        super::bounded_import::peak_bytes(maximum_disk_bytes)
-    }
-
-    /// Import a disk-only raw archive within its known maximum disk size.
-    /// Temporary-copy and metadata allowances are derived internally. Bundled
-    /// images, memory and owned volumes are refused before their payloads are
-    /// written. Existing unbounded imports are unchanged.
-    #[cfg(feature = "local")]
-    pub async fn load_bounded(
-        path: &Path,
-        opts: LoadOpts,
-        maximum_disk_bytes: u64,
-    ) -> MicrosandboxResult<Snapshot> {
-        Self::ctx(crate::context::default_local_context().as_ref())
-            .load_bounded(path, opts, maximum_disk_bytes)
-            .await
-    }
-    /// Import locally with caller-supplied expansion limits and format policy.
-    /// The caller separately reserves temporary workspace for copies and publication.
-    #[cfg(feature = "local")]
-    pub async fn load_with_limits(
-        path: &Path,
-        opts: LoadOpts,
-        limits: ImportLimits,
-        policy: &dyn ImportPolicy,
-    ) -> MicrosandboxResult<Snapshot> {
-        Self::ctx(crate::context::default_local_context().as_ref())
-            .load_with_limits(path, opts, limits, policy)
-            .await
-    }
-
     /// Validate all inputs before publication and return their heads in input order.
-    pub async fn load_many(paths: &[PathBuf], opts: LoadOpts) -> MicrosandboxResult<Vec<Snapshot>> {
+    pub async fn load_many(
+        paths: &[PathBuf],
+        opts: LoadOptions,
+    ) -> MicrosandboxResult<Vec<Snapshot>> {
         let backend = crate::context::default_local_context();
         backend
             .snapshot_ops()

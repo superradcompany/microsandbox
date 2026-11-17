@@ -4,12 +4,7 @@ use std::sync::Arc;
 
 use super::Context;
 use crate::sandbox::SandboxBuilder;
-#[cfg(feature = "local")]
-use crate::snapshot::bounded_import::RawDiskImport;
-#[cfg(feature = "local")]
-use crate::snapshot::import_budget::ImportBudget;
-#[cfg(feature = "local")]
-use crate::snapshot::{ImportLimits, ImportPolicy};
+use crate::snapshot::LoadOptions;
 use crate::volume::VolumeBuilder;
 use crate::{
     MicrosandboxError, MicrosandboxResult, Sandbox, SandboxListBuilder, SandboxPage, Snapshot,
@@ -248,23 +243,11 @@ impl Snapshots {
             .await
     }
 
-    /// Import one archive into this destination.
+    /// Import one archive with destination, dependency and size options.
     pub async fn load(
         &self,
         path: &std::path::Path,
-        dest: Option<&std::path::Path>,
-    ) -> MicrosandboxResult<Snapshot> {
-        self.context
-            .snapshot_ops()
-            .load(self.context.clone(), path, dest)
-            .await
-    }
-
-    /// Import with an explicit dependency base and publication policy.
-    pub async fn load_with_options(
-        &self,
-        path: &std::path::Path,
-        opts: crate::snapshot::LoadOpts,
+        opts: LoadOptions,
     ) -> MicrosandboxResult<Snapshot> {
         let mut snapshots = self.load_many(&[path.to_path_buf()], opts).await?;
         snapshots.pop().ok_or_else(|| {
@@ -272,52 +255,11 @@ impl Snapshots {
         })
     }
 
-    /// Import a disk-only raw archive within a known maximum disk size.
-    /// Requires local storage and no external dependency base.
-    #[cfg(feature = "local")]
-    pub async fn load_bounded(
-        &self,
-        path: &std::path::Path,
-        opts: crate::snapshot::LoadOpts,
-        maximum_disk_bytes: u64,
-    ) -> MicrosandboxResult<Snapshot> {
-        if self.context.as_local().is_none() || opts.base.is_some() {
-            return Err(MicrosandboxError::InvalidConfig(
-                "bounded snapshot import requires local storage without external dependencies"
-                    .into(),
-            ));
-        }
-        let policy = RawDiskImport::new(maximum_disk_bytes)?;
-        self.load_with_limits(path, opts, policy.limits(), &policy)
-            .await
-    }
-
-    /// Import locally with caller-supplied expansion limits and format policy.
-    /// Limits cover the archive's logical contents, not total workspace usage.
-    #[cfg(feature = "local")]
-    pub async fn load_with_limits(
-        &self,
-        path: &std::path::Path,
-        opts: crate::snapshot::LoadOpts,
-        limits: ImportLimits,
-        policy: &dyn ImportPolicy,
-    ) -> MicrosandboxResult<Snapshot> {
-        let local = self.context.as_local().ok_or_else(|| {
-            MicrosandboxError::InvalidConfig(
-                "limited snapshot import requires local storage".into(),
-            )
-        })?;
-        let mut budget = ImportBudget::new(limits, policy)?;
-        local
-            .import_with_limits(self.context.clone(), path, opts, &mut budget)
-            .await
-    }
-
     /// Validate the complete import set before publication.
     pub async fn load_many(
         &self,
         paths: &[std::path::PathBuf],
-        opts: crate::snapshot::LoadOpts,
+        opts: LoadOptions,
     ) -> MicrosandboxResult<Vec<Snapshot>> {
         self.context
             .snapshot_ops()

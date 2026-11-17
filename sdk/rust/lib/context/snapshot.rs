@@ -10,7 +10,7 @@ use super::Context;
 use crate::MicrosandboxResult;
 use crate::sandbox::SandboxConfig;
 use crate::snapshot::{
-    HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
+    HeadUpdate, LoadOptions, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
     SnapshotReference, SnapshotVerifyReport,
 };
 
@@ -35,7 +35,7 @@ pub trait SnapshotOps: Send + Sync {
         &'a self,
         _backend: Arc<dyn Context>,
         _archives: &'a [PathBuf],
-        _opts: LoadOpts,
+        _opts: LoadOptions,
     ) -> BoxFuture<'a, MicrosandboxResult<Vec<Snapshot>>> {
         Box::pin(async {
             Err(crate::MicrosandboxError::local_only(
@@ -160,12 +160,4 @@ pub trait SnapshotOps: Send + Sync {
         out: &'a Path,
         opts: SaveOpts,
     ) -> BoxFuture<'a, MicrosandboxResult<()>>;
-
-    /// Import a snapshot through the selected backend.
-    fn load<'a>(
-        &'a self,
-        backend: Arc<dyn Context>,
-        archive: &'a Path,
-        dest: Option<&'a Path>,
-    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>>;
 }

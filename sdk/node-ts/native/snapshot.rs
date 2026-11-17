@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use microsandbox::snapshot::{
-    HeadUpdateReason, LoadOpts as RustLoadOpts, SaveOpts as RustSaveOpts,
+    HeadUpdateReason, LoadOptions as RustLoadOptions, SaveOpts as RustSaveOpts,
 };
 use microsandbox::{
     Snapshot as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
@@ -66,6 +66,8 @@ pub struct JsLoadOpts {
     pub group: Option<String>,
     /// Select the unique imported tip even when it is not a fast-forward.
     pub set_head: Option<bool>,
+    /// Maximum expanded payload bytes and declared disk capacity.
+    pub maximum_disk_bytes: Option<f64>,
 }
 
 /// Outcome of reading or selecting a snapshot group's head.
@@ -157,13 +159,12 @@ impl JsSnapshot {
         dest: Option<String>,
         base: Option<String>,
     ) -> Result<JsSnapshot> {
-        let dest = dest.map(PathBuf::from);
-        let h = if let Some(base) = base {
-            RustSnapshot::load_with_base(&PathBuf::from(archive), dest.as_deref(), &base).await
-        } else {
-            RustSnapshot::load(&PathBuf::from(archive), dest.as_deref()).await
-        }
-        .map_err(to_napi_error)?;
+        let mut options = RustLoadOptions::default();
+        options.dest = dest.map(PathBuf::from);
+        options.base = base;
+        let h = RustSnapshot::load(&PathBuf::from(archive), options)
+            .await
+            .map_err(to_napi_error)?;
         Ok(JsSnapshot::from_rust(h))
     }
 
@@ -173,15 +174,18 @@ impl JsSnapshot {
         opts: Option<JsLoadOpts>,
     ) -> Result<JsSnapshot> {
         let opts = opts.unwrap_or_default();
-        let h = RustSnapshot::load_with_options(
-            &PathBuf::from(archive),
-            RustLoadOpts {
-                dest: opts.dest.map(PathBuf::from),
-                base: opts.base,
-                group: opts.group,
-                set_head: opts.set_head.unwrap_or(false),
-            },
-        )
+        let h = RustSnapshot::load(&PathBuf::from(archive), {
+            let mut options = RustLoadOptions::default();
+            options.dest = opts.dest.map(PathBuf::from);
+            options.base = opts.base;
+            options.group = opts.group;
+            options.set_head = opts.set_head.unwrap_or(false);
+            options.maximum_disk_bytes = opts
+                .maximum_disk_bytes
+                .map(|v| crate::numeric::safe_integer(v, "maximumDiskBytes"))
+                .transpose()?;
+            options
+        })
         .await
         .map_err(to_napi_error)?;
         Ok(JsSnapshot::from_rust(h))
@@ -195,18 +199,38 @@ impl JsSnapshot {
     ) -> Result<Vec<JsSnapshot>> {
         let opts = opts.unwrap_or_default();
         let paths = archives.into_iter().map(PathBuf::from).collect::<Vec<_>>();
-        let handles = RustSnapshot::load_many(
-            &paths,
-            RustLoadOpts {
-                dest: opts.dest.map(PathBuf::from),
-                base: opts.base,
-                group: opts.group,
-                set_head: opts.set_head.unwrap_or(false),
-            },
-        )
+        let handles = RustSnapshot::load_many(&paths, {
+            let mut options = RustLoadOptions::default();
+            options.dest = opts.dest.map(PathBuf::from);
+            options.base = opts.base;
+            options.group = opts.group;
+            options.set_head = opts.set_head.unwrap_or(false);
+            options.maximum_disk_bytes = opts
+                .maximum_disk_bytes
+                .map(|v| crate::numeric::safe_integer(v, "maximumDiskBytes"))
+                .transpose()?;
+            options
+        })
         .await
         .map_err(to_napi_error)?;
         Ok(handles.into_iter().map(JsSnapshot::from_rust).collect())
+    }
+
+    /// Separate entry points let older addons reject an unsupported size limit.
+    #[napi(js_name = "loadWithSizeLimit")]
+    pub async fn load_with_size_limit(
+        archive: String,
+        opts: Option<JsLoadOpts>,
+    ) -> Result<JsSnapshot> {
+        Self::load_with_options(archive, opts).await
+    }
+
+    #[napi(js_name = "loadManyWithSizeLimit")]
+    pub async fn load_many_with_size_limit(
+        archives: Vec<String>,
+        opts: Option<JsLoadOpts>,
+    ) -> Result<Vec<JsSnapshot>> {
+        Self::load_many(archives, opts).await
     }
 
     /// Read a group's head, or select `group:member` as its head.

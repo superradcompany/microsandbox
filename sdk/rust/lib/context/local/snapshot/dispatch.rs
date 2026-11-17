@@ -10,9 +10,8 @@ use microsandbox_image::snapshot::SnapshotRootDisk;
 use super::{archive, artifact, copy, create, group, store, verify};
 use crate::context::{Context, LocalContext, SnapshotOps};
 use crate::sandbox::SandboxConfig;
-use crate::snapshot::import_budget::ImportBudget;
 use crate::snapshot::{
-    HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
+    HeadUpdate, LoadOptions, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
     SnapshotReference, SnapshotVerifyReport,
 };
 use crate::{MicrosandboxError, MicrosandboxResult, Operation};
@@ -22,21 +21,6 @@ use crate::{MicrosandboxError, MicrosandboxResult, Operation};
 //--------------------------------------------------------------------------------------------------
 
 impl LocalContext {
-    pub(crate) async fn import_with_limits(
-        &self,
-        context: Arc<dyn Context>,
-        path: &Path,
-        mut opts: LoadOpts,
-        budget: &mut ImportBudget<'_>,
-    ) -> MicrosandboxResult<Snapshot> {
-        let path = std::path::absolute(path)?;
-        opts.dest = opts.dest.map(std::path::absolute).transpose()?;
-        opts.base = opts.base.map(anchor_archive_selector).transpose()?;
-        let handle = archive::load_snapshot_with_limits(self, &path, opts, budget).await?;
-
-        Ok(from_handle(context, handle))
-    }
-
     /// Inspect a restore source; caller options remain separate from resolved settings.
     pub(crate) async fn prepare_local_restore(
         &self,
@@ -359,27 +343,11 @@ impl SnapshotOps for LocalContext {
         })
     }
 
-    fn load<'a>(
-        &'a self,
-        backend: Arc<dyn Context>,
-        path: &'a Path,
-        dest: Option<&'a Path>,
-    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
-        Box::pin(async move {
-            let path = std::path::absolute(path)?;
-            let dest = dest.map(std::path::absolute).transpose()?;
-            Ok(from_handle(
-                backend,
-                archive::load_snapshot(self, &path, dest.as_deref()).await?,
-            ))
-        })
-    }
-
     fn load_many<'a>(
         &'a self,
         backend: Arc<dyn Context>,
         paths: &'a [PathBuf],
-        mut opts: LoadOpts,
+        mut opts: LoadOptions,
     ) -> BoxFuture<'a, MicrosandboxResult<Vec<Snapshot>>> {
         Box::pin(async move {
             let paths = paths
@@ -592,13 +560,15 @@ mod tests {
                 assert!(first.join("saved.tar").is_file());
                 assert!(!second.join("saved.tar").exists());
                 std::env::set_current_dir(&first).unwrap();
-                let load = SnapshotOps::load(
+                let archives = [PathBuf::from("./saved.tar")];
+                let load = SnapshotOps::load_many(
                     local.as_ref(),
                     local.clone(),
-                    Path::new("./saved.tar"),
-                    Some(Path::new("./imported")),
+                    &archives,
+                    LoadOptions::default().destination("./imported"),
                 );
-                let loaded = switch_cwd_at_first_io(&second, load).await.unwrap();
+                let mut imported = switch_cwd_at_first_io(&second, load).await.unwrap();
+                let loaded = imported.pop().unwrap();
                 assert!(loaded.path().unwrap().starts_with(first.join("imported")));
                 assert!(!second.join("imported").exists());
             });

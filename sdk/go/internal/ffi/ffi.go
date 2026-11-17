@@ -4815,10 +4815,11 @@ type SnapshotSaveOptions struct {
 }
 
 type SnapshotLoadOptions struct {
-	Dest    string `json:"dest,omitempty"`
-	Base    string `json:"base,omitempty"`
-	Group   string `json:"group,omitempty"`
-	SetHead bool   `json:"set_head,omitempty"`
+	MaximumDiskBytes *uint64 `json:"maximum_disk_bytes,omitempty"`
+	Dest             string  `json:"dest,omitempty"`
+	Base             string  `json:"base,omitempty"`
+	Group            string  `json:"group,omitempty"`
+	SetHead          bool    `json:"set_head,omitempty"`
 }
 
 type SnapshotHeadUpdate struct {

@@ -336,15 +336,6 @@ impl SnapshotOps for ConfigurationErrorBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         self.fail()
     }
-
-    fn load<'a>(
-        &'a self,
-        _backend: Arc<dyn Context>,
-        _archive: &'a Path,
-        _dest: Option<&'a Path>,
-    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
-        self.fail()
-    }
 }
 
 impl VolumeOps for ConfigurationErrorBackend {

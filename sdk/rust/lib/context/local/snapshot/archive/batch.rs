@@ -22,14 +22,14 @@ struct StagedArchive {
 pub(super) async fn load(
     local: &LocalContext,
     archives: &[PathBuf],
-    opts: LoadOpts,
-    mut budget: Option<&mut ImportBudget<'_>>,
+    opts: LoadOptions,
 ) -> MicrosandboxResult<Vec<SnapshotHandle>> {
     if archives.is_empty() {
         return Err(MicrosandboxError::InvalidConfig(
             "snapshot load requires at least one archive".into(),
         ));
     }
+    let mut budget = opts.maximum_disk_bytes.map(ImportBudget::new).transpose()?;
     let started = Instant::now();
     let snapshots_dir = opts.dest.clone().unwrap_or_else(|| local.snapshots_dir());
     // Validate the requested namespace before doing expensive I/O. This read does not create a
@@ -45,17 +45,7 @@ pub(super) async fn load(
 
     let mut staged = Vec::with_capacity(archives.len());
     for archive in archives {
-        staged.push(unpack(archive, &snapshots_dir, &cache_tmp, budget.as_deref_mut()).await?);
-    }
-    if let Some(budget) = &budget {
-        for item in &staged {
-            let complete = item.unpacked.inventory.as_ref().is_none_or(|inventory| {
-                inventory.completeness == "boot-complete"
-                    && inventory.members.len() == item.unpacked.manifest_dirs.len()
-                    && inventory.entries.iter().all(|entry| entry.included)
-            });
-            budget.validate_archive(item.unpacked.manifest_dirs.len(), complete)?;
-        }
+        staged.push(unpack(archive, &snapshots_dir, &cache_tmp, budget.as_mut()).await?);
     }
     let unpack_us = started.elapsed().as_micros();
     let has_dependencies = staged.iter().try_fold(false, |found, item| {
@@ -139,7 +129,7 @@ pub(super) async fn load(
         }
         match opts.base.as_deref().filter(|_| !complete(&sources)) {
             Some(base) => {
-                let opened = Box::pin(delta::open_base(local, base, budget.as_deref_mut())).await?;
+                let opened = Box::pin(delta::open_base(local, base, budget.as_mut())).await?;
                 sources
                     .add(opened.snapshot.manifest(), opened.snapshot.path(), None)
                     .await?;
@@ -168,6 +158,7 @@ pub(super) async fn load(
                 item.snapshots.path(),
                 item.cache.path(),
                 &sources,
+                budget.as_mut(),
             )
             .await
             .map_err(|error| archive_error(&item.source, error))?;
@@ -337,7 +328,7 @@ async fn unpack(
     archive: &Path,
     root: &Path,
     cache_tmp: &Path,
-    budget: Option<&mut ImportBudget<'_>>,
+    budget: Option<&mut ImportBudget>,
 ) -> MicrosandboxResult<StagedArchive> {
     let snapshots = tempfile::Builder::new()
         .prefix(".msb-snapshot-import-")

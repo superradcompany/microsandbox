@@ -1,7 +1,7 @@
 //! Explicit Go destinations. Registry entries retain provider state, never ambient scope.
 
 use super::{FfiError, Handle, cstr, run_c};
-use microsandbox::Context;
+use microsandbox::{Context, LoadOptions};
 use std::{
     collections::HashMap,
     os::raw::{c_char, c_uchar},
@@ -257,7 +257,7 @@ async fn persistent_operation(
             .into_iter()
             .map(Resource::snapshot)
             .collect(),
-        "snapshot_load" => {
+        "snapshot_load" | "snapshot_load_with_size_limit" => {
             let opts: super::SnapshotLoadOptsJson =
                 serde_json::from_value(request.args["options"].clone())
                     .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
@@ -266,16 +266,15 @@ async fn persistent_operation(
                     .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
             context
                 .snapshot_ops()
-                .load_many(
-                    context.clone(),
-                    &archives,
-                    microsandbox::snapshot::LoadOpts {
-                        dest: opts.dest,
-                        base: opts.base,
-                        group: opts.group,
-                        set_head: opts.set_head,
-                    },
-                )
+                .load_many(context.clone(), &archives, {
+                    let mut options = LoadOptions::default();
+                    options.dest = opts.dest;
+                    options.base = opts.base;
+                    options.group = opts.group;
+                    options.set_head = opts.set_head;
+                    options.maximum_disk_bytes = opts.maximum_disk_bytes;
+                    options
+                })
                 .await?
                 .into_iter()
                 .map(Resource::snapshot)

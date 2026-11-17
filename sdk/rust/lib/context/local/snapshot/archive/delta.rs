@@ -488,6 +488,7 @@ pub(super) async fn resolve_sources(
     snapshots_dir: &Path,
     cache_dir: &Path,
     sources: &Sources,
+    mut budget: Option<&mut ImportBudget>,
 ) -> MicrosandboxResult<()> {
     let Some(dependencies) = validate(inventory)? else {
         return Ok(());
@@ -496,7 +497,7 @@ pub(super) async fn resolve_sources(
     for layer in &dependencies.disks {
         let source = &sources.disks[&serde_json::to_string(&layer.identity)?];
         let target = inventory_entry_target(&layer.path, snapshots_dir, cache_dir)?;
-        copy_dependency(source, &target).await?;
+        copy_dependency(source, &target, budget.as_deref_mut()).await?;
         if let LayerIdentity::File(layer) = &layer.identity {
             super::super::verify::verify_file_payload(&target, layer.payload.integrity.as_ref())
                 .await?;
@@ -508,7 +509,7 @@ pub(super) async fn resolve_sources(
             snapshots_dir,
             cache_dir,
         )?;
-        copy_dependency(&sources.memory[id], &target).await?;
+        copy_dependency(&sources.memory[id], &target, budget.as_deref_mut()).await?;
         let actual = format!(
             "sha256:{}",
             hex::encode(Box::pin(file_sha256(&target)).await?)
@@ -522,7 +523,7 @@ pub(super) async fn resolve_sources(
     for payload in &dependencies.owned {
         let source = &sources.owned[&serde_json::to_string(&payload.identity)?];
         let target = inventory_entry_target(&payload.path, snapshots_dir, cache_dir)?;
-        copy_dependency(source, &target).await?;
+        copy_dependency(source, &target, budget.as_deref_mut()).await?;
         verify_owned_payload(&target, &payload.identity).await?;
     }
     validate_resolved(local, inventory, snapshots_dir, cache_dir, &dependencies).await
@@ -836,7 +837,7 @@ pub(super) async fn resolve(
     // must not inherit a writable hardlink into the base; deleting the base must be harmless.
     for (source, required) in available.iter().zip(&dependencies.disks) {
         let target = inventory_entry_target(&required.path, snapshots_dir, cache_dir)?;
-        copy_dependency(&source.source, &target).await?;
+        copy_dependency(&source.source, &target, None).await?;
     }
     for id in &dependencies.memory {
         let source = checkpoint_object_path(&base.snapshot.path().join(CHECKPOINT_DIRECTORY), id);
@@ -845,7 +846,7 @@ pub(super) async fn resolve(
             snapshots_dir,
             cache_dir,
         )?;
-        copy_dependency(&source, &target).await?;
+        copy_dependency(&source, &target, None).await?;
         // Verify only the objects actually borrowed, in the destination-owned copy. Export
         // selection is metadata-only for RAM; it must not scan the base's entire guest memory.
         // This reader owns a 64 KiB buffer; boxing prevents every enclosing archive/SDK
@@ -872,7 +873,7 @@ pub(super) async fn resolve(
                 source_error(format!("base is missing owned payload {}", payload.path))
             })?;
         let target = inventory_entry_target(&payload.path, snapshots_dir, cache_dir)?;
-        copy_dependency(source, &target).await?;
+        copy_dependency(source, &target, None).await?;
         verify_owned_payload(&target, &payload.identity).await?;
     }
 
@@ -984,11 +985,18 @@ async fn validate_resolved(
     Ok(())
 }
 
-async fn copy_dependency(source: &Path, target: &Path) -> MicrosandboxResult<()> {
+async fn copy_dependency(
+    source: &Path,
+    target: &Path,
+    budget: Option<&mut ImportBudget>,
+) -> MicrosandboxResult<()> {
     if tokio::fs::symlink_metadata(target).await.is_ok() {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "dependency collides with an extracted member".into(),
         ));
+    }
+    if let Some(budget) = budget {
+        budget.charge_payload(tokio::fs::metadata(source).await?.len())?;
     }
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -1134,7 +1142,7 @@ fn physical_layers(
 pub(super) async fn open_base(
     local: &LocalContext,
     input: &str,
-    mut budget: Option<&mut ImportBudget<'_>>,
+    mut budget: Option<&mut ImportBudget>,
 ) -> MicrosandboxResult<BaseSnapshot> {
     let path = Path::new(input);
     // Admission has already anchored archive filenames. A remaining bare selector
@@ -1179,21 +1187,14 @@ pub(super) async fn open_base(
         ))
         .await?
     };
-    if let Some(budget) = &budget {
-        let complete = unpacked.inventory.as_ref().is_none_or(|inventory| {
-            inventory.completeness == "boot-complete"
-                && inventory.members.len() == unpacked.manifest_dirs.len()
-                && inventory.entries.iter().all(|entry| entry.included)
-        });
-        budget.validate_archive(unpacked.manifest_dirs.len(), complete)?;
-        if unpacked.inventory.is_some() {
-            for directory in &unpacked.manifest_dirs {
-                let manifest = Manifest::from_bytes(
-                    &tokio::fs::read(directory.join(DESCRIPTOR_FILENAME)).await?,
-                )
-                .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-                budget.validate_manifest(&manifest)?;
-            }
+    if let Some(budget) = &budget
+        && unpacked.inventory.is_some()
+    {
+        for directory in &unpacked.manifest_dirs {
+            let manifest =
+                Manifest::from_bytes(&tokio::fs::read(directory.join(DESCRIPTOR_FILENAME)).await?)
+                    .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+            budget.validate_manifest(&manifest)?;
         }
     }
     if let Some(inventory) = &unpacked.inventory {
@@ -1326,7 +1327,7 @@ mod tests {
                 super::super::load_snapshot_with_options(
                     &local,
                     &archive,
-                    LoadOpts {
+                    LoadOptions {
                         group: Some("group".into()),
                         ..Default::default()
                     },
@@ -1458,7 +1459,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let options = || LoadOpts {
+        let options = || LoadOptions {
             group: Some("corrupt-source".into()),
             ..Default::default()
         };
@@ -1592,6 +1593,41 @@ mod tests {
         .await
         .unwrap();
         assert!(load_snapshot(&local, &archive, None).await.is_err());
+        // The omitted base consumes the same budget as payloads in the archive.
+        let top_bytes = std::fs::metadata(head_dir.join(microsandbox_image::snapshot::layer_path(
+            &top.layer_id,
+            top.format,
+        )))
+        .unwrap()
+        .len();
+        let error = load_snapshot_with_options(
+            &local,
+            &archive,
+            LoadOptions::default()
+                .group("over-budget")
+                .base(base_name)
+                .maximum_disk_bytes(top_bytes.max(65536)),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("maximum disk size"), "{error}");
+        assert!(!local.snapshots_dir().join("over-budget").exists());
+
+        let limited = load_snapshot_with_options(
+            &local,
+            &archive,
+            LoadOptions::default()
+                .group("within-budget")
+                .base(base_name)
+                .maximum_disk_bytes(top_bytes + 65536),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(limited.path().join(&base_path)).unwrap(),
+            vec![91u8; 65536],
+        );
+
         // Loading now resolves exact payload identities from a source pool. A complete newer
         // snapshot can supply the required prefix even when it contains additional layers.
         let supplied_by_newer = load_snapshot_with_base(&local, &archive, None, Some(head_name))
@@ -1662,7 +1698,7 @@ mod tests {
             let batch = load_snapshots(
                 &local,
                 &inputs,
-                LoadOpts {
+                LoadOptions {
                     group: Some(group.into()),
                     ..Default::default()
                 },
