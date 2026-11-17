@@ -813,14 +813,23 @@ async fn a_crashed_lock_is_waited_out() {
 }
 
 #[tokio::test]
-async fn in_progress_until_the_deadline_returns_the_409() {
+async fn in_progress_without_retry_budget_returns_the_409() {
     let mock = MockCloud::replies(vec![Reply::Json(
         409,
         error_json(CLOUD_MODIFICATION_IN_PROGRESS, "busy"),
     )])
     .await;
 
-    let error = apply_within(&mock.backend(), &value_patch(VALUE), short_budget(600))
+    // Keep ample time for the HTTP answer, but no room for its next retry.
+    // A subsecond wall-clock deadline can expire during a later request on
+    // a busy runner, which correctly makes that request's outcome unknown.
+    let mut budget = short_budget(30_000);
+    budget.in_progress = Backoff {
+        first: budget.total,
+        max: budget.total,
+        jitter: false,
+    };
+    let error = apply_within(&mock.backend(), &value_patch(VALUE), budget)
         .await
         .unwrap_err();
 
@@ -832,7 +841,7 @@ async fn in_progress_until_the_deadline_returns_the_409() {
         ),
         "{error:?}"
     );
-    assert!(mock.requests().len() > 1);
+    assert_eq!(mock.requests().len(), 1);
 }
 
 #[tokio::test]
