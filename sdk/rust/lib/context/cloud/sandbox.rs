@@ -840,7 +840,7 @@ pub(crate) fn sandbox_config_from_cloud_spec(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support;
+    use std::path::Path;
     use std::sync::Arc;
 
     use microsandbox_types::{
@@ -853,6 +853,7 @@ mod tests {
     use crate::context::{Context, SandboxOps};
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
     use crate::snapshot::SnapshotReference;
+    use crate::test_support;
     use microsandbox_types::CloudSnapshotLocation;
     use microsandbox_types::HttpDenyResponseFormat;
 
@@ -1506,7 +1507,7 @@ mod tests {
             match config.spec.image {
                 RootfsSource::Bind { path: retained, .. }
                 | RootfsSource::DiskImage { path: retained, .. } => {
-                    assert_eq!(retained, std::path::Path::new(path))
+                    assert_eq!(retained, Path::new(path))
                 }
                 _ => panic!("remote root source changed"),
             }
