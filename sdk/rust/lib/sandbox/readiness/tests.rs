@@ -644,29 +644,31 @@ async fn remote_stop_waits_through_checkpoint_save() {
 }
 
 #[tokio::test]
-async fn remote_stop_observes_existing_save_without_resubmitting_stop() {
-    let (context, server) = provider(vec![
-        (
-            "GET",
-            "/v1/sandboxes/original",
-            200,
-            sandbox("original", "saving_state"),
-        ),
-        (
-            "GET",
-            "/v1/sandboxes/original",
-            200,
-            sandbox("original", "stopped"),
-        ),
-    ])
-    .await;
-    context
-        .as_cloud()
-        .unwrap()
-        .stop_complete("original")
-        .await
-        .unwrap();
-    server.await.unwrap();
+async fn remote_stop_observes_in_progress_shutdown_without_resubmitting_stop() {
+    for status in ["stopping", "saving_state"] {
+        let (context, server) = provider(vec![
+            (
+                "GET",
+                "/v1/sandboxes/original",
+                200,
+                sandbox("original", status),
+            ),
+            (
+                "GET",
+                "/v1/sandboxes/original",
+                200,
+                sandbox("original", "stopped"),
+            ),
+        ])
+        .await;
+        context
+            .as_cloud()
+            .unwrap()
+            .stop_complete("original")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]

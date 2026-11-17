@@ -15,6 +15,13 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_tungstenite::tungstenite::{self, protocol::Message as WsMessage};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Remote relay peers exchange byte streams in frames of up to 32 KiB.
+const WRITE_FRAME_BYTES: usize = 32 * 1024;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -23,7 +30,7 @@ use tokio_tungstenite::tungstenite::{self, protocol::Message as WsMessage};
 /// Reads drain binary messages in arrival order; message boundaries are not
 /// preserved (the relay is a byte pipe, so they carry no meaning). Text
 /// messages are ignored. A close message or end of stream reads as EOF.
-/// Each write is sent as one binary message.
+/// Large writes advance one frame at a time so the relay can apply backpressure.
 pub(super) struct WsByteStream<S> {
     inner: S,
     read_buf: Vec<u8>,
@@ -106,10 +113,11 @@ where
             Poll::Ready(Err(error)) => return Poll::Ready(Err(io::Error::other(error))),
             Poll::Pending => return Poll::Pending,
         }
+        let count = buf.len().min(WRITE_FRAME_BYTES);
         Pin::new(&mut self.inner)
-            .start_send(WsMessage::Binary(buf.to_vec().into()))
+            .start_send(WsMessage::Binary(buf[..count].to_vec().into()))
             .map_err(io::Error::other)?;
-        Poll::Ready(Ok(buf.len()))
+        Poll::Ready(Ok(count))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -234,6 +242,24 @@ mod tests {
             &io.inner.sent[0],
             WsMessage::Binary(data) if data.as_ref() == b"abc"
         ));
+    }
+
+    #[tokio::test]
+    async fn large_writes_preserve_bytes_across_relay_frames() {
+        use tokio::io::AsyncWriteExt;
+
+        let mut io = WsByteStream::new(ScriptedWs::new(Vec::new()));
+        let payload: Vec<_> = (0..2 * WRITE_FRAME_BYTES + 7)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        io.write_all(&payload).await.unwrap();
+        let mut frames = io.inner.sent.iter();
+        for chunk in payload.chunks(WRITE_FRAME_BYTES) {
+            assert!(
+                matches!(frames.next(), Some(WsMessage::Binary(bytes)) if bytes.as_ref() == chunk)
+            );
+        }
+        assert!(frames.next().is_none());
     }
 
     #[tokio::test]

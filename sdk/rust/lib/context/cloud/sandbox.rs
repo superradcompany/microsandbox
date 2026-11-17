@@ -100,10 +100,12 @@ impl RemoteContext {
         ) {
             return Ok(());
         }
-        // SavingState means teardown already completed; issuing another stop
-        // could conflict with the provider's checkpoint-save gate. Observe it
-        // until terminal rather than treating an exited VM as safe to delete.
-        if current.status != CloudSandboxStatus::SavingState {
+        // A previous caller may have already submitted stop. The provider
+        // rejects a duplicate while stopping or persisting the checkpoint.
+        if !matches!(
+            current.status,
+            CloudSandboxStatus::Stopping | CloudSandboxStatus::SavingState
+        ) {
             self.stop_sandbox_by_id(id).await?;
         }
         loop {
