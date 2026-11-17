@@ -3,8 +3,8 @@
 //! Requests address the sandbox by the id captured with the builder, so a new
 //! sandbox that reuses the name is never modified. Secret values are resolved in
 //! this process and sent only in the apply request body. An apply is re-sent only
-//! when nothing left the client, and waits while another change to the sandbox
-//! holds its lock; any other failure after sending is
+//! when nothing left the client or the API reports a modification in progress;
+//! any other failure after sending is
 //! [`ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed).
 
 use std::hash::{BuildHasher, RandomState};
@@ -35,8 +35,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 /// The apply route, as error messages name it.
 const APPLY_OP: &str = "PATCH /v1/sandboxes/:id";
 
-/// One `apply()`: 180 s in all, 75 s per request. 180 s covers a crashed
-/// request's 90 s lock plus one full request, with margin.
+/// Client timeouts and retry delays for one apply operation.
 const APPLY_BUDGET: ApplyBudget = ApplyBudget {
     total: Duration::from_secs(180),
     per_request: Duration::from_secs(75),
@@ -98,7 +97,7 @@ enum Attempt {
 enum RetryClass {
     /// The request never left the client.
     NotSent,
-    /// Another change to the sandbox holds its lock.
+    /// The API reports that a modification is already in progress.
     InProgress,
 }
 

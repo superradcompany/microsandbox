@@ -1,11 +1,11 @@
 //! Backend abstraction: routes SDK calls to either a local libkrun runtime or
-//! a remote msb-cloud control plane.
+//! the remote cloud API.
 //!
 //! The [`Backend`] trait + its sub-traits ([`SandboxBackend`], `VolumeBackend`,
 //! `SnapshotBackend`) are the dispatch surface every SDK handle (`Sandbox`,
 //! `Volume`, `ExecHandle`, …) routes through. Two implementations are planned:
 //! [`LocalBackend`] (wraps today's libkrun + agentd path) and `CloudBackend`
-//! (HTTP to msb-cloud, lives in this crate once the cloud-side wire surface is
+//! (HTTP to the cloud API, lives in this crate once the cloud-side wire surface is
 //! complete).
 //!
 //! ## Ambient default
@@ -85,7 +85,7 @@ use serde::{Deserialize, Serialize};
 pub enum BackendKind {
     /// Local libkrun + agentd backend. Spawns microVMs on the calling host.
     Local,
-    /// Remote backend talking to an msb-cloud control plane over HTTP.
+    /// Remote backend talking to the cloud API over HTTP.
     Cloud,
 }
 

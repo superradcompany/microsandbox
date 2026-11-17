@@ -82,7 +82,7 @@ struct CloudSandboxWaitQuery {
 //--------------------------------------------------------------------------------------------------
 // Methods: Sandbox lifecycle
 //
-// HTTP dispatch for the SDK's sandbox lifecycle ops, hitting msb-cloud's
+// HTTP dispatch for the SDK's sandbox lifecycle ops, hitting the cloud API's
 // API-key-authenticated routes (`/v1/sandboxes/*` and `/v1/sandboxes/by-name/*`).
 //--------------------------------------------------------------------------------------------------
 
@@ -90,7 +90,7 @@ impl CloudBackend {
     /// `POST /v1/sandboxes` (optionally create, start, and wait for readiness).
     ///
     /// Pass `start=true` to atomically create-and-start in a single round-trip
-    /// — mirrors msb-cloud's create-and-start shorthand. The SDK also requests
+    /// — mirrors the cloud API's create-and-start shorthand. The SDK also requests
     /// the opt-in server-side readiness barrier so a successful high-level
     /// create has the same immediately-usable contract as the local backend.
     pub(in crate::backend) async fn create_sandbox(
@@ -286,7 +286,7 @@ impl CloudBackend {
     }
 
     /// `DELETE /v1/sandboxes/by-name/:name`. Returns the typed `MessageResponse`
-    /// msb-cloud emits.
+    /// returned by the API.
     pub async fn destroy_sandbox(&self, name: &str) -> MicrosandboxResult<CloudMessageResponse> {
         let url = format!("{}/v1/sandboxes/by-name/{}", self.url, urlencoding(name));
         let resp = self
@@ -315,7 +315,7 @@ impl CloudBackend {
 
     /// Stream logs from `GET /v1/sandboxes/:id/logs`.
     ///
-    /// msb-cloud exposes logs as Server-Sent Events keyed by sandbox UUID, so
+    /// The API exposes logs as Server-Sent Events keyed by sandbox UUID, so
     /// the SDK resolves the current name to a cloud sandbox first. The cloud
     /// endpoint is streaming-only and requires a running sandbox, so callers
     /// must set `follow: true`.
@@ -516,7 +516,7 @@ impl CloudBackend {
 //--------------------------------------------------------------------------------------------------
 
 /// Parse a JSON response into `T`, mapping HTTP errors to typed
-/// `MicrosandboxError` variants. Tries to decode msb-cloud's typed error body
+/// `MicrosandboxError` variants. Tries to decode the cloud API's typed error body
 /// for richer messages on 4xx/5xx.
 pub(super) async fn decode_json<T: serde::de::DeserializeOwned>(
     resp: Response,
