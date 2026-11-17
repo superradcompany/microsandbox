@@ -55,7 +55,7 @@ pub enum VolumeInner {
     /// Local persisted volume handle.
     Local(VolumeLocalState),
     /// Cloud msb-cloud volume handle.
-    Cloud(VolumeCloudState),
+    Cloud(VolumeRemoteState),
 }
 
 /// Local handle state. Snapshot of the database row.
@@ -85,7 +85,7 @@ pub struct VolumeLocalState {
 
 /// Cloud handle state. Captures the snapshot msb-cloud returned at fetch time.
 #[derive(Clone)]
-pub struct VolumeCloudState {
+pub struct VolumeRemoteState {
     /// Server-side UUID.
     pub id: String,
     /// Bytes stored in the volume, when the cloud reports usage.

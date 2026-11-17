@@ -464,7 +464,7 @@ mod tests {
     fn cloud_sandbox(url: &str) -> crate::sandbox::Sandbox {
         crate::sandbox::Sandbox::from_cloud_state(
             Arc::new(crate::test_support::cloud_backend(url, "test-key").unwrap()),
-            crate::context::SandboxCloudState {
+            crate::context::SandboxRemoteState {
                 id: SANDBOX_ID.to_owned(),
                 org_id: "test-org".to_owned(),
                 created_at: chrono::Utc::now(),

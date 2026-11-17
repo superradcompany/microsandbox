@@ -144,7 +144,10 @@ class NativeType(type):
             return lambda context: getattr(context, collection)
 
         def invoke(*args, **kwargs):
-            owner = default_binding()
+            if name in ("local", "remote") and cls._native_name in ("Sandbox", "Volume", "Snapshot"):
+                owner = binding(name)
+            else:
+                owner = default_binding()
             function = getattr(getattr(owner, cls._native_name), name)
             return _call(function, owner, args, kwargs)
 

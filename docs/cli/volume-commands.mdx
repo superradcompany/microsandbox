@@ -6,6 +6,8 @@ description: Create, mount, and manage persistent sandbox volumes with the micro
 icon: "hard-drive"
 ---
 
+Use mutually exclusive `--local` / `--remote` to select a destination for this command. Explicit flags override profile/environment selection while preserving managed backend restrictions; see [selection and credentials](/operations/backends#explicit-cli-selection).
+
 Named volumes persist independently of sandboxes. Local volumes default to `~/.microsandbox/volumes/`.
 
 ## msb volume create

@@ -359,6 +359,19 @@ impl Snapshots {
 }
 
 impl Sandbox {
+    /// Select the default-local destination without consulting ambient remote selection.
+    #[cfg(feature = "local")]
+    pub fn local() -> Sandboxes {
+        super::default_local_context().sandboxes()
+    }
+
+    /// Capture remote credentials and endpoint from the environment, without backend I/O.
+    /// Existing collections and resources keep their previously captured destination.
+    #[cfg(feature = "cloud")]
+    pub fn remote() -> MicrosandboxResult<Sandboxes> {
+        Ok(super::RemoteContext::from_env()?.sandboxes())
+    }
+
     /// Bind sandbox factories to an explicit context, retaining its shared state.
     pub fn ctx(context: &dyn Context) -> Sandboxes {
         context.sandboxes()
@@ -366,6 +379,19 @@ impl Sandbox {
 }
 
 impl Volume {
+    /// Select the default-local destination without consulting ambient remote selection.
+    #[cfg(feature = "local")]
+    pub fn local() -> Volumes {
+        super::default_local_context().volumes()
+    }
+
+    /// Capture remote credentials and endpoint from the environment, without backend I/O.
+    /// Existing collections and resources keep their previously captured destination.
+    #[cfg(feature = "cloud")]
+    pub fn remote() -> MicrosandboxResult<Volumes> {
+        Ok(super::RemoteContext::from_env()?.volumes())
+    }
+
     /// Bind volume factories to an explicit context, retaining its shared state.
     pub fn ctx(context: &dyn Context) -> Volumes {
         context.volumes()
@@ -373,6 +399,19 @@ impl Volume {
 }
 
 impl Snapshot {
+    /// Select the default-local destination without consulting ambient remote selection.
+    #[cfg(feature = "local")]
+    pub fn local() -> Snapshots {
+        super::default_local_context().snapshots()
+    }
+
+    /// Capture remote credentials and endpoint from the environment, without backend I/O.
+    /// Existing collections and resources keep their previously captured destination.
+    #[cfg(feature = "cloud")]
+    pub fn remote() -> MicrosandboxResult<Snapshots> {
+        Ok(super::RemoteContext::from_env()?.snapshots())
+    }
+
     /// Bind snapshot factories to an explicit context, retaining its shared state.
     pub fn ctx(context: &dyn Context) -> Snapshots {
         context.snapshots()
@@ -386,6 +425,87 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "local", feature = "cloud"))]
+    #[test]
+    fn selectors_capture_remote_and_preserve_default_local() {
+        let _guard = crate::test_support::lock_env();
+        let home = tempfile::tempdir().unwrap();
+        let names = [
+            "MSB_HOME",
+            "MSB_CONFIG_PATH",
+            "MSB_BACKEND",
+            "MSB_PROFILE",
+            "MSB_API_KEY",
+            "MSB_API_URL",
+        ];
+        let previous = names.map(|name| (name, std::env::var_os(name)));
+        // All environment-mutating SDK tests serialize with lock_env.
+        unsafe {
+            std::env::set_var("MSB_HOME", home.path());
+            std::env::set_var("MSB_CONFIG_PATH", home.path().join("config.json"));
+            std::env::set_var("MSB_BACKEND", "local");
+            std::env::set_var("MSB_PROFILE", "missing");
+            std::env::remove_var("MSB_API_KEY");
+            std::env::set_var("MSB_API_URL", "https://first.example");
+        }
+        assert!(Sandbox::remote().is_err());
+        assert!(Volume::remote().is_err());
+        assert!(Snapshot::remote().is_err());
+        unsafe {
+            std::env::set_var("MSB_API_KEY", "fixture-key");
+        }
+        let selected = Sandbox::remote().unwrap();
+        let builder = selected.builder("retained");
+        assert_eq!(
+            Volume::remote().unwrap().context().kind(),
+            crate::ContextKind::Remote
+        );
+        assert_eq!(
+            Snapshot::remote().unwrap().context().kind(),
+            crate::ContextKind::Remote
+        );
+        unsafe {
+            std::env::set_var("MSB_API_URL", "https://second.example");
+            std::env::set_var("MSB_BACKEND", "remote");
+        }
+        assert_eq!(
+            selected.context().info().unwrap().api_url.as_deref(),
+            Some("https://first.example")
+        );
+        assert_eq!(
+            builder.context().info().unwrap().api_url.as_deref(),
+            Some("https://first.example")
+        );
+        assert_eq!(
+            Sandbox::remote()
+                .unwrap()
+                .context()
+                .info()
+                .unwrap()
+                .api_url
+                .as_deref(),
+            Some("https://second.example")
+        );
+        assert_eq!(Sandbox::local().context().kind(), crate::ContextKind::Local);
+        assert_eq!(Volume::local().context().kind(), crate::ContextKind::Local);
+        assert_eq!(
+            Snapshot::local().context().kind(),
+            crate::ContextKind::Local
+        );
+        assert_eq!(
+            Sandbox::builder("default").context().kind(),
+            crate::ContextKind::Local
+        );
+        for (name, value) in previous {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
     use crate::context::misconfigured::ConfigurationErrorBackend;
 
     fn destination(name: &str) -> ConfigurationErrorBackend {

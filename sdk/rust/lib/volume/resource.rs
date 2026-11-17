@@ -19,7 +19,7 @@ use sea_orm::{
 
 #[cfg(feature = "local")]
 use crate::context::local::creation::CreationStorage;
-use crate::context::{Context, ContextKind, VolumeCloudState, VolumeInner, VolumeLocalState};
+use crate::context::{Context, ContextKind, VolumeInner, VolumeLocalState, VolumeRemoteState};
 use crate::{MicrosandboxError, MicrosandboxResult, error::Operation, size::Mebibytes};
 #[cfg(feature = "local")]
 use crate::{
@@ -66,7 +66,7 @@ impl Volume {
 
     /// Host storage path, unavailable for remote volumes.
     pub fn path(&self) -> MicrosandboxResult<&Path> {
-        self.local()
+        self.local_state()
             .map(|state| state.path.as_path())
             .ok_or_else(|| MicrosandboxError::local_only(Operation::VolumePath))
     }
@@ -174,7 +174,7 @@ impl Volume {
     #[cfg(feature = "cloud")]
     pub(crate) fn from_cloud(
         backend: Arc<dyn Context>,
-        cloud: VolumeCloudState,
+        cloud: VolumeRemoteState,
         name: String,
     ) -> Self {
         Self {
@@ -197,7 +197,7 @@ impl Volume {
     }
 
     /// Local-only handle state. Returns `Some` for local-backed handles.
-    pub fn local(&self) -> Option<&VolumeLocalState> {
+    pub fn local_state(&self) -> Option<&VolumeLocalState> {
         match self.inner.as_ref() {
             VolumeInner::Local(s) => Some(s),
             VolumeInner::Cloud(_) => None,
@@ -205,7 +205,7 @@ impl Volume {
     }
 
     /// Cloud-only handle state. Returns `Some` for cloud-backed handles.
-    pub fn cloud(&self) -> Option<&VolumeCloudState> {
+    pub fn remote_state(&self) -> Option<&VolumeRemoteState> {
         match self.inner.as_ref() {
             VolumeInner::Cloud(s) => Some(s),
             VolumeInner::Local(_) => None,
@@ -633,7 +633,7 @@ async fn remove_local_identity(
 
     local_backend
         .remove_volume_storage(
-            handle.local().expect("local handle").db_id,
+            handle.local_state().expect("local handle").db_id,
             local_backend.volume_path(name),
             name_lock,
             disk_lock,
@@ -863,7 +863,7 @@ mod tests {
     #[cfg(feature = "local")]
     use crate::context::LocalContext;
     #[cfg(feature = "cloud")]
-    use crate::context::{CloudVolumeKind, CloudVolumeStatus, Context, VolumeCloudState};
+    use crate::context::{CloudVolumeKind, CloudVolumeStatus, Context, VolumeRemoteState};
     #[cfg(feature = "local")]
     use crate::sandbox::{HostPermissions, MountOptions, SandboxStatus, StatVirtualization};
 
@@ -974,7 +974,7 @@ mod tests {
         let now = chrono::Utc::now();
         let volume = Volume::from_cloud(
             Arc::new(context),
-            VolumeCloudState {
+            VolumeRemoteState {
                 id: "original-id".into(),
                 used_bytes: None,
                 capacity_bytes: None,
@@ -1095,7 +1095,7 @@ mod tests {
         let now = chrono::Utc::now();
         let handle = Volume::from_cloud(
             backend,
-            VolumeCloudState {
+            VolumeRemoteState {
                 id: "volume-id".into(),
                 used_bytes: Some(0),
                 capacity_bytes: None,
@@ -1109,7 +1109,10 @@ mod tests {
         );
 
         assert_eq!(handle.kind(), VolumeKind::Directory);
-        assert_eq!(handle.cloud().unwrap().kind, CloudVolumeKind::Managed);
+        assert_eq!(
+            handle.remote_state().unwrap().kind,
+            CloudVolumeKind::Managed
+        );
         assert_eq!(handle.fs_target, "cloud-id:volume-id");
     }
 
@@ -1122,7 +1125,7 @@ mod tests {
         let now = chrono::Utc::now();
         let handle = Volume::from_cloud(
             backend,
-            VolumeCloudState {
+            VolumeRemoteState {
                 id: "default-volume-id".into(),
                 used_bytes: Some(0),
                 capacity_bytes: None,

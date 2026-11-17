@@ -96,7 +96,7 @@ pub(in crate::sandbox) async fn fixture_with_version(
 }
 
 pub(in crate::sandbox) async fn finish(sb: &Sandbox) {
-    let local = sb.local().unwrap();
+    let local = sb.local_state().unwrap();
     let mut child = local.handle.as_ref().unwrap().lock().await;
     child.kill().unwrap();
     child.wait().await.unwrap();
@@ -112,7 +112,7 @@ async fn reaping_preserves_a_live_run_and_does_not_wait_for_its_process_lock() {
     sb.reap_exited_child().unwrap();
     assert!(sb.owns_lifecycle());
 
-    let local = sb.local().unwrap();
+    let local = sb.local_state().unwrap();
     let mut process = local.handle.as_ref().unwrap().lock().await;
     assert!(process.try_wait().unwrap().is_none());
 
@@ -134,7 +134,7 @@ async fn final_owner_drop_stops_the_child_but_one_clone_drop_does_not() {
     let (sb, _peer, _stdin, _home) = fixture(None).await;
     let clone = sb.clone();
     let pid = sb
-        .local()
+        .local_state()
         .unwrap()
         .handle
         .as_ref()
@@ -145,7 +145,7 @@ async fn final_owner_drop_stops_the_child_but_one_clone_drop_does_not() {
     drop(sb);
     assert!(
         clone
-            .local()
+            .local_state()
             .unwrap()
             .handle
             .as_ref()
@@ -170,7 +170,7 @@ async fn final_owner_drop_stops_the_child_but_one_clone_drop_does_not() {
 async fn detached_final_owner_drop_leaves_the_child_running() {
     let (sb, _peer, mut stdin, _home) = fixture(None).await;
     let pid = sb
-        .local()
+        .local_state()
         .unwrap()
         .handle
         .as_ref()
@@ -227,7 +227,7 @@ async fn detach_is_repeatable_shared_and_non_consuming() {
     assert_eq!(sb.id(), identity);
     assert_eq!(sb.name(), "task");
     assert!(
-        sb.local()
+        sb.local_state()
             .unwrap()
             .handle
             .as_ref()
@@ -240,8 +240,8 @@ async fn detach_is_repeatable_shared_and_non_consuming() {
     );
     // The resource and its original connection survive detaching a different clone.
     assert!(Arc::ptr_eq(
-        &sb.local().unwrap().client,
-        &clone.local().unwrap().client
+        &sb.local_state().unwrap().client,
+        &clone.local_state().unwrap().client
     ));
     drop(clone);
     finish(&sb).await;
@@ -271,7 +271,7 @@ async fn nonowner_cannot_disarm_an_independent_owner() {
             handle: None,
             cleanup: None,
             owned_run_id: None,
-            client: sb.local().unwrap().client.clone(),
+            client: sb.local_state().unwrap().client.clone(),
         },
         sb.prepared_runtime().unwrap().config.clone(),
     );
@@ -285,7 +285,7 @@ async fn nonowner_cannot_disarm_an_independent_owner() {
 #[tokio::test]
 async fn detach_does_not_wait_for_the_process_wait_lock() {
     let (sb, _peer, _stdin, _home) = fixture(None).await;
-    let local = sb.local().unwrap();
+    let local = sb.local_state().unwrap();
     let guard = local.handle.as_ref().unwrap().lock().await;
     tokio::time::timeout(Duration::from_secs(1), sb.detach())
         .await

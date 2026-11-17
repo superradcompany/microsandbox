@@ -43,9 +43,10 @@ pub use context::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
     CloudVolumeKind, CloudVolumeStatus, ComputeType, Context, ContextInfo, ContextKind,
-    ContextSelectionSource, Profile, ProfileKind, SandboxCloudState, SandboxInner, SandboxOps,
-    SandboxRecordCloudState, SandboxRecordInner, Sandboxes, Snapshots, VolumeCloudState,
-    VolumeInner, VolumeOps, Volumes, default_local_context, resolve_default_backend,
+    ContextSelectionSource, Profile, ProfileKind, SandboxInner, SandboxOps,
+    SandboxRecordCloudState, SandboxRecordInner, SandboxRemoteState, Sandboxes, Snapshots,
+    VolumeInner, VolumeOps, VolumeRemoteState, Volumes, default_local_context,
+    resolve_default_backend,
 };
 /// Previous name for [`ComputeType`].
 #[deprecated(note = "use ComputeType instead")]

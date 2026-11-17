@@ -64,13 +64,13 @@ pub struct SandboxRecordPage {
 /// Context-private state behind [`Sandbox`].
 ///
 /// Users never see this enum directly — they get the outer `Sandbox` and reach
-/// variant-specific data through the [`Sandbox::local`](crate::sandbox::Sandbox::local)
-/// / [`Sandbox::cloud`](crate::sandbox::Sandbox::cloud) accessors.
+/// variant-specific data through the [`Sandbox::local_state`](crate::sandbox::Sandbox::local_state)
+/// / [`Sandbox::remote_state`](crate::sandbox::Sandbox::remote_state) accessors.
 pub enum SandboxInner {
     /// Local libkrun-backed sandbox state.
     Local(Arc<SandboxLocalState>),
     /// Cloud msb-cloud-backed sandbox state.
-    Cloud(Arc<SandboxCloudState>),
+    Cloud(Arc<SandboxRemoteState>),
 }
 
 /// Local libkrun-backed sandbox state held inside [`SandboxInner::Local`].
@@ -93,7 +93,7 @@ pub struct SandboxLocalState {
 }
 
 /// Cloud msb-cloud-backed sandbox state held inside [`SandboxInner::Cloud`].
-pub struct SandboxCloudState {
+pub struct SandboxRemoteState {
     /// Server-side UUID (kept as a string to match the cloud wire format).
     pub id: String,
     /// Owning org's UUID.

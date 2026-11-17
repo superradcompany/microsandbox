@@ -11,7 +11,17 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 
 ### Live inspection
 
-`info` returns a hash with string keys `id`, `name`, `status`, `last_failure_message`, `created_at`, and `updated_at`. Timestamps are RFC3339 strings or `nil`. `id` and `name` require no I/O; mutable state is fetched on each inspection call. See [lifecycle](/sandboxes/lifecycle).
+```ruby
+sb = Microsandbox::Sandbox.get("task")
+info = sb.info
+status = sb.status
+failure = sb.last_failure_message
+config = sb.config
+```
+
+`info` returns a hash with string keys `id`, `name`, `status`, `last_failure_message`, `created_at` and `updated_at`. Optional timestamps are RFC3339 strings or `nil`. `name` and `id` require no backend I/O. List pages contain unprepared `Sandbox` objects without per-item connections or startup.
+
+Each inspection method performs a fresh backend lookup without starting the resource. A failed lookup raises or returns an error; it never substitutes cached data. Use `info` when several related fields are needed together. Configuration is the latest persisted settings, which may differ from settings applied to the current run. Retain the returned value when you want a snapshot.
 
 <p className="msb-member-group">Class methods</p>
 
@@ -259,7 +269,7 @@ output = sb.shell("echo hello")
 sb.ensure_running # => nil
 ```
 
-Connect to the sandbox if running, or start it if stopped. The object and its clones own any attached local run they start. Ordinary shell and exec calls do this automatically. See [lifecycle](/sandboxes/lifecycle#prepare-ahead-of-time).
+Optionally prepare this receiver before work. It connects when running or starts the captured resource when stopped. A newly started attached local run belongs to this receiver and its clones; connecting to an existing run acquires no ownership. Repeated calls preserve the shared owner. Ordinary shell and exec calls perform this preparation internally.
 
 <Accordion title="Example">
 
@@ -269,6 +279,43 @@ sb.ensure_running
 ```
 
 </Accordion>
+
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">recover_storage()</span>
+
+```ruby
+Microsandbox::Sandbox.recover_storage(
+  name, selections: {}, accept_selected_view: false,
+  legacy_writers_stopped: false
+) # => StorageRecovery
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>selections</code><span className="msb-type">Hash&lt;String, String&gt;</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with disk ID keys and candidate ID values. Omit or leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>accept_selected_view</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>legacy_writers_stopped</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originals_retained</code> (boolean) confirms the original disks were retained.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">list()</span>
 
@@ -580,7 +627,7 @@ Record activity to refresh the sandbox idle timer.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="SDK metrics methods are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```ruby
 sandbox.metrics # => SandboxMetrics
@@ -754,7 +801,7 @@ sandbox.restart(force: false, timeout: nil, detached: false) # => Sandbox
 
 Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Set `force: true` to kill, `timeout:` in seconds to change how long shutdown can take, or `detached: true` for a local background start.
 
-On managed cloud, graceful restart is supported, but timeout expiry cannot escalate to force kill. `force: true` is local-only, and `detached:` affects only local process ownership.
+On microsandbox cloud, graceful restart is supported, but timeout expiry cannot escalate to force kill. `force: true` is local-only, and `detached:` affects only local process ownership.
 
 <p className="msb-label">Parameters</p>
 
@@ -1800,6 +1847,16 @@ Stop observing logs. This does not stop the job.
 ```ruby
 sandbox = Microsandbox::Sandbox.create("nested", image: "alpine", nested_virt: true)
 ```
+
+## Sandbox.local / Sandbox.remote
+
+```ruby
+Microsandbox::Sandbox.local  # => Sandboxes
+Microsandbox::Sandbox.remote # => Sandboxes
+```
+
+Select before creation/lookup/listing; the collection retains its destination. Remote selection captures environment credentials and raises on invalid configuration. Neither selector changes an existing resource or global default. See [selector examples](/cloud/connect#resource-selectors).
+
 
 ## Storage recovery
 

@@ -3636,7 +3636,7 @@ mod tests {
                     .unwrap();
                 let sandbox = Sandbox::from_cloud_state(
                     Arc::new(cloud),
-                    crate::context::SandboxCloudState {
+                    crate::context::SandboxRemoteState {
                         id: "test-sandbox".into(),
                         org_id: "test-org".into(),
                         created_at: chrono::Utc::now(),

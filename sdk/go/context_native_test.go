@@ -80,7 +80,45 @@ func TestExplicitContextsNative(t *testing.T) {
 		return destination
 	}
 	a, b := provider("a"), provider("b")
-	collection := a.Sandboxes()
+	if _, err := SandboxRemote(); err == nil {
+		t.Fatal("missing credentials accepted")
+	}
+	if _, err := VolumeRemote(); err == nil {
+		t.Fatal("missing credentials accepted")
+	}
+	if _, err := SnapshotRemote(); err == nil {
+		t.Fatal("missing credentials accepted")
+	}
+	t.Setenv("MSB_API_URL", urls["a"])
+	t.Setenv("MSB_API_KEY", "key-a")
+	t.Setenv("MSB_BACKEND", "local")
+	collection, err := SandboxRemote()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vr, err := VolumeRemote()
+	if err != nil || vr.Context().Kind() != ContextRemote {
+		t.Fatal("volume remote selector", err)
+	}
+	sr, err := SnapshotRemote()
+	if err != nil || sr.Context().Kind() != ContextRemote {
+		t.Fatal("snapshot remote selector", err)
+	}
+	t.Setenv("MSB_BACKEND", "remote")
+	sl, err := SandboxLocal()
+	if err != nil || sl.Context().Kind() != ContextLocal {
+		t.Fatal("sandbox local selector", err)
+	}
+	vl, err := VolumeLocal()
+	if err != nil || vl.Context().Kind() != ContextLocal {
+		t.Fatal("volume local selector", err)
+	}
+	snl, err := SnapshotLocal()
+	if err != nil || snl.Context().Kind() != ContextLocal {
+		t.Fatal("snapshot local selector", err)
+	}
+	t.Setenv("MSB_API_URL", urls["b"])
+	t.Setenv("MSB_API_KEY", "key-b")
 	unchanged, err := a.WithOptions()
 	if err != nil {
 		t.Fatal(err)

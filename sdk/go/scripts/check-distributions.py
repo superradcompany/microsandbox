@@ -43,7 +43,7 @@ def main():
         requires = "\n".join(f" {module} {version}" for module in modules.values())
         (app / "go.mod").write_text(f"module providerconsumer\n\ngo 1.22\n\nrequire (\n{requires}\n)\n")
         full_import = f'full "{BASE}"' if "full" in modules else ""
-        full_identity = "var same *full.Sandbox = resource; _ = same" if "full" in modules else ""
+        full_identity = "var same *full.Sandbox = resource; _ = same; _ = full.SandboxLocal; _ = full.SandboxRemote; _ = full.VolumeLocal; _ = full.VolumeRemote; _ = full.SnapshotLocal; _ = full.SnapshotRemote" if "full" in modules else ""
         (app / "providers_test.go").write_text(f'''package providerconsumer
 import (
  "testing"
@@ -56,6 +56,9 @@ import (
 func TestSharedTypesAndMissingProvider(t *testing.T) {{
  var resource *core.Sandbox
  {full_identity}
+ _ = core.SandboxLocal; _ = core.SandboxRemote
+ _ = core.VolumeLocal; _ = core.VolumeRemote
+ _ = core.SnapshotLocal; _ = core.SnapshotRemote
  _ = local.NewContext
  var hosted func(string, string) (*core.RemoteContext, error) = remote.NewContext
  var explicit func(string, string, string) (*core.RemoteContext, error) = remote.NewContextWithURL

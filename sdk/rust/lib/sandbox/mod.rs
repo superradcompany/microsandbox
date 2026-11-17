@@ -283,7 +283,7 @@ pub struct SandboxPage {
 /// regardless of backend. It holds an [`Arc<dyn Context>`](crate::context::Context)
 /// to route lifecycle ops through, and a backend-private
 /// [`SandboxInner`](crate::context::SandboxInner) enum carrying variant-specific
-/// state. Users reach variant data via [`Sandbox::local`] / [`Sandbox::cloud`].
+/// state. Users reach variant data via [`Sandbox::local_state`] / [`Sandbox::remote_state`].
 #[derive(Clone)]
 #[must_use = "Retain the Sandbox; discarding an owning result may trigger shutdown"]
 pub struct Sandbox {
@@ -747,7 +747,7 @@ impl Sandbox {
     /// Local-only state accessor. Returns `Some` when this `Sandbox` was
     /// created by the local libkrun backend.
     #[cfg(feature = "local")]
-    pub fn local(&self) -> Option<Arc<crate::context::SandboxLocalState>> {
+    pub fn local_state(&self) -> Option<Arc<crate::context::SandboxLocalState>> {
         match &self.binding.current()?.inner {
             crate::context::SandboxInner::Local(local) => Some(local.clone()),
             _ => None,
@@ -755,21 +755,21 @@ impl Sandbox {
     }
 
     /// Current remote runtime metadata, if preparation has established it.
-    pub fn cloud(&self) -> Option<Arc<crate::context::SandboxCloudState>> {
+    pub fn remote_state(&self) -> Option<Arc<crate::context::SandboxRemoteState>> {
         match &self.binding.current()?.inner {
             crate::context::SandboxInner::Cloud(remote) => Some(remote.clone()),
             _ => None,
         }
     }
 
-    /// Same as [`Sandbox::local`] but returns a typed `Unsupported` error
+    /// Same as [`Sandbox::local_state`] but returns a typed `Unsupported` error
     /// for cloud sandboxes. Used by methods that have no cloud equivalent yet.
     #[cfg(feature = "local")]
     fn require_local(
         &self,
         op: Operation,
     ) -> MicrosandboxResult<Arc<crate::context::SandboxLocalState>> {
-        self.local().ok_or_else(|| {
+        self.local_state().ok_or_else(|| {
             if self.backend.as_local().is_some() {
                 crate::MicrosandboxError::SandboxNotRunning(self.name.clone())
             } else {
@@ -1070,7 +1070,7 @@ impl Sandbox {
     /// Keep the creator's process safety net armed until every creation check has succeeded.
     #[cfg(feature = "local")]
     pub(crate) async fn finish_detached_creation(&mut self) -> MicrosandboxResult<()> {
-        if let Some(local) = self.local()
+        if let Some(local) = self.local_state()
             && let Some(cleanup) = &local.cleanup
         {
             cleanup.disarm()?;
@@ -1081,7 +1081,7 @@ impl Sandbox {
     /// Creation cleanup owns this exact process and must not reacquire its transition lock.
     #[cfg(feature = "local")]
     pub(crate) async fn terminate_creation_owner(&self) {
-        if let Some(local) = self.local()
+        if let Some(local) = self.local_state()
             && let Some(handle) = &local.handle
         {
             let mut handle = handle.lock().await;

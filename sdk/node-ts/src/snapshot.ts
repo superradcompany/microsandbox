@@ -1,4 +1,4 @@
-import { Context, Snapshots } from "./context.js";
+import { Context, LocalContext, RemoteContext, Snapshots } from "./context.js";
 import { UnsupportedError } from "./errors.js";
 import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
@@ -161,8 +161,16 @@ export class Snapshot {
     this.inner = inner;
   }
 
+  /** Capture a local destination; never changes ambient routing. */
+  static local(): Snapshots { return new LocalContext().snapshots; }
+  /** Capture remote environment credentials now, before creating or looking up a resource. */
+  static remote(): Snapshots { return RemoteContext.fromEnv().snapshots; }
+  static ctx(context: Context): Snapshots { return context.snapshots; }
+
+  get context(): Context { return Context.fromNative(this.inner.context()); }
+
   /**
-   * Begin building a snapshot using the active backend; local names may be generated.
+   * Begin building a snapshot using the default-local destination; local names may be generated.
    *
    * The source sandbox is required:
    * `Snapshot.builder("clean").fromSandbox("box").create()`.
@@ -170,10 +178,6 @@ export class Snapshot {
    * Use `group(name)` to select a group and `destDir(dir)` to select its
    * parent directory. The default group is the source sandbox's name.
    */
-  static ctx(context: Context): Snapshots { return context.snapshots; }
-
-  get context(): Context { return Context.fromNative(this.inner.context()); }
-
   static builder(name = ""): SnapshotBuilder {
     return wrapBuilder(new napi.SnapshotBuilder(name));
   }

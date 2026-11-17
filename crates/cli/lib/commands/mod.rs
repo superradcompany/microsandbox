@@ -89,7 +89,10 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
             // Rebuild a live sandbox. Local connects to the agent relay now;
             // cloud agent operations establish their WebSocket lazily.
             let sandbox = handle.connect().await?;
-            if sandbox.local().is_some() && sandbox.client().await?.is_legacy_protocol() && !quiet {
+            if sandbox.local_state().is_some()
+                && sandbox.client().await?.is_legacy_protocol()
+                && !quiet
+            {
                 // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
                 // compatibility for versions before 0.5 is no longer supported.
                 ui::warn(&format!(

@@ -336,3 +336,12 @@ Delete this volume using its identity and connection. A same-name replacement is
     <div className="msb-param-desc">No return value.</div>
   </div>
 </div>
+
+## Volume.local / Volume.remote
+
+```ruby
+Microsandbox::Volume.local  # => Volumes
+Microsandbox::Volume.remote # => Volumes
+```
+
+Select before creation/lookup/listing; the collection retains its destination. Remote selection captures environment credentials and raises on invalid configuration. Neither selector changes an existing resource or global default. See [selector examples](/operations/backends#resource-selectors).

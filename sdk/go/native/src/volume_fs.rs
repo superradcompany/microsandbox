@@ -142,7 +142,7 @@ pub(crate) async fn dispatch_volume(
     args: &Value,
 ) -> Result<String, FfiError> {
     #[cfg(feature = "local")]
-    if volume.local().is_some() {
+    if volume.local_state().is_some() {
         let data = if op == "write" {
             Some(decode_data(args)?)
         } else {

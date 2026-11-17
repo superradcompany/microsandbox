@@ -167,7 +167,8 @@ import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import threading
-from microsandbox import LocalContext, RemoteContext, Sandbox
+from microsandbox import LocalContext, RemoteContext, Sandbox, Volume, Snapshot
+import os
 
 servers = []
 creates = []
@@ -223,7 +224,24 @@ async def check():
             raise AssertionError("fixture should deny creation")
     assert creates == ["shared", "standard"], creates
     assert a.kind == "remote" and LocalContext().kind == "local"
-    collection = a.sandboxes
+    for resource in (Sandbox, Volume, Snapshot):
+        try:
+            resource.remote()
+        except Exception:
+            pass
+        else:
+            raise AssertionError("missing credentials accepted")
+    os.environ.update(
+        MSB_API_URL=f"http://127.0.0.1:{servers[0].server_port}",
+        MSB_API_KEY="key-a", MSB_BACKEND="local",
+    )
+    collection = Sandbox.remote()
+    for resource in (Sandbox, Volume, Snapshot):
+        assert resource.remote().context.kind == "remote"
+    os.environ["MSB_BACKEND"] = "remote"
+    for resource in (Sandbox, Volume, Snapshot):
+        assert resource.local().context.kind == "local"
+    os.environ.update(MSB_API_URL=f"http://127.0.0.1:{servers[1].server_port}", MSB_API_KEY="key-b")
     assert (await a.replace().sandboxes.get("task")).id == (await collection.get("task")).id
     for overrides in (
         {"api_key": ""}, {"url": ""}, {"request_timeout_ms": -1}, {"compute_type": "invalid"}

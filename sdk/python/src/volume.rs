@@ -24,6 +24,22 @@ pub struct PyVolume {
 
 #[pymethods]
 impl PyVolume {
+    /// Capture a local destination without consulting remote selection variables.
+    #[staticmethod]
+    fn local() -> crate::context::PyVolumes {
+        crate::context::PyVolumes {
+            inner: microsandbox::context::default_local_context(),
+        }
+    }
+
+    /// Capture remote environment settings before any deferred operation.
+    #[staticmethod]
+    fn remote() -> PyResult<crate::context::PyVolumes> {
+        Ok(crate::context::PyVolumes {
+            inner: microsandbox::context::remote_from_env().map_err(to_py_err)?,
+        })
+    }
+
     #[staticmethod]
     fn ctx(context: PyRef<'_, crate::context::PyContext>) -> crate::context::PyVolumes {
         crate::context::PyVolumes {

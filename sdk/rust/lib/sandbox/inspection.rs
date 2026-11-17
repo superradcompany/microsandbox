@@ -104,7 +104,7 @@ impl Sandbox {
     /// Lookup failures are returned; this never substitutes a cached configuration.
     pub async fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         let record = self.refresh_handle().await?;
-        if record.local().is_some() {
+        if record.local_state().is_some() {
             return record.config();
         }
         #[cfg(feature = "cloud")]

@@ -1,4 +1,4 @@
-import { Context, Volumes } from "./context.js";
+import { Context, LocalContext, RemoteContext, Volumes } from "./context.js";
 import { withMappedErrors } from "./internal/error-mapping.js";
 import {
   napi,
@@ -38,11 +38,15 @@ export class Volume {
     this.inner = inner;
   }
 
-  /** Begin building a new volume. */
+  /** Capture a local destination; never changes ambient routing. */
+  static local(): Volumes { return new LocalContext().volumes; }
+  /** Capture remote environment credentials now, before creating or looking up a resource. */
+  static remote(): Volumes { return RemoteContext.fromEnv().volumes; }
   static ctx(context: Context): Volumes { return context.volumes; }
 
   get context(): Context { return Context.fromNative(this.inner.context()); }
 
+  /** Begin building a new volume using the default-local destination. */
   static builder(name: string): VolumeBuilder {
     return Volume.fromNativeBuilder(new napi.VolumeBuilder(name));
   }

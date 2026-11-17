@@ -13,6 +13,22 @@ See [Snapshots](/sdk/rust/snapshots#forking) for live fork methods.
 
 ## Sandbox
 
+#### <span className="msb-recv">Sandbox::</span><span className="msb-hn">local()</span>
+
+```rust
+fn local() -> Sandboxes
+```
+
+Select the default-local destination. Requires the local feature. Does not consult remote selection variables. See [selector examples](/operations/backends#resource-selectors).
+
+#### <span className="msb-recv">Sandbox::</span><span className="msb-hn">remote()</span>
+
+```rust
+fn remote() -> MicrosandboxResult<Sandboxes>
+```
+
+Capture remote environment credentials and endpoint without network I/O. Requires the cloud feature. Missing credentials fail; existing resources keep their destination. See [selector examples](/operations/backends#resource-selectors).
+
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">builder()</span>
 
 ```rust
@@ -897,6 +913,15 @@ Local ephemeral cleanup removes this information along with the sandbox. If an
 orchestrator needs the result, create the local sandbox with `.ephemeral(false)`,
 consume its exit, then explicitly destroy it when its retention policy requires
 cleanup. This does not disable idle timeouts or enable automatic snapshots.
+
+### local_state() / remote_state()
+
+```rust
+fn local_state(&self) -> Option<Arc<SandboxLocalState>>;
+fn remote_state(&self) -> Option<Arc<SandboxRemoteState>>;
+```
+
+Return retained connection state without I/O. Local state requires the local feature. None can mean no connection has been prepared; use `context_kind()` to determine the destination. The Arc keeps the captured state valid when the receiver later changes runs. Use live inspection methods for current backend information.
 
 ## SandboxBuilder
 

@@ -300,7 +300,7 @@ mod tests {
         let make_handle = |backend, id: &str| {
             crate::sandbox::Sandbox::from_cloud_state(
                 backend,
-                crate::context::SandboxCloudState {
+                crate::context::SandboxRemoteState {
                     id: id.to_owned(),
                     org_id: "test-org".to_owned(),
                     created_at: chrono::Utc::now(),

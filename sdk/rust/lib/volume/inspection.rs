@@ -71,9 +71,9 @@ impl Volume {
             is_default: current.is_default(),
             quota_mib: current.quota_mib_snapshot(),
             used_bytes: current
-                .cloud()
+                .remote_state()
                 .map(|state| state.used_bytes)
-                .unwrap_or_else(|| current.local().and_then(|state| state.used_bytes)),
+                .unwrap_or_else(|| current.local_state().and_then(|state| state.used_bytes)),
             capacity_bytes: current.capacity_bytes_snapshot(),
             disk_format: current.disk_format().map(str::to_owned),
             disk_fstype: current.disk_fstype().map(str::to_owned),

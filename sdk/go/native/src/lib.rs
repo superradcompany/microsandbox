@@ -5335,10 +5335,10 @@ fn volume_handle_json(vh: &Volume) -> String {
     // Best-effort: local handles carry their exact backend path; cloud
     // volumes don't expose a host-side directory.
     let path = vh
-        .local()
+        .local_state()
         .map(|local| local.path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let id = vh.cloud().map(|cloud| cloud.id.as_str());
+    let id = vh.remote_state().map(|cloud| cloud.id.as_str());
     serde_json::json!({
         "id": id,
         "name": vh.name(),

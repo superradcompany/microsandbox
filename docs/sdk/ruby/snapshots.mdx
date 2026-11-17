@@ -401,3 +401,12 @@ Fresh descriptor state. Missing or replaced artifacts raise errors rather than r
 ## Forking
 
 The Ruby SDK does not currently expose single or batch sandbox forking. For supported APIs and examples, see [TypeScript](/sdk/typescript/snapshots#forking), [Rust](/sdk/rust/snapshots#forking), [Python](/sdk/python/snapshots#forking), or [Go](/sdk/go/snapshots#forking).
+
+## Snapshot.local / Snapshot.remote
+
+```ruby
+Microsandbox::Snapshot.local  # => Snapshots
+Microsandbox::Snapshot.remote # => Snapshots
+```
+
+Select before creation/lookup/listing; the collection retains its destination. Remote selection captures environment credentials and raises on invalid configuration. Neither selector changes an existing resource or global default. See [selector examples](/operations/backends#resource-selectors).

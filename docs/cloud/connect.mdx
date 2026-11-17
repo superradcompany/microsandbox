@@ -435,3 +435,59 @@ See [context commands](/cli/management#msb-context) for JSON output and troubles
 `msb context` shows where CLI commands run. To check an object’s connection in code, see your [SDK reference](/sdk/overview#reference).
 
 See [configuration](/operations/configuration) for defaults and [cloud limitations](/cloud/limitations) for feature differences.
+
+
+## Resource selectors
+
+For explicit selection before creation, lookup or listing, use the resource's `local()` or `remote()` selector. Sandbox, Volume and Snapshot return their existing plural collection types. Ordinary direct entry points remain default-local; selectors do not install a global default or retarget existing resources.
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox, Volume } from "microsandbox";
+
+const sb = await Sandbox.remote().get("worker");
+const volumes = await Volume.remote().list();
+const local = Sandbox.local();
+```
+
+```rust Rust
+use microsandbox::{Sandbox, Volume};
+
+let sb = Sandbox::remote()?.get("worker").await?;
+let volumes = Volume::remote()?.list().await?;
+let local = Sandbox::local();
+```
+
+```python Python
+from microsandbox import Sandbox, Volume
+
+sb = await Sandbox.remote().get("worker")
+volumes = await Volume.remote().list()
+local = Sandbox.local()
+```
+
+```go Go
+import msb "github.com/superradcompany/microsandbox/sdk/go"
+
+sandboxes, err := msb.SandboxRemote()
+if err != nil { return err }
+sb, err := sandboxes.Get(ctx, "worker")
+if err != nil { return err }
+volumes, err := msb.VolumeRemote()
+if err != nil { return err }
+local, err := msb.SandboxLocal()
+if err != nil { return err }
+```
+
+```ruby Ruby
+require "microsandbox"
+
+sb = Microsandbox::Sandbox.remote.get("worker")
+volumes = Microsandbox::Volume.remote.list
+local = Microsandbox::Sandbox.local
+```
+</CodeGroup>
+
+Remote selectors capture `MSB_API_KEY` and optional `MSB_API_URL` at the call, ignoring ambient backend/profile selection. Construction performs no remote lookup; validation or missing-provider errors happen before a usable remote collection is returned. Existing collections, deferred builders and resources keep captured credentials after environment changes. Go's local selectors also return an error because context/provider construction can fail. Rust selectors are gated by the corresponding local/cloud feature. Bindings require the corresponding installed provider and never fall back to the other destination.
+
+Use `Resource.ctx(context)` or context collections when selecting a named profile, a different account or custom local configuration. Instance resources remain bound to their original destination. Rust `local_state()` / `remote_state()` expose retained backend-specific state; they do not perform live inspection.
