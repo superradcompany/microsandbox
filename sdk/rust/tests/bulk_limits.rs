@@ -14,6 +14,10 @@ use test_utils::msb_test;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
 /// Raw bulk operations one agent client may hold open at once.
 const PER_CLIENT_BULK_LIMIT: usize = 64;
 
@@ -31,6 +35,225 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const RELEASE_DEADLINE: Duration = Duration::from_secs(10);
 
 const WRITE_CHUNK: usize = 64 * 1024;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Counts commands run on a separate client for the length of a test.
+struct Observer {
+    stop: Arc<AtomicBool>,
+    runs: Arc<AtomicUsize>,
+    task: JoinHandle<usize>,
+}
+
+struct ObserverTally {
+    runs: usize,
+    failures: usize,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl Observer {
+    fn start(client: Sandbox) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn({
+            let (stop, runs) = (Arc::clone(&stop), Arc::clone(&runs));
+            async move {
+                let mut failures = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    match timeout(COMMAND_TIMEOUT, client.shell("true")).await {
+                        Ok(Ok(output)) if output.status().success => {
+                            runs.fetch_add(1, Ordering::Relaxed);
+                        }
+                        _ => failures += 1,
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+                failures
+            }
+        });
+        Self { stop, runs, task }
+    }
+
+    fn runs(&self) -> usize {
+        self.runs.load(Ordering::Relaxed)
+    }
+
+    async fn finish(self) -> ObserverTally {
+        self.stop.store(true, Ordering::Relaxed);
+        let failures = timeout(STEP_TIMEOUT, self.task)
+            .await
+            .expect("observer did not stop")
+            .unwrap();
+        ObserverTally {
+            runs: self.runs.load(Ordering::Relaxed),
+            failures,
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+async fn create_sandbox(name: &str, memory: u32) -> Sandbox {
+    let sandbox = Sandbox::builder(name)
+        .image(IMAGE)
+        .cpus(1)
+        .memory(memory)
+        .replace()
+        .create()
+        .await
+        .unwrap();
+    let output = sandbox
+        .shell(format!("truncate -s 64G {ENDLESS_FILE}"))
+        .await
+        .unwrap();
+    assert!(output.status().success);
+    sandbox
+}
+
+/// Open a new agent client. Each client has its own bulk allowance.
+async fn connect(name: &str) -> Sandbox {
+    timeout(STEP_TIMEOUT, async {
+        Sandbox::get(name).await?.connect().await
+    })
+    .await
+    .expect("connecting to the sandbox stalled")
+    .expect("connecting to the sandbox failed")
+}
+
+async fn open_read(client: &Sandbox, path: &str) -> MicrosandboxResult<FsReadStream> {
+    let fs = client.fs();
+    let options = FsOpenOptions {
+        read: true,
+        ..Default::default()
+    };
+    let handle = with_timeout(fs.open_file(path, options)).await?;
+
+    let stream = with_timeout(fs.read_handle_stream(handle, 0, None)).await;
+    if stream.is_err() {
+        let _ = with_timeout(fs.close_handle(handle)).await;
+    }
+    stream
+}
+
+async fn open_write(client: &Sandbox, path: &str) -> MicrosandboxResult<FsWriteSink> {
+    let fs = client.fs();
+    let options = FsOpenOptions {
+        write: true,
+        create: true,
+        truncate: true,
+        ..Default::default()
+    };
+    let handle = with_timeout(fs.open_file(path, options)).await?;
+
+    let sink = with_timeout(fs.write_handle_stream(handle, 0, None)).await;
+    if sink.is_err() {
+        let _ = with_timeout(fs.close_handle(handle)).await;
+    }
+    sink
+}
+
+/// Open a read stream, retrying while a just-released slot is still held.
+async fn open_read_once_released(client: &Sandbox) -> FsReadStream {
+    let deadline = Instant::now() + RELEASE_DEADLINE;
+    loop {
+        match open_read(client, ENDLESS_FILE).await {
+            Ok(stream) => return stream,
+            Err(error) if is_limit_refusal(&error) && Instant::now() < deadline => {
+                sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("released bulk slot was not reusable: {error}"),
+        }
+    }
+}
+
+async fn read_file(client: &Sandbox, path: &str) -> Bytes {
+    let stream = open_read(client, path).await.unwrap();
+    timeout(STEP_TIMEOUT, stream.collect())
+        .await
+        .expect("reading the file stalled")
+        .unwrap()
+}
+
+/// Read a stream to its end in the background, counting it once its first chunk arrives.
+fn drain(mut stream: FsReadStream, started: &Arc<AtomicUsize>) -> JoinHandle<()> {
+    let started = Arc::clone(started);
+    tokio::spawn(async move {
+        let mut first = true;
+        while let Ok(Some(_)) = stream.recv().await {
+            if std::mem::take(&mut first) {
+                started.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    })
+}
+
+async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    while counter.load(Ordering::Relaxed) < expected {
+        assert!(
+            Instant::now() < deadline,
+            "only {} of {expected} streams delivered data",
+            counter.load(Ordering::Relaxed)
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn assert_serving(sandbox: &Sandbox) {
+    assert!(
+        matches!(sandbox.status().await.unwrap(), SandboxStatus::Running),
+        "sandbox is not running"
+    );
+    let output = timeout(COMMAND_TIMEOUT, sandbox.shell("true"))
+        .await
+        .expect("command stalled")
+        .unwrap();
+    assert!(output.status().success);
+}
+
+fn assert_limit_refusal(error: Option<MicrosandboxError>) {
+    let error = error.expect("a bulk stream beyond the per-client limit was admitted");
+    assert!(
+        is_limit_refusal(&error),
+        "expected the per-client limit error, got: {error}"
+    );
+}
+
+fn is_limit_refusal(error: &MicrosandboxError) -> bool {
+    error.to_string().contains(&format!(
+        "maximum of {PER_CLIENT_BULK_LIMIT} active bulk operations"
+    ))
+}
+
+async fn with_timeout<T>(
+    operation: impl Future<Output = MicrosandboxResult<T>>,
+) -> MicrosandboxResult<T> {
+    timeout(STEP_TIMEOUT, operation)
+        .await
+        .expect("filesystem operation stalled")
+}
+
+fn written_path(index: usize) -> String {
+    format!("/tmp/written-{index}")
+}
+
+/// Deterministic content that varies with the offset and the seed.
+fn known_bytes(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|offset| ((offset as u64).wrapping_mul(2_654_435_761) >> 11) as u8 ^ seed)
+        .collect()
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
 
 #[msb_test]
 async fn bulk_admission_is_per_client_and_released_slots_are_reusable() {
@@ -251,207 +474,4 @@ async fn concurrent_bulk_writes_land_intact_beside_an_abandoned_write() {
     assert_serving(&sandbox).await;
     sandbox.stop().await.unwrap();
     Sandbox::remove(name).await.unwrap();
-}
-
-/// Counts commands run on a separate client for the length of a test.
-struct Observer {
-    stop: Arc<AtomicBool>,
-    runs: Arc<AtomicUsize>,
-    task: JoinHandle<usize>,
-}
-
-struct ObserverTally {
-    runs: usize,
-    failures: usize,
-}
-
-impl Observer {
-    fn start(client: Sandbox) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let runs = Arc::new(AtomicUsize::new(0));
-        let task = tokio::spawn({
-            let (stop, runs) = (Arc::clone(&stop), Arc::clone(&runs));
-            async move {
-                let mut failures = 0;
-                while !stop.load(Ordering::Relaxed) {
-                    match timeout(COMMAND_TIMEOUT, client.shell("true")).await {
-                        Ok(Ok(output)) if output.status().success => {
-                            runs.fetch_add(1, Ordering::Relaxed);
-                        }
-                        _ => failures += 1,
-                    }
-                    sleep(Duration::from_millis(20)).await;
-                }
-                failures
-            }
-        });
-        Self { stop, runs, task }
-    }
-
-    fn runs(&self) -> usize {
-        self.runs.load(Ordering::Relaxed)
-    }
-
-    async fn finish(self) -> ObserverTally {
-        self.stop.store(true, Ordering::Relaxed);
-        let failures = timeout(STEP_TIMEOUT, self.task)
-            .await
-            .expect("observer did not stop")
-            .unwrap();
-        ObserverTally {
-            runs: self.runs.load(Ordering::Relaxed),
-            failures,
-        }
-    }
-}
-
-async fn create_sandbox(name: &str, memory: u32) -> Sandbox {
-    let sandbox = Sandbox::builder(name)
-        .image(IMAGE)
-        .cpus(1)
-        .memory(memory)
-        .replace()
-        .create()
-        .await
-        .unwrap();
-    let output = sandbox
-        .shell(format!("truncate -s 64G {ENDLESS_FILE}"))
-        .await
-        .unwrap();
-    assert!(output.status().success);
-    sandbox
-}
-
-/// Open a new agent client. Each client has its own bulk allowance.
-async fn connect(name: &str) -> Sandbox {
-    timeout(STEP_TIMEOUT, async {
-        Sandbox::get(name).await?.connect().await
-    })
-    .await
-    .expect("connecting to the sandbox stalled")
-    .expect("connecting to the sandbox failed")
-}
-
-async fn open_read(client: &Sandbox, path: &str) -> MicrosandboxResult<FsReadStream> {
-    let fs = client.fs();
-    let options = FsOpenOptions {
-        read: true,
-        ..Default::default()
-    };
-    let handle = with_timeout(fs.open_file(path, options)).await?;
-
-    let stream = with_timeout(fs.read_handle_stream(handle, 0, None)).await;
-    if stream.is_err() {
-        let _ = with_timeout(fs.close_handle(handle)).await;
-    }
-    stream
-}
-
-async fn open_write(client: &Sandbox, path: &str) -> MicrosandboxResult<FsWriteSink> {
-    let fs = client.fs();
-    let options = FsOpenOptions {
-        write: true,
-        create: true,
-        truncate: true,
-        ..Default::default()
-    };
-    let handle = with_timeout(fs.open_file(path, options)).await?;
-
-    let sink = with_timeout(fs.write_handle_stream(handle, 0, None)).await;
-    if sink.is_err() {
-        let _ = with_timeout(fs.close_handle(handle)).await;
-    }
-    sink
-}
-
-/// Open a read stream, retrying while a just-released slot is still held.
-async fn open_read_once_released(client: &Sandbox) -> FsReadStream {
-    let deadline = Instant::now() + RELEASE_DEADLINE;
-    loop {
-        match open_read(client, ENDLESS_FILE).await {
-            Ok(stream) => return stream,
-            Err(error) if is_limit_refusal(&error) && Instant::now() < deadline => {
-                sleep(Duration::from_millis(100)).await;
-            }
-            Err(error) => panic!("released bulk slot was not reusable: {error}"),
-        }
-    }
-}
-
-async fn read_file(client: &Sandbox, path: &str) -> Bytes {
-    let stream = open_read(client, path).await.unwrap();
-    timeout(STEP_TIMEOUT, stream.collect())
-        .await
-        .expect("reading the file stalled")
-        .unwrap()
-}
-
-/// Read a stream to its end in the background, counting it once its first chunk arrives.
-fn drain(mut stream: FsReadStream, started: &Arc<AtomicUsize>) -> JoinHandle<()> {
-    let started = Arc::clone(started);
-    tokio::spawn(async move {
-        let mut first = true;
-        while let Ok(Some(_)) = stream.recv().await {
-            if std::mem::take(&mut first) {
-                started.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    })
-}
-
-async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
-    let deadline = Instant::now() + STEP_TIMEOUT;
-    while counter.load(Ordering::Relaxed) < expected {
-        assert!(
-            Instant::now() < deadline,
-            "only {} of {expected} streams delivered data",
-            counter.load(Ordering::Relaxed)
-        );
-        sleep(Duration::from_millis(10)).await;
-    }
-}
-
-async fn assert_serving(sandbox: &Sandbox) {
-    assert!(
-        matches!(sandbox.status().await.unwrap(), SandboxStatus::Running),
-        "sandbox is not running"
-    );
-    let output = timeout(COMMAND_TIMEOUT, sandbox.shell("true"))
-        .await
-        .expect("command stalled")
-        .unwrap();
-    assert!(output.status().success);
-}
-
-fn assert_limit_refusal(error: Option<MicrosandboxError>) {
-    let error = error.expect("a bulk stream beyond the per-client limit was admitted");
-    assert!(
-        is_limit_refusal(&error),
-        "expected the per-client limit error, got: {error}"
-    );
-}
-
-fn is_limit_refusal(error: &MicrosandboxError) -> bool {
-    error.to_string().contains(&format!(
-        "maximum of {PER_CLIENT_BULK_LIMIT} active bulk operations"
-    ))
-}
-
-async fn with_timeout<T>(
-    operation: impl Future<Output = MicrosandboxResult<T>>,
-) -> MicrosandboxResult<T> {
-    timeout(STEP_TIMEOUT, operation)
-        .await
-        .expect("filesystem operation stalled")
-}
-
-fn written_path(index: usize) -> String {
-    format!("/tmp/written-{index}")
-}
-
-/// Deterministic content that varies with the offset and the seed.
-fn known_bytes(len: usize, seed: u8) -> Vec<u8> {
-    (0..len)
-        .map(|offset| ((offset as u64).wrapping_mul(2_654_435_761) >> 11) as u8 ^ seed)
-        .collect()
 }
