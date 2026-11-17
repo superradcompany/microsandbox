@@ -1,19 +1,8 @@
 //! Optional size limits passed explicitly through snapshot archive extraction.
 
-use std::path::Path;
-
 use microsandbox_types::SnapshotManifest;
-use tokio_tar::Header;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
-
-//--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-const MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_METADATA_TOTAL_BYTES: u64 = 12 * 1024 * 1024;
-const MAX_PATH_BYTES: usize = 4096;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -22,7 +11,6 @@ const MAX_PATH_BYTES: usize = 4096;
 pub(crate) struct ImportBudget {
     maximum_disk_bytes: u64,
     remaining_payload_bytes: u64,
-    remaining_metadata_bytes: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -38,36 +26,7 @@ impl ImportBudget {
         Ok(Self {
             maximum_disk_bytes,
             remaining_payload_bytes: maximum_disk_bytes,
-            remaining_metadata_bytes: MAX_METADATA_TOTAL_BYTES,
         })
-    }
-
-    pub(crate) fn charge(&mut self, path: &Path, header: &Header) -> MicrosandboxResult<()> {
-        if path.as_os_str().len() > MAX_PATH_BYTES {
-            return Err(invalid("snapshot import exceeds its archive path limit"));
-        }
-
-        // GNU sparse files can encode a tiny body with a huge logical size.
-        let logical_bytes = header.size()?;
-        let metadata = path.file_name().is_some_and(|name| {
-            matches!(
-                name.to_str(),
-                Some("archive.json" | "snapshot.json" | "manifest.json" | "metadata.json")
-            )
-        });
-        if metadata {
-            if logical_bytes > MAX_METADATA_BYTES {
-                return Err(invalid("snapshot import exceeds its metadata size limit"));
-            }
-            self.remaining_metadata_bytes = self
-                .remaining_metadata_bytes
-                .checked_sub(logical_bytes)
-                .ok_or_else(|| invalid("snapshot import exceeds its aggregate metadata limit"))?;
-        } else {
-            self.charge_payload(logical_bytes)?;
-        }
-
-        Ok(())
     }
 
     pub(crate) fn charge_payload(&mut self, bytes: u64) -> MicrosandboxResult<()> {

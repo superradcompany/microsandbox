@@ -2505,9 +2505,6 @@ where
     let mut extraction_targets = HashSet::new();
     let mut inventory_path = None;
     while let Some((header, path_in_archive)) = read_entry_header(&mut reader).await? {
-        if let Some(budget) = budget.as_mut() {
-            budget.charge(&path_in_archive, &header)?;
-        }
         let entry_type = header.entry_type();
         let components = normal_utf8_components(&path_in_archive)?;
         if entry_type == EntryType::Directory {
@@ -2524,6 +2521,16 @@ where
         }
         let (target, descriptor, inventory) =
             archive_entry_target(&components, &path_in_archive, snapshots_dir, cache_dir)?;
+
+        let metadata = matches!(components.as_slice(), ["snapshots", _, name] if *name == super::metadata::METADATA_FILENAME);
+        if !descriptor
+            && !inventory
+            && !metadata
+            && let Some(budget) = budget.as_mut()
+        {
+            // GNU sparse bodies can be tiny while their logical payloads are large.
+            budget.charge_payload(header.size()?)?;
+        }
 
         // Tar member names are portable paths. Re-encode their parsed components
         // instead of displaying a native Path, which would put `\\` into the
@@ -4624,16 +4631,20 @@ mod tests {
         let backend = crate::test_support::local_backend_builder(root.path().join("home"))
             .build()
             .unwrap();
-        let names = [(
-            "files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/upper.ext4",
-            "maximum disk size",
-        )];
+        let names = [
+            "upper.ext4",
+            "archive.json",
+            "snapshot.json",
+            "manifest.json",
+            "metadata.json",
+        ];
         {
             let snapshots = backend.snapshots();
-            for (index, (name, expected)) in names.into_iter().enumerate() {
+            for (index, name) in names.into_iter().enumerate() {
+                let name = format!("files/{}/{name}", "a".repeat(64));
                 let archive = root.path().join(format!("bad-{index}.tar"));
                 let mut header = tokio_tar::Header::new_gnu();
-                header.set_path(name).unwrap();
+                header.set_path(&name).unwrap();
                 header.set_mode(0o600);
                 header.set_entry_type(EntryType::GNUSparse);
                 header.set_size(0);
@@ -4649,7 +4660,7 @@ mod tests {
                     .load(&archive, LoadOptions::default().maximum_disk_bytes(4096))
                     .await
                     .unwrap_err();
-                assert!(error.to_string().contains(expected), "{error}");
+                assert!(error.to_string().contains("maximum disk size"), "{error}");
             }
             let archive = root.path().join("aggregate.tar");
             let mut bytes = Vec::new();
@@ -4881,7 +4892,7 @@ mod tests {
             "image": {"ref": "alpine:3.21", "manifest_digest": format!("sha256:{}", "a".repeat(64))},
             "source_sandbox": "previous", "labels": {},
             "state": {"kind": "file", "format": "raw", "fstype": "ext4",
-                "upper": {"file": "disk.ext4", "size_bytes": 7, "integrity": null}},
+                "upper": {"file": "archive.json", "size_bytes": 7, "integrity": null}},
             "extensions": {}, "requires": []
         })).unwrap();
             let parent = if with_parent {
@@ -4909,9 +4920,9 @@ mod tests {
             let digest = manifest.digest().unwrap();
             let digest = digest.strip_prefix("sha256:").unwrap();
             for (directory, payload_name) in [
-                (digest, "disk.ext4"),
+                (digest, "archive.json"),
                 (digest, "upper.ext4"),
-                ("not-an-id", "disk.ext4"),
+                ("not-an-id", "archive.json"),
             ] {
                 let archive = temporary.path().join(format!("{payload_name}.tar"));
                 let mut builder = tar::Builder::new(std::fs::File::create(&archive).unwrap());
@@ -4940,7 +4951,10 @@ mod tests {
                             format!("snapshots/{digest}/snapshot.json"),
                             descriptor.as_slice(),
                         ),
-                        (format!("files/{digest}/disk.ext4"), b"payload".as_slice()),
+                        (
+                            format!("files/{digest}/archive.json"),
+                            b"payload".as_slice(),
+                        ),
                     ] {
                         let mut header = tar::Header::new_gnu();
                         header.set_mode(0o600);
@@ -4973,8 +4987,21 @@ mod tests {
                     continue;
                 }
                 inspection.unwrap();
+                if with_parent && payload_name == "archive.json" {
+                    let error = load_snapshot_with_options(
+                        &local,
+                        &archive,
+                        LoadOptions::default()
+                            .group("over-budget")
+                            .maximum_disk_bytes(10),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(error.to_string().contains("maximum disk size"), "{error}");
+                    assert!(!local.snapshots_dir().join("over-budget").exists());
+                }
                 let result = load_snapshot(&local, &archive, None).await;
-                if payload_name == "disk.ext4" {
+                if payload_name == "archive.json" {
                     let loaded = result.unwrap();
                     let snapshot = store::open_snapshot(&local, &loaded.path().to_string_lossy())
                         .await
