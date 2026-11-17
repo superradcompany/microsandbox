@@ -13,7 +13,6 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 
 const MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_METADATA_TOTAL_BYTES: u64 = 12 * 1024 * 1024;
-const MAX_ENTRIES: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
 
 //--------------------------------------------------------------------------------------------------
@@ -24,7 +23,6 @@ pub(crate) struct ImportBudget {
     maximum_disk_bytes: u64,
     remaining_payload_bytes: u64,
     remaining_metadata_bytes: u64,
-    entries: usize,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -41,16 +39,10 @@ impl ImportBudget {
             maximum_disk_bytes,
             remaining_payload_bytes: maximum_disk_bytes,
             remaining_metadata_bytes: MAX_METADATA_TOTAL_BYTES,
-            entries: 0,
         })
     }
 
     pub(crate) fn charge(&mut self, path: &Path, header: &Header) -> MicrosandboxResult<()> {
-        if self.entries == MAX_ENTRIES {
-            return Err(invalid("snapshot import exceeds its archive entry limit"));
-        }
-        self.entries += 1;
-
         if path.as_os_str().len() > MAX_PATH_BYTES {
             return Err(invalid("snapshot import exceeds its archive path limit"));
         }

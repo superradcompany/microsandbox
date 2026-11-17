@@ -1201,7 +1201,7 @@ pub(super) async fn open_base(
         if validate(inventory)?.is_some() {
             return Err(MicrosandboxError::InvalidConfig("the supplied base archive must be standalone; load dependent bases explicitly first".into()));
         }
-        materialize_inventory_layers(inventory, &snapshots_dir).await?;
+        materialize_inventory_layers(inventory, &snapshots_dir, budget.as_deref_mut()).await?;
     } else {
         super::super::migration::normalize_staged(local.db().await?, &unpacked.manifest_dirs)
             .await?;

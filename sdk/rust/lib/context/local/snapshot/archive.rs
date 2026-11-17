@@ -3678,8 +3678,10 @@ fn inventory_entry_target(
 async fn materialize_inventory_layers(
     inventory: &ArchiveInventory,
     snapshots_dir: &Path,
+    mut budget: Option<&mut ImportBudget>,
 ) -> MicrosandboxResult<()> {
     let shared_layers = snapshots_dir.join(".archive-layers");
+    let mut materialized = HashSet::new();
     for member in &inventory.members {
         let artifact_dir = snapshots_dir.join(&member.snapshot_id);
         let descriptor_bytes = tokio::fs::read(artifact_dir.join(DESCRIPTOR_FILENAME)).await?;
@@ -3698,6 +3700,13 @@ async fn materialize_inventory_layers(
             let target = artifact_dir.join(&relative);
             if let Some(parent) = target.parent() {
                 tokio::fs::create_dir_all(parent).await?;
+            }
+            // Extraction or dependency resolution already charged one copy. Only charge
+            // additional member copies; the shared staging file is removed below.
+            if !materialized.insert(source.clone())
+                && let Some(budget) = budget.as_deref_mut()
+            {
+                budget.charge_payload(tokio::fs::metadata(&source).await?.len())?;
             }
             let source_clone = source.clone();
             let target_clone = target.clone();
@@ -4576,6 +4585,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_batch_import_accepts_more_than_256_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .unwrap();
+        let mut archives = Vec::new();
+        for index in 0..86 {
+            let manifest = grouped_archive_manifest(1000 + index, None);
+            let artifact = root.path().join(format!("artifact-{index}"));
+            write_grouped_archive_fixture(&artifact, &manifest);
+            let archive = root.path().join(format!("archive-{index}.msb"));
+            save_snapshot(
+                &local,
+                artifact.to_str().unwrap(),
+                &archive,
+                SaveOpts::default(),
+            )
+            .await
+            .unwrap();
+            archives.push(archive);
+        }
+
+        let loaded = load_snapshots(
+            &local,
+            &archives,
+            LoadOptions::default().maximum_disk_bytes(86 * 4096),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(loaded.len(), 86);
+    }
+
+    #[tokio::test]
     async fn bounded_import_counts_sparse_logical_sizes_before_extraction() {
         let root = tempfile::tempdir().unwrap();
         let backend = crate::test_support::local_backend_builder(root.path().join("home"))
@@ -5148,7 +5191,8 @@ mod tests {
             .build()
             .unwrap();
         let parent = grouped_archive_manifest(1, None);
-        let child = grouped_archive_manifest(2, Some(&parent));
+        let mut child = grouped_archive_manifest(2, Some(&parent));
+        child.state = parent.state.clone();
         for name in ["first", "second"] {
             let group = super::super::group::ensure(&local.snapshots_dir(), Some(name))
                 .await
@@ -5189,6 +5233,58 @@ mod tests {
         )
         .await
         .unwrap();
+        // Store the common layer once, as permitted by the portable archive format.
+        let bytes = std::fs::read(&archive).unwrap();
+        let mut source = tar::Archive::new(bytes.as_slice());
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut paths = HashSet::new();
+        for entry in source.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            if !paths.insert(path.clone()) {
+                continue;
+            }
+            let mut header = entry.header().clone();
+            if path == Path::new("archive.json") {
+                let mut inventory: ArchiveInventory = serde_json::from_reader(entry).unwrap();
+                inventory.entries.dedup_by(|a, b| a.path == b.path);
+                inventory.limits = ArchiveLimits {
+                    entry_count: inventory.entries.len() as u64,
+                    encoded_bytes: inventory
+                        .entries
+                        .iter()
+                        .map(|entry| entry.encoded_size)
+                        .sum(),
+                    apparent_bytes: inventory
+                        .entries
+                        .iter()
+                        .map(|entry| entry.apparent_size)
+                        .sum(),
+                };
+                let bytes = serde_json::to_vec(&inventory).unwrap();
+                header.set_size(bytes.len() as u64);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, path, bytes.as_slice())
+                    .unwrap();
+            } else {
+                builder.append_data(&mut header, path, &mut entry).unwrap();
+            }
+        }
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+
+        let error = load_snapshot_with_options(
+            &local,
+            &archive,
+            LoadOptions::default()
+                .group("over-budget")
+                .maximum_disk_bytes(4096),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("maximum disk size"), "{error}");
+        assert!(!local.snapshots_dir().join("over-budget").exists());
+
         let loaded = load_snapshot_with_options(
             &local,
             &archive,

@@ -172,7 +172,7 @@ pub(super) async fn load(
     let mut identities = BTreeMap::new();
     for item in &staged {
         if let Some(inventory) = &item.unpacked.inventory {
-            materialize_inventory_layers(inventory, item.snapshots.path()).await?;
+            materialize_inventory_layers(inventory, item.snapshots.path(), budget.as_mut()).await?;
         }
         let snapshots = verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await?;
         if let Some(budget) = &budget {
