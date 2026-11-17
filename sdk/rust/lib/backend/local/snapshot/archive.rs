@@ -4585,8 +4585,33 @@ mod tests {
 
     use super::*;
     use crate::Snapshot as PublicSnapshot;
-    use crate::snapshot::ImportLimits;
     use crate::snapshot::bounded_import::RawDiskImport;
+    use crate::snapshot::{ImportLimits, ImportPolicy};
+
+    struct DiskSizePolicy {
+        maximum_disk_bytes: u64,
+    }
+
+    impl ImportPolicy for DiskSizePolicy {
+        fn validate_entry(&self, _path: &Path, _logical_bytes: u64) -> MicrosandboxResult<()> {
+            Ok(())
+        }
+
+        fn validate_archive(&self, _snapshots: usize, _complete: bool) -> MicrosandboxResult<()> {
+            Ok(())
+        }
+
+        fn validate_manifest(&self, manifest: &Manifest) -> MicrosandboxResult<()> {
+            let file = manifest.state.as_file().unwrap();
+            if file.virtual_size > self.maximum_disk_bytes {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "disk exceeds caller limit".into(),
+                ));
+            }
+
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn explicit_import_limits_use_the_supplied_policy_and_byte_limit() {
@@ -5094,6 +5119,30 @@ mod tests {
                     assert_eq!(
                         std::fs::read(snapshot.layer_path(layer)).unwrap(),
                         b"payload"
+                    );
+                    let policy = DiskSizePolicy {
+                        maximum_disk_bytes: 6,
+                    };
+                    let mut budget = ImportBudget::new(
+                        ImportLimits {
+                            expanded_bytes: 64 * 1024,
+                            metadata_bytes: 16 * 1024,
+                            entries: 32,
+                            path_bytes: 1024,
+                        },
+                        &policy,
+                    )
+                    .unwrap();
+                    let base =
+                        delta::open_base(&local, archive.to_str().unwrap(), Some(&mut budget))
+                            .await;
+                    let error = match base {
+                        Err(error) => error,
+                        Ok(_) => panic!("legacy base bypassed the caller's policy"),
+                    };
+                    assert!(
+                        error.to_string().contains("disk exceeds caller limit"),
+                        "{error}"
                     );
                 } else {
                     assert!(
