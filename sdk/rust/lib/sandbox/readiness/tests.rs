@@ -566,3 +566,34 @@ async fn retained_snapshot_rejects_replaced_source_before_capture() {
     );
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn config_returns_fresh_typed_remote_observations_without_preparation() {
+    let mut first = sandbox("original", "stopped");
+    first["spec"] = crate::sandbox::config_inspection::tests::projection();
+    let mut second = first.clone();
+    second["spec"]["runtime"]["shell"] = json!("/bin/zsh");
+    let (context, server) = provider(vec![
+        ("GET", "/v1/sandboxes/by-name/task", 200, first.clone()),
+        ("GET", "/v1/sandboxes/by-name/task", 200, first),
+        ("GET", "/v1/sandboxes/by-name/task", 200, second),
+        (
+            "GET",
+            "/v1/sandboxes/by-name/task",
+            503,
+            json!({"message":"unavailable"}),
+        ),
+    ])
+    .await;
+    let resource = Sandbox::ctx(context.as_ref()).get("task").await.unwrap();
+    let captured = resource.config().await.unwrap();
+    assert_eq!(captured.runtime().shell.as_deref(), Some("/bin/bash"));
+    assert_eq!(
+        resource.config().await.unwrap().runtime().shell.as_deref(),
+        Some("/bin/zsh")
+    );
+    assert!(resource.config().await.is_err());
+    assert_eq!(captured.runtime().shell.as_deref(), Some("/bin/bash"));
+    assert!(resource.binding.current().is_none());
+    server.await.unwrap();
+}

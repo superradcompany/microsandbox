@@ -55,7 +55,8 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     expect(out.stdout()).toBe("$MSB_SDK_SECRET_TOKEN");
     expect(out.stdout()).not.toContain("dummy-private-value");
     const handle = await Sandbox.get(SANDBOX_NAME);
-    for (const config of [await sb.config(), await handle.config()]) {
+    for (const observation of [await sb.config(), await handle.config()]) {
+      const config = observation.spec;
       expect(config.labels).toEqual({ setup_db: "one", setupDb: "two" });
       expect(config.runtime.scripts).toEqual({ setup_db: "echo one", setupDb: "echo two" });
     }

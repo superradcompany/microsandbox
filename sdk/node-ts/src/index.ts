@@ -415,3 +415,5 @@ export type { StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection 
 
 export { Context, LocalContext, RemoteContext, LocalContextBuilder, RemoteContextBuilder, Sandboxes, Volumes, Snapshots } from "./context.js";
 export type { LocalContextOptions, RemoteContextOptions } from "./context.js";
+
+export type { SandboxConfigInspection, SandboxRuntimeInspection, RemoteSandboxInspection, LocalSandboxInspection, RemoteMountInspection, RemoteSecretInspection } from "./config-inspection.js";

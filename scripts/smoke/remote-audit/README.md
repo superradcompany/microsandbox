@@ -33,6 +33,23 @@ node scripts/smoke/remote-audit/runtime-settings.mjs
 
 This runtime probe does not qualify live `config()` or dependent Go shell, CLI command-resolution and SFTP configuration paths.
 
+The cross-SDK inspection regression uses one recorded disposable sandbox. Set `MSB_INSPECTION_FIXTURE` to an absolute JSON path and use a different `MSB_AUDIT_REPORT` for each command. Setup writes the name before creation; preserve that file even if creation is interrupted. All SDK probes validate the recorded identity. Run the CLI probe after the SDK probes because `run` may change lifecycle state. Always finish with cleanup, which verifies exact identity before deletion and then verifies absence:
+
+```sh
+node scripts/smoke/remote-audit/inspection.mjs setup
+node scripts/smoke/remote-audit/inspection.mjs
+python scripts/smoke/remote-audit/inspection.py
+ruby scripts/smoke/remote-audit/inspection.rb
+cargo test -p microsandbox --no-default-features --features local,cloud,net,ssh --test remote_api_live remote_inspection_live -- --exact --ignored --nocapture
+# From sdk/go, with MSB_SELECTOR_NATIVE_LIBRARY set:
+go run ../../scripts/smoke/remote-audit/inspection.go
+# Back at the repository root:
+python scripts/smoke/remote-audit/inspection-cli.py
+node scripts/smoke/remote-audit/inspection.mjs cleanup
+```
+
+These checks cover fresh inspection result shapes, configured shell/default command/workdir after get and paginated list, TypeScript SFTP relative-path initialization, and CLI explicit/default command resolution. They do not qualify every mount, secret, network setting, or backend option; redacted and unavailable projections also have separate fixture-based decoder tests. Never silently retry a failed assertion into a pass: retain the failed attempt and record any later rerun separately.
+
 Additional investigations use separate disposable resources and report paths:
 
 ```sh

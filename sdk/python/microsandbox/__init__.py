@@ -106,6 +106,11 @@ from microsandbox.errors import (
     UnsupportedOperationError,
     VolumeNotFoundError,
 )
+from microsandbox.inspection import (
+    SandboxConfigInspection,
+    SandboxInspectionSpec,
+    SandboxRuntimeInspection,
+)
 from microsandbox.jobs import JobEvent, JobExit, JobInfo, JobLogEntry, JobPage, JobState
 from microsandbox.setup import (
     InstallOptions,
@@ -230,6 +235,9 @@ if _bundled_msb.is_file():
 
 
 __all__ = [
+    "SandboxConfigInspection",
+    "SandboxInspectionSpec",
+    "SandboxRuntimeInspection",
     "Job",
     "JobAttachment",
     "JobLogStream",

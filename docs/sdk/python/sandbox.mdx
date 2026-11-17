@@ -1806,7 +1806,15 @@ Observed convergence state for an accepted live resize.
 | `ResourceConvergenceState.GUEST_REFUSED` | `"guest-refused"` | Guest refused or failed to cooperate |
 | `ResourceConvergenceState.FAILED` | `"failed"` | Resize failed |
 
-### SandboxMetrics
+#### config()
+
+```python
+async def config(self) -> SandboxConfigInspection: ...
+```
+
+Fetch a fresh persisted observation without starting the sandbox. The typed dictionary contains `kind`, `name`, `spec`, `unavailable` and `redacted`. Read execution settings through `observed["spec"]["runtime"]`. Remote source identities and secret material are not reconstructed; unavailable/redacted paths are explicit. Failed lookups raise instead of returning stale data. Persisted settings may require restart to apply. See [inspection result shapes](/migrations/sdk-contexts#configuration-result-shape).
+
+## SandboxMetrics
 
 <p className="msb-backref">Returned by <a href="#sb-metrics">metrics()</a> · <a href="#sb-metrics_stream">metrics_stream()</a></p>
 

@@ -81,4 +81,22 @@ describe("adapter security regressions", () => {
     expect(config.labels.team_name).toBe("four");
     expect(config.resources.memoryMib).toBe(512);
   });
+
+  it("keeps inspection metadata paths and nested user keys intact", () => {
+    const observation = remapKeysToCamel({
+      kind: "remote", name: "task",
+      spec: {
+        runtime: { scripts: { setup_db: "one", setupDb: "two" }, workdir: "/tmp" },
+        labels: { team_name: "infra" },
+        network: { secrets: [{ env_var: "TOKEN", injection: { query_params: false } }] },
+      },
+      unavailable: ["resources.max_cpus"],
+      redacted: ["network.secrets[0].value"],
+    });
+    expect(observation.spec.runtime.scripts).toEqual({ setup_db: "one", setupDb: "two" });
+    expect(observation.spec.labels).toEqual({ team_name: "infra" });
+    expect(observation.spec.network.secrets[0]).toEqual({ envVar: "TOKEN", injection: { queryParams: false } });
+    expect(observation.unavailable).toEqual(["resources.max_cpus"]);
+    expect(observation.redacted).toEqual(["network.secrets[0].value"]);
+  });
 });

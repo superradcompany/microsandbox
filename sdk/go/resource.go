@@ -3,6 +3,7 @@ package microsandbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -53,14 +54,17 @@ func (s *Sandbox) LastFailureMessage(ctx context.Context) (*string, error) {
 }
 
 // Config fetches latest persisted settings, which may still require restart to apply.
-func (s *Sandbox) Config(ctx context.Context) (*SandboxConfig, error) {
+func (s *Sandbox) Config(ctx context.Context) (*SandboxConfigInspection, error) {
 	raw, err := s.inner.ConfigJSON(ctx)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	var config SandboxConfig
+	var config SandboxConfigInspection
 	if err := json.Unmarshal([]byte(raw), &config); err != nil {
 		return nil, err
+	}
+	if config.Kind != "local" && config.Kind != "remote" {
+		return nil, fmt.Errorf("native library returned an unsupported configuration inspection shape; rebuild or upgrade the native provider")
 	}
 	return &config, nil
 }

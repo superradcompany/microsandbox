@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -131,8 +132,14 @@ func TestWithInitAuto(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Config: %v", err)
 	}
-	if parsed.Init == nil || parsed.Init.Cmd != "auto" {
-		t.Errorf("Init.Auto not visible in parsed Config: %+v", parsed.Init)
+	var init struct {
+		Cmd string `json:"cmd"`
+	}
+	if err := json.Unmarshal(parsed.Spec.Init, &init); err != nil {
+		t.Fatalf("decode inspected init: %v", err)
+	}
+	if init.Cmd != "auto" {
+		t.Errorf("Init.Auto not visible in parsed Config: %+v", parsed.Spec.Init)
 	}
 }
 

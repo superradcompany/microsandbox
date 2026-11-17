@@ -17,6 +17,7 @@ info = sb.info
 status = sb.status
 failure = sb.last_failure_message
 config = sb.config
+shell = config["spec"]["runtime"]["shell"]
 ```
 
 `info` returns a hash with string keys `id`, `name`, `status`, `last_failure_message`, `created_at` and `updated_at`. Optional timestamps are RFC3339 strings or `nil`. `name` and `id` require no backend I/O. List pages contain unprepared `Sandbox` objects without per-item connections or startup.
@@ -858,6 +859,14 @@ Stop and remove this exact sandbox. Defaults to graceful shutdown with the SDK's
     <div className="msb-param-desc">No return value.</div>
   </div>
 </div>
+
+### config
+
+```ruby
+config # => Hash
+```
+
+Return a fresh observation with string keys `kind`, `name`, `spec`, `unavailable` and `redacted`. `kind` distinguishes local specifications from remote inspection projections. Remote mount sources and secret material are deliberately absent; the metadata identifies those paths without inventing defaults. The hash is not creation input. See [inspection result shapes](/migrations/sdk-contexts#configuration-result-shape).
 
 ## SandboxBuilder
 

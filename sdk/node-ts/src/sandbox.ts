@@ -1,3 +1,4 @@
+import type { SandboxConfigInspection } from "./config-inspection.js";
 import { bindingFor } from "./internal/provider.js";
 import { Snapshot } from "./snapshot.js";
 import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
@@ -585,9 +586,9 @@ export class Sandbox implements AsyncDisposable {
   }
 
   /** Fetch the latest persisted settings; these may still require a restart to apply. */
-  async config(): Promise<SandboxConfig> {
+  async config(): Promise<SandboxConfigInspection> {
     const json = await withMappedErrors(() => this.inner.configJson());
-    return remapKeysToCamel(JSON.parse(json)) as SandboxConfig;
+    return remapKeysToCamel(JSON.parse(json)) as SandboxConfigInspection;
   }
 
   // -- logs ---------------------------------------------------------------

@@ -478,3 +478,75 @@ async fn remote_transport_probe() {
         "transport qualification found failures"
     );
 }
+
+/// Read/execute the exact cross-SDK inspection fixture. Setup and cleanup are
+/// owned by inspection.mjs, so this probe cannot delete another SDK's fixture.
+#[tokio::test]
+#[ignore = "requires explicit staging opt-in and a disposable shared fixture"]
+async fn remote_inspection_live() -> MicrosandboxResult<()> {
+    assert_eq!(std::env::var("MSB_REMOTE_AUDIT").as_deref(), Ok("1"));
+    let fixture: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("MSB_INSPECTION_FIXTURE").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let name = fixture["name"].as_str().unwrap();
+    let context = RemoteContext::from_env()?;
+    let sb = context.sandboxes().get(name).await?;
+    assert_eq!(sb.id().as_str(), fixture["id"].as_str().unwrap());
+    let mut cursor = None;
+    let listed = loop {
+        let page = context
+            .sandboxes()
+            .list_with(|mut b| {
+                if let Some(c) = cursor.take() {
+                    b = b.cursor(c);
+                }
+                b
+            })
+            .await?;
+        if let Some(found) = page.sandboxes.into_iter().find(|s| s.id() == sb.id()) {
+            break found;
+        }
+        cursor = page.next_cursor;
+        assert!(cursor.is_some(), "fixture not listed");
+    };
+    let mut rows = vec![];
+    for (kind, resource) in [("get", sb), ("list", listed)] {
+        let config = resource.config().await?;
+        assert!(config.remote_spec().is_some());
+        assert_eq!(config.runtime().shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(config.runtime().workdir.as_deref(), Some("/tmp"));
+        assert!(config.unavailable.contains(&"init".to_string()));
+        rows.push(json!({"feature":format!("{kind}_config"),"verdict":"PASS"}));
+        assert_eq!(
+            resource
+                .shell("test -n \"$BASH_VERSION\" && printf bash")
+                .await?
+                .stdout()
+                .unwrap(),
+            "bash"
+        );
+        rows.push(json!({"feature":format!("{kind}_shell"),"verdict":"PASS"}));
+        assert_eq!(
+            resource.exec_default().await?.stdout().unwrap(),
+            "configured-default"
+        );
+        rows.push(json!({"feature":format!("{kind}_default_command"),"verdict":"PASS"}));
+        assert_eq!(
+            resource
+                .exec("pwd", std::iter::empty::<&str>())
+                .await?
+                .stdout()
+                .unwrap()
+                .trim(),
+            "/tmp"
+        );
+        rows.push(json!({"feature":format!("{kind}_workdir"),"verdict":"PASS"}));
+    }
+    std::fs::write(
+        std::env::var("MSB_AUDIT_REPORT").unwrap(),
+        serde_json::to_vec_pretty(&json!({"sdk":"rust","rows":rows})).unwrap(),
+    )
+    .unwrap();
+    Ok(())
+}

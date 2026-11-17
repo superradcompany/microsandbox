@@ -20,7 +20,7 @@ pub unsafe extern "C" fn msb_sandbox_shell_path(
         let sandbox = get(handle)?;
         Ok(Box::pin(async move {
             let config = sandbox.config().await.map_err(crate::FfiError::from)?;
-            let shell = config.spec.runtime.shell.as_deref().unwrap_or("/bin/sh");
+            let shell = config.runtime().shell.as_deref().unwrap_or("/bin/sh");
             Ok(serde_json::json!({"shell": shell}).to_string())
         }))
     })

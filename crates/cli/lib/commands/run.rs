@@ -143,7 +143,7 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
 
     let result: anyhow::Result<i32> = async {
         let (cmd, cmd_args) =
-            common::resolve_command(&sandbox.config().await?, args.command, interactive)?;
+            common::resolve_command(sandbox.config().await?.runtime(), args.command, interactive)?;
         match cmd {
             Some(cmd) => exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await,
             None => Ok(0),
@@ -279,7 +279,7 @@ async fn run_new(
     }
 
     let (cmd, cmd_args) =
-        common::resolve_command(&sandbox.config().await?, args.command, interactive)?;
+        common::resolve_command(sandbox.config().await?.runtime(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
         (Some(cmd), args) => (cmd, args),
         (None, _) => {

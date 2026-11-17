@@ -719,7 +719,7 @@ mod tests {
                     let output = restarted.exec("sh", ["-c", "printf '%s:%s' \"$CATALOG_TEST_A\" \"$CATALOG_TEST_B\""]).await.unwrap();
                     assert!(output.status().success);
                     assert_eq!(output.stdout().unwrap(), "one:two");
-                    assert_eq!(restarted.config().await.unwrap().spec.resources.memory_mib, 384);
+                    assert_eq!(restarted.config().await.unwrap().local_spec().unwrap().resources.memory_mib, 384);
                     restarted.stop().await.unwrap();
                     let after = Migrator::get_applied_migrations(local.db().await.unwrap().write().inner()).await.unwrap();
                     assert_eq!(after.iter().map(|migration| migration.name()).collect::<Vec<_>>(), before.iter().map(|migration| migration.name()).collect::<Vec<_>>());

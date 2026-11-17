@@ -49,8 +49,8 @@ describe.skipIf(!msbPath())("revamp real-runtime contracts", () => {
     await sb.modify({ labels: { revision: "first" } });
     const captured = await observer.config();
     await sb.modify({ labels: { revision: "second" } });
-    expect(captured.labels).toMatchObject({ revision: "first" });
-    expect((await observer.config()).labels).toMatchObject({ revision: "second" });
+    expect(captured.spec.labels).toMatchObject({ revision: "first" });
+    expect((await observer.config()).spec.labels).toMatchObject({ revision: "second" });
   });
 
   it("retains volume builder destinations after their context variables leave scope", async () => {

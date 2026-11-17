@@ -58,7 +58,7 @@ When preparation starts a stopped local sandbox, the receiving resource retains 
 
 Identity (`id`, `name`, `context`) is synchronous and performs no I/O. A captured name is a lookup label; resource operations target the captured stable identity and must not act on a replacement that reused that name.
 
-Mutable inspection and configuration perform fresh backend lookups. Rust `config()` now returns `Result<SandboxConfig>` asynchronously rather than borrowing a captured configuration. TypeScript uses `await sb.config()`, Python uses `await sb.config()`, Go uses `sb.Config(ctx)`, and Ruby's `config` performs the lookup. Keep the returned value yourself when you want an observation without further I/O.
+Mutable inspection and configuration perform fresh backend lookups. Rust `config()` now returns `Result<SandboxConfigInspection>` asynchronously rather than borrowing a captured configuration. TypeScript uses `await sb.config()`, Python uses `await sb.config()`, Go uses `sb.Config(ctx)`, and Ruby's `config` performs the lookup. Keep the returned value yourself when you want an observation without further I/O.
 
 Use `info` to obtain related fields together. `status` and `last_failure_message` are live convenience methods. No refresh call is required, and a failed live lookup does not silently fall back to cached state. Inspection observes one moment; it does not prevent subsequent changes. Configuration means the latest persisted settings, which may require restart before they apply to a running VM.
 
@@ -121,3 +121,13 @@ Rust `client()` is now asynchronous and returns an owned `Arc<AgentClient>` boun
 Rust `sandbox.launch_info()` returns optional `SandboxLaunchInfo` for the sandbox object's retained session. Its `init_owns_boot_workload` and `resumed_from_full_snapshot` flags describe preparation outcomes, not persisted settings or live status. An unprepared lookup returns `None`. The CLI uses these outcomes to avoid executing an init-owned workload twice and to report full-restore warnings. Continue using `config().await?` for current persisted configuration and `status().await?` for current lifecycle state.
 
 </Accordion>
+
+## Configuration result shape
+
+`config()` returns a dedicated inspection result rather than creation input. This intentionally changes the public Rust and Go return types and the serialized shape used by TypeScript, Python and Ruby. The result always performs a fresh backend lookup; retaining it gives a snapshot, not a live object. A persisted value is not proof that it has been applied to the running VM.
+
+The serialized envelope has `kind` (`local` or `remote`), `name`, `spec`, `unavailable` and `redacted`. Local `spec` is the persisted task specification, excluding process-local creation options. Remote `spec` is the provider's allowlisted view: OCI reference (or null for an unavailable non-OCI source), resource sizes, runtime settings, environment, labels, resource limits, lifecycle, mount presentation and redacted network metadata. Remote mounts do not expose source identities, and secret descriptors do not contain values or vault paths. Omitted init, security-profile, patches and other unreported fields remain unavailable, never silently defaulted.
+
+Rust uses `inspection.runtime()` and pattern matching on `inspection.settings`, or `local_spec()`/`remote_spec()`. TypeScript reads `inspection.spec.runtime.shell`; Python and Ruby read `inspection["spec"]["runtime"]["shell"]`. Go reads `inspection.Spec.Runtime.Shell` (a pointer, nil when unset). TypeScript camel-cases object keys; the strings in `unavailable` and `redacted` remain snake_case wire paths in every SDK. Use `Kind`/`kind` before interpreting backend-specific source and resource fields.
+
+Do not feed the result back into a creation builder. Keep creation input separately if your application needs to reproduce a task; a redacted inspection response cannot supply withheld source references or credentials. Fetching an existing resource preserves its returned runtime settings for shell and default-command execution without an explicit `ensure_running` call.

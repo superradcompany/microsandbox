@@ -133,8 +133,11 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         );
         let sandbox = handle.connect().await?;
         let tty = args.tty || interactive;
-        let (cmd, command_args) =
-            super::common::resolve_exec_command(&sandbox.config().await?, args.command, tty)?;
+        let (cmd, command_args) = super::common::resolve_exec_command(
+            sandbox.config().await?.runtime(),
+            args.command,
+            tty,
+        )?;
         let cmd = cmd.ok_or_else(|| {
             anyhow::anyhow!("detached execution requires a command or configured default")
         })?;
@@ -205,7 +208,7 @@ async fn run_started(
     // directly, while omitted commands can still fall back to the sandbox's
     // configured image command/default shell.
     let (cmd, cmd_args) = match super::common::resolve_exec_command(
-        &sandbox.config().await?,
+        sandbox.config().await?.runtime(),
         args.command,
         interactive,
     )? {

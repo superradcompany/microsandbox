@@ -1320,6 +1320,19 @@ impl RubySandbox {
         Ok(RubyExecOutput { inner: output })
     }
 
+    /// Execute the persisted entrypoint and command from the retained runtime.
+    fn exec_default(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        args: &[Value],
+    ) -> Result<RubyExecOutput, Error> {
+        let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
+        let opts = apply_exec_options(ruby, ExecOptionsBuilder::default(), parsed.keywords)?;
+        let sb = this.inner_clone()?;
+        let output = run(ruby, async move { sb.exec_default_with(move |_| opts).await })?;
+        Ok(RubyExecOutput { inner: output })
+    }
+
     fn shell(
         ruby: &Ruby,
         this: typed_data::Obj<Self>,
@@ -2636,6 +2649,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         method!(RubySandbox::last_failure_message, 0),
     )?;
     sandbox.define_method("exec", method!(RubySandbox::exec, -1))?;
+    sandbox.define_method("exec_default", method!(RubySandbox::exec_default, -1))?;
     sandbox.define_method("shell", method!(RubySandbox::shell, -1))?;
     sandbox.define_method("stop", method!(RubySandbox::stop, -1))?;
     sandbox.define_method(

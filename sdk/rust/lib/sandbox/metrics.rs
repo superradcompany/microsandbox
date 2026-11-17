@@ -122,7 +122,11 @@ impl Sandbox {
     pub async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics> {
         self.backend()
             .sandbox_ops()
-            .metrics(self.backend().clone(), self.name(), &self.config().await?)
+            .metrics(
+                self.backend().clone(),
+                self.name(),
+                &self.refresh_handle().await?.config()?,
+            )
             .await
     }
 
@@ -135,7 +139,7 @@ impl Sandbox {
         let sandbox = self.observer();
         use futures::TryStreamExt;
         futures::stream::once(async move {
-            let config = sandbox.config().await?;
+            let config = sandbox.refresh_handle().await?.config()?;
             Ok::<_, crate::MicrosandboxError>(sandbox.backend().sandbox_ops().metrics_stream(
                 sandbox.backend().clone(),
                 sandbox.name().to_owned(),

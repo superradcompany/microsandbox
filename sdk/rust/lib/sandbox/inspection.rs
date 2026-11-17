@@ -1,6 +1,6 @@
 //! Live inspection is independent of runtime preparation and ownership.
 
-use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus};
+use super::{Sandbox, SandboxConfigInspection, SandboxId, SandboxStatus};
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -102,24 +102,20 @@ impl Sandbox {
     ///
     /// Persisted settings need not already be applied to the current runtime.
     /// Lookup failures are returned; this never substitutes a cached configuration.
-    pub async fn config(&self) -> MicrosandboxResult<SandboxConfig> {
+    pub async fn config(&self) -> MicrosandboxResult<SandboxConfigInspection> {
         let record = self.refresh_handle().await?;
         if record.local_state().is_some() {
-            return record.config();
+            return Ok(SandboxConfigInspection::local(record.config()?.spec));
         }
         #[cfg(feature = "cloud")]
         {
             let spec: Option<serde_json::Value> = serde_json::from_str(record.config_json())?;
             if let Some(spec) = spec {
-                let request: crate::context::CloudCreateSandboxRequest =
-                    serde_json::from_value(spec)?;
-                let mut spec = super::SandboxSpec::try_from(request)
-                    .map_err(|error| crate::MicrosandboxError::InvalidConfig(error.to_string()))?;
-                spec.name = record.name().to_owned();
-                return Ok(SandboxConfig {
-                    spec,
-                    ..Default::default()
-                });
+                let inspection = serde_json::from_value(spec)?;
+                return Ok(SandboxConfigInspection::remote(
+                    record.name().to_owned(),
+                    inspection,
+                ));
             }
         }
         // An omitted provider spec is unavailable information, not a default config.

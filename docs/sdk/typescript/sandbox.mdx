@@ -292,28 +292,30 @@ Lifecycle calls do not wait for unrelated guest operations on the same handle to
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">config()</span>
 
 ```typescript
-config(): Promise<SandboxConfig>
+config(): Promise<SandboxConfigInspection>
 ```
 
 <Accordion title="Example">
 
 ```typescript
 const config = await sandbox.config();
-console.log(`${config.memoryMib} MiB`);
+console.log(`${config.spec.resources.memoryMib} MiB`);
 ```
 
 </Accordion>
 
-Fetch the latest persisted configuration from the backend. Lookup errors are returned without a cached fallback; saved settings may still require restart to apply. The shape mirrors [`SandboxBuilder.build()`](#sandboxbuilder-build).
+Fetch the latest persisted configuration from the backend. Lookup errors are returned without a cached fallback; saved settings may still require restart to apply. The result is an inspection observation, not the creation input returned by `SandboxBuilder.build()`.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxconfig">Promise&lt;SandboxConfig&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxconfiginspection">Promise&lt;SandboxConfigInspection&gt;</a></div>
     <div className="msb-param-desc">Sandbox configuration.</div>
   </div>
 </div>
+
+The result distinguishes local persisted specifications from remote inspection projections. Remote source details may be unavailable and secret material is redacted; these are explicit paths in `unavailable` and `redacted`, not fabricated defaults. See [inspection migration](/migrations/sdk-contexts#configuration-result-shape).
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">detach()</span>
 
@@ -2973,3 +2975,9 @@ Import or resume storage for a stopped local sandbox. Inspect it first with [sto
     <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originalsRetained</code> (boolean) confirms the original disks were retained.</div>
   </div>
 </div>
+
+## SandboxConfigInspection
+
+`name` is the name observed by this lookup. `unavailable` and `redacted` contain snake_case paths relative to `spec`, including in TypeScript. They identify information the backend cannot expose or deliberately withholds. This result cannot be used as creation input.
+
+`kind` discriminates `{ kind: "local", spec: LocalSandboxInspection }` from `{ kind: "remote", spec: RemoteSandboxInspection }`. Runtime settings are at `spec.runtime`; remote resources use `spec.resources.vcpus` and local resources use `spec.resources.cpus`. Remote `image: null` means the source details are unavailable.

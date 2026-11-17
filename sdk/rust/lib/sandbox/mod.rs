@@ -9,6 +9,7 @@ pub(crate) mod attach;
 pub(crate) mod branch;
 mod branch_batch;
 mod builder;
+mod config_inspection;
 mod context;
 mod execution;
 mod inspection;
@@ -156,6 +157,11 @@ pub use branch::{ForkBuilder, ForkManyBuilder, ForkOutcome};
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use compact::{DiskCompactionBuilder, DiskCompactionDiskResult, DiskCompactionResult};
 pub use config::{SandboxConfig, SandboxConfigPatch};
+pub use config_inspection::{
+    RemoteMountInspection, RemoteNetworkInspection, RemoteResourceInspection,
+    RemoteSandboxInspection, RemoteSecretInjection, RemoteSecretInspection, RemoteSecretViolation,
+    SandboxConfigInspection, SandboxInspectedSettings,
+};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 #[cfg(feature = "local")]
 pub use exit::{SandboxRunExit, SandboxTerminationReason};

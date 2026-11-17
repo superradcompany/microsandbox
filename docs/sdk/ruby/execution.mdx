@@ -76,6 +76,24 @@ Run an executable and collect its output. Shell syntax is not interpreted. Ruby 
   </div>
 </div>
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec_default()</span>
+
+```ruby
+sandbox.exec_default(**options) # => ExecOutput
+```
+
+Execute the configured entrypoint and command, including on a sandbox retrieved through `get` or `list`. The receiver prepares its runtime automatically. Accepts the same execution options as `exec`, including `cwd`, `user`, `env`, `timeout`, `stdin`, `tty`, and `rlimits`.
+
+<Accordion title="Example">
+
+```ruby
+sandbox = Microsandbox::Sandbox.get("worker")
+output = sandbox.exec_default
+puts output.stdout
+```
+
+</Accordion>
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell()</span>
 
 ```ruby

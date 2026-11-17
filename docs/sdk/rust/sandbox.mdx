@@ -283,13 +283,14 @@ let client = sb.client().await?;
 #### <span className="msb-recv">sb.</span><span className="msb-hn">config()</span>
 
 ```rust
-async fn config(&self) -> MicrosandboxResult<SandboxConfig>
+async fn config(&self) -> MicrosandboxResult<SandboxConfigInspection>
 ```
 
 <Accordion title="Example">
 
 ```rust
-println!("{} MiB", sb.config().await?.spec.resources.memory_mib);
+let observed = sb.config().await?;
+println!("{:?}", observed.runtime().shell);
 ```
 
 </Accordion>
@@ -300,10 +301,12 @@ Fetch the latest persisted configuration, including other clients' changes. This
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxconfig">SandboxConfig</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxconfiginspection">SandboxConfigInspection</a></div>
     <div className="msb-param-desc">Sandbox configuration.</div>
   </div>
 </div>
+
+The result distinguishes local persisted specifications from remote inspection projections. Remote source details may be unavailable and secret material is redacted; these are explicit paths in `unavailable` and `redacted`, not fabricated defaults. See [inspection migration](/migrations/sdk-contexts#configuration-result-shape).
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">id()</span>
 
@@ -3072,3 +3075,9 @@ Import or resume storage for a stopped local sandbox. Inspect it first with [sto
     <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originals_retained</code> (boolean) confirms the original disks were retained.</div>
   </div>
 </div>
+
+## SandboxConfigInspection
+
+`name` is the name observed by this lookup. `unavailable` and `redacted` contain snake_case paths relative to `spec`, including in TypeScript. They identify information the backend cannot expose or deliberately withholds. This result cannot be used as creation input.
+
+`settings` is `SandboxInspectedSettings::Local(Box<SandboxSpec>)` or `Remote(Box<RemoteSandboxInspection>)`. Use `runtime()` for shared execution settings, `local_spec()` for an optional complete local task spec, or `remote_spec()` for an optional typed provider projection.

@@ -1689,8 +1689,7 @@ impl russh::server::Handler for SshSession {
             .sandbox
             .config()
             .await?
-            .spec
-            .runtime
+            .runtime()
             .workdir
             .as_deref()
             .filter(|path| !path.is_empty() && path.starts_with('/'))

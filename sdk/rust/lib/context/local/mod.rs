@@ -1630,8 +1630,28 @@ mod tests {
             }
             .await
             .unwrap();
-            assert_eq!(first.config().await.unwrap().spec.resources.cpus, 1);
-            assert_eq!(first.config().await.unwrap().spec.resources.memory_mib, 256);
+            assert_eq!(
+                first
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .cpus,
+                1
+            );
+            assert_eq!(
+                first
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .memory_mib,
+                256
+            );
             let output = first.exec("sh", ["-c", "nproc; pwd"]).await.unwrap();
             assert!(output.status().success);
             assert_eq!(output.stdout().unwrap().trim(), "1\n/tmp");
@@ -1646,7 +1666,17 @@ mod tests {
             }
             .await
             .unwrap();
-            assert_eq!(retained.config().await.unwrap().spec.resources.cpus, 1);
+            assert_eq!(
+                retained
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .cpus,
+                1
+            );
             retained.stop().await.unwrap();
 
             let updated = build();
@@ -1656,8 +1686,28 @@ mod tests {
             }
             .await
             .unwrap();
-            assert_eq!(fresh.config().await.unwrap().spec.resources.cpus, 2);
-            assert_eq!(fresh.config().await.unwrap().spec.resources.memory_mib, 384);
+            assert_eq!(
+                fresh
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .cpus,
+                2
+            );
+            assert_eq!(
+                fresh
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .memory_mib,
+                384
+            );
             fresh.stop().await.unwrap();
 
             // New policy governs new creates. Restart keeps the existing
