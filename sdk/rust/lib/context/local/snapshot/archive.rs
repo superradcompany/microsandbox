@@ -5107,6 +5107,30 @@ mod tests {
                         std::fs::read(snapshot.layer_path(layer)).unwrap(),
                         b"payload"
                     );
+                    let policy = DiskSizePolicy {
+                        maximum_disk_bytes: 6,
+                    };
+                    let mut budget = ImportBudget::new(
+                        ImportLimits {
+                            expanded_bytes: 64 * 1024,
+                            metadata_bytes: 16 * 1024,
+                            entries: 32,
+                            path_bytes: 1024,
+                        },
+                        &policy,
+                    )
+                    .unwrap();
+                    let base =
+                        delta::open_base(&local, archive.to_str().unwrap(), Some(&mut budget))
+                            .await;
+                    let error = match base {
+                        Err(error) => error,
+                        Ok(_) => panic!("legacy base bypassed the caller's policy"),
+                    };
+                    assert!(
+                        error.to_string().contains("disk exceeds caller limit"),
+                        "{error}"
+                    );
                 } else {
                     assert!(
                         result.is_err(),

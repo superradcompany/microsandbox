@@ -1206,6 +1206,12 @@ pub(super) async fn open_base(
             .await?;
     }
     let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs).await?;
+    if let Some(budget) = &budget {
+        for snapshot in &imported {
+            budget.validate_manifest(snapshot.manifest())?;
+        }
+    }
+
     let head = match unpacked.head {
         Some(head) => imported
             .iter()
