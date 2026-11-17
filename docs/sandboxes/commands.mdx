@@ -221,6 +221,8 @@ msb attach worker --job "$shell_job"
 
 One attachment can write at a time; others can use `--read-only`. Detaching or reaching local input EOF leaves guest input open. An abrupt disconnect releases input ownership within 30 seconds. Terminal output combines stdout and stderr as `output`; pipes keep them separate.
 
+A terminal job completes when its tracked process exits, after draining queued output. A background child holding the terminal open does not keep the job running. Completion does not send an additional kill signal to descendants; explicit job signals still target the job’s process group. The terminal closes when the job finishes, so surviving children must not rely on continued access to that terminal. Run independently managed work as a separate job.
+
 </Accordion>
 
 <Accordion title="History and limits">

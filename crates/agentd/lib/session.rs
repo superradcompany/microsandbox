@@ -10,8 +10,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::{iter, mem, ptr};
 
+use nix::fcntl::OFlag;
 use nix::pty;
 use nix::sys::signal::Signal;
+use nix::unistd::pipe2;
 use tokio::io::AsyncReadExt;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -39,6 +41,13 @@ const PR_CAPBSET_DROP: libc::c_int = 24;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_int = 4;
 const DEFAULT_USER_SPEC: &str = "0:0";
+
+/// Bound only the drain after the tracked process exits, not its total output.
+/// Linux PTYs have a 640 KiB flip-buffer budget plus the 4 KiB N_TTY buffer;
+/// 1 MiB covers that queued tail while a continuously writing descendant cannot
+/// keep a completed execution alive. Preserve output-window backpressure while
+/// sending these bytes; a wall-clock deadline could discard a slow reader's tail.
+const PTY_EXIT_DRAIN_LIMIT: usize = 1024 * 1024;
 
 /// Aggregate guest-to-host data retained outside the serial output buffer.
 const SESSION_OUTPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
@@ -1013,6 +1022,9 @@ impl ExecSession {
         let output_window = OutputWindow::new(policy.map(|p| p.output_limit))?;
         let pty = pty::openpty(None, None)?;
         let err_pipe = new_exec_error_pipe()?;
+        // Closing the write end wakes the PTY reader without signalling any process.
+        // Allocate before fork so failure cannot strand an already-started command.
+        let exit_pipe = pipe2(OFlag::O_CLOEXEC)?;
 
         // Set initial window size.
         let ws = libc::winsize {
@@ -1227,6 +1239,7 @@ impl ExecSession {
             id,
             reader_fd,
             exit_watcher,
+            exit_pipe,
             tx,
             output_window.clone(),
             policy.map_or(4096, |p| p.output_chunk_size as usize),
@@ -1881,15 +1894,23 @@ fn write_nonblocking_fd(fd: RawFd, data: &[u8]) -> std::io::Result<usize> {
     }
 }
 
-fn wait_fd_readable(fd: RawFd) -> AgentdResult<()> {
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
+/// Wait for output or leader exit. Both descriptors stay owned by the reader.
+fn wait_pty_readable(fd: RawFd, exit_fd: RawFd, timeout: i32) -> AgentdResult<bool> {
+    let mut pollfds = [
+        libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: exit_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
 
     loop {
-        let ret = unsafe { libc::poll(&mut pollfd, 1, -1) };
+        let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as _, timeout) };
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
@@ -1897,11 +1918,9 @@ fn wait_fd_readable(fd: RawFd) -> AgentdResult<()> {
             }
             return Err(AgentdError::Io(err));
         }
-        if ret == 0 {
-            continue;
-        }
-        // Always retry read on HUP/ERR too: a PTY may still contain final output before EIO.
-        return Ok(());
+        // HUP on the private pipe means the exit watcher has resolved (or its task
+        // was cancelled). Do not mistake HUP on the PTY for an empty output tail.
+        return Ok(pollfds[1].revents != 0);
     }
 }
 
@@ -1910,26 +1929,39 @@ async fn pty_reader_task(
     id: u32,
     master_fd: OwnedFd,
     exit_watcher: ProcessExitWatcher,
+    exit_pipe: (OwnedFd, OwnedFd),
     tx: SessionOutputSender,
     output_window: Option<Arc<OutputWindow>>,
     chunk_size: usize,
 ) {
+    let (exit_read, exit_write) = exit_pipe;
     let tx_output = tx.clone();
     let runtime_handle = tokio::runtime::Handle::current();
-    let read_result = tokio::task::spawn_blocking(move || {
-        // PTY masters are safer with a dedicated blocking read loop than with
-        // edge-driven readiness. Fast writers followed by process exit can
-        // strand the tail behind a missed wakeup/HUP transition.
+    let reader = tokio::task::spawn_blocking(move || {
+        // Keep nonblocking reads on the dedicated worker: edge-driven readiness
+        // alone can strand final output. The duplicate shares flags with stdin.
         let raw = master_fd.as_raw_fd();
-        // The duplicated master shares O_NONBLOCK with stdin. Never clear that flag here:
-        // a blocked write would otherwise strand lifecycle handling on the agent actor.
-
+        let mut remaining = None;
         let mut buf = vec![0u8; chunk_size];
         loop {
-            let n = unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if remaining.is_none() {
+                match wait_pty_readable(raw, exit_read.as_raw_fd(), 0) {
+                    Ok(true) => remaining = Some(PTY_EXIT_DRAIN_LIMIT),
+                    Ok(false) => {}
+                    Err(_) => break,
+                }
+            }
+            let len = remaining.map_or(buf.len(), |n| n.min(buf.len()));
+            if len == 0 {
+                break;
+            }
+            let n = unsafe { libc::read(raw, buf.as_mut_ptr().cast(), len) };
 
             if n > 0 {
                 let n = n as usize;
+                if let Some(remaining) = &mut remaining {
+                    *remaining -= n;
+                }
                 let sent = runtime_handle.block_on(async {
                     if let Some(window) = &output_window
                         && !window.acquire(n).await
@@ -1948,29 +1980,33 @@ async fn pty_reader_task(
                 }
                 continue;
             }
-
             if n == 0 {
                 break;
             }
 
-            let err = std::io::Error::last_os_error();
-            match err.raw_os_error() {
+            match std::io::Error::last_os_error().raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) => {
-                    if wait_fd_readable(raw).is_err() {
+                Some(libc::EAGAIN) if remaining.is_none() => {
+                    // Exit may race this empty read. Wake and retry the read before
+                    // finishing so bytes queued just before exit are not discarded.
+                    if wait_pty_readable(raw, exit_read.as_raw_fd(), -1).is_err() {
                         break;
                     }
                 }
-                Some(libc::EIO) => break,
+                // A nonblocking Linux PTY read flushes pending flip-buffer work
+                // before EAGAIN. After leader exit, do not wait for descendant EOF.
+                Some(libc::EAGAIN | libc::EIO) => break,
                 _ => break,
             }
         }
-    })
-    .await;
+    });
 
-    let _ = read_result;
-
+    // Observe exit concurrently with the reader, then wake its poll. Waiting for
+    // the reader first deadlocks when a descendant retains a slave descriptor.
     let code = exit_watcher.await;
+    drop(exit_write);
+    let _ = reader.await;
+    // All accepted output precedes completion, including flow-controlled output.
     let _ = tx.send(id, SessionOutput::Exited(code)).await;
 }
 
@@ -2813,6 +2849,182 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Own only the descendant created by this test, including assertion failures.
+    struct PtyTestChild(i32);
+
+    impl Drop for PtyTestChild {
+        fn drop(&mut self) {
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+        }
+    }
+
+    #[tokio::test]
+    async fn pty_leader_exit_preserves_tail_and_background_child() {
+        check_pty_leader_exit(false).await;
+    }
+
+    #[tokio::test]
+    async fn pty_kill_preserves_tail_and_background_child() {
+        check_pty_leader_exit(true).await;
+    }
+
+    async fn check_pty_leader_exit(kill: bool) {
+        for controlled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let pidfile = dir.path().join("child");
+            let after_output = if kill {
+                "while :; do sleep 1; done"
+            } else {
+                "exit 7"
+            };
+            // A separate process group models an interactive shell's background job.
+            // Ignore HUP, which the kernel/shell can send independently of agentd.
+            let command = format!(
+                "trap '' HUP; setsid sh -c 'trap \"\" HUP; echo $$ > {}; exec sleep 30' & \
+                 while [ ! -s {} ]; do sleep .01; done; \
+                 head -c 2097152 /dev/zero | tr '\\000' x; printf '<END>'; {after_output}",
+                pidfile.display(),
+                pidfile.display(),
+            );
+            let req: ExecRequest = serde_json::from_value(serde_json::json!({
+                "cmd": "/bin/sh", "args": ["-c", command], "tty": true,
+            }))
+            .unwrap();
+            let policy = controlled.then(|| ExecLimits {
+                output_limit: 1024,
+                output_chunk_size: 512,
+                ..ExecLimits::default()
+            });
+            let (tx, mut rx) = SessionOutputSender::channel();
+            let mut session =
+                ExecSession::spawn(71, &req, tx, None, SecurityProfile::Default, None, policy)
+                    .unwrap();
+            let child = time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(pid) = std::fs::read_to_string(&pidfile)
+                        && let Ok(pid) = pid.trim().parse::<i32>()
+                    {
+                        break PtyTestChild(pid);
+                    }
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("background child starts");
+            // Exercise a full output window before allowing the consumer to drain.
+            time::sleep(Duration::from_millis(100)).await;
+            let mut output = Vec::new();
+            let mut consumed = 0;
+            let mut signalled = false;
+            let result = time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = rx.recv().await.expect("completion event");
+                    match event.output {
+                        SessionOutput::Stdout(data) => {
+                            consumed += data.len() as u64 + u64::from(EXEC_OUTPUT_EVENT_OVERHEAD);
+                            output.extend_from_slice(&data);
+                            if controlled {
+                                session.acknowledge_output(consumed).unwrap();
+                            }
+                            if kill && !signalled && output.ends_with(b"<END>") {
+                                session.send_signal(libc::SIGKILL).unwrap();
+                                signalled = true;
+                            }
+                        }
+                        SessionOutput::Exited(code) => break code,
+                        _ => panic!("unexpected PTY event"),
+                    }
+                }
+            })
+            .await;
+            if result.is_err() {
+                let _ = session.send_signal(libc::SIGKILL);
+            }
+            let code = result.expect("leader completion must not wait for its child");
+            assert_eq!(code, if kill { -1 } else { 7 });
+            let mut expected = vec![b'x'; 2097152];
+            expected.extend_from_slice(b"<END>");
+            assert_eq!(output, expected, "preserve every byte before completion");
+            assert_eq!(session.finish(code), Some(code));
+            drop(session);
+            time::sleep(Duration::from_millis(20)).await;
+            let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.0)).unwrap();
+            assert!(
+                !stat.split_once(") ").unwrap().1.starts_with('Z'),
+                "child became a zombie"
+            );
+            assert_eq!(
+                unsafe { libc::kill(child.0, 0) },
+                0,
+                "completion must not kill the child"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pty_noisy_descendant_cannot_postpone_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("child");
+        let command = format!(
+            "trap '' HUP; setsid sh -c 'trap \"\" HUP PIPE; echo $$ > {}; \
+             while :; do printf cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; done' & \
+             while [ ! -s {} ]; do sleep .01; done; exit 7",
+            pidfile.display(),
+            pidfile.display(),
+        );
+        let req: ExecRequest = serde_json::from_value(serde_json::json!({
+            "cmd": "/bin/sh", "args": ["-c", command], "tty": true,
+        }))
+        .unwrap();
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let session =
+            ExecSession::spawn(73, &req, tx, None, SecurityProfile::Default, None, None).unwrap();
+        let child = time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pidfile)
+                    && let Ok(pid) = pid.trim().parse::<i32>()
+                {
+                    break PtyTestChild(pid);
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let result = time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = rx.recv().await.expect("completion event");
+                if let SessionOutput::Exited(code) = event.output {
+                    break code;
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.expect("noisy child must not prolong completion"), 7);
+        drop(session);
+        assert_eq!(unsafe { libc::kill(child.0, 0) }, 0);
+    }
+
+    #[tokio::test]
+    async fn pty_closed_output_does_not_complete_a_live_leader() {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let req: ExecRequest = serde_json::from_value(serde_json::json!({
+            "cmd": "/bin/sh", "args": ["-c", "exec </dev/null >/dev/null 2>&1; sleep .3; exit 9"], "tty": true,
+        })).unwrap();
+        let _session =
+            ExecSession::spawn(72, &req, tx, None, SecurityProfile::Default, None, None).unwrap();
+        assert!(
+            time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .is_err()
+        );
+        let event = time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event.output, SessionOutput::Exited(9)));
     }
 
     #[tokio::test]
