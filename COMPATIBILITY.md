@@ -418,6 +418,8 @@ Strict hostname policy is enabled by default. The v0.6.0–v0.6.17 launch gate r
 
 Observable network behavior is an effective compatibility contract. It includes default MTU, sandbox-slot address derivation, IPv4 subnet sizing, guest and gateway offsets, IPv6 prefixes, deterministic MAC addresses, interface name `eth0`, `host.microsandbox.internal`, DNS UDP and TCP behavior, DNS-over-TLS, TLS interception and trust paths, published-port binding, TCP half-close, UDP peer lifetime, destination policy, and host-side secret placeholder substitution.
 
+TLS reconnects may use SNI to revalidate an expired DNS binding. A fresh policy-filtered answer must contain the chosen IP before connection policy is rechecked; no prior guest lookup is required. Deferring SYN admission never dials upstream. Non-SNI connections, UDP, ICMP, and ingress still require live bindings. No launch fields, persisted formats, protocols, SDK contracts, or agent/kernel requirements change. Older runtimes retain their previous TTL-expiry behavior.
+
 Omitted HTTP denial settings now default to enabled + JSON, including in older payloads and saved configs. Denied requests may return `403` instead of a connection error; callers must check status. Set `deny_response: false` for silent closure or `deny_response_format: text` for legacy bodies and `{host}` substitution. JSON requires the `http_deny_json` runtime capability. Cloud behavior is unchanged. See [denial responses](docs/networking/overview.mdx#what-a-denied-http-request-sees) for message settings and protocol limits.
 
 Network idle sleep is bounded by the existing one-second cleanup deadline and any earlier stack or deferred-close deadline, with packet and proxy events still waking it immediately.

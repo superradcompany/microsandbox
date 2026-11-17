@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 use super::sni;
 use super::state::TlsState;
+use crate::engine::dns::forwarder::DnsForwarderHandle;
 use crate::engine::http_deny::classify_http_request;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
@@ -51,6 +52,7 @@ pub(crate) struct TlsProxy {
     strict: bool,
     proxy_connect: Arc<ProxyConnectState>,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+    dns_forwarder: DnsForwarderHandle,
     /// Pre-connected upstream; when `Some`, skips dialing `connect_target`.
     upstream_stream: Option<TcpStream>,
     /// Hostname from a CONNECT authority that must match the ClientHello SNI.
@@ -66,9 +68,10 @@ pub(crate) struct TlsProxy {
 //--------------------------------------------------------------------------------------------------
 
 impl TlsProxy {
-    /// Build a proxy for a newly established guest TLS connection.
-    /// `upstream_stream` is reused when present; otherwise, dial after policy checks.
-    /// Policy uses `guest_dst`; host connections use the resolved `connect_target`.
+    /// Create a proxy for a guest TLS connection.
+    ///
+    /// Check the rules against the address the guest chose (`guest_dst`). Reuse
+    /// `upstream_stream` if supplied; otherwise, connect to `connect_target` once allowed.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         upstream_stream: Option<TcpStream>,
@@ -82,6 +85,7 @@ impl TlsProxy {
         strict: bool,
         proxy_connect: Arc<ProxyConnectState>,
         outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+        dns_forwarder: DnsForwarderHandle,
     ) -> Self {
         Self {
             guest_dst,
@@ -94,6 +98,7 @@ impl TlsProxy {
             strict,
             proxy_connect,
             outbound_proxy,
+            dns_forwarder,
             upstream_stream,
             expected_sni: None,
             via_connect: false,
@@ -146,6 +151,7 @@ impl TlsProxy {
             proxy_connect,
             upstream_stream,
             outbound_proxy,
+            dns_forwarder,
             expected_sni,
             via_connect,
             initial_buf,
@@ -190,12 +196,9 @@ impl TlsProxy {
         } else {
             HostnameSource::CacheOnly
         };
-        let eval = network_policy.evaluate_egress_with_source(
-            guest_dst,
-            Protocol::Tcp,
-            &shared,
-            hostname_source,
-        );
+        let eval = network_policy
+            .evaluate_tcp_egress(guest_dst, &shared, hostname_source, &dns_forwarder)
+            .await;
         if !matches!(eval, EgressEvaluation::Allow) {
             tracing::debug!(
                 sni = %sni_name,
@@ -1136,6 +1139,7 @@ mod tests {
                 true,
                 Arc::new(ProxyConnectState::new()),
                 None,
+                tokio::sync::watch::channel(None).1,
             );
             let relay = tokio::spawn(proxy.try_run());
             send_client_tls_output(&mut client, &from_tx).await;
@@ -1340,6 +1344,7 @@ mod tests {
             strict,
             Arc::new(ProxyConnectState::new()),
             None,
+            tokio::sync::watch::channel(None).1,
         );
         tokio::time::timeout(Duration::from_secs(2), proxy.try_run())
             .await
