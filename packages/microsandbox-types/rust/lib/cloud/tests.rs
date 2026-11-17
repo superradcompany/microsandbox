@@ -484,7 +484,7 @@ fn sandbox_response_accepts_omitted_spec() {
 }
 
 #[test]
-fn sandbox_response_decodes_recovery_and_unknown_statuses() {
+fn sandbox_response_decodes_new_and_unknown_statuses() {
     let mut body = serde_json::json!({
         "id": "00000000-0000-0000-0000-000000000002",
         "org_id": "00000000-0000-0000-0000-000000000001",
@@ -501,6 +501,11 @@ fn sandbox_response_decodes_recovery_and_unknown_statuses() {
     });
 
     for (wire_status, expected) in [
+        ("saving_state", CloudSandboxStatus::SavingState),
+        (
+            "temporarily_unavailable",
+            CloudSandboxStatus::TemporarilyUnavailable,
+        ),
         (
             "recovery_decision_required",
             CloudSandboxStatus::RecoveryDecisionRequired,
