@@ -1271,13 +1271,11 @@ Deprecated alias for `WithRootDisk(RootDisk.Managed(mebibytes))`.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithImageDisk()</span>
 
-<Tooltip tip="Disk-image root filesystems are not available on managed cloud; use an OCI image."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```go
 func WithImageDisk(path string, fstype string) SandboxOption
 ```
 
-Use a disk image as the root filesystem and optionally provide the inner filesystem type, e.g. `"ext4"`. The disk format is inferred from the path extension (`.qcow2`, `.raw`, or `.vmdk`).
+Use a disk image as the root filesystem and optionally provide the inner filesystem type, e.g. `"ext4"`. The disk format is inferred from the path extension (`.qcow2`, `.raw`, or `.vmdk`). On our managed cloud, the path refers to your organization's host volume.
 
 <p className="msb-label">Parameters</p>
 
