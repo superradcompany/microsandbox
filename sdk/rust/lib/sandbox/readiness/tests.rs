@@ -104,6 +104,42 @@ async fn get_running_connects_existing_run_without_start_or_ownership() {
 }
 
 #[tokio::test]
+async fn get_preparation_retains_the_latest_inspected_runtime() {
+    let mut observed = sandbox("original", "running");
+    observed["spec"] = json!({
+        "image": "python",
+        "runtime": { "shell": "/bin/bash", "cmd": ["printf", "ready"], "workdir": "/tmp" }
+    });
+    let (context, server) = provider(vec![
+        (
+            "GET",
+            "/v1/sandboxes/by-name/task",
+            200,
+            sandbox("original", "running"),
+        ),
+        ("GET", "/v1/sandboxes/by-name/task", 200, observed),
+    ])
+    .await;
+    let resource = Sandbox::ctx(context.as_ref()).get("task").await.unwrap();
+    assert!(resource.binding.current().is_none());
+
+    resource.ensure_running().await.unwrap();
+
+    let session = resource.binding.current().unwrap();
+    assert_eq!(
+        session.config.spec.runtime.shell.as_deref(),
+        Some("/bin/bash")
+    );
+    assert_eq!(session.config.spec.runtime.workdir.as_deref(), Some("/tmp"));
+    assert_eq!(
+        session.config.spec.runtime.cmd,
+        Some(vec!["printf".into(), "ready".into()])
+    );
+    assert!(!resource.owns_lifecycle());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn get_running_starts_the_captured_identity_when_stopped() {
     let (context, server) = provider(vec![
         (

@@ -25,6 +25,14 @@ For Go, set `MSB_SELECTOR_NATIVE_LIBRARY` to the rebuilt remote-capable native l
 go run ../../scripts/smoke/remote-audit/go.go
 ```
 
+The focused runtime-settings regression checks configured shell, default command and workdir on create-, get- and list-derived objects, then deletes its exact test resource and verifies absence:
+
+```sh
+node scripts/smoke/remote-audit/runtime-settings.mjs
+```
+
+This runtime probe does not qualify live `config()` or dependent Go shell, CLI command-resolution and SFTP configuration paths.
+
 Additional investigations use separate disposable resources and report paths:
 
 ```sh

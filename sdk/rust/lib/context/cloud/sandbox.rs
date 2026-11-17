@@ -39,6 +39,15 @@ const DEFAULT_CLOUD_STOP_TIMEOUT: Duration = Duration::from_secs(360);
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Execution-facing fields of a provider inspection response. These fields
+/// are independent of root-source, mount-source and secret redaction, and must
+/// not be decoded through the creation-request contract.
+#[derive(serde::Deserialize)]
+struct RemoteRuntimeInspection {
+    runtime: Option<SandboxRuntimeOptions>,
+    env: Option<Vec<microsandbox_types::EnvVar>>,
+}
+
 /// Wire body for the cloud's create route: the shared sandbox spec, nested
 /// under `spec`, with the cloud-only create options beside it.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -193,7 +202,7 @@ impl SandboxOps for RemoteContext {
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
             let current = RemoteContext::get_sandbox(self, name).await?;
-            let config = sandbox_config_from_cloud(&current);
+            let config = sandbox_config_from_cloud(&current)?;
             let cloud = RemoteContext::start_sandbox(self, name).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -209,7 +218,7 @@ impl SandboxOps for RemoteContext {
         // after this process exits. Same code path as `start`.
         Box::pin(async move {
             let current = RemoteContext::get_sandbox(self, name).await?;
-            let config = sandbox_config_from_cloud(&current);
+            let config = sandbox_config_from_cloud(&current)?;
             let cloud = RemoteContext::start_sandbox(self, name).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -225,7 +234,7 @@ impl SandboxOps for RemoteContext {
         Box::pin(async move {
             let id = cloud_identity(identity)?;
             let current = RemoteContext::get_sandbox_by_id(self, &id).await?;
-            let config = sandbox_config_from_cloud(&current);
+            let config = sandbox_config_from_cloud(&current)?;
             let cloud = RemoteContext::start_sandbox_by_id(self, &id).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -802,23 +811,30 @@ fn ensure_cloud_sandbox_ready(cloud: &CloudCreateSandboxResponse) -> Microsandbo
 /// Build the best available runtime config for a sandbox the SDK did not
 /// create itself.
 ///
-/// The cloud owns its response projection and may omit `spec` or return a
-/// curated shape. A complete shared cloud spec is decoded when available;
-/// otherwise agent operations use SDK defaults. Lifecycle start must never
-/// depend on the optional inspection projection.
-fn sandbox_config_from_cloud(cloud: &CloudCreateSandboxResponse) -> SandboxConfig {
+/// The provider may omit `spec` or return a curated shape. Runtime settings
+/// are decoded independently from creation metadata; malformed settings fail
+/// preparation. An omitted projection retains the existing legacy behavior.
+fn sandbox_config_from_cloud(
+    cloud: &CloudCreateSandboxResponse,
+) -> MicrosandboxResult<SandboxConfig> {
     sandbox_config_from_cloud_spec(&cloud.name, cloud.spec.clone())
 }
 
 /// Decode the server-owned spec projection carried by a cloud handle.
 ///
-/// Agent operations only require a best-effort runtime config. The response
-/// projection may be absent or curated, so reconnecting must preserve the
-/// lifecycle contract without requiring a complete create request.
+/// This internal session config is not the public live configuration result.
+/// Preserve execution settings even when a redacted projection cannot supply
+/// creation metadata; never discard a runtime decoding error.
 pub(crate) fn sandbox_config_from_cloud_spec(
     name: &str,
     spec: Option<serde_json::Value>,
-) -> SandboxConfig {
+) -> MicrosandboxResult<SandboxConfig> {
+    // Validate the fields consumed by execution independently. In particular,
+    // malformed runtime settings are not permission to run with other defaults.
+    let runtime = spec
+        .as_ref()
+        .map(|value| serde_json::from_value::<RemoteRuntimeInspection>(value.clone()))
+        .transpose()?;
     let mut config = spec
         .and_then(|value| serde_json::from_value::<CloudCreateSandboxRequest>(value).ok())
         .and_then(|request| crate::sandbox::SandboxSpec::try_from(request).ok())
@@ -828,10 +844,19 @@ pub(crate) fn sandbox_config_from_cloud_spec(
         })
         .unwrap_or_default();
 
+    if let Some(runtime) = runtime {
+        if let Some(options) = runtime.runtime {
+            config.spec.runtime = options;
+        }
+        if let Some(env) = runtime.env {
+            config.spec.env = env;
+        }
+    }
+
     // The top-level response name is canonical even when a complete spec was
     // unavailable or carried stale inspection data.
     config.spec.name = name.to_string();
-    config
+    Ok(config)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1976,7 +2001,7 @@ mod tests {
             last_failure_message: None,
         };
 
-        let config = sandbox_config_from_cloud(&cloud);
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
 
         assert_eq!(config.spec.name, "agent-1");
         assert!(
@@ -2010,11 +2035,66 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_config_from_cloud_preserves_inspected_runtime_settings() {
+        // Inspection is a provider projection, not a source-tagged create request.
+        // These values must survive get/connect even though mount sources and
+        // private secret material are deliberately absent from that projection.
+        let mut cloud = cloud_response(CloudSandboxStatus::Running);
+        cloud.spec = Some(serde_json::json!({
+            "image": "python",
+            "resources": { "vcpus": 2, "memory_mib": 512 },
+            "runtime": {
+                "shell": "/bin/bash",
+                "entrypoint": ["printf"],
+                "cmd": ["configured-default"],
+                "workdir": "/tmp",
+                "user": "1000",
+                "scripts": { "check": "printf checked" }
+            },
+            "env": [{ "key": "CONFIG_TEST", "value": "retained" }],
+            "labels": {},
+            "rlimits": [],
+            "lifecycle": { "ephemeral": false },
+            "mounts": [],
+            "network": { "enabled": true, "ports": [], "trust_host_cas": false }
+        }));
+
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
+
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/tmp"));
+        assert_eq!(config.spec.runtime.user.as_deref(), Some("1000"));
+        assert_eq!(config.spec.runtime.entrypoint, Some(vec!["printf".into()]));
+        assert_eq!(
+            config.spec.runtime.cmd,
+            Some(vec!["configured-default".into()])
+        );
+        assert_eq!(config.spec.runtime.scripts["check"], "printf checked");
+        assert_eq!(
+            config.spec.env,
+            vec![EnvVar::new("CONFIG_TEST", "retained")]
+        );
+    }
+
+    #[test]
+    fn sandbox_config_from_cloud_rejects_malformed_runtime_settings() {
+        for runtime in [
+            serde_json::json!({ "shell": 42 }),
+            serde_json::json!({ "entrypoint": "printf" }),
+            serde_json::json!({ "workdir": [] }),
+        ] {
+            let mut cloud = cloud_response(CloudSandboxStatus::Running);
+            cloud.spec = Some(serde_json::json!({ "image": "python", "runtime": runtime }));
+            assert!(sandbox_config_from_cloud(&cloud).is_err());
+        }
+    }
+
+    #[test]
     fn sandbox_config_from_cloud_does_not_require_spec() {
         let mut cloud = cloud_response(CloudSandboxStatus::Stopped);
         cloud.spec = None;
 
-        let config = sandbox_config_from_cloud(&cloud);
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
 
         assert_eq!(config.spec.name, cloud.name);
         assert_eq!(config.spec.runtime.shell, None);
@@ -2028,7 +2108,7 @@ mod tests {
             "resources": { "vcpus": 1 }
         }));
 
-        let config = sandbox_config_from_cloud(&cloud);
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
 
         assert_eq!(config.spec.name, cloud.name);
         assert_eq!(config.spec.runtime.shell, None);

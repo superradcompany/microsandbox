@@ -650,12 +650,12 @@ impl SandboxRecord {
                 }
                 #[cfg(feature = "cloud")]
                 {
-                    // The cloud handle stores the optional curated spec exactly as
-                    // returned by the API. Decode it on reconnect, falling back to
-                    // SDK defaults when the server intentionally omitted it.
+                    // Decode execution settings from the inspection projection,
+                    // independently of redacted creation-only fields. Invalid
+                    // runtime settings must fail preparation rather than vanish.
                     let spec = serde_json::from_str(&cloud.config_json)?;
                     let config =
-                        crate::context::sandbox::sandbox_config_from_cloud_spec(&self.name, spec);
+                        crate::context::sandbox::sandbox_config_from_cloud_spec(&self.name, spec)?;
                     let created_at = cloud.created_at.ok_or_else(|| {
                         MicrosandboxError::Runtime(format!(
                             "cloud sandbox {:?} is missing its creation timestamp",
