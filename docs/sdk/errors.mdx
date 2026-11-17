@@ -336,17 +336,17 @@ end
 
 ## Stop observation timeouts
 
-On Local, a graceful-stop timeout causes the SDK to force-kill the sandbox.
+A graceful-stop timeout ends the wait. It does not force-kill the sandbox.
 
-On Cloud, the same timeout only limits how long the SDK waits: the accepted server-side stop is not cancelled and may still complete.
+On our managed cloud, an accepted stop keeps running on the server and may still complete.
 
-Cloud reports this with `SandboxStopTimedOutError` in TypeScript and Python, `Error::SandboxStopTimedOut` in Rust, and `ErrSandboxStopTimedOut` in Go. Ruby currently raises `Microsandbox::Error` with a message explaining that the accepted stop may still complete.
+The timeout error means the accepted stop may still complete. See your [SDK error reference](/sdk/overview#reference) for the error type.
 
-After a Cloud timeout, poll the sandbox status or call the wait-until-stopped method if you still need confirmation. Calling `request_stop` first is useful when the application wants to submit the stop and control its own observation deadline.
+After a managed cloud timeout, poll the sandbox status or call the wait-until-stopped method if you still need confirmation. Calling `request_stop` first is useful when the application wants to submit the stop and control its own observation deadline.
 
 ## Modification not confirmed
 
-On Cloud, a `modify` apply that did not complete as asked fails with `ModificationNotConfirmedError` in TypeScript and Python, `MicrosandboxError::ModificationNotConfirmed` in Rust, and `ErrModificationNotConfirmed` in Go. The change may be saved without being in effect on the running sandbox, or its result is unknown. The message reads `the change did not complete as asked: <cause>`, where the cause says which is known and, when sending the same change again retries it, says so. If another change arrived in between, the resend overwrites it.
+On managed cloud, an unconfirmed modification raises a not-confirmed error. The change may be saved without being in effect on the running sandbox, or its result is unknown. The message reads `the change did not complete as asked: <cause>`, where the cause says which is known and, when sending the same change again retries it, says so. If another change arrived in between, the resend overwrites it.
 
 A running or failed Cloud sandbox answers each live change with `live` or this error. A change reads `next start` only when the sandbox is stopped or the next-start policy is used. Until the server knows the result, usually within seconds, starting the sandbox is refused. Local sandboxes never return this error.
 
@@ -411,7 +411,7 @@ The CLI prints the startup failure before any captured log output so the immedia
 
 ## Resource cleanup
 
-<Tooltip tip="TypeScript await using and Rust drop do not stop microsandbox cloud sandboxes, because cloud handles do not own the host process; call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="TypeScript await using and Rust drop do not stop our managed cloud sandboxes, because cloud handles do not own the host process; call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Sandboxes hold compute resources, so release them when done.
 

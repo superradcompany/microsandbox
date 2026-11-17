@@ -15,6 +15,7 @@ impl RemoteContext {
             api_key: Some(self.inner.api_key.clone()),
             request_timeout: self.inner.request_timeout,
             user_agent: self.inner.user_agent.clone(),
+            compute_type: self.inner.compute_type,
             custom_client: self.inner.custom_client.clone(),
             shared_client: Some(self.inner.http.clone()),
             config: Some(self.inner.config.clone()),

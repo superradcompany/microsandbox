@@ -17,7 +17,7 @@ Creation, lookup and list items return the same `Volume` type. Each resource ret
 fn id(&self) -> &VolumeId
 ```
 
-Borrow the opaque identity without I/O. Removing and recreating a name creates a different resource identity. Identities are interpreted within their retained context.
+Borrow the opaque identity without I/O. Removing and recreating a name creates a different resource identity. The identity belongs to the connection that created it.
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">context()</span>
 
@@ -25,7 +25,7 @@ Borrow the opaque identity without I/O. Removing and recreating a name creates a
 fn context(&self) -> &dyn Context
 ```
 
-Borrow the retained destination without I/O or allocation.
+Get the connection used by this volume without contacting the backend.
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">ctx()</span>
 
@@ -49,13 +49,13 @@ volume.destroy().await?;
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get_default()</span>
 
-<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available only on our managed cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn get_default() -> MicrosandboxResult<Volume>
 ```
 
-Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
+Get your managed cloud organization's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
 
 <Accordion title="Example">
 
@@ -104,7 +104,7 @@ Create a builder for configuring a new named volume. Directory-backed volumes ar
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">create()</span>
 
-<Tooltip tip="Microsandbox cloud creates directory volumes only; capacity is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="our managed cloud creates directory volumes only; capacity is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn create(config: VolumeConfig) -> MicrosandboxResult<Volume>
@@ -411,7 +411,7 @@ Which backend variant this volume is bound to: `Local` or `Remote`.
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">local()</span>
 
-<Tooltip tip="Returns state only for local-backed volumes; None on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Returns state only for local-backed volumes; None on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn local(&self) -> Option<&VolumeLocalState>
@@ -974,7 +974,7 @@ Create a directory-backed named volume (mounted through virtiofs). This is the d
 
 #### <span className="msb-recv">volume_builder.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Disk-kind volumes are not available on our managed cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn disk(self) -> Self
@@ -984,7 +984,7 @@ Create a raw ext4 disk-image named volume (mounted through virtio-blk). Requires
 
 #### <span className="msb-recv">volume_builder.</span><span className="msb-hn">size()</span>
 
-<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Disk-kind volumes are not available on our managed cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn size(self, size: impl Into<Mebibytes>) -> Self
@@ -1017,7 +1017,7 @@ Set the disk volume's capacity. Required for disk volumes; rejected for director
 
 #### <span className="msb-recv">volume_builder.</span><span className="msb-hn">quota()</span>
 
-<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn quota(self, size: impl Into<Mebibytes>) -> Self
@@ -1126,7 +1126,9 @@ Configure an owned directory or raw ext4 disk. Directory storage accepts a quota
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">bind()</span>
 
-<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```rust
 fn bind(self, host: impl Into<PathBuf>) -> Self
@@ -1162,7 +1164,7 @@ Mount a named volume created via [`Volume::create()`](#volumecreate). The volume
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">named_with()</span>
 
-<Tooltip tip="On microsandbox cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn named_with(
@@ -1218,7 +1220,9 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops. Good
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 <a id="mb-disk"></a>
 
@@ -1458,7 +1462,7 @@ Use directory-backed storage for a created volume. This is the default. Clears a
 
 #### <span className="msb-recv">named.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Disk-kind volumes are not available on our managed cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="nv-disk"></a>
 
@@ -1470,7 +1474,7 @@ Use raw ext4 disk-image storage for a created volume. Requires [`.size()`](#nv-s
 
 #### <span className="msb-recv">named.</span><span className="msb-hn">size()</span>
 
-<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Disk-kind volumes are not available on our managed cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="nv-size"></a>
 
@@ -1491,7 +1495,7 @@ Set disk capacity for a created disk volume. Accepts a bare `u32` (MiB) or a `Si
 
 #### <span className="msb-recv">named.</span><span className="msb-hn">quota()</span>
 
-<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="nv-quota"></a>
 

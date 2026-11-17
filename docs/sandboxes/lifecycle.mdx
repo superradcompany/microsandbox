@@ -71,7 +71,9 @@ await worker.resume()
 
 ```go Go
 worker, err := m.GetSandbox(ctx, "worker")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 if err := worker.Pause(ctx); err != nil { return err }
 if err := worker.Resume(ctx); err != nil { return err }
 ```
@@ -219,7 +221,9 @@ output = await sb.shell("echo ready")
 
 ```go Go
 sb, err := m.GetSandbox(ctx, "worker")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 defer sb.Close()
 output, err := sb.Shell(ctx, "echo ready")
 ```
@@ -254,7 +258,9 @@ await sb.ensure_running()  # Surface preparation failures now; submit work later
 
 ```go Go
 sb, err := m.GetSandbox(ctx, "worker")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 defer sb.Close()
 // Surface preparation failures now; submit work later in this scope.
 if err := sb.EnsureRunning(ctx); err != nil { return err }
@@ -268,7 +274,7 @@ sb.ensure_running # Surface preparation failures now; submit work later.
 
 Preparation retains a newly started local run on the receiving object. Releasing the final owner stops that run; connecting to an already-running sandbox acquires no new cleanup ownership. `detach` explicitly releases cleanup ownership while leaving the object usable. Remote runs remain independent of client scope.
 
-Use `Sandbox.getRunning`, `Sandbox::get_running`, `Sandbox.get_running`, `GetRunningSandbox`, or `Sandbox.get_running` in TypeScript, Rust, Python, Go, or Ruby respectively for lookup and preparation together. These methods never create a missing sandbox. Static `start` and `start_detached` are strict: an already-running sandbox is an error.
+Use the running-sandbox lookup to combine lookup and startup without creating a missing sandbox. Explicit start operations fail if the sandbox is already running. See your [SDK reference](/sdk/overview#reference) for the matching method.
 
 ## Keep a sandbox running
 
@@ -310,7 +316,7 @@ msb run -d python --name worker
 ```
 </CodeGroup>
 
-To detach a sandbox you already created, call `detach()` (`Detach` in Go).
+Detach an existing sandbox to let it keep running after its handle is released:
 
 ## List and inspect
 
@@ -345,13 +351,17 @@ print(await handle.status())
 page, err := m.ListSandboxes(ctx)
 for _, handle := range page.Sandboxes {
     status, err := handle.Status(ctx)
-    if err != nil { return err }
+    if err != nil {
+        return err
+    }
     fmt.Printf("%s: %s\n", handle.Name(), status)
 }
 
 handle, err := m.GetSandbox(ctx, "worker")
 status, err := handle.Status(ctx)
-if err != nil { return err }
+if err != nil {
+    return err
+}
 fmt.Println(status)
 ```
 
@@ -400,7 +410,7 @@ To wait for a specific lifecycle state, use the status-wait method in your SDK: 
 
 ## Change configuration
 
-Use `msb modify`, or the SDK `modify()` methods, to change an existing sandbox without recreating it. Some changes apply immediately, some affect future commands, and some take effect after a restart.
+Use `msb modify`, or the SDK `modify()` methods, to change an existing sandbox without recreating it. Locally, you can resize resources and update settings. On our managed cloud, you can change secrets; recreate the sandbox to change CPU, memory, or mounts. Some changes apply immediately and others take effect at the next start.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -491,7 +501,7 @@ msb ping worker --touch
 ## Drain before stopping
 
 <Note>
-Draining is currently available only for local sandboxes. Use a graceful stop on microsandbox cloud.
+Draining is currently available only for local sandboxes. Use a graceful stop on our managed cloud.
 </Note>
 
 Use a drain when existing commands should finish but new commands should be rejected. The sandbox moves to `Draining`, waits for in-flight commands, and then stops. This is useful when rotating worker sandboxes without interrupting active jobs.
@@ -670,7 +680,7 @@ Concurrent callers can safely use `connect_or_create` or `ensure_running` to reu
 ### Stop an unresponsive sandbox
 
 <Note>
-Force kill is currently available only for local sandboxes. Use a graceful stop on microsandbox cloud.
+Force kill is currently available only for local sandboxes. Use a graceful stop on our managed cloud.
 </Note>
 
 If [graceful stop](#stop-and-start-again) does not work, use `kill` to end the VM immediately. Running work is interrupted and unsaved data may be lost.

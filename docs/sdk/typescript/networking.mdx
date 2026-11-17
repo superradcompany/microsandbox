@@ -413,7 +413,7 @@ Set the policy. Accepts a [`NetworkPolicy`](#networkpolicy) literal or factory r
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">port()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 port(host: number, guest: number): this
@@ -436,7 +436,7 @@ Publish a TCP port from the guest to the host. The default host bind address is 
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">portBind()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 portBind(bind: string, host: number, guest: number): this
@@ -463,7 +463,7 @@ Publish a TCP port on a specific host bind address, such as `0.0.0.0`.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">portUdp()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 portUdp(host: number, guest: number): this
@@ -486,7 +486,7 @@ Publish a UDP port from the guest to the host. The default host bind address is 
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">portUdpBind()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 portUdpBind(bind: string, host: number, guest: number): this
@@ -513,7 +513,7 @@ Publish a UDP port on a specific host bind address.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">dns()</span>
 
-<Tooltip tip="Custom nameservers are not available on microsandbox cloud; cloud uses platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Custom nameservers are not available on our managed cloud; cloud uses platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 dns(configure: (b: DnsBuilder) => DnsBuilder): this
@@ -540,7 +540,7 @@ Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">tls()</span>
 
-<Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="TLS interception and host-CA trust are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 tls(configure: (b: TlsBuilder) => TlsBuilder): this
@@ -559,7 +559,7 @@ Configure TLS interception. See [`TlsBuilder`](#tlsbuilder).
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">trustHostCAs()</span>
 
-<Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="TLS interception and host-CA trust are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 trustHostCAs(enabled: boolean): this
@@ -667,7 +667,7 @@ Limit the maximum number of concurrent network connections from the sandbox. TCP
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">rateLimiter()</span>
 
-<Tooltip tip="Host-side network rate limiting is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Host-side network rate limiting is not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 rateLimiter(configure: (r: NetworkRateLimiterBuilder) => NetworkRateLimiterBuilder): this
@@ -690,7 +690,7 @@ Configure network rate limits. Egress and ingress are independently optional; an
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">ipv4Pool()</span>
 
-<Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Interface and IP-pool overrides are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 ipv4Pool(pool: string): this
@@ -709,7 +709,7 @@ Set the IPv4 pool used to derive per-sandbox `/30` guest subnets. Defaults to `1
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">ipv6Pool()</span>
 
-<Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Interface and IP-pool overrides are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 ipv6Pool(pool: string): this
@@ -745,7 +745,7 @@ Add a NAT64 `/96` prefix for policy classification. Destinations inside NAT64 pr
 
 #### <span className="msb-recv" id="nb-interface">network.</span><span className="msb-hn">interface()</span>
 
-<Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Interface and IP-pool overrides are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 interface(configure: (b: InterfaceOverridesBuilder) => InterfaceOverridesBuilder): this
@@ -1588,7 +1588,7 @@ Toggle DNS rebinding protection. When enabled, DNS responses resolving to privat
 
 #### <span className="msb-recv">dns.</span><span className="msb-hn">nameservers()</span>
 
-<Tooltip tip="Custom nameservers are not available on microsandbox cloud; cloud uses platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Custom nameservers are not available on our managed cloud; cloud uses platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 nameservers(servers: string[]): this
@@ -1670,7 +1670,7 @@ Verify upstream server certificates only when the upstream SNI matches `pattern`
 
 #### <span className="msb-recv">tls.</span><span className="msb-hn">interceptedPorts()</span>
 
-<Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="TLS interception and host-CA trust are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 interceptedPorts(ports: number[]): this
@@ -1706,7 +1706,7 @@ Block QUIC on intercepted ports, forcing TCP/TLS fallback.
 
 #### <span className="msb-recv">tls.</span><span className="msb-hn">interceptCaCert()</span>
 
-<Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="TLS interception and host-CA trust are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 interceptCaCert(path: string): this
@@ -1725,7 +1725,7 @@ Path to a PEM file used as the intercepting CA's certificate.
 
 #### <span className="msb-recv">tls.</span><span className="msb-hn">interceptCaKey()</span>
 
-<Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="TLS interception and host-CA trust are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 interceptCaKey(path: string): this
@@ -1780,7 +1780,7 @@ Create HTTP settings with JSON denial responses enabled. [`network.http()`](#net
 
 #### <span className="msb-recv">http.</span><span className="msb-hn">denyResponse()</span>
 
-<Tooltip tip="HTTP denial responses are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="HTTP denial responses are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 denyResponse(enabled: boolean): this
@@ -2103,7 +2103,7 @@ TLS interception configuration.
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.rateLimiter</a></p>
 
-<Tooltip tip="Host-side network rate limiting is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Host-side network rate limiting is not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 interface NetworkRateLimiterConfig {

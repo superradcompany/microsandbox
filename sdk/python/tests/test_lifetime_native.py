@@ -170,9 +170,16 @@ import threading
 from microsandbox import LocalContext, RemoteContext, Sandbox
 
 servers = []
+creates = []
 def provider(identity):
     class Provider(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            creates.append(body["compute"]["type"])
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         def do_GET(self):
             assert self.headers["Authorization"] == "Bearer key-" + identity
             observation = {"id": identity, "org_id": "org", "name": "task",
@@ -189,7 +196,9 @@ def provider(identity):
     server = HTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     servers.append(server)
-    return RemoteContext.with_url(f"http://127.0.0.1:{server.server_port}", "key-" + identity)
+    return RemoteContext.with_url(
+        f"http://127.0.0.1:{server.server_port}", "key-" + identity, compute_type="shared"
+    )
 
 async def check():
     assert RemoteContext(api_key="hosted-key").kind == "remote"
@@ -205,10 +214,20 @@ async def check():
         else:
             raise AssertionError("invalid remote constructor accepted")
     a, b = provider("a"), provider("b")
+    for selected in (a.replace(), a.replace(compute_type="standard")):
+        try:
+            await selected.sandboxes.create("task", image="python")
+        except Exception as error:
+            assert "403" in str(error), error
+        else:
+            raise AssertionError("fixture should deny creation")
+    assert creates == ["shared", "standard"], creates
     assert a.kind == "remote" and LocalContext().kind == "local"
     collection = a.sandboxes
     assert (await a.replace().sandboxes.get("task")).id == (await collection.get("task")).id
-    for overrides in ({"api_key": ""}, {"url": ""}, {"request_timeout_ms": -1}):
+    for overrides in (
+        {"api_key": ""}, {"url": ""}, {"request_timeout_ms": -1}, {"compute_type": "invalid"}
+    ):
         try:
             a.replace(**overrides)
         except Exception:

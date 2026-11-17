@@ -4491,16 +4491,13 @@ mod tests {
     };
 
     use super::*;
-    use crate::Snapshot as PublicSnapshot;
+    use crate::Context;
 
     #[tokio::test]
     async fn bounded_import_limits_expansion_and_keeps_unbounded_import_compatible() {
-        use crate::backend::{default_backend, with_backend};
-
         let root = tempfile::tempdir().unwrap();
         let backend = crate::test_support::local_backend_builder(root.path().join("home"))
             .build()
-            .await
             .unwrap();
         let data = grouped_archive_manifest(990, None);
         let artifact = root.path().join("artifact");
@@ -4515,19 +4512,21 @@ mod tests {
         .await
         .unwrap();
 
-        with_backend(backend, async {
-            let loaded = PublicSnapshot::load_bounded(
-                &archive,
-                LoadOpts {
-                    group: Some("bounded".into()),
-                    ..Default::default()
-                },
-                4096,
-            )
-            .await
-            .unwrap();
+        {
+            let snapshots = backend.snapshots();
+            let loaded = snapshots
+                .load_bounded(
+                    &archive,
+                    LoadOpts {
+                        group: Some("bounded".into()),
+                        ..Default::default()
+                    },
+                    4096,
+                )
+                .await
+                .unwrap();
             assert_eq!(
-                loaded.open().await.unwrap().manifest().snapshot_id,
+                loaded.manifest().await.unwrap().snapshot_id,
                 data.snapshot_id
             );
 
@@ -4536,13 +4535,13 @@ mod tests {
                 (u64::MAX, "overflow"),
                 (2048, "maximum disk size"),
             ] {
-                let error = PublicSnapshot::load_bounded(&archive, LoadOpts::default(), disk_limit)
+                let error = snapshots
+                    .load_bounded(&archive, LoadOpts::default(), disk_limit)
                     .await
                     .unwrap_err();
                 assert!(error.to_string().contains(expected), "{error}");
             }
-            let local = default_backend();
-            let local = local.as_local().unwrap();
+            let local = &backend;
             for entry in std::fs::read_dir(local.snapshots_dir()).unwrap() {
                 let entry = entry.unwrap();
                 assert!(
@@ -4552,27 +4551,24 @@ mod tests {
                         .starts_with(".msb-snapshot-")
                 );
             }
-            PublicSnapshot::load_with_options(
-                &archive,
-                LoadOpts {
-                    group: Some("unbounded".into()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        })
-        .await;
+            snapshots
+                .load_with_options(
+                    &archive,
+                    LoadOpts {
+                        group: Some("unbounded".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]
     async fn bounded_import_refuses_sparse_and_non_disk_payloads_before_creating_them() {
-        use crate::backend::with_backend;
-
         let root = tempfile::tempdir().unwrap();
         let backend = crate::test_support::local_backend_builder(root.path().join("home"))
             .build()
-            .await
             .unwrap();
         let names = [
             ("cache/blobs/payload", "disk-only payloads"),
@@ -4589,7 +4585,8 @@ mod tests {
                 "maximum disk size",
             ),
         ];
-        with_backend(backend, async {
+        {
+            let snapshots = backend.snapshots();
             for (index, (name, expected)) in names.into_iter().enumerate() {
                 let archive = root.path().join(format!("bad-{index}.tar"));
                 let mut header = tokio_tar::Header::new_gnu();
@@ -4605,7 +4602,8 @@ mod tests {
                 let mut bytes = header.as_bytes().to_vec();
                 bytes.resize(bytes.len() + 1024, 0);
                 std::fs::write(&archive, bytes).unwrap();
-                let error = PublicSnapshot::load_bounded(&archive, LoadOpts::default(), 4096)
+                let error = snapshots
+                    .load_bounded(&archive, LoadOpts::default(), 4096)
                     .await
                     .unwrap_err();
                 assert!(error.to_string().contains(expected), "{error}");
@@ -4629,16 +4627,15 @@ mod tests {
             }
             bytes.resize(bytes.len() + 1024, 0);
             std::fs::write(&archive, bytes).unwrap();
-            let error =
-                PublicSnapshot::load_bounded(&archive, LoadOpts::default(), 64 * 1024 * 1024)
-                    .await
-                    .unwrap_err();
+            let error = snapshots
+                .load_bounded(&archive, LoadOpts::default(), 64 * 1024 * 1024)
+                .await
+                .unwrap_err();
             assert!(
                 error.to_string().contains("aggregate byte budget"),
                 "{error}"
             );
-        })
-        .await;
+        }
     }
 
     #[tokio::test]

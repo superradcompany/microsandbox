@@ -11,8 +11,6 @@ use super::{
     HeadUpdate, LoadOpts, Manifest, SaveOpts, SnapshotConfig, SnapshotCopyBuilder, SnapshotFormat,
     SnapshotId, SnapshotScope, SnapshotState, SnapshotVerifyReport,
 };
-#[cfg(feature = "local")]
-use crate::MicrosandboxError;
 use crate::MicrosandboxResult;
 use crate::context::Context;
 
@@ -653,15 +651,10 @@ impl Snapshot {
         path: &Path,
         opts: LoadOpts,
         maximum_disk_bytes: u64,
-    ) -> MicrosandboxResult<SnapshotHandle> {
-        let backend = crate::backend::default_backend();
-        if backend.as_local().is_none() || opts.base.is_some() {
-            return Err(MicrosandboxError::InvalidConfig(
-                "bounded snapshot import requires local storage without external dependencies"
-                    .into(),
-            ));
-        }
-        super::import_budget::scope(maximum_disk_bytes, Self::load_with_options(path, opts)).await
+    ) -> MicrosandboxResult<Snapshot> {
+        Self::ctx(crate::context::default_local_context().as_ref())
+            .load_bounded(path, opts, maximum_disk_bytes)
+            .await
     }
     /// Validate all inputs before publication and return their heads in input order.
     pub async fn load_many(paths: &[PathBuf], opts: LoadOpts) -> MicrosandboxResult<Vec<Snapshot>> {

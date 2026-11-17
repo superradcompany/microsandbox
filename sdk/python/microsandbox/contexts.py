@@ -2,6 +2,7 @@
 
 import json
 import os
+from typing import Literal
 
 from ._microsandbox import Context
 
@@ -38,6 +39,7 @@ class RemoteContext(Context):
         profile: str | None = None,
         request_timeout_ms: int | None = None,
         user_agent: str | None = None,
+        compute_type: Literal["standard", "shared"] | None = None,
     ):
         if request_timeout_ms is not None and (
             isinstance(request_timeout_ms, bool)
@@ -53,10 +55,19 @@ class RemoteContext(Context):
             "requestTimeoutMs": request_timeout_ms,
             "userAgent": user_agent,
         }
+        if compute_type is not None:
+            options["computeType"] = compute_type
         return super().__new__(cls, json.dumps(options))
 
     def __init__(
-        self, *, url=None, api_key=None, profile=None, request_timeout_ms=None, user_agent=None
+        self,
+        *,
+        url=None,
+        api_key=None,
+        profile=None,
+        request_timeout_ms=None,
+        user_agent=None,
+        compute_type=None,
     ):
         pass
 
@@ -67,6 +78,7 @@ class RemoteContext(Context):
         api_key: str | None = None,
         request_timeout_ms: int | None = None,
         user_agent: str | None = None,
+        compute_type: Literal["standard", "shared"] | None = None,
     ) -> "RemoteContext":
         """Return an independent context with overrides; None retains the captured value.
 
@@ -85,6 +97,8 @@ class RemoteContext(Context):
             "requestTimeoutMs": request_timeout_ms,
             "userAgent": user_agent,
         }
+        if compute_type is not None:
+            options["computeType"] = compute_type
         # Allocate the concrete wrapper around derived native state, without rerunning
         # the public constructor or copying credentials into Python.
         return Context.__new__(type(self), json.dumps(options), self)
@@ -97,6 +111,7 @@ class RemoteContext(Context):
         *,
         request_timeout_ms: int | None = None,
         user_agent: str | None = None,
+        compute_type: Literal["standard", "shared"] | None = None,
     ) -> "RemoteContext":
         """Select an explicit endpoint while retaining the normal option validation."""
         return cls(
@@ -104,6 +119,7 @@ class RemoteContext(Context):
             api_key=api_key,
             request_timeout_ms=request_timeout_ms,
             user_agent=user_agent,
+            compute_type=compute_type,
         )
 
     @classmethod

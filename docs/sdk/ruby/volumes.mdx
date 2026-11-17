@@ -254,7 +254,7 @@ Creation, lookup and list items return the same `Microsandbox::Volume` class. Dr
 volume.id # => String
 ```
 
-Opaque identity within the retained destination. Available without I/O; a replacement with the same name has a different identity.
+An opaque identity for this connection. Reading it does not contact the backend; a replacement with the same name has a different identity.
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
 
@@ -303,7 +303,7 @@ puts info.fetch("used_bytes")
 puts info.fetch("labels")
 ```
 
-Fetch current quota, usage, capacity, labels, and metadata from the retained destination. The method performs a fresh lookup on each call; unknown usage is `nil` and lookup errors do not return captured data. Retain this returned hash when several fields should come from one observation.
+Fetch the current quota, usage, capacity, labels, and metadata from the backend. The method performs a fresh lookup on each call; unknown usage is `nil` and lookup errors do not return captured data. Reuse this returned hash when several values should come from the same lookup.
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">created_at</span>
 
@@ -326,7 +326,7 @@ volume.created_at # => String | nil
 volume.destroy # => nil
 ```
 
-Delete this volume using its retained identity and context. A same-name replacement is left untouched.
+Delete this volume using its identity and connection. A same-name replacement is left untouched.
 
 <p className="msb-label">Returns</p>
 

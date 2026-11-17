@@ -1,7 +1,7 @@
 ---
 title: Configuration
 "og:title": Rust SDK configuration reference
-description: Read global settings and configure local contexts with the Rust SDK.
+description: Read global settings and configure local or remote connections with the Rust SDK.
 ---
 
 See [Global configuration](/configuration) for file fields and defaults, and [Runtime setup](/sdk/setup) for installation.
@@ -106,7 +106,7 @@ let backend = LocalContext::builder()
 fn deployment_profile(self, profile: DeploymentProfile) -> Self
 ```
 
-Set the authoritative deployment profile for this backend. It takes precedence over the user configuration file and each sandbox's requested profile on create and restart. Managed settings retain precedence. See [deployment profiles](/configuration#deployment_profile) for behavior.
+Set the deployment profile for this backend. It takes precedence over the user configuration file and each sandbox's requested profile on create and restart. Managed settings retain precedence. See [deployment profiles](/configuration#deployment_profile) for behavior.
 
 ### ssh_inactivity_timeout_secs()
 
@@ -132,7 +132,7 @@ fn volumes(&self) -> Volumes;
 fn snapshots(&self) -> Snapshots;
 ```
 
-Select an explicit destination for resource factories. These accessors perform no backend I/O. Collections and their builders retain the context, so the original context variable can go out of scope. Use the ordinary resource factories for the default destination; select a context for remote operation or custom local settings.
+Choose which connection resource builders use. These accessors perform no backend I/O. Collections and builders keep using that connection even after the original variable goes out of scope. Use the default resource builders for local execution, or choose a context for remote execution or custom local settings.
 
 <Accordion title="Example">
 ```rust
@@ -153,7 +153,7 @@ let worker_b = collection.create().await?;
 fn clone_shared(&self) -> std::sync::Arc<dyn Context>;
 ```
 
-Retain the selected destination and shared implementation state. `LocalContext` clones share configuration, database initialization and control state. `RemoteContext` clones share their HTTP client and captured configuration. Context binding accepts `&dyn Context`; callers do not need to allocate an `Arc` themselves.
+Clone the context while sharing its connection and settings. `LocalContext` clones share configuration, database initialization and control state. `RemoteContext` clones share their HTTP client and captured configuration. Context binding accepts `&dyn Context`; callers do not need to allocate an `Arc` themselves.
 
 ### Resource and builder context()
 
@@ -161,7 +161,7 @@ Retain the selected destination and shared implementation state. `LocalContext` 
 fn context(&self) -> &dyn Context;
 ```
 
-`Sandbox`, `Volume`, `Snapshot` and their builders expose the retained destination through this synchronous accessor. It borrows the existing context without allocation or backend I/O. Use it to select another collection on the same destination.
+`Sandbox`, `Volume`, `Snapshot` and their builders expose their connection through this synchronous accessor. It returns the existing connection without allocating or contacting the backend. Use it to select another collection on the same destination.
 
 ## RemoteContext
 
@@ -172,7 +172,7 @@ fn new(api_key: impl Into<String>) -> MicrosandboxResult<Self>;
 fn with_url(url: impl Into<String>, api_key: impl Into<String>) -> MicrosandboxResult<Self>;
 ```
 
-`new` uses the hosted endpoint. `with_url` selects an explicit compatible provider; an empty URL is invalid. Both validate configuration synchronously. Use `from_env()` to read endpoint settings from the environment or `from_profile(name)` to load a named profile. See [remote endpoints](/operations/backends#remote-endpoints) and the [constructor migration](/migrations/sdk-contexts#remote-context-construction).
+`new` uses the hosted endpoint. `with_url` selects an explicit compatible provider; an empty URL is invalid. Both validate configuration synchronously. Use `from_env()` to read endpoint settings from the environment or `from_profile(name)` to load a named profile. See [remote endpoints](/cloud/connect#remote-endpoints) and the [constructor migration](/migrations/sdk-contexts#remote-context-construction).
 
 ### builder()
 
@@ -200,10 +200,31 @@ let sandbox = context.sandboxes().builder("worker").image("python").create().awa
 fn to_builder(&self) -> RemoteContextBuilder;
 ```
 
-Return a builder initialized from captured endpoint, credentials, transport options and configuration. Building creates an independent context without rereading profiles, environment or configuration files. Existing resources retain their original context. A supplied custom HTTP client keeps its transport settings; the context API key controls Authorization. See [derivation examples](/operations/backends#deriving-a-remote-context).
+Return a builder initialized from captured endpoint, credentials, compute type, transport options and configuration. Building creates an independent context without rereading profiles, environment or configuration files. Existing resources retain their original context. A supplied custom HTTP client keeps its transport settings; the context API key controls Authorization. See [derivation examples](/cloud/connect#deriving-a-remote-context).
 
 <Accordion title="Example">
 ```rust
 let other = remote.to_builder().api_key(other_key).build()?;
+```
+</Accordion>
+
+## RemoteContextBuilder
+
+### compute_type()
+
+```rust
+fn compute_type(self, compute_type: ComputeType) -> Self
+```
+
+Choose `Standard` or `Shared` for new sandboxes and snapshot restores. Omission uses the server default. Existing sandboxes keep their type. See [compute types](/cloud/pricing#choose-a-compute-type).
+
+<Accordion title="Example">
+```rust
+use microsandbox::{ComputeType, RemoteContext};
+
+let remote = RemoteContext::builder()
+    .api_key(std::env::var("MSB_API_KEY")?)
+    .compute_type(ComputeType::Shared)
+    .build()?;
 ```
 </Accordion>

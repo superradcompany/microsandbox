@@ -15,7 +15,7 @@ Creation, lookup and list items return the same `Volume` type. Each resource ret
 
 `string`
 
-Opaque identity within the retained destination, available synchronously without I/O. A replacement with the same name has a different identity.
+An opaque identity for this connection. Reading it does not contact the backend. A replacement with the same name has a different identity.
 
 <p className="msb-member-group">Instance properties</p>
 
@@ -35,13 +35,13 @@ Absolute host path to the volume's directory. By default volumes live under `~/.
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">getDefault()</span>
 
-<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available only on our managed cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 static getDefault(): Promise<Volume>
 ```
 
-Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`.
+Get your managed cloud organization's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`.
 
 The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
 
@@ -267,7 +267,7 @@ Create a directory-backed volume. This is the default, so calling it is only nee
 
 #### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Disk-kind volumes are not available on our managed cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 disk(): this
@@ -288,7 +288,7 @@ Create a raw ext4 disk-backed volume. Pair with [`size()`](#volumebuilder-size) 
 
 #### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">size()</span>
 
-<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Disk-kind volumes are not available on our managed cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 size(mib: number): this
@@ -307,7 +307,7 @@ Set the disk capacity in MiB. Required after [`disk()`](#volumebuilder-disk).
 
 #### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">quota()</span>
 
-<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 quota(mib: number): this
@@ -364,7 +364,7 @@ Materialize the volume configuration without creating the volume on disk. To cre
 
 #### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">create()</span>
 
-<Tooltip tip="Microsandbox cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="our managed cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 create(): Promise<Volume>

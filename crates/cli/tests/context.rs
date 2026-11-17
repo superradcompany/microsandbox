@@ -81,6 +81,14 @@ fn context_commands_recover_selection_and_save_only_the_preference() {
     let mut expected = config.clone();
     expected["version"] = json!(1);
     expected["active_profile"] = json!("work");
+    for profile in expected["profiles"].as_object_mut().unwrap().values_mut() {
+        let kind = profile.as_object_mut().unwrap().remove("backend").unwrap();
+        profile["kind"] = if kind == "cloud" {
+            json!("remote")
+        } else {
+            kind
+        };
+    }
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap(),
         expected
@@ -139,7 +147,7 @@ fn prohibited_selection_is_visible_but_cannot_be_used() {
         assert!(!output.status.success());
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains("user config"), "{error}");
-        assert!(error.contains("allowed backends: cloud"), "{error}");
+        assert!(error.contains("allowed backends: remote"), "{error}");
         assert!(error.contains(path.to_str().unwrap()), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), config);
     }
@@ -177,12 +185,12 @@ fn cloud_context_uses_explicit_selection_without_contacting_the_endpoint() {
         }
 
         let context = success_json(command.output().unwrap());
-        assert_eq!(context["selected"]["kind"], "cloud");
+        assert_eq!(context["selected"]["kind"], "remote");
         assert!(
             context["selection_error"]
                 .as_str()
                 .unwrap()
-                .contains("requires a non-empty MSB_API_KEY or a cloud profile")
+                .contains("requires a non-empty MSB_API_KEY or a remote profile")
         );
     }
 
@@ -195,7 +203,7 @@ fn cloud_context_uses_explicit_selection_without_contacting_the_endpoint() {
     let context = success_json(output);
     assert_eq!(
         context,
-        json!({"kind":"cloud","api_url":"http://127.0.0.1:1","source":"MSB_BACKEND"})
+        json!({"kind":"remote","api_url":"http://127.0.0.1:1","source":"MSB_BACKEND"})
     );
 
     let context = success_json(
@@ -209,7 +217,7 @@ fn cloud_context_uses_explicit_selection_without_contacting_the_endpoint() {
         .unwrap(),
     );
     assert_eq!(context["saved_profile"], "personal");
-    assert_eq!(context["selected"]["kind"], "cloud");
+    assert_eq!(context["selected"]["kind"], "remote");
     assert_eq!(context["preference_overridden"], true);
     assert!(context["selection_error"].is_null());
     assert!(!dir.path().join("runtime").exists());

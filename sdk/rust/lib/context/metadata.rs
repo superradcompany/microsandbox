@@ -1,4 +1,4 @@
-//! Context diagnostics retain the existing selection and serialization contracts.
+//! Context identity and secret-safe selection diagnostics.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +14,7 @@ pub enum ContextKind {
     /// Local libkrun + agentd backend. Spawns microVMs on the calling host.
     Local,
     /// Remote provider implementing the Microsandbox HTTP API.
-    #[serde(rename = "cloud")]
+    #[serde(alias = "cloud")]
     Remote,
 }
 
@@ -82,12 +82,11 @@ impl ContextKind {
         }
     }
 
-    /// Legacy configuration spelling, preserved for persisted profiles and CLI diagnostics.
-    /// Use the enum variants when distinguishing public context kinds.
+    /// Canonical spelling for configuration and diagnostics.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
-            Self::Remote => "cloud",
+            Self::Remote => "remote",
         }
     }
 }

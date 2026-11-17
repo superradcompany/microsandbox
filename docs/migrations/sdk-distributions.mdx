@@ -1,11 +1,11 @@
 ---
 title: "SDK distribution choices"
-description: "Keep the full SDK or select a smaller local or remote native provider."
+description: "Keep the full SDK or install only what you need."
 ---
 
-These package layouts accompany the SDK revamp and are not part of v0.7.15. Use the matching released wrapper and native provider versions when this migration is released. Package publication and the documentation deployment are separate from the implementation branch.
+These packages are unreleased and are not part of v0.7.15. When available, install matching SDK and native-library versions.
 
-Keep `npm install microsandbox` or `pip install microsandbox` to retain the full distribution. Switching to a smaller package is optional. The [API migration](/migrations/sdk-contexts) applies independently of package selection.
+Keep `npm install microsandbox` or `pip install microsandbox` to keep the full package. Switching to a smaller package is optional. The [API migration](/migrations/sdk-contexts) applies independently of package selection.
 
 ## Choose what gets installed
 
@@ -21,7 +21,7 @@ Rust package defaults and Ruby distribution are unchanged by this packaging migr
 
 ## Update imports
 
-For ordinary local use, keep the default-local factories and change only the import package:
+For local use, change the package you import:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -39,7 +39,7 @@ sb = await Sandbox.create("worker", image="python")
 
 Python uses separate distributions, not `microsandbox[local]` or `microsandbox[remote]` extras. Each owns a separate import package. npm uses separately installable scoped packages, not `microsandbox/local` or `microsandbox/remote` subpath imports.
 
-Both providers may be installed together. Their resource classes come from the same shared core, `@microsandbox/core` or `microsandbox_core`. Existing resources retain the provider that created them; importing another provider does not redirect operations. A remote-only installation reports a missing-local-provider error if a default-local factory is selected. Use an explicit [RemoteContext](/operations/backends#sdk-contexts) for remote operations.
+Local and remote packages can be installed together. Existing objects keep their original connection. A remote-only installation requires a [RemoteContext](/cloud/connect#sdk-contexts); trying to run locally reports a missing-package error.
 
 ## Provision Go FFI explicitly
 
@@ -69,7 +69,7 @@ func create(ctx context.Context) (*msb.Sandbox, error) {
 }
 ```
 
-For remote operations, provision `--kind remote` and use `remote.NewContextWithURL(path, url, apiKey)`. Full and lean modules share public resource types. Each native object retains its allocating library for operations, cancellation and cleanup.
+For remote operations, provision `--kind remote` and use `remote.NewContextWithURL(path, url, apiKey)`. Full and smaller packages use the same object types. Objects keep using the library they were created with.
 
 ## Verify the installation
 

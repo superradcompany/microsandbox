@@ -1,0 +1,437 @@
+---
+title: "Connect"
+sidebarTitle: "Connect"
+description: "Switch from local sandboxes to our managed cloud in one command"
+icon: "cloud-arrow-up"
+---
+
+Run agents and workloads on your machine by default. Need more compute? Switch to [our managed cloud](/cloud/overview) with one command in the CLI or one line to choose a remote context in your SDK. Keep the same sandbox code, and switch back just as easily.
+
+## Start locally
+
+Microsandbox runs locally by default, without a cloud account or daemon:
+
+```bash
+msb run python -- python -V
+```
+
+The default SDK helpers run locally too. You do not need a remote connection or an API key.
+
+<span id="connect-remotely" />
+
+## Switch to cloud
+
+<span id="sdk-contexts" />
+
+Get an API key from the [dashboard](https://dashboard.microsandbox.dev/access/api-keys) and set it in your environment:
+
+```bash
+export MSB_API_KEY="msb_..."
+```
+
+Then switch the CLI with one command:
+
+```bash
+export MSB_BACKEND=remote
+```
+
+Your next `msb` command runs remotely. In an application that uses a context, change the line that creates it to a remote context. The code that creates and uses your sandboxes stays the same:
+
+<CodeGroup>
+```typescript TypeScript
+import { RemoteContext } from "microsandbox";
+
+const remote = RemoteContext.fromEnv();
+const sb = await remote.sandboxes.builder("task")
+  .image("python")
+  .create();
+```
+
+```rust Rust
+use microsandbox::{Context, RemoteContext};
+
+let remote = RemoteContext::from_env()?;
+let sb = remote.sandboxes().builder("task")
+    .image("python")
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import RemoteContext
+
+remote = RemoteContext.from_env()
+sb = await remote.sandboxes.create("task", image="python")
+```
+
+```go Go
+remote, err := microsandbox.RemoteContextFromEnv()
+if err != nil {
+    return err
+}
+sb, err := remote.Sandboxes().Create(ctx, "task", microsandbox.WithImage("python"))
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+require "microsandbox"
+
+remote = Microsandbox::RemoteContext.from_env
+sb = remote.sandboxes.builder("task").image("python").create
+```
+
+```bash CLI
+msb create python --name task
+```
+</CodeGroup>
+
+A context is the connection your sandbox code uses. Default SDK helpers always run locally; use the remote context for cloud work.
+
+Switching connections does not move existing sandboxes or data. Objects you already opened keep their original connection.
+
+<span id="choose-at-startup" />
+
+<Accordion title="Choose the connection at startup">
+Choose the context once when your application starts. This example reads `MSB_BACKEND` itself; CLI profiles do not change it.
+
+<CodeGroup>
+```typescript TypeScript
+import { LocalContext, RemoteContext } from "microsandbox";
+
+const context = process.env.MSB_BACKEND === "remote"
+  ? RemoteContext.fromEnv()
+  : new LocalContext();
+
+const sb = await context.sandboxes.builder("hello").image("python").create();
+try {
+  const output = await sb.shell("echo hello");
+  console.log(output.stdout());
+} finally {
+  await sb.destroy();
+}
+```
+
+```rust Rust
+use microsandbox::{Context, LocalContext, RemoteContext};
+
+let context = if std::env::var("MSB_BACKEND").as_deref() == Ok("remote") {
+    RemoteContext::from_env()?.clone_shared()
+} else {
+    LocalContext::lazy()?.clone_shared()
+};
+
+let sb = context.sandboxes().builder("hello").image("python").create().await?;
+let output = sb.shell("echo hello").await?;
+println!("{}", output.stdout()?);
+sb.destroy().await?;
+```
+
+```python Python
+import os
+from microsandbox import LocalContext, RemoteContext
+
+context = (
+    RemoteContext.from_env()
+    if os.environ.get("MSB_BACKEND") == "remote"
+    else LocalContext()
+)
+
+sb = await context.sandboxes.create("hello", image="python")
+try:
+    output = await sb.shell("echo hello")
+    print(output.stdout_text)
+finally:
+    await sb.destroy()
+```
+
+```go Go
+import (
+    "fmt"
+    "os"
+
+    m "github.com/superradcompany/microsandbox/sdk/go"
+)
+
+var connection m.Context
+if os.Getenv("MSB_BACKEND") == "remote" {
+    remote, err := m.RemoteContextFromEnv()
+    if err != nil {
+        return err
+    }
+    connection = remote
+} else {
+    local, err := m.NewLocalContext(m.LocalOptions{})
+    if err != nil {
+        return err
+    }
+    connection = local
+}
+
+sb, err := connection.Sandboxes().Create(ctx, "hello", m.WithImage("python"))
+if err != nil {
+    return err
+}
+defer sb.Close()
+defer sb.Destroy(ctx)
+
+output, err := sb.Shell(ctx, "echo hello")
+if err != nil {
+    return err
+}
+fmt.Println(output.Stdout())
+```
+
+```ruby Ruby
+require "microsandbox"
+
+context = if ENV["MSB_BACKEND"] == "remote"
+  Microsandbox::RemoteContext.from_env
+else
+  Microsandbox::LocalContext.new
+end
+
+sb = context.sandboxes.builder("hello").image("python").create
+begin
+  puts sb.shell("echo hello").stdout
+ensure
+  sb.destroy
+end
+```
+</CodeGroup>
+
+Set `MSB_BACKEND=remote` and `MSB_API_KEY` before starting the application to run remotely. Set `MSB_BACKEND=local` and restart it to run locally again.
+</Accordion>
+
+## Switch back
+
+Point the CLI back at your machine:
+
+```bash
+export MSB_BACKEND=local
+```
+
+In your application, choose a local context again. Your sandbox workflow stays the same. See [Choose the connection at startup](#choose-at-startup) for an example.
+
+<Accordion title="CLI connection settings">
+`MSB_BACKEND=remote` switches CLI commands to remote. `MSB_API_KEY` supplies credentials; setting it alone does not switch where commands run. `cloud` remains an alias for `remote`. Set `MSB_API_URL` to use another API, or save a [profile](#profiles) for later commands.
+</Accordion>
+
+<span id="connect-from-an-sdk" />
+<span id="connect-the-cli" />
+<span id="cli-environment" />
+
+<span id="profiles" />
+
+## Save a connection
+
+Save a connection as a profile to use it again. Profiles live in `~/.microsandbox/config.json`.
+
+<Accordion title="Add profiles to config.json">
+```json
+{
+  "profiles": {
+    "work": {
+      "kind": "remote",
+      "api_key_ref": "env:MSB_API_KEY"
+    },
+    "local": {
+      "kind": "local"
+    }
+  }
+}
+```
+
+Set `url` on a remote profile for a self-hosted API. See the [profiles schema](/configuration#profiles) for all fields and credential sources. Readers accept the previous `backend` and `cloud` spellings; older SDKs may reject profiles rewritten with `kind` and `remote`.
+</Accordion>
+
+### View and switch
+
+```bash
+msb context list       # List saved profiles
+msb context use work   # Use a profile for subsequent CLI commands
+msb context           # Show the current connection, without the key
+msb context reset     # Clear the saved preference
+```
+
+For one command, use `MSB_PROFILE`:
+
+```bash
+MSB_PROFILE=work msb ls
+```
+
+### Load a profile in code
+
+SDKs load saved profiles explicitly. Switching the CLI profile does not change connections in your application.
+
+<CodeGroup>
+```typescript TypeScript
+const remote = RemoteContext.fromProfile("work");
+```
+
+```rust Rust
+let remote = RemoteContext::from_profile("work")?;
+```
+
+```python Python
+remote = RemoteContext.from_profile("work")
+```
+
+```go Go
+remote, err := m.RemoteContextFromProfile("work")
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+remote = Microsandbox::RemoteContext.from_profile("work")
+```
+</CodeGroup>
+
+## More options
+
+### Another endpoint
+
+The default endpoint is `https://api.microsandbox.dev`. Set an explicit URL to use another compatible API; an empty URL is an error.
+
+<Accordion title="Set another endpoint">
+<CodeGroup>
+```typescript TypeScript
+const remote = RemoteContext.withUrl("https://sandbox.example.com", apiKey);
+```
+
+```rust Rust
+let remote = RemoteContext::with_url("https://sandbox.example.com", api_key)?;
+```
+
+```python Python
+remote = RemoteContext.with_url("https://sandbox.example.com", api_key)
+```
+
+```go Go
+remote, err := m.NewRemoteContextWithURL("https://sandbox.example.com", apiKey)
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+remote = Microsandbox::RemoteContext.with_url("https://sandbox.example.com", api_key)
+```
+</CodeGroup>
+</Accordion>
+
+Environment-based constructors read `MSB_API_KEY` and optional `MSB_API_URL`.
+
+<span id="remote-endpoints" />
+
+<span id="compute-type" />
+
+For Standard and Shared options, see [compute types](/cloud/pricing#choose-a-compute-type).
+
+<span id="deriving-a-remote-context" />
+<Accordion title="Change a remote context">
+
+Create a copy of a context to change its endpoint, credentials, or options. Settings you leave out stay the same. Existing resources keep their original connection. Copying a context does not reload profiles or configuration.
+
+<CodeGroup>
+```typescript TypeScript
+import { RemoteContext } from "microsandbox";
+
+const remote = RemoteContext.fromEnv();
+const other = remote.toBuilder()
+  .url("https://other-provider.example")
+  .apiKey(process.env.OTHER_API_KEY!)
+  .build();
+```
+
+```rust Rust
+use microsandbox::RemoteContext;
+
+let remote = RemoteContext::from_env()?;
+let other = remote.to_builder()
+    .url("https://other-provider.example")
+    .api_key(std::env::var("OTHER_API_KEY")?)
+    .build()?;
+```
+
+```python Python
+import os
+from microsandbox import RemoteContext
+
+remote = RemoteContext.from_env()
+other = remote.replace(
+    url="https://other-provider.example",
+    api_key=os.environ["OTHER_API_KEY"],
+)
+```
+
+```go Go
+import (
+    "os"
+    m "github.com/superradcompany/microsandbox/sdk/go"
+)
+
+remote, err := m.RemoteContextFromEnv()
+if err != nil {
+    return err
+}
+other, err := remote.WithOptions(
+    m.WithRemoteURL("https://other-provider.example"),
+    m.WithRemoteAPIKey(os.Getenv("OTHER_API_KEY")),
+)
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+require "microsandbox"
+
+remote = Microsandbox::RemoteContext.from_env
+other = remote.with(
+  url: "https://other-provider.example",
+  api_key: ENV.fetch("OTHER_API_KEY")
+)
+```
+</CodeGroup>
+
+Empty URLs and keys are errors. Changing a connection does not contact the server.
+
+</Accordion>
+
+<Accordion title="HTTP settings">
+Request timeouts and user agents can be set when constructing or deriving a context. See the SDK references for options and validation. Custom HTTP client behavior is documented in the [Rust configuration reference](/sdk/rust/configuration#to_builder).
+</Accordion>
+
+<span id="cli-profiles" />
+<span id="precedence" />
+<Accordion title="Which CLI setting wins?">
+CLI selection uses this order:
+
+1. Managed `active_profile`
+2. `MSB_BACKEND=local|remote`
+3. `MSB_PROFILE`
+4. Saved `active_profile`
+5. Local runtime
+
+Environment and managed settings can override `msb context use`; the command warns when they do. `reset` clears only the saved preference. Missing credentials or a blocked connection cause an error. The command will not run locally instead.
+
+A managed `active_profile` of `null` or `""` clears saved and environment-selected profiles, while preserving `MSB_BACKEND`. To enforce local execution, choose a named managed local profile. Managed profile entries replace same-named user entries.
+</Accordion>
+
+<Accordion title="Allow only local or remote execution">
+Set `allowed_backends` to `["local"]`, `["remote"]`, or `["local", "remote"]` in user configuration or managed overrides. `cloud` remains an input alias for `remote`. Both are allowed by default; an empty list is invalid. `null` removes the restriction, and managed values replace user values.
+
+This controls where execution is allowed. It does not switch the current connection. Changes apply to newly created contexts. See [managed configuration](/enterprise/managed-configuration).
+</Accordion>
+
+See [context commands](/cli/management#msb-context) for JSON output and troubleshooting.
+
+## Check your connection
+
+`msb context` shows where CLI commands run. To check an object’s connection in code, see your [SDK reference](/sdk/overview#reference).
+
+See [configuration](/operations/configuration) for defaults and [cloud limitations](/cloud/limitations) for feature differences.

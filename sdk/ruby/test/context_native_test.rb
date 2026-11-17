@@ -25,6 +25,7 @@ class ContextNativeTest < Test::Unit::TestCase
         require "json"
         servers = []
         workers = []
+        creates = []
         provider = lambda do |id|
           server = TCPServer.new("127.0.0.1", 0)
           servers << server
@@ -38,6 +39,13 @@ class ContextNativeTest < Test::Unit::TestCase
                 headers[key.downcase] = value.strip
               end
               raise "wrong credentials" unless headers["authorization"] == "Bearer key-#{id}"
+              if request.start_with?("POST ")
+                body = JSON.parse(socket.read(headers.fetch("content-length").to_i))
+                creates << body.fetch("compute").fetch("type")
+                socket.write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                socket.close
+                next
+              end
               raise "unexpected mutation" unless request.start_with?("GET ")
               observation = {id: id, name: "task", slug: "task", org_id: "org", status: "running", ephemeral: false, created_at: "2026-11-15T00:00:00Z"}
               path = request.split[1].split("?")[0]
@@ -46,7 +54,7 @@ class ContextNativeTest < Test::Unit::TestCase
               socket.close
             end
           end
-          Microsandbox::RemoteContext.with_url("http://127.0.0.1:#{server.addr[1]}", "key-#{id}")
+          Microsandbox::RemoteContext.with_url("http://127.0.0.1:#{server.addr[1]}", "key-#{id}", compute_type: "shared")
         end
         begin
           raise "wrong hosted type" unless Microsandbox::RemoteContext.new(api_key: "hosted-key").is_a?(Microsandbox::RemoteContext)
@@ -64,9 +72,18 @@ class ContextNativeTest < Test::Unit::TestCase
           a, b = provider.call("a"), provider.call("b")
           raise "wrong concrete type" unless a.is_a?(Microsandbox::RemoteContext)
           raise "wrong local type" unless Microsandbox::LocalContext.new.is_a?(Microsandbox::LocalContext)
+          [a.with, a.with(compute_type: "standard")].each do |selected|
+            begin
+              selected.sandboxes.create("task", image: "python")
+              raise "fixture should deny creation"
+            rescue Microsandbox::Error => error
+              raise error unless error.message.include?("403")
+            end
+          end
+          raise "compute options lost" unless creates == ["shared", "standard"]
           collection = a.sandboxes
           raise "unchanged derivation lost settings" unless a.with.sandboxes.get("task").id == collection.get("task").id
-          [{api_key: ""}, {url: ""}, {request_timeout_ms: -1}].each do |overrides|
+          [{api_key: ""}, {url: ""}, {request_timeout_ms: -1}, {compute_type: "invalid"}].each do |overrides|
             rejected = false
             begin
               a.with(**overrides)

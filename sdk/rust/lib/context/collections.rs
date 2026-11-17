@@ -266,6 +266,28 @@ impl Snapshots {
         })
     }
 
+    /// Import a disk-only raw archive within a known maximum disk size.
+    /// Requires local storage and no external dependency base.
+    #[cfg(feature = "local")]
+    pub async fn load_bounded(
+        &self,
+        path: &std::path::Path,
+        opts: crate::snapshot::LoadOpts,
+        maximum_disk_bytes: u64,
+    ) -> MicrosandboxResult<Snapshot> {
+        if self.context.as_local().is_none() || opts.base.is_some() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "bounded snapshot import requires local storage without external dependencies"
+                    .into(),
+            ));
+        }
+        crate::snapshot::import_budget::scope(
+            maximum_disk_bytes,
+            self.load_with_options(path, opts),
+        )
+        .await
+    }
+
     /// Validate the complete import set before publication.
     pub async fn load_many(
         &self,

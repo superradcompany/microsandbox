@@ -122,7 +122,7 @@ impl BackendSelection {
             && api_key.is_none_or(|key| key.trim().is_empty())
         {
             return Err(MicrosandboxError::InvalidConfig(
-                "MSB_BACKEND=cloud requires a non-empty MSB_API_KEY or a cloud profile".into(),
+                "MSB_BACKEND=remote requires a non-empty MSB_API_KEY or a remote profile".into(),
             ));
         }
         Ok(())
@@ -210,9 +210,9 @@ impl BackendSelection {
         };
         match value.trim().to_ascii_lowercase().as_str() {
             "local" => Ok(Some(ProfileKind::Local)),
-            "cloud" => Ok(Some(ProfileKind::Remote)),
+            "remote" | "cloud" => Ok(Some(ProfileKind::Remote)),
             other => Err(MicrosandboxError::InvalidConfig(format!(
-                "MSB_BACKEND must be 'local' or 'cloud', got {other:?}"
+                "MSB_BACKEND must be 'local' or 'remote', got {other:?}"
             ))),
         }
     }
@@ -242,7 +242,7 @@ impl BackendSelection {
             })?;
             if backend_kind == Some(ProfileKind::Remote) && profile.kind != ProfileKind::Remote {
                 return Err(MicrosandboxError::InvalidConfig(format!(
-                    "MSB_BACKEND=cloud cannot select local profile {name:?}"
+                    "MSB_BACKEND=remote cannot select local profile {name:?}"
                 )));
             }
             return Ok(match profile.kind {
@@ -433,7 +433,7 @@ mod tests {
         .unwrap()
         .to_string();
         assert!(
-            error.contains("cloud backend selected by active_profile is disabled"),
+            error.contains("remote backend selected by active_profile is disabled"),
             "{error}"
         );
         assert!(error.contains("managed config"));
@@ -588,7 +588,7 @@ mod tests {
     fn selection_rejects_backends_missing_from_this_build() {
         for (kind, available) in [
             ("local", cfg!(feature = "local")),
-            ("cloud", cfg!(feature = "cloud")),
+            ("remote", cfg!(feature = "cloud")),
         ] {
             let result = BackendSelection::resolve_from(
                 Path::new("config.json"),
@@ -941,11 +941,13 @@ mod tests {
     #[cfg(feature = "cloud")]
     #[test]
     fn explicit_cloud_uses_environment_credentials() {
-        for profile in [None, Some("missing")] {
-            assert!(matches!(
-                select_backend(Some("cloud"), Some("msb_live_abc"), profile, None).unwrap(),
-                BackendSelection::Cloud { profile: None }
-            ));
+        for kind in ["remote", "cloud"] {
+            for profile in [None, Some("missing")] {
+                assert!(matches!(
+                    select_backend(Some(kind), Some("msb_live_abc"), profile, None).unwrap(),
+                    BackendSelection::Cloud { profile: None }
+                ));
+            }
         }
     }
 

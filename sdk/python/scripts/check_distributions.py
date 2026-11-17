@@ -2,17 +2,17 @@
 
 import argparse
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import zipfile
+from pathlib import Path
 
 
 def run(command, *, env=None):
     subprocess.run(command, check=True, timeout=120, env=env)
 
 
-PROBE = r'''
+PROBE = r"""
 import asyncio, importlib, json, tempfile, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import microsandbox_core as core
@@ -29,7 +29,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         requests.append(self.path)
         assert self.headers['Authorization'] == 'Bearer key'
-        value = dict(id='original', org_id='org', name='task', slug='task', status='stopped', ephemeral=False, created_at='2026-11-16T00:00:00Z')
+        value = dict(
+            id='original', org_id='org', name='task', slug='task', status='stopped',
+            ephemeral=False, created_at='2026-11-16T00:00:00Z',
+        )
         if self.path.split('?')[0] == '/v1/sandboxes': value = dict(data=[value])
         self.send_response(200)
         self.send_header('Content-Type','application/json')
@@ -73,12 +76,12 @@ finally:
     server.shutdown()
     server.server_close()
     thread.join()
-'''
+"""
 
 
 # Optional real-runtime coverage exercises native decoders after installing each
 # package independently, so the full package cannot mask a lean import defect.
-JOBS_PROBE = r'''
+JOBS_PROBE = r"""
 import asyncio, importlib, os, uuid
 from contextlib import suppress
 sdk=importlib.import_module(os.environ['MSB_TEST_PACKAGE'])
@@ -101,13 +104,20 @@ async def main():
         with suppress(Exception): await sb.stop()
         await sdk.Sandbox.remove(name)
 asyncio.run(main())
-'''
+"""
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheels", type=Path, required=True)
-    parser.add_argument("--full", action="store_true", help="Also check coexistence with the staged full wheel")
-    parser.add_argument("--live-jobs-home", type=Path, help="Opt-in isolated runtime home with a cached alpine image for native job decoding")
+    parser.add_argument(
+        "--full", action="store_true", help="Also check coexistence with the staged full wheel"
+    )
+    parser.add_argument(
+        "--live-jobs-home",
+        type=Path,
+        help="Opt-in isolated runtime home with a cached alpine image for native job decoding",
+    )
     args = parser.parse_args()
     wheels = {}
     for kind in ("core", "local", "remote"):
@@ -117,7 +127,12 @@ def main():
         wheels[kind] = str(candidates[0].resolve())
         with zipfile.ZipFile(candidates[0]) as archive:
             paths = archive.namelist()
-            if any("_bundled/" in path or "libkrunfw" in path or path.endswith(("/msb", "/msb.exe", "/_cli.py")) for path in paths):
+            if any(
+                "_bundled/" in path
+                or "libkrunfw" in path
+                or path.endswith(("/msb", "/msb.exe", "/_cli.py"))
+                for path in paths
+            ):
                 raise RuntimeError(f"{kind} includes runtime payload or launcher")
             if kind == "core" and any(path.endswith((".so", ".dylib", ".pyd")) for path in paths):
                 raise RuntimeError("core includes native payload")
@@ -128,13 +143,28 @@ def main():
             python = str(venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
             install = ["uv", "pip", "install", "--offline", "--python", python]
             run([*install, wheels["core"]])
-            run([python, "-c", "import sys, microsandbox_core; assert not any(name.startswith('microsandbox_local') or name.startswith('microsandbox_remote') for name in sys.modules)"])
+            run(
+                [
+                    python,
+                    "-c",
+                    "import sys, microsandbox_core; assert not any("
+                    "name.startswith('microsandbox_local') or "
+                    "name.startswith('microsandbox_remote') for name in sys.modules)",
+                ]
+            )
             run([*install, wheels[first]])
             run([*install, wheels[second]])
             run([python, "-c", PROBE])
             run(["uv", "pip", "uninstall", "--python", python, f"microsandbox-{first}"])
             constructor = "LocalContext()" if second == "local" else "RemoteContext(api_key='key')"
-            run([python, "-c", f"import microsandbox_{second} as sdk; assert sdk.{constructor}.kind == {second!r}"])
+            run(
+                [
+                    python,
+                    "-c",
+                    f"import microsandbox_{second} as sdk; "
+                    f"assert sdk.{constructor}.kind == {second!r}",
+                ]
+            )
         if args.full:
             full = list(args.wheels.glob("microsandbox-[0-9]*.whl"))
             if len(full) != 1:
@@ -142,8 +172,23 @@ def main():
             venv = Path(temporary) / "full"
             run(["uv", "venv", str(venv)])
             python = str(venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
-            run(["uv", "pip", "install", "--offline", "--python", python, *wheels.values(), str(full[0].resolve())])
-            prefix = "import microsandbox as full\nfrom microsandbox_core._native import default_binding\noriginal = default_binding()\n"
+            run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--python",
+                    python,
+                    *wheels.values(),
+                    str(full[0].resolve()),
+                ]
+            )
+            prefix = (
+                "import microsandbox as full\n"
+                "from microsandbox_core._native import default_binding\n"
+                "original = default_binding()\n"
+            )
             suffix = """
 from microsandbox.jobs import _decode_exit, _decode_page
 assert _decode_exit(dict(code=0, success=True, timed_out=False)).success
@@ -152,19 +197,43 @@ assert full.Sandbox is core.Sandbox and full.MicrosandboxError is core.Microsand
 assert default_binding() is original
 """
             run([python, "-c", prefix + PROBE + suffix])
-            run([python, "-c", PROBE + "\nimport microsandbox as full\nassert full.Sandbox is core.Sandbox\n"])
+            run(
+                [
+                    python,
+                    "-c",
+                    PROBE + "\nimport microsandbox as full\nassert full.Sandbox is core.Sandbox\n",
+                ]
+            )
         if args.live_jobs_home:
             for kind in ("local", "full") if args.full else ("local",):
                 venv = Path(temporary) / f"jobs-{kind}"
                 run(["uv", "venv", str(venv)])
                 python = str(venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
                 artifact = str(full[0].resolve()) if kind == "full" else wheels[kind]
-                run(["uv", "pip", "install", "--offline", "--python", python, wheels["core"], artifact])
+                run(
+                    [
+                        "uv",
+                        "pip",
+                        "install",
+                        "--offline",
+                        "--python",
+                        python,
+                        wheels["core"],
+                        artifact,
+                    ]
+                )
                 home = str(args.live_jobs_home.resolve())
-                env = dict(os.environ, MSB_HOME=home, MSB_CONFIG_PATH=str(Path(home) / "config.json"),
-                           MSB_TEST_PACKAGE="microsandbox" if kind == "full" else "microsandbox_local")
+                env = dict(
+                    os.environ,
+                    MSB_HOME=home,
+                    MSB_CONFIG_PATH=str(Path(home) / "config.json"),
+                    MSB_TEST_PACKAGE="microsandbox" if kind == "full" else "microsandbox_local",
+                )
                 run([python, "-c", JOBS_PROBE], env=env)
-    print("Wheel payloads, shared types, live resource calls, context retention, offline installs and independent uninstall passed.")
+    print(
+        "Wheel payloads, shared types, live resource calls, context retention, "
+        "offline installs and independent uninstall passed."
+    )
 
 
 if __name__ == "__main__":

@@ -160,7 +160,7 @@ mod tests {
     fn human_context_uses_existing_table_style() {
         let rendered = render_human(&cloud_info()).render();
         assert!(rendered.contains("Backend"));
-        assert!(rendered.contains("cloud"));
+        assert!(rendered.contains("remote"));
         assert!(rendered.contains("https://api.microsandbox.dev"));
         assert!(rendered.contains("MSB_API_KEY"));
         assert!(!rendered.contains("msb_ak_"));
@@ -171,7 +171,7 @@ mod tests {
         let rendered = serde_json::to_string(&cloud_info()).unwrap();
         assert_eq!(
             rendered,
-            r#"{"kind":"cloud","api_url":"https://api.microsandbox.dev","source":"MSB_API_KEY"}"#
+            r#"{"kind":"remote","api_url":"https://api.microsandbox.dev","source":"MSB_API_KEY"}"#
         );
         assert!(!rendered.contains("msb_ak_"));
     }

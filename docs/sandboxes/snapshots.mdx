@@ -78,13 +78,19 @@ await baseline.stop()
 
 ```go Go
 baseline, err := m.GetSandbox(ctx, "baseline")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 _, err = baseline.Exec(ctx, "pip", []string{"install", "requests"})
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 err = baseline.Stop(ctx)
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```ruby Ruby
@@ -199,7 +205,7 @@ Ruby can capture basic disk snapshots, inspect and export existing snapshots, an
 
 ## Full snapshots
 
-<Tooltip tip="Full snapshots are not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Full snapshots are not yet available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Capture a running workload to resume its processes and memory later. A running source briefly pauses during capture, then resumes; an already-paused source stays paused.
 
@@ -278,7 +284,9 @@ resumed = await Sandbox.restore("worker:snap", name="resumed")
 
 ```go Go
 resumed, err := m.RestoreSandbox(ctx, "worker:snap", "resumed")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -350,12 +358,16 @@ worker_b = await Sandbox.restore(
 worker_a, err := m.RestoreSandbox(ctx, "worker:snap", "worker_a",
     m.WithCowMemory(),
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 worker_b, err := m.RestoreSandbox(ctx, "worker:snap", "worker_b",
     m.WithCowMemory(),
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -416,7 +428,9 @@ rebooted = await Sandbox.restore(
 rebooted, err := m.RestoreSandbox(ctx, "worker:snap", "rebooted",
     m.WithSnapshotDiskOnly(),
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -550,7 +564,9 @@ snapshot, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
     Full:        true,
     GuestFlush:  m.GuestFlushRequired,
 })
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -579,7 +595,7 @@ Flushing does not save data still buffered by your application or commit databas
 
 ## Forking
 
-<Tooltip tip="Forking is not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Forking is not yet available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Forking preserves disk and execution state. Memory sharing is built in; each child’s writes stay private. To start from a saved snapshot, use [restore](#full-snapshots).
 
@@ -606,10 +622,14 @@ experiment = await source.fork("experiment")
 
 ```go Go
 source, err := m.GetSandbox(ctx, "worker")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 experiment, err := source.Fork(ctx, "experiment")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -672,10 +692,14 @@ for outcome in outcomes:
 
 ```go Go
 source, err := m.GetSandbox(ctx, "worker")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 outcomes, err := source.ForkMany(ctx, []string{"alice", "bob"})
-if err != nil { return err }
+if err != nil {
+    return err
+}
 for _, outcome := range outcomes {
     if outcome.Error != nil {
         fmt.Printf("%s: %v\n", outcome.Name, outcome.Error)
@@ -747,7 +771,9 @@ child, err := m.RestoreSandbox(ctx, "worker:snap", "child",
             "/work": m.Mount.Bind("/host/project", m.MountOptions{}),
         },
     }))
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -831,17 +857,23 @@ partial = await Sandbox.restore(
 // Reuse source bindings.
 inherited, err := m.RestoreSandbox(ctx, "worker:snap", "inherited",
     m.WithDangerouslyInheritResources())
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 // Select a captured disk.
 privateDisk, err := m.RestoreSandbox(ctx, "worker:snap", "private-disk",
     m.WithRestoreConfig(m.RestoreConfig{CapturedVolumes: []string{"/data"}}))
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 // Allow missing resources.
 partial, err := m.RestoreSandbox(ctx, "worker:snap", "partial",
     m.WithAllowMissingResources())
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -905,7 +937,9 @@ child, err := m.RestoreSandbox(ctx, "worker:snap", "child",
         },
     }),
     m.WithExternalMountPolicy(m.ExternalMountRelaxed))
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -990,7 +1024,7 @@ msb snap restore worker:snap --name resumed
 ```
 </CodeGroup>
 
-In Go, always receive the result and close its sandbox handle when finished, even if you ignore progress events. Closing a restored handle does not stop the detached sandbox; call `Stop` or `Destroy` when needed. Cancel the context to cancel the operation.
+Always collect the restore result and release its handle when finished, even if progress events are ignored. Releasing a handle does not stop a detached sandbox; stop or destroy it explicitly when needed.
 
 Some stages have no percentage. Memory preparation has no fixed timeout; activation has a separate timeout. Set an overall deadline or use SDK cancellation when needed.
 
@@ -1028,14 +1062,20 @@ await Snapshot.remove("baseline:ready")
 
 ```go Go
 snapshots, err := m.Snapshot.List(ctx)
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 saved, err := m.Snapshot.Open(ctx, "baseline:ready")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 fmt.Println(saved.Digest())
 err = m.Snapshot.Remove(ctx, "baseline:ready", false)
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```ruby Ruby
@@ -1061,7 +1101,7 @@ msb snap rm baseline:ready
 
 A group keeps related snapshots together. Restore an earlier snapshot and save new changes to explore a different path while keeping the original snapshots. Choose the original group when capturing to keep the new snapshots in that group; otherwise, the group defaults to the restored sandbox’s name.
 
-Since v0.7, installed snapshot members are immutable. Creating another snapshot cannot overwrite an existing member. In SDK calls, omit `force` or set it to `false` (`False` in Python): enabling it fails even when the requested name does not exist. Use a unique or generated member name for each capture. To reuse a name, explicitly remove the existing member first; removal still checks for dependent snapshots.
+Since v0.7, installed snapshot members are immutable. Creating another snapshot cannot overwrite an existing member. In SDK calls, omit `force` or set it to disabled: enabling it fails even when the requested name does not exist. Use a unique or generated member name for each capture. To reuse a name, explicitly remove the existing member first; removal still checks for dependent snapshots.
 
 See the [v0.6 snapshot upgrade example](/migrations/v0.7#update-snapshot-code).
 
@@ -1142,26 +1182,38 @@ _, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
     FromSandbox: "baseline",
     Group: "work",
 })
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 _, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
     Name: "cp02",
     FromSandbox: "baseline",
     Group: "work",
 })
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 latest, err := m.RestoreSandbox(ctx, "work", "latest")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 earlier, err := m.RestoreSandbox(ctx, "work:cp01", "earlier")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 _, err = m.Snapshot.GroupHead(ctx, "work")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 _, err = m.Snapshot.GroupHead(ctx, "work:cp01")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -1225,12 +1277,16 @@ var err error
 _, err = m.Snapshot.LoadWithOptions(ctx, "snap.msb",
     m.SnapshotLoadOptions{Group: "work"},
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 _, err = m.Snapshot.LoadWithOptions(ctx, "experiment.msb",
     m.SnapshotLoadOptions{Group: "work", SetHead: true},
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -1280,7 +1336,9 @@ var err error
 err = m.Snapshot.Save(ctx, "baseline:ready", "ready.msb",
     m.SnapshotSaveOptions{WithImage: true},
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```ruby Ruby
@@ -1314,7 +1372,9 @@ worker = await Sandbox.restore("./ready.msb", name="worker")
 
 ```go Go
 worker, err := m.RestoreSandbox(ctx, "./ready.msb", "worker")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -1364,7 +1424,9 @@ handles, err := m.Snapshot.LoadMany(ctx,
     []string{"changes.msb", "base.msb"},
     m.SnapshotLoadOptions{Group: "received", Dest: "/mnt/snapshots"},
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -1430,12 +1492,16 @@ _, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
     FromSandbox: "worker",
     Full: true,
 })
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 err = m.Snapshot.Save(ctx, "worker:v2", "changes.msb",
     m.SnapshotSaveOptions{Since: "worker:v1"},
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```ruby Ruby
@@ -1511,12 +1577,16 @@ var err error
 _, err = m.Snapshot.LoadWithOptions(ctx, "changes.msb",
     m.SnapshotLoadOptions{Group: "imported", Base: "worker:v1"},
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 child, err := m.RestoreSandbox(ctx, "changes.msb", "child",
     m.WithSnapshotBase("worker:v1"),
 )
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -1617,17 +1687,23 @@ result = await worker.compact(layers=3)
 
 ```go Go
 worker, err := m.GetSandbox(ctx, "worker")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 layers := uint32(3)
 plan, err := worker.Compact(ctx, m.DiskCompactionOptions{
     Layers: &layers,
     DryRun: true,
 })
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 result, err := worker.Compact(ctx, m.DiskCompactionOptions{Layers: &layers})
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI
@@ -1752,13 +1828,19 @@ _, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
     Full: true,
     RecordIntegrity: true,
 })
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 source, err := m.GetSandbox(ctx, "worker")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 
 child, err := source.Fork(ctx, "child", m.WithForkIntegrity())
-if err != nil { return err }
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI

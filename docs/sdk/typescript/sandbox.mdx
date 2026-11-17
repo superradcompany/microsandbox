@@ -15,7 +15,7 @@ See [Snapshots](/sdk/typescript/snapshots#forking) for live fork methods.
 
 #### <span className="msb-hn">allSandboxMetrics()</span>
 
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
@@ -27,17 +27,7 @@ Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbo
 
 ### Live inspection
 
-```typescript
-const sb = await Sandbox.get("task");
-const info = await sb.info();
-const status = await sb.status();
-const failure = await sb.lastFailureMessage();
-const config = await sb.config();
-```
-
-`SandboxInfo` contains `id`, `name`, `status`, `lastFailureMessage`, `createdAt` and `updatedAt`. This worktree preserves timestamps as RFC3339 `string | null` without discarding sub-millisecond precision; the final cross-resource timestamp API remains under review. `lastFailureMessage` is `string | null`. Identity properties `sb.id` and `sb.name` are synchronous. List pages contain unprepared `Sandbox` objects without per-item connections or startup.
-
-Each inspection method performs a fresh backend lookup without starting the resource. A failed lookup raises or returns an error; it never substitutes cached data. Use `info` when several related fields are needed together. Configuration is the latest persisted settings, which may differ from settings applied to the current run. Retain the returned value when you want a snapshot.
+`info()` returns identity, status, optional failure message, and creation/update timestamps. Timestamps are RFC3339 strings or `null`. `id` and `name` require no I/O; mutable state is fetched on each inspection call. See [inspection and lifecycle](/sandboxes/lifecycle).
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">builder()</span>
 
@@ -117,7 +107,7 @@ const output = await sb.shell("echo hello");
 ensureRunning(): Promise<void>
 ```
 
-Optionally prepare this receiver before work. It connects when running or starts the captured resource when stopped. A newly started attached local run belongs to this receiver and its clones; connecting to an existing run acquires no ownership. Repeated calls preserve the shared owner. Ordinary shell and exec calls perform this preparation internally.
+Connect to the sandbox if running, or start it if stopped. The object and its clones own any attached local run they start. Ordinary shell and exec calls do this automatically. See [lifecycle](/sandboxes/lifecycle#prepare-ahead-of-time).
 
 <Accordion title="Example">
 
@@ -127,43 +117,6 @@ await sb.ensureRunning();
 ```
 
 </Accordion>
-
-#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">recoverStorage()</span>
-
-```typescript
-static recoverStorage(
-  name: string,
-  options?: StorageRecoveryOptions,
-): Promise<StorageRecovery>
-```
-
-Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
-
-<p className="msb-label">Options</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>selections</code><span className="msb-type">readonly StorageRecoverySelection[]</span></div>
-    <div className="msb-param-desc">Exact IDs from storage diagnosis, with <code>diskId</code> and <code>candidateId</code> strings. Omit or leave empty to import or resume the validated current view.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>acceptSelectedView</code><span className="msb-type">boolean</span></div>
-    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>legacyWritersStopped</code><span className="msb-type">boolean</span></div>
-    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>StorageRecovery</code></div>
-    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originalsRetained</code> (boolean) confirms the original disks were retained.</div>
-  </div>
-</div>
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list()</span>
 
@@ -407,7 +360,7 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">kill()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 kill(): Promise<void>
@@ -425,7 +378,7 @@ Force-terminate the sandbox and wait until stopped state is observed. No gracefu
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">killWithTimeout()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 killWithTimeout(timeoutMs: number): Promise<void>
@@ -439,7 +392,7 @@ await sandbox.killWithTimeout(2000);
 
 </Accordion>
 
-Force-terminate the sandbox and wait up to `timeoutMs` for stopped-state observation.
+Force-terminate the sandbox and wait up to `timeoutMs` for confirmation that the sandbox stopped.
 
 <p className="msb-label">Parameters</p>
 
@@ -452,7 +405,7 @@ Force-terminate the sandbox and wait up to `timeoutMs` for stopped-state observa
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">logs()</span>
 
-<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Bounded log reads are not available on managed cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 logs(opts?: LogReadOptions): Promise<LogEntry[]>
@@ -514,7 +467,7 @@ The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pas
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">logStream()</span>
 
-<Tooltip tip="On microsandbox cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On managed cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 logStream(opts?: LogStreamOptions): Promise<LogStream>
@@ -553,7 +506,7 @@ Stream captured output as it appears, with optional follow. Backed by the same o
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">ping()</span>
 
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 ping(): Promise<SandboxPingResult>
@@ -581,7 +534,7 @@ Check that the running sandbox's guest agent is reachable without refreshing idl
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">touch()</span>
 
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 touch(): Promise<SandboxTouchResult>
@@ -609,7 +562,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On managed cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 modify(opts?: ModifyOptions): Promise<SandboxModificationPlan>
@@ -683,7 +636,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metrics(): Promise<SandboxMetrics>
@@ -711,7 +664,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metricsStream()</span>
 
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsStream(intervalMs: number): Promise<MetricsStream>
@@ -750,7 +703,7 @@ Stream resource metrics at a regular interval. The returned [`MetricsStream`](#m
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">requestDrain()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 requestDrain(): Promise<void>
@@ -765,11 +718,11 @@ await sandbox.waitUntilStopped();
 
 </Accordion>
 
-Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected. The sandbox transitions to `stopped` when all in-flight commands finish. Use [`waitUntilStopped()`](#sandbox-waituntilstopped) when the caller needs stopped-state observation. Useful for zero-downtime rotation of worker sandboxes.
+Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected. The sandbox transitions to `stopped` when all in-flight commands finish. Use [`waitUntilStopped()`](#sandbox-waituntilstopped) when you need to wait for the sandbox to stop. Useful for zero-downtime rotation of worker sandboxes.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">requestKill()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 requestKill(): Promise<void>
@@ -917,7 +870,7 @@ Block until the sandbox is observed in a terminal non-running state, without tri
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">[Symbol.asyncDispose]()</span>
 
-<Tooltip tip="On microsandbox cloud this does not stop the sandbox; the cloud handle does not own the host process, so call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On managed cloud this does not stop the sandbox; the cloud handle does not own the host process, so call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 [Symbol.asyncDispose](): Promise<void>
@@ -1018,7 +971,7 @@ Set the number of virtual CPUs. This is a limit, not a reservation.
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">maxCpus()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on managed cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 maxCpus(n: number): this
@@ -1078,7 +1031,7 @@ Reuse or create the sandbox with this name. The method connects when it is runni
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">createWithPullProgress()</span>
 
-<Tooltip tip="Microsandbox cloud completes the image pull without reporting per-layer progress."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="our managed cloud completes the image pull without reporting per-layer progress."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 createWithPullProgress(): Promise<PullProgressCreate>
@@ -1132,7 +1085,7 @@ Create in detached/background mode when `true`. A detached sandbox survives afte
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">disableMetricsSample()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on managed cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 disableMetricsSample(): this
@@ -1222,7 +1175,7 @@ When `true`, the sandbox and all its persisted state are removed automatically o
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">hostname()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud; the platform assigns the hostname."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on managed cloud; the platform assigns the hostname."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 hostname(name: string): this
@@ -1275,7 +1228,9 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">image()</span>
 
-<Tooltip tip="Microsandbox cloud accepts OCI root filesystems only; host-directory and disk-image roots are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```typescript
 image(src: string): this
@@ -1294,7 +1249,9 @@ Set the root filesystem source. Accepts OCI image names (`"alpine"`), local dire
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">imageWith()</span>
 
-<Tooltip tip="Microsandbox cloud accepts OCI root filesystems only; host-directory and disk-image roots are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```typescript
 imageWith(configure: (b: ImageBuilder) => ImageBuilder): this
@@ -1492,7 +1449,7 @@ Set the guest memory size in MiB. Physical pages are only allocated as the guest
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">maxMemory()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on managed cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 maxMemory(mib: number): this
@@ -1528,7 +1485,7 @@ Select the guest transparent huge-page policy applied through the kernel command
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">metricsSampleIntervalMs()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on managed cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsSampleIntervalMs(ms: number): this
@@ -1617,7 +1574,7 @@ Modify the rootfs before the VM boots. Patches go into the writable layer - the 
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">port()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 port(host: number, guest: number): this
@@ -1640,7 +1597,7 @@ Publish a TCP port from the sandbox to the host. The default host bind address i
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">portBind()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 portBind(bind: string, host: number, guest: number): this
@@ -1667,7 +1624,7 @@ Publish a TCP port on a specific host bind address, such as `"0.0.0.0"`.
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">portUdp()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 portUdp(host: number, guest: number): this
@@ -1690,7 +1647,7 @@ Publish a UDP port. The default host bind address is `127.0.0.1`.
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">portUdpBind()</span>
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Publishing host ports is not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 portUdpBind(bind: string, host: number, guest: number): this
@@ -1742,7 +1699,7 @@ Suppress sandbox process log output.
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">registry()</span>
 
-<Tooltip tip="On microsandbox cloud, plain-HTTP and custom-CA registry options are not available; credential auth still works."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On managed cloud, plain-HTTP and custom-CA registry options are not available; credential auth still works."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 registry(configure: (b: RegistryConfigBuilder) => RegistryConfigBuilder): this
@@ -1774,7 +1731,7 @@ Configure the OCI registry connection: authentication, insecure transport, and C
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">replace()</span>
 
-<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Replace-on-create is not available on managed cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 replace(): this
@@ -1784,7 +1741,7 @@ If a sandbox with the same name already exists, stop it (10s SIGTERM grace, then
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">replaceWithTimeout()</span>
 
-<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Replace-on-create is not available on managed cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 replaceWithTimeout(timeoutMs: number): this
@@ -2043,7 +2000,9 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
 
 #### <span className="msb-recv">patch.</span><span className="msb-hn">copyDir()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```typescript
 copyDir(src: string, dst: string, opts?: { replace?: boolean }): this
@@ -2070,7 +2029,9 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`.
 
 #### <span className="msb-recv">patch.</span><span className="msb-hn">copyFile()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```typescript
 copyFile(src: string, dst: string, opts?: { mode?: number; replace?: boolean }): this
@@ -2973,3 +2934,42 @@ Current lifecycle state of a sandbox. String literal type.
 ```typescript
 const sandbox = await Sandbox.builder("nested").image("alpine").nestedVirt(true).create();
 ```
+
+## Storage recovery
+
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">recoverStorage()</span>
+
+```typescript
+static recoverStorage(
+  name: string,
+  options?: StorageRecoveryOptions,
+): Promise<StorageRecovery>
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Options</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>selections</code><span className="msb-type">readonly StorageRecoverySelection[]</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with <code>diskId</code> and <code>candidateId</code> strings. Omit or leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>acceptSelectedView</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>legacyWritersStopped</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originalsRetained</code> (boolean) confirms the original disks were retained.</div>
+  </div>
+</div>

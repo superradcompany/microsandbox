@@ -298,3 +298,55 @@ func exercisePersistentResources(t *testing.T) {
 		t.Fatal("deleted snapshot remained readable")
 	}
 }
+
+func TestRemoteComputeTypeNative(t *testing.T) {
+	library := os.Getenv("MSB_READINESS_NATIVE_LIBRARY")
+	if library == "" {
+		t.Skip("requires MSB_READINESS_NATIVE_LIBRARY")
+	}
+	provider, err := LoadNativeProvider(library, ContextRemote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	choices := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Compute struct {
+				Type string `json:"type"`
+			} `json:"compute"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		choices <- body.Compute.Type
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	remote, err := provider.NewRemoteContextWithURL(server.URL, "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err = remote.WithOptions(WithRemoteComputeType(ComputeShared))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained, err := remote.WithOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, err := remote.WithOptions(WithRemoteComputeType(ComputeStandard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selected := range []*RemoteContext{retained, standard} {
+		if _, err := selected.Sandboxes().Create(context.Background(), "task", WithImage("python")); err == nil {
+			t.Fatal("fixture should deny creation")
+		}
+	}
+	if shared, standard := <-choices, <-choices; shared != "shared" || standard != "standard" {
+		t.Fatalf("compute choices: %q, %q", shared, standard)
+	}
+	if _, err := remote.WithOptions(WithRemoteComputeType("invalid")); err == nil {
+		t.Fatal("invalid compute type accepted")
+	}
+}

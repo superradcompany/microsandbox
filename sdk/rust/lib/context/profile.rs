@@ -642,7 +642,7 @@ mod tests {
             std::env::remove_var("MSB_BACKEND");
         }
 
-        assert!(error.to_string().contains("MSB_BACKEND=cloud requires"));
+        assert!(error.to_string().contains("MSB_BACKEND=remote requires"));
     }
 
     #[test]

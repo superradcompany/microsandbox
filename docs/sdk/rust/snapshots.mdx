@@ -1189,7 +1189,7 @@ Use `SnapshotReference::auto()`, `id()`, or `path()` to construct a reference.
 
 A lightweight handle returned by the active backend. Use [`open()`](#h-open) to
 read the snapshot metadata. The handle retains its backend, so `open()` and
-`destroy()` use the retained destination; remote path destruction requires provider conditional deletion support.
+`destroy()` use the original connection; remote path destruction requires provider conditional deletion support.
 
 | Method | Type | Description |
 |--------|------|-------------|
