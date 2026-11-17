@@ -412,6 +412,9 @@ pub(super) async fn prepare_branch(
     }
 
     config.caller_config_overrides = options.caller_config_overrides.clone();
+    // Initial-boot tokens authorize one fresh create, never an inherited fork child.
+    #[cfg(unix)]
+    config.spec.labels.remove(super::failed_boot::TOKEN_LABEL);
 
     // Owned declarations contain no source host path. Retain them as the required inventory
     // until capture proves that every one has independent child backing; clear external mounts.
