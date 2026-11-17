@@ -412,7 +412,7 @@ Options for `LoadOpts`.
 
 #### `maximumDiskBytes`
 
-`number`. Optional maximum logical payload bytes across the import, including sparse holes. Omit for no size limit. Temporary workspace is reserved separately.
+`number`. Optional maximum logical file bytes (payload and metadata) across the import, including sparse holes. Omit for no size limit. Temporary workspace is reserved separately.
 
 With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
 

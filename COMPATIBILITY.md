@@ -591,8 +591,8 @@ For v0.8, snapshot imports use `Snapshot::load(path, LoadOptions)` and the
 matching context collection method. `LoadOptions` is non-exhaustive and offers
 builder methods; `maximum_disk_bytes` is optional and omitted by default.
 The SDK passes a size budget explicitly through extraction, including archive
-bases and sparse logical sizes. Cloud format restrictions and workspace
-reservations remain caller responsibilities; no public trait is required.
+bases, metadata and sparse logical sizes. There is no separate metadata allowance.
+Cloud format restrictions and workspace reservations remain caller responsibilities; no public trait is required.
 
 The v0.8 source API change replaces `LoadOpts`, positional destinations,
 `load_with_base` and `load_with_options`. Other SDK signatures remain unchanged; their existing options or keyword

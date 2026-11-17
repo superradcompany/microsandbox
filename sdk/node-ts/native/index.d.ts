@@ -2195,7 +2195,7 @@ export interface LoadOpts {
   group?: string
   /** Select the unique imported tip even when it is not a fast-forward. */
   setHead?: boolean
-  /** Maximum expanded payload bytes and declared disk capacity. */
+  /** Maximum expanded file bytes (payload and metadata) and declared disk capacity. */
   maximumDiskBytes?: number
 }
 

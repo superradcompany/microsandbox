@@ -996,7 +996,7 @@ async fn copy_dependency(
         ));
     }
     if let Some(budget) = budget {
-        budget.charge_payload(tokio::fs::metadata(source).await?.len())?;
+        budget.charge(tokio::fs::metadata(source).await?.len())?;
     }
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -1619,7 +1619,7 @@ mod tests {
             LoadOptions::default()
                 .group("within-budget")
                 .base(base_name)
-                .maximum_disk_bytes(top_bytes + 65536),
+                .maximum_disk_bytes(top_bytes + 65536 + 8192),
         )
         .await
         .unwrap();

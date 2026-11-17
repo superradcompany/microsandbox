@@ -10,7 +10,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 
 pub(crate) struct ImportBudget {
     maximum_disk_bytes: u64,
-    remaining_payload_bytes: u64,
+    remaining_bytes: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -25,19 +25,14 @@ impl ImportBudget {
 
         Ok(Self {
             maximum_disk_bytes,
-            remaining_payload_bytes: maximum_disk_bytes,
+            remaining_bytes: maximum_disk_bytes,
         })
     }
 
-    pub(crate) fn charge_payload(&mut self, bytes: u64) -> MicrosandboxResult<()> {
-        self.remaining_payload_bytes =
-            self.remaining_payload_bytes
-                .checked_sub(bytes)
-                .ok_or_else(|| {
-                    invalid(
-                        "snapshot import exceeds its maximum disk size (expanded payload bytes)",
-                    )
-                })?;
+    pub(crate) fn charge(&mut self, bytes: u64) -> MicrosandboxResult<()> {
+        self.remaining_bytes = self.remaining_bytes.checked_sub(bytes).ok_or_else(|| {
+            invalid("snapshot import exceeds its maximum disk size (expanded file bytes)")
+        })?;
         Ok(())
     }
 

@@ -527,7 +527,7 @@ fn maximum_disk_bytes(self, bytes: u64) -> Self
 
 `destination` selects the parent directory for imported groups. `base` supplies missing dependencies. `group` selects a destination group; omission creates one. `set_head(true)` permits replacing a divergent head.
 
-`maximum_disk_bytes` limits the total logical payload bytes extracted across the import and its archive bases, including sparse holes, and each declared file-disk capacity. The limit must be positive. Omit it for unrestricted size. Metadata has a separate bounded allowance. Temporary copies and publication need additional workspace.
+`maximum_disk_bytes` limits the total logical file bytes (payload and metadata) extracted across the import and its archive bases, including sparse holes, and each declared file-disk capacity. The limit must be positive. Omit it for unrestricted size. Existing per-file metadata limits still apply. Temporary copies and publication need additional workspace.
 
 With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
 

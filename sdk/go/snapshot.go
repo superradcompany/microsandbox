@@ -43,7 +43,7 @@ type SnapshotSaveOptions struct {
 
 // SnapshotLoadOptions configures importing one or more archives into a snapshot group.
 type SnapshotLoadOptions struct {
-	// Maximum expanded payload bytes; nil leaves size unlimited.
+	// Maximum expanded file bytes (payload and metadata); nil leaves size unlimited.
 	MaximumDiskBytes *uint64
 	// Parent directory containing snapshot groups; empty selects the default.
 	Dest string

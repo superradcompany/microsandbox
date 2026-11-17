@@ -66,7 +66,7 @@ pub struct JsLoadOpts {
     pub group: Option<String>,
     /// Select the unique imported tip even when it is not a fast-forward.
     pub set_head: Option<bool>,
-    /// Maximum expanded payload bytes and declared disk capacity.
+    /// Maximum expanded file bytes (payload and metadata) and declared disk capacity.
     pub maximum_disk_bytes: Option<f64>,
 }
 

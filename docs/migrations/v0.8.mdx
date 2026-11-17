@@ -24,7 +24,7 @@ let snapshot = Snapshot::load(Path::new("snapshot.msb"), options).await?;
 
 `LoadOptions` replaces `LoadOpts`. `load` replaces `load_with_base` and `load_with_options`. Set `base(...)` for dependencies and `set_head(true)` to replace a divergent head. Context-bound imports and `load_many` use the same options type.
 
-The size limit is optional. It counts logical payload bytes, including sparse holes, across the complete import. Reserve temporary space separately.
+The size limit is optional. It counts logical file bytes (payload and metadata), including sparse holes, across the complete import. Reserve temporary space separately.
 
 ## Other SDKs
 

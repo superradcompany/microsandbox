@@ -428,6 +428,8 @@ async def load(
 ) -> Snapshot
 ```
 
+The optional `maximum_disk_bytes` limits the total extracted payload and metadata, including sparse holes. It also limits each declared disk capacity. Omit it for no size limit.
+
 Unpack a snapshot archive (`.msb` or `.tar`) into the selected or generated group. The returned handle's `group` identifies the group and `head_update` reports the head selection outcome. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
 
 <p className="msb-label">Parameters</p>

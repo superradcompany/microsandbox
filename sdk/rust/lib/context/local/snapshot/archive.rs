@@ -2522,14 +2522,23 @@ where
         let (target, descriptor, inventory) =
             archive_entry_target(&components, &path_in_archive, snapshots_dir, cache_dir)?;
 
-        let metadata = matches!(components.as_slice(), ["snapshots", _, name] if *name == super::metadata::METADATA_FILENAME);
-        if !descriptor
-            && !inventory
-            && !metadata
-            && let Some(budget) = budget.as_mut()
-        {
-            // GNU sparse bodies can be tiny while their logical payloads are large.
-            budget.charge_payload(header.size()?)?;
+        let metadata_limit =
+            inspect::metadata_limit(&path_in_archive).or_else(|| match components.as_slice() {
+                ["snapshots", _, name] if *name == super::metadata::METADATA_FILENAME => {
+                    Some(super::metadata::MAX_METADATA_BYTES)
+                }
+                _ => None,
+            });
+        if let Some(budget) = budget.as_mut() {
+            if let Some(limit) = metadata_limit
+                && header.size()? > limit
+            {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot import metadata exceeds its size limit".into(),
+                ));
+            }
+            // Count metadata and payloads together, including sparse logical sizes.
+            budget.charge(header.size()?)?;
         }
 
         // Tar member names are portable paths. Re-encode their parsed components
@@ -3713,7 +3722,7 @@ async fn materialize_inventory_layers(
             if !materialized.insert(source.clone())
                 && let Some(budget) = budget.as_deref_mut()
             {
-                budget.charge_payload(tokio::fs::metadata(&source).await?.len())?;
+                budget.charge(tokio::fs::metadata(&source).await?.len())?;
             }
             let source_clone = source.clone();
             let target_clone = target.clone();
@@ -4537,10 +4546,19 @@ mod tests {
             &backend,
             artifact.to_str().unwrap(),
             &archive,
-            SaveOpts::default(),
+            SaveOpts {
+                plain_tar: true,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
+
+        let file_bytes: u64 = tar::Archive::new(std::fs::File::open(&archive).unwrap())
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().size())
+            .sum();
 
         {
             let snapshots = backend.snapshots();
@@ -4549,7 +4567,7 @@ mod tests {
                     &archive,
                     LoadOptions::default()
                         .group("bounded")
-                        .maximum_disk_bytes(4096),
+                        .maximum_disk_bytes(file_bytes),
                 )
                 .await
                 .unwrap();
@@ -4558,7 +4576,10 @@ mod tests {
                 data.snapshot_id
             );
 
-            for (disk_limit, expected) in [(0, "must be positive"), (2048, "maximum disk size")] {
+            for (disk_limit, expected) in [
+                (0, "must be positive"),
+                (file_bytes - 1, "maximum disk size"),
+            ] {
                 let error = snapshots
                     .load(
                         &archive,
@@ -4617,12 +4638,67 @@ mod tests {
         let loaded = load_snapshots(
             &local,
             &archives,
-            LoadOptions::default().maximum_disk_bytes(86 * 4096),
+            LoadOptions::default().maximum_disk_bytes(86 * 8192),
         )
         .await
         .unwrap();
 
         assert_eq!(loaded.len(), 86);
+    }
+
+    #[tokio::test]
+    async fn bounded_metadata_rejects_large_bodies_before_writing() {
+        use tokio::io::AsyncWriteExt;
+
+        let snapshot = "snap_00000000000000000000000000000001";
+        for (name, limit) in [
+            ("archive.json".into(), 4096),
+            ("archive.json".into(), 4 * 1024 * 1024),
+            (format!("snapshots/{snapshot}/snapshot.json"), 1024 * 1024),
+            (format!("snapshots/{snapshot}/metadata.json"), 1024 * 1024),
+            ("legacy/manifest.json".into(), 1024 * 1024),
+            (
+                format!("checkpoints/{snapshot}/checkpoint.json"),
+                8 * 1024 * 1024,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let snapshots = root.path().join("snapshots");
+            let cache = root.path().join("cache");
+            std::fs::create_dir_all(&snapshots).unwrap();
+            std::fs::create_dir_all(&cache).unwrap();
+            let archive = root.path().join("oversized.msb");
+            let mut header = Header::new_gnu();
+            header.set_path(name).unwrap();
+            header.set_size(limit + 1);
+            header.set_mode(0o600);
+            header.set_cksum();
+            // The declared body is intentionally absent: reject its size before writing it.
+            let mut encoder = ZstdEncoder::new(tokio::fs::File::create(&archive).await.unwrap());
+            encoder.write_all(header.as_bytes()).await.unwrap();
+            encoder.shutdown().await.unwrap();
+            let reader = BufReader::new(tokio::fs::File::open(&archive).await.unwrap());
+            let mut budget = ImportBudget::new(4096).unwrap();
+
+            let error = unpack_archive(
+                ZstdDecoder::new(reader),
+                &snapshots,
+                &cache,
+                Some(&mut budget),
+            )
+            .await
+            .err()
+            .unwrap();
+
+            let expected = if limit == 4096 {
+                "maximum disk size"
+            } else {
+                "metadata exceeds its size limit"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(std::fs::read_dir(&snapshots).unwrap().count(), 0);
+            assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+        }
     }
 
     #[tokio::test]
@@ -5300,12 +5376,19 @@ mod tests {
         }
         std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
 
+        let extracted_bytes: u64 = tar::Archive::new(std::fs::File::open(&archive).unwrap())
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().size())
+            .sum();
+        let installed_bytes = extracted_bytes + 4096;
+
         let error = load_snapshot_with_options(
             &local,
             &archive,
             LoadOptions::default()
                 .group("over-budget")
-                .maximum_disk_bytes(4096),
+                .maximum_disk_bytes(installed_bytes - 1),
         )
         .await
         .unwrap_err();
@@ -5315,7 +5398,7 @@ mod tests {
         let loaded = load_snapshot_with_options(
             &local,
             &archive,
-            LoadOptions::default().maximum_disk_bytes(8192),
+            LoadOptions::default().maximum_disk_bytes(installed_bytes),
         )
         .await
         .unwrap();
