@@ -596,17 +596,25 @@ change adds no runtime/guest protocol requirement or catalog migration. Older
 SDKs keep their previous restore footprint; updating only the runtime binary
 does not change that SDK behavior. Snapshot source files remain immutable.
 
-The Rust SDK adds `Snapshot::load_bounded` for local callers with a known
-maximum virtual disk size. It derives its aggregate write allowance from that
-size and the supported import steps; callers do not configure a separate byte
-limit. `Snapshot::bounded_import_peak_bytes` exposes that same calculation so
-embedding workers can reserve the complete import allowance before writing. It accepts one complete
-raw-disk snapshot without bundled image-cache, owned-volume, memory or dependency
-payloads. Tar members are charged before extraction, including the logical size
-of sparse entries, and the descriptor is checked before layer placement or
-external dependency resolution. Existing `load`, `load_with_options`, and
-`LoadOpts` callers retain their accepted formats and signatures. This is an
-opt-in embedding API; no CLI or other language SDK workflow selects it.
+The Rust SDK exposes `Snapshot::load_with_limits` and the corresponding
+context collection method for embedding callers. The caller supplies
+`ImportLimits` (expanded bytes, metadata size, entry count and path length) and
+an `ImportPolicy` for supported formats and declared disk sizes. The importer
+passes the budget explicitly through extraction and checks each member's logical
+size before writing, including sparse holes. Policy validation runs before
+layer placement and dependency resolution. Limits bound archive extraction;
+callers separately reserve workspace for copies and dependency materialization.
+
+Cloud admission owns its maximum disk size, supported formats and workspace
+reservation. Its current raw-only pipeline reserves four copies of the disk and
+metadata, plus a per-entry allocation allowance, without assuming reflinks.
+Changing that reservation does not change the accepted maximum disk size.
+
+Existing `load_bounded` and `bounded_import_peak_bytes` methods retain the
+raw-only embedding contract and reservation calculation for existing callers.
+Ordinary `load`, `load_with_options`, `LoadOpts`, archive formats, persisted
+state and runtime protocols remain unchanged. The new API is local Rust
+embedding functionality; no CLI or other language SDK workflow selects it.
 
 The SDK snapshot suite exercises ordinary imports, current and legacy archives,
 delta exports/restores and private child disks. Real older-runtime launch

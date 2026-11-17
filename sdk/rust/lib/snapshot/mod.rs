@@ -5,6 +5,8 @@
 //! its own wire contract and reports unsupported local artifact operations explicitly.
 
 mod api;
+#[cfg(feature = "local")]
+pub(crate) mod bounded_import;
 mod copy;
 #[cfg(feature = "local")]
 pub(crate) mod import_budget;
@@ -17,6 +19,8 @@ mod types;
 
 pub use api::{Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotReference};
 pub use copy::SnapshotCopyBuilder;
+#[cfg(feature = "local")]
+pub use import_budget::{ImportLimits, ImportPolicy};
 pub use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
     ImageRef, LayerFileKind, LayerPayload, Manifest, SnapshotCapture, SnapshotConsistency,

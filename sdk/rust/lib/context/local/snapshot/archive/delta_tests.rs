@@ -235,7 +235,7 @@ async fn unpack(path: &Path, stage: &Path) -> ArchiveInventory {
     let cache = stage.join("cache");
     tokio::fs::create_dir_all(&cache).await.unwrap();
     // Tests use plain tar to inspect exactly which payloads were physically transported.
-    unpack_archive(file, stage, &cache)
+    unpack_archive(file, stage, &cache, None)
         .await
         .unwrap()
         .inventory
@@ -1960,7 +1960,11 @@ async fn standalone_base_archive_resolves_ram_but_dependent_base_archive_is_refu
     )
     .await
     .unwrap();
-    assert!(open_base(&local, delta.to_str().unwrap()).await.is_err());
+    assert!(
+        open_base(&local, delta.to_str().unwrap(), None)
+            .await
+            .is_err()
+    );
     let loaded =
         load_snapshot_with_base(&local, &delta, None, Some(base_archive.to_str().unwrap()))
             .await

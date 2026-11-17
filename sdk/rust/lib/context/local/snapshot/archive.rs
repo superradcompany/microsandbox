@@ -45,6 +45,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use crate::context::LocalContext;
 use crate::context::local::creation::CreationStorage;
+use crate::snapshot::import_budget::ImportBudget;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 pub use crate::snapshot::{LoadOpts, SaveOpts};
@@ -271,10 +272,17 @@ impl LocalContext {
                 ZstdDecoder::new(buffered),
                 child_stage,
                 cache_stage.path(),
+                None,
             ))
             .await?
         } else {
-            Box::pin(unpack_archive(buffered, child_stage, cache_stage.path())).await?
+            Box::pin(unpack_archive(
+                buffered,
+                child_stage,
+                cache_stage.path(),
+                None,
+            ))
+            .await?
         };
 
         let unpack_us = unpack_started.elapsed().as_micros();
@@ -1502,7 +1510,7 @@ pub(super) async fn load_snapshot_with_options(
     archive: &Path,
     opts: LoadOpts,
 ) -> MicrosandboxResult<SnapshotHandle> {
-    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts).await?;
+    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts, None).await?;
     Ok(loaded.remove(0))
 }
 
@@ -1512,7 +1520,19 @@ pub(super) async fn load_snapshots(
     archives: &[PathBuf],
     opts: LoadOpts,
 ) -> MicrosandboxResult<Vec<SnapshotHandle>> {
-    batch::load(local, archives, opts).await
+    batch::load(local, archives, opts, None).await
+}
+
+pub(crate) async fn load_snapshot_with_limits(
+    local: &LocalContext,
+    archive: &Path,
+    opts: LoadOpts,
+    budget: &mut ImportBudget<'_>,
+) -> MicrosandboxResult<SnapshotHandle> {
+    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts, Some(budget)).await?;
+    loaded
+        .pop()
+        .ok_or_else(|| MicrosandboxError::InvalidConfig("import returned no snapshot".into()))
 }
 
 /// Consume a current archive directly into a child sandbox's staging directory.
@@ -2483,6 +2503,7 @@ async fn unpack_archive<R>(
     reader: R,
     snapshots_dir: &Path,
     cache_dir: &Path,
+    mut budget: Option<&mut ImportBudget<'_>>,
 ) -> MicrosandboxResult<UnpackedArchive>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -2493,7 +2514,9 @@ where
     let mut extraction_targets = HashSet::new();
     let mut inventory_path = None;
     while let Some((header, path_in_archive)) = read_entry_header(&mut reader).await? {
-        crate::snapshot::import_budget::charge(&path_in_archive, &header)?;
+        if let Some(budget) = budget.as_mut() {
+            budget.charge(&path_in_archive, &header)?;
+        }
         let entry_type = header.entry_type();
         let components = normal_utf8_components(&path_in_archive)?;
         if entry_type == EntryType::Directory {
@@ -4470,7 +4493,7 @@ pub async fn fuzz_unpack_local_snapshot_archive(data: &[u8]) {
     let Ok(cache) = tempfile::tempdir() else {
         return;
     };
-    let _ = unpack_archive(data, snapshots.path(), cache.path()).await;
+    let _ = unpack_archive(data, snapshots.path(), cache.path(), None).await;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -4492,6 +4515,142 @@ mod tests {
 
     use super::*;
     use crate::Context;
+    use crate::snapshot::{ImportLimits, ImportPolicy};
+
+    struct DiskSizePolicy {
+        maximum_disk_bytes: u64,
+    }
+
+    impl ImportPolicy for DiskSizePolicy {
+        fn validate_entry(&self, _path: &Path, _logical_bytes: u64) -> MicrosandboxResult<()> {
+            Ok(())
+        }
+
+        fn validate_archive(&self, _snapshots: usize, _complete: bool) -> MicrosandboxResult<()> {
+            Ok(())
+        }
+
+        fn validate_manifest(&self, manifest: &Manifest) -> MicrosandboxResult<()> {
+            let file = manifest.state.as_file().unwrap();
+            if file.virtual_size > self.maximum_disk_bytes {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "disk exceeds caller limit".into(),
+                ));
+            }
+
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_import_limits_are_independent_and_enforced_before_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .unwrap();
+        let manifest = grouped_archive_manifest(989, None);
+        let artifact = root.path().join("artifact");
+        write_grouped_archive_fixture(&artifact, &manifest);
+        let archive = root.path().join("archive.msb");
+        save_snapshot(
+            &local,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+
+        let snapshots = local.snapshots();
+        let limits = ImportLimits {
+            expanded_bytes: 64 * 1024,
+            metadata_bytes: 16 * 1024,
+            entries: 32,
+            path_bytes: 1024,
+        };
+        let accepted = DiskSizePolicy {
+            maximum_disk_bytes: 4096,
+        };
+        let rejected = DiskSizePolicy {
+            maximum_disk_bytes: 2048,
+        };
+        let options = |group: &str| LoadOpts {
+            group: Some(group.into()),
+            ..Default::default()
+        };
+        let (small, large) = tokio::join!(
+            snapshots.load_with_limits(
+                &archive,
+                options("too-small"),
+                ImportLimits {
+                    expanded_bytes: 4095,
+                    ..limits
+                },
+                &accepted
+            ),
+            snapshots.load_with_limits(&archive, options("accepted"), limits, &accepted),
+        );
+        assert!(
+            small
+                .unwrap_err()
+                .to_string()
+                .contains("expanded byte limit")
+        );
+        assert_eq!(
+            large.unwrap().manifest().await.unwrap().snapshot_id,
+            manifest.snapshot_id
+        );
+
+        for (limited, message) in [
+            (
+                ImportLimits {
+                    metadata_bytes: 1,
+                    ..limits
+                },
+                "metadata size limit",
+            ),
+            (
+                ImportLimits {
+                    entries: 1,
+                    ..limits
+                },
+                "archive entry limit",
+            ),
+            (
+                ImportLimits {
+                    path_bytes: 1,
+                    ..limits
+                },
+                "archive path limit",
+            ),
+        ] {
+            let error = snapshots
+                .load_with_limits(&archive, options("quota-denied"), limited, &accepted)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert!(!local.snapshots_dir().join("quota-denied").exists());
+        }
+
+        let error = snapshots
+            .load_with_limits(&archive, options("policy-denied"), limits, &rejected)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("disk exceeds caller limit"));
+        for group in ["too-small", "policy-denied"] {
+            assert!(!local.snapshots_dir().join(group).exists());
+        }
+
+        for entry in std::fs::read_dir(local.snapshots_dir()).unwrap() {
+            let entry = entry.unwrap();
+            assert!(
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".msb-snapshot-import-")
+            );
+        }
+    }
 
     #[tokio::test]
     async fn bounded_import_limits_expansion_and_keeps_unbounded_import_compatible() {
@@ -4631,10 +4790,7 @@ mod tests {
                 .load_bounded(&archive, LoadOpts::default(), 64 * 1024 * 1024)
                 .await
                 .unwrap_err();
-            assert!(
-                error.to_string().contains("aggregate byte budget"),
-                "{error}"
-            );
+            assert!(error.to_string().contains("expanded byte limit"), "{error}");
         }
     }
 
@@ -5180,7 +5336,25 @@ mod tests {
         )
         .await
         .unwrap();
-        let loaded = load_snapshot(&local, &archive, None).await.unwrap();
+        // Expansion limits do not impose the cloud's single-snapshot policy.
+        let policy = DiskSizePolicy {
+            maximum_disk_bytes: 4096,
+        };
+        let loaded = local
+            .snapshots()
+            .load_with_limits(
+                &archive,
+                LoadOpts::default(),
+                ImportLimits {
+                    expanded_bytes: 64 * 1024,
+                    metadata_bytes: 16 * 1024,
+                    entries: 64,
+                    path_bytes: 1024,
+                },
+                &policy,
+            )
+            .await
+            .unwrap();
         let loaded_group = loaded.group().unwrap();
         assert_eq!(
             store::get_handle(&local, &format!("{loaded_group}:base"))

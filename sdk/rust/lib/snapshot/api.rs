@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "local")]
-use super::DiskLayer;
+use super::{DiskLayer, ImportLimits, ImportPolicy};
 use super::{
     HeadUpdate, LoadOpts, Manifest, SaveOpts, SnapshotConfig, SnapshotCopyBuilder, SnapshotFormat,
     SnapshotId, SnapshotScope, SnapshotState, SnapshotVerifyReport,
@@ -639,7 +639,7 @@ impl Snapshot {
     /// `load_bounded`; both use the same calculation from the maximum disk size.
     #[cfg(feature = "local")]
     pub fn bounded_import_peak_bytes(maximum_disk_bytes: u64) -> MicrosandboxResult<u64> {
-        super::import_budget::peak_bytes(maximum_disk_bytes)
+        super::bounded_import::peak_bytes(maximum_disk_bytes)
     }
 
     /// Import a disk-only raw archive within its known maximum disk size.
@@ -656,6 +656,20 @@ impl Snapshot {
             .load_bounded(path, opts, maximum_disk_bytes)
             .await
     }
+    /// Import locally with caller-supplied expansion limits and format policy.
+    /// The caller separately reserves temporary workspace for copies and publication.
+    #[cfg(feature = "local")]
+    pub async fn load_with_limits(
+        path: &Path,
+        opts: LoadOpts,
+        limits: ImportLimits,
+        policy: &dyn ImportPolicy,
+    ) -> MicrosandboxResult<Snapshot> {
+        Self::ctx(crate::context::default_local_context().as_ref())
+            .load_with_limits(path, opts, limits, policy)
+            .await
+    }
+
     /// Validate all inputs before publication and return their heads in input order.
     pub async fn load_many(paths: &[PathBuf], opts: LoadOpts) -> MicrosandboxResult<Vec<Snapshot>> {
         let backend = crate::context::default_local_context();

@@ -490,6 +490,51 @@ async fn load_with_options(
 
 Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
 
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_with_limits()</span>
+
+```rust
+async fn load_with_limits(
+    path: &Path,
+    opts: LoadOpts,
+    limits: ImportLimits,
+    policy: &dyn ImportPolicy,
+) -> MicrosandboxResult<Snapshot>
+```
+
+Import locally with caller-supplied limits and format rules. Also available as `context.snapshots().load_with_limits(...)`. Requires the `local` feature.
+
+`ImportLimits` sets `expanded_bytes`, `metadata_bytes`, `entries`, and `path_bytes`. Each limit must be positive. Expanded bytes count the logical size of every archive member, including sparse holes, before writing it. Reserve temporary space for copies and publication separately.
+
+Implement `ImportPolicy` to choose accepted formats and disk sizes:
+
+```rust
+fn validate_entry(&self, path: &Path, logical_bytes: u64) -> MicrosandboxResult<()>
+fn validate_archive(&self, snapshots: usize, complete: bool) -> MicrosandboxResult<()>
+fn validate_manifest(&self, manifest: &Manifest) -> MicrosandboxResult<()>
+```
+
+Entry checks run before writing payloads. Archive and descriptor checks run before resolving dependencies or placing layers. The importer still applies its normal integrity and path checks.
+
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_bounded()</span>
+
+```rust
+async fn load_bounded(
+    path: &Path,
+    opts: LoadOpts,
+    maximum_disk_bytes: u64,
+) -> MicrosandboxResult<Snapshot>
+```
+
+Import one self-contained raw disk locally, without bundled images, memory, owned volumes, or external dependencies. Use `load_with_limits` to supply your own policy.
+
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">bounded_import_peak_bytes()</span>
+
+```rust
+fn bounded_import_peak_bytes(maximum_disk_bytes: u64) -> MicrosandboxResult<u64>
+```
+
+Calculate the conservative workspace reservation for `load_bounded`, including temporary copies and metadata. This is separate from the accepted disk-size limit.
+
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_many()</span>
 
 ```rust
