@@ -2,17 +2,21 @@
 
 import asyncio
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
 
-@pytest.mark.skipif(not os.environ.get("MSB_TEST_CAPTURE_SANDBOX"), reason="requires a disposable running sandbox")
+@pytest.mark.skipif(
+    not os.environ.get("MSB_TEST_CAPTURE_SANDBOX"), reason="requires a disposable running sandbox"
+)
 def test_snapshot_capture_admission() -> None:
-    result = subprocess.run([sys.executable, str(Path(__file__).resolve())], capture_output=True, text=True, timeout=180)
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve())], capture_output=True, text=True, timeout=180
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PYTHON_CAPTURE_ADMISSION_OK" in result.stdout
 
@@ -29,7 +33,9 @@ async def exercise(root: Path) -> None:
     handle = await Sandbox.get(os.environ["MSB_TEST_CAPTURE_SANDBOX"])
     running = await handle.connect()
     for index, receiver in enumerate((handle, running)):
-        for ordinal, destination in enumerate(("not-created/store", "link/../store", str(root / "absolute"))):
+        for ordinal, destination in enumerate(
+            ("not-created/store", "link/../store", str(root / "absolute"))
+        ):
             os.chdir(first)
             expected = (first / destination).resolve()
             future = receiver.snapshot(f"path-py-{index}-{ordinal}", dest_dir=destination)
