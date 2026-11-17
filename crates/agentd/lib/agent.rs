@@ -2246,8 +2246,8 @@ fn cancel_bulk_correlation(
 ) {
     let owner_tx = session_tx.with_incarnation(client_incarnation_for_id(state, id));
     // Stop every producer before publishing the scheduler cut. Any send that completed before
-    // teardown is already bounded in the scheduler input queue; an in-progress send is cancelled
-    // with its producer task and cannot appear after the cleanup acknowledgement.
+    // teardown is already in the scheduler input queue, where the next reconcile purges it; an
+    // in-progress send is cancelled with its producer task and never enqueues.
     let producer_was_live = match kind {
         BulkKind::Filesystem => {
             state.write_sessions.remove(&id);
@@ -3167,7 +3167,9 @@ async fn handle_message_with_charge(
                     .write_data_charged(data.data, input_charge.take())
                     .await
                 {
-                    state.tcp_sessions.remove(&msg.id);
+                    if let Some(session) = state.tcp_sessions.remove(&msg.id) {
+                        session.close();
+                    }
                     clear_bulk_receive_state(state, msg.id);
                     encode_tcp_failed(msg.id, e, out_buf)?;
                 } else {
@@ -3185,7 +3187,9 @@ async fn handle_message_with_charge(
             if let Some(session) = state.tcp_sessions.get(&msg.id)
                 && let Err(e) = session.close_write_charged(input_charge.take()).await
             {
-                state.tcp_sessions.remove(&msg.id);
+                if let Some(session) = state.tcp_sessions.remove(&msg.id) {
+                    session.close();
+                }
                 clear_bulk_receive_state(state, msg.id);
                 encode_tcp_failed(msg.id, e, out_buf)?;
             }
@@ -3220,9 +3224,10 @@ async fn handle_message_with_charge(
                 disconnect_relay_client(state, disconnected, &session_tx)?;
             if removed && let Some(disconnect_ack) = disconnect_ack {
                 if let Some(cleanup) = scheduler_cleanup {
-                    // Keep the single-vCPU control actor available while the bulk actor reaches
-                    // its cleanup cut. The acknowledgement is emitted through the ordinary
-                    // control queue only after matching queued records release their permits.
+                    // Keep the single-vCPU control actor available while the bulk actor finishes
+                    // this owner's in-flight record, if any. Its queued records are never written
+                    // after this point, so the acknowledgement goes through the ordinary control
+                    // queue as soon as no record of the owner is on the port.
                     let output_tx = session_tx.clone();
                     tokio::spawn(async move {
                         if cleanup.await.is_ok() {
@@ -6180,6 +6185,102 @@ mod tests {
             assert!(flows.is_empty());
             assert!(active.is_empty());
             assert_eq!(cleanup.pending_counts(), (0, 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_producer_blocked_in_send_before_it_enqueues() {
+        let incarnation = [0x6c; CLIENT_INCARNATION_SIZE];
+        let filler_id = 18;
+        let blocked_id = 17;
+        let (sender, _control, mut bulk, _commands) = SessionOutputSender::split_channel();
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let mut state = AgentState::default();
+        state
+            .client_incarnations
+            .insert(relay_client_slot(blocked_id).unwrap(), incarnation);
+        sender.connect_bulk_incarnation(incarnation);
+
+        for _ in 0..crate::session::SESSION_BULK_OUTPUT_ITEM_CAPACITY {
+            queue_bulk(
+                &sender,
+                incarnation,
+                filler_id,
+                Bytes::from_static(b"filler"),
+            )
+            .await;
+        }
+        let owner = sender.with_incarnation(Some(incarnation));
+        let producer = tokio::spawn(async move {
+            let record = BulkRecord {
+                id: blocked_id,
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::GuestToHost,
+                offset: 0,
+                payload: Bytes::from_static(b"blocked"),
+            };
+            let output = crate::session::BulkSessionOutput::new(record, RawActivity::default());
+            owner.send(blocked_id, SessionOutput::Bulk(output)).await;
+        });
+        state.tcp_sessions.insert(
+            blocked_id,
+            crate::tcp::TcpSession::for_test(blocked_id, producer),
+        );
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(cleanup.pending_counts(), (0, 2));
+
+        cancel_bulk_correlation(blocked_id, BulkKind::Tcp, &mut state, &sender);
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(cleanup.pending_counts(), (1, 1));
+
+        let mut flows = HashMap::new();
+        let mut active = VecDeque::new();
+        reconcile_all_bulk(&cleanup, &mut bulk, &mut flows, &mut active);
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        reconcile_all_bulk(&cleanup, &mut bulk, &mut flows, &mut active);
+
+        assert!(flows.contains_key(&(incarnation, filler_id)));
+        assert!(!flows.contains_key(&(incarnation, blocked_id)));
+        assert!(matches!(bulk.try_recv(), Err(TryRecvError::Empty)));
+        flows.clear();
+        assert_eq!(cleanup.pending_counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn rejected_cbor_tcp_input_on_bulk_session_aborts_its_producer() {
+        for eof in [false, true] {
+            let id = 23;
+            let mut context = MessageTestContext::new();
+            let (mut sender, _output) = SessionOutputSender::channel();
+            let (alive, stopped) = tokio::sync::oneshot::channel::<()>();
+            let producer = tokio::spawn(async move {
+                let _alive = alive;
+                std::future::pending::<()>().await;
+            });
+            context
+                .state
+                .tcp_sessions
+                .insert(id, crate::tcp::TcpSession::for_test(id, producer));
+            let message = if eof {
+                Message::with_payload(MessageType::TcpEof, id, &TcpEof {}).unwrap()
+            } else {
+                let data = TcpData {
+                    data: b"cbor".to_vec(),
+                };
+                Message::with_payload(MessageType::TcpData, id, &data).unwrap()
+            };
+
+            context.handle(message, &mut sender).await;
+
+            assert!(context.state.tcp_sessions.is_empty());
+            assert!(test_timeout(stopped).await.is_err());
         }
     }
 

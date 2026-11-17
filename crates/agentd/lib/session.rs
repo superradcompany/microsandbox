@@ -50,7 +50,7 @@ const SESSION_OUTPUT_BUDGET_GRANULE: usize = 4096;
 const SESSION_OUTPUT_ITEM_CAPACITY: usize = 1024;
 
 /// Maximum number of records waiting for the independently scheduled bulk writer.
-const SESSION_BULK_OUTPUT_ITEM_CAPACITY: usize = 256;
+pub(crate) const SESSION_BULK_OUTPUT_ITEM_CAPACITY: usize = 256;
 
 /// Maximum lifecycle commands waiting for the dedicated bulk scheduler.
 const SESSION_BULK_COMMAND_CAPACITY: usize = 128;
