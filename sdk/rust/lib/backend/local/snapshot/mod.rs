@@ -31,10 +31,10 @@ pub(crate) use create::{
     validate_owned_inventory,
 };
 pub(crate) use restore::{
-    adopt_local_branch_for_child, apply_additional_disks, materialize_additional_disks,
-    materialize_checkpoint_child_state, materialize_checkpoint_disk_for_child,
-    materialize_checkpoint_for_child, materialize_file_snapshot_for_child,
-    materialize_owned_volumes, root_device,
+    adopt_local_branch_for_child, apply_additional_disks, grow_restored_root_disk,
+    materialize_additional_disks, materialize_checkpoint_child_state,
+    materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
+    materialize_file_snapshot_for_child, materialize_owned_volumes, root_device,
 };
 
 pub(crate) use archive::save_snapshot_expected;

@@ -842,6 +842,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_restore_growth_removes_child_storage_and_catalog_reservation() {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let source = archive(root.path(), false, true).await;
+        let before = std::fs::read(&source).unwrap();
+        let local = backend_without_runtime(root.path());
+
+        for _ in 0..2 {
+            let request =
+                crate::Sandbox::restore_ref(SnapshotReference::path(source.to_string_lossy()))
+                    .name("growth-failure")
+                    .root_disk(256u32);
+            let error = match local
+                .create_sandbox(local.clone(), request.inner, SpawnMode::Detached, None)
+                .await
+            {
+                Ok(_) => panic!("corrupt filesystem must not launch"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("failed to grow restored root filesystem"),
+                "{error}"
+            );
+            assert!(!local.sandboxes_dir().join("growth-failure").exists());
+            assert!(
+                sandbox_entity::Entity::find()
+                    .all(local.db().await.unwrap().read())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(std::fs::read(&source).unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
     async fn corrupt_payload_is_deferred_to_create_without_replacing_target() {
         use std::io::{Seek, SeekFrom, Write};
 

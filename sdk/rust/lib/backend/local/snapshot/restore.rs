@@ -208,6 +208,60 @@ pub(crate) async fn materialize_file_snapshot_for_child(
     })
 }
 
+/// Expand only an unpublished child-private restore head; sealed ancestors remain read-only.
+/// Creation owns cleanup of the complete child on any error or interrupted attempt.
+pub(crate) async fn grow_restored_root_disk(
+    layers: &[RootfsUpperLayerConfig],
+    target_mib: u32,
+    full_memory_restore: bool,
+    child_stage: &CreationStorage,
+) -> MicrosandboxResult<()> {
+    let target_bytes = u64::from(target_mib) * 1024 * 1024;
+    let head = layers.last().ok_or_else(|| {
+        MicrosandboxError::SnapshotIntegrity("snapshot disk closure is empty".into())
+    })?;
+    // Restores always append a fresh qcow2 head. Never grow an imported raw layer,
+    // even when its directory entry belongs to the child: it may share a source inode.
+    if head.format != "qcow2" || head.path.parent() != Some(child_stage.path()) {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot growth requires a child-private writable head".into(),
+        ));
+    }
+    let chain = layers
+        .iter()
+        .map(|layer| microsandbox_image::checkpoint::CompactLayer {
+            path: layer.path.clone(),
+            qcow2: layer.format == "qcow2",
+        })
+        .collect::<Vec<_>>();
+    let worker_storage = child_stage.clone();
+    tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
+        let capacities = microsandbox_image::checkpoint::layer_capacities(chain.clone())?;
+        let captured_bytes = *capacities.last().expect("validated nonempty chain");
+        if target_bytes == captured_bytes {
+            return Ok(());
+        }
+        if full_memory_restore {
+            return Err(MicrosandboxError::InvalidConfig(
+                "a full snapshot must restore with its captured root disk capacity; use disk-only restore to grow it".into(),
+            ));
+        }
+        if target_bytes < captured_bytes {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "snapshot root disk cannot shrink from {} bytes to {target_bytes} bytes",
+                captured_bytes
+            )));
+        }
+        microsandbox_image::ext4::grow_chain(&chain, target_bytes).map_err(|error| {
+            MicrosandboxError::Runtime(format!("failed to grow restored root filesystem: {error}"))
+        })?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Runtime(format!("snapshot growth task: {error}")))?
+}
+
 /// Adopt a local handoff using independent directory entries, without duplicating disk bytes.
 pub(crate) async fn adopt_local_branch_for_child(
     sources: &[RootfsUpperLayerConfig],
@@ -561,15 +615,87 @@ fn checkpoint_layer_target(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Seek, SeekFrom};
+
     use microsandbox_image::checkpoint::{
-        CaptureIntent, CheckpointManifest, ContentRef, DiskGenerationManifest, DiskLayerRef,
-        LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest,
-        sparse_file_integrity,
+        CaptureIntent, CheckpointManifest, CompactLayer, ContentRef, DiskGenerationManifest,
+        DiskLayerRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
+        MemoryManifest, materialize_raw_prefix, sparse_file_integrity,
     };
+    use microsandbox_image::ext4::{Ext4FormatOptions, format_ext4};
 
     use crate::backend::local::creation::CreationStorage;
 
     use super::*;
+
+    #[tokio::test]
+    async fn restore_growth_expands_only_the_private_head_and_rejects_geometry_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.raw");
+        let mib = 1024 * 1024;
+        format_ext4(
+            &source,
+            &Ext4FormatOptions {
+                size_bytes: 256 * mib,
+                journal_blocks: 4096,
+            },
+        )
+        .unwrap();
+        let before = sparse_file_integrity(&source).unwrap().root;
+
+        for root in [SnapshotRootDisk::Managed, SnapshotRootDisk::Flat] {
+            let child = CreationStorage::for_test(dir.path().join(format!("child-{root:?}")));
+            let restored = materialize_file_snapshot_for_child(
+                &[RootfsUpperLayerConfig {
+                    path: source.clone(),
+                    format: "raw".into(),
+                }],
+                256 * mib,
+                &child,
+                &root,
+            )
+            .await
+            .unwrap();
+            let layers = restored.upper_layers;
+            let head = layers.last().unwrap();
+            let head_before = std::fs::read(&head.path).unwrap();
+
+            for (size, full, expected) in [
+                (128, false, "cannot shrink"),
+                (512, true, "captured root disk capacity"),
+            ] {
+                let error = grow_restored_root_disk(&layers, size, full, &child)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains(expected), "{error}");
+                assert_eq!(std::fs::read(&head.path).unwrap(), head_before);
+            }
+            grow_restored_root_disk(&layers, 256, true, &child)
+                .await
+                .unwrap();
+            grow_restored_root_disk(&layers, 512, false, &child)
+                .await
+                .unwrap();
+            assert_eq!(sparse_file_integrity(&source).unwrap().root, before);
+            assert_eq!(sparse_file_integrity(&layers[0].path).unwrap().root, before);
+
+            let chain = layers
+                .iter()
+                .map(|layer| CompactLayer {
+                    path: layer.path.clone(),
+                    qcow2: layer.format == "qcow2",
+                })
+                .collect::<Vec<_>>();
+            let output = dir.path().join(format!("grown-{root:?}.raw"));
+            let disk = materialize_raw_prefix(&chain, &output).await.unwrap();
+            assert_eq!(disk.virtual_size, 512 * mib);
+            let mut file = std::fs::File::open(&output).unwrap();
+            file.seek(SeekFrom::Start(1024 + 4)).unwrap();
+            let mut blocks = [0; 4];
+            file.read_exact(&mut blocks).unwrap();
+            assert_eq!(u64::from(u32::from_le_bytes(blocks)) * 4096, 512 * mib);
+        }
+    }
 
     #[tokio::test]
     async fn local_adoption_preserves_owned_layers_and_cold_boot_base() {

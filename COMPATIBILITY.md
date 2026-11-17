@@ -585,3 +585,9 @@ Incoming unversioned launch/cloud requests retain detection of previous formats.
 The runtime dispatcher selects the current reader when `execution` is present, `v0_6_10/launch.rs` when `bootstrap` is present, and `v0_5_9/launch.rs` otherwise. `client/launch.rs` contains both `LaunchConfig` and the `LaunchCapabilities` probe response. The launch type remains in the runtime crate to avoid a dependency cycle. SDK tests exercise its encoder against the runtime decoder; runtime tests also consume independently captured release payloads.
 
 Launch and cloud requests reject duplicate recognized fields and conflicting previous/current spellings. Previous saved-format decoding and the duplicate-key JSON fixture reader in the SDK are test-only.
+
+### Restore-time root disk growth
+
+Rust `RestoreBuilder::root_disk(size)` carries an explicit size through the existing OCI root-disk option. Disk snapshots and disk-only restores grow the new child-private qcow2 head and ext4 filesystem before publication. Shrinking is refused; full memory restores accept only the captured disk capacity. Omitted sizes retain the existing capture-size behavior, including when destination defaults specify a different disk size. Source snapshots and their sealed disk layers are never resized.
+
+No snapshot descriptor, catalog schema, launch field, or control protocol changes. New SDKs prepare growth before launching a runtime, using the existing explicit chain format and ext4 offline resizer. Older SDKs retain their prior behavior; an older SDK cannot request the new restore builder option. Same-version storage tests verify the prepared chain; historical-runtime VM boot coverage is tracked separately from this storage evidence.

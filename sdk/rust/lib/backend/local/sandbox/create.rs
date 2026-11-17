@@ -469,6 +469,42 @@ impl LocalBackend {
                     .await?;
                     crate::snapshot::apply_additional_disks(&mut config, mounts);
                 }
+                let explicit_disk_size = config
+                    .caller_config_overrides
+                    .as_deref()
+                    .and_then(|patch| patch.spec.image.as_ref())
+                    .and_then(RootfsSource::oci_root_disk)
+                    .is_some_and(|root| {
+                        matches!(
+                            root,
+                            RootDisk::Managed { size_mib: Some(_) }
+                                | RootDisk::Flat {
+                                    size_mib: Some(_),
+                                    ..
+                                }
+                        )
+                    });
+                if explicit_disk_size
+                    && !config.snapshot_upper_layers.is_empty()
+                    && let Some(target_mib) =
+                        config
+                            .spec
+                            .image
+                            .oci_root_disk()
+                            .and_then(|root| match root {
+                                microsandbox_types::RootDisk::Managed { size_mib }
+                                | microsandbox_types::RootDisk::Flat { size_mib, .. } => *size_mib,
+                                _ => None,
+                            })
+                {
+                    crate::snapshot::grow_restored_root_disk(
+                        &config.snapshot_upper_layers,
+                        target_mib,
+                        config.checkpoint_restore.is_some(),
+                        preparation,
+                    )
+                    .await?;
+                }
                 // All source payloads are now child-owned; runtime handles must not retain the source.
                 config.snapshot_lease = None;
 

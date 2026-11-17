@@ -702,6 +702,44 @@ mod tests {
             }
         })
         .await;
+        for layout in [SnapshotRootDisk::Managed, SnapshotRootDisk::Flat] {
+            let mut descriptor = manifest.clone();
+            descriptor.root_disk = layout.clone();
+            std::fs::write(
+                source.join(crate::snapshot::DESCRIPTOR_FILENAME),
+                descriptor.to_canonical_bytes().unwrap(),
+            )
+            .unwrap();
+            crate::with_backend(backend.clone(), async {
+                for target in [None, Some(8192)] {
+                    let restore = crate::Sandbox::restore_ref(SnapshotReference::path(
+                        source.to_string_lossy(),
+                    ))
+                    .name("child");
+                    let restore = match target {
+                        Some(target) => restore.root_disk(target),
+                        None => restore,
+                    };
+                    let config = restore.inner.build().await.unwrap();
+                    let root = config.spec.image.oci_root_disk().unwrap();
+                    match (&layout, root) {
+                        (
+                            SnapshotRootDisk::Managed,
+                            microsandbox_types::RootDisk::Managed { size_mib },
+                        )
+                        | (
+                            SnapshotRootDisk::Flat,
+                            microsandbox_types::RootDisk::Flat { size_mib, .. },
+                        ) => {
+                            assert_eq!(*size_mib, target);
+                        }
+                        other => panic!("restore changed captured root layout: {other:?}"),
+                    }
+                    assert_eq!(config.snapshot_root_virtual_size, Some(512));
+                }
+            })
+            .await;
+        }
         assert!(matches!(
             local_selector(&local, SnapshotReference::id(source.to_string_lossy())).await,
             Err(MicrosandboxError::SnapshotNotFound(_))

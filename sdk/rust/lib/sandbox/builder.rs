@@ -292,7 +292,10 @@ impl SandboxBuilder {
             })
             .unwrap_or_default();
         match &mut image {
-            RootfsSource::Oci(oci) if !oci.reference.is_empty() => {
+            RootfsSource::Oci(oci)
+                if !oci.reference.is_empty()
+                    || matches!(self.config_source, ConfigSource::Snapshot(_)) =>
+            {
                 oci.root_disk = Some(root_disk);
                 self.config.spec.image = Some(image);
             }
@@ -1657,7 +1660,15 @@ impl SandboxBuilder {
 
     fn has_explicit_rootfs_source(&self) -> bool {
         match self.config.spec.image.as_ref() {
-            Some(RootfsSource::Oci(oci)) => !oci.reference.is_empty() || oci.root_disk.is_some(),
+            Some(RootfsSource::Oci(oci)) => {
+                !oci.reference.is_empty()
+                    || oci.root_disk.as_ref().is_some_and(|root| {
+                        !matches!(
+                            root,
+                            microsandbox_types::RootDisk::Managed { size_mib: Some(_) }
+                        )
+                    })
+            }
             Some(RootfsSource::Bind { path, .. }) => !path.as_os_str().is_empty(),
             Some(RootfsSource::DiskImage { .. }) => true,
             None => false,
@@ -2319,15 +2330,34 @@ pub(crate) fn apply_snapshot_root_layout(
     config: &mut SandboxConfig,
     layout: &SnapshotRootDisk,
 ) -> MicrosandboxResult<()> {
+    // Only explicit caller intent may resize a restore. Backend/image defaults must not
+    // silently grow a captured disk, and root_disk(size) preserves the captured topology.
+    let requested_mib = config
+        .caller_config_overrides
+        .as_deref()
+        .and_then(|patch| patch.spec.image.as_ref())
+        .and_then(RootfsSource::oci_root_disk)
+        .and_then(|root| match root {
+            microsandbox_types::RootDisk::Managed { size_mib }
+            | microsandbox_types::RootDisk::Flat { size_mib, .. } => *size_mib,
+            _ => None,
+        });
     let RootfsSource::Oci(oci) = &mut config.spec.image else {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "snapshot image did not resolve to an OCI rootfs".into(),
         ));
     };
+    if requested_mib.is_some() && matches!(layout, SnapshotRootDisk::Tmpfs { .. }) {
+        return Err(MicrosandboxError::InvalidConfig(
+            "snapshot root disk growth requires a managed or flat disk".into(),
+        ));
+    }
     oci.root_disk = Some(match layout {
-        SnapshotRootDisk::Managed => microsandbox_types::RootDisk::Managed { size_mib: None },
+        SnapshotRootDisk::Managed => microsandbox_types::RootDisk::Managed {
+            size_mib: requested_mib,
+        },
         SnapshotRootDisk::Flat => microsandbox_types::RootDisk::Flat {
-            size_mib: None,
+            size_mib: requested_mib,
             fstype: Some("ext4".into()),
             clone: microsandbox_types::FlatClone::Auto,
         },
@@ -4269,9 +4299,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_from_snapshot_rejects_explicit_root_disk() {
+    async fn test_builder_from_snapshot_rejects_explicit_root_layout() {
         let err = SandboxBuilder::new("test")
-            .image_with(|i| i.oci("").root_disk(8192u32))
+            .image_with(|i| i.oci("").root_disk_with(|disk| disk.tmpfs()))
             .with_snapshot_reference(SnapshotReference::auto("/tmp/missing-snapshot"))
             .build()
             .await

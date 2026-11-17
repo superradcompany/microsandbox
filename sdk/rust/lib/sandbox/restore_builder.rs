@@ -114,6 +114,15 @@ impl RestoreBuilder {
         self
     }
 
+    /// Set the restored root disk capacity, in MiB, on the local backend.
+    ///
+    /// Disk snapshots and disk-only restores may grow the captured disk, but cannot shrink it.
+    /// Full memory restores require the captured size. Omit this to keep the captured capacity.
+    pub fn root_disk(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.inner = self.inner.root_disk(size);
+        self
+    }
+
     /// Set the destination host's network policy before disk boot or captured execution resumes.
     /// This changes traffic admission, not the captured guest interface or TLS trust setup.
     #[cfg(feature = "net")]

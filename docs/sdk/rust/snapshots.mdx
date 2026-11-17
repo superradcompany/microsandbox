@@ -1109,6 +1109,29 @@ Omitted controls retain destination defaults. Durations are whole seconds. Netwo
 
 </Accordion>
 
+#### <span className="msb-recv">restore.</span><span className="msb-hn">root_disk()</span>
+
+```rust
+fn root_disk(self, size: impl Into<Mebibytes>) -> Self
+```
+
+Set the restored root disk capacity in MiB on the local backend. Disk snapshots and `disk_only()` restores can grow a managed or flat root, but cannot shrink it. Full memory restores require the captured capacity. Omit this option to retain the captured size.
+
+Growth updates the new sandbox's private writable disk and ext4 filesystem before launch. The source snapshot stays unchanged; failed preparation discards the incomplete destination.
+
+<Accordion title="Example">
+
+```rust
+let child = Sandbox::restore("api:baseline")
+    .name("api-larger")
+    .disk_only()
+    .root_disk(8192u32)
+    .restore()
+    .await?;
+```
+
+</Accordion>
+
 #### <span className="msb-recv">restore.</span><span className="msb-hn">volume()</span>
 
 ```rust
