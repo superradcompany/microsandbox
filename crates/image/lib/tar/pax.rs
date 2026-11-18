@@ -384,6 +384,7 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
+    use ::tar::{EntryType, Header};
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
@@ -393,9 +394,9 @@ mod tests {
 
     /// Build a ustar header block.
     fn header(path: &str, entry_type: u8, size: u64) -> Vec<u8> {
-        let mut header = tokio_tar::Header::new_ustar();
+        let mut header = Header::new_ustar();
         header.set_path(path).unwrap();
-        header.set_entry_type(tokio_tar::EntryType::new(entry_type));
+        header.set_entry_type(EntryType::new(entry_type));
         header.set_size(size);
         header.set_mode(0o644);
         header.set_cksum();
