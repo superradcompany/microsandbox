@@ -64,7 +64,6 @@ async fn backend_with_stale_running_pid(
     let backend = Arc::new(
         crate::test_support::local_backend_builder(home)
             .build()
-            .await
             .unwrap(),
     );
     let run_dir = backend.config().run_dir();
@@ -190,7 +189,6 @@ async fn kill_sandbox_still_kills_a_proven_runtime() {
     let backend = Arc::new(
         crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap(),
     );
     let name = "live";
@@ -272,7 +270,6 @@ async fn drain_sandbox_still_drains_a_proven_runtime() {
     let backend = Arc::new(
         crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap(),
     );
     let name = "live";
