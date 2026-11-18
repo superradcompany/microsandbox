@@ -16,6 +16,7 @@ mod agentd_format;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-check-cfg=cfg(msb_embedded_storage_reader_v1)");
+    println!("cargo:rustc-check-cfg=cfg(msb_embedded_disk_editor_v1)");
     println!("cargo:rerun-if-env-changed=MSB_EMBED_ARTIFACTS_DIR");
 
     #[cfg(feature = "embed-binaries")]
@@ -27,6 +28,10 @@ fn main() {
         // downloads can still boot normal workloads; their binaries cannot serve this protocol.
         let marker = b"microsandbox-private-storage-reader/1";
         let staged = std::fs::read(out_dir.join(AGENTD_BINARY)).expect("staged guest agent");
+        let editor = b"microsandbox-private-disk-editor/1";
+        if staged.windows(editor.len()).any(|bytes| bytes == editor) {
+            println!("cargo:rustc-cfg=msb_embedded_disk_editor_v1");
+        }
         if staged.windows(marker.len()).any(|bytes| bytes == marker) {
             println!("cargo:rustc-cfg=msb_embedded_storage_reader_v1");
         }

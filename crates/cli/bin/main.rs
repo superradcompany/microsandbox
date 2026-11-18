@@ -87,6 +87,15 @@ enum Commands {
     #[command(hide = true)]
     Machine(Box<MachineArgs>),
 
+    /// Apply ordered edits to a private staged disk in an isolated VM (internal).
+    #[command(name = "__snapshot-editor", hide = true)]
+    SnapshotEditor {
+        firmware: std::path::PathBuf,
+        scratch: std::path::PathBuf,
+        chain: std::path::PathBuf,
+        lower: Option<std::path::PathBuf>,
+    },
+
     /// Report launch wire capabilities without initializing a backend.
     #[command(name = "__launch-protocol", hide = true)]
     LaunchProtocol,
@@ -301,6 +310,23 @@ fn main() {
     let log_level = cli.logs.selected_level();
 
     let exit_code = match cli.command.into_canonical() {
+        Commands::SnapshotEditor {
+            firmware,
+            scratch,
+            chain,
+            lower,
+        } => {
+            if let Err(error) = microsandbox_runtime::vm::enter_snapshot_editor(
+                &firmware,
+                &scratch,
+                &chain,
+                lower.as_deref(),
+            ) {
+                eprintln!("snapshot editor: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Commands::LaunchProtocol => {
             println!(
                 "{}",
@@ -712,7 +738,7 @@ fn run_async_command_anyhow(
         }
 
         let result = match command {
-            Commands::Machine(_) | Commands::LaunchProtocol => {
+            Commands::Machine(_) | Commands::LaunchProtocol | Commands::SnapshotEditor { .. } => {
                 unreachable!("handled before Tokio starts")
             }
             Commands::SandboxShortcut(_) => unreachable!("normalized before dispatch"),

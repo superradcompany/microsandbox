@@ -453,6 +453,7 @@ pub mod heartbeat;
 pub mod message;
 #[doc(hidden)]
 pub mod restore_transport;
+pub mod snapshot_patch;
 pub mod storage_preview;
 pub mod tcp;
 #[doc(hidden)]

@@ -66,6 +66,8 @@ impl RestoreStaging {
         let mut reserved = config.clone_for_persistence();
         reserved.spec.name = name.clone();
         reserved.spec.labels.clear();
+        // The reservation needs an identity, never a second copy of user-provided file content.
+        reserved.spec.patches.clear();
         reserved.replace_existing = false;
         reserved.spec.lifecycle.ephemeral = true;
 

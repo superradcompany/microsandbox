@@ -29,6 +29,7 @@ pub mod network;
 pub mod process;
 pub mod serial;
 pub mod session;
+pub mod snapshot_patch;
 pub mod storage_preview;
 pub mod tcp;
 pub mod teardown;

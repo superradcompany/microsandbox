@@ -5,6 +5,10 @@
 //! `Vm::enter()` from msb_krun. It **never returns** — the VMM calls
 //! `_exit()` on guest shutdown after running exit observers.
 
+#[path = "snapshot_editor.rs"]
+mod snapshot_editor;
+pub use snapshot_editor::enter_snapshot_editor;
+
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::num::NonZero;

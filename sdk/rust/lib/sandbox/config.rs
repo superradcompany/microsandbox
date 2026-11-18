@@ -230,6 +230,10 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_reference: Option<SnapshotReference>,
 
+    /// The canonical local launch admitted offline edits on an unpublished disk child.
+    #[serde(skip)]
+    pub(crate) snapshot_disk_edits: bool,
+
     /// Local restore inputs have been classified and anchored for this operation.
     /// Keep an admitted store name from becoming a file lookup after cwd changes.
     #[serde(skip)]
@@ -699,6 +703,7 @@ impl SandboxConfig {
     /// transient launch markers and any workload argv routed through an inherited init are removed.
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
+        config.snapshot_disk_edits = false;
         config.local_restore_paths_resolved = false;
         #[cfg(feature = "local")]
         {
@@ -1236,6 +1241,7 @@ impl Default for SandboxConfig {
             slug: None,
             manifest_digest: None,
             snapshot_reference: None,
+            snapshot_disk_edits: false,
             local_restore_paths_resolved: false,
             snapshot_upper_source: None,
             #[cfg(feature = "local")]

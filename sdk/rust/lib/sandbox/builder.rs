@@ -1793,13 +1793,20 @@ impl SandboxBuilder {
                 "from_snapshot is mutually exclusive with explicit rootfs configuration".into(),
             ));
         }
-        if self
+        #[cfg(feature = "local")]
+        let offline_editor = self.canonical_snapshot_launch && backend.as_local().is_some();
+        #[cfg(not(feature = "local"))]
+        let offline_editor = false;
+        let has_edits = self
             .config
             .spec
             .patches
             .as_ref()
-            .is_some_and(|patches| !patches.is_empty())
-        {
+            .is_some_and(|patches| !patches.is_empty());
+        if offline_editor && has_edits {
+            self.config.snapshot_disk_edits = Some(true);
+        }
+        if !offline_editor && has_edits {
             return Err(MicrosandboxError::InvalidConfig(
                 "patches cannot be combined with from_snapshot".into(),
             ));
@@ -2223,7 +2230,10 @@ impl SandboxBuilder {
             ));
         }
         #[cfg(feature = "local")]
-        if sandbox.checkpoint_restore.is_some() && !sandbox.spec.patches.is_empty() {
+        if sandbox.checkpoint_restore.is_some()
+            && sandbox.snapshot_restore_mode != SnapshotRestoreMode::DiskOnly
+            && !sandbox.spec.patches.is_empty()
+        {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "patches cannot be combined with full snapshot restore".into(),
             ));

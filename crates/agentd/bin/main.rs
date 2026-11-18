@@ -20,6 +20,14 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() {
+    if process::id() == 1
+        && std::env::args_os().nth(1).as_deref()
+            == Some(std::ffi::OsStr::new(
+                microsandbox_protocol::snapshot_patch::BOOT_ARG,
+            ))
+    {
+        microsandbox_agentd::snapshot_patch::boot();
+    }
     // Capture CLOCK_BOOTTIME immediately — this represents kernel boot duration.
     let boot_time_ns = clock::boottime_ns();
     // Only the injected binary runs this fixed, read-only guest helper. PID 1 always follows

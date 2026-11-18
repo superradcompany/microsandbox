@@ -62,24 +62,26 @@ pub(super) async fn prepare_owned<T: AsRef<std::path::Path> + Send + 'static>(
     fs_state_limit: usize,
 ) -> MicrosandboxResult<(SandboxConfig, T)> {
     tokio::spawn(async move {
-        let size_mib = config.snapshot_root_growth_mib.take().ok_or_else(|| {
-            MicrosandboxError::InvalidConfig("snapshot root capacity is missing".into())
-        })?;
-        let size = u64::from(size_mib)
-            .checked_mul(1024 * 1024)
-            .filter(|size| *size > 0)
-            .ok_or_else(|| {
-                MicrosandboxError::InvalidConfig(
-                    "snapshot root capacity is zero or too large".into(),
-                )
-            })?;
+        let growth = config.snapshot_root_growth_mib.take();
+        let size = growth
+            .map(|size_mib| {
+                u64::from(size_mib)
+                    .checked_mul(1024 * 1024)
+                    .filter(|size| *size > 0)
+                    .ok_or_else(|| {
+                        MicrosandboxError::InvalidConfig(
+                            "snapshot root capacity is zero or too large".into(),
+                        )
+                    })
+            })
+            .transpose()?;
         let layout = super::snapshot_root_layout_from_config(&config)?;
         // A fresh catalog reservation owns its path before any filesystem worker starts.
         tokio::fs::create_dir_all(stage.as_ref()).await?;
         if let Some(checkpoint) = checkpoint {
             if config.snapshot_restore_mode != SnapshotRestoreMode::DiskOnly {
                 return Err(MicrosandboxError::InvalidConfig(
-                    "root-disk growth requires disk-only mode for a full snapshot".into(),
+                    "changing a full snapshot disk requires disk-only mode".into(),
                 ));
             }
             let materialized = crate::snapshot::materialize_checkpoint_disk_for_child(
@@ -107,9 +109,33 @@ pub(super) async fn prepare_owned<T: AsRef<std::path::Path> + Send + 'static>(
             .await?;
             config.snapshot_upper_layers = materialized.upper_layers;
         }
+        if config.snapshot_upper_layers.is_empty()
+            && let Some(raw) = config.snapshot_upper_source.take()
+        {
+            use microsandbox_runtime::launch::RootfsUpperLayerConfig;
+            let size = tokio::fs::metadata(&raw).await?.len();
+            let mut layers = vec![RootfsUpperLayerConfig {
+                path: raw.clone(),
+                format: "raw".into(),
+            }];
+            // A legacy archive may already occupy the canonical raw base in this stage.
+            // Keep it sealed and append a head. Installed legacy bases still need local ownership.
+            if raw.parent() == Some(stage.as_ref()) {
+                crate::snapshot::append_private_writable_head(&mut layers, size, &storage, &layout)
+                    .await?;
+                config.snapshot_upper_layers = layers;
+            } else {
+                config.snapshot_upper_layers =
+                    crate::snapshot::materialize_file_snapshot_for_child(
+                        &layers, size, &storage, &layout,
+                    )
+                    .await?
+                    .upper_layers;
+            }
+        }
         if config.checkpoint_restore.is_some() {
             return Err(MicrosandboxError::InvalidConfig(
-                "root-disk growth cannot modify captured execution state".into(),
+                "disk edits or growth cannot modify captured execution state".into(),
             ));
         }
         let layers = config
@@ -145,6 +171,9 @@ pub(super) async fn prepare_owned<T: AsRef<std::path::Path> + Send + 'static>(
                 "snapshot root growth requires an unpublished child-owned writable head".into(),
             ));
         }
+        let Some((size_mib, size)) = growth.zip(size) else {
+            return Ok((config, stage));
+        };
         #[cfg(test)]
         tests::pause_staged_worker(stage.as_ref().parent().expect("staging has a parent")).await;
         // Transfer staging into the blocking task too: even runtime shutdown must not

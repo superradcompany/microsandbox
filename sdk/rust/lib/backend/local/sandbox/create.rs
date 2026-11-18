@@ -30,6 +30,7 @@
 //! a stale record retaining unused files until normal sandbox cleanup removes the dependency.
 
 mod cleanup;
+mod disk_editor;
 mod restore;
 mod root_growth;
 
@@ -297,7 +298,17 @@ impl LocalBackend {
             None
         };
 
-        if config.snapshot_root_growth_mib.is_some() {
+        let direct_flat = matches!(
+            config.spec.image.oci_root_disk(),
+            Some(RootDisk::Flat { .. })
+        ) && config.branch_source.is_none()
+            && config.checkpoint_restore.is_none()
+            && (config.snapshot_upper_source.is_some()
+                || !config.snapshot_upper_layers.is_empty()
+                || !installed_file_sources.is_empty());
+        let edit_child =
+            (config.snapshot_disk_edits || direct_flat) && !config.spec.patches.is_empty();
+        if config.snapshot_root_growth_mib.is_some() || edit_child {
             // The complete disk/filesystem rewrite must succeed before replacement can
             // stop the old sandbox. The worker owns staging and source leases through
             // caller cancellation; publication later moves the directory without copying.
@@ -338,9 +349,7 @@ impl LocalBackend {
         {
             // Preserve option admission ahead of image/cache effects. Direct resolved
             // snapshot inputs can bypass the public builder's reference-based check.
-            if !config.spec.patches.is_empty()
-                && !matches!(oci.root_disk, Some(RootDisk::Flat { .. }))
-            {
+            if !edit_child && !config.spec.patches.is_empty() {
                 let source = if config.snapshot_upper_source.is_some() {
                     "from_snapshot"
                 } else {
@@ -376,6 +385,29 @@ impl LocalBackend {
                 )
                 .await?,
             );
+        }
+
+        if edit_child {
+            let runtime = crate::setup::resolve_runtime(self.config())?;
+            let image = resolved_image.take().ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(
+                    "snapshot edits require the captured OCI root".into(),
+                )
+            })?;
+            let stage = archive_stage
+                .take()
+                .expect("child preparation reserved staging");
+            let (prepared, edited_stage, image) = disk_editor::apply(
+                config,
+                stage,
+                runtime.msb_path,
+                runtime.libkrunfw_path,
+                image,
+            )
+            .await?;
+            config = prepared;
+            archive_stage = Some(edited_stage);
+            resolved_image = Some(image);
         }
 
         // Transition ownership is deliberately separate from the runtime lifecycle lock: this

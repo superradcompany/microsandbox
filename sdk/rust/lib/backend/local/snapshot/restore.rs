@@ -467,7 +467,7 @@ async fn materialize_checkpoint_disk_layers(
     Ok(upper_layers)
 }
 
-async fn append_private_writable_head(
+pub(crate) async fn append_private_writable_head(
     layers: &mut Vec<RootfsUpperLayerConfig>,
     virtual_size: u64,
     child_stage: &CreationStorage,
