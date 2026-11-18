@@ -18,6 +18,8 @@ mod service;
 mod snapshot;
 #[cfg(test)]
 mod stop_tests;
+#[cfg(test)]
+mod stream_tests;
 mod volume;
 mod ws_io;
 
@@ -78,8 +80,11 @@ pub struct CloudBackend {
     url: String,
     api_key: String,
     http: reqwest::Client,
+    /// Client for log follows and volume file transfers, with no total timeout.
+    stream_http: reqwest::Client,
     /// Client for Service changes, which must never resend a request.
     service_http: reqwest::Client,
+    request_timeout: Duration,
     config: Arc<BackendConfig>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
@@ -267,7 +272,12 @@ impl CloudBackendBuilder {
         self
     }
 
-    /// Set the per-request timeout for outbound HTTP calls.
+    /// Set the timeout for each ordinary HTTP request.
+    ///
+    /// Log follows and volume file transfers are not bounded by this duration
+    /// as a total. It bounds connecting, the wait for a log follow or file read
+    /// to start, each wait for more file read data, the wait for a file write's
+    /// reply after all data is sent, and reading an error reply.
     pub fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
         self
@@ -279,9 +289,11 @@ impl CloudBackendBuilder {
         self
     }
 
-    /// Provide a fully custom `reqwest::Client`. When set, `request_timeout`
-    /// and `user_agent` builder options are ignored — the supplied client owns
-    /// its own configuration.
+    /// Provide a fully custom `reqwest::Client`. When set, `user_agent` is
+    /// ignored and the supplied client's own settings apply. `request_timeout`
+    /// still bounds the log follow and file transfer waits listed on
+    /// [`Self::request_timeout`]. A total timeout on the supplied client also
+    /// ends log follows and file transfers.
     ///
     /// Service create, update, enable, disable and remove also use this client,
     /// so its retry and redirect policies decide whether a change request can be
@@ -326,8 +338,8 @@ impl CloudBackendBuilder {
         let url = url.trim_end_matches('/').to_string();
         let api_key = api_key.to_string();
 
-        let (http, service_http) = if let Some(client) = self.custom_client {
-            (client.clone(), client)
+        let (http, stream_http, service_http) = if let Some(client) = self.custom_client {
+            (client.clone(), client.clone(), client)
         } else {
             let mut headers = HeaderMap::new();
             let bearer = format!("Bearer {api_key}");
@@ -346,7 +358,6 @@ impl CloudBackendBuilder {
 
             let build = |builder: reqwest::ClientBuilder| {
                 builder
-                    .timeout(self.request_timeout)
                     .default_headers(headers.clone())
                     .build()
                     .map_err(|e| {
@@ -356,8 +367,9 @@ impl CloudBackendBuilder {
                     })
             };
             (
-                build(reqwest::Client::builder())?,
-                build(service::service_change_client_builder())?,
+                build(reqwest::Client::builder().timeout(self.request_timeout))?,
+                build(reqwest::Client::builder().connect_timeout(self.request_timeout))?,
+                build(service::service_change_client_builder().timeout(self.request_timeout))?,
             )
         };
 
@@ -365,7 +377,9 @@ impl CloudBackendBuilder {
             url,
             api_key,
             http,
+            stream_http,
             service_http,
+            request_timeout: self.request_timeout,
             config,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,

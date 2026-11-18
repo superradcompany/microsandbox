@@ -5,11 +5,14 @@ use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
-use futures::{StreamExt, future::BoxFuture, stream};
+use futures::{StreamExt, future::BoxFuture, future::ready, stream};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use super::CloudBackend;
+use super::{
+    CloudBackend,
+    http::{FileTransfer, volume_download_stream},
+};
 use crate::backend::{
     Backend,
     volume::{
@@ -163,7 +166,7 @@ impl CloudBackend {
         query: &[(&str, String)],
         json: Option<serde_json::Value>,
     ) -> MicrosandboxResult<T> {
-        self.volume_file_request(method, id, suffix, query, json, None)
+        self.volume_file_request(method, id, suffix, query, json, FileTransfer::Request)
             .await?
             .json()
             .await
@@ -262,18 +265,22 @@ impl VolumeBackend for CloudBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<Bytes>> {
         Box::pin(async move {
             let volume_id = self.volume_id_for_fs(name).await?;
-            self.volume_file_request(
-                reqwest::Method::GET,
-                &volume_id,
-                "/content",
-                &[(FILE_PATH_HEADER, encoded_path(path))],
-                None,
-                None,
-            )
-            .await?
-            .bytes()
-            .await
-            .map_err(|error| MicrosandboxError::Custom(format!("volume read failed: {error}")))
+            let response = self
+                .volume_file_request(
+                    reqwest::Method::GET,
+                    &volume_id,
+                    "/content",
+                    &[(FILE_PATH_HEADER, encoded_path(path))],
+                    None,
+                    FileTransfer::Download,
+                )
+                .await?;
+            let mut stream = volume_download_stream(response, self.request_timeout);
+            let mut data = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                data.extend_from_slice(&chunk?);
+            }
+            Ok(Bytes::from(data))
         })
     }
 
@@ -302,9 +309,14 @@ impl VolumeBackend for CloudBackend {
                 reqwest::Method::PUT,
                 &volume_id,
                 "/content",
-                &[(FILE_PATH_HEADER, encoded_path(path))],
+                &[
+                    (FILE_PATH_HEADER, encoded_path(path)),
+                    ("content-length", data.len().to_string()),
+                ],
                 None,
-                Some(reqwest::Body::from(data)),
+                FileTransfer::Upload(
+                    stream::once(ready(Ok::<_, std::io::Error>(Bytes::from(data)))).boxed(),
+                ),
             )
             .await?;
             Ok(())
@@ -364,7 +376,7 @@ impl VolumeBackend for CloudBackend {
                 "/mkdir",
                 &[],
                 Some(serde_json::json!({ "path": path })),
-                None,
+                FileTransfer::Request,
             )
             .await?;
             Ok(())
@@ -388,7 +400,7 @@ impl VolumeBackend for CloudBackend {
                     (FILE_RECURSIVE_HEADER, recursive.to_string()),
                 ],
                 None,
-                None,
+                FileTransfer::Request,
             )
             .await?;
             Ok(())
@@ -409,7 +421,7 @@ impl VolumeBackend for CloudBackend {
                 "/copy",
                 &[],
                 Some(serde_json::json!({ "from": from, "to": to })),
-                None,
+                FileTransfer::Request,
             )
             .await?;
             Ok(())
@@ -430,7 +442,7 @@ impl VolumeBackend for CloudBackend {
                 "/rename",
                 &[],
                 Some(serde_json::json!({ "from": from, "to": to })),
-                None,
+                FileTransfer::Request,
             )
             .await?;
             Ok(())
@@ -471,15 +483,11 @@ impl VolumeBackend for CloudBackend {
                     "/content",
                     &[(FILE_PATH_HEADER, encoded_path(path))],
                     None,
-                    None,
+                    FileTransfer::Download,
                 )
                 .await?;
-            let stream = response.bytes_stream().map(|chunk| {
-                chunk.map_err(|error| {
-                    MicrosandboxError::Custom(format!("volume read stream failed: {error}"))
-                })
-            });
-            Ok(VolumeFsReadStream::from_stream(Box::pin(stream)))
+            let stream = volume_download_stream(response, self.request_timeout);
+            Ok(VolumeFsReadStream::from_stream(stream))
         })
     }
 
@@ -506,7 +514,7 @@ impl VolumeBackend for CloudBackend {
                         "/content",
                         &[(FILE_PATH_HEADER, encoded_path(&path))],
                         None,
-                        Some(reqwest::Body::wrap_stream(body_stream)),
+                        FileTransfer::Upload(body_stream.boxed()),
                     )
                     .await?;
                 Ok(())
