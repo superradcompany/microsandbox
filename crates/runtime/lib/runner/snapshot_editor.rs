@@ -68,6 +68,13 @@ pub fn enter_snapshot_editor(
         .kernel(|k| k.krunfw_path(firmware))
         .fs(|f| f.tag("/dev/root").custom(Box::new(fs)))
         .exec(|e| e.args([microsandbox_protocol::snapshot_patch::BOOT_ARG]));
+    #[cfg(windows)]
+    {
+        // WHP needs the same virtio boot console as a regular sandbox. With
+        // only the implicit console the helper can exit before writing its receipt.
+        let log = chain.with_file_name("editor-kernel.log");
+        vm = vm.console(|c| c.disable_implicit().virtio_output(log));
+    }
     if let Some(lower) = lower {
         vm = vm.disk(|d| d.path(lower).format(DiskImageFormat::Vmdk).read_only(true));
     }
