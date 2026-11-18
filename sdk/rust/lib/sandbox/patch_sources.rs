@@ -2,12 +2,21 @@
 //! Retain the staging owner until every consumer has stopped using the files.
 
 mod files;
-use std::fs::{self, File};
+use std::collections::HashMap;
+use std::fs::{self, File, Permissions};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf, absolute};
 use std::sync::{Arc, LazyLock};
 
+#[cfg(not(target_os = "linux"))]
+use cap_primitives::fs::FollowSymlinks;
+use cap_std::fs::Dir;
+#[cfg(not(target_os = "linux"))]
+use cap_std::fs::{OpenOptions, OpenOptionsExt};
 use microsandbox_types::Patch;
+use tempfile::{Builder, TempDir};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -25,13 +34,16 @@ static CAPACITY: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore:
 // Types
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Default)]
 pub(crate) struct Prepared {
+    modes: HashMap<PathBuf, u32>,
     patches: Option<Vec<Patch>>,
-    _stage: Option<tempfile::TempDir>,
+    _stage: Option<TempDir>,
     _capacity: Option<OwnedSemaphorePermit>,
 }
 
 struct Budget {
+    modes: HashMap<PathBuf, u32>,
     bytes: u64,
     entries: usize,
 }
@@ -41,6 +53,10 @@ struct Budget {
 //--------------------------------------------------------------------------------------------------
 
 impl Prepared {
+    pub(crate) fn mode(&self, path: &Path) -> Option<u32> {
+        self.modes.get(path).copied()
+    }
+
     pub(crate) fn patches<'a>(&'a self, original: &'a [Patch]) -> &'a [Patch] {
         self.patches.as_deref().unwrap_or(original)
     }
@@ -82,13 +98,24 @@ impl Budget {
         let count = io::copy(&mut file.take(MAX_BYTES - self.bytes + 1), &mut output)?;
         self.add(count)?;
         output.flush()?;
-        fs::set_permissions(destination, metadata.permissions())
+        #[cfg(unix)]
+        output.set_permissions(Permissions::from_mode(0o600))?;
+        #[cfg(unix)]
+        self.modes.insert(
+            destination.to_path_buf(),
+            metadata.permissions().mode() & 0o7777,
+        );
+        // Staging belongs to this process, regardless of who owned the input.
+        // Leave owner access intact; consumers apply the separately retained mode.
+        Ok(())
     }
     fn directory(&mut self, file: File, destination: &Path, depth: usize) -> io::Result<()> {
         let source_device = device(&file)?;
         let permissions = file.metadata()?.permissions();
-        let directory = cap_std::fs::Dir::from_std_file(file.try_clone()?);
+        let directory = Dir::from_std_file(file.try_clone()?);
         fs::create_dir(destination)?;
+        #[cfg(unix)]
+        fs::set_permissions(destination, Permissions::from_mode(0o700))?;
         for entry in directory.entries()? {
             let entry = entry?;
             self.entry(depth + 1)?;
@@ -97,10 +124,9 @@ impl Budget {
             let child = files::open_child(&file, &name)?;
             #[cfg(not(target_os = "linux"))]
             let child = {
-                let mut options = cap_std::fs::OpenOptions::new();
+                let mut options = OpenOptions::new();
                 options.read(true);
-                use cap_std::fs::OpenOptionsExt;
-                options._cap_fs_ext_follow(cap_primitives::fs::FollowSymlinks::No);
+                options._cap_fs_ext_follow(FollowSymlinks::No);
                 #[cfg(unix)]
                 options.custom_flags(libc::O_NONBLOCK);
                 directory.open_with(&name, &options)?.into_std()
@@ -115,8 +141,10 @@ impl Budget {
                 self.file(child, &output)?;
             }
         }
-        // Set modes last so a read-only input directory can still be materialized.
-        fs::set_permissions(destination, permissions)
+        #[cfg(unix)]
+        self.modes
+            .insert(destination.to_path_buf(), permissions.mode() & 0o7777);
+        Ok(())
     }
 }
 //--------------------------------------------------------------------------------------------------
@@ -125,23 +153,18 @@ impl Budget {
 
 pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxResult<Prepared> {
     if !enabled {
-        return Ok(Prepared {
-            patches: None,
-            _stage: None,
-            _capacity: None,
-        });
+        return Ok(Prepared::default());
     }
     let mut budget = Budget {
         bytes: 0,
         entries: 0,
+        modes: HashMap::new(),
     };
     let mut sources = Vec::with_capacity(patches.len().min(MAX_ENTRIES));
     for patch in patches {
         budget.entry(0)?;
         let source = match patch {
-            Patch::CopyFile { src, .. } | Patch::CopyDir { src, .. } => {
-                Some(std::path::absolute(src)?)
-            }
+            Patch::CopyFile { src, .. } | Patch::CopyDir { src, .. } => Some(absolute(src)?),
             Patch::Text { content, .. } | Patch::Append { content, .. } => {
                 budget.add(content.len() as u64)?;
                 None
@@ -168,13 +191,14 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
         }
     }
     tokio::task::spawn_blocking(move || {
-        let stage = tempfile::Builder::new().prefix("msb-copy-").tempdir()?;
+        let stage = Builder::new().prefix("msb-copy-").tempdir()?;
         let mut prepared = Vec::new();
         for (index, mut patch) in patches.into_iter().enumerate() {
             match &mut patch {
                 Patch::CopyFile { src, .. } => {
                     let output = stage.path().join(index.to_string());
-                    budget.file(files::open_regular(src, false)?, &output)?;
+                    let source = files::open_regular(src, false)?;
+                    budget.file(source, &output)?;
                     *src = output;
                 }
                 Patch::CopyDir { src, .. } => {
@@ -187,6 +211,7 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
             prepared.push(patch);
         }
         Ok::<_, io::Error>(Prepared {
+            modes: budget.modes,
             patches: Some(prepared),
             _stage: Some(stage),
             _capacity: Some(permit),
@@ -219,11 +244,34 @@ fn device(file: &File) -> io::Result<u64> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn staged_file_keeps_owner_access_without_changing_its_destination_mode() {
+        let source = tempfile::tempdir().unwrap();
+        let source_path = source.path().join("source");
+        fs::write(&source_path, b"group readable").unwrap();
+        let file = File::open(&source_path).unwrap();
+        // Metadata can become group-readable-only after admission. The held
+        // descriptor still reads it, but applying its mode to staging would
+        // make the newly owned file unreadable to this process.
+        fs::set_permissions(&source_path, Permissions::from_mode(0o040)).unwrap();
+        let destination = source.path().join("staged");
+        let mut budget = Budget {
+            modes: HashMap::new(),
+            bytes: 0,
+            entries: 0,
+        };
+        budget.file(file, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"group readable");
+        assert_eq!(budget.modes[&destination], 0o040);
+        assert_eq!(fs::metadata(&destination).unwrap().mode() & 0o777, 0o600);
+    }
 
     #[tokio::test]
     async fn staged_copy_is_independent_of_later_source_writes() {
         let source = tempfile::tempdir().unwrap();
-        let file = source.path().join("data");
+        let file = source.path().canonicalize().unwrap().join("data");
         fs::write(&file, b"original").unwrap();
         let patches = [Patch::CopyFile {
             src: file.clone(),

@@ -38,19 +38,7 @@ fn open_path(path: &Path, writable: bool, directory: bool) -> io::Result<File> {
         )?
     };
     #[cfg(all(unix, not(target_os = "linux")))]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        File::options()
-            .read(true)
-            .write(writable)
-            .custom_flags(
-                libc::O_NOFOLLOW
-                    | libc::O_NONBLOCK
-                    | libc::O_CLOEXEC
-                    | if directory { libc::O_DIRECTORY } else { 0 },
-            )
-            .open(path)?
-    };
+    let file = open_without_links(path, writable, directory)?;
     #[cfg(unix)]
     {
         Ok(file)
@@ -63,6 +51,60 @@ fn open_path(path: &Path, writable: bool, directory: bool) -> io::Result<File> {
             "bounded patch source staging requires Unix",
         ))
     }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn open_without_links(path: &Path, writable: bool, directory: bool) -> io::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    let mut parent = File::open(if path.is_absolute() { "/" } else { "." })?;
+    let mut components = path
+        .components()
+        .filter(|component| !matches!(component, Component::RootDir | Component::CurDir))
+        .peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "patch source path contains '..'",
+            ));
+        };
+        let name = CString::new(name.as_bytes())?;
+        let final_component = components.peek().is_none();
+        let flags = libc::O_NOFOLLOW
+            | libc::O_NONBLOCK
+            | libc::O_CLOEXEC
+            | if final_component {
+                if writable {
+                    libc::O_RDWR
+                } else {
+                    libc::O_RDONLY
+                }
+            } else {
+                libc::O_RDONLY | libc::O_DIRECTORY
+            }
+            | if final_component && directory {
+                libc::O_DIRECTORY
+            } else {
+                0
+            };
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        if final_component {
+            return Ok(file);
+        }
+        parent = file;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "patch source path is empty",
+    ))
 }
 
 /// Pin one directory child without crossing a mount, including same-device binds.

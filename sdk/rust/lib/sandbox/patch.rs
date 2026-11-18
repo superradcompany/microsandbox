@@ -27,6 +27,7 @@ use microsandbox_image::tree::{
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
+use super::patch_sources::Prepared;
 use super::types::{Patch, RootfsSource};
 use crate::MicrosandboxResult;
 use crate::backend::local::creation::CreationStorage;
@@ -429,6 +430,7 @@ impl RootedPatchFs {
         dst: &Path,
         guest_path: &str,
         replace: bool,
+        sources: &Prepared,
     ) -> MicrosandboxResult<()> {
         let source = Dir::open_ambient_dir(src, ambient_authority()).map_err(|err| {
             crate::MicrosandboxError::PatchFailed(format!(
@@ -437,7 +439,7 @@ impl RootedPatchFs {
             ))
         })?;
         self.validate_copy_dir_source(&source)?;
-        self.copy_dir_from(&source, dst, guest_path, replace)
+        self.copy_dir_from(&source, src, dst, guest_path, replace, sources)
     }
 
     /// Validate the complete source tree before creating a destination.
@@ -475,12 +477,16 @@ impl RootedPatchFs {
     fn copy_dir_from(
         &self,
         source: &Dir,
+        source_path: &Path,
         dst: &Path,
         guest_path: &str,
         replace: bool,
+        sources: &Prepared,
     ) -> MicrosandboxResult<()> {
         #[cfg(unix)]
-        let source_mode = source_cap_permissions_mode(&source.dir_metadata()?.permissions());
+        let source_mode = sources.mode(source_path).or(source_cap_permissions_mode(
+            &source.dir_metadata()?.permissions(),
+        ));
         self.ensure_parent(dst)?;
         #[cfg(unix)]
         {
@@ -488,7 +494,11 @@ impl RootedPatchFs {
                 self.root.create_dir_all(dst)?;
             } else {
                 let mut builder = DirBuilder::new();
-                builder.mode(source_mode.unwrap_or(0o755));
+                builder.mode(if sources.mode(source_path).is_some() {
+                    0o700
+                } else {
+                    source_mode.unwrap_or(0o755)
+                });
                 self.root.create_dir_with(dst, &builder).map_err(|err| {
                     if err.kind() == std::io::ErrorKind::AlreadyExists {
                         path_exists_error(guest_path)
@@ -498,7 +508,12 @@ impl RootedPatchFs {
                 })?;
             }
             if let Some(mode) = source_mode {
-                set_dir_mode(&self.root.open_dir(dst)?, mode)?;
+                let construction_mode = if sources.mode(source_path).is_some() {
+                    0o700
+                } else {
+                    mode
+                };
+                set_dir_mode(&self.root.open_dir(dst)?, construction_mode)?;
             }
         }
         #[cfg(windows)]
@@ -551,9 +566,11 @@ impl RootedPatchFs {
                 )?;
                 self.copy_dir_from(
                     &Dir::from_std_file(child),
+                    &source_path.join(entry.file_name()),
                     &resolved_dst,
                     &child_guest_path,
                     replace,
+                    sources,
                 )?;
                 continue;
             }
@@ -578,7 +595,9 @@ impl RootedPatchFs {
                 )));
             }
             let source_permissions = source_file.metadata()?.permissions();
-            let source_mode = source_cap_permissions_mode(&source_permissions);
+            let source_mode = sources
+                .mode(&source_path.join(entry.file_name()))
+                .or(source_cap_permissions_mode(&source_permissions));
             let mut destination =
                 self.open_file_for_write(&resolved_dst, &child_guest_path, replace, source_mode)?;
             self.copy_stream(&mut source_file, &mut destination)?;
@@ -587,6 +606,10 @@ impl RootedPatchFs {
             }
             #[cfg(windows)]
             destination.set_permissions(source_permissions)?;
+        }
+        #[cfg(unix)]
+        if let Some(mode) = sources.mode(source_path) {
+            set_dir_mode(&self.root.open_dir(dst)?, mode)?;
         }
         Ok(())
     }
@@ -756,7 +779,7 @@ pub(crate) async fn apply_patches(
         let source_owner = prepared.clone();
         tokio::task::spawn_blocking(move || {
             let _source_owner = source_owner;
-            apply_one_to_bind(&root, &patch)
+            apply_one_to_bind(&root, &patch, &_source_owner)
         })
         .await
         .map_err(|err| {
@@ -778,7 +801,7 @@ pub(crate) async fn build_upper_tree(
     let mut lowers = LowerLayers::open(lower_erofs)?;
     let mut tree = FileTree::new();
     for patch in patches {
-        apply_one_to_tree(&mut tree, &mut lowers, patch).await?;
+        apply_one_to_tree(&mut tree, &mut lowers, patch, &prepared).await?;
     }
     Ok(tree)
 }
@@ -806,7 +829,7 @@ pub(crate) async fn build_flat_tree(
         removed: Vec::new(),
     };
     for patch in patches {
-        apply_one_to_tree(&mut tree, &mut no_lowers, patch).await?;
+        apply_one_to_tree(&mut tree, &mut no_lowers, patch, &prepared).await?;
     }
     Ok(tree)
 }
@@ -815,6 +838,7 @@ async fn apply_one_to_tree(
     tree: &mut FileTree,
     lowers: &mut LowerLayers,
     patch: &Patch,
+    sources: &Prepared,
 ) -> MicrosandboxResult<()> {
     match patch {
         Patch::Text {
@@ -878,7 +902,9 @@ async fn apply_one_to_tree(
                 tree.remove(&rel);
             }
             let (data, source_mode) = read_regular_source(src).await?;
-            let file_mode = mode.map_or(source_mode, |mode| mode as u16);
+            let file_mode = mode
+                .or(sources.mode(src))
+                .map_or(source_mode, |mode| mode as u16);
             insert_tree_node(
                 tree,
                 &rel,
@@ -894,7 +920,7 @@ async fn apply_one_to_tree(
         Patch::CopyDir { src, dst, replace } => {
             let rel = normalize_guest_path_bytes(dst)?;
             check_replace_tree(tree, lowers, dst, *replace)?;
-            copy_dir_into_tree(tree, lowers, src, &rel).await?;
+            copy_dir_into_tree(tree, lowers, src, &rel, sources).await?;
         }
         Patch::Symlink {
             target,
@@ -1024,7 +1050,11 @@ async fn apply_one_to_tree(
 }
 
 /// Apply one patch through a capability-scoped bind-root handle.
-fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<()> {
+fn apply_one_to_bind(
+    root: &RootedPatchFs,
+    patch: &Patch,
+    sources: &Prepared,
+) -> MicrosandboxResult<()> {
     match patch {
         Patch::Text {
             path,
@@ -1051,11 +1081,11 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             replace,
         } => {
             let dest = root.resolve(dst, *replace)?;
-            root.copy_file(src, &dest, dst, *replace, *mode)?;
+            root.copy_file(src, &dest, dst, *replace, mode.or(sources.mode(src)))?;
         }
         Patch::CopyDir { src, dst, replace } => {
             let dest = root.resolve(dst, *replace)?;
-            root.copy_dir(src, &dest, dst, *replace)?;
+            root.copy_dir(src, &dest, dst, *replace, sources)?;
         }
         Patch::Symlink {
             target,
@@ -1245,6 +1275,7 @@ async fn copy_dir_into_tree(
     lowers: &mut LowerLayers,
     src: &Path,
     dst_relative: &[u8],
+    sources: &Prepared,
 ) -> MicrosandboxResult<()> {
     ensure_tree_parents(tree, lowers, dst_relative)?;
     insert_tree_node(
@@ -1253,7 +1284,12 @@ async fn copy_dir_into_tree(
         TreeNode::Directory(new_upper_directory(
             lowers,
             dst_relative,
-            metadata_with_mode(source_mode(src, true).await?),
+            metadata_with_mode(
+                sources
+                    .mode(src)
+                    .map(|mode| mode as u16)
+                    .unwrap_or(source_mode(src, true).await?),
+            ),
         )),
     )?;
 
@@ -1271,6 +1307,7 @@ async fn copy_dir_into_tree(
                 lowers,
                 &child_path,
                 &child_relative,
+                sources,
             ))
             .await?;
             continue;
@@ -1289,6 +1326,7 @@ async fn copy_dir_into_tree(
             )?;
         } else if file_type.is_file() {
             let (data, mode) = read_regular_source(&child_path).await?;
+            let mode = sources.mode(&child_path).map_or(mode, |mode| mode as u16);
             insert_tree_node(
                 tree,
                 &child_relative,
@@ -2297,7 +2335,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[cfg(unix)]
     #[tokio::test]
     async fn bounded_sources_refuse_unsafe_batches_before_applying_any_patch() {
         use std::os::unix::fs::symlink;
@@ -2351,8 +2388,27 @@ mod tests {
         let error = apply_patches(&image, &patches, true).await.unwrap_err();
         assert!(error.to_string().contains("byte budget"), "{error}");
         assert!(!root.join("first").exists());
+        symlink(&source, fixture.join("alias-dir")).unwrap();
+        for patch in [
+            Patch::CopyFile {
+                src: fixture.join("alias-dir/data"),
+                dst: "/file".into(),
+                mode: None,
+                replace: false,
+            },
+            Patch::CopyDir {
+                src: fixture.join("alias-dir"),
+                dst: "/dir".into(),
+                replace: false,
+            },
+        ] {
+            assert!(apply_patches(&image, &[patch], true).await.is_err());
+        }
+        assert!(!root.join("file").exists());
+        assert!(!root.join("dir").exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bind_patch_confines_host_absolute_symlink() {
         use std::os::unix::fs::symlink;
