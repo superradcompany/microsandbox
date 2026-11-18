@@ -14,6 +14,8 @@ mod agent;
 mod constructors;
 mod http;
 mod modify;
+#[cfg(test)]
+mod named_volume_tests;
 pub(in crate::context) mod sandbox;
 mod service;
 mod sharing;

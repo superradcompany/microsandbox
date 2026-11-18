@@ -73,7 +73,7 @@ msb volume rm cache-1 cache-2   # Remove multiple
 
 ## Using volumes with sandboxes
 
-Use `NAME:GUEST_PATH` to mount a volume. Locally, missing named volumes are created and compatible existing volumes are reused. On cloud, create the volume first.
+Use `NAME:GUEST_PATH` with `-v` or `--mount-named` to mount a volume. Missing named volumes are created with default settings and existing volumes are reused. With the cloud backend, the client looks up or creates the volume before creating the sandbox.
 
 <Accordion title="Examples">
 
@@ -95,7 +95,7 @@ msb run --name reader -v shared:/data alpine -- cat /data/msg.txt
 
 </Accordion>
 
-`--mount-named` accepts a `kind` from [volume creation](#msb-volume-create), disk `size`, and directory `quota`. Disk mounts require a size. Conflicting settings on an existing volume fail.
+Locally, `--mount-named` also accepts a `kind` from [volume creation](#msb-volume-create), disk `size`, and directory `quota`. Disk mounts require a size. Conflicting settings on an existing volume fail. The cloud backend rejects these inline creation settings; use a separate volume-create call for supported custom settings.
 
 Directory and bind mounts accept paired `uid` and `gid` guest-owner fallbacks. These do not change host ownership and cannot combine with `stat-virt=off` or disk mounts.
 
