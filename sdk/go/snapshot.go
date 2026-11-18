@@ -117,10 +117,19 @@ type SnapshotUpperVerifyStatus struct {
 	Digest    string
 }
 
-// SnapshotState is the closed schema-1 state family. Exactly one of File or
-// Checkpoint is populated according to Kind.
+// SnapshotStateKind identifies the payload family. Indexed observations may
+// contain an unfamiliar tag written by another version.
+type SnapshotStateKind string
+
+const (
+	SnapshotStateFile       SnapshotStateKind = "file"
+	SnapshotStateCheckpoint SnapshotStateKind = "checkpoint"
+)
+
+// SnapshotState contains the matching payload for known schema-1 kinds.
+// An unrecognized kind retains its tag with neither payload populated.
 type SnapshotState struct {
-	Kind       string
+	Kind       SnapshotStateKind
 	File       *SnapshotFileState
 	Checkpoint *SnapshotCheckpointState
 }
@@ -502,7 +511,8 @@ func snapshotVerifyReportFromInfo(info *ffi.SnapshotVerifyReport) *SnapshotVerif
 }
 
 func snapshotStateFromInfo(info *ffi.SnapshotInfo) SnapshotState {
-	if info.StateKind == "checkpoint" {
+	kind := SnapshotStateKind(info.StateKind)
+	if kind == SnapshotStateCheckpoint {
 		state := &SnapshotCheckpointState{}
 		if info.CheckpointID != nil {
 			state.CheckpointID = *info.CheckpointID
@@ -510,7 +520,10 @@ func snapshotStateFromInfo(info *ffi.SnapshotInfo) SnapshotState {
 		if info.CheckpointManifestDigest != nil {
 			state.ManifestDigest = *info.CheckpointManifestDigest
 		}
-		return SnapshotState{Kind: "checkpoint", Checkpoint: state}
+		return SnapshotState{Kind: kind, Checkpoint: state}
+	}
+	if kind != SnapshotStateFile {
+		return SnapshotState{Kind: kind}
 	}
 	state := &SnapshotFileState{}
 	if info.Format != nil {
@@ -547,7 +560,7 @@ func snapshotStateFromInfo(info *ffi.SnapshotInfo) SnapshotState {
 	} else if info.UpperIntegrityDigest != nil {
 		state.Integrity.Digest = *info.UpperIntegrityDigest
 	}
-	return SnapshotState{Kind: "file", File: state}
+	return SnapshotState{Kind: kind, File: state}
 }
 
 func cloneSnapshotState(in SnapshotState) SnapshotState {
@@ -592,23 +605,23 @@ func cloneMap(in map[string]string) map[string]string {
 
 // SnapshotInfo is a fresh artifact observation, distinct from the resource itself.
 type SnapshotInfo struct {
-	ID                       string     `json:"id"`
-	Name                     *string    `json:"name"`
-	Group                    *string    `json:"group"`
-	Digest                   string     `json:"digest"`
-	ParentDigest             *string    `json:"parent_digest"`
-	Scope                    string     `json:"scope"`
-	ImageRef                 string     `json:"image_ref"`
-	StateKind                string     `json:"state_kind"`
-	Format                   *string    `json:"format"`
-	Fstype                   *string    `json:"fstype"`
-	CheckpointManifestDigest *string    `json:"checkpoint_manifest_digest"`
-	SizeBytes                *uint64    `json:"size_bytes"`
-	Locality                 string     `json:"locality"`
-	Availability             string     `json:"availability"`
-	MigrationState           string     `json:"migration_state"`
-	MigrationErrorCode       *string    `json:"migration_error_code"`
-	CreatedAt                *time.Time `json:"created_at"`
+	ID                       string            `json:"id"`
+	Name                     *string           `json:"name"`
+	Group                    *string           `json:"group"`
+	Digest                   string            `json:"digest"`
+	ParentDigest             *string           `json:"parent_digest"`
+	Scope                    string            `json:"scope"`
+	ImageRef                 string            `json:"image_ref"`
+	StateKind                SnapshotStateKind `json:"state_kind"`
+	Format                   *string           `json:"format"`
+	Fstype                   *string           `json:"fstype"`
+	CheckpointManifestDigest *string           `json:"checkpoint_manifest_digest"`
+	SizeBytes                *uint64           `json:"size_bytes"`
+	Locality                 string            `json:"locality"`
+	Availability             string            `json:"availability"`
+	MigrationState           string            `json:"migration_state"`
+	MigrationErrorCode       *string           `json:"migration_error_code"`
+	CreatedAt                *time.Time        `json:"created_at"`
 }
 
 func (s *Snapshot) Info(ctx context.Context) (*SnapshotInfo, error) {
@@ -639,7 +652,7 @@ func (s *Snapshot) ImageRef(ctx context.Context) (string, error) {
 	}
 	return info.ImageRef, nil
 }
-func (s *Snapshot) StateKind(ctx context.Context) (string, error) {
+func (s *Snapshot) StateKind(ctx context.Context) (SnapshotStateKind, error) {
 	info, err := s.Info(ctx)
 	if err != nil {
 		return "", err

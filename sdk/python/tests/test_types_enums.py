@@ -348,3 +348,25 @@ def test_wrong_enum_classes_do_not_cross_matching_wire_values() -> None:
 
     with pytest.raises(TypeError, match=r"PortBinding\.protocol"):
         PortBinding(8000, 8000, protocol=Protocol.TCP)._to_dict()  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("wire", "member"),
+    [("IfMissing", PullPolicy.IF_MISSING), ("Always", PullPolicy.ALWAYS), ("Never", PullPolicy.NEVER)],
+)
+def test_inspection_decodes_local_policy_and_level(wire, member):
+    from microsandbox.inspection import _decode_config
+
+    view = _decode_config(
+        {"kind": "local", "spec": {"pull_policy": wire, "runtime": {"log_level": "warn"}}}
+    )
+    assert view["spec"]["pull_policy"] is member
+    assert view["spec"]["runtime"]["log_level"] is LogLevel.WARN
+
+
+def test_remote_inspection_preserves_unavailable_policy_and_unset_level():
+    from microsandbox.inspection import _decode_config
+
+    view = _decode_config({"kind": "remote", "spec": {"runtime": {"log_level": None}}})
+    assert "pull_policy" not in view["spec"]
+    assert view["spec"]["runtime"]["log_level"] is None

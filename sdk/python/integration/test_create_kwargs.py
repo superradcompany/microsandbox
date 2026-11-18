@@ -54,7 +54,7 @@ async def test_create_kwargs_affect_guest_defaults(sandbox_name):
 
 
 @pytest.mark.asyncio
-async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
+async def test_create_kwargs_round_trip_through_config(sandbox_name):
     name = sandbox_name("py-sdk-create-config")
     await remove_sandbox(name)
 
@@ -90,7 +90,9 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         assert await sandbox.owns_lifecycle is False
 
         handle = await Sandbox.get(name)
-        config = await handle.config()
+        inspection = await handle.config()
+        assert inspection["kind"] == "local"
+        config = inspection["spec"]
 
         assert config["name"] == name
         assert config["resources"]["cpus"] == 1
@@ -111,8 +113,8 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
             "echo entrypoint-from-python",
         ]
         assert config["init"]["cmd"] == "auto"
-        assert config["pull_policy"] == "IfMissing"
-        assert config["runtime"]["log_level"] == "info"
+        assert config["pull_policy"] is PullPolicy.IF_MISSING
+        assert config["runtime"]["log_level"] is LogLevel.INFO
         assert config["lifecycle"]["max_duration_secs"] == 7200
         assert config["lifecycle"]["idle_timeout_secs"] == 1800
         assert config["lifecycle"]["ephemeral"] is True

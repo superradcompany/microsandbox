@@ -588,7 +588,13 @@ export class Sandbox implements AsyncDisposable {
   /** Fetch the latest persisted settings; these may still require a restart to apply. */
   async config(): Promise<SandboxConfigInspection> {
     const json = await withMappedErrors(() => this.inner.configJson());
-    return remapKeysToCamel(JSON.parse(json)) as SandboxConfigInspection;
+    const view = remapKeysToCamel(JSON.parse(json));
+    if (view.kind === "local") {
+      // Local specs persist Rust variant names. Builders accept kebab-case values.
+      const policy: string = view.spec.pullPolicy;
+      view.spec.pullPolicy = policy === "IfMissing" ? "if-missing" : policy.toLowerCase();
+    }
+    return view as SandboxConfigInspection;
   }
 
   // -- logs ---------------------------------------------------------------

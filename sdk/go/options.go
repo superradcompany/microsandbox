@@ -1795,8 +1795,8 @@ type MountConfig struct {
 
 	Bind      string
 	Named     string
-	NamedMode string
-	NamedKind string
+	NamedMode NamedVolumeMode
+	NamedKind VolumeKind
 	Owned     string
 	QuotaMiB  uint32
 	Tmpfs     bool
@@ -1876,10 +1876,19 @@ type MountOptions struct {
 	QuotaMiB uint32
 }
 
+// NamedVolumeMode selects how a sandbox acquires a named volume.
+type NamedVolumeMode string
+
+const (
+	NamedVolumeExisting     NamedVolumeMode = "existing"
+	NamedVolumeCreate       NamedVolumeMode = "create"
+	NamedVolumeEnsureExists NamedVolumeMode = "ensure-exists"
+)
+
 // NamedVolumeOptions tunes sandbox-time named volume provisioning.
 type NamedVolumeOptions struct {
-	Mode     string // "existing", "create", or "ensure-exists"; empty means existing.
-	Kind     string // "dir" or "disk"; empty means dir.
+	Mode     NamedVolumeMode // The zero value uses an existing volume.
+	Kind     VolumeKind      // The zero value selects directory storage.
 	SizeMiB  uint32
 	QuotaMiB uint32
 }

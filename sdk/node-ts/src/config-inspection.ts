@@ -1,3 +1,6 @@
+import type { LogLevel } from "./log-level.js";
+import type { PullPolicy } from "./pull-policy.js";
+
 /** A fresh persisted observation. It is not a creation request or applied VM state. */
 export interface SandboxRuntimeInspection {
   workdir: string | null;
@@ -7,7 +10,7 @@ export interface SandboxRuntimeInspection {
   cmd: string[] | null;
   hostname: string | null;
   user: string | null;
-  logLevel: string | null;
+  logLevel: LogLevel | null;
   metricsSampleIntervalMs: number | null;
   disableMetricsSample: boolean;
   guestClock?: "sync" | "off" | null;
@@ -60,6 +63,7 @@ export interface RemoteSandboxInspection {
 export interface LocalSandboxInspection extends Record<string, unknown> {
   name: string;
   image: Record<string, unknown>;
+  pullPolicy: PullPolicy;
   resources: { cpus: number; memoryMib: number; [key: string]: unknown };
   runtime: SandboxRuntimeInspection;
   env: Array<{ key: string; value: string }>;

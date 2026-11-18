@@ -55,6 +55,8 @@ import (
 )
 func TestSharedTypesAndMissingProvider(t *testing.T) {{
  var _ core.JobState = core.JobStateRunning
+ var _ core.SnapshotStateKind = core.SnapshotStateFile
+ _ = core.NamedVolumeOptions{{Mode: core.NamedVolumeEnsureExists, Kind: core.VolumeKindDir}}
  _ = core.JobLogOptions{{Sources: []core.JobOutputSource{{core.JobOutputStdout, core.JobOutputPTY}}}}
  var resource *core.Sandbox
  {full_identity}

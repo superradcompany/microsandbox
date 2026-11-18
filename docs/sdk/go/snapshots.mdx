@@ -527,7 +527,7 @@ Load artifact metadata lazily. `GetSnapshot` and `ListSnapshots` do not eagerly 
 func (s *Snapshot) State(ctx context.Context) (SnapshotState, error)
 ```
 
-Load the file or checkpoint state from the selected artifact.
+Load the file or checkpoint state from the selected artifact. To read only the indexed kind, use `kind, err := s.StateKind(ctx)`. Compare it with `SnapshotStateFile` or `SnapshotStateCheckpoint`. An unfamiliar indexed tag is preserved as a `SnapshotStateKind`.
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">Path()</span>
 

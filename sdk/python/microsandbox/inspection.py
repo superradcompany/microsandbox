@@ -1,6 +1,8 @@
 """Typed dictionaries for fresh configuration observations, not creation input."""
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
+
+from .types import LogLevel, PullPolicy
 
 
 class _RuntimeOptional(TypedDict, total=False):
@@ -15,7 +17,7 @@ class SandboxRuntimeInspection(_RuntimeOptional):
     cmd: list[str] | None
     hostname: str | None
     user: str | None
-    log_level: str | None
+    log_level: LogLevel | None
     metrics_sample_interval_ms: int | None
     disable_metrics_sample: bool
 
@@ -27,7 +29,7 @@ class _SpecOptional(TypedDict, total=False):
     vsock: dict[str, Any]
     security_profile: str
     deployment_profile: str
-    pull_policy: str
+    pull_policy: PullPolicy
 
 
 class SandboxInspectionSpec(_SpecOptional):
@@ -61,3 +63,15 @@ class SandboxConfigInspection(TypedDict):
     spec: SandboxInspectionSpec
     unavailable: list[str]
     redacted: list[str]
+
+
+def _decode_config(value: dict[str, Any]) -> SandboxConfigInspection:
+    spec = value["spec"]
+    runtime = spec["runtime"]
+    if runtime.get("log_level") is not None:
+        runtime["log_level"] = LogLevel(runtime["log_level"])
+    if "pull_policy" in spec:
+        # Local persisted specs use Rust variant names. Remote views omit the policy.
+        policy = spec["pull_policy"]
+        spec["pull_policy"] = PullPolicy("if-missing" if policy == "IfMissing" else policy.lower())
+    return cast(SandboxConfigInspection, value)

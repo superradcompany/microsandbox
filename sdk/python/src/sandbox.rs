@@ -1522,7 +1522,16 @@ impl PySandbox {
                 .await
                 .map_err(to_py_err)?;
             let value = serde_json::to_value(config).map_err(|error| to_py_err(error.into()))?;
-            Python::attach(|py| crate::conversion::json_value_to_py(py, value))
+            Python::attach(|py| {
+                let inspection =
+                    py.import(crate::provider::public_module("inspection").as_str())?;
+                let value = crate::conversion::json_value_to_py(py, value)?;
+                Ok::<_, PyErr>(
+                    inspection
+                        .call_method1("_decode_config", (value,))?
+                        .unbind(),
+                )
+            })
         })
     }
 

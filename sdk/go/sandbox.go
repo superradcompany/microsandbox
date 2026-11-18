@@ -259,8 +259,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 			spec := ffi.MountSpec{
 				Bind:               m.Bind,
 				Named:              m.Named,
-				NamedMode:          m.NamedMode,
-				NamedKind:          m.NamedKind,
+				NamedMode:          string(m.NamedMode),
+				NamedKind:          string(m.NamedKind),
 				Owned:              m.Owned,
 				Tmpfs:              m.Tmpfs,
 				Disk:               m.Disk,

@@ -46,3 +46,24 @@ func TestLocalInspectionPreservesPersistedFields(t *testing.T) {
 		t.Fatal("guest clock lost")
 	}
 }
+
+func TestInspectedPoliciesUsePublicTypes(t *testing.T) {
+	for persisted, expected := range map[string]PullPolicy{
+		"Always": PullPolicyAlways, "IfMissing": PullPolicyIfMissing, "Never": PullPolicyNever,
+	} {
+		var spec SandboxInspectionSpec
+		if err := json.Unmarshal([]byte(`{"pull_policy":"`+persisted+`","runtime":{"log_level":"warn"}}`), &spec); err != nil {
+			t.Fatal(err)
+		}
+		if spec.PullPolicy == nil || *spec.PullPolicy != expected || spec.Runtime.LogLevel == nil || *spec.Runtime.LogLevel != LogLevelWarn {
+			t.Fatalf("invalid typed inspection for %q: %+v", persisted, spec)
+		}
+	}
+	var view SandboxConfigInspection
+	if err := json.Unmarshal([]byte(`{"kind":"remote","spec":{"runtime":{"log_level":null}}}`), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Spec.PullPolicy != nil || view.Spec.Runtime.LogLevel != nil {
+		t.Fatal("unset inspection settings acquired defaults")
+	}
+}

@@ -181,3 +181,20 @@ func TestSnapshotPathIsFallibleForRemoteResources(t *testing.T) {
 		t.Fatalf("remote Path() = %v", err)
 	}
 }
+
+func TestSnapshotStateKindPreservesUnknownTags(t *testing.T) {
+	for _, kind := range []SnapshotStateKind{SnapshotStateFile, SnapshotStateCheckpoint, "future"} {
+		wire, err := json.Marshal(map[string]string{"state_kind": string(kind)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var info SnapshotInfo
+		if err := json.Unmarshal(wire, &info); err != nil {
+			t.Fatal(err)
+		}
+		state := snapshotStateFromInfo(&ffi.SnapshotInfo{StateKind: string(kind)})
+		if info.StateKind != kind || state.Kind != kind || (state.File != nil) != (kind == SnapshotStateFile) || (state.Checkpoint != nil) != (kind == SnapshotStateCheckpoint) {
+			t.Fatalf("incorrect indexed or artifact state for %q: %q, %+v", kind, info.StateKind, state)
+		}
+	}
+}

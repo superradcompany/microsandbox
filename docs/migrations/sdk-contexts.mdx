@@ -128,6 +128,8 @@ The serialized envelope has `kind` (`local` or `remote`), `name`, `spec`, `unava
 
 Rust uses `inspection.runtime()` and pattern matching on `inspection.settings`, or `local_spec()`/`remote_spec()`. TypeScript reads `inspection.spec.runtime.shell`; Python and Ruby read `inspection["spec"]["runtime"]["shell"]`. Go reads `inspection.Spec.Runtime.Shell` (a pointer, nil when unset). TypeScript camel-cases object keys; the strings in `unavailable` and `redacted` remain snake_case wire paths in every SDK. Use `Kind`/`kind` before interpreting backend-specific source and resource fields.
 
+In TypeScript, Python and Go, inspected log levels and local pull policies use the same choices as creation. Replace comparisons against the persisted spelling `IfMissing` with `"if-missing"`, `PullPolicy.IF_MISSING`, or `PullPolicyIfMissing`, respectively. Go named-volume options and snapshot state kinds also use named string types.
+
 Do not feed the result back into a creation builder. Keep creation input separately if your application needs to reproduce a task; a redacted inspection response cannot supply withheld source references or credentials. Fetching an existing resource preserves its returned runtime settings for shell and default-command execution without an explicit `ensure_running` call.
 
 

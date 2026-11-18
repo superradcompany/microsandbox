@@ -32,7 +32,7 @@ type SandboxInspectionSpec struct {
 	SecurityProfile   *string                   `json:"security_profile,omitempty"`
 	Vsock             map[string]any            `json:"vsock,omitempty"`
 	DeploymentProfile *string                   `json:"deployment_profile,omitempty"`
-	PullPolicy        *string                   `json:"pull_policy,omitempty"`
+	PullPolicy        *PullPolicy               `json:"pull_policy,omitempty"`
 }
 
 // SandboxResourceInspection distinguishes local cpus from remote vcpus and
@@ -60,7 +60,7 @@ type SandboxRuntimeInspection struct {
 	Cmd                     []string          `json:"cmd"`
 	Hostname                *string           `json:"hostname"`
 	User                    *string           `json:"user"`
-	LogLevel                *string           `json:"log_level"`
+	LogLevel                *LogLevel         `json:"log_level"`
 	MetricsSampleIntervalMs *uint64           `json:"metrics_sample_interval_ms"`
 	DisableMetricsSample    bool              `json:"disable_metrics_sample"`
 	GuestClock              *string           `json:"guest_clock,omitempty"`

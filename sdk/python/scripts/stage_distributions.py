@@ -130,6 +130,9 @@ def full_wrapper_files():
             if source.name in ("_runtime.py", "_cli.py")
             else f"from microsandbox_core.{source.stem} import *\n"
         )
+        if source.stem == "inspection":
+            # The full native extension resolves the decoder through this wrapper.
+            text += "from microsandbox_core.inspection import _decode_config\n"
         if source.stem == "jobs":
             # Native full bindings use these private decoders too. A wildcard
             # import alone omits them, breaking successful job responses.
