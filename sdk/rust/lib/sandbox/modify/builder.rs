@@ -544,9 +544,27 @@ mod tests {
         assert_eq!(plan.sandbox, "agent-1");
         assert_eq!(
             *lines.lock().unwrap(),
-            [format!(
-                "POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1"
-            )]
+            [format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1")]
+        );
+
+        // Secret material must never become part of the request URL, including
+        // through the public fluent builder that carries both transport and patch.
+        cloud_sandbox(&url)
+            .modify()
+            .secret(|secret| {
+                secret
+                    .env("API_KEY")
+                    .value("synthetic-url-canary/?token=value")
+            })
+            .apply()
+            .await
+            .unwrap();
+        assert_eq!(
+            *lines.lock().unwrap(),
+            [
+                format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1"),
+                format!("PATCH /v1/sandboxes/{SANDBOX_ID} HTTP/1.1"),
+            ]
         );
 
         let unbound = SandboxModificationBuilder::new(
@@ -557,6 +575,6 @@ mod tests {
             unbound.dry_run().await,
             Err(MicrosandboxError::Runtime(_))
         ));
-        assert_eq!(lines.lock().unwrap().len(), 1);
+        assert_eq!(lines.lock().unwrap().len(), 2);
     }
 }

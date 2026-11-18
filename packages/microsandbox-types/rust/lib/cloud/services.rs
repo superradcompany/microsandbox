@@ -41,7 +41,7 @@ pub enum CloudServiceStatus {
     Disabled,
     /// The Service has no target.
     Detached,
-    /// The backend returned a status this SDK does not recognize.
+    /// The cloud API returned a status this SDK does not recognize.
     #[serde(other)]
     Unknown,
 }

@@ -810,7 +810,7 @@ impl Sandbox {
     /// Stream log entries for this sandbox.
     ///
     /// Local streams the on-disk JSON Lines files produced by the relay tap;
-    /// cloud streams the msb-cloud SSE logs endpoint and maps each event into
+    /// cloud streams the API SSE logs endpoint and maps each event into
     /// a typed [`LogEntry`].
     pub async fn log_stream(
         &self,

@@ -1,4 +1,4 @@
-//! Cloud backend implementation — talks to an msb-cloud control plane over HTTP.
+//! Cloud backend implementation — talks to the cloud API over HTTP.
 //!
 //! Holds the (url, api_key) tuple and a `reqwest::Client`. Lifecycle ops are
 //! plain HTTP; logs stream over SSE; exec, attach, and guest-fs ride the agent
@@ -7,8 +7,8 @@
 //! Construction requires an API key. Hosted-cloud callers use the default
 //! endpoint; `new`, environment configuration, and profiles can override it
 //! for development, self-hosted, and on-prem deployments.
-//! Auth is API-key-only — the same `msb_live_*` / `msb_test_*` tokens msb-cloud
-//! issues today. No OAuth or session credentials are honored here.
+//! Auth is API-key-only, using `msb_live_*` / `msb_test_*` tokens.
+//! No OAuth or session credentials are honored here.
 
 mod agent;
 mod http;
@@ -58,11 +58,11 @@ fn default_user_agent() -> String {
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Cloud-runtime backend: talks to an msb-cloud control plane over HTTP.
+/// Cloud-runtime backend: talks to the cloud API over HTTP.
 ///
 /// Holds the deployment URL, API key, and captured user and managed settings.
 /// The `(url, api_key)` pair determines
-/// which org's view the backend sees: msb-cloud derives the org from the API
+/// which org's view the backend sees: the cloud API derives the org from the API
 /// key, so there is no per-call org argument.
 ///
 /// Constructors:
@@ -110,7 +110,7 @@ pub struct CloudBackendBuilder {
 impl CloudBackend {
     /// Construct a `CloudBackend` with an explicit URL and API key.
     ///
-    /// Primary constructor. Works identically for hosted msb-cloud, self-hosted
+    /// Primary constructor. Works identically for the hosted cloud API, self-hosted
     /// deployments, and on-prem installs — no constructor implies a specific
     /// deployment shape.
     pub fn new(url: impl Into<String>, api_key: impl Into<String>) -> MicrosandboxResult<Self> {
@@ -135,7 +135,7 @@ impl CloudBackend {
     /// Construct from a named SDK profile in `~/.microsandbox/config.json`.
     ///
     /// Profiles are local SDK sugar over the primary `(url, api_key)` constructor;
-    /// msb-cloud does not receive or interpret profile names.
+    /// the cloud API does not receive or interpret profile names.
     pub fn from_profile(name: &str) -> MicrosandboxResult<Self> {
         super::profile::cloud_backend_from_profile(name)
     }
@@ -145,7 +145,7 @@ impl CloudBackend {
         CloudBackendBuilder::default()
     }
 
-    /// Configured msb-cloud endpoint URL (no trailing slash).
+    /// Configured cloud API endpoint URL (no trailing slash).
     pub fn url(&self) -> &str {
         &self.url
     }
@@ -255,7 +255,7 @@ impl CloudBackendBuilder {
         self
     }
 
-    /// Set the msb-cloud endpoint URL.
+    /// Set the cloud API endpoint URL.
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
