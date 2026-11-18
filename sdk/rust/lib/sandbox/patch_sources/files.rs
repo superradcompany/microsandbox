@@ -3,6 +3,10 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
 pub(crate) fn open_regular(path: &Path, writable: bool) -> io::Result<File> {
     let file = open_path(path, writable, false)?;
     if !file.metadata()?.is_file() {
