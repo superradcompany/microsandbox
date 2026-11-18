@@ -444,3 +444,66 @@ async fn volume_read_error_body_is_bounded() {
     .await
     .expect("volume read error-body test timed out");
 }
+
+#[tokio::test]
+async fn volume_upload_fails_when_server_stops_reading() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = backend(format!("http://{}", listener.local_addr().unwrap()));
+        let fs = VolumeFs::with_backend(Arc::new(backend), "stream-test");
+        let server = tokio::spawn(async move {
+            serve_volume_lookup(&listener).await;
+            let (_, _reader) = accept_request(&listener).await;
+            std::future::pending::<()>().await;
+        });
+
+        let mut sink = fs.write_stream("/file").await.unwrap();
+        let chunk = vec![7u8; 1 << 20];
+        let mut write_failed = false;
+        for _ in 0..256 {
+            if sink.write(chunk.clone()).await.is_err() {
+                write_failed = true;
+                break;
+            }
+        }
+        let error = sink.close().await.unwrap_err().to_string();
+
+        assert!(
+            write_failed,
+            "writes kept succeeding after the upload stalled"
+        );
+        assert!(error.contains("volume write stalled"), "{error}");
+        server.abort();
+    })
+    .await
+    .expect("stalled volume upload test timed out");
+}
+
+#[tokio::test]
+async fn volume_upload_sends_a_large_chunk_intact() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = backend(format!("http://{}", listener.local_addr().unwrap()));
+        let fs = VolumeFs::with_backend(Arc::new(backend), "stream-test");
+        let server = tokio::spawn(async move {
+            serve_volume_lookup(&listener).await;
+            let (_, mut reader) = accept_request(&listener).await;
+            let received = read_chunked_body(&mut reader).await;
+            reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            received
+        });
+
+        let data: Vec<u8> = (0..(1 << 20) + 3).map(|index| index as u8).collect();
+        let mut sink = fs.write_stream("/file").await.unwrap();
+        sink.write(data.clone()).await.unwrap();
+        sink.close().await.unwrap();
+
+        assert_eq!(server.await.unwrap(), data);
+    })
+    .await
+    .expect("large volume upload test timed out");
+}

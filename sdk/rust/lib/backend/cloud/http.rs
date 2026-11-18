@@ -38,6 +38,9 @@ const CLOUD_READY_WAIT_TIMEOUT_SECS: u64 = 90;
 /// before reqwest's ordinary 30-second client timeout applies.
 const CLOUD_READY_HTTP_TIMEOUT: Duration = Duration::from_secs(95);
 
+/// Largest piece of a volume upload handed to the HTTP client at once.
+const UPLOAD_PIECE_BYTES: usize = 256 * 1024;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -536,13 +539,43 @@ impl CloudBackend {
                 .send()
                 .await
                 .map_err(|e| cloud_io_error("volume filesystem request", e))?,
-            FileTransfer::Upload(body_stream) => {
+            FileTransfer::Upload(mut body_stream) => {
+                // The caller's stream is read by a task this request owns, so it
+                // is released, and further writes fail, once the request ends
+                // even if the HTTP client still holds the body. Pieces keep the
+                // stall limit about network progress when a caller hands over
+                // one large buffer.
+                let (piece_tx, piece_rx) = tokio::sync::mpsc::channel(1);
+                let _pump = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                    while let Some(item) = body_stream.next().await {
+                        let mut chunk = match item {
+                            Ok(chunk) => chunk,
+                            Err(error) => {
+                                let _ = piece_tx.send(Err(error)).await;
+                                return;
+                            }
+                        };
+                        while !chunk.is_empty() {
+                            let piece = chunk.split_to(chunk.len().min(UPLOAD_PIECE_BYTES));
+                            if piece_tx.send(Ok(piece)).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }));
                 let (body_done_tx, body_done_rx) = tokio::sync::oneshot::channel();
+                // Set while the client holds a piece it has not finished sending,
+                // so time spent waiting for the caller's next chunk is not counted.
+                let (sending_tx, sending_rx) = tokio::sync::watch::channel(None);
                 let wrapped = stream::unfold(
-                    (body_stream, Some(body_done_tx)),
-                    |(mut body_stream, mut body_done_tx)| async move {
-                        match body_stream.next().await {
-                            Some(chunk) => Some((chunk, (body_stream, body_done_tx))),
+                    (piece_rx, Some(body_done_tx), sending_tx),
+                    |(mut piece_rx, mut body_done_tx, sending_tx)| async move {
+                        sending_tx.send_replace(None);
+                        match piece_rx.recv().await {
+                            Some(piece) => {
+                                sending_tx.send_replace(Some(tokio::time::Instant::now()));
+                                Some((piece, (piece_rx, body_done_tx, sending_tx)))
+                            }
                             None => {
                                 if let Some(body_done_tx) = body_done_tx.take() {
                                     let _ = body_done_tx.send(());
@@ -568,6 +601,12 @@ impl CloudBackend {
                             self.request_timeout
                         )));
                     }
+                    _ = upload_stall(sending_rx, self.request_timeout) => {
+                        return Err(MicrosandboxError::Custom(format!(
+                            "volume write stalled: no progress for {:?}",
+                            self.request_timeout
+                        )));
+                    }
                 }
             }
         };
@@ -583,6 +622,27 @@ impl CloudBackend {
 //--------------------------------------------------------------------------------------------------
 // Functions: HTTP helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Resolve once a piece has been held unsent for `timeout`. Never resolves after
+/// the body is gone; the reply timeout covers that part.
+async fn upload_stall(
+    mut sending: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+    timeout: Duration,
+) {
+    loop {
+        let since = *sending.borrow_and_update();
+        let changed = match since {
+            Some(since) => tokio::select! {
+                _ = tokio::time::sleep_until(since + timeout) => return,
+                changed = sending.changed() => changed,
+            },
+            None => sending.changed().await,
+        };
+        if changed.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
 
 /// Stream a volume file read, failing when no data arrives within `timeout`.
 pub(super) fn volume_download_stream(

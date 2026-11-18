@@ -276,8 +276,9 @@ impl CloudBackendBuilder {
     ///
     /// Log follows and volume file transfers are not bounded by this duration
     /// as a total. It bounds connecting, the wait for a log follow or file read
-    /// to start, each wait for more file read data, the wait for a file write's
-    /// reply after all data is sent, and reading an error reply.
+    /// to start, each wait for more file read data, each wait for a file write
+    /// to send data it already has, the wait for a file write's reply after all
+    /// data is sent, and reading an error reply.
     pub fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
         self
