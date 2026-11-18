@@ -12,4 +12,4 @@ pub use session::{
     ExecControl, ExecEvent, ExecHandle, ExecOptions, ExecOptionsBuilder, ExecOutput, ExecSink,
     ExitStatus, Rlimit, RlimitResource, StdinMode,
 };
-pub(crate) use session::{agent, validate_rlimits};
+pub(crate) use session::{agent, require_capture_honoured, validate_rlimits};

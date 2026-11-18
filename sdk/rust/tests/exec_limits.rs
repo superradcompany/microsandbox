@@ -22,6 +22,7 @@ fn request(command: &str) -> ExecRequest {
         rows: 24,
         cols: 80,
         rlimits: vec![],
+        capture: false,
     }
 }
 

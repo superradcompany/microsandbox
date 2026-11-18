@@ -1,4 +1,4 @@
-//! Host-side capture of the primary exec session's stdout/stderr into
+//! Host-side capture of exec sessions' stdout/stderr into
 //! a JSON Lines file (`exec.log`).
 //!
 //! The relay taps `ExecStdout` / `ExecStderr` frames as they pass
@@ -9,9 +9,10 @@
 //! {"t": "2026-04-30T20:32:59.688Z", "s": "stdout", "d": "..."}
 //! ```
 //!
-//! Only the **primary session** — the first exec session opened
-//! against the sandbox per lifetime — feeds this file. See
-//! `design/runtime/sandbox-logs.md` D3a for the rationale.
+//! Only sessions whose `ExecRequest` set `capture` feed this file: the
+//! runtime sets it for the sandbox's startup command, and SDK callers opt in
+//! per exec. Interactive shells and ad-hoc execs are not recorded unless
+//! asked, and a sandbox created with `disable_exec_log` records nothing.
 //!
 //! The writer is a thin wrapper around [`crate::logging::RotatingLog`]:
 //! disk size is bounded at 10 MiB × 3 rotated files (40 MiB ceiling).
@@ -86,8 +87,9 @@ impl LogWriter {
     /// switch to base64; for now lossy decode keeps the file
     /// grep-friendly.
     ///
-    /// `session_id` is the protocol correlation id for the exec
-    /// session this chunk came from. It's recorded in the log so
+    /// `session_id` is the relay-monotonic id of the exec session this
+    /// chunk came from (not the protocol correlation id, which can be reused
+    /// after slot recycling). It's recorded in the log so
     /// readers can group or filter by session.
     pub fn write_chunk(&self, source: LogSource, session_id: u64, data: &[u8]) {
         let decoded = String::from_utf8_lossy(data);

@@ -225,6 +225,9 @@ func (s *Sandbox) ExecDetached(ctx context.Context, cmd string, args []string, o
 	if cfg.Timeout > 0 {
 		options["timeout_ms"] = uint64((cfg.Timeout-1)/1_000_000 + 1)
 	}
+	if cfg.Capture != nil {
+		options["capture"] = *cfg.Capture
+	}
 	if cfg.input != nil {
 		options["input_base64"] = base64.StdEncoding.EncodeToString(*cfg.input)
 	}

@@ -45,6 +45,13 @@ impl Sandbox {
         configure: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> JobResult<Job> {
         let options = configure(ExecOptionsBuilder::default().stdin_pipe()).build()?;
+        // A detached job is an ad-hoc command like any other exec: its output
+        // stays with the runtime's job store, and reaches `exec.log` only if asked.
+        crate::sandbox::exec::require_capture_honoured(
+            self.client().ready().ok().as_ref(),
+            options.capture,
+        )
+        .map_err(|error| JobError::operation("invalid_options", error.to_string()))?;
         let no_stdin = matches!(options.stdin, StdinMode::Null);
         if options.tty && no_stdin {
             return Err(JobError::operation(
@@ -75,6 +82,7 @@ impl Sandbox {
             options.tty,
             24,
             80,
+            options.capture,
         );
         let target = Target {
             backend: self.backend().clone(),

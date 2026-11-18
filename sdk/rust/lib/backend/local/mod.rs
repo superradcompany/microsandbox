@@ -1908,6 +1908,7 @@ mod tests {
                 outbound_proxy: None,
                 metrics_sample_interval_ms: NonZero::new(750),
                 disable_metrics_sample: true,
+                disable_exec_log: false,
             },
             ..Default::default()
         };

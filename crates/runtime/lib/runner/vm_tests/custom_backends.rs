@@ -187,6 +187,7 @@ fn config(directory: &Path) -> Config {
         sandbox_db_path: directory.join("unused.db"),
         sandbox_db_connect_timeout_secs: 1,
         log_dir: directory.into(),
+        disable_exec_log: false,
         runtime_dir: directory.join("runtime"),
         sandboxes_dir: directory.into(),
         run_dir: directory.into(),
