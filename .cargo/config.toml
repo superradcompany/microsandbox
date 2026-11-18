@@ -4,8 +4,8 @@ rustflags = [
     "link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path,-rpath,@executable_path/../../../build",
 ]
 
-[target.'cfg(not(target_os = "macos"))']
+[target.'cfg(target_os = "linux")']
 rustflags = [
     "-C",
-    "link-args=-Wl,-rpath,$ORIGIN/../lib,-rpath,$ORIGIN,-rpath,$ORIGIN/../../../build",
+    "link-args=-Wl,-rpath,$ORIGIN/../lib,-rpath,$ORIGIN",
 ]
