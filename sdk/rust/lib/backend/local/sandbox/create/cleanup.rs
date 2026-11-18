@@ -269,6 +269,8 @@ mod tests {
                 &self.config,
                 &self.sandbox_dir,
                 &self.backend.config().run_dir(),
+                None,
+                &mut None,
             )
             .await
             .unwrap();
@@ -381,6 +383,8 @@ mod tests {
             &fixture.config,
             &fixture.sandbox_dir,
             &fixture.backend.config().run_dir(),
+            None,
+            &mut None,
         )
         .await
         .unwrap();
@@ -460,6 +464,8 @@ mod tests {
                 &fixture.config,
                 &fixture.sandbox_dir,
                 &fixture.backend.config().run_dir(),
+                None,
+                &mut None,
             )
             .await
             .unwrap();
@@ -680,6 +686,8 @@ mod tests {
                     &config,
                     &replacement_dir,
                     &backend.config().run_dir(),
+                    None,
+                    &mut None,
                 )
                 .await
                 .unwrap();

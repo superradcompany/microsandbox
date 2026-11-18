@@ -31,6 +31,7 @@
 
 mod cleanup;
 mod disk_editor;
+mod replacement;
 mod restore;
 mod root_growth;
 
@@ -128,7 +129,46 @@ impl LocalBackend {
         mode: SpawnMode,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<Sandbox> {
-        let mut builder = input.into();
+        let mut attempt = None;
+        let result = Box::pin(self.create_with_replacement(
+            backend,
+            input.into(),
+            mode,
+            progress,
+            &mut attempt,
+        ))
+        .await;
+        let Some(attempt) = attempt else {
+            return result;
+        };
+        let recovered = Box::pin(self.finish_replacement(&attempt)).await;
+        match (result, recovered) {
+            (Err(error), Ok(true)) => Err(MicrosandboxError::Runtime(format!(
+                "{error}; original sandbox {:?} (ID {}) is stopped. Restart it with: msb start {}",
+                attempt.name, attempt.original, attempt.name
+            ))),
+            (Err(error), Err(recovery)) => Err(MicrosandboxError::Runtime(format!(
+                "{error}; recovery for {:?} is pending: {recovery}. Retry msb start {} after resolving the error",
+                attempt.name, attempt.name
+            ))),
+            (Ok(sandbox), Err(error)) => {
+                // The replacement has published. Reporting a launch failure here
+                // would invite callers to repeat an already successful mutation.
+                tracing::warn!(sandbox = %attempt.name, %error, "replacement published with original cleanup pending");
+                Ok(sandbox)
+            }
+            (result, Ok(_)) => result,
+        }
+    }
+
+    async fn create_with_replacement(
+        &self,
+        backend: Arc<dyn Backend>,
+        mut builder: SandboxBuilder,
+        mode: SpawnMode,
+        progress: Option<PullProgressSender>,
+        attempt: &mut Option<replacement::Attempt>,
+    ) -> MicrosandboxResult<Sandbox> {
         let options = builder.prepare(backend.clone()).await?;
         tracing::Span::current().record(
             "sandbox_name",
@@ -419,13 +459,22 @@ impl LocalBackend {
             Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name),
         )
         .await?;
+        Box::pin(self.recover_replacement(&config.spec.name, None)).await?;
         if config.replace_existing {
             self.remove_interrupted_create_for_replacement(db, &config)
                 .await?;
         }
 
         let preparation = CreationStorage::acquire(self, &config.spec.name)?;
-        Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
+        Self::prepare_create_target(
+            db,
+            &config,
+            &sandbox_dir,
+            &self.config().run_dir(),
+            Some(self),
+            attempt,
+        )
+        .await?;
         // Hold the existing lifecycle lock across reservation, capture and spawn. Recheck
         // under the lock so two creates cannot both own the same child staging directory.
         let lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
@@ -440,11 +489,12 @@ impl LocalBackend {
         // insert can leave a row, but never untracked storage.
         let reserved_config = config.clone_for_persistence();
         let reserved_config_json = serde_json::to_string(&reserved_config)?;
-        let sandbox_id = Self::insert_sandbox_record_impl(
+        let sandbox_id = Self::insert_with_replacement(
             db.write(),
             &reserved_config,
             SandboxStatus::Starting,
             true,
+            attempt.as_ref().and_then(|a| a.token.as_deref()),
         )
         .await?;
 
@@ -1983,6 +2033,8 @@ impl LocalBackend {
         config: &SandboxConfig,
         sandbox_dir: &Path,
         run_dir: &Path,
+        local: Option<&Self>,
+        attempt: &mut Option<replacement::Attempt>,
     ) -> MicrosandboxResult<()> {
         if !config.replace_existing {
             return Self::check_create_target(pools, &config.spec.name, sandbox_dir).await;
@@ -2001,6 +2053,16 @@ impl LocalBackend {
                     sandbox_dir.display()
                 ))
             })?;
+            let _lineage =
+                crate::snapshot::lineage::lock_source(run_dir, &config.spec.name).await?;
+            *attempt = Some(replacement::Attempt {
+                name: config.spec.name.clone(),
+                original: model.id,
+                token: None,
+            });
+            if model.ephemeral {
+                replacement::retain_ephemeral(pools.write(), model.id).await?;
+            }
             let model = Self::reconcile_sandbox_runtime_state_owned(
                 pools,
                 model,
@@ -2013,12 +2075,15 @@ impl LocalBackend {
                 SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
             );
             if active {
-                Self::stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout)
-                    .await?;
+                Self::stop_sandbox_for_replacement(
+                    pools,
+                    &model,
+                    config.replace_with_timeout,
+                    local,
+                )
+                .await?;
             }
 
-            let _lineage =
-                crate::snapshot::lineage::lock_source(run_dir, &config.spec.name).await?;
             let _guard = crate::runtime::acquire_sandbox_lifecycle_guard(
                 run_dir,
                 &config.spec.name,
@@ -2047,11 +2112,14 @@ impl LocalBackend {
             }
 
             socket_paths.runtime.remove_artifacts()?;
-            remove_dir_if_exists(sandbox_dir)?;
-
-            sandbox_entity::Entity::delete_by_id(model.id)
-                .exec(pools.write())
-                .await?;
+            replacement::park(
+                pools.write(),
+                &config.spec.name,
+                model.id,
+                sandbox_dir,
+                attempt,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -2079,15 +2147,7 @@ impl LocalBackend {
         run_dir: &Path,
         name: &str,
     ) -> MicrosandboxResult<SandboxTransitionGuard> {
-        let path = sandbox_transition_lock_path(run_dir, name);
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("transition lock has no parent: {}", path.display()),
-            )
-        })?;
-        tokio::fs::create_dir_all(parent).await?;
-        let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+        let file = open_transition_lock(run_dir, name).await?;
 
         // LockFileEx/flock is process-wide coordination, but the nonblocking form is a short
         // syscall. Polling it asynchronously avoids pinning one blocking-pool thread per waiter
@@ -2115,6 +2175,7 @@ impl LocalBackend {
         pools: &DbPools,
         sandbox: &sandbox_entity::Model,
         grace: std::time::Duration,
+        local: Option<&Self>,
     ) -> MicrosandboxResult<()> {
         let run = Self::load_active_run(pools.read(), sandbox.id).await?;
         let pids: Vec<i32> = run
@@ -2127,10 +2188,33 @@ impl LocalBackend {
         if !pids.is_empty() {
             // Polite phase: SIGTERM and wait up to `grace` for graceful exit.
             if !grace.is_zero() {
-                for pid in &pids {
-                    let _ = Self::terminate_pid_gracefully(*pid);
+                let deadline = tokio::time::Instant::now() + grace;
+                // The guest shutdown handler flushes dirty disks. Sending the host
+                // process SIGTERM first can discard an already returned guest write.
+                let requested = if let Some(local) = local
+                    && sandbox.status == SandboxStatus::Running
+                {
+                    matches!(
+                        tokio::time::timeout_at(
+                            deadline,
+                            local.request_agent_shutdown(&sandbox.name, sandbox.id)
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    )
+                } else {
+                    false
+                };
+                if !requested {
+                    for pid in &pids {
+                        let _ = Self::terminate_pid_gracefully(*pid);
+                    }
                 }
-                Self::wait_for_pids_to_exit(&pids, grace).await;
+                Self::wait_for_pids_to_exit(
+                    &pids,
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                )
+                .await;
             }
 
             // SIGKILL anything still alive, then prove every recorded owner
@@ -2309,7 +2393,8 @@ impl LocalBackend {
         if !creation::pending(pools.write(), model.id).await? {
             return Ok(());
         }
-        Self::stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout).await?;
+        Self::stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout, None)
+            .await?;
         let _lineage =
             crate::snapshot::lineage::lock_source(&self.config().run_dir(), &model.name).await?;
         let _runtime = crate::runtime::acquire_sandbox_lifecycle_guard(
@@ -2354,6 +2439,16 @@ impl LocalBackend {
         status: SandboxStatus,
         reserve: bool,
     ) -> MicrosandboxResult<i32> {
+        Self::insert_with_replacement(db, config, status, reserve, None).await
+    }
+
+    async fn insert_with_replacement(
+        db: &DbWriteConnection,
+        config: &SandboxConfig,
+        status: SandboxStatus,
+        reserve: bool,
+        token: Option<&str>,
+    ) -> MicrosandboxResult<i32> {
         let config_json = serde_json::to_string(config)?;
         let caller_config_overrides_json = config.caller_config_overrides_json(&config_json)?;
         let labels = config.spec.labels.clone();
@@ -2374,6 +2469,16 @@ impl LocalBackend {
                     updated_at: Set(Some(now)),
                     ..Default::default()
                 };
+                if let Some(token) = token {
+                    let admitted = txn.execute_raw(Statement::from_sql_and_values(
+                        DatabaseBackend::Sqlite,
+                        "UPDATE sandbox_replacement SET admitting = 1 WHERE name = ? AND token = ? AND candidate IS NULL",
+                        [config.spec.name.as_str().into(), token.into()],
+                    )).await?;
+                    if admitted.rows_affected() != 1 {
+                        return Err(MicrosandboxError::Runtime("lost replacement admission before reservation".into()));
+                    }
+                }
                 let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
                 let sandbox_id = result.last_insert_id;
                 if reserve {
@@ -2587,6 +2692,18 @@ fn relay_readiness_timeout(
 }
 
 /// Derive a stable, filesystem-safe transition-lock path for one sandbox name.
+async fn open_transition_lock(run_dir: &Path, name: &str) -> MicrosandboxResult<File> {
+    let path = sandbox_transition_lock_path(run_dir, name);
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("transition lock has no parent: {}", path.display()),
+        )
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    Ok(microsandbox_utils::process_lock::open_lock_file(&path)?)
+}
+
 fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
     microsandbox_runtime::ipc::sandbox_transition_lock_path(run_dir, name)
 }
@@ -4128,9 +4245,16 @@ esac
         let config = test_config("existing");
 
         let run_dir = temp.path().join("run");
-        let err = LocalBackend::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
-            .await
-            .unwrap_err();
+        let err = LocalBackend::prepare_create_target(
+            &pools,
+            &config,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("already exists"));
     }
 
@@ -4146,9 +4270,16 @@ esac
         let winner = LocalBackend::acquire_sandbox_transition_guard(&run_dir, "contended")
             .await
             .unwrap();
-        LocalBackend::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
-            .await
-            .unwrap();
+        LocalBackend::prepare_create_target(
+            &pools,
+            &config,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap();
         LocalBackend::insert_sandbox_record(pools.write(), &config)
             .await
             .unwrap();
@@ -4180,6 +4311,8 @@ esac
                 &test_config("contended"),
                 &contender_sandbox_dir,
                 &contender_run_dir,
+                None,
+                &mut None,
             )
             .await
         });
@@ -4232,10 +4365,16 @@ esac
                 .await
                 .unwrap();
 
-            let error =
-                LocalBackend::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
-                    .await
-                    .expect_err("replacement must preserve a live legacy runtime");
+            let error = LocalBackend::prepare_create_target(
+                &pools,
+                &config,
+                &sandbox_dir,
+                &run_dir,
+                None,
+                &mut None,
+            )
+            .await
+            .expect_err("replacement must preserve a live legacy runtime");
             assert!(matches!(
                 error,
                 crate::MicrosandboxError::SandboxStillRunning(_)
@@ -4253,9 +4392,16 @@ esac
 
             drop(listener);
             fs::remove_file(&socket).unwrap();
-            LocalBackend::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
-                .await
-                .unwrap();
+            LocalBackend::prepare_create_target(
+                &pools,
+                &config,
+                &sandbox_dir,
+                &run_dir,
+                None,
+                &mut None,
+            )
+            .await
+            .unwrap();
             assert!(!sandbox_dir.exists());
             if let Some(id) = sandbox_id {
                 assert!(
@@ -4263,7 +4409,7 @@ esac
                         .one(pools.read())
                         .await
                         .unwrap()
-                        .is_none()
+                        .is_some_and(|row| row.name.starts_with(".msb-retained-"))
                 );
             }
         }
@@ -4305,9 +4451,16 @@ esac
             paths.publish_legacy_control_link(&paths.control).unwrap();
             paths
         };
-        LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)
-            .await
-            .unwrap();
+        LocalBackend::prepare_create_target(
+            &pools,
+            &forced,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap();
 
         assert!(!sandbox_dir.exists());
         #[cfg(unix)]
@@ -4325,7 +4478,7 @@ esac
                 .one(pools.write())
                 .await
                 .unwrap()
-                .is_none()
+                .is_some_and(|row| row.name.starts_with(".msb-retained-"))
         );
     }
 
@@ -4357,9 +4510,16 @@ esac
         forced.replace_existing = true;
 
         let run_dir = temp.path().join("run");
-        LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)
-            .await
-            .unwrap();
+        LocalBackend::prepare_create_target(
+            &pools,
+            &forced,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap();
 
         assert!(!sandbox_dir.exists());
         assert!(
@@ -4367,7 +4527,7 @@ esac
                 .one(pools.write())
                 .await
                 .unwrap()
-                .is_none()
+                .is_some_and(|row| row.name.starts_with(".msb-retained-"))
         );
     }
 
@@ -4406,9 +4566,16 @@ esac
         forced.replace_existing = true;
 
         let run_dir = temp.path().join("run");
-        LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)
-            .await
-            .unwrap();
+        LocalBackend::prepare_create_target(
+            &pools,
+            &forced,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap();
 
         waiter.join().unwrap();
 
@@ -4419,7 +4586,7 @@ esac
                 .one(pools.write())
                 .await
                 .unwrap()
-                .is_none()
+                .is_some_and(|row| row.name.starts_with(".msb-retained-"))
         );
     }
 

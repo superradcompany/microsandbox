@@ -1759,6 +1759,9 @@ pub(super) async fn remove_local_persisted_sandbox(
     name: &str,
     expected_id: i32,
 ) -> MicrosandboxResult<()> {
+    // An internal recovery alias may be visible to a mixed-version catalog reader.
+    // It cannot own a user operation, including deletion of TLS keys by numeric ID.
+    validate_sandbox_name(name)?;
     let _transition_guard =
         LocalBackend::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
             .await?;

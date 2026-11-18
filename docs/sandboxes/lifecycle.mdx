@@ -532,6 +532,11 @@ Removing a sandbox does not undo writes made to a named volume, bind mount, or u
 
 If the creating process crashes, an incomplete sandbox stays recorded and cannot be started. Remove it with `msb rm <name>`, or recreate it with `--replace`. An ordinary create retry leaves the incomplete sandbox intact.
 
+When `msb create --replace` or `msb run --replace` targets an existing sandbox, preflight runs while the original is still available. If launch fails after shutdown, the original keeps its ID and on-disk state. Restart it explicitly with `msb start <name>`. A recovered ephemeral sandbox stays available until it is restarted, at which point its usual automatic removal policy resumes. Guest memory, interrupted requests and writes to external mounts are outside this rollback.
+
+If the creator exits mid-replacement, use the updated CLI to inspect or start the sandbox by name. It checks the replacement journal to decide which generation owns the name. Older clients can continue using other sandboxes while that record is protected.
+
+
 Recovery removes partial sandbox files and any named volumes newly created by that attempt. Preexisting named volumes and bind-mounted files are preserved. The database records are deleted together only after file cleanup succeeds; if cleanup fails, fix the reported problem and retry removal.
 
 If preparation is still finishing, retry removal after its filesystem work completes. Background formatters retain a preparation lock even when the creating task is cancelled; the lock is released when their work finishes or the process exits. You do not need to close a long-running application after its workers finish.

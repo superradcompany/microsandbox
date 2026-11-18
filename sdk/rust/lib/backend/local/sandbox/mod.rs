@@ -86,6 +86,7 @@ impl LocalBackend {
         let _transition_guard =
             Self::acquire_sandbox_transition_guard(&self.config().run_dir(), name).await?;
         let pools = self.db().await?;
+        self.recover_replacement(name, None).await?;
         let write_db = pools.write();
         let model = self.load_sandbox_record_reconciled(pools, name).await?;
         ensure_local_identity(name, expected_id, model.id)?;
@@ -559,7 +560,9 @@ impl LocalBackend {
         query: &SandboxListBuilder,
     ) -> MicrosandboxResult<(Vec<(sandbox_entity::Model, Option<i32>)>, Option<String>)> {
         let pools = self.db().await?;
-        let mut select = microsandbox_db::catalog::sandbox_query(pools.read()).await?;
+        let mut select = microsandbox_db::catalog::sandbox_query(pools.read())
+            .await?
+            .filter(sandbox_entity::Column::Name.not_like(".msb-retained-%"));
 
         if let Some(cursor) = query.cursor.as_deref() {
             select = select.filter(sandbox_entity::Column::Id.lt(decode_list_cursor(cursor)?));
@@ -1340,6 +1343,7 @@ impl SandboxBackend for LocalBackend {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<SandboxHandle>> {
         Box::pin(async move {
+            self.recover_replacement_for_lookup(name).await?;
             let (mut model, pid) = self.sandbox_handle_state(name, None).await?;
             model.status = crate::sandbox::pause::projected_status(self, name, model.status).await;
             Ok(SandboxHandle::from_local_model(backend, model, pid))
