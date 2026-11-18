@@ -25,4 +25,5 @@ def test_batch_load_preserves_single_load_options_and_returns_resources() -> Non
         ast.dump(value) for value in single.args.kw_defaults
     ]
     assert ast.unparse(single.returns) == "Snapshot"
-    assert ast.unparse(batch.returns) == "list[Snapshot]"
+    # Snapshot.list is also an SDK method in this scope.
+    assert ast.unparse(batch.returns) == "builtins.list[Snapshot]"
