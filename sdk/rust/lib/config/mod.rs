@@ -234,8 +234,9 @@ pub struct SshConfig {
 pub struct SnapshotsConfig {
     /// Virtio-fs backend state budget per device, in MiB. Valid values are 1 through 4095.
     pub max_filesystem_state_mib: u32,
-    /// Materialize capture and restore files with independent inodes instead of hard links.
-    /// Defaults to false. Copies may use reflinks or sparse extents, but never share inodes.
+    /// Give files kept by new snapshots, restores, and local branches independent inodes
+    /// instead of hard links. Defaults to false. Copies may use reflinks or sparse extents,
+    /// but never share inodes. Transient branch handoff files stay linked to their source.
     pub copy_files: bool,
 }
 

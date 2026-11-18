@@ -36,7 +36,7 @@ const BATCH_STARTUP_CONCURRENCY: usize = 4;
 #[cfg(feature = "local")]
 #[derive(Debug)]
 pub(crate) struct BatchCapture {
-    pub staging: Arc<tempfile::TempDir>,
+    pub staging: tempfile::TempDir,
     pub pin: Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>,
     pub state: Arc<microsandbox_runtime::checkpoint::LocalBranchState>,
     pub snapshot_parent: Option<String>,
@@ -429,7 +429,7 @@ mod tests {
         std::fs::write(first.join("layers/base.raw"), b"immutable disk").unwrap();
         std::fs::write(first.join("memory.ram"), b"not part of the closure").unwrap();
         let retained = root.path().join("retained");
-        crate::snapshot::stage_local_branch_closure(&first, &retained, false).unwrap();
+        crate::snapshot::stage_local_branch_closure(&first, &retained).unwrap();
         assert!(!retained.join("memory.ram").exists());
         assert_eq!(
             std::fs::read(retained.join("local-disk-admission.json")).unwrap(),
@@ -449,7 +449,7 @@ mod tests {
         }
         std::fs::remove_dir_all(first).unwrap();
         let sibling = root.path().join("sibling");
-        crate::snapshot::stage_local_branch_closure(&retained, &sibling, false).unwrap();
+        crate::snapshot::stage_local_branch_closure(&retained, &sibling).unwrap();
         std::fs::remove_dir_all(retained).unwrap();
         assert_eq!(
             std::fs::read(sibling.join("layers/base.raw")).unwrap(),
@@ -466,7 +466,7 @@ mod tests {
         std::fs::write(first.join("branch.json"), b"capture").unwrap();
         std::os::unix::fs::symlink("/dev/null", first.join("layers/not-a-disk")).unwrap();
         assert!(
-            crate::snapshot::stage_local_branch_closure(&first, &root.path().join("child"), false)
+            crate::snapshot::stage_local_branch_closure(&first, &root.path().join("child"))
                 .is_err()
         );
     }

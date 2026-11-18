@@ -368,18 +368,20 @@ async fn capture_installed(
     }
 
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
-    let disk = capture_disk_source(
-        local,
-        &sandbox_dir,
-        &source_sandbox,
-        current.id,
-        current.status,
-        &root_disk,
-        &sandbox_config.spec.mounts,
-        _lifecycle_guard.clone(),
-        guest_flush,
-    )
-    .await?;
+    let disk = Arc::new(
+        capture_disk_source(
+            local,
+            &sandbox_dir,
+            &source_sandbox,
+            current.id,
+            current.status,
+            &root_disk,
+            &sandbox_config.spec.mounts,
+            _lifecycle_guard.clone(),
+            guest_flush,
+        )
+        .await?,
+    );
 
     // Stage the artifact in a sibling directory, so a failed create never
     // leaves a partial artifact at the destination (which would poison
@@ -1093,7 +1095,7 @@ fn capture_publication_failure(
 /// `dir`. Pure staging: the caller promotes or discards the directory.
 async fn build_artifact(
     dir: &std::path::Path,
-    disk: &SnapshotDiskClosure,
+    disk: &Arc<SnapshotDiskClosure>,
     labels: &BTreeMap<String, String>,
     record_integrity: bool,
     metadata: FileSnapshotMetadata<'_>,
@@ -1131,8 +1133,27 @@ async fn build_artifact(
         captured.push((layer_id, source.format, destination));
     }
     let copy_us = copy_started.elapsed().as_micros();
-    if let Some(source) = &disk.capture_root {
-        copy_owned_payloads(source, dir, &disk.owned_volumes, disk.copy_files)?;
+    if disk.capture_root.is_some() {
+        // The closure removes its capture root on drop. The worker keeps a reference, so a
+        // canceled caller cannot remove the payload source while it is still being copied.
+        let worker_disk = disk.clone();
+        let destination = dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let source = worker_disk
+                .capture_root
+                .as_deref()
+                .expect("capture root checked above");
+            copy_owned_payloads(
+                source,
+                &destination,
+                &worker_disk.owned_volumes,
+                worker_disk.copy_files,
+            )
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Custom(format!("owned payload copy task: {error}"))
+        })??;
     }
 
     let payload_sync_started = Instant::now();
@@ -1905,13 +1926,11 @@ pub(crate) fn stage_checkpoint_closure(
 }
 
 /// Retain immutable local capture files without copying RAM or publishing a snapshot.
-pub(crate) fn stage_local_branch_closure(
-    source: &Path,
-    destination: &Path,
-    copy_files: bool,
-) -> std::io::Result<()> {
-    // Prefer links on the same filesystem unless independent inodes are requested.
-    // RAM is outside this tree and stays pinned in either mode.
+pub(crate) fn stage_local_branch_closure(source: &Path, destination: &Path) -> std::io::Result<()> {
+    // Batch staging and children are on the same sandbox filesystem. Require links rather
+    // than silently copying large disk layers; RAM is outside this tree and stays pinned.
+    // Links are required even when snapshot files are copied: the runtime's disk receipts
+    // bind these exact inodes. Child adoption makes the lasting copies.
     std::fs::create_dir_all(destination)?;
     for member in [
         "objects",
@@ -1924,32 +1943,20 @@ pub(crate) fn stage_local_branch_closure(
         if member != "branch.json" && !path.try_exists()? {
             continue;
         }
-        link_local_branch_member(&path, &destination.join(member), copy_files)?;
+        link_local_branch_member(&path, &destination.join(member))?;
     }
     Ok(())
 }
 
-fn link_local_branch_member(
-    source: &Path,
-    destination: &Path,
-    copy_files: bool,
-) -> std::io::Result<()> {
+fn link_local_branch_member(source: &Path, destination: &Path) -> std::io::Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.is_file() {
-        if copy_files {
-            microsandbox_utils::copy::fast_copy(source, destination).map(|_| ())
-        } else {
-            std::fs::hard_link(source, destination)
-        }
+        std::fs::hard_link(source, destination)
     } else if metadata.is_dir() {
         std::fs::create_dir(destination)?;
         for entry in std::fs::read_dir(source)? {
             let entry = entry?;
-            link_local_branch_member(
-                &entry.path(),
-                &destination.join(entry.file_name()),
-                copy_files,
-            )?;
+            link_local_branch_member(&entry.path(), &destination.join(entry.file_name()))?;
         }
         Ok(())
     } else {
@@ -2059,6 +2066,9 @@ pub(crate) fn copy_checkpoint_file(
         return Ok(());
     }
     microsandbox_utils::copy::fast_copy(source, destination)?;
+    if copy_files {
+        harden_copied_file(destination)?;
+    }
     // FlushFileBuffers on Windows requires write access even though the bytes are now
     // immutable. Open read/write consistently on every platform for the same contract.
     std::fs::OpenOptions::new()
@@ -2066,6 +2076,17 @@ pub(crate) fn copy_checkpoint_file(
         .write(true)
         .open(destination)?
         .sync_all()
+}
+
+/// Give a requested copy the owner-only access its private hard link would have had.
+///
+/// Plain copies take the process umask and reflinks can carry the source's mode and ACL.
+pub(crate) fn harden_copied_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    microsandbox_utils::private_file::harden_existing_file(path)?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 async fn write_descriptor(directory: &Path, canonical: &[u8]) -> MicrosandboxResult<()> {
@@ -2291,9 +2312,9 @@ mod tests {
         std::fs::create_dir_all(source.path().join("owned/mount-test/payloads")).unwrap();
         std::fs::write(source.path().join(payload), b"captured owned data").unwrap();
         std::fs::write(source.path().join("branch.json"), b"{}").unwrap();
-        stage_local_branch_closure(source.path(), batch.path(), false).unwrap();
+        stage_local_branch_closure(source.path(), batch.path()).unwrap();
         source.close().unwrap();
-        stage_local_branch_closure(batch.path(), sibling.path(), false).unwrap();
+        stage_local_branch_closure(batch.path(), sibling.path()).unwrap();
         batch.close().unwrap();
         assert_eq!(
             std::fs::read(sibling.path().join(payload)).unwrap(),
@@ -2909,6 +2930,24 @@ mod tests {
             .unwrap(),
             vec![11; 1024 * 1024]
         );
+
+        let copied = temp.path().join("copied-artifact");
+        copy_owned_payloads(&capture, &copied, &volumes, true).unwrap();
+        let layer = Path::new("layers").join(format!("{}.raw", generation.head));
+        assert_eq!(
+            std::fs::read(copied.join(&layer)).unwrap(),
+            vec![11; 1024 * 1024]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let captured = std::fs::metadata(capture.join(&layer)).unwrap();
+            let linked = std::fs::metadata(artifact.join(&layer)).unwrap();
+            let copied = std::fs::metadata(copied.join(&layer)).unwrap();
+            assert_eq!(linked.ino(), captured.ino());
+            assert_ne!(copied.ino(), captured.ino());
+            assert_eq!(copied.permissions().mode() & 0o777, 0o600);
+        }
         std::fs::remove_file(source_disk).unwrap();
         assert!(
             capture_stopped_owned_volumes(&sandbox, &temp.path().join("missing"), &mounts).is_err()
@@ -3214,7 +3253,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.ext4");
         std::fs::write(&source, b"snapshot payload").unwrap();
-        let disk = SnapshotDiskClosure {
+        let disk = Arc::new(SnapshotDiskClosure {
             copy_files: false,
             capture_root: None,
             owned_volumes: Vec::new(),
@@ -3224,7 +3263,7 @@ mod tests {
                 sealed_layer_id: None,
             }],
             virtual_size: b"snapshot payload".len() as u64,
-        };
+        });
 
         let without_dir = temp.path().join("without");
         std::fs::create_dir(&without_dir).unwrap();
@@ -3295,6 +3334,7 @@ mod tests {
                 let generation = base.disk.clone();
                 let base = validate_live_disk_capture(base, "disk_capture", base_cut, device, &[])
                     .unwrap();
+                let base = Arc::new(base);
 
                 let head_cut = temp.path().join("head-cut");
                 let mut head = disk_capture_fixture(&head_cut);
@@ -3321,6 +3361,7 @@ mod tests {
                 });
                 let head = validate_live_disk_capture(head, "disk_capture", head_cut, device, &[])
                     .unwrap();
+                let head = Arc::new(head);
                 let source_bytes = head
                     .sources
                     .iter()
@@ -3492,7 +3533,7 @@ mod tests {
         microsandbox_image::checkpoint::create_qcow2_overlay(&qcow, 4096, &raw, "raw")
             .await
             .unwrap();
-        let disk = SnapshotDiskClosure {
+        let disk = Arc::new(SnapshotDiskClosure {
             copy_files: false,
             capture_root: None,
             owned_volumes: Vec::new(),
@@ -3509,7 +3550,7 @@ mod tests {
                 },
             ],
             virtual_size: 4096,
-        };
+        });
         let artifact = temp.path().join("artifact");
         std::fs::create_dir(&artifact).unwrap();
 
@@ -3604,15 +3645,14 @@ mod tests {
             let saved = std::fs::read(&original).unwrap();
             #[cfg(unix)]
             {
-                use std::os::unix::fs::MetadataExt;
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
                 assert_eq!(
                     std::fs::metadata(&original).unwrap().ino(),
                     std::fs::metadata(destination.join(member)).unwrap().ino()
                 );
-                assert_ne!(
-                    std::fs::metadata(&original).unwrap().ino(),
-                    std::fs::metadata(copied.join(member)).unwrap().ino()
-                );
+                let copy = std::fs::metadata(copied.join(member)).unwrap();
+                assert_ne!(std::fs::metadata(&original).unwrap().ino(), copy.ino());
+                assert_eq!(copy.permissions().mode() & 0o777, 0o600);
             }
             std::fs::write(&original, b"changed").unwrap();
             assert_eq!(std::fs::read(copied.join(member)).unwrap(), saved);

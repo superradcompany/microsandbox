@@ -89,6 +89,16 @@ impl CreationStorage {
         }
     }
 
+    /// The same storage for sources already private to this child, such as its staged
+    /// closure or extracted archive. Those sources stay linked: copying them again only
+    /// costs I/O and loses the inode identity that restore uses to reuse integrity roots.
+    pub(crate) fn for_child_private_sources(&self) -> Self {
+        Self {
+            copy_snapshot_files: false,
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
