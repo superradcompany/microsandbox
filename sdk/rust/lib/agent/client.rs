@@ -70,10 +70,11 @@ impl AgentClient {
             .map(Self)
     }
 
-    /// Connect to a local relay with all payloads kept on the byte stream.
+    /// Connect to a local relay with bulk payloads kept on the byte stream.
     ///
     /// Shared-memory upgrades are disabled even when the peer advertises them.
-    /// The deadline bounds dialing and the handshake.
+    /// Exec signals retain the advertised control route. The deadline bounds
+    /// the handshake.
     pub async fn connect_in_band_with_deadline(
         sock_path: impl AsRef<Path>,
         deadline: Instant,

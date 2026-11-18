@@ -201,11 +201,13 @@ Connect to an arbitrary agent relay socket by path with an explicit handshake de
 
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect_in_band_with_deadline()</span>
 
+<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 async fn connect_in_band_with_deadline(sock_path: impl AsRef<Path>, deadline: Instant) -> AgentClientResult<AgentClient>
 ```
 
-Connect to a local relay while keeping every frame and bulk payload on the socket or named pipe. Shared-memory upgrades stay disabled even if the peer advertises them. One Tokio deadline bounds dialing and both handshake reads. Execution flow control remains enabled. Existing connection methods keep automatic transport selection.
+Connect to a local relay while keeping bulk payloads on the socket or named pipe. Shared-memory upgrades stay disabled even if the peer advertises them. Exec signals still use the advertised control endpoint, as they do with `connect_with_deadline`. One Tokio deadline bounds the handshake. Existing connection methods keep automatic transport selection.
 
 <Accordion title="Example">
 
