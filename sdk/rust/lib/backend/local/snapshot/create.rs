@@ -53,6 +53,12 @@ struct StagedSnapshot {
     source_recovery: Option<SnapshotSourceRecoveryError>,
 }
 
+/// Retain artifact staging and its enclosing capture group through background work.
+struct SnapshotStaging {
+    directory: tempfile::TempDir,
+    _group: Option<Arc<tempfile::TempDir>>,
+}
+
 /// Non-identity publication options shared by the full-capture entry point.
 #[derive(Clone, Copy)]
 struct SnapshotDestination<'a> {
@@ -93,6 +99,12 @@ struct SnapshotDiskClosure {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl SnapshotStaging {
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
 
 impl SnapshotDiskSource {
     fn artifact_layer_id(&self) -> MicrosandboxResult<DiskLayerId> {
@@ -146,13 +158,15 @@ pub(super) async fn create_snapshot(
         .take()
         .unwrap_or_else(|| config.source_sandbox.clone());
     let group_dir = super::group::ensure(&root, Some(&group_name)).await?;
-    let staging = tempfile::Builder::new()
-        .prefix(".capture-")
-        .tempdir_in(&group_dir)?;
+    let staging = Arc::new(
+        tempfile::Builder::new()
+            .prefix(".capture-")
+            .tempdir_in(&group_dir)?,
+    );
     let name = config.name.clone();
     let source_sandbox = config.source_sandbox.clone();
     config.dest_dir = Some(staging.path().to_path_buf());
-    let captured = capture_installed(local, config, lineage.sandbox_id()).await?;
+    let captured = capture_installed(local, config, lineage.sandbox_id(), &staging).await?;
     publish_snapshot_group(
         local,
         captured,
@@ -170,7 +184,7 @@ pub(super) async fn create_snapshot(
 async fn publish_snapshot_group(
     local: &LocalBackend,
     captured: StagedSnapshot,
-    staging: tempfile::TempDir,
+    staging: Arc<tempfile::TempDir>,
     lineage: super::lineage::CaptureLineage,
     name: String,
     generated_name: bool,
@@ -253,6 +267,7 @@ async fn capture_installed(
     local: &LocalBackend,
     config: SnapshotConfig,
     expected_source_id: i32,
+    group: &Arc<tempfile::TempDir>,
 ) -> MicrosandboxResult<StagedSnapshot> {
     let total_started = Instant::now();
     let SnapshotConfig {
@@ -294,6 +309,7 @@ async fn capture_installed(
     if full {
         return create_full_snapshot(
             local,
+            group,
             SnapshotDestination {
                 name: &name,
                 path: &dest_dir,
@@ -396,15 +412,21 @@ async fn capture_installed(
             ))
         })?
         .to_path_buf();
-    tokio::fs::create_dir_all(&parent_dir).await?;
-    let staging_dir = parent_dir.join(format!(".{name}.{:016x}.staging", rand::random::<u64>()));
-    tokio::fs::create_dir_all(&staging_dir).await?;
+    // The capture group already owns this parent; never queue a mkdir that can outlive it.
+    let staging = Arc::new(SnapshotStaging {
+        directory: tempfile::Builder::new()
+            .prefix(&format!(".{name}."))
+            .suffix(".staging")
+            .tempdir_in(&parent_dir)?,
+        _group: Some(group.clone()),
+    });
+    let staging_dir = staging.path().to_path_buf();
 
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
     let artifact_started = Instant::now();
     let external_mounts = uncaptured_mount_paths(&sandbox_config.spec.mounts)?;
     let built = build_artifact(
-        &staging_dir,
+        &staging,
         &disk,
         &labels,
         record_integrity,
@@ -428,7 +450,7 @@ async fn capture_installed(
     let artifact_build_us = artifact_started.elapsed().as_micros();
 
     let promote_started = Instant::now();
-    promote_snapshot_directory(&staging_dir, &dest_dir, force).await?;
+    promote_snapshot_directory(&staging, &dest_dir, force).await?;
     let promote_us = promote_started.elapsed().as_micros();
 
     tracing::info!(
@@ -448,8 +470,11 @@ async fn capture_installed(
 }
 
 /// Capture one running sandbox into an installed composite-checkpoint snapshot.
+// The capture inputs are kept separate because each has a distinct lifecycle or publication role.
+#[allow(clippy::too_many_arguments)]
 async fn create_full_snapshot(
     local: &LocalBackend,
+    group: &Arc<tempfile::TempDir>,
     destination: SnapshotDestination<'_>,
     source_sandbox: &str,
     labels: Vec<(String, String)>,
@@ -468,7 +493,7 @@ async fn create_full_snapshot(
             ))
         })?
         .to_path_buf();
-    tokio::fs::create_dir_all(&parent_dir).await?;
+    // The capture group already owns this parent; never queue a mkdir that can outlive it.
     let capture_started = Instant::now();
     // The runtime owns capture and recovery even if this client disappears. Do not allocate an
     // artifact staging directory while waiting for it: there is nothing to stage until capture
@@ -485,6 +510,7 @@ async fn create_full_snapshot(
     let capture_us = capture_started.elapsed().as_micros();
     stage_full_snapshot(
         destination,
+        Some(group.clone()),
         source_sandbox,
         captured,
         parent_dir,
@@ -497,6 +523,7 @@ async fn create_full_snapshot(
 /// Materialize a validated capture without exposing its operation-owned path as publication.
 async fn stage_full_snapshot(
     destination: SnapshotDestination<'_>,
+    group: Option<Arc<tempfile::TempDir>>,
     source_sandbox: &str,
     mut captured: CapturedFullSnapshot,
     parent_dir: PathBuf,
@@ -513,12 +540,13 @@ async fn stage_full_snapshot(
     // Recovery belongs to the source, not to the immutable artifact. Carry it through staging
     // until the outer publisher owns the final group member and its ancestry cursor.
     let published = async {
-        let staging = Arc::new(
-            tempfile::Builder::new()
+        let staging = Arc::new(SnapshotStaging {
+            directory: tempfile::Builder::new()
                 .prefix(&format!(".{name}."))
                 .suffix(".staging")
                 .tempdir_in(&parent_dir)?,
-        );
+            _group: group,
+        });
         let staging_dir = staging.path().to_path_buf();
         let checkpoint_source = captured.checkpoint_path.clone();
         let checkpoint_destination = staging_dir.join(CHECKPOINT_DIRECTORY);
@@ -565,7 +593,7 @@ async fn stage_full_snapshot(
         let metadata_descriptor_us = metadata_started.elapsed().as_micros();
 
         let promote_started = Instant::now();
-        promote_snapshot_directory(&staging_dir, dest_dir, force).await?;
+        promote_snapshot_directory(&staging, dest_dir, force).await?;
         let promote_us = promote_started.elapsed().as_micros();
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
@@ -1092,14 +1120,15 @@ fn capture_publication_failure(
 }
 
 /// Build the artifact contents (upper copy, integrity, descriptor) into
-/// `dir`. Pure staging: the caller promotes or discards the directory.
+/// owned staging. The caller promotes or discards the directory.
 async fn build_artifact(
-    dir: &std::path::Path,
+    staging: &Arc<SnapshotStaging>,
     disk: &Arc<SnapshotDiskClosure>,
     labels: &BTreeMap<String, String>,
     record_integrity: bool,
     metadata: FileSnapshotMetadata<'_>,
 ) -> MicrosandboxResult<(String, Manifest)> {
+    let dir = staging.path();
     let FileSnapshotMetadata {
         image_reference,
         manifest_digest: manifest_digest_str,
@@ -1112,7 +1141,8 @@ async fn build_artifact(
     let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
         .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
     let layers_dir = dir.join(microsandbox_image::snapshot::LAYERS_DIRECTORY);
-    tokio::fs::create_dir_all(&layers_dir).await?;
+    // Create this small directory before yielding; a detached mkdir must not outlive its owner.
+    std::fs::create_dir_all(&layers_dir)?;
 
     let copy_started = Instant::now();
     let mut captured: Vec<(DiskLayerId, SnapshotFormat, PathBuf)> =
@@ -1122,7 +1152,10 @@ async fn build_artifact(
         let destination = dir.join(layer_path(&layer_id, source.format));
         let source_path = source.path.clone();
         let destination_for_copy = destination.clone();
+        let worker_staging = staging.clone();
+        let worker_disk = disk.clone();
         tokio::task::spawn_blocking(move || {
+            let (_staging, _disk) = (worker_staging, worker_disk);
             microsandbox_utils::copy::fast_copy(&source_path, &destination_for_copy)
         })
         .await
@@ -1134,26 +1167,7 @@ async fn build_artifact(
     }
     let copy_us = copy_started.elapsed().as_micros();
     if disk.capture_root.is_some() {
-        // The closure removes its capture root on drop. The worker keeps a reference, so a
-        // canceled caller cannot remove the payload source while it is still being copied.
-        let worker_disk = disk.clone();
-        let destination = dir.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            let source = worker_disk
-                .capture_root
-                .as_deref()
-                .expect("capture root checked above");
-            copy_owned_payloads(
-                source,
-                &destination,
-                &worker_disk.owned_volumes,
-                worker_disk.copy_files,
-            )
-        })
-        .await
-        .map_err(|error| {
-            MicrosandboxError::Custom(format!("owned payload copy task: {error}"))
-        })??;
+        copy_owned_artifact_payloads(staging, disk).await?;
     }
 
     let payload_sync_started = Instant::now();
@@ -1241,6 +1255,24 @@ async fn build_artifact(
     );
 
     Ok((digest, manifest))
+}
+
+/// Keep both ends of a queued copy alive until its blocking worker has stopped.
+async fn copy_owned_artifact_payloads(
+    staging: &Arc<SnapshotStaging>,
+    disk: &Arc<SnapshotDiskClosure>,
+) -> MicrosandboxResult<()> {
+    let staging = staging.clone();
+    let disk = disk.clone();
+    tokio::task::spawn_blocking(move || {
+        let source = disk
+            .capture_root
+            .as_deref()
+            .expect("capture root checked by caller");
+        copy_owned_payloads(source, staging.path(), &disk.owned_volumes, disk.copy_files)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("owned payload copy task: {error}")))?
 }
 
 fn new_file_manifest(
@@ -2121,11 +2153,11 @@ async fn write_descriptor(directory: &Path, canonical: &[u8]) -> MicrosandboxRes
 /// Atomically replace an installed snapshot while retaining the previous artifact until the new
 /// staging directory is in place. If promotion fails, the previous destination is restored.
 async fn promote_snapshot_directory(
-    staging: &Path,
+    staging: &Arc<SnapshotStaging>,
     destination: &Path,
     force: bool,
 ) -> MicrosandboxResult<()> {
-    let staging = staging.to_path_buf();
+    let staging = staging.clone();
     let destination = destination.to_path_buf();
     if !force && tokio::fs::symlink_metadata(&destination).await.is_ok() {
         return Err(MicrosandboxError::SnapshotAlreadyExists(
@@ -2137,7 +2169,7 @@ async fn promote_snapshot_directory(
     })?;
     tokio::spawn(async move {
         let _lease = lease;
-        promote_snapshot_directory_inner(&staging, &destination, force).await
+        promote_snapshot_directory_inner(staging.path(), &destination, force).await
     })
     .await
     .map_err(|error| MicrosandboxError::Custom(format!("snapshot promotion task: {error}")))?
@@ -2609,10 +2641,12 @@ mod tests {
             let group = super::super::group::ensure(&local.snapshots_dir(), Some("box"))
                 .await
                 .unwrap();
-            let staging = tempfile::Builder::new()
-                .prefix(".capture-")
-                .tempdir_in(&group)
-                .unwrap();
+            let staging = Arc::new(
+                tempfile::Builder::new()
+                    .prefix(".capture-")
+                    .tempdir_in(&group)
+                    .unwrap(),
+            );
             let staged_path = staging.path().join("snapshot");
             let staged = stage_full_snapshot(
                 SnapshotDestination {
@@ -2620,6 +2654,7 @@ mod tests {
                     path: &staged_path,
                     force: false,
                 },
+                Some(staging.clone()),
                 "box",
                 captured,
                 staging.path().to_path_buf(),
@@ -2785,6 +2820,7 @@ mod tests {
             } else {
                 stage_full_snapshot(
                     target,
+                    None,
                     "box",
                     captured,
                     temp.path().to_path_buf(),
@@ -3248,6 +3284,66 @@ mod tests {
         assert_eq!(config.spec.mounts[0].guest(), "/data//./");
     }
 
+    #[test]
+    fn cancelled_owned_payload_copy_retains_both_staging_owners_until_worker_stops() {
+        use std::future::{Future, poll_fn};
+        use std::sync::mpsc;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        let group = Arc::new(tempfile::tempdir().unwrap());
+        let group_path = group.path().to_path_buf();
+        let staging = Arc::new(SnapshotStaging {
+            directory: tempfile::tempdir_in(group.path()).unwrap(),
+            _group: Some(group.clone()),
+        });
+        let destination = staging.path().to_path_buf();
+        let source = tempfile::tempdir().unwrap().keep();
+        let disk = Arc::new(SnapshotDiskClosure {
+            sources: Vec::new(),
+            virtual_size: 1,
+            capture_root: Some(source.clone()),
+            owned_volumes: Vec::new(),
+            copy_files: true,
+        });
+        let (release, released) = mpsc::channel();
+        let (started, start) = mpsc::channel();
+        let busy = runtime.spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = released.recv();
+        });
+        start.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut copying = Box::pin(copy_owned_artifact_payloads(&staging, &disk));
+        runtime.block_on(poll_fn(|context| {
+            assert!(copying.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        }));
+        // Dropping the future cancels only its wait. The queued blocking worker owns both
+        // roots until copying finishes, so neither root can disappear and be recreated.
+        drop(copying);
+        drop(staging);
+        drop(group);
+        drop(disk);
+        let retained = destination.exists() && source.exists() && group_path.exists();
+        release.send(()).unwrap();
+        runtime.block_on(async {
+            busy.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while destination.exists() || source.exists() || group_path.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("cancelled copy left staging behind");
+        });
+        assert!(retained, "queued copy lost a staging owner on cancellation");
+    }
+
     #[tokio::test]
     async fn artifact_integrity_is_recorded_only_when_requested() {
         let temp = tempfile::tempdir().unwrap();
@@ -3265,8 +3361,10 @@ mod tests {
             virtual_size: b"snapshot payload".len() as u64,
         });
 
-        let without_dir = temp.path().join("without");
-        std::fs::create_dir(&without_dir).unwrap();
+        let without_dir = Arc::new(SnapshotStaging {
+            directory: tempfile::tempdir_in(temp.path()).unwrap(),
+            _group: None,
+        });
         let (_, without) = build_artifact(
             &without_dir,
             &disk,
@@ -3281,8 +3379,10 @@ mod tests {
             None
         );
 
-        let with_dir = temp.path().join("with");
-        std::fs::create_dir(&with_dir).unwrap();
+        let with_dir = Arc::new(SnapshotStaging {
+            directory: tempfile::tempdir_in(temp.path()).unwrap(),
+            _group: None,
+        });
         let (_, with) = build_artifact(
             &with_dir,
             &disk,
@@ -3368,9 +3468,17 @@ mod tests {
                     .map(|source| std::fs::read(&source.path).unwrap())
                     .collect::<Vec<_>>();
                 let mut manifests = Vec::new();
-                let base_dir = temp.path().join("base");
-                let head_dir = temp.path().join("head");
-                for (directory, cut) in [(&base_dir, &base), (&head_dir, &head)] {
+                let base_stage = Arc::new(SnapshotStaging {
+                    directory: tempfile::tempdir_in(temp.path()).unwrap(),
+                    _group: None,
+                });
+                let head_stage = Arc::new(SnapshotStaging {
+                    directory: tempfile::tempdir_in(temp.path()).unwrap(),
+                    _group: None,
+                });
+                let base_dir = base_stage.path().to_path_buf();
+                let head_dir = head_stage.path().to_path_buf();
+                for (directory, cut) in [(&base_stage, &base), (&head_stage, &head)] {
                     let (_, manifest) = build_artifact(
                         directory,
                         cut,
@@ -3551,11 +3659,14 @@ mod tests {
             ],
             virtual_size: 4096,
         });
-        let artifact = temp.path().join("artifact");
-        std::fs::create_dir(&artifact).unwrap();
+        let artifact_stage = Arc::new(SnapshotStaging {
+            directory: tempfile::tempdir_in(temp.path()).unwrap(),
+            _group: None,
+        });
+        let artifact = artifact_stage.path().to_path_buf();
 
         let (_, manifest) = build_artifact(
-            &artifact,
+            &artifact_stage,
             &disk,
             &BTreeMap::new(),
             true,
@@ -3681,18 +3792,21 @@ mod tests {
     async fn snapshot_promotion_replaces_only_after_staging_is_complete() {
         let temp = tempfile::tempdir().unwrap();
         let destination = temp.path().join("snapshot");
-        let staging = temp.path().join(".snapshot.staging");
+        let staging = Arc::new(SnapshotStaging {
+            directory: tempfile::tempdir_in(temp.path()).unwrap(),
+            _group: None,
+        });
+        let staging_path = staging.path().to_path_buf();
         std::fs::create_dir(&destination).unwrap();
         std::fs::write(destination.join("payload"), b"old").unwrap();
-        std::fs::create_dir(&staging).unwrap();
-        std::fs::write(staging.join("payload"), b"new").unwrap();
+        std::fs::write(staging_path.join("payload"), b"new").unwrap();
 
         promote_snapshot_directory(&staging, &destination, true)
             .await
             .unwrap();
 
         assert_eq!(std::fs::read(destination.join("payload")).unwrap(), b"new");
-        assert!(!staging.exists());
+        assert!(!staging_path.exists());
         let hidden_entries = std::fs::read_dir(temp.path())
             .unwrap()
             .filter_map(Result::ok)
@@ -3710,11 +3824,14 @@ mod tests {
     async fn snapshot_promotion_without_force_preserves_both_artifacts() {
         let temp = tempfile::tempdir().unwrap();
         let destination = temp.path().join("snapshot");
-        let staging = temp.path().join(".snapshot.staging");
+        let staging = Arc::new(SnapshotStaging {
+            directory: tempfile::tempdir_in(temp.path()).unwrap(),
+            _group: None,
+        });
+        let staging_path = staging.path().to_path_buf();
         std::fs::create_dir(&destination).unwrap();
         std::fs::write(destination.join("payload"), b"old").unwrap();
-        std::fs::create_dir(&staging).unwrap();
-        std::fs::write(staging.join("payload"), b"new").unwrap();
+        std::fs::write(staging_path.join("payload"), b"new").unwrap();
 
         let error = promote_snapshot_directory(&staging, &destination, false)
             .await
@@ -3722,6 +3839,6 @@ mod tests {
 
         assert!(matches!(error, MicrosandboxError::SnapshotAlreadyExists(_)));
         assert_eq!(std::fs::read(destination.join("payload")).unwrap(), b"old");
-        assert_eq!(std::fs::read(staging.join("payload")).unwrap(), b"new");
+        assert_eq!(std::fs::read(staging_path.join("payload")).unwrap(), b"new");
     }
 }
