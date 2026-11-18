@@ -1,53 +1,54 @@
 ---
-title: Configuration
-"og:title": Microsandbox CLI YAML configuration reference
+title: Sandboxfile
+"og:title": Microsandbox CLI Sandboxfile reference
 description: Configure sandbox resources, networking, and storage with reusable microsandbox CLI YAML files.
 icon: "file-code"
 ---
 
-Load reusable sandbox settings with `--conf`. See [configuration precedence](/operations/configuration#precedence) for global defaults.
-
-<Note>
-Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud.
-</Note>
-
-Files may have any name and contain only the fields you need. Explicit CLI arguments override their values.
+Save the settings for one sandbox in a YAML file named `Sandboxfile`. The CLI loads it when you pass `--file Sandboxfile`. You can also pass another filename.
 
 <CodeGroup>
-```yaml YAML
-# sandbox.yaml
+```yaml Sandboxfile
 image: "python:3.12"
 cpus: 2
 memory: "1G"
-workdir: "/app"
-mounts:
-  - "./src:/app"
-network:
-  allow: ["api.openai.com"]
-  ports: ["8000:8000"]
-secret_violation_action: block-and-log
-secrets:
-  OPENAI_API_KEY:
-    allow: ["api.openai.com"]
-    substitution:
-      headers: true
-      query: false
-      body: false
-    passthrough: ["telemetry.example.com"]
-scripts:
-  start: "python app.py"
+cmd: ["python", "--version"]
 ```
 </CodeGroup>
 
 <CodeGroup>
 ```bash Shell
-msb run --conf sandbox.yaml -- start
-msb create --conf sandbox.yaml --name agent
-msb install --conf sandbox.yaml --name agent
+msb run --file Sandboxfile
 ```
 </CodeGroup>
 
-Files are never auto-discovered; pass each file explicitly.
+This runs `python --version` in the sandbox. Use the same file with `msb create --file Sandboxfile --name agent` to create a named sandbox, or with `msb install --file Sandboxfile --name agent` to install it as a command.
+
+<Note>
+Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud.
+</Note>
+
+## Combining files
+
+Start with `--file Sandboxfile` and add overrides in command-line order using `--file` or its alias `--conf`. An override file only needs the fields you want to change.
+
+<CodeGroup>
+```yaml local.yaml
+memory: "2G"
+```
+</CodeGroup>
+
+<CodeGroup>
+```bash Shell
+msb run --file Sandboxfile --conf local.yaml
+```
+</CodeGroup>
+
+The example keeps the image, CPUs, and command from `Sandboxfile` and uses 2 GiB of memory from `local.yaml`. An explicit flag such as `--memory 3G` overrides the value from both files. You can interleave [scoped config files](#scoped-config-files) in the same stack. See [configuration precedence](/operations/configuration#precedence) for global and managed settings.
+
+Relative host paths are resolved against the file that contains them. Paths inside a file listed by `patch_files` are resolved against that patch file. See [merge precedence](/operations/configuration#merge-precedence) for rules by value type.
+
+For sparse configuration without YAML, see [typed patches in the Rust reference](/sdk/rust/configuration#sandbox-configuration-patches), including merge behavior and migration from earlier patch types.
 
 ## Sparse configuration
 
@@ -67,7 +68,7 @@ network:
 
 <CodeGroup>
 ```bash Shell
-msb run python --conf net-policy.yaml
+msb run python --file net-policy.yaml
 ```
 </CodeGroup>
 
@@ -79,7 +80,7 @@ Scoped files contain one group of settings without its wrapper key. Unrelated fi
 
 | Flag | Accepted fields |
 | --- | --- |
-| `--conf PATH` | Any sandbox configuration field |
+| `--file PATH`, `--conf PATH` | Any sandbox configuration field |
 | `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_tcp_connections`, `max_udp_connections`, `max_inbound_tcp_connections`, `tcp_accept_queue_size` |
 | `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits` |
 | `--runtime-conf PATH` | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
@@ -105,34 +106,9 @@ msb run python --net-conf net-policy.yaml
 ```
 </CodeGroup>
 
-Passing `network: {...}` to `--net-conf` is an error; use `--conf` for a
-root-shaped document.
+Pass a file containing the `network:` wrapper with `--file`. Use `--net-conf` for the fields inside that wrapper.
 
-## Combining files
-
-Root and scoped configuration flags are repeatable and may be interleaved. The
-CLI applies each file from left to right, then applies explicit flags and
-positional arguments. See [Precedence](/operations/configuration#precedence)
-and [Merge precedence](/operations/configuration#merge-precedence) for the
-complete resolution rules.
-
-`--net-conf` cannot be combined with `--net`, `--no-net`, `--net-rule`, or `--net-default*`. When network policy is loaded through a root `--conf` file instead, a policy CLI flag replaces it, while `--net-rule` remains additive and is evaluated before rules loaded from the file.
-
-<CodeGroup>
-```bash Shell
-# Files overlay left to right; --memory wins unless managed policy overrides it.
-msb run python \
-  --conf base.yaml \
-  --resource-conf standard.yaml \
-  --conf project.yaml \
-  --resource-conf large.yaml \
-  --memory 12G
-```
-</CodeGroup>
-
-Relative host paths are resolved against the file that contains them. Paths inside a file listed by `patch_files` are resolved against that patch file.
-
-For sparse configuration without YAML, see [typed patches in the Rust reference](/sdk/rust/configuration#sandbox-configuration-patches), including merge behavior and migration from earlier patch types.
+`--net-conf` conflicts with `--net`, `--no-net`, `--net-rule`, and the `--net-default*` flags. When a root file supplies network policy, a policy flag can replace it. Rules passed with `--net-rule` are additive and evaluated before rules from the file.
 
 ## Schema
 
@@ -358,7 +334,7 @@ Run a script like any other guest command:
 
 <CodeGroup>
 ```bash Shell
-msb run --conf sandbox.yaml -- migrate
+msb run --file Sandboxfile -- migrate
 ```
 </CodeGroup>
 
