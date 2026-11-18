@@ -78,38 +78,43 @@ def qualify(binary, firmware, image, layout, directory, full, legacy_cli):
                 assert "msb start destination" in result.stderr, result.stderr
                 msb("start", "destination")
                 assert guest("destination", "grep -qx keep /sentinel; cat /proc/sys/kernel/random/boot_id") != sentinel
-            # Kill a separate CLI after it has reserved the replacement. The guest
-            # may or may not have launched. A fresh client must handle both states.
-            proc = subprocess.Popen([str(binary), "create", "--replace", "--name", "destination",
-                                     "--workdir", "/missing-after-boot", "--from-snapshot", "history"],
-                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                deadline = time.monotonic() + 45
-                while time.monotonic() < deadline:
-                    pending = catalog.execute(
-                        "SELECT candidate FROM sandbox_replacement WHERE name='destination'").fetchone()
-                    if pending and pending[0] is not None:
-                        break
-                    assert proc.poll() is None, proc.communicate()
-                    time.sleep(0.005)
-                else:
-                    raise AssertionError("replacement never reserved the candidate")
-                proc.kill()
-            finally:
-                if proc.poll() is None:
+            # The later crash can leave a detached VM in its exit observer even
+            # after the lifecycle lock is released. Exercise both process boundaries.
+            for query in (
+                "SELECT candidate FROM sandbox_replacement WHERE name='destination'",
+                "SELECT candidate FROM sandbox_replacement JOIN run ON run.sandbox_id=candidate "
+                "WHERE sandbox_replacement.name='destination' AND run.pid IS NOT NULL",
+            ):
+                proc = subprocess.Popen([str(binary), "create", "--replace", "--name", "destination",
+                                         "--workdir", "/missing-after-boot", "--from-snapshot", "history"],
+                                        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    deadline = time.monotonic() + 45
+                    while time.monotonic() < deadline:
+                        pending = catalog.execute(
+                            query).fetchone()
+                        if pending and pending[0] is not None:
+                            break
+                        assert proc.poll() is None, proc.communicate()
+                        time.sleep(0.005)
+                    else:
+                        raise AssertionError("replacement never reserved the candidate")
                     proc.kill()
-                proc.communicate(timeout=30)
-            if legacy_cli:
-                listing = subprocess.run([str(legacy_cli), "list"], env=env, capture_output=True,
-                                         text=True, timeout=45, check=True)
-                assert "source" in listing.stdout, listing
-                removal = subprocess.run([str(legacy_cli), "rm", f".msb-retained-{original_id}"],
-                                         env=env, capture_output=True, text=True, timeout=45)
-                assert removal.returncode != 0, "released CLI deleted the retained original"
-            msb("inspect", "destination")
-            assert catalog.execute(row).fetchone() == (original_id, "Stopped")
-            msb("start", "destination")
-            guest("destination", "grep -qx keep /sentinel")
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.communicate(timeout=30)
+                if legacy_cli:
+                    listing = subprocess.run([str(legacy_cli), "list"], env=env, capture_output=True,
+                                             text=True, timeout=45, check=True)
+                    assert "source" in listing.stdout, listing
+                    removal = subprocess.run([str(legacy_cli), "rm", f".msb-retained-{original_id}"],
+                                             env=env, capture_output=True, text=True, timeout=45)
+                    assert removal.returncode != 0, "released CLI deleted the retained original"
+                msb("inspect", "destination")
+                assert catalog.execute(row).fetchone() == (original_id, "Stopped")
+                msb("start", "destination")
+                guest("destination", "grep -qx keep /sentinel")
             if layout == "managed":
                 # Unnamed detached runs are ephemeral. The stopped original must
                 # survive maintenance, then regain automatic cleanup on restart.

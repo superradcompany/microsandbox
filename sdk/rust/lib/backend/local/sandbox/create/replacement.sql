@@ -35,7 +35,7 @@ CREATE TRIGGER IF NOT EXISTS replacement_record_publication AFTER UPDATE OF crea
 WHEN OLD.creation_state IS NOT NULL AND NEW.creation_state IS NULL AND NEW.status = 'Running'
 BEGIN UPDATE sandbox_replacement SET published = 1 WHERE candidate = NEW.id; END;
 
--- An explicit restart of a retained --rm sandbox restores cleanup only after
+-- An explicit restart of a retained ephemeral sandbox restores cleanup only after
 -- it reaches Running. A failed restart can therefore be retried.
 CREATE TABLE IF NOT EXISTS sandbox_replacement_ephemeral (
     original INTEGER PRIMARY KEY REFERENCES sandbox(id) ON DELETE CASCADE

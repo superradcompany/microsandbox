@@ -324,6 +324,17 @@ impl LocalBackend {
                 )));
             }
             let run_dir = self.config().run_dir();
+            let pid = match current {
+                Some(id) => Self::load_latest_run(pools.read(), id)
+                    .await?
+                    .and_then(|run| run.pid),
+                None => None,
+            };
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let departing = super::super::process_exit::RuntimeExit::capture(
+                pid,
+                &microsandbox_runtime::ipc::lifecycle_lock_path(&run_dir, name),
+            )?;
             let _runtime =
                 match microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run_dir, name)? {
                     Some(guard) => guard,
@@ -345,14 +356,26 @@ impl LocalBackend {
                     }
                 };
             if let Some(id) = current {
-                if Self::load_latest_run(pools.read(), id)
-                    .await?
-                    .and_then(|run| run.pid)
-                    .is_some_and(Self::pid_is_alive)
-                {
-                    return Err(MicrosandboxError::Runtime(format!(
-                        "replacement runtime for {name:?} still owns its files"
-                    )));
+                // The runtime can drop its lifecycle lock before its final disk
+                // descriptors close. Observe process-wide exit without reaping it.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    let exited = match &departing {
+                        Some(process) => process.has_exited()?,
+                        None => pid.is_none_or(Self::pid_has_exited),
+                    };
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    let exited = pid.is_none_or(Self::pid_has_exited);
+                    if exited {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(MicrosandboxError::Runtime(format!(
+                            "replacement runtime for {name:?} still owns its files"
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
                 }
                 self.remove_incomplete_sandbox(id, name, creation::RemovalMode::Recovery)
                     .await?;
