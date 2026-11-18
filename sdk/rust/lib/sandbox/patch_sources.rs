@@ -272,6 +272,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copy_source_paths_preserve_parent_steps_through_search_only_directories() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        fs::create_dir(root.join("search-only")).unwrap();
+        fs::create_dir(root.join("step")).unwrap();
+        fs::write(root.join("search-only/data"), b"payload").unwrap();
+        fs::set_permissions(root.join("search-only"), Permissions::from_mode(0o111)).unwrap();
+        let patches = [Patch::CopyFile {
+            src: root.join("step/../search-only/data"),
+            dst: "/data".into(),
+            mode: None,
+            replace: false,
+        }];
+        let result = prepare(&patches, true).await;
+        fs::set_permissions(root.join("search-only"), Permissions::from_mode(0o700)).unwrap();
+        let prepared = result.unwrap();
+        let [Patch::CopyFile { src, .. }] = prepared.patches(&patches) else {
+            panic!("copy patch missing")
+        };
+        assert_eq!(fs::read(src).unwrap(), b"payload");
+    }
+
+    #[tokio::test]
     async fn staged_copy_is_independent_of_later_source_writes() {
         let source = tempfile::tempdir().unwrap();
         let file = source.path().canonicalize().unwrap().join("data");

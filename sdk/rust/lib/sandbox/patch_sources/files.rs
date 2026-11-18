@@ -60,17 +60,26 @@ fn open_without_links(path: &Path, writable: bool, directory: bool) -> io::Resul
     use std::os::unix::ffi::OsStrExt;
     use std::path::Component;
 
-    let mut parent = File::open(if path.is_absolute() { "/" } else { "." })?;
+    use std::ffi::OsStr;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    #[cfg(target_vendor = "apple")]
+    let search_flags = libc::O_SEARCH;
+    #[cfg(not(target_vendor = "apple"))]
+    let search_flags = libc::O_RDONLY | libc::O_DIRECTORY;
+    let mut parent = File::options()
+        .read(true)
+        .custom_flags(search_flags | libc::O_CLOEXEC)
+        .open(if path.is_absolute() { "/" } else { "." })?;
     let mut components = path
         .components()
         .filter(|component| !matches!(component, Component::RootDir | Component::CurDir))
         .peekable();
     while let Some(component) = components.next() {
-        let Component::Normal(name) = component else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "patch source path contains '..'",
-            ));
+        let name = match component {
+            Component::Normal(name) => name,
+            Component::ParentDir => OsStr::new(".."),
+            _ => unreachable!("root and current directory components are filtered"),
         };
         let name = CString::new(name.as_bytes())?;
         let final_component = components.peek().is_none();
@@ -84,7 +93,7 @@ fn open_without_links(path: &Path, writable: bool, directory: bool) -> io::Resul
                     libc::O_RDONLY
                 }
             } else {
-                libc::O_RDONLY | libc::O_DIRECTORY
+                search_flags
             }
             | if final_component && directory {
                 libc::O_DIRECTORY
