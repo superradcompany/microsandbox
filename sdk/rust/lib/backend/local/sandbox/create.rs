@@ -2319,6 +2319,10 @@ impl LocalBackend {
 
         tokio::task::spawn_blocking(move || {
             let _ = std::fs::remove_file(&path);
+            // The formatter truncates an existing inode, preserving its private host mode.
+            // This disk can later be hardlinked into checkpoint and snapshot storage.
+            #[cfg(unix)]
+            microsandbox_utils::private_file::create_new(&path)?;
             ext4::format_ext4_with_tree(&path, &ext4_options, overlay_tree)
         })
         .await
@@ -2584,6 +2588,20 @@ mod tests {
         .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
         pools
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_upper_is_private_before_snapshot_linking() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upper.ext4");
+        LocalBackend::create_upper_ext4(&CreationStorage::for_test(&path), 256, None)
+            .await
+            .unwrap();
+        microsandbox_utils::private_file::verify(&fs::File::open(&path).unwrap()).unwrap();
+        let snapshot = directory.path().join("snapshot.raw");
+        fs::hard_link(&path, &snapshot).unwrap();
+        microsandbox_utils::private_file::verify(&fs::File::open(snapshot).unwrap()).unwrap();
     }
 
     #[tokio::test]

@@ -81,9 +81,49 @@ class SandboxStatus(StrEnum):
     PAUSED = "paused"
 
 
+class ServiceStatus(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    DETACHED = "detached"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceTarget:
+    """The sandbox and port that receive a Service's requests."""
+
+    sandbox: str
+    port: int
+
+
 class BackendKind(StrEnum):
     LOCAL = "local"
     CLOUD = "cloud"
+
+
+class ServiceErrorReason(StrEnum):
+    """Why a Service change did not complete.
+
+    ``OTHER`` is an unrecognized reason; ``ServiceError.raw_code`` keeps its raw code,
+    and ``ServiceError.changed`` still reports the outcome.
+    """
+
+    SERVICE_QUOTA_EXCEEDED = "service_quota_exceeded"
+    SANDBOX_SERVICE_LIMIT_EXCEEDED = "sandbox_service_limit_exceeded"
+    SERVICE_CONFLICT = "service_conflict"
+    SERVICE_DETACHED = "service_detached"
+    TARGET_UNREACHABLE = "target_unreachable"
+    SANDBOX_NOT_RUNNING = "sandbox_not_running"
+    SERVICE_CHANGES_PAUSED = "service_changes_paused"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    OTHER = "other"
+
+
+class ChangeState(StrEnum):
+    """Whether a failed Service change may have been applied."""
+
+    UNCHANGED = "unchanged"
+    UNKNOWN = "unknown"
 
 
 class ModificationPolicy(StrEnum):

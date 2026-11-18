@@ -112,6 +112,15 @@ export {
   VolumeFsWriteSink,
 } from "./volume-fs.js";
 
+// Services
+export { Service, ServiceBuilder, ServiceListBuilder } from "./service.js";
+export type {
+  ServicePage,
+  ServiceStatus,
+  ServiceTarget,
+  ServiceUpdateOptions,
+} from "./service.js";
+
 // Snapshots
 export { Snapshot, SnapshotArchive } from "./snapshot.js";
 export type { DiskCompactionOptions, DiskCompactionDiskResult, DiskCompactionResult } from "./compact.js";
@@ -493,6 +502,9 @@ export {
   SandboxStopTimedOutError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  ServiceAlreadyExistsError,
+  ServiceError,
+  ServiceNotFoundError,
   SnapshotSourceRecoveryError,
   TerminalError,
   UnsupportedOperationError,
@@ -501,8 +513,11 @@ export {
   VolumeNotFoundError,
 } from "./errors.js";
 export type {
+  ChangeState,
   MicrosandboxErrorCode,
   PublishedSnapshotArtifact,
+  ServiceErrorDetails,
+  ServiceErrorReason,
   SnapshotSourceRecoveryDetails,
 } from "./errors.js";
 

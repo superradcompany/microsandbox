@@ -322,7 +322,12 @@ pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
     {
         let mut context = summary(&entries);
         context.push(String::new());
-        context.push("Repair supported storage using its existing saved state. Original disk files are retained.".into());
+        if cfg!(unix) {
+            context.push("Repair supported storage using its saved state. This also makes recognized Microsandbox-managed host files owner-only and clears their Unix ACLs; guest state, directory-volume contents, external mounts, and unknown paths are left alone.".into());
+        } else {
+            context.push("Repair supported storage using its saved state.".into());
+        }
+        context.push("Original disk files are retained.".into());
         context
             .push("Sandboxes stay stopped. Any required shutdown needs separate consent.".into());
         context.push(
@@ -393,9 +398,13 @@ async fn process_batch<B: Operations, U: Interaction>(
     // Every batch obtains its own consent in this terminal; no argument can pre-authorize it.
     let mut maintenance_confirmed = false;
     if needs_maintenance
-        && entries
-            .iter()
-            .any(|entry| entry.outcome == Outcome::Pending)
+        && entries.iter().any(|entry| {
+            entry.outcome == Outcome::Pending
+                && entry
+                    .diagnosis
+                    .as_ref()
+                    .is_some_and(|item| item.status != StorageDiagnosticStatus::Ready)
+        })
     {
         let context = vec![
             "Stop legacy VMs across all microsandbox homes and prevent old tools or other writers from changing these disks until repair finishes.".into(),
@@ -408,10 +417,13 @@ async fn process_batch<B: Operations, U: Interaction>(
         )? {
             Some(true) => maintenance_confirmed = true,
             Some(false) => {
-                for entry in entries
-                    .iter_mut()
-                    .filter(|entry| entry.outcome == Outcome::Pending)
-                {
+                for entry in entries.iter_mut().filter(|entry| {
+                    entry.outcome == Outcome::Pending
+                        && entry
+                            .diagnosis
+                            .as_ref()
+                            .is_some_and(|item| item.status != StorageDiagnosticStatus::Ready)
+                }) {
                     entry.outcome = Outcome::Skipped("maintenance not confirmed");
                 }
             }
@@ -560,7 +572,10 @@ fn may_check_blockers(item: &StorageSandboxDiagnosis) -> bool {
 
 fn classify(item: &StorageSandboxDiagnosis) -> Outcome {
     if item.status == StorageDiagnosticStatus::Ready {
-        return Outcome::AlreadyReady;
+        if !cfg!(unix) {
+            return Outcome::AlreadyReady;
+        }
+        return Outcome::Pending;
     }
     if item
         .reason
@@ -586,7 +601,11 @@ fn classify(item: &StorageSandboxDiagnosis) -> Outcome {
 
 fn inspection_label(item: &StorageSandboxDiagnosis) -> &'static str {
     if item.status == StorageDiagnosticStatus::Ready {
-        return "ready";
+        return if cfg!(unix) {
+            "ready; permission repair available"
+        } else {
+            "ready"
+        };
     }
     if item.running && classify(item) == Outcome::Pending {
         return "running; inspection may require a stop";
@@ -625,7 +644,7 @@ fn summary(entries: &[Entry]) -> Vec<String> {
                     })
                     .unwrap_or("inspection pending"),
                 Outcome::AlreadyReady => "already ready",
-                Outcome::Repaired => "repaired; ready to start",
+                Outcome::Repaired => "repaired; ready",
                 Outcome::Investigation(_) => "needs investigation",
                 Outcome::Skipped(reason) => reason,
                 Outcome::Cancelled => "cancelled; repair not attempted",
@@ -993,11 +1012,23 @@ mod tests {
             .await
             .unwrap()
         );
-        assert_eq!(backend.repaired, ["app", "worker"]);
+        let expected_repairs = if cfg!(unix) {
+            vec!["app", "worker", "ready"]
+        } else {
+            vec!["app", "worker"]
+        };
+        assert_eq!(backend.repaired, expected_repairs);
         assert!(matches!(entries[0].outcome, Outcome::Investigation(_)));
         assert_eq!(entries[1].outcome, Outcome::Repaired);
         assert_eq!(entries[2].outcome, Outcome::Repaired);
-        assert_eq!(entries[3].outcome, Outcome::AlreadyReady);
+        assert_eq!(
+            entries[3].outcome,
+            if cfg!(unix) {
+                Outcome::Repaired
+            } else {
+                Outcome::AlreadyReady
+            }
+        );
         assert!(report_actions(&entries, 0).other_actions_attempted);
         assert!(
             !report::preservation(report_actions(&entries, 0), Failure::Unclassified)
@@ -1081,6 +1112,33 @@ mod tests {
             report::preservation(report_actions(&entries, 0), Failure::StaleOperation)
                 .contains("may have recorded migration")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn declined_maintenance_keeps_ready_permission_repairs() {
+        let (mut entries, mut backend) = fixtures(&[
+            ("legacy", StorageDiagnosticStatus::Eligible, false),
+            ("ready", StorageDiagnosticStatus::Ready, false),
+        ]);
+        let mut answers = Answers(VecDeque::from([Some(false)]));
+        assert!(
+            !process_batch(
+                &mut entries,
+                &mut backend,
+                &mut answers,
+                true,
+                &Cancellation::default()
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(backend.repaired, ["ready"]);
+        assert_eq!(
+            entries[0].outcome,
+            Outcome::Skipped("maintenance not confirmed")
+        );
+        assert_eq!(entries[1].outcome, Outcome::Repaired);
     }
 
     #[tokio::test]
@@ -1186,7 +1244,7 @@ mod tests {
         assert!(entries[0].actions.repaired);
         assert_eq!(entries[1].outcome, Outcome::Cancelled);
         assert!(!entries[1].actions.repair_attempted);
-        assert!(summary(&entries)[0].contains("repaired; ready to start"));
+        assert!(summary(&entries)[0].contains("repaired; ready"));
     }
 
     #[tokio::test]
@@ -1222,7 +1280,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maintenance_is_explicit_and_does_not_apply_to_ready_storage() {
+    async fn maintenance_confirmation_does_not_apply_to_ready_storage() {
         let (mut entries, mut backend) =
             fixtures(&[("ready", StorageDiagnosticStatus::Ready, false)]);
         assert!(
@@ -1236,7 +1294,12 @@ mod tests {
             .await
             .unwrap()
         );
-        assert!(backend.repaired.is_empty());
+        if cfg!(unix) {
+            assert_eq!(backend.repaired, ["ready"]);
+        } else {
+            assert!(backend.repaired.is_empty());
+            assert_eq!(entries[0].outcome, Outcome::AlreadyReady);
+        }
 
         for answer in [Some(true), Some(false), None] {
             let (mut entries, mut backend) =

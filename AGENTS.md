@@ -18,7 +18,7 @@ Do not apply them to other repositories or to general agent behavior outside thi
 - `crates/testing` contains shared test initialization, macros, and utilities.
 - `packages/agent-client` and `packages/control-client` provide agent and host-control clients; `packages/protocol-client` supplies shared framing/transport primitives, and `packages/microsandbox-types` supplies shared types and contracts. These packages have Rust and TypeScript implementations. `packages/protocol-fixtures` contains cross-language protocol fixtures and checks.
 - `crates/agentd` is the in-guest agent. It is a workspace member; the musl guest binary that ships in releases is built separately.
-- `docs/` contains the documentation site, including usage guides in `docs/how-to/`, migration guides in `docs/migrations/`, and CLI/SDK references. Keep docs in sync with user-facing behavior.
+- `docs/` contains the documentation site, including usage guides in `docs/how-to/`, version migration guides in `docs/migrations/`, repair guides in `docs/repairs/`, and CLI/SDK references. Keep docs in sync with user-facing behavior.
 - `examples/` contains runnable examples. Add new example projects only when requested or clearly required by the contribution.
 - `.agents/skills/` contains repository-specific agent skills. `.github/`, `scripts/ci/`, and `scripts/smoke/` contain CI workflows, automation, and validation tooling.
 - `packaging/` contains Docker and Windows package assets.
@@ -72,6 +72,7 @@ High-level repository layout (not exhaustive). Confirm paths against the checked
 |   |-- networking/
 |   |-- observability/
 |   |-- operations/
+|   |-- repairs/
 |   |-- sandboxes/
 |   |-- sdk/
 |   |-- security/
@@ -398,8 +399,8 @@ git diff origin/main..HEAD --name-status
 
 - For changes under `docs/`, read [the Microsandbox docs skill](.agents/skills/microsandbox-docs/SKILL.md) for page structure, examples, version labels, and validation.
 - Update docs when behavior, configuration, CLI flags, SDK APIs, or examples change.
-- For persisted-format or cross-version changes, update `COMPATIBILITY.md`. For user-visible upgrade, recovery, or downgrade changes, update the applicable existing `docs/migrations/` guide with affected versions, safe actions, and data-preservation limits.
-- Document command and API additions in their owning references and link to the migration guide instead of repeating it. Keep additions minimal and use maintained release-note sources; do not hand-edit generated changelogs.
+- For persisted-format or cross-version changes, update `COMPATIBILITY.md`. Put version upgrade and downgrade guidance in `docs/migrations/`, and issue-specific recovery in `docs/repairs/`. Keep separate fixes on separate repair pages, with affected versions, availability, safe actions, and data-preservation limits.
+- Document command and API additions in their owning references and link to the applicable migration or repair guide instead of repeating it. Keep additions minimal and use maintained release-note sources; do not hand-edit generated changelogs.
 - Keep SDK reference introductions to a short purpose statement and a link to the relevant usage guide, then go straight into API entries. Follow the concise structure of the execution and networking reference pages across all SDK languages.
 - Start reference type sections directly with their members when the type heading is sufficient. Avoid redundant “Built by” / “Used by” rows and introductory text that repeats the member descriptions.
 - Do not prepend feature walkthroughs, lifecycle summaries, implementation details, or long examples to reference pages or type sections. Put API-specific details beside the relevant member and broader explanations in the usage guides; avoid duplicating those guides in the reference.

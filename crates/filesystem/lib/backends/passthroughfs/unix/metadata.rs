@@ -18,7 +18,9 @@ use std::{
     time::Duration,
 };
 
-use super::host_mode::{fchmod_mirror, fchmod_raw, host_strip_priv_bits, mirror_eligible_type};
+use super::host_mode::{
+    fchmod_raw, fchmod_with_owner_floor, host_strip_priv_bits, mirror_eligible_type,
+};
 use super::{PassthroughFs, inode};
 use crate::{
     Context, SetattrValid,
@@ -187,7 +189,7 @@ pub(crate) fn do_setattr(
                 && valid.contains(SetattrValid::MODE)
                 && mirror_eligible_type(new_mode & platform::MODE_TYPE_MASK)
             {
-                fchmod_mirror(fd, new_mode, new_mode & platform::MODE_TYPE_MASK)?;
+                fchmod_with_owner_floor(fd, new_mode, new_mode & platform::MODE_TYPE_MASK)?;
             }
 
             stat_override::set_override(fd, new_uid, new_gid, new_mode, cur_rdev)?;
@@ -205,7 +207,7 @@ pub(crate) fn do_setattr(
                 perms &= !(platform::MODE_SETUID | platform::MODE_SETGID);
             }
             if mirror_eligible_type(file_type) {
-                fchmod_mirror(fd, perms, file_type)?;
+                fchmod_with_owner_floor(fd, perms, file_type)?;
             } else {
                 fchmod_raw(fd, perms)?;
             }

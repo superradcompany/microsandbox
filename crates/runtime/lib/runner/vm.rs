@@ -1660,7 +1660,7 @@ fn run(
     // Enter the VM (never returns).
     tracing::info!(sandbox = %config.sandbox_name, "entering VM");
     match vm.enter() {
-        Ok(infallible) => Ok(infallible),
+        Ok(infallible) => match infallible {},
         Err(e) => {
             if let Err(error) = cleanup_rt_handle.block_on(writeback_guard.release(&db)) {
                 tracing::warn!(%error, "release writeback pressure membership after VM enter failure");
@@ -3078,13 +3078,17 @@ fn bootstrap_trampoline_backend(
     sandbox_dir: &Path,
 ) -> RuntimeResult<(PassthroughFs, PathBuf)> {
     let parent = sandbox_dir.join(BOOTSTRAP_ROOTFS_DIR);
-    std::fs::create_dir_all(&parent).map_err(|error| {
+    microsandbox_utils::private_file::create_private_dir_all(&parent).map_err(|error| {
         RuntimeError::Custom(format!("create bootstrap trampoline directory: {error}"))
     })?;
 
     let trampoline = tempfile::tempdir_in(parent)?;
+    microsandbox_utils::private_file::harden_existing_directory(trampoline.path())?;
     for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
-        std::fs::create_dir(trampoline.path().join(directory)).map_err(|error| {
+        microsandbox_utils::private_file::create_private_directory(
+            &trampoline.path().join(directory),
+        )
+        .map_err(|error| {
             RuntimeError::Custom(format!("create bootstrap mountpoint {directory}: {error}"))
         })?;
     }
@@ -3158,22 +3162,17 @@ fn trampoline_rootfs_cleanup_on_exit(
 fn prepare_runtime_restore_namespace(runtime_dir: &Path, oci_root: bool) -> RuntimeResult<()> {
     if oci_root {
         for directory in ["rootfs", "rootfs/lower", "rootfs/upperfs"] {
-            crate::checkpoint::layout::real_directory(&runtime_dir.join(directory), true).map_err(
-                |error| {
+            crate::checkpoint::layout::private_directory(&runtime_dir.join(directory), true)
+                .map_err(|error| {
                     RuntimeError::Custom(format!(
                         "create restored runtime mountpoint {directory}: {error}"
                     ))
-                },
-            )?;
+                })?;
         }
     }
 
     let heartbeat = runtime_dir.join("heartbeat.json");
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&heartbeat)
-    {
+    match microsandbox_utils::private_file::create_new(&heartbeat) {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(RuntimeError::Custom(format!(

@@ -3,7 +3,7 @@
 //! Volumes are persistent named storage. Locally they are host-side
 //! directories under `~/.microsandbox/volumes/<name>/` with metadata tracked
 //! in SQLite. Cloud-side they are org-scoped managed volumes: create / get /
-//! list / remove and direct filesystem operations route through msb-cloud.
+//! list / remove and direct filesystem operations route through the cloud API.
 //! Cloud also provides an always-present default volume; local lookup of that
 //! default is deliberately unsupported to avoid exposing host storage.
 //!
@@ -261,7 +261,7 @@ impl Volume {
     /// needing a running sandbox.
     ///
     /// Routes through the backend trait — local ops hit `tokio::fs`, while
-    /// Cloud ops use the authenticated msb-cloud API.
+    /// Cloud ops use the authenticated cloud API.
     pub fn fs(&self) -> VolumeFs<'_> {
         VolumeFs::new(self.backend.clone(), &self.fs_target)
     }

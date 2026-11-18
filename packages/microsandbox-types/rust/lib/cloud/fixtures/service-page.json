@@ -1,0 +1,17 @@
+{
+  "data": [
+    {
+      "slug": "shop",
+      "url": "https://shop.<domain>",
+      "status": "enabled",
+      "target": {
+        "sandbox": "web-1",
+        "port": 8080
+      },
+      "created_at": "2026-10-26T10:00:00Z",
+      "updated_at": "2026-10-26T10:05:00Z"
+    }
+  ],
+  "next_cursor": "c2hvcA",
+  "has_more": true
+}

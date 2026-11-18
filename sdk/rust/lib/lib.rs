@@ -28,6 +28,7 @@ pub mod progress;
 #[cfg(feature = "local")]
 pub mod runtime;
 pub mod sandbox;
+pub mod service;
 #[cfg(feature = "local")]
 pub mod setup;
 pub mod snapshot;
@@ -40,12 +41,14 @@ pub use agent::{
 };
 pub use backend::{
     Backend, BackendInfo, BackendKind, BackendSelectionSource, CloudCreateSandboxRequest,
-    CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason, CloudVolumeKind,
-    CloudVolumeStatus, Profile, ProfileBackend, SandboxBackend, SandboxCloudState,
-    SandboxHandleCloudState, SandboxHandleInner, SandboxInner, VolumeBackend, VolumeCloudState,
-    VolumeHandleCloudState, VolumeHandleInner, VolumeInner, default_backend, default_backend_info,
-    resolve_default_backend, set_default_backend, swap_default_backend, with_backend,
+    CloudCreateSandboxResponse, CloudCreateServiceRequest, CloudErrorBody, CloudErrorDetails,
+    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudService, CloudServiceStatus, CloudServiceTarget, CloudUpdateServiceRequest,
+    CloudVolumeKind, CloudVolumeStatus, Profile, ProfileBackend, SandboxBackend, SandboxCloudState,
+    SandboxHandleCloudState, SandboxHandleInner, SandboxInner, ServiceBackend, VolumeBackend,
+    VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner, VolumeInner, default_backend,
+    default_backend_info, resolve_default_backend, set_default_backend, swap_default_backend,
+    with_backend,
 };
 #[cfg(feature = "cloud")]
 pub use backend::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
@@ -105,6 +108,10 @@ pub use sandbox::{
 pub use sandbox::{
     SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics, all_sandbox_metrics_local,
     all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+};
+pub use service::{
+    Service, ServiceBuilder, ServiceListBuilder, ServicePage, ServiceStatus, ServiceTarget,
+    ServiceUpdate,
 };
 pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts,
