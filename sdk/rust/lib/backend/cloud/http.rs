@@ -82,7 +82,7 @@ struct CloudSandboxWaitQuery {
 //--------------------------------------------------------------------------------------------------
 // Methods: Sandbox lifecycle
 //
-// HTTP dispatch for the SDK's sandbox lifecycle ops, hitting msb-cloud's
+// HTTP dispatch for the SDK's sandbox lifecycle ops, hitting the cloud API's
 // API-key-authenticated routes (`/v1/sandboxes/*` and `/v1/sandboxes/by-name/*`).
 //--------------------------------------------------------------------------------------------------
 
@@ -90,7 +90,7 @@ impl CloudBackend {
     /// `POST /v1/sandboxes` (optionally create, start, and wait for readiness).
     ///
     /// Pass `start=true` to atomically create-and-start in a single round-trip
-    /// — mirrors msb-cloud's create-and-start shorthand. The SDK also requests
+    /// — mirrors the cloud API's create-and-start shorthand. The SDK also requests
     /// the opt-in server-side readiness barrier so a successful high-level
     /// create has the same immediately-usable contract as the local backend.
     pub(in crate::backend) async fn create_sandbox(
@@ -216,39 +216,40 @@ impl CloudBackend {
         decode_json(resp, "POST /v1/sandboxes/:id/start").await
     }
 
-    /// `POST /v1/sandboxes/:id/modifications/plan`, a dry run whose body carries no secret value.
+    /// `POST /v1/sandboxes/:id/plan`, a dry run whose body carries no secret value.
     pub(in crate::backend) async fn post_modification_plan(
         &self,
         id: &str,
         req: &CloudSandboxModificationPlanRequest,
     ) -> MicrosandboxResult<SandboxModificationPlan> {
-        let url = format!(
-            "{}/v1/sandboxes/{}/modifications/plan",
-            self.url,
-            urlencoding(id)
-        );
+        let url = format!("{}/v1/sandboxes/{}/plan", self.url, urlencoding(id));
         let resp = self
             .http
             .post(&url)
             .json(req)
             .send()
             .await
-            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/modifications/plan", e))?;
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/plan", e))?;
         let plan: CloudSandboxModificationPlan =
-            decode_json(resp, "POST /v1/sandboxes/:id/modifications/plan").await?;
+            decode_json(resp, "POST /v1/sandboxes/:id/plan").await?;
         Ok(plan.into())
     }
 
-    /// `PUT /v1/sandboxes/:id`, sent once. The body is the only
+    /// `PATCH /v1/sandboxes/:id`, sent once. The body is the only
     /// place a secret value travels; the caller reads and classifies the outcome.
-    pub(in crate::backend) async fn put_modification(
+    pub(in crate::backend) async fn patch_modification(
         &self,
         id: &str,
         req: &CloudSandboxModificationApplyRequest,
         timeout: Duration,
     ) -> Result<Response, reqwest::Error> {
         let url = format!("{}/v1/sandboxes/{}", self.url, urlencoding(id));
-        self.http.put(&url).json(req).timeout(timeout).send().await
+        self.http
+            .patch(&url)
+            .json(req)
+            .timeout(timeout)
+            .send()
+            .await
     }
 
     /// `POST /v1/sandboxes/by-name/:name/stop`.
@@ -285,7 +286,7 @@ impl CloudBackend {
     }
 
     /// `DELETE /v1/sandboxes/by-name/:name`. Returns the typed `MessageResponse`
-    /// msb-cloud emits.
+    /// returned by the API.
     pub async fn destroy_sandbox(&self, name: &str) -> MicrosandboxResult<CloudMessageResponse> {
         let url = format!("{}/v1/sandboxes/by-name/{}", self.url, urlencoding(name));
         let resp = self
@@ -314,7 +315,7 @@ impl CloudBackend {
 
     /// Stream logs from `GET /v1/sandboxes/:id/logs`.
     ///
-    /// msb-cloud exposes logs as Server-Sent Events keyed by sandbox UUID, so
+    /// The API exposes logs as Server-Sent Events keyed by sandbox UUID, so
     /// the SDK resolves the current name to a cloud sandbox first. The cloud
     /// endpoint is streaming-only and requires a running sandbox, so callers
     /// must set `follow: true`.
@@ -515,7 +516,7 @@ impl CloudBackend {
 //--------------------------------------------------------------------------------------------------
 
 /// Parse a JSON response into `T`, mapping HTTP errors to typed
-/// `MicrosandboxError` variants. Tries to decode msb-cloud's typed error body
+/// `MicrosandboxError` variants. Tries to decode the cloud API's typed error body
 /// for richer messages on 4xx/5xx.
 pub(super) async fn decode_json<T: serde::de::DeserializeOwned>(
     resp: Response,
@@ -583,6 +584,10 @@ pub(super) fn cloud_http_error(
             return MicrosandboxError::SnapshotNotFound(message);
         }
         Some("volume_not_found") => return MicrosandboxError::VolumeNotFound(message),
+        Some("service_not_found") => return MicrosandboxError::ServiceNotFound(message),
+        Some("service_already_exists") => {
+            return MicrosandboxError::ServiceAlreadyExists(message);
+        }
         Some("volume_file_not_found") => return MicrosandboxError::SandboxFsOps(message),
         Some("snapshot_name_already_exists") | Some("snapshot_already_exists") => {
             return MicrosandboxError::SnapshotAlreadyExists(message);
@@ -612,6 +617,7 @@ pub(super) fn cloud_http_error(
             MicrosandboxError::SnapshotNotFound(message)
         }
         404 if op.contains("/v1/volumes") => MicrosandboxError::VolumeNotFound(message),
+        404 if op.contains("/v1/services") => MicrosandboxError::ServiceNotFound(message),
         404 => MicrosandboxError::SandboxNotFound(message),
         409 if op == "POST /v1/sandboxes" => MicrosandboxError::SandboxAlreadyExists(message),
         409 if op == "POST /v1/volumes" => MicrosandboxError::VolumeAlreadyExists(message),
@@ -913,7 +919,7 @@ mod tests {
             r#"{"error":{"code":"modification_unsupported","message":"secrets: not supported"}}"#,
         )
         .unwrap();
-        let op = "PUT /v1/sandboxes/:id";
+        let op = "PATCH /v1/sandboxes/:id";
 
         assert!(matches!(
             cloud_http_error(409, Some(&unsupported), "", op),

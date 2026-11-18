@@ -1,11 +1,11 @@
 //! Backend abstraction: routes SDK calls to either a local libkrun runtime or
-//! a remote msb-cloud control plane.
+//! the remote cloud API.
 //!
 //! The [`Backend`] trait + its sub-traits ([`SandboxBackend`], `VolumeBackend`,
 //! `SnapshotBackend`) are the dispatch surface every SDK handle (`Sandbox`,
 //! `Volume`, `ExecHandle`, …) routes through. Two implementations are planned:
 //! [`LocalBackend`] (wraps today's libkrun + agentd path) and `CloudBackend`
-//! (HTTP to msb-cloud, lives in this crate once the cloud-side wire surface is
+//! (HTTP to the cloud API, lives in this crate once the cloud-side wire surface is
 //! complete).
 //!
 //! ## Ambient default
@@ -35,6 +35,7 @@ pub(crate) use local::ControlSession;
 mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
+pub(crate) mod service;
 pub(crate) mod snapshot;
 pub(crate) mod volume;
 
@@ -50,8 +51,10 @@ pub use local::snapshot_downgrade as local_snapshot_downgrade;
 #[cfg(feature = "local")]
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
+    CloudErrorBody, CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudSandboxStatusReason, CloudService, CloudServiceStatus, CloudServiceTarget,
+    CloudUpdateServiceRequest,
 };
 pub use profile::{Profile, ProfileBackend, resolve_default_backend};
 pub use sandbox::{
@@ -59,6 +62,7 @@ pub use sandbox::{
     SandboxIdentity, SandboxInner,
 };
 pub use sandbox::{SandboxHandleLocalState, SandboxLocalState};
+pub use service::ServiceBackend;
 pub use snapshot::SnapshotBackend;
 pub use volume::{
     CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
@@ -81,7 +85,7 @@ use serde::{Deserialize, Serialize};
 pub enum BackendKind {
     /// Local libkrun + agentd backend. Spawns microVMs on the calling host.
     Local,
-    /// Remote backend talking to an msb-cloud control plane over HTTP.
+    /// Remote backend talking to the cloud API over HTTP.
     Cloud,
 }
 
@@ -313,6 +317,10 @@ mod tests {
             fn snapshots(&self) -> &dyn SnapshotBackend {
                 unimplemented!("fake backend only tests kind routing")
             }
+
+            fn services(&self) -> &dyn ServiceBackend {
+                unreachable!("fake backend only tests kind routing")
+            }
         }
         let fake: Arc<dyn Backend> = Arc::new(Fake(BackendKind::Cloud));
         let observed = with_backend(fake, async { default_backend().kind() }).await;
@@ -343,6 +351,10 @@ mod tests {
 
             fn snapshots(&self) -> &dyn SnapshotBackend {
                 unimplemented!("fake backend only tests kind routing")
+            }
+
+            fn services(&self) -> &dyn ServiceBackend {
+                unreachable!("fake backend only tests kind routing")
             }
         }
 

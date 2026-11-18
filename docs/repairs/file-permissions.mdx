@@ -1,0 +1,29 @@
+---
+title: "Repair file permissions"
+sidebarTitle: "File permissions"
+description: "Tighten permissions on local sandbox files created by older macOS and Linux runtimes."
+---
+
+On macOS and Linux, runtimes through v0.7.15 could create host-managed files with overly broad permissions, allowing other host accounts to change them when the parent directories were accessible.
+
+<Note>
+The fix and permission repair are not yet released. They require an SDK/CLI and runtime containing the umask security fix, including any pinned runtime.
+</Note>
+
+## Repair existing files
+
+After installing the fixed build, run this in a terminal:
+
+```bash
+msb self repair
+```
+
+Select the affected sandboxes and follow the prompts. Press `r` to show sandboxes whose storage is already ready; they can still need permission repair. To target one directly, use `msb self repair --sandbox app`. Repair asks before stopping a blocking VM and leaves repaired sandboxes stopped. Restart each one with the updated runtime, for example `msb start app`.
+
+Updating binaries alone does not tighten existing files. Repair also applies to sandboxes that already completed storage migration.
+
+## What repair changes
+
+Repair makes recognized host-managed state owner-only and clears its ACLs, including intentional sharing. Guest files, directory-volume data, external mounts, shared caches, and unknown paths are left alone. It does not recursively change everything in `MSB_HOME`.
+
+Shared files it cannot safely change require investigation. Keep the files and copy the diagnostic report for the [maintainers](https://github.com/superradcompany/microsandbox/issues); nothing is submitted automatically. Repair cannot detect or undo earlier tampering.

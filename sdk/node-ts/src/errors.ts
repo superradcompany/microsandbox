@@ -26,6 +26,9 @@ export type MicrosandboxErrorCode =
   | "imageInUse"
   | "volumeNotFound"
   | "volumeAlreadyExists"
+  | "serviceNotFound"
+  | "serviceAlreadyExists"
+  | "service"
   | "image"
   | "patchFailed"
   | "snapshotSourceRecovery"
@@ -36,12 +39,22 @@ export type MicrosandboxErrorCode =
   | "modificationNotConfirmed"
   | "custom";
 
+/** Whether a failed Service change may have been applied. */
+export type ChangeState = "unchanged" | "unknown";
+
+interface ChangeErrorOptions extends ErrorOptions {
+  changed?: ChangeState;
+}
+
 export class MicrosandboxError extends Error {
   readonly code: MicrosandboxErrorCode;
+  /** Present when this error was returned by a Service change. */
+  readonly changed?: ChangeState;
 
   constructor(code: MicrosandboxErrorCode, message: string, options?: ErrorOptions) {
     super(message, options);
     this.code = code;
+    this.changed = (options as ChangeErrorOptions | undefined)?.changed;
     this.name = new.target.name;
   }
 }
@@ -210,6 +223,82 @@ export class VolumeAlreadyExistsError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("volumeAlreadyExists", message, options);
   }
+}
+
+/** No visible Service has this slug. */
+export class ServiceNotFoundError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("serviceNotFound", message, options);
+  }
+}
+
+/** The slug is unavailable. */
+export class ServiceAlreadyExistsError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("serviceAlreadyExists", message, options);
+  }
+}
+
+/**
+ * Why a Service change did not complete. `"other"` is unrecognized; `changed` still reports
+ * the outcome.
+ */
+export type ServiceErrorReason =
+  | "serviceQuotaExceeded"
+  | "sandboxServiceLimitExceeded"
+  | "serviceConflict"
+  | "serviceDetached"
+  | "targetUnreachable"
+  | "sandboxNotRunning"
+  | "serviceChangesPaused"
+  | "outcomeUnknown"
+  | "other";
+
+/** Details reported with a Service change error. */
+export interface ServiceErrorDetails {
+  /** Slug of the Service the change addressed. */
+  readonly slug: string;
+  readonly reason: ServiceErrorReason;
+  /** Retry delay returned with the refusal, in milliseconds, or `null`. */
+  readonly retryAfterMs: number | null;
+  readonly changed: ChangeState;
+  /** Raw refusal code when `reason` is `"other"`, otherwise `null`. */
+  readonly rawCode: string | null;
+  /** Raw HTTP status when `reason` is `"other"`, otherwise `null`. */
+  readonly rawStatus: number | null;
+  /** Raw refusal message when `reason` is `"other"`, otherwise `null`. */
+  readonly rawMessage: string | null;
+}
+
+/** A Service change was refused, or its outcome is unknown. */
+export class ServiceError extends MicrosandboxError {
+  readonly slug: string;
+  readonly reason: ServiceErrorReason;
+  readonly retryAfterMs: number | null;
+  override readonly changed: ChangeState;
+  readonly rawCode: string | null;
+  readonly rawStatus: number | null;
+  readonly rawMessage: string | null;
+
+  constructor(
+    message: string,
+    details: ServiceErrorDetails,
+    options?: ErrorOptions,
+  ) {
+    super("service", message, withChangeState(options, details.changed));
+    this.slug = details.slug;
+    this.reason = details.reason;
+    this.retryAfterMs = details.retryAfterMs;
+    this.changed = details.changed;
+    this.rawCode = details.rawCode;
+    this.rawStatus = details.rawStatus;
+    this.rawMessage = details.rawMessage;
+  }
+}
+
+function withChangeState(options: ErrorOptions | undefined, changed: ChangeState): ErrorOptions {
+  const changeOptions: ChangeErrorOptions = { ...options, changed };
+  return changeOptions;
 }
 
 export class ImageError extends MicrosandboxError {
