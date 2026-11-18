@@ -4,108 +4,130 @@
 //! ClientHello message to determine which domain the guest is connecting to.
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// A complete ClientHello, which may omit the server name.
+pub(super) struct ClientHello {
+    /// The wire hostname, before DNS-name validation.
+    pub server_name: Option<String>,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Extract the SNI hostname from a TLS ClientHello message.
-///
-/// `data` should contain at least the TLS record header and the ClientHello.
-/// Returns `None` if the data is not a valid ClientHello or has no SNI.
+/// Extract the SNI hostname from a buffered TLS ClientHello.
+/// Returns `None` for incomplete or malformed messages, or an absent SNI.
 pub fn extract_sni(data: &[u8]) -> Option<String> {
-    // TLS record header: type(1) + version(2) + length(2).
-    if data.len() < 5 {
-        return None;
-    }
-    if data[0] != 0x16 {
-        return None; // Not a Handshake record.
-    }
+    // Policy peeking has always used the first SNI. A later malformed or
+    // duplicate extension must not erase or replace that policy evidence.
+    parse_client_hello_inner(data, true)?.server_name
+}
 
-    let record_len = u16::from_be_bytes([data[3], data[4]]) as usize;
-    let record_end = 5usize.checked_add(record_len)?;
-    let record = data.get(5..record_end)?;
+/// Peek at a complete ClientHello without requiring rustls-compatible ciphers
+/// or extensions. Bypass forwards legacy TLS without terminating it.
+pub(super) fn parse_client_hello(data: &[u8]) -> Option<ClientHello> {
+    parse_client_hello_inner(data, false)
+}
 
-    // Handshake header: type(1) + length(3).
-    if record.first() != Some(&0x01) {
-        return None; // Not ClientHello.
+fn parse_client_hello_inner(mut data: &[u8], first_name_only: bool) -> Option<ClientHello> {
+    let mut handshake = Vec::new();
+    loop {
+        let header = data.get(..5)?;
+        if header[0] != 0x16 || header[1] != 3 {
+            return None;
+        }
+        let record_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let record_end = 5 + record_len;
+        handshake.extend_from_slice(data.get(5..record_end)?);
+        data = &data[record_end..];
+        if handshake.len() < 4 {
+            continue;
+        }
+        if handshake[0] != 1 {
+            return None;
+        }
+        let length = ((handshake[1] as usize) << 16)
+            | ((handshake[2] as usize) << 8)
+            | handshake[3] as usize;
+        if handshake.len() >= 4 + length {
+            return parse_hello_body(&handshake[4..4 + length], first_name_only);
+        }
     }
-    if record.len() < 4 {
-        return None;
-    }
-    let hs_len = (record[1] as usize) << 16 | (record[2] as usize) << 8 | (record[3] as usize);
-    let hello_end = 4usize.checked_add(hs_len)?;
-    let hello = record.get(4..hello_end)?;
+}
 
-    // ClientHello: version(2) + random(32) = 34 bytes.
-    if hello.len() < 34 {
-        return None;
-    }
+fn parse_hello_body(hello: &[u8], first_name_only: bool) -> Option<ClientHello> {
+    // Version and random, then length-prefixed session ID, cipher suites,
+    // and compression methods. Extensions are optional in legacy TLS.
     let mut pos = 34;
-
-    // Session ID.
     let session_id_len = *hello.get(pos)? as usize;
     pos += 1 + session_id_len;
-
-    // Cipher suites.
-    if pos + 2 > hello.len() {
-        return None;
+    let cipher_len = hello.get(pos..pos + 2)?;
+    pos += 2 + u16::from_be_bytes([cipher_len[0], cipher_len[1]]) as usize;
+    let compression_len = *hello.get(pos)? as usize;
+    pos += 1 + compression_len;
+    if pos == hello.len() {
+        return Some(ClientHello { server_name: None });
     }
-    let cipher_suites_len = u16::from_be_bytes([hello[pos], hello[pos + 1]]) as usize;
-    pos += 2 + cipher_suites_len;
-
-    // Compression methods.
-    let comp_len = *hello.get(pos)? as usize;
-    pos += 1 + comp_len;
-
-    // Extensions.
-    if pos + 2 > hello.len() {
-        return None;
-    }
-    let extensions_len = u16::from_be_bytes([hello[pos], hello[pos + 1]]) as usize;
+    let length = hello.get(pos..pos + 2)?;
     pos += 2;
-
-    let extensions_end = pos.checked_add(extensions_len)?;
-    while pos + 4 <= extensions_end && pos + 4 <= hello.len() {
-        let ext_type = u16::from_be_bytes([hello[pos], hello[pos + 1]]);
-        let ext_len = u16::from_be_bytes([hello[pos + 2], hello[pos + 3]]) as usize;
-        pos += 4;
-
-        if ext_type == 0x0000 {
-            // SNI extension.
-            let ext_end = pos.checked_add(ext_len)?;
-            return parse_sni_extension(hello.get(pos..ext_end)?);
-        }
-
-        pos = pos.checked_add(ext_len)?;
+    let end = pos + u16::from_be_bytes([length[0], length[1]]) as usize;
+    if !first_name_only && end != hello.len() {
+        return None;
     }
-
-    None
+    let mut server_name = None;
+    while pos + 4 <= end && pos + 4 <= hello.len() {
+        let header = hello.get(pos..pos + 4)?;
+        let kind = u16::from_be_bytes([header[0], header[1]]);
+        let length = u16::from_be_bytes([header[2], header[3]]) as usize;
+        pos += 4;
+        let extension = hello.get(pos..pos + length)?;
+        if kind == 0 {
+            if server_name.is_some() {
+                return None;
+            }
+            server_name = Some(parse_sni_extension(extension, first_name_only)?);
+            if first_name_only {
+                return Some(ClientHello { server_name });
+            }
+        }
+        pos += length;
+    }
+    if !first_name_only && pos != end {
+        return None;
+    }
+    Some(ClientHello { server_name })
 }
 
 /// Parse the SNI extension data to extract the hostname.
-fn parse_sni_extension(data: &[u8]) -> Option<String> {
-    // ServerNameList: length(2) + entries.
-    if data.len() < 2 {
+fn parse_sni_extension(data: &[u8], first_name_only: bool) -> Option<String> {
+    let length = data.get(..2)?;
+    let list_len = u16::from_be_bytes([length[0], length[1]]) as usize;
+    if !first_name_only && list_len != data.len() - 2 {
         return None;
     }
-    let list_len = u16::from_be_bytes([data[0], data[1]]) as usize;
-    let list = data.get(2..2 + list_len)?;
-
-    let mut pos = 0;
-    while pos + 3 <= list.len() {
-        let name_type = list[pos];
-        let name_len = u16::from_be_bytes([list[pos + 1], list[pos + 2]]) as usize;
-        pos += 3;
-
-        if name_type == 0x00 {
-            // HostName.
-            let name_bytes = list.get(pos..pos + name_len)?;
-            return String::from_utf8(name_bytes.to_vec()).ok();
+    let mut list = data.get(2..2 + list_len)?;
+    let mut server_name = None;
+    while !list.is_empty() {
+        let header = list.get(..3)?;
+        let name_len = u16::from_be_bytes([header[1], header[2]]) as usize;
+        let name = list.get(3..3 + name_len)?;
+        if header[0] == 0 {
+            if server_name.is_some() {
+                return None;
+            }
+            server_name = Some(String::from_utf8(name.to_vec()).ok()?);
+            if first_name_only {
+                return server_name;
+            }
+        } else if !first_name_only {
+            // rustls only supports host_name entries in ServerNameList.
+            return None;
         }
-
-        pos += name_len;
+        list = &list[3 + name_len..];
     }
-
-    None
+    server_name
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -231,5 +253,101 @@ mod tests {
         }
 
         assert_eq!(extract_sni(&hello), Some("example.com".to_string()));
+    }
+    #[test]
+    fn complete_hello_without_sni_is_distinct_from_incomplete() {
+        let named = build_client_hello("example.com");
+        // No extensions (legacy), an empty extension block, and an unknown
+        // extension are all complete hellos with no server name.
+        for (kind, extensions) in [
+            ("absent", None),
+            ("empty", Some(Vec::new())),
+            ("unknown", Some(vec![0x12, 0x34, 0, 2, 7, 8])),
+        ] {
+            let mut hello = named[..50].to_vec();
+            if let Some(extensions) = extensions {
+                hello.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+                hello.extend_from_slice(&extensions);
+            }
+            patch_hello_lengths(&mut hello);
+            for end in 0..hello.len() {
+                assert!(
+                    parse_client_hello(&hello[..end]).is_none(),
+                    "{kind}: prefix={end}"
+                );
+            }
+            assert!(parse_client_hello(&hello).unwrap().server_name.is_none());
+        }
+    }
+
+    #[test]
+    fn every_record_split_preserves_name_and_requires_complete_input() {
+        let hello = build_client_hello("example.com");
+        for split in 1..hello.len() - 5 {
+            let mut wire = Vec::new();
+            for body in [&hello[5..5 + split], &hello[5 + split..]] {
+                wire.extend_from_slice(&hello[..3]);
+                wire.extend_from_slice(&(body.len() as u16).to_be_bytes());
+                wire.extend_from_slice(body);
+            }
+            for end in 0..wire.len() {
+                assert!(
+                    parse_client_hello(&wire[..end]).is_none(),
+                    "split={split}, prefix={end}"
+                );
+            }
+            assert_eq!(
+                parse_client_hello(&wire).unwrap().server_name.as_deref(),
+                Some("example.com")
+            );
+            assert_eq!(extract_sni(&wire).as_deref(), Some("example.com"));
+            // Later records are not part of the ClientHello being inspected.
+            wire.extend_from_slice(&[0x17, 3, 3, 0, 3, 1, 2, 3]);
+            assert_eq!(extract_sni(&wire).as_deref(), Some("example.com"));
+        }
+    }
+
+    #[test]
+    fn malformed_lengths_and_record_headers_are_rejected() {
+        let hello = build_client_hello("example.com");
+        // Wire offsets in this fixture: record length, handshake length,
+        // session ID length, ciphers length, compression length, extensions
+        // length, SNI extension length, name-list length, hostname length.
+        for (offset, replacement) in [
+            (0, vec![0x17]),
+            (1, vec![4]),
+            (5, vec![2]),
+            (3, vec![0xff, 0xff]),
+            (6, vec![0xff, 0xff, 0xff]),
+            (43, vec![0xff]),
+            (44, vec![0xff, 0xff]),
+            (48, vec![0xff]),
+            (50, vec![0xff, 0xff]),
+            (54, vec![0xff, 0xff]),
+            (56, vec![0xff, 0xff]),
+            (59, vec![0xff, 0xff]),
+        ] {
+            let mut malformed = hello.clone();
+            malformed[offset..offset + replacement.len()].copy_from_slice(&replacement);
+            assert!(parse_client_hello(&malformed).is_none(), "offset={offset}");
+        }
+        // Unknown SNI name types and an empty name list must reach the
+        // validating TLS decoder, not be mistaken for an absent extension.
+        let mut unknown = hello.clone();
+        unknown[58] = 1;
+        assert!(parse_client_hello(&unknown).is_none());
+        let mut empty = hello[..58].to_vec();
+        empty[50..52].copy_from_slice(&6u16.to_be_bytes());
+        empty[54..56].copy_from_slice(&2u16.to_be_bytes());
+        empty[56..58].copy_from_slice(&0u16.to_be_bytes());
+        patch_hello_lengths(&mut empty);
+        assert!(parse_client_hello(&empty).is_none());
+    }
+
+    fn patch_hello_lengths(hello: &mut [u8]) {
+        let record = (hello.len() - 5) as u16;
+        let handshake = (hello.len() - 9) as u32;
+        hello[3..5].copy_from_slice(&record.to_be_bytes());
+        hello[6..9].copy_from_slice(&handshake.to_be_bytes()[1..]);
     }
 }

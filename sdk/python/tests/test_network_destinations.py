@@ -120,6 +120,11 @@ def test_network_profile_convenience_serializes_as_custom_policy() -> None:
     assert "policy" not in network._to_dict()
 
 
+def test_network_serializes_nat64_prefixes() -> None:
+    network = Network(nat64_prefixes=("2001:db8:64::/96",))
+    assert network._to_dict()["nat64_prefixes"] == ["2001:db8:64::/96"]
+
+
 def test_removed_string_presets_fail_with_migration_guidance() -> None:
     try:
         Network(policy="public_only")._to_dict()  # type: ignore[arg-type]
@@ -148,3 +153,9 @@ def test_unrelated_string_enum_is_not_a_destination_shorthand() -> None:
 
     with pytest.raises(TypeError, match=r"Rule\.destination"):
         policy._to_dict()
+
+
+def test_network_preserves_positional_connection_limit() -> None:
+    network = Network(None, {}, (), (), None, None, True, None, None, 25)
+    with pytest.warns(DeprecationWarning, match="max_connections"):
+        assert network._to_dict()["max_tcp_connections"] == 25

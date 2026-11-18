@@ -43,6 +43,9 @@ pub struct BootError {
     pub stage: BootErrorStage,
     /// Operating-system error number, when one was available.
     pub errno: Option<i32>,
+    /// Typed guest startup failure used for actionable hints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<super::InitFailureReason>,
     /// Human-readable failure message.
     pub message: String,
 }
@@ -118,6 +121,12 @@ impl LogOptions {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::LogSource;
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -161,9 +170,3 @@ mod tests {
         assert_eq!(entries.len(), 2);
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub use microsandbox_types::LogSource;

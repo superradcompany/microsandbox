@@ -41,18 +41,20 @@ type CreationResult struct {
 // Always receive the result and close its Sandbox when finished. Ignoring progress never
 // delays or cancels creation. Cancel ctx to cancel creation, not just observation.
 func CreateSandboxWithProgress(ctx context.Context, name string, opts ...SandboxOption) (<-chan CreationProgress, <-chan CreationResult) {
+	config := SandboxConfig{}
+	for _, opt := range opts {
+		opt(&config)
+	}
+	if err := prepareSandboxCreateConfig(&config); err != nil {
+		events := make(chan CreationProgress)
+		results := make(chan CreationResult, 1)
+		results <- CreationResult{Err: err}
+		close(events)
+		close(results)
+		return events, results
+	}
 	return sandboxWithProgress(ctx, func(id uint64) (*ffi.Sandbox, error) {
-		config := SandboxConfig{}
-		for _, opt := range opts {
-			opt(&config)
-		}
-		if err := resolveRegistryCACertPaths(&config); err != nil {
-			return nil, err
-		}
 		options := buildFFICreateOptions(config)
-		if err := validateOwnedMounts(config.Volumes); err != nil {
-			return nil, err
-		}
 		options.CreationProgress = id
 		return ffi.CreateSandbox(ctx, name, options)
 	})

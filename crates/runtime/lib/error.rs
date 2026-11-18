@@ -29,6 +29,15 @@ pub enum RuntimeError {
     #[cfg(unix)]
     Nix(#[from] nix::errno::Errno),
 
+    /// A guest initialization failure received before readiness.
+    #[error("guest initialization failed: {message}")]
+    GuestInitialization {
+        /// Diagnostic text supplied by the guest.
+        message: String,
+        /// Typed configuration failure, when the guest can identify it.
+        reason: Option<microsandbox_protocol::core::InitFailureReason>,
+    },
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),

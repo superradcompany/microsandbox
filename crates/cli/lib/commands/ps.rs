@@ -3,7 +3,7 @@
 use clap::Args;
 use microsandbox::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxStatus};
 
-use crate::ui;
+use crate::ui::{self, OutputFormat};
 
 use super::common;
 
@@ -27,8 +27,8 @@ pub struct PsArgs {
     pub label: Vec<String>,
 
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 
     /// Show only sandbox names.
     #[arg(short, long)]
@@ -66,7 +66,7 @@ pub async fn run(args: PsArgs) -> anyhow::Result<()> {
         sandboxes
     };
 
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         print_json(&handles, single)?;
         return Ok(());
     }

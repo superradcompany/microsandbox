@@ -1,6 +1,7 @@
 package microsandbox
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -16,19 +17,19 @@ func TestWithImage(t *testing.T) {
 }
 
 func TestBranchIntegrityOption(t *testing.T) {
-	var options BranchOptions
-	if options.RecordIntegrity {
+	var options forkOptions
+	if options.recordIntegrity {
 		t.Fatal("branch integrity must be opt-in")
 	}
-	WithBranchIntegrity()(&options)
-	if !options.RecordIntegrity {
+	WithForkIntegrity()(&options)
+	if !options.recordIntegrity {
 		t.Fatal("explicit branch integrity option was lost")
 	}
 }
 
 func TestDedicatedRestoreOptions(t *testing.T) {
 	var config RestoreConfig
-	WithForked()(&config)
+	WithCowMemory()(&config)
 	WithExternalMountPolicy(ExternalMountRelaxed)(&config)
 	WithAllowMissingResources()(&config)
 	wire := buildFFIRestoreOptions("saved", config)
@@ -40,6 +41,32 @@ func TestDedicatedRestoreOptions(t *testing.T) {
 		if _, ok := typ.FieldByName(name); ok {
 			t.Fatalf("creation still exposes %s", name)
 		}
+	}
+}
+
+func TestRestoreCowMemoryAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config RestoreConfig
+		option RestoreOption
+		want   bool
+	}{
+		{"default", RestoreConfig{}, nil, false},
+		{"canonical option", RestoreConfig{}, WithCowMemory(), true},
+		{"legacy option", RestoreConfig{}, WithForked(), true},
+		{"canonical field", RestoreConfig{CowMemory: true}, nil, true},
+		{"legacy field", RestoreConfig{Forked: true}, nil, true},
+		{"both fields", RestoreConfig{CowMemory: true, Forked: true}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := tc.config
+			if tc.option != nil {
+				tc.option(&config)
+			}
+			if got := buildFFIRestoreOptions("saved", config).Forked; got != tc.want {
+				t.Fatalf("wire CoW memory = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -434,6 +461,13 @@ func TestSOCKS5ProxyCredentials(t *testing.T) {
 	}
 }
 
+func TestHTTPConnectProxyCredentials(t *testing.T) {
+	proxy := HTTPConnectProxy("127.0.0.1:3128").Credentials("sandbox", SecretSourceEnv("HTTP_CONNECT_PASSWORD"))
+	if proxy.protocol != "http_connect" || proxy.username != "sandbox" || proxy.password.kind != "env" || proxy.password.varName != "HTTP_CONNECT_PASSWORD" || !proxy.hasCredentials {
+		t.Fatalf("HTTPConnectProxy credentials: got %+v", proxy)
+	}
+}
+
 func TestNetworkPolicyFactory(t *testing.T) {
 	if got := NetworkPolicy.None(); got.DefaultEgress != PolicyActionDeny || got.DefaultIngress != PolicyActionDeny {
 		t.Fatalf("None defaults = %q/%q", got.DefaultEgress, got.DefaultIngress)
@@ -534,6 +568,9 @@ func TestSecretEnvFactory(t *testing.T) {
 		Allow:              []string{"a.com", "b.com", "*.corp"},
 		Placeholder:        "$TOK",
 		RequireTLSIdentity: &rt,
+		Substitution: SecretSubstitution{
+			HeaderFields: []string{"authorization"},
+		},
 	})
 	if s.EnvVar != "TOK" || s.Value != "val" {
 		t.Errorf("EnvVar/Value: got %q/%q", s.EnvVar, s.Value)
@@ -549,6 +586,9 @@ func TestSecretEnvFactory(t *testing.T) {
 	}
 	if s.RequireTLSIdentity == nil || !*s.RequireTLSIdentity {
 		t.Error("RequireTLSIdentity should be true")
+	}
+	if len(s.Substitution.HeaderFields) != 1 || s.Substitution.HeaderFields[0] != "authorization" {
+		t.Errorf("Substitution.HeaderFields: got %v", s.Substitution.HeaderFields)
 	}
 }
 
@@ -890,6 +930,20 @@ func TestWithRegistryAuth(t *testing.T) {
 	}
 }
 
+func TestWithRegistryAnonymous(t *testing.T) {
+	o := SandboxConfig{}
+	WithRegistryAuth(RegistryAuth{Username: "u", Password: "p"})(&o)
+	WithRegistryAnonymous()(&o)
+	if !o.registryAnonymous || o.RegistryAuth != nil {
+		t.Errorf("anonymous registry selection: got %+v", o)
+	}
+
+	WithRegistryAuth(RegistryAuth{Username: "u", Password: "p"})(&o)
+	if o.registryAnonymous || o.RegistryAuth == nil {
+		t.Errorf("basic registry selection: got %+v", o)
+	}
+}
+
 func TestWithRegistryInsecure(t *testing.T) {
 	o := SandboxConfig{}
 	WithRegistryInsecure()(&o)
@@ -1081,5 +1135,51 @@ func TestSandboxConfigCompose(t *testing.T) {
 	}
 	if o.Env["DEBUG"] != "true" {
 		t.Errorf("Env[DEBUG]: got %q", o.Env["DEBUG"])
+	}
+}
+
+func TestForkOptionsKeepBranchAliases(t *testing.T) {
+	var canonical forkOptions
+	var legacy forkOptions
+	WithForkIntegrity()(&canonical)
+	WithForkGuestFlush(GuestFlushRequired)(&canonical)
+	WithBranchIntegrity()(&legacy)
+	WithBranchGuestFlush(GuestFlushRequired)(&legacy)
+	if !reflect.DeepEqual(canonical, legacy) {
+		t.Fatalf("legacy options differ: %#v versus %#v", canonical, legacy)
+	}
+	// Deprecated option aliases remain assignable to the fork method types.
+	var _ func(*Sandbox, context.Context, string, ...BranchOption) (*Sandbox, error) = (*Sandbox).Fork
+	var _ func(*SandboxHandle, context.Context, []string, ...BranchOption) ([]BranchOutcome, error) = (*SandboxHandle).ForkMany
+	if _, ok := reflect.TypeOf(RestoreConfig{}).FieldByName("Forked"); !ok {
+		t.Fatal("restore lost the deprecated Forked field")
+	}
+}
+
+func TestWithInterceptTLSPreservesNetworkWithoutMutatingInput(t *testing.T) {
+	original := NetworkConfig{DefaultEgress: PolicyActionDeny, DenyDomains: []string{"blocked.example"}}
+	var config SandboxConfig
+	WithNetwork(&original)(&config)
+	WithInterceptTLS()(&config)
+	WithInterceptTLS()(&config)
+
+	wire := buildFFINetwork(config.Network)
+	if wire.TLS == nil || config.Network.DefaultEgress != PolicyActionDeny || !reflect.DeepEqual(config.Network.DenyDomains, original.DenyDomains) {
+		t.Fatal("TLS shortcut lost network policy or did not enable interception")
+	}
+	if original.TLS != nil {
+		t.Fatal("TLS shortcut mutated the caller's network configuration")
+	}
+
+	original.TLS = &TLSConfig{Bypass: []string{"pinned.example"}, CACert: "/test/ca.pem", CAKey: "/test/ca.key"}
+	WithNetwork(&original)(&config)
+	WithInterceptTLS()(&config)
+	if !reflect.DeepEqual(buildFFINetwork(config.Network).TLS, buildFFINetwork(&original).TLS) {
+		t.Fatal("TLS shortcut reset existing TLS settings")
+	}
+
+	WithNetwork(&NetworkConfig{})(&config)
+	if buildFFINetwork(config.Network).TLS != nil {
+		t.Fatal("later network configuration did not replace TLS settings")
 	}
 }

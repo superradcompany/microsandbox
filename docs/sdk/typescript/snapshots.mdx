@@ -1,18 +1,23 @@
 ---
 title: Snapshots
-description: TypeScript SDK - Snapshot API reference
+"og:title": TypeScript SDK Snapshots reference
+description: Create snapshots, fork sandboxes, and restore snapshots with the TypeScript SDK.
 keywords: ["TypeScript SDK", "TypeScript snapshots", "microsandbox snapshots"]
 ---
 
-<Tooltip tip="Cloud supports disk capture from stopped or crashed sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk capture from stopped persistent sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
+See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
 
 Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
 ## Guest writeback
 
-Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.branch`, `source.branchMany`, and `source.pause` options. The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `"skip"` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
+Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.fork`, `source.forkMany`, and `source.pause` options.
+
+The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `"skip"` retains mandatory storage barriers.
+
+A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
 ## Snapshot
 
@@ -405,7 +410,7 @@ With divergent tips, the existing head stays selected; a new group has no head. 
 snapshot(name: string): Promise<Snapshot>
 ```
 
-Snapshot this sandbox into its default group with the given member name. Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). Live disk captures preserve the source's running or paused state. Use the returned artifact path or `sandbox:member` to open it later.
+Snapshot this sandbox into its default group with the given member name. Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). Local live disk captures preserve the source's running or paused state. Cloud requires a stopped persistent source. Use the returned artifact path or `sandbox:member` to open it later.
 
 <p className="msb-label">Parameters</p>
 
@@ -445,127 +450,91 @@ that created or opened it. Returned by [`Snapshot.builder().create()`](#snapshot
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">id</span>
 
-```typescript
-get id(): string
-```
+`string`
 
 Stable opaque `snap_...` identity, separate from the descriptor digest.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">path</span>
 
-```typescript
-get path(): string
-```
+`string`
 
 Local artifact directory. Throws `UnsupportedError` for cloud snapshots; use the snapshot object or its typed reference for backend-neutral operations.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">reference</span>
 
-```typescript
-get reference(): string
-```
+`string`
 
 Stable backend-relative value. Pass the snapshot object to `Sandbox.restore(snapshot)` to preserve both this value and its reference kind.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">referenceKind</span>
 
-```typescript
-get referenceKind(): "id" | "path"
-```
+`"id" \| "path"`
 
-How the selected backend resolves `reference`. Most callers can pass the
-snapshot object directly and never inspect this value.
+How the selected backend resolves `reference`. Most callers can pass the snapshot object directly and never inspect this value.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">digest</span>
 
-```typescript
-get digest(): string
-```
+`string`
 
 Canonical descriptor digest (`sha256:hex`), separate from the stable snapshot ID.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">sizeBytes</span>
 
-```typescript
-get sizeBytes(): bigint | null
-```
+`bigint \| null`
 
 Backend-reported stored payload size in bytes, or `null` when unavailable.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">imageRef</span>
 
-```typescript
-get imageRef(): string
-```
+`string`
 
 Image reference the snapshot was taken from.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">imageManifestDigest</span>
 
-```typescript
-get imageManifestDigest(): string
-```
+`string`
 
 OCI manifest digest of the pinned image.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">format</span>
 
-```typescript
-get format(): "raw" | "qcow2" | null
-```
+`"raw" \| "qcow2" \| null`
 
 On-disk format of the upper layer.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">scope</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
-```typescript
-get scope(): SnapshotScope
-```
+`SnapshotScope`
 
 Snapshot scope: `"disk"` for a disk-only snapshot or `"full"` for disk plus VM execution state. See [`SnapshotScope`](#snapshotscope-type).
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">fstype</span>
 
-```typescript
-get fstype(): string | null
-```
+`string \| null`
 
 Filesystem type inside the upper (e.g. `"ext4"`).
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">parent</span>
 
-```typescript
-get parent(): string | null
-```
+`string \| null`
 
 Manifest digest of the parent snapshot, or `null` for a root.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">createdAt</span>
 
-```typescript
-get createdAt(): string
-```
+`string`
 
 RFC 3339 timestamp when the snapshot was created.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">labels</span>
 
-```typescript
-get labels(): ReadonlyArray<readonly [string, string]>
-```
+`ReadonlyArray<readonly [string, string]>`
 
 User-supplied labels (sorted by key in canonical form), as `[key, value]` pairs.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">sourceSandbox</span>
 
-```typescript
-get sourceSandbox(): string | null
-```
+`string \| null`
 
 Best-effort source-sandbox name, if recorded. `null` when the manifest has no source recorded.
 
@@ -729,17 +698,13 @@ await h.remove({ force: false });     // refuse if it has children
 </Accordion>
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">reference</span>
 
-```typescript
-get reference(): string
-```
+`string`
 
 Backend-relative snapshot reference.
 
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">referenceKind</span>
 
-```typescript
-get referenceKind(): "id" | "path"
-```
+`"id" \| "path"`
 
 How the backend resolves the reference.
 
@@ -776,7 +741,7 @@ Set the sandbox to capture. Required; [`.create()`](#create) fails without it.
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>sourceSandbox</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Name of the source sandbox. Disk capture supports running, paused, stopped, and crashed sources.</div>
+    <div className="msb-param-desc">Name of the source sandbox. Local disk capture supports running, paused, stopped, and crashed sources. Cloud requires a stopped persistent source.</div>
   </div>
 </div>
 
@@ -854,7 +819,7 @@ Compute and record a content-integrity hash of the upper layer at creation time,
 full(): this
 ```
 
-Capture disk, memory, and execution state. The source must be running or paused and returns to that state after capture.
+Local-only: capture disk, memory, and execution state. The source must be running or paused and returns to that state after capture.
 
 ---
 
@@ -864,7 +829,7 @@ Capture disk, memory, and execution state. The source must be running or paused 
 guestFlush(policy: GuestFlush): this
 ```
 
-Select guest writeback before capture. `GuestFlush` is `"auto" | "required" | "skip"`; defaults to `"auto"`. See [guest writeback](#guest-writeback).
+Select the [guest writeback policy](/sandboxes/snapshots#guest-flushing) before capture. Defaults to `"auto"`. See [SDK usage](#guest-writeback).
 
 ---
 
@@ -907,6 +872,68 @@ and returns `this`.
 | `recordIntegrity(boolean)` | `this` | Compute integrity when true, or omit it when false |
 | `save()` | `Promise<void>` | Write the configured archive |
 
+## Forking
+
+Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `SandboxHandle` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
+
+### fork()
+
+```typescript
+fork(name: string, options?: ForkOptions): Promise<Sandbox>
+```
+
+<Accordion title="Example">
+
+```typescript
+const child = await sandbox.fork("experiment");
+try {
+  console.log((await child.exec("python", ["-V"])).stdout);
+} finally {
+  await child.stop();
+}
+```
+
+</Accordion>
+
+Create one child from the current execution state.
+
+### forkMany()
+
+```typescript
+forkMany(names: string[], options?: ForkOptions): Promise<ForkOutcome[]>
+```
+
+<Accordion title="Example">
+
+```typescript
+const outcomes = await sandbox.forkMany(["alice", "bob"]);
+for (const outcome of outcomes) {
+  if (outcome.sandbox) {
+    await outcome.sandbox.stop();
+  } else {
+    console.error(outcome.name, outcome.error);
+  }
+}
+```
+
+</Accordion>
+
+Capture once for all names and return outcomes in input order. Each outcome has `name` and either a started `sandbox` or an `error`. Validation or capture errors reject the whole call; a child startup error leaves successful siblings running. Stop successful children when finished.
+
+### ForkOptions
+
+```typescript
+interface ForkOptions {
+  recordIntegrity?: boolean;
+  guestFlush?: GuestFlush;
+  volumes?: Record<string, (mount: NapiMountBuilder) => NapiMountBuilder>;
+}
+
+type GuestFlush = "auto" | "required" | "skip";
+```
+
+`recordIntegrity` records disk hashes. [`guestFlush`](#guest-writeback) defaults to `"auto"`. Each `volumes` key is a captured disk's guest path; its callback configures the replacement mount. Forks cannot add new block devices, and batch children cannot share a writable disk image. See [fork disk bindings](/sandboxes/snapshots#forking). `branch()`, `branchMany()`, and `BranchOutcome` remain deprecated aliases.
+
 ## RestoreBuilder
 
 Restore into a new detached sandbox. Disk boots fresh; full resumes execution. See [restore examples](/sandboxes/snapshots#disk-snapshots) and [progress](/sandboxes/snapshots#restore-progress).
@@ -916,7 +943,7 @@ Restore into a new detached sandbox. Disk boots fresh; full resumes execution. S
 ```typescript
 const child = await Sandbox.restore("api:baseline")
   .name("api-restored")
-  .forked()
+  .cowMemory()
   .restore();
 ```
 
@@ -924,7 +951,8 @@ const child = await Sandbox.restore("api:baseline")
 
 | Control | Purpose |
 | --- | --- |
-| `forked()` | Share unchanged full-snapshot memory. |
+| `cowMemory()` | Share unchanged full-snapshot memory. |
+| `.forked()` | Deprecated alias for the same CoW memory policy; see [migration notes](/sandboxes/snapshots#migrating-restore-options). |
 | `diskOnly()` | Boot only the saved disk. |
 | `snapshotBase(base)` | Supply an archive dependency. |
 | `restore()` | Return the restored sandbox. |
@@ -932,7 +960,7 @@ const child = await Sandbox.restore("api:baseline")
 
 Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 
-Full restore rejects missing external filesystems and additional disks by default. Use `allowMissingResources()` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+Restore rejects missing external filesystems (and, for full restore, additional disks) by default. Use `allowMissingResources()` to resume with unavailable devices (full restore records warnings). This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
 
 <Accordion title="Destination options">
 
@@ -944,17 +972,42 @@ Full restore rejects missing external filesystems and additional disks by defaul
 | `disableNetwork()` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
 | `maxDuration(), idleTimeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
-| `volume()` | Map host volumes or select captured private volumes. |
 | `port(), portBind(), portUdp(), portUdpBind()` | Bind destination TCP or UDP ports. |
 | `vsock(), vsockDgram()` | Bind destination vsock endpoints. |
 | `user(), logLevel()` | Default user for new execs and host runtime log level. |
 | `dangerouslyInheritResources()` | Explicitly inherit host resources. Disabled by default. |
-| `allowMissingResources()` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
 | `externalMountPolicy()` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
 Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy` or `NetworkPolicyBuilder`. Use `v => v.captured()` for a private captured volume.
 
 </Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">volume()</span>
+
+```typescript
+volume(guestPath: string, configure: (mount: MountBuilder) => MountBuilder): this
+```
+
+Map a host volume to a guest path, or use `v => v.captured()` to select its captured private volume.
+
+<Accordion title="Example">
+
+```typescript
+const child = await Sandbox.restore("api:baseline")
+  .name("api-restored")
+  .volume("/data", v => v.disk("./seed.img").fstype("ext4"))
+  .restore();
+```
+
+</Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">allowMissingResources()</span>
+
+```typescript
+allowMissingResources(): this
+```
+
+Allow unavailable external filesystems or additional disks. Full restore records warnings; root and owned storage remain required. Disabled by default. This does not relax validation of supplied mappings.
 
 
 <span id="disk-maintenance-and-incremental-export" />

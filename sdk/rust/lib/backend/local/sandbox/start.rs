@@ -1,6 +1,6 @@
 //! Admission of a fresh local run after Linux has reused the catalog PID.
 
-use super::{LocalBackend, RecordedRuntime, create, sandbox_entity};
+use super::{LocalBackend, RecordedRuntime, sandbox_entity};
 use crate::MicrosandboxResult;
 use crate::sandbox::{SandboxStatus, load_sandbox_record};
 use microsandbox_db::pool::DbPools;
@@ -10,12 +10,16 @@ use microsandbox_db::pool::DbPools;
 //--------------------------------------------------------------------------------------------------
 
 impl LocalBackend {
-    pub(super) fn start_endpoint_is_live(&self, name: &str) -> MicrosandboxResult<bool> {
-        Ok(create::sandbox_runtime_endpoint_is_live(
-            &self.config().run_dir(),
-            &self.sandboxes_dir().join(name),
-            name,
-        )?)
+    pub(super) async fn start_endpoint_is_live(&self, name: &str) -> MicrosandboxResult<bool> {
+        Ok(
+            microsandbox_runtime::ipc::SandboxSocketPaths::in_sandboxes_dir(
+                &self.config().run_dir(),
+                &self.sandboxes_dir(),
+                name,
+            )
+            .may_be_live()
+            .await?,
+        )
     }
 
     /// The caller owns the transition guard and has validated the sandbox identity.
@@ -43,7 +47,7 @@ impl LocalBackend {
         if !matches!(
             Self::recorded_runtime(Some(&run), &lifecycle),
             RecordedRuntime::Recycled
-        ) || self.start_endpoint_is_live(&model.name)?
+        ) || self.start_endpoint_is_live(&model.name).await?
         {
             return Ok(model);
         }

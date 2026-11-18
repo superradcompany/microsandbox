@@ -25,9 +25,11 @@ use crate::{
 
 mod builder;
 mod create_ops;
+mod dax;
 mod dir_ops;
 mod file_ops;
 mod inode;
+mod memory_mapping;
 mod metadata;
 mod mobility;
 mod ops;
@@ -35,6 +37,7 @@ mod owned_metadata;
 mod remove_ops;
 mod stat_store;
 
+use dax::{DaxFiles, DaxWindows};
 use inode::{DirHandle, DirSnapshotEntry, HandleData, InodeData, InodeTable};
 pub(super) use owned_metadata::{
     capture_owned_metadata, clear_owned_payload_metadata, owned_component, restore_owned_metadata,
@@ -93,7 +96,9 @@ const LINUX_EROFS: i32 = 30;
 const LINUX_ENOTEMPTY: i32 = 39;
 const LINUX_ELOOP: i32 = 40;
 const LINUX_ENODATA: i32 = 61;
+const LINUX_ESTALE: i32 = 116;
 const LINUX_EOPNOTSUPP: i32 = 95;
+const LINUX_ENOSYS: i32 = 38;
 
 const LINUX_O_ACCMODE: i32 = 0o3;
 const LINUX_O_WRONLY: i32 = 0o1;
@@ -159,6 +164,10 @@ pub struct PassthroughFs {
     stat_store: Option<StatStore>,
     quota: Option<super::quota::DirQuota>,
     invalid_inodes: RwLock<std::collections::BTreeSet<u64>>,
+    /// Installed DAX mappings, keyed by guest address.
+    map_windows: Mutex<DaxWindows>,
+    /// Host-file coordination shared by hardlink aliases, separate from worker waits.
+    dax_files: DaxFiles,
 }
 
 #[repr(C, packed)]
@@ -189,9 +198,21 @@ enum StatStoreBackend {
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
+    pub(crate) fn max_state_bytes(&self) -> usize {
+        self.cfg.max_state_bytes
+    }
+
     /// Validate an external checkpoint without opening any destination host paths.
+    pub fn validate_external_state_with_limit(bytes: &[u8], limit: usize) -> io::Result<()> {
+        mobility::validate_unavailable(bytes, limit)
+    }
+
+    /// Validate external state with the default filesystem budget.
     pub fn validate_external_state(bytes: &[u8]) -> io::Result<()> {
-        mobility::validate_unavailable(bytes)
+        Self::validate_external_state_with_limit(
+            bytes,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
     }
 
     /// Validate and translate only the isolated facade's selected host basename.
@@ -199,8 +220,9 @@ impl PassthroughFs {
         bytes: &[u8],
         source: &CStr,
         destination: &CStr,
+        limit: usize,
     ) -> io::Result<(Vec<u8>, super::ExternalSingleFileIndex)> {
-        mobility::prepare_single_file_state(bytes, source, destination)
+        mobility::prepare_single_file_state(bytes, source, destination, limit)
     }
 
     /// Charge the quota for growing from `old_len` to `new_end` bytes.

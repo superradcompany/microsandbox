@@ -11,6 +11,16 @@ use tokio::io::AsyncWriteExt;
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Terminal end-of-input characters.
+///
+/// A guest PTY has no stdin to close, so the end of piped input has to be typed. The first
+/// flushes a line with no trailing newline, and the second reaches the reader as EOF.
+const PTY_END_OF_INPUT: &[u8] = &[0x04, 0x04];
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -19,6 +29,10 @@ use crate::ui;
 pub struct ExecArgs {
     /// Sandbox to run the command in.
     pub name: String,
+
+    /// Start a runtime-owned job and print its ID without consuming host stdin.
+    #[arg(short = 'd', long, conflicts_with = "stream")]
+    pub detach: bool,
 
     /// Set an environment variable (KEY=value).
     #[arg(short, long)]
@@ -36,7 +50,7 @@ pub struct ExecArgs {
     #[arg(short = 't', long, conflicts_with = "no_tty")]
     pub tty: bool,
 
-    /// Disable pseudo-terminal allocation and run non-interactively.
+    /// Disable pseudo-terminal allocation and use pipes.
     #[arg(long = "no-tty", conflicts_with = "tty")]
     pub no_tty: bool,
 
@@ -110,6 +124,41 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         .transpose()?
         .map(Duration::from_secs);
 
+    if args.detach {
+        let handle = Sandbox::get(&args.name).await?;
+        anyhow::ensure!(
+            handle.status_snapshot() == microsandbox::sandbox::SandboxStatus::Running,
+            "detached execution requires a running sandbox; start it with `msb start {}`",
+            args.name
+        );
+        let sandbox = handle.connect().await?;
+        let tty = args.tty || interactive;
+        let (cmd, command_args) =
+            super::common::resolve_exec_command(sandbox.config(), args.command, tty)?;
+        let cmd = cmd.ok_or_else(|| {
+            anyhow::anyhow!("detached execution requires a command or configured default")
+        })?;
+        let job = sandbox
+            .exec_detached_with(cmd, |options| {
+                let options = apply_common_exec_opts(
+                    options.args(command_args).tty(tty),
+                    &env_pairs,
+                    &args.workdir,
+                    &args.user,
+                    timeout,
+                    &rlimits,
+                );
+                if args.no_stdin {
+                    options.stdin_null()
+                } else {
+                    options.stdin_pipe()
+                }
+            })
+            .await?;
+        println!("{}", job.id());
+        return Ok(());
+    }
+
     let sandbox = super::resolve_and_start(&args.name, args.quiet).await?;
 
     let result = run_started(
@@ -167,7 +216,8 @@ async fn run_started(
             &env_pairs,
             &workdir,
             &args.user,
-            timeout,
+            // drive_stream owns the CLI deadline and its existing diagnostic/exit behavior.
+            None,
             &rlimits,
         );
         if args.no_stdin {
@@ -176,7 +226,7 @@ async fn run_started(
                 .await?;
             return drive_stream(&mut handle, timeout, args.stream).await;
         }
-        return run_piped(sandbox, cmd, options, timeout, args.stream).await;
+        return run_piped(sandbox, cmd, options, timeout, args.stream, args.tty).await;
     }
 
     if interactive {
@@ -256,12 +306,13 @@ fn apply_common_exec_opts(
 }
 
 /// Forward piped input while running the command, independently of output buffering.
-async fn run_piped(
+pub(super) async fn run_piped(
     sandbox: &Sandbox,
     cmd: String,
     options: ExecOptionsBuilder,
     timeout: Option<Duration>,
     stream_output: bool,
+    tty: bool,
 ) -> anyhow::Result<i32> {
     let mut handle = sandbox
         .exec_stream_with(cmd, |_| options.stdin_pipe())
@@ -275,7 +326,7 @@ async fn run_piped(
         // Preserve the guest's result if it exits while input forwarding fails.
         biased;
         result = &mut output => result,
-        result = forward_stdin(sink) => {
+        result = forward_stdin(sink, tty, stream_output) => {
             if let Err(error) = result {
                 let _ = control.kill().await;
                 return Err(error);
@@ -286,7 +337,11 @@ async fn run_piped(
 }
 
 /// Read stdin outside Tokio's blocking pool so an open pipe cannot hold up CLI exit.
-async fn forward_stdin(sink: ExecSink) -> anyhow::Result<()> {
+///
+/// Like any pipe writer, this stops when the guest closes stdin and leaves the outcome to the
+/// command. Streaming sessions surface that error instead, because their peer is waiting on
+/// the conversation.
+async fn forward_stdin(sink: ExecSink, tty: bool, stream_output: bool) -> anyhow::Result<()> {
     // Tokio's stdin uses an uncancellable blocking read; dropping its task still
     // makes runtime shutdown wait for EOF. A dedicated detached thread does not
     // hold up process exit. The bounded channel limits read-ahead, and dropping
@@ -320,20 +375,30 @@ async fn forward_stdin(sink: ExecSink) -> anyhow::Result<()> {
             }
         })?;
 
+    let mut forwarded = Ok(());
     while let Some(chunk) = receiver.recv().await {
         let chunk = chunk.map_err(|error| anyhow::anyhow!("failed to read stdin: {error}"))?;
-        sink.write(&chunk).await?;
+        forwarded = sink.write(&chunk).await;
+        if forwarded.is_err() {
+            break;
+        }
     }
-    sink.close().await?;
-    Ok(())
+    if tty && forwarded.is_ok() {
+        forwarded = sink.write(PTY_END_OF_INPUT).await;
+    }
+
+    let closed = sink.close().await;
+    match forwarded.and(closed) {
+        Err(error) if stream_output => Err(error.into()),
+        _ => Ok(()),
+    }
 }
 
 /// Pump events from a streaming exec session to the host's stdout/stderr until
 /// the guest exits, returning its exit code.
 ///
-/// Enforces `timeout` by killing the guest on expiry — the SDK leaves timeout
-/// enforcement to the stream driver, mirroring the buffered path's
-/// `tokio::time::timeout` + kill.
+/// Owns the CLI timeout and its diagnostic/exit behavior. The underlying SDK stream
+/// is opened without a second deadline so the two timers cannot race each other.
 async fn drive_stream(
     handle: &mut ExecHandle,
     timeout: Option<Duration>,
@@ -403,7 +468,7 @@ async fn drive_stream(
                 // Match buffered collect(): an early guest stdin close is not
                 // an error on the captured path. Keep streaming diagnostics.
                 if stream_output {
-                    eprintln!("msb: warning: failed to forward stdin to guest: {err:?}");
+                    ui::warn(&format!("failed to forward stdin to guest: {err:?}"));
                 }
             }
             // Explicit (not `_`) so a new ExecEvent variant fails to compile here.

@@ -7,16 +7,17 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use microsandbox::SandboxConfigPatch;
 use microsandbox::sandbox::{
-    DiskImageFormat, EnvVar, HandoffInit, HostPermissions, MountBuilder, Patch, PullPolicy, Rlimit,
-    RlimitResource, SandboxBuilder, SandboxPolicyPatch, SandboxResourcesPatch,
+    DiskImageFormat, EnvVar, GuestClockPolicy, HandoffInit, HostPermissions, MountBuilder, Patch,
+    PullPolicy, Rlimit, RlimitResource, SandboxBuilder, SandboxPolicyPatch, SandboxResourcesPatch,
     SandboxRuntimeOptionsPatch, SandboxSpecPatch, SecurityProfile, StatVirtualization, VolumeMount,
 };
 #[cfg(feature = "net")]
 use microsandbox::sandbox::{
-    DnsConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch, SecretsConfigPatch,
-    TlsConfigPatch,
+    DnsConfigPatch, HttpConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch,
+    SecretsConfigPatch, TlsConfigPatch,
 };
 use microsandbox_image::RegistryAuth;
+use microsandbox_types::HttpDenyResponseFormat;
 use microsandbox_types_macros::ConfigPatch;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -111,6 +112,7 @@ struct SandboxConfigInput {
     shell: Option<String>,
     user: Option<String>,
     hostname: Option<String>,
+    guest_clock: Option<GuestClockPolicy>,
     security: Option<SecurityInput>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
@@ -150,6 +152,7 @@ struct RuntimeConfigInput {
     shell: Option<String>,
     user: Option<String>,
     hostname: Option<String>,
+    guest_clock: Option<GuestClockPolicy>,
     security: Option<SecurityInput>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
@@ -374,7 +377,7 @@ struct AppendPatchInput {
 #[serde(untagged)]
 enum NetworkInput {
     Preset(NetworkPreset),
-    Object(NetworkConfigInput),
+    Object(Box<NetworkConfigInput>),
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -401,6 +404,20 @@ struct NetworkConfigInput {
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
+    tcp_accept_queue_size: Option<u32>,
+    max_inbound_tcp_connections: Option<usize>,
+    #[config_patch(nested)]
+    http: Option<HttpInput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
+#[serde(default, deny_unknown_fields)]
+struct HttpInput {
+    deny_response: Option<bool>,
+    deny_response_format: Option<HttpDenyResponseFormat>,
+    deny_message: Option<String>,
+    network_deny_message: Option<String>,
+    secret_deny_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
@@ -448,6 +465,7 @@ enum SecretValueInput {
 #[serde(default, deny_unknown_fields)]
 struct SecretSubstitutionInput {
     headers: Option<bool>,
+    header_fields: Option<Vec<String>>,
     query: Option<bool>,
     body: Option<bool>,
 }
@@ -467,7 +485,7 @@ impl SandboxConfigInput {
         if let Some(ports) = self.ports.take() {
             let network = self
                 .network
-                .get_or_insert_with(|| NetworkInput::Object(NetworkConfigInput::default()));
+                .get_or_insert_with(|| NetworkInput::Object(Box::default()));
             network.object_mut().ports = Some(match network.object_mut().ports.take() {
                 Some(mut nested) => {
                     nested.extend(ports);
@@ -486,16 +504,16 @@ impl NetworkInput {
                 policy: Some(policy),
                 ..NetworkConfigInput::default()
             },
-            Self::Object(input) => input,
+            Self::Object(input) => *input,
         }
     }
 
     fn object_mut(&mut self) -> &mut NetworkConfigInput {
         if let Self::Preset(policy) = self {
-            *self = Self::Object(NetworkConfigInput {
+            *self = Self::Object(Box::new(NetworkConfigInput {
                 policy: Some(*policy),
                 ..NetworkConfigInput::default()
-            });
+            }));
         }
         let Self::Object(input) = self else {
             unreachable!("preset was normalized to an object")
@@ -671,7 +689,7 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
                 reject_scoped_wrapper(&source.path, "network", "--net-conf")?;
                 let network = load_typed::<NetworkConfigInput>(&source.path, "network config")?;
                 SandboxConfigInput {
-                    network: Some(NetworkInput::Object(network)),
+                    network: Some(NetworkInput::Object(Box::new(network))),
                     ..SandboxConfigInput::default()
                 }
             }
@@ -693,6 +711,7 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
                     shell: scoped.shell,
                     user: scoped.user,
                     hostname: scoped.hostname,
+                    guest_clock: scoped.guest_clock,
                     security: scoped.security,
                     entrypoint: scoped.entrypoint,
                     cmd: scoped.cmd,
@@ -1206,6 +1225,9 @@ fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<Sandbo
     if let Some(value) = &input.hostname {
         runtime = runtime.hostname(value.clone());
     }
+    if let Some(value) = input.guest_clock {
+        runtime = runtime.guest_clock(value);
+    }
     if let Some(value) = input.security {
         config_patch = config_patch.security_profile(match value {
             SecurityInput::Default => SecurityProfile::Default,
@@ -1653,23 +1675,21 @@ fn materialize_network_patch(
     }
 
     if let Some(ports) = input.ports {
-        let ports = ports
-            .iter()
-            .map(|value| {
-                let (host_bind, host_port, guest_port, udp) = parse_port_mapping(value)?;
-                Ok(PublishedPortSpec {
-                    host_port,
-                    guest_port,
-                    protocol: if udp {
-                        PortProtocol::Udp
-                    } else {
-                        PortProtocol::Tcp
+        let mut expanded = Vec::new();
+        for value in ports {
+            for port in parse_port_mapping(&value)? {
+                expanded.push(PublishedPortSpec {
+                    host_port: port.host_port,
+                    guest_port: port.guest_port,
+                    protocol: match port.protocol {
+                        microsandbox_network::config::PortProtocol::Udp => PortProtocol::Udp,
+                        microsandbox_network::config::PortProtocol::Tcp => PortProtocol::Tcp,
                     },
-                    host_bind: host_bind.to_string(),
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        patch = patch.ports(ports);
+                    host_bind: port.host_bind.to_string(),
+                });
+            }
+        }
+        patch = patch.ports(expanded);
     }
     if let Some(dns) = input.dns {
         let mut value = DnsConfigPatch::new();
@@ -1738,6 +1758,33 @@ fn materialize_network_patch(
     if let Some(max) = input.max_udp_connections {
         patch = patch.max_udp_connections(max);
     }
+    if let Some(value) = input.max_inbound_tcp_connections {
+        patch = patch.max_inbound_tcp_connections(value);
+    }
+    if let Some(size) = input.tcp_accept_queue_size {
+        // Refuse here rather than at launch, where the runtime would reject the whole network.
+        microsandbox_network::config::TcpAcceptQueueSize::try_from(size)?;
+        patch = patch.tcp_accept_queue_size(size);
+    }
+    if let Some(http) = input.http {
+        let mut value = HttpConfigPatch::new();
+        if let Some(enabled) = http.deny_response {
+            value = value.deny_response(enabled);
+        }
+        if let Some(format) = http.deny_response_format {
+            value = value.deny_response_format(format);
+        }
+        if let Some(message) = http.deny_message {
+            value = value.deny_message(message);
+        }
+        if let Some(message) = http.network_deny_message {
+            value = value.network_deny_message(message);
+        }
+        if let Some(message) = http.secret_deny_message {
+            value = value.secret_deny_message(message);
+        }
+        patch = patch.http(value);
+    }
     Ok(patch)
 }
 
@@ -1780,6 +1827,7 @@ fn materialize_secrets(
         let substitution = input.substitution.clone().unwrap_or_default();
         let substitution = SecretSubstitution {
             headers: substitution.headers.unwrap_or(true),
+            header_fields: substitution.header_fields.clone().unwrap_or_default(),
             query: substitution.query.unwrap_or(false),
             body: substitution.body.unwrap_or(false),
         };
@@ -1834,6 +1882,115 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "net")]
+    #[test]
+    fn published_tcp_overrides_survive_cli_config_materialization() {
+        let input: NetworkInput = serde_json::from_value(serde_json::json!({
+            "max_inbound_tcp_connections": 0
+        }))
+        .unwrap();
+        let mut network = microsandbox_types::NetworkSpec::default();
+        materialize_network_patch(Some(&input), None, None)
+            .unwrap()
+            .apply_to(&mut network);
+        assert_eq!(network.max_inbound_tcp_connections, Some(0));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_config_tcp_accept_queue_size_is_validated_before_launch() {
+        let input = |value: u32| -> NetworkInput {
+            serde_json::from_value(serde_json::json!({ "tcp_accept_queue_size": value })).unwrap()
+        };
+        let mut network = microsandbox_types::NetworkSpec::default();
+        materialize_network_patch(Some(&input(4096)), None, None)
+            .unwrap()
+            .apply_to(&mut network);
+        assert_eq!(network.tcp_accept_queue_size, Some(4096));
+
+        for invalid in [0, 2_147_483_648] {
+            let error = materialize_network_patch(Some(&input(invalid)), None, None).unwrap_err();
+            assert!(
+                error.to_string().contains("TCP accept queue size"),
+                "{invalid}: {error}"
+            );
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn published_port_ranges_lower_from_yaml_and_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = write_config(
+            dir.path(),
+            "ports.yaml",
+            r#"
+image: alpine
+ports: ["8000-8002:80-82"]
+network:
+  policy: open
+  ports: ["0.0.0.0:10240-11264:10240-11264/udp"]
+"#,
+        );
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
+        let resolved = resolve(&sources).unwrap();
+        let builder = resolved.apply(SandboxBuilder::new("port-ranges")).unwrap();
+        let opts = crate::commands::common::SandboxOpts {
+            port: vec!["[::1]:9000-9001:90-91/tcp".to_owned()],
+            ..Default::default()
+        };
+        let builder =
+            crate::commands::common::apply_sandbox_opts_after_config(builder, &opts).unwrap();
+        let config = resolved
+            .image(None, None)
+            .unwrap()
+            .apply(builder)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let ports = &config.spec.network.ports;
+        assert_eq!(ports.len(), 1030);
+        for (offset, port) in ports[..1025].iter().enumerate() {
+            assert_eq!(port.host_port, 10240 + offset as u16);
+            assert_eq!(port.guest_port, 10240 + offset as u16);
+            assert_eq!(port.host_bind, "0.0.0.0");
+            assert_eq!(port.protocol, microsandbox_types::PortProtocol::Udp);
+        }
+        for (offset, port) in ports[1025..1028].iter().enumerate() {
+            assert_eq!(port.host_port, 8000 + offset as u16);
+            assert_eq!(port.guest_port, 80 + offset as u16);
+            assert_eq!(port.host_bind, "127.0.0.1");
+            assert_eq!(port.protocol, microsandbox_types::PortProtocol::Tcp);
+        }
+        for (offset, port) in ports[1028..].iter().enumerate() {
+            assert_eq!(port.host_port, 9000 + offset as u16);
+            assert_eq!(port.guest_port, 90 + offset as u16);
+            assert_eq!(port.host_bind, "::1");
+            assert_eq!(port.protocol, microsandbox_types::PortProtocol::Tcp);
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn published_port_ranges_reject_invalid_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        for (spec, expected) in [
+            ("8000-8002:80-81", "equal lengths"),
+            ("8000-8002:82-80/udp", "guest port range is reversed"),
+        ] {
+            for contents in [
+                format!("network:\n  ports: [\"{spec}\"]\n"),
+                format!("ports: [\"{spec}\"]\n"),
+            ] {
+                let root = write_config(dir.path(), "ports.yaml", &contents);
+                let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
+                let error = resolve(&sources).unwrap_err();
+                assert!(error.to_string().contains(expected), "{error}");
+            }
+        }
+    }
+
     fn write_config(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
         fs::write(&path, contents).unwrap();
@@ -1861,6 +2018,7 @@ workdir: "/lower"
 shell: "/bin/sh"
 user: "lower"
 hostname: "lower"
+guest_clock: sync
 security: default
 entrypoint: ["lower-entrypoint"]
 cmd: ["lower-command"]
@@ -1896,6 +2054,7 @@ workdir: "/higher"
 shell: "/bin/bash"
 user: "higher"
 hostname: "higher"
+guest_clock: "off"
 security: restricted
 entrypoint: ["higher-entrypoint"]
 cmd: ["higher-command"]
@@ -1954,6 +2113,7 @@ registry: { username: higher, password_env: PATH }
             shell,
             user,
             hostname,
+            guest_clock,
             security,
             entrypoint,
             cmd,
@@ -1988,6 +2148,7 @@ registry: { username: higher, password_env: PATH }
         assert_eq!(shell.as_deref(), Some("/bin/bash"));
         assert_eq!(user.as_deref(), Some("higher"));
         assert_eq!(hostname.as_deref(), Some("higher"));
+        assert_eq!(guest_clock, Some(GuestClockPolicy::Off));
         assert!(matches!(security, Some(SecurityInput::Restricted)));
         assert_eq!(entrypoint.as_deref().unwrap(), ["higher-entrypoint"]);
         assert_eq!(cmd.as_deref().unwrap(), ["higher-command"]);
@@ -2531,6 +2692,21 @@ mounts:
     }
 
     #[test]
+    fn commented_yaml_loads_sandbox_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            "commented.yaml",
+            "# sandbox image\nimage: alpine # pinned by the caller\nmemory: 1G\n",
+        );
+
+        let input = load_root(&path).unwrap();
+
+        assert!(matches!(input.image, Some(ImageInput::String(image)) if image == "alpine"));
+        assert_eq!(input.memory.as_deref(), Some("1G"));
+    }
+
+    #[test]
     fn interpolation_supports_only_braced_environment_names() {
         assert_eq!(interpolate_string("plain").unwrap(), "plain");
         assert_eq!(interpolate_string("$PATH").unwrap(), "$PATH");
@@ -2595,6 +2771,12 @@ network:
   allow: ["api.openai.com"]
   strict: true
   max_tcp_connections: 64
+  http:
+    deny_response: true
+    deny_response_format: json
+    deny_message: "legacy {host}"
+    network_deny_message: "Blocked: {host}"
+    secret_deny_message: "Check secret access."
 secrets:
   TOKEN:
     value: "literal-test-value"
@@ -2627,6 +2809,23 @@ secrets:
             "#!/bin/bash\npython app.py\n"
         );
         assert_eq!(config.spec.network.max_tcp_connections, Some(64));
+        assert!(config.spec.network.http.deny_response);
+        assert_eq!(
+            config.spec.network.http.deny_response_format,
+            microsandbox_types::HttpDenyResponseFormat::Json
+        );
+        assert_eq!(
+            config.spec.network.http.deny_message.as_deref(),
+            Some("legacy {host}")
+        );
+        assert_eq!(
+            config.spec.network.http.network_deny_message.as_deref(),
+            Some("Blocked: {host}")
+        );
+        assert_eq!(
+            config.spec.network.http.secret_deny_message.as_deref(),
+            Some("Check secret access.")
+        );
         assert!(config.spec.network.strict);
         assert_eq!(config.spec.network.ports.len(), 0);
         assert!(config.spec.network.tls.as_ref().unwrap().enabled);

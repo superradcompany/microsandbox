@@ -56,6 +56,7 @@ describe("native Sandbox lifecycle contract", () => {
     expect(builder.cpus(2).memory(512).maxTcpConnections(0).maxUdpConnections(7).disableNetwork()
       .security("default").maxDuration(0).idleTimeout(0)).toBe(builder);
     expect(builder.maxConnections(64).maxUdpConnections(0)).toBe(builder);
+    expect(builder.port(8080, 80).tcpAcceptQueueSize(4096)).toBe(builder);
     expect(() => builder.networkPolicyJson(JSON.stringify({
       default_egress: "deny", default_ingress: "deny", rules: [],
     }))).not.toThrow();
@@ -141,5 +142,13 @@ describe("native snapshot contract", () => {
     expect(typeof napi.Snapshot.prototype.saveTo).toBe("function");
     expect(typeof napi.Snapshot.prototype.copyTo).toBe("function");
     expect(typeof napi.SnapshotHandle.prototype.saveTo).toBe("function");
+  });
+});
+
+
+describe("native storage contract", () => {
+  it("exports storage observation and runtime RAM pruning", () => {
+    expect(typeof napi.storageUsage).toBe("function");
+    expect(typeof napi.storagePrune).toBe("function");
   });
 });

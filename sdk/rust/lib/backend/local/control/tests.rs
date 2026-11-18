@@ -1,20 +1,42 @@
 //! Kernel identity and actual shared-connection tests; no VM is needed here.
 
+use std::time::Duration;
+
+use microsandbox_db::pool::DbPools;
+use sea_orm::ConnectionTrait;
+
 use super::identity::DatabaseIdentity;
 
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[test]
-fn database_identity_detects_replacement_but_not_ordinary_writes() {
+#[tokio::test]
+async fn database_identity_detects_replacement_but_not_ordinary_writes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("database");
-    std::fs::write(&path, b"original").unwrap();
-    let identity = DatabaseIdentity::capture(&path).unwrap();
-    std::fs::write(&path, b"updated contents").unwrap();
+    let pools = DbPools::open(&path, 1, Duration::from_secs(5), Duration::from_secs(5))
+        .await
+        .unwrap();
+    pools
+        .write()
+        .execute_unprepared("CREATE TABLE item (id INTEGER)")
+        .await
+        .unwrap();
+    let identity = DatabaseIdentity::capture(&path).await.unwrap();
+    pools
+        .write()
+        .execute_unprepared("INSERT INTO item VALUES (1)")
+        .await
+        .unwrap();
     identity.verify().unwrap();
+    pools.read().inner().close_by_ref().await.unwrap();
+    pools.write().inner().close_by_ref().await.unwrap();
     std::fs::rename(&path, directory.path().join("old")).unwrap();
+    assert!(matches!(
+        identity.verify(),
+        Err(microsandbox_control_client::ControlClientError::RuntimeChanged)
+    ));
     std::fs::write(&path, b"replacement").unwrap();
     assert!(matches!(
         identity.verify(),
@@ -25,6 +47,7 @@ fn database_identity_detects_replacement_but_not_ordinary_writes() {
 #[cfg(unix)]
 mod unix {
     use futures::FutureExt;
+    use microsandbox_runtime::ipc::RuntimeSocketPaths;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -194,10 +217,7 @@ mod unix {
         .insert(pools.write())
         .await
         .unwrap();
-        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(
-            &backend.config().run_dir(),
-            "control-fixture",
-        );
+        let paths = RuntimeSocketPaths::new(&backend.config().run_dir(), "control-fixture");
         let endpoint = if legacy {
             paths.legacy_control.clone()
         } else {
@@ -490,6 +510,92 @@ mod unix {
     }
 
     #[tokio::test]
+    async fn paused_runtime_preserves_retained_and_fresh_control_sessions() {
+        for legacy in [false, true] {
+            let fixture = fixture(legacy, false).await;
+            let retained = fixture
+                .backend
+                .control_session("control-fixture")
+                .await
+                .unwrap()
+                .unwrap();
+            let pools = fixture.backend.db().await.unwrap();
+            for status in [
+                sandbox::SandboxStatus::Paused,
+                sandbox::SandboxStatus::Running,
+            ] {
+                sandbox::ActiveModel {
+                    id: Set(fixture.sandbox_id),
+                    status: Set(status),
+                    ..Default::default()
+                }
+                .update(pools.write())
+                .await
+                .unwrap();
+
+                // Pause changes guest execution, not the runtime's run or process identity.
+                assert!(retained.request(&GetCapabilities).await.unwrap().cpu_resize);
+                let fresh = fixture
+                    .backend
+                    .control_session("control-fixture")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(Arc::ptr_eq(&retained.entry, &fresh.entry));
+                assert!(fresh.request(&GetCapabilities).await.unwrap().memory_resize);
+            }
+            assert_eq!(
+                fixture.probes.load(Ordering::SeqCst),
+                if legacy { 5 } else { 1 }
+            );
+            assert_eq!(
+                fixture.frames.load(Ordering::SeqCst),
+                if legacy { 0 } else { 4 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nonresident_sandbox_states_still_reject_control_before_dispatch() {
+        for status in [
+            sandbox::SandboxStatus::Created,
+            sandbox::SandboxStatus::Starting,
+            sandbox::SandboxStatus::Stopped,
+            sandbox::SandboxStatus::Crashed,
+        ] {
+            let fixture = fixture(false, false).await;
+            let retained = fixture
+                .backend
+                .control_session("control-fixture")
+                .await
+                .unwrap()
+                .unwrap();
+            let pools = fixture.backend.db().await.unwrap();
+            sandbox::ActiveModel {
+                id: Set(fixture.sandbox_id),
+                status: Set(status),
+                ..Default::default()
+            }
+            .update(pools.write())
+            .await
+            .unwrap();
+
+            let error = retained.request(&GetCapabilities).await.unwrap_err();
+            assert!(matches!(&*error, ControlClientError::RuntimeChanged));
+            assert_eq!(error.delivery(), Delivery::NotSent);
+            assert!(
+                fixture
+                    .backend
+                    .control_session("control-fixture")
+                    .await
+                    .is_err()
+            );
+            assert_eq!(fixture.probes.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.frames.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn idle_framed_disconnect_releases_the_registry_entry_without_another_lookup() {
         let fixture = fixture(false, false).await;
         let session = fixture
@@ -518,44 +624,57 @@ mod unix {
 
     #[tokio::test]
     async fn run_replacement_with_the_same_pid_invalidates_prepared_operations() {
-        let fixture = fixture(false, false).await;
-        let session = fixture
-            .backend
-            .control_session("control-fixture")
-            .await
-            .unwrap()
-            .unwrap();
-        let pools = fixture.backend.db().await.unwrap();
-        run::ActiveModel {
-            id: Set(fixture.run_id),
-            status: Set(run::RunStatus::Terminated),
-            ..Default::default()
-        }
-        .update(pools.write())
-        .await
-        .unwrap();
-        run::ActiveModel {
-            sandbox_id: Set(fixture.sandbox_id),
-            pid: Set(Some(std::process::id() as i32)),
-            status: Set(run::RunStatus::Running),
-            ..Default::default()
-        }
-        .insert(pools.write())
-        .await
-        .unwrap();
-        let error = session.request(&GetCapabilities).await.unwrap_err();
-        assert!(matches!(&*error, ControlClientError::RuntimeChanged));
-        assert_eq!(fixture.frames.load(Ordering::SeqCst), 0);
-        fixture
-            .backend
-            .control_session("control-fixture")
-            .await
-            .unwrap()
-            .unwrap()
-            .request(&GetCapabilities)
+        for status in [
+            sandbox::SandboxStatus::Running,
+            sandbox::SandboxStatus::Paused,
+        ] {
+            let fixture = fixture(false, false).await;
+            let session = fixture
+                .backend
+                .control_session("control-fixture")
+                .await
+                .unwrap()
+                .unwrap();
+            let pools = fixture.backend.db().await.unwrap();
+            sandbox::ActiveModel {
+                id: Set(fixture.sandbox_id),
+                status: Set(status),
+                ..Default::default()
+            }
+            .update(pools.write())
             .await
             .unwrap();
-        assert_eq!(fixture.probes.load(Ordering::SeqCst), 2);
+            run::ActiveModel {
+                id: Set(fixture.run_id),
+                status: Set(run::RunStatus::Terminated),
+                ..Default::default()
+            }
+            .update(pools.write())
+            .await
+            .unwrap();
+            run::ActiveModel {
+                sandbox_id: Set(fixture.sandbox_id),
+                pid: Set(Some(std::process::id() as i32)),
+                status: Set(run::RunStatus::Running),
+                ..Default::default()
+            }
+            .insert(pools.write())
+            .await
+            .unwrap();
+            let error = session.request(&GetCapabilities).await.unwrap_err();
+            assert!(matches!(&*error, ControlClientError::RuntimeChanged));
+            assert_eq!(fixture.frames.load(Ordering::SeqCst), 0);
+            fixture
+                .backend
+                .control_session("control-fixture")
+                .await
+                .unwrap()
+                .unwrap()
+                .request(&GetCapabilities)
+                .await
+                .unwrap();
+            assert_eq!(fixture.probes.load(Ordering::SeqCst), 2);
+        }
     }
 
     #[tokio::test]
@@ -867,7 +986,7 @@ mod unix {
         crate::backend::with_backend(backend, async {
             let stale = local.control_session(&name).await.unwrap().unwrap();
             let previous = stale.entry.key;
-            let endpoints = crate::runtime::sandbox_agent_socket_path_candidates_for(&local, &name);
+            let endpoints = local.agent_socket_paths(&name);
             crate::Sandbox::get(&name)
                 .await
                 .unwrap()
@@ -885,10 +1004,7 @@ mod unix {
                 assert_ne!(previous, current.entry.key);
                 assert_ne!(previous.run_id, current.entry.key.run_id);
                 assert!(!Arc::ptr_eq(&stale.entry, &current.entry));
-                assert_eq!(
-                    endpoints,
-                    crate::runtime::sandbox_agent_socket_path_candidates_for(&local, &name)
-                );
+                assert_eq!(endpoints, local.agent_socket_paths(&name));
                 let before = current
                     .request(&microsandbox_control_client::GetCpuState)
                     .await

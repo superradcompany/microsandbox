@@ -398,7 +398,7 @@ mod tests {
 
     use super::*;
     use crate::backends::passthroughfs::owned::OwnedDirectorySnapshot;
-    use crate::{Context, DynFileSystem};
+    use crate::{Context, DynFileSystem, FsOptions};
 
     #[test]
     fn owned_windows_namespace_is_private_and_preserves_guest_symlinks() {
@@ -449,6 +449,7 @@ mod tests {
             gid: 0,
             pid: 0,
         };
+        backend.init(FsOptions::empty()).unwrap();
         let entry = backend.lookup(ctx, 1, c"link").unwrap();
         assert_eq!(backend.readlink(ctx, entry.inode).unwrap(), b"nested/data");
         let (stat, _) = backend.getattr(ctx, entry.inode, None).unwrap();

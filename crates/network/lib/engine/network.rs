@@ -10,6 +10,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+use if_addrs::{IfAddr, get_if_addrs};
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_protocol::bootstrap::{
     BootstrapEnvVar, BootstrapIpv4, BootstrapIpv6, BootstrapNetwork,
@@ -20,7 +21,7 @@ use microsandbox_types::{
 };
 use msb_krun::backends::net::NetBackend;
 
-use crate::config::{ConnectionLimit, ResolvedNetworkConfig};
+use crate::config::{ConnectionLimit, PortProtocol, ResolvedNetworkConfig};
 use crate::engine::tls::state::{TlsState, TlsStateError};
 use crate::netstack::{
     backend::SmoltcpBackend,
@@ -28,6 +29,7 @@ use crate::netstack::{
     shared::{DEFAULT_QUEUE_CAPACITY, SharedState},
 };
 use crate::policy::{NetworkPolicy, NetworkProfile};
+use crate::ports::{BoundPublishedPorts, PublishedPortBindError};
 use crate::secrets::handle::SecretsHandle;
 
 //--------------------------------------------------------------------------------------------------
@@ -65,7 +67,7 @@ pub struct SmoltcpNetwork {
     gateway_mac: [u8; 6],
     mtu: u16,
     // IPv4 / IPv6 are `Some` when active for this sandbox: the user supplied
-    // an explicit address, or the host has a route for that family.
+    // an explicit address, the host has a route, or published ports need that family.
     guest_ipv4: Option<Ipv4Addr>,
     gateway_ipv4: Option<Ipv4Addr>,
     guest_ipv6: Option<Ipv6Addr>,
@@ -78,10 +80,14 @@ pub struct SmoltcpNetwork {
     secrets: SecretsHandle,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Default)]
 struct HostRoutes {
     ipv4: bool,
     ipv6: bool,
+    host_ipv4: Vec<Ipv4Addr>,
+    host_ipv4_networks: Vec<Ipv4Network>,
+    host_ipv6: Vec<Ipv6Addr>,
+    host_ipv6_networks: Vec<Ipv6Network>,
 }
 
 /// Errors that prevent the smoltcp network from being created safely.
@@ -106,6 +112,13 @@ pub enum NetworkInitError {
         pool: Ipv6Network,
         /// Requested sandbox slot.
         slot: u16,
+    },
+
+    /// A configured NAT64 prefix is not an IPv6 `/96` network.
+    #[error("invalid NAT64 prefix `{raw}`: prefix must be IPv6 /96")]
+    InvalidNat64Prefix {
+        /// Invalid raw prefix.
+        raw: String,
     },
 
     /// TLS interception state failed to initialize.
@@ -133,7 +146,7 @@ pub struct TerminationHandle {
     shared: Arc<SharedState>,
 }
 
-/// Read-only view of aggregate network byte counters.
+/// Read-only view of aggregate network counters.
 #[derive(Clone)]
 pub struct MetricsHandle {
     shared: Arc<SharedState>,
@@ -156,10 +169,66 @@ struct NetworkActivationGate {
 
 impl HostRoutes {
     fn detect() -> Self {
-        Self {
+        let mut routes = Self {
             ipv4: host_has_ipv4_route(),
             ipv6: host_has_ipv6_route(),
+            ..Self::default()
+        };
+        let interfaces = match get_if_addrs() {
+            Ok(interfaces) => interfaces,
+            Err(_) => {
+                // Interface discovery is security-sensitive. If IPv6 routing
+                // exists but enumeration fails, fail closed for IPv6 policy
+                // classification rather than treating every destination as
+                // public.
+                if routes.ipv6 {
+                    routes.host_ipv6_networks.push(
+                        Ipv6Network::new(Ipv6Addr::UNSPECIFIED, 0)
+                            .expect("unspecified IPv6 /0 must be valid"),
+                    );
+                }
+                return routes;
+            }
+        };
+
+        for interface in interfaces {
+            match interface.addr {
+                IfAddr::V4(addr) => {
+                    routes.host_ipv4.push(addr.ip);
+                    if addr.prefixlen > 0
+                        && let Ok(network) = Ipv4Network::new(addr.ip, addr.prefixlen)
+                    {
+                        routes.host_ipv4_networks.push(network);
+                    }
+                }
+                IfAddr::V6(addr) => {
+                    routes.host_ipv6.push(addr.ip);
+                    // Most hosts advertise a /64 while cloud guests can expose
+                    // a /128 address with a wider on-link route. Use the
+                    // reported prefix when available and conservatively model
+                    // a /64 for that cloud form.
+                    let prefix_len = if addr.prefixlen == 128 {
+                        64
+                    } else {
+                        addr.prefixlen
+                    };
+                    if prefix_len > 0
+                        && let Ok(network) = Ipv6Network::new(addr.ip, prefix_len)
+                    {
+                        routes.host_ipv6_networks.push(network);
+                    }
+                }
+            }
         }
+
+        if routes.ipv6 && routes.host_ipv6_networks.is_empty() {
+            routes.host_ipv6_networks.push(
+                Ipv6Network::new(Ipv6Addr::UNSPECIFIED, 0)
+                    .expect("unspecified IPv6 /0 must be valid"),
+            );
+        }
+
+        routes
     }
 }
 
@@ -223,9 +292,28 @@ impl SmoltcpNetwork {
         let gateway_mac = derive_gateway_mac(slot);
         let mtu = config.interface.mtu.unwrap_or(1500);
 
+        // Preserve existing family selection, including IPv6-only TCP targets. If
+        // startup would leave the guest without any IP, supply the private addresses
+        // needed for published ports: TCP can bridge families and uses IPv4, while
+        // UDP needs the host bind's family. Neither requires an external host route.
+        let no_guest_address = !host_routes.ipv4
+            && !host_routes.ipv6
+            && config.interface.ipv4_address.is_none()
+            && config.interface.ipv6_address.is_none();
+        let published_ipv4 = no_guest_address
+            && config
+                .ports
+                .iter()
+                .any(|port| port.protocol == PortProtocol::Tcp || port.host_bind.is_ipv4());
+        let published_ipv6 = no_guest_address
+            && config
+                .ports
+                .iter()
+                .any(|port| port.protocol == PortProtocol::Udp && port.host_bind.is_ipv6());
+
         let guest_ipv4 = match config.interface.ipv4_address {
             Some(address) => Some(address),
-            None if host_routes.ipv4 => Some(derive_guest_ipv4(
+            None if host_routes.ipv4 || published_ipv4 => Some(derive_guest_ipv4(
                 config
                     .interface
                     .ipv4_pool
@@ -237,7 +325,7 @@ impl SmoltcpNetwork {
         let gateway_ipv4 = guest_ipv4.map(gateway_from_guest_ipv4);
         let guest_ipv6 = match config.interface.ipv6_address {
             Some(address) => Some(address),
-            None if host_routes.ipv6 => Some(derive_guest_ipv6(
+            None if host_routes.ipv6 || published_ipv6 => Some(derive_guest_ipv6(
                 config
                     .interface
                     .ipv6_pool
@@ -251,6 +339,24 @@ impl SmoltcpNetwork {
         // Packet queue capacity is independent of the optional connection cap:
         // a large cap must not allocate a correspondingly large packet queue.
         let shared = Arc::new(SharedState::new(DEFAULT_QUEUE_CAPACITY));
+        shared.set_host_networks(
+            host_routes.host_ipv4.clone(),
+            host_routes.host_ipv4_networks.clone(),
+            host_routes.host_ipv6.clone(),
+            host_routes.host_ipv6_networks.clone(),
+        );
+
+        shared.set_http_config(config.http.clone());
+        if let Some(prefix) = config
+            .nat64_prefixes
+            .iter()
+            .find(|prefix| prefix.prefix() != 96)
+        {
+            return Err(NetworkInitError::InvalidNat64Prefix {
+                raw: prefix.to_string(),
+            });
+        }
+        shared.set_nat64_prefixes(config.nat64_prefixes.clone());
         // Every write path validates rate limiters (`NetworkBuilder::build`),
         // but a stored config bypasses the builder: fail startup cleanly
         // instead of panicking on a corrupted spec.
@@ -345,11 +451,18 @@ impl SmoltcpNetwork {
         }
     }
 
-    /// Start the smoltcp poll thread.
+    /// Claim published host ports and start the smoltcp poll thread.
     ///
     /// Must be called before VM boot. Requires a tokio runtime handle for
     /// spawning proxy tasks, DNS resolution, and published port listeners.
-    pub fn start(&mut self, tokio_handle: tokio::runtime::Handle) {
+    ///
+    /// # Errors
+    ///
+    /// Fails if a published host port cannot be claimed. No poll thread starts in that case.
+    pub fn start(
+        &mut self,
+        tokio_handle: tokio::runtime::Handle,
+    ) -> Result<(), PublishedPortBindError> {
         let shared = self.shared.clone();
         let poll_config = PollLoopConfig {
             gateway_mac: self.gateway_mac,
@@ -364,10 +477,20 @@ impl SmoltcpNetwork {
         let platform_policy = self.platform_policy.clone();
         let dns_config = config.dns.clone();
         let tls_state = self.tls_state.clone();
-        let published_ports = config.ports.clone();
+        let tcp_accept_queue_size = config.tcp_accept_queue_size.unwrap_or_default();
+        let published_ports = BoundPublishedPorts::bind(
+            &config.ports,
+            tcp_accept_queue_size,
+            self.guest_ipv4,
+            self.guest_ipv6,
+            self.gateway_ipv4,
+            self.gateway_ipv6,
+            &tokio_handle,
+        )?;
         let strict = config.strict;
         let max_tcp_connections = config.max_tcp_connections.and_then(ConnectionLimit::cap);
         let max_udp_connections = config.max_udp_connections;
+        let max_inbound_tcp_connections = config.max_inbound_tcp_connections;
         let secrets = self.secrets.clone();
         let activation_gate = self.activation_gate.take();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
@@ -390,6 +513,7 @@ impl SmoltcpNetwork {
                         strict,
                         max_tcp_connections,
                         max_udp_connections,
+                        max_inbound_tcp_connections,
                         tokio_handle,
                         secrets,
                         outbound_proxy,
@@ -397,6 +521,8 @@ impl SmoltcpNetwork {
                 })
                 .expect("failed to spawn smoltcp poll thread"),
         );
+
+        Ok(())
     }
 
     /// Take the `NetBackend` for `VmBuilder::net()`. One-shot.
@@ -525,7 +651,7 @@ impl SmoltcpNetwork {
         }
     }
 
-    /// Create a handle for reading aggregate network byte counters.
+    /// Create a handle for reading aggregate network counters.
     pub fn metrics_handle(&self) -> MetricsHandle {
         MetricsHandle {
             shared: self.shared.clone(),
@@ -576,6 +702,21 @@ impl MetricsHandle {
     /// Total runtime -> guest bytes observed at the virtio-net boundary.
     pub fn rx_bytes(&self) -> u64 {
         self.shared.rx_bytes()
+    }
+
+    /// Published TCP connections rejected by the bounded admission queue.
+    pub fn inbound_tcp_rejected(&self) -> u64 {
+        self.shared.inbound_tcp_rejected()
+    }
+
+    /// Outbound TCP connections rejected because this sandbox reached its active cap.
+    pub fn outbound_tcp_rejected(&self) -> u64 {
+        self.shared.outbound_tcp_rejected()
+    }
+
+    /// Outbound UDP sessions evicted because this sandbox reached its session cap.
+    pub fn outbound_udp_evicted(&self) -> u64 {
+        self.shared.outbound_udp_evicted()
     }
 }
 
@@ -748,6 +889,18 @@ fn host_has_ipv6_route() -> bool {
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
+#[path = "network/test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "network/tcp_connect_tests.rs"]
+mod tcp_connect_tests;
+
+#[cfg(test)]
+#[path = "network/published_ports_tests.rs"]
+mod published_ports_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{EnvNetworkSecretResolver, NetworkConfig, PortProtocol, PublishedPort};
@@ -758,7 +911,11 @@ mod tests {
     }
 
     fn routes(ipv4: bool, ipv6: bool) -> HostRoutes {
-        HostRoutes { ipv4, ipv6 }
+        HostRoutes {
+            ipv4,
+            ipv6,
+            ..HostRoutes::default()
+        }
     }
 
     #[test]
@@ -1176,6 +1333,97 @@ mod tests {
             .find(|(k, _)| k == ENV_NET_IPV6)
             .expect("explicit ipv6 should publish env var even without host route");
         assert!(v6.1.contains("fd42:6d73:62:99::2/64"));
+    }
+
+    #[test]
+    fn published_ports_preserve_existing_address_families() {
+        for (host_routes, explicit_address, profile, expected_ipv4, expected_ipv6) in [
+            (
+                routes(true, false),
+                None,
+                DeploymentProfile::SingleTenant,
+                true,
+                false,
+            ),
+            (
+                routes(false, true),
+                None,
+                DeploymentProfile::SingleTenant,
+                false,
+                true,
+            ),
+            (
+                routes(true, true),
+                None,
+                DeploymentProfile::SingleTenant,
+                true,
+                true,
+            ),
+            (
+                routes(false, false),
+                Some("fd42:6d73:62:99::2"),
+                DeploymentProfile::SingleTenant,
+                false,
+                true,
+            ),
+            (
+                routes(false, false),
+                Some("172.20.0.2"),
+                DeploymentProfile::SingleTenant,
+                true,
+                false,
+            ),
+            (
+                routes(false, false),
+                None,
+                DeploymentProfile::MultiTenant,
+                false,
+                false,
+            ),
+        ] {
+            let mut config = NetworkConfig::default();
+            config.tls.enabled = false;
+            let explicit_address = explicit_address.map(|address| address.parse().unwrap());
+            match explicit_address {
+                Some(std::net::IpAddr::V4(address)) => {
+                    config.interface.ipv4_address = Some(address)
+                }
+                Some(std::net::IpAddr::V6(address)) => {
+                    config.interface.ipv6_address = Some(address)
+                }
+                None => {}
+            }
+            config.ports.push(PublishedPort {
+                host_port: 8080,
+                guest_port: 8000,
+                protocol: PortProtocol::Tcp,
+                host_bind: Ipv4Addr::UNSPECIFIED.into(),
+            });
+            // Adding a missing UDP family must not switch an existing TCP target
+            // from IPv6 to IPv4, or otherwise change an already-addressed guest.
+            for host_bind in [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()] {
+                config.ports.push(PublishedPort {
+                    host_port: 8081,
+                    guest_port: 8001,
+                    protocol: PortProtocol::Udp,
+                    host_bind,
+                });
+            }
+            let network = SmoltcpNetwork::build(resolved(config), 7, profile, host_routes).unwrap();
+            let bootstrap = network.guest_bootstrap_network();
+
+            assert_eq!(bootstrap.ipv4.is_some(), expected_ipv4);
+            assert_eq!(bootstrap.ipv6.is_some(), expected_ipv6);
+            match explicit_address {
+                Some(std::net::IpAddr::V4(address)) => {
+                    assert_eq!(bootstrap.ipv4.unwrap().address, address);
+                }
+                Some(std::net::IpAddr::V6(address)) => {
+                    assert_eq!(bootstrap.ipv6.unwrap().address, address);
+                }
+                None => {}
+            }
+        }
     }
 
     #[test]

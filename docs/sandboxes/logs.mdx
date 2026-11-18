@@ -10,20 +10,24 @@ Local sandboxes record captured output to disk so you can read it later, even af
 
 ## Read logs
 
-```bash
+<CodeGroup>
+```bash Shell
 msb logs devbox
 msb logs devbox --tail 100
 msb logs devbox -f
 msb logs devbox --grep ERROR
 msb logs devbox --json | jq 'select(.s == "stderr")'
 ```
+</CodeGroup>
 
 The default output includes user-program `stdout`, `stderr`, and PTY output. Add system diagnostics when you need runtime or kernel logs:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb logs devbox --source system
 msb logs devbox --source all
 ```
+</CodeGroup>
 
 ## Read from the SDK
 
@@ -46,6 +50,12 @@ entries = await handle.logs()
 ```go Go
 handle, err := m.GetSandbox(ctx, "web")
 entries, err := handle.Logs(ctx, m.LogOptions{})
+```
+
+```ruby Ruby
+# Ruby reads logs through a connection to a running local sandbox.
+sb = Microsandbox::Sandbox.get("web").connect
+entries = sb.logs
 ```
 </CodeGroup>
 
@@ -82,6 +92,10 @@ recent, err := handle.Logs(ctx, m.LogOptions{
     Sources: []m.LogSource{m.LogSourceStdout, m.LogSourceStderr},
 })
 ```
+
+```ruby Ruby
+recent = sb.logs(tail: 50, sources: [:stdout, :stderr])
+```
 </CodeGroup>
 
 ## Sources
@@ -99,18 +113,22 @@ Interactive sessions use a PTY, so stdout and stderr are merged before microsand
 
 **Sandbox crashed**
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ls
 msb logs <name>
 msb logs <name> --source system
 ```
+</CodeGroup>
 
 **Sandbox will not start**
 
-```bash
+<CodeGroup>
+```bash Shell
 msb create --name nope ...
 msb logs nope --source system
 ```
+</CodeGroup>
 
 **Program produced no logs**
 
@@ -129,4 +147,4 @@ Sandbox logs live under `<sandbox-dir>/logs/`:
 
 ## Reference
 
-For exact log APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For local log retrieval and follow mode, see [`msb logs`](/cli/sandbox-commands#msb-logs).
+For exact log APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), [Go](/sdk/go/sandbox), or [Ruby](/sdk/ruby/sandbox). For local log retrieval and follow mode, see [`msb logs`](/cli/sandbox-commands#msb-logs).

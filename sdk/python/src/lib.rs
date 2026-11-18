@@ -4,13 +4,16 @@ mod exec;
 mod fs;
 mod helpers;
 mod image;
+mod jobs;
 mod logs;
 mod metrics;
 mod sandbox;
 mod sandbox_handle;
+mod service;
 mod setup;
 mod snapshot;
 mod ssh;
+mod storage;
 mod volume;
 
 use std::sync::Arc;
@@ -49,6 +52,7 @@ struct PyBackendInfo {
 fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(setup::resolve_runtime, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::diagnose_storage, m)?)?;
     m.add_function(wrap_pyfunction!(setup::is_runtime_installed, m)?)?;
     m.add_function(wrap_pyfunction!(setup::install_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(setup::ensure_runtime, m)?)?;
@@ -63,13 +67,19 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(setup::resolved_cli_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
-    m.add_class::<sandbox::PyBranchOutcome>()?;
+    m.add_class::<sandbox::PyStorageRecovery>()?;
+    m.add_class::<sandbox::PyForkOutcome>()?;
+    // Preserve the old class identity for callers using isinstance on batch outcomes.
+    m.add("BranchOutcome", m.getattr("ForkOutcome")?)?;
     m.add_class::<sandbox::PySandboxStopResult>()?;
     m.add_class::<sandbox::PySandboxPingResult>()?;
     m.add_class::<sandbox::PySandboxTouchResult>()?;
     m.add_class::<sandbox::PyExternalMountWarning>()?;
     m.add_class::<sandbox::PySandboxPage>()?;
     m.add_class::<sandbox_handle::PySandboxHandle>()?;
+    m.add_class::<jobs::PyJob>()?;
+    m.add_class::<jobs::PyJobAttachment>()?;
+    m.add_class::<jobs::PyJobLogStream>()?;
     m.add_class::<exec::PyExecOutput>()?;
     m.add_class::<exec::PyExecHandle>()?;
     m.add_class::<exec::PyExecSink>()?;
@@ -83,9 +93,17 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<image::PyImageConfigDetail>()?;
     m.add_class::<image::PyImageLayerDetail>()?;
     m.add_class::<image::PyImagePruneReport>()?;
+    m.add_class::<storage::PyStorage>()?;
+    m.add_class::<storage::PyStorageUsage>()?;
+    m.add_class::<storage::PyStorageCategoryUsage>()?;
+    m.add_class::<storage::PyStorageItemUsage>()?;
+    m.add_class::<storage::PyMemoryCacheEntry>()?;
+    m.add_class::<storage::PyMemoryCacheReport>()?;
     m.add_class::<volume::PyVolume>()?;
     m.add_class::<volume::PyVolumeHandle>()?;
     m.add_class::<volume::PyVolumeFs>()?;
+    m.add_class::<service::PyService>()?;
+    m.add_class::<service::PyServicePage>()?;
     m.add_class::<snapshot::PySnapshot>()?;
     m.add_class::<snapshot::PySnapshotArchive>()?;
     m.add_class::<snapshot::PySnapshotCopyBuilder>()?;
@@ -178,8 +196,11 @@ fn backend_scope(
 
 /// Return the active default backend kind.
 #[pyfunction]
-fn default_backend_kind(py: Python<'_>) -> PyResult<PyObject> {
-    let kind = match microsandbox::default_backend().kind() {
+fn default_backend_kind(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let kind = match microsandbox::default_backend_info()
+        .map_err(error::to_py_err)?
+        .kind
+    {
         microsandbox::BackendKind::Local => "local",
         microsandbox::BackendKind::Cloud => "cloud",
     };
@@ -188,14 +209,14 @@ fn default_backend_kind(py: Python<'_>) -> PyResult<PyObject> {
 
 /// Return secret-safe information about the active default backend.
 #[pyfunction]
-fn default_backend_info() -> PyBackendInfo {
-    let info = microsandbox::default_backend_info();
-    PyBackendInfo {
+fn default_backend_info() -> PyResult<PyBackendInfo> {
+    let info = microsandbox::default_backend_info().map_err(error::to_py_err)?;
+    Ok(PyBackendInfo {
         kind: info.kind.as_str().to_string(),
         api_url: info.api_url,
         source: info.source.as_str().to_string(),
         profile: info.profile,
-    }
+    })
 }
 
 /// Return the `msb` binary path the native resolver would currently use.

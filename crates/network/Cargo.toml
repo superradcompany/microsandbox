@@ -21,6 +21,7 @@ engine = [
     "dep:hickory-net",
     "dep:httlib-hpack",
     "dep:httparse",
+    "dep:if-addrs",
     "dep:libc",
     "dep:lru",
     "dep:msb_krun",
@@ -33,6 +34,7 @@ engine = [
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:rustls-pki-types",
+    "dep:serde_json",
     "dep:socket2",
     "dep:smoltcp",
     "dep:system-configuration",
@@ -53,6 +55,7 @@ futures = { workspace = true, optional = true }
 # crypto provider, so no new dependency is introduced.
 hickory-net = { workspace = true, features = ["tls-ring"], optional = true }
 hickory-proto = { workspace = true }
+if-addrs = { workspace = true, optional = true }
 httlib-hpack = { workspace = true, optional = true }
 httparse = { version = "1", optional = true }
 ipnetwork = { workspace = true }
@@ -72,6 +75,7 @@ rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
 # Used for the `SO_LINGER(0)` (RST-on-drop) trick on rejected inbound
 # connections in `publisher.rs`. tokio's `TcpStream::set_linger` is
 # deprecated; `socket2::SockRef::from(&stream)` is the supported path.
@@ -85,6 +89,7 @@ smoltcp = { workspace = true, optional = true, features = [
     "socket-dns",
     "socket-icmp",
     "socket-tcp",
+    "socket-tcp-pause-synack",
     "socket-udp",
 ] }
 thiserror = { workspace = true }
@@ -109,3 +114,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Netwo
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

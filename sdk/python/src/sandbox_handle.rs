@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList};
 
 use crate::error::to_py_err;
-use crate::helpers::{extract_str_enum, str_enum_member};
+use crate::helpers::{apply_fork_volumes, extract_str_enum, prepare_fork_volumes, str_enum_member};
 use crate::metrics::convert_metrics;
 use crate::sandbox::{
     PySandbox, PySandboxPingResult, PySandboxStopResult, PySandboxTouchResult, optional_duration,
@@ -15,7 +15,7 @@ use crate::sandbox::{
 //--------------------------------------------------------------------------------------------------
 
 /// A lightweight handle to a sandbox from the database.
-#[pyclass(name = "SandboxHandle")]
+#[pyclass(from_py_object, name = "SandboxHandle")]
 #[derive(Clone)]
 pub struct PySandboxHandle {
     inner: Arc<microsandbox::sandbox::SandboxHandle>,
@@ -35,6 +35,38 @@ impl PySandboxHandle {
 
 #[pymethods]
 impl PySandboxHandle {
+    fn get_job<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = inner;
+            Ok(crate::jobs::PyJob {
+                inner: sandbox.get_job(id).await.map_err(crate::jobs::job_error)?,
+            })
+        })
+    }
+    #[pyo3(signature = (*, all = false, limit = 50, cursor = None))]
+    fn list_jobs<'py>(
+        &self,
+        py: Python<'py>,
+        all: bool,
+        limit: usize,
+        cursor: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = crate::jobs::list_options(all, limit, cursor)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = inner;
+            let page = sandbox
+                .list_jobs_with(|_| options)
+                .await
+                .map_err(crate::jobs::job_error)?;
+            crate::jobs::decode(
+                "page",
+                serde_json::to_value(page).map_err(crate::jobs::invalid)?,
+            )
+        })
+    }
+
     /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[getter]
     fn name(&self) -> PyResult<String> {
@@ -51,7 +83,7 @@ impl PySandboxHandle {
 
     /// Current sandbox lifecycle status.
     #[getter]
-    fn status(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn status(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let guard = &self.inner;
         str_enum_member(
             py,
@@ -75,7 +107,7 @@ impl PySandboxHandle {
     }
 
     /// Parsed sandbox configuration.
-    fn config(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let guard = &self.inner;
         let value: serde_json::Value =
             serde_json::from_str(guard.config_json()).map_err(|e| to_py_err(e.into()))?;
@@ -89,6 +121,15 @@ impl PySandboxHandle {
             let guard = inner.clone();
             let refreshed = guard.refresh().await.map_err(to_py_err)?;
             Ok(PySandboxHandle::from_rust(refreshed))
+        })
+    }
+
+    /// Observe managed storage through this handle's captured backend.
+    fn storage_usage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let usage = inner.storage_usage().await.map_err(to_py_err)?;
+            Ok(crate::storage::PyStorageItemUsage::from_rust(usage))
         })
     }
 
@@ -166,8 +207,9 @@ impl PySandboxHandle {
     /// applying anything.
     ///
     /// `secrets` maps secret names to spec dicts with at most one of
-    /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
-    /// `"allowed_hosts"`. `secrets_rm` removes secrets by name.
+    /// `"env"` / `"value"` / `"store"`, plus optional placeholder, allowed
+    /// hosts, substitution, violation action, TLS identity requirement, and
+    /// `"allow_placeholder_for"` hosts. `secrets_rm` removes secrets by name.
     #[pyo3(signature = (
         *,
         cpus = None,
@@ -182,6 +224,8 @@ impl PySandboxHandle {
         workdir = None,
         secrets = None,
         secrets_rm = None,
+        ports = None,
+        ports_rm = None,
         policy = None,
         dry_run = false,
     ))]
@@ -203,12 +247,14 @@ impl PySandboxHandle {
             std::collections::HashMap<String, std::collections::HashMap<String, Py<PyAny>>>,
         >,
         secrets_rm: Option<Vec<String>>,
+        ports: Option<Py<PyAny>>,
+        ports_rm: Option<Py<PyAny>>,
         policy: Option<Py<PyAny>>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = crate::sandbox::build_secret_patches(py, secrets)?;
-        let patch = crate::sandbox::build_modify_patch(
+        let mut patch = crate::sandbox::build_modify_patch(
             cpus,
             max_cpus,
             memory,
@@ -222,6 +268,9 @@ impl PySandboxHandle {
             secrets,
             secrets_rm,
         );
+        patch.ports = crate::helpers::modify_ports(ports.as_ref().map(|value| value.bind(py)))?;
+        patch.ports_remove =
+            crate::helpers::modify_ports_remove(ports_rm.as_ref().map(|value| value.bind(py)))?;
         let policy = policy
             .as_ref()
             .map(|value| extract_str_enum(value.bind(py), "ModificationPolicy"))
@@ -379,48 +428,102 @@ impl PySandboxHandle {
         self.stop(py, Some(timeout))
     }
 
-    /// Create an independent local CoW child without a durable full snapshot.
-    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    /// Deprecated: use fork for live execution duplication.
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.clone();
-            let mut builder = guard
-                .branch(name)
-                .guest_flush(crate::snapshot::guest_flush_policy(guest_flush)?);
-            if record_integrity {
-                builder = builder.record_integrity();
-            }
-            Ok(PySandbox::from_rust(
-                builder.branch().await.map_err(to_py_err)?,
-            ))
-        })
+        PyModule::import(py, "warnings")?.call_method1(
+            "warn",
+            (
+                "branch is deprecated; use fork",
+                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                2,
+            ),
+        )?;
+        self.fork(py, name, record_integrity, guest_flush, volumes)
     }
 
-    /// Capture once for all names; return individual child outcomes in input order.
-    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    /// Deprecated: use fork_many for live execution duplication.
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        PyModule::import(py, "warnings")?.call_method1(
+            "warn",
+            (
+                "branch_many is deprecated; use fork_many",
+                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                2,
+            ),
+        )?;
+        self.fork_many(py, names, record_integrity, guest_flush, volumes)
+    }
+
+    /// Create an independent local CoW child without a durable full snapshot.
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
+    fn fork<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        record_integrity: bool,
+        guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes = prepare_fork_volumes(
+            volumes.as_ref().map(|v| v.bind(py)),
+            self.inner.backend_kind().as_str() == "local",
+        )?;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut builder = inner
-                .branch_many(names)
+            let guard = inner.clone();
+            let mut builder = guard
+                .fork(name)
                 .guest_flush(crate::snapshot::guest_flush_policy(guest_flush)?);
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            crate::sandbox::branch_outcomes(builder.branch().await.map_err(to_py_err)?)
+            builder = apply_fork_volumes(builder, &volumes)?;
+            Ok(PySandbox::from_rust(
+                builder.fork().await.map_err(to_py_err)?,
+            ))
+        })
+    }
+
+    /// Capture once for all names; return individual child outcomes in input order.
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
+    fn fork_many<'py>(
+        &self,
+        py: Python<'py>,
+        names: Vec<String>,
+        record_integrity: bool,
+        guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes = prepare_fork_volumes(
+            volumes.as_ref().map(|v| v.bind(py)),
+            self.inner.backend_kind().as_str() == "local",
+        )?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut builder = inner
+                .fork_many(names)
+                .guest_flush(crate::snapshot::guest_flush_policy(guest_flush)?);
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
+            builder = apply_fork_volumes(builder, &volumes)?;
+            crate::sandbox::branch_outcomes(builder.fork().await.map_err(to_py_err)?)
         })
     }
 
@@ -604,7 +707,7 @@ impl PySandboxHandle {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) fn json_value_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+pub(crate) fn json_value_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     match value {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(value) => Ok(PyBool::new(py, value).to_owned().unbind().into()),

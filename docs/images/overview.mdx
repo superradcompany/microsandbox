@@ -50,6 +50,10 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithPullPolicy(m.PullPolicyAlways),
 )
 ```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("worker", image: "python", pull_policy: "always")
+```
 </CodeGroup>
 
 <Tip>
@@ -119,7 +123,8 @@ By default, microsandbox connects to registries over HTTPS using system CA roots
 
 Local registries often run without TLS. Mark them as insecure to connect over plain HTTP:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "registries": {
     "hosts": {
@@ -130,24 +135,28 @@ Local registries often run without TLS. Mark them as insecure to connect over pl
   }
 }
 ```
+</CodeGroup>
 
 #### Custom CA certificates
 
 For registries using self-signed or internal CA certificates, point `ca_certs` to a PEM file. This applies globally to all registry connections:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "registries": {
     "ca_certs": "/path/to/ca-bundle.pem"
   }
 }
 ```
+</CodeGroup>
 
 microsandbox adds these certificates to the default system roots, so public registries continue to work normally. You can also supply the same roots per-sandbox through the SDK: `caCerts` in TypeScript, `ca_certs` in Rust, `registry_ca_certs` in Python, and `WithRegistryCACerts` / `WithRegistryCACertsPath` in Go.
 
 #### Combined configuration
 
-```json
+<CodeGroup>
+```json JSON
 {
   "registries": {
     "ca_certs": "/path/to/corporate-ca.pem",
@@ -163,6 +172,7 @@ microsandbox adds these certificates to the default system roots, so public regi
   }
 }
 ```
+</CodeGroup>
 
 Per-sandbox SDK options override user registry settings. [Managed registry settings](/configuration#auth-resolution-order) take precedence over both. Managed `insecure: false` requires TLS without changing credentials; managed `auth: null` forces anonymous access, and managed CA settings replace per-call custom certificates.
 
@@ -309,6 +319,14 @@ sb2, err := m.CreateSandbox(ctx, "custom-vm-2",
     m.WithMemory(512),
 )
 ```
+```ruby Ruby
+# Auto-detect the format from the file extension.
+sb = Microsandbox::Sandbox.create(
+  "custom-vm", image: "./ubuntu-22.04.qcow2", cpus: 2, memory: 2048
+)
+# Ruby accepts image paths but does not expose a filesystem-type override.
+```
+
 </CodeGroup>
 
 <Note>
@@ -317,4 +335,4 @@ sb2, err := m.CreateSandbox(ctx, "custom-vm-2",
 
 ## Reference
 
-For exact image APIs, see [TypeScript](/sdk/typescript/images), [Rust](/sdk/rust/images), [Python](/sdk/python/images), or [Go](/sdk/go/images). For local image management, see [Image commands](/cli/image-commands).
+For exact image APIs, see [TypeScript](/sdk/typescript/images), [Rust](/sdk/rust/images), [Python](/sdk/python/images), [Go](/sdk/go/images), or [Ruby](/sdk/ruby/images). For local image management, see [Image commands](/cli/image-commands).

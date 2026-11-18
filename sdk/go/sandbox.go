@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
@@ -28,7 +30,7 @@ type Sandbox struct {
 type GuestFlush string
 
 const (
-	// GuestFlushAuto flushes live disk-only captures, but not full captures or branches.
+	// GuestFlushAuto flushes live disk-only captures, but not full captures or forks.
 	GuestFlushAuto GuestFlush = "auto"
 	// GuestFlushRequired requires successful writeback of captured persistent filesystems.
 	GuestFlushRequired GuestFlush = "required"
@@ -36,30 +38,59 @@ const (
 	GuestFlushSkip GuestFlush = "skip"
 )
 
-// BranchOptions controls optional integrity and guest writeback for a local branch.
-type BranchOptions struct {
-	RecordIntegrity bool
-	GuestFlush      GuestFlush
+// forkOptions holds the private configuration for a local fork.
+type forkOptions struct {
+	recordIntegrity bool
+	guestFlush      GuestFlush
+	volumes         map[string]MountConfig
 }
 
-// BranchOutcome contains either a running child or its startup error.
-type BranchOutcome struct {
+// ForkOutcome contains either a running child or its startup error.
+type ForkOutcome struct {
 	Name    string
 	Sandbox *Sandbox
 	Error   error
 }
 
-// BranchOption configures a local branch.
-type BranchOption func(*BranchOptions)
+// ForkOption configures a local fork.
+type ForkOption func(*forkOptions)
 
-// WithBranchIntegrity records disk content hashes; RAM backing remains unhashed.
-func WithBranchIntegrity() BranchOption {
-	return func(options *BranchOptions) { options.RecordIntegrity = true }
+// BranchOption configures a live fork.
+//
+// Deprecated: use ForkOption.
+type BranchOption = ForkOption
+
+// BranchOutcome is a live fork result.
+//
+// Deprecated: use ForkOutcome.
+type BranchOutcome = ForkOutcome
+
+// WithBranchIntegrity enables disk integrity recording.
+//
+// Deprecated: use WithForkIntegrity.
+func WithBranchIntegrity() ForkOption { return WithForkIntegrity() }
+
+// WithBranchGuestFlush selects guest writeback for live forking.
+//
+// Deprecated: use WithForkGuestFlush.
+func WithBranchGuestFlush(policy GuestFlush) ForkOption { return WithForkGuestFlush(policy) }
+
+// WithForkIntegrity records disk content hashes; RAM backing remains unhashed.
+func WithForkIntegrity() ForkOption {
+	return func(options *forkOptions) { options.recordIntegrity = true }
 }
 
-// WithBranchGuestFlush selects guest writeback before capturing a branch generation.
-func WithBranchGuestFlush(policy GuestFlush) BranchOption {
-	return func(options *BranchOptions) { options.GuestFlush = policy }
+// WithForkVolumes rebinds captured disks to host images consistent with the
+// captured state. A fork cannot add a new block device. Each child attaches
+// the supplied image directly, without a private copy, so batch forks should
+// not share a writable image.
+func WithForkVolumes(volumes map[string]MountConfig) ForkOption {
+	return func(options *forkOptions) { options.volumes = volumes }
+}
+
+// WithForkGuestFlush selects guest writeback before capturing a live fork.
+func WithForkGuestFlush(policy GuestFlush) ForkOption {
+	return func(options *forkOptions) { options.guestFlush = policy }
 }
 
 // BackendKind returns the backend retained by this sandbox.
@@ -90,10 +121,7 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 		opt(&o)
 	}
 
-	if err := resolveRegistryCACertPaths(&o); err != nil {
-		return nil, err
-	}
-	if err := validateOwnedMounts(o.Volumes); err != nil {
+	if err := prepareSandboxCreateConfig(&o); err != nil {
 		return nil, err
 	}
 
@@ -112,6 +140,17 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 	return &Sandbox{inner: inner}, nil
 }
 
+// prepareSandboxCreateConfig resolves host inputs and validates options before native creation.
+func prepareSandboxCreateConfig(config *SandboxConfig) error {
+	if err := resolveRegistryCACertPaths(config); err != nil {
+		return err
+	}
+	if err := validateOwnedMounts(config.Volumes); err != nil {
+		return err
+	}
+	return validateHTTPConfig(config.Network)
+}
+
 // resolveRegistryCACertPaths reads every PEM file named by
 // RegistryCACertPaths and appends its contents to RegistryCACerts. The option
 // functions only record paths, since they cannot report a read failure.
@@ -119,7 +158,7 @@ func resolveRegistryCACertPaths(o *SandboxConfig) error {
 	for _, path := range o.RegistryCACertPaths {
 		pem, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("microsandbox: reading registry CA certs %q: %w", path, err)
+			return &Error{Kind: ErrInvalidConfig, Message: fmt.Sprintf("microsandbox: reading registry CA certs %q", path), Cause: err}
 		}
 		o.RegistryCACerts = append(o.RegistryCACerts, pem)
 	}
@@ -140,6 +179,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		CPUPlacement:      string(o.CPUPlacement),
 		PlacementProfile:  o.PlacementProfile,
 		THP:               string(o.THP),
+		NestedVirt:        o.NestedVirt,
 		Workdir:           o.Workdir,
 		Shell:             o.Shell,
 		SecurityProfile:   string(o.SecurityProfile),
@@ -195,7 +235,9 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		}
 		ffiOpts.Init = init
 	}
-	if o.RegistryAuth != nil {
+	if o.registryAnonymous {
+		ffiOpts.RegistryAnonymous = true
+	} else if o.RegistryAuth != nil {
 		ffiOpts.RegistryAuth = &ffi.RegistryAuthOptions{
 			Username: o.RegistryAuth.Username,
 			Password: o.RegistryAuth.Password,
@@ -252,9 +294,10 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 			Placeholder:        s.Placeholder,
 			RequireTLSIdentity: s.RequireTLSIdentity,
 			Substitution: ffi.SecretSubstitutionOptions{
-				Headers: s.Substitution.Headers,
-				Query:   s.Substitution.Query,
-				Body:    s.Substitution.Body,
+				Headers:      s.Substitution.Headers,
+				HeaderFields: s.Substitution.HeaderFields,
+				Query:        s.Substitution.Query,
+				Body:         s.Substitution.Body,
 			},
 			ViolationAction: string(s.ViolationAction),
 		})
@@ -378,22 +421,45 @@ func sandboxTouchResultFromFFI(result *ffi.SandboxTouchResult) *SandboxTouchResu
 	}
 }
 
+func validateHTTPConfig(network *NetworkConfig) error {
+	if network == nil || network.HTTP == nil {
+		return nil
+	}
+	switch network.HTTP.DenyResponseFormat {
+	case "", HTTPDenyResponseText, HTTPDenyResponseJSON:
+		return nil
+	default:
+		return &Error{Kind: ErrInvalidConfig, Message: "deny_response_format must be text or json"}
+	}
+}
+
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
 func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	out := &ffi.NetworkOptions{
-		DNSRebindProtection:   n.DNSRebindProtection,
-		DenyDomains:           n.DenyDomains,
-		DenyDomainSuffixes:    n.DenyDomainSuffixes,
-		Ports:                 n.Ports,
-		PortBindings:          buildFFIPortBindings(n.PortBindings),
-		IPv4Pool:              n.IPv4Pool,
-		IPv6Pool:              n.IPv6Pool,
-		MaxConnections:        n.MaxConnections,
-		MaxTCPConnections:     n.MaxTCPConnections,
-		MaxUDPConnections:     n.MaxUDPConnections,
-		RateLimiter:           buildFFINetworkRateLimiter(n.RateLimiter),
-		SecretViolationAction: string(n.SecretViolationAction),
-		TrustHostCAs:          n.TrustHostCAs,
+		DNSRebindProtection:      n.DNSRebindProtection,
+		DenyDomains:              n.DenyDomains,
+		DenyDomainSuffixes:       n.DenyDomainSuffixes,
+		Ports:                    n.Ports,
+		PortBindings:             buildFFIPortBindings(n.PortBindings),
+		TCPAcceptQueueSize:       n.TCPAcceptQueueSize,
+		MaxInboundTCPConnections: n.MaxInboundTCPConnections,
+		IPv4Pool:                 n.IPv4Pool,
+		IPv6Pool:                 n.IPv6Pool,
+		NAT64Prefixes:            n.NAT64Prefixes,
+		MaxConnections:           n.MaxConnections,
+		MaxTCPConnections:        n.MaxTCPConnections,
+		MaxUDPConnections:        n.MaxUDPConnections,
+		RateLimiter:              buildFFINetworkRateLimiter(n.RateLimiter),
+		SecretViolationAction:    string(n.SecretViolationAction),
+		TrustHostCAs:             n.TrustHostCAs,
+	}
+
+	if n.HTTP != nil {
+		format := n.HTTP.DenyResponseFormat
+		if format == "" {
+			format = HTTPDenyResponseJSON
+		}
+		out.HTTP = &ffi.HTTPConfig{DenyResponseFormat: string(format), DenyMessage: n.HTTP.DenyMessage, DenyResponse: n.HTTP.DenyResponse, NetworkDenyMessage: n.HTTP.NetworkDenyMessage, SecretDenyMessage: n.HTTP.SecretDenyMessage}
 	}
 
 	strict := !n.DisableStrict
@@ -983,23 +1049,45 @@ func (h *SandboxHandle) RequestStop(ctx context.Context) error {
 	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_stop", ffi.SandboxHandleLifecycleOptions{}))
 }
 
-// BranchMany captures once and returns each named child's startup outcome in input order.
-func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...BranchOption) ([]BranchOutcome, error) {
-	options := BranchOptions{}
+// ForkMany captures once and returns each named child's startup outcome in input order.
+func (h *SandboxHandle) ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	options := forkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.recordIntegrity, volumes, string(options.guestFlush))
 	return wrapBranchOutcomes(rows, err)
 }
 
-// Branch creates an independent local CoW child without publishing a durable full snapshot.
-func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
-	options := BranchOptions{}
+// Branch creates a live fork.
+//
+// Deprecated: use Fork.
+func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	return h.Fork(ctx, name, opts...)
+}
+
+// BranchMany creates live forks from one capture.
+//
+// Deprecated: use ForkMany.
+func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	return h.ForkMany(ctx, names, opts...)
+}
+
+// Fork creates an independent local CoW child without publishing a durable full snapshot.
+func (h *SandboxHandle) Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	options := forkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.recordIntegrity, volumes, string(options.guestFlush))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -1164,13 +1252,31 @@ func (s *Sandbox) PauseWithGuestFlush(ctx context.Context, policy GuestFlush) er
 	return wrapFFI(s.inner.PauseWithGuestFlush(ctx, string(policy)))
 }
 
-// Branch creates an independent local CoW child without publishing a durable full snapshot.
-func (s *Sandbox) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
-	options := BranchOptions{}
+// Branch creates a live fork.
+//
+// Deprecated: use Fork.
+func (s *Sandbox) Branch(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	return s.Fork(ctx, name, opts...)
+}
+
+// BranchMany creates live forks from one capture.
+//
+// Deprecated: use ForkMany.
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	return s.ForkMany(ctx, names, opts...)
+}
+
+// Fork creates an independent local CoW child without publishing a durable full snapshot.
+func (s *Sandbox) Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	options := forkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	inner, err := s.inner.Branch(ctx, name, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := s.inner.Branch(ctx, name, options.recordIntegrity, volumes, string(options.guestFlush))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -1182,24 +1288,68 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	return wrapFFI(s.inner.Resume(ctx))
 }
 
-// BranchMany captures once and returns each child's outcome in input order.
+// ForkMany captures once and returns each child's outcome in input order.
 // Validation/capture errors fail the call; individual startup failures are returned in Error.
-func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...BranchOption) ([]BranchOutcome, error) {
-	options := BranchOptions{}
+func (s *Sandbox) ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	options := forkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	rows, err := s.inner.BranchMany(ctx, names, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.inner.BranchMany(ctx, names, options.recordIntegrity, volumes, string(options.guestFlush))
 	return wrapBranchOutcomes(rows, err)
 }
 
-func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]BranchOutcome, error) {
+// ffiForkVolumes validates and encodes fork volumes like restore volumes.
+func ffiForkVolumes(volumes map[string]MountConfig) (map[string]ffi.MountSpec, error) {
+	if len(volumes) == 0 {
+		return nil, nil
+	}
+	if err := validateOwnedMounts(volumes); err != nil {
+		return nil, err
+	}
+	specs := buildFFICreateOptions(SandboxConfig{Volumes: volumes}).Volumes
+	// Fork is always local. Resolve host paths now so a later chdir cannot change
+	// which file the native fork opens.
+	var cwd string
+	for guestPath, spec := range specs {
+		for _, hostPath := range []*string{&spec.Bind, &spec.Disk} {
+			if *hostPath == "" || filepath.IsAbs(*hostPath) {
+				continue
+			}
+			var abs string
+			var err error
+			if filepath.Separator == '\\' {
+				abs, err = filepath.Abs(*hostPath)
+			} else {
+				if cwd == "" {
+					cwd, err = os.Getwd()
+				}
+				if err == nil {
+					// Keep ".." components uncleaned so symlinked parents resolve as the native call resolves them.
+					abs = strings.TrimSuffix(cwd, "/") + "/" + *hostPath
+				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("microsandbox: resolve host path %q for fork volume %q: %w", *hostPath, guestPath, err)
+			}
+			*hostPath = abs
+		}
+		specs[guestPath] = spec
+	}
+	return specs, nil
+}
+
+func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]ForkOutcome, error) {
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	results := make([]BranchOutcome, 0, len(rows))
+	results := make([]ForkOutcome, 0, len(rows))
 	for _, row := range rows {
-		item := BranchOutcome{Name: row.Name, Error: wrapFFI(row.Error)}
+		item := ForkOutcome{Name: row.Name, Error: wrapFFI(row.Error)}
 		if row.Sandbox != nil {
 			item.Sandbox = &Sandbox{inner: row.Sandbox}
 		}

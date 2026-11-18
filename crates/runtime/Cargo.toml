@@ -38,6 +38,7 @@ net = ["dep:microsandbox-network", "msb_krun?/net"]
 
 [dependencies]
 base64.workspace = true
+cap-primitives.workspace = true
 ciborium-ll.workspace = true
 bytes = { workspace = true, optional = true }
 chrono.workspace = true
@@ -71,7 +72,7 @@ tracing.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Kernel", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [target.'cfg(unix)'.dependencies]
 microsandbox-agent-client = { workspace = true, features = ["uds"], optional = true }
@@ -85,5 +86,6 @@ optional = true
 microsandbox-protocol-client.workspace = true
 microsandbox-control-client.workspace = true
 microsandbox-migration.workspace = true
+msb_krun_utils.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

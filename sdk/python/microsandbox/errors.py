@@ -9,10 +9,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from microsandbox.types import ChangeState, ServiceErrorReason
+
 
 class MicrosandboxError(Exception):
-    """Base exception for all microsandbox errors."""
+    """Base exception for all microsandbox errors.
+
+    ``changed`` is set on every error raised by Service create, update, enable,
+    disable, and remove. ``ChangeState.UNKNOWN`` means the change may have been
+    applied, so get and check the Service; it is ``None`` for other calls.
+    """
+
     code: str = "microsandbox-error"
+    changed: ChangeState | None = None
 
 
 class RuntimeNotInstalledError(MicrosandboxError):
@@ -38,6 +47,11 @@ class NoDefaultCommandError(MicrosandboxError):
 class CloudHttpError(MicrosandboxError):
     """Cloud control-plane request failed."""
     code = "cloud-http"
+
+
+class ModificationNotConfirmedError(MicrosandboxError):
+    """A Cloud change did not complete as asked: saved but not in effect, or result unknown."""
+    code = "modification-not-confirmed"
 
 
 class SandboxNotFoundError(MicrosandboxError):
@@ -98,6 +112,49 @@ class PathNotFoundError(MicrosandboxError):
 class VolumeNotFoundError(MicrosandboxError):
     """Volume does not exist."""
     code = "volume-not-found"
+
+
+class ServiceNotFoundError(MicrosandboxError):
+    """No visible Service has this slug."""
+    code = "service-not-found"
+
+
+class ServiceAlreadyExistsError(MicrosandboxError):
+    """The slug is unavailable."""
+    code = "service-already-exists"
+
+
+class ServiceError(MicrosandboxError):
+    """A Service change was refused, or its outcome is unknown.
+
+    Get and check the Service when ``changed`` is ``ChangeState.UNKNOWN``.
+    For ``ServiceErrorReason.OTHER``, ``raw_code``, ``raw_status``, and
+    ``raw_message`` hold the unrecognized refusal's code, HTTP status, and message.
+    ``retry_after`` is the retry delay in seconds returned with the refusal, or ``None``.
+    """
+
+    code = "service"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        slug: str,
+        reason: str,
+        retry_after: float | None,
+        changed: str,
+        raw_code: str | None = None,
+        raw_status: int | None = None,
+        raw_message: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.slug = slug
+        self.reason = ServiceErrorReason(reason)
+        self.retry_after = retry_after
+        self.changed = ChangeState(changed)
+        self.raw_code = raw_code
+        self.raw_status = raw_status
+        self.raw_message = raw_message
 
 
 class ImageNotFoundError(MicrosandboxError):
@@ -200,3 +257,12 @@ class SnapshotSourceRecoveryError(MicrosandboxError):
         self.artifact = PublishedSnapshotArtifact(**artifact) if artifact is not None else None
         self.detail = detail
         self.publication_error = publication_error
+
+
+class JobError(MicrosandboxError):
+    """Managed-job refusal or failure. An uncertain launch retains its recoverable ID."""
+
+    def __init__(self, code: str, message: str, job_id: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.job_id = job_id

@@ -28,28 +28,21 @@ pub struct RestoreBuilder {
     pub(crate) inner: SandboxBuilder,
 }
 
-/// Explicit boot-policy requests must survive deferred source resolution, even when their
-/// values equal defaults. Captured execution cannot acquire a different guest security setup.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct RestoreBootOverrides {
-    pub(crate) security: bool,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl RestoreBootOverrides {
+impl super::SandboxConfigPatch {
     /// Reject unsupported changes while the source is still metadata, before child publication.
-    pub(crate) fn validate_scope(
-        self,
+    pub(crate) fn validate_for_restore(
+        &self,
         scope: crate::snapshot::SnapshotScope,
         mode: SnapshotRestoreMode,
     ) -> MicrosandboxResult<()> {
         if scope != crate::snapshot::SnapshotScope::Full || mode == SnapshotRestoreMode::DiskOnly {
             return Ok(());
         }
-        if self.security {
+        if self.spec.security_profile.is_some() {
             return Err(MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
                 UnsupportedReason::NotAvailable(
@@ -79,12 +72,9 @@ impl Sandbox {
 impl RestoreBuilder {
     fn new(reference: SnapshotReference) -> Self {
         let mut inner = SandboxBuilder::new("").with_snapshot_reference(reference);
-        // Global creation defaults must not silently authorize host access or override the
-        // captured exec user. Destination bindings come only from this operation's builder.
-        inner.config.spec.mounts = Some(Vec::new());
-        inner.config.spec.network.ports = Some(Vec::new());
-        inner.config.spec.vsock = Default::default();
-        inner.config.spec.runtime.user = None;
+        // The creation builder's empty environment is not a caller request to
+        // clear captured settings. Destination bindings start absent as well.
+        inner.config.spec.clear_env_mut();
         inner
             .config
             .restore_resources
@@ -170,11 +160,6 @@ impl RestoreBuilder {
     /// Captured processes cannot be retroactively confined, so full restore rejects this setter.
     pub fn security(mut self, profile: SecurityProfile) -> Self {
         self.inner = self.inner.security(profile);
-        self.inner
-            .config
-            .restore_boot_overrides
-            .get_or_insert_with(Default::default)
-            .security = true;
         self
     }
 
@@ -191,6 +176,13 @@ impl RestoreBuilder {
         self
     }
 
+    /// Select how the host manages the restored guest's wall clock, including full restore.
+    /// Without this call the restore keeps the policy recorded in the snapshot.
+    pub fn guest_clock(mut self, policy: super::GuestClockPolicy) -> Self {
+        self.inner = self.inner.guest_clock(policy);
+        self
+    }
+
     /// Set host runtime logging for the restored sandbox.
     pub fn log_level(mut self, level: crate::LogLevel) -> Self {
         self.inner = self.inner.log_level(level);
@@ -198,9 +190,15 @@ impl RestoreBuilder {
     }
 
     /// Restore captured RAM with private copy-on-write mappings.
-    pub fn forked(mut self) -> Self {
+    pub fn cow_memory(mut self) -> Self {
         self.inner = self.inner.forked();
         self
+    }
+
+    /// Deprecated spelling for copy-on-write memory during full-snapshot restore.
+    #[deprecated(note = "use cow_memory instead")]
+    pub fn forked(self) -> Self {
+        self.cow_memory()
     }
 
     /// Cold-boot the captured disk instead of resuming captured execution.
@@ -239,11 +237,11 @@ impl RestoreBuilder {
 // Share resource bindings without exposing image, replacement, init or startup-command setters.
 // Destination boot controls belong only to RestoreBuilder, not the live branch builders.
 macro_rules! resource_methods {
-    ($builder:ty) => {
+    ($builder:ty, $($inner:ident).+) => {
         impl $builder {
             /// Override the default user for new execs, not credentials of captured processes.
             pub fn user(mut self, user: impl Into<String>) -> Self {
-                self.inner = self.inner.user(user);
+                self.$($inner).+ = self.$($inner).+.user(user);
                 self
             }
 
@@ -253,12 +251,11 @@ macro_rules! resource_methods {
                 guest: impl Into<String>,
                 configure: impl FnOnce(MountBuilder) -> MountBuilder,
             ) -> Self {
-                let resources = self
-                    .inner
+                let resources = self.$($inner).+
                     .config
                     .restore_resources
                     .get_or_insert_with(Default::default);
-                let mounts = self.inner.config.spec.mounts.get_or_insert_with(Vec::new);
+                let mounts = self.$($inner).+.config.spec.mounts.get_or_insert_with(Vec::new);
                 match configure(MountBuilder::new(guest)).build_restore() {
                     Ok(Ok(mount)) => {
                         let guest = mount.guest();
@@ -273,7 +270,7 @@ macro_rules! resource_methods {
                         resources.captured.insert(guest);
                     }
                     Err(error) => {
-                        self.inner.build_error = Some(error);
+                        self.$($inner).+.build_error = Some(error);
                     }
                 }
                 self
@@ -281,19 +278,19 @@ macro_rules! resource_methods {
 
             /// Bind a host stream socket or local named pipe to a guest-to-host vsock port.
             pub fn vsock(mut self, path: impl AsRef<std::path::Path>, port: u32) -> Self {
-                self.inner = self.inner.vsock(path, port);
+                self.$($inner).+ = self.$($inner).+.vsock(path, port);
                 self
             }
 
             /// Bind a host datagram endpoint to a guest-to-host vsock port.
             pub fn vsock_dgram(mut self, path: impl AsRef<std::path::Path>, port: u32) -> Self {
-                self.inner = self.inner.vsock_dgram(path, port);
+                self.$($inner).+ = self.$($inner).+.vsock_dgram(path, port);
                 self
             }
 
             /// Fill unspecified resources from validated local source records. Explicit choices win.
             pub fn dangerously_inherit_resources(mut self) -> Self {
-                self.inner
+                self.$($inner).+
                     .config
                     .restore_resources
                     .get_or_insert_with(Default::default)
@@ -304,44 +301,61 @@ macro_rules! resource_methods {
             /// Choose strict or relaxed compatibility validation for authorized filesystem mappings.
             /// This does not authorize inheritance or waive restore's required-resource checks.
             pub fn external_mount_policy(mut self, policy: ExternalMountRestorePolicy) -> Self {
-                self.inner = self.inner.external_mount_policy(policy);
+                self.$($inner).+ = self.$($inner).+.external_mount_policy(policy);
                 self
             }
 
             /// Publish a new TCP listener owned by this child, not the source's listener.
             #[cfg(feature = "net")]
             pub fn port(mut self, host: u16, guest: u16) -> Self {
-                self.inner = self.inner.port(host, guest);
+                self.$($inner).+ = self.$($inner).+.port(host, guest);
                 self
             }
 
             /// Publish a TCP listener on an explicit destination address.
             #[cfg(feature = "net")]
             pub fn port_bind(mut self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self {
-                self.inner = self.inner.port_bind(bind, host, guest);
+                self.$($inner).+ = self.$($inner).+.port_bind(bind, host, guest);
                 self
             }
 
             /// Publish a new UDP listener owned by this child.
             #[cfg(feature = "net")]
             pub fn port_udp(mut self, host: u16, guest: u16) -> Self {
-                self.inner = self.inner.port_udp(host, guest);
+                self.$($inner).+ = self.$($inner).+.port_udp(host, guest);
                 self
             }
 
             /// Publish a UDP listener on an explicit destination address.
             #[cfg(feature = "net")]
             pub fn port_udp_bind(mut self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self {
-                self.inner = self.inner.port_udp_bind(bind, host, guest);
+                self.$($inner).+ = self.$($inner).+.port_udp_bind(bind, host, guest);
+                self
+            }
+
+            /// Set inbound tcp connection limits for this child's published ports.
+            #[cfg(feature = "net")]
+            pub fn max_inbound_tcp_connections(mut self, value: usize) -> Self {
+                self.$($inner).+ = self.$($inner).+
+                    .network(|network| network.max_inbound_tcp_connections(value));
+                self
+            }
+
+            /// Set the accept-queue depth of this child's published TCP listeners, `1..=i32::MAX`.
+            /// Defaults to 1024; the host kernel clamps it to its own `somaxconn`.
+            #[cfg(feature = "net")]
+            pub fn tcp_accept_queue_size(mut self, size: u32) -> Self {
+                self.$($inner).+ = self.$($inner).+
+                    .network(|network| network.tcp_accept_queue_size(size));
                 self
             }
         }
     };
 }
 
-resource_methods!(RestoreBuilder);
-resource_methods!(super::branch::BranchBuilder);
-resource_methods!(super::branch::BranchManyBuilder);
+resource_methods!(RestoreBuilder, inner);
+resource_methods!(super::branch::ForkBuilder, config.inner);
+resource_methods!(super::branch::ForkManyBuilder, config.inner);
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -353,6 +367,19 @@ mod tests {
 
     fn config(builder: &RestoreBuilder) -> crate::SandboxConfig {
         builder.inner.config.clone().into_config()
+    }
+
+    #[test]
+    fn cow_memory_preserves_the_existing_transient_launch_flag() {
+        let ordinary = Sandbox::restore("saved").name("child");
+        assert!(!config(&ordinary).forked);
+        let cow = ordinary.cow_memory();
+        assert!(config(&cow).forked);
+        assert!(!config(&cow).clone_for_persistence().forked);
+        #[allow(deprecated)]
+        let legacy = Sandbox::restore("saved").name("child").forked();
+        assert_eq!(config(&legacy).forked, config(&cow).forked);
+        assert!(!config(&legacy).clone_for_persistence().forked);
     }
 
     #[test]
@@ -378,20 +405,23 @@ mod tests {
         use crate::snapshot::SnapshotScope;
 
         for security in [false, true] {
-            let overrides = RestoreBootOverrides { security };
+            let mut overrides = crate::SandboxConfigPatch::new();
+            if security {
+                overrides.spec.security_profile = Some(SecurityProfile::Default);
+            }
             assert!(
                 overrides
-                    .validate_scope(SnapshotScope::Disk, SnapshotRestoreMode::Full)
+                    .validate_for_restore(SnapshotScope::Disk, SnapshotRestoreMode::Full)
                     .is_ok()
             );
             assert!(
                 overrides
-                    .validate_scope(SnapshotScope::Full, SnapshotRestoreMode::DiskOnly)
+                    .validate_for_restore(SnapshotScope::Full, SnapshotRestoreMode::DiskOnly)
                     .is_ok()
             );
             assert_eq!(
                 overrides
-                    .validate_scope(SnapshotScope::Full, SnapshotRestoreMode::Full)
+                    .validate_for_restore(SnapshotScope::Full, SnapshotRestoreMode::Full)
                     .is_err(),
                 security
             );
@@ -402,7 +432,7 @@ mod tests {
     fn security_setter_keeps_explicit_intent_even_for_default_profile() {
         for profile in [SecurityProfile::Default, SecurityProfile::Restricted] {
             let restore = Sandbox::restore("saved").name("child").security(profile);
-            assert!(config(&restore).restore_boot_overrides.security);
+            assert!(restore.inner.config.spec.security_profile.is_some());
             assert_eq!(config(&restore).spec.security_profile, profile);
         }
     }
@@ -419,7 +449,7 @@ mod tests {
         assert_eq!(config(&restore).spec.resources.memory_mib, 2048);
         assert_eq!(config(&restore).spec.lifecycle.max_duration_secs, Some(600));
         assert_eq!(config(&restore).spec.lifecycle.idle_timeout_secs, Some(120));
-        assert!(!config(&restore).restore_boot_overrides.security);
+        assert!(restore.inner.config.spec.security_profile.is_none());
     }
 
     #[cfg(feature = "net")]
@@ -439,7 +469,7 @@ mod tests {
         assert_eq!(network.max_tcp_connections, Some(8.into()));
         assert_eq!(network.max_udp_connections, Some(4.into()));
         assert!(network.interface.mac.is_none());
-        assert!(!config(&restore).restore_boot_overrides.security);
+        assert!(restore.inner.config.spec.security_profile.is_none());
         let unlimited = Sandbox::restore("saved")
             .name("child")
             .max_tcp_connections(0)
@@ -476,6 +506,30 @@ mod tests {
         assert_eq!(config(&legacy).spec.network.max_udp_connections, None);
     }
 
+    #[cfg(feature = "net")]
+    #[test]
+    fn destination_accept_queue_size_is_omitted_unless_set_and_validated() {
+        let defaults = Sandbox::restore("saved").port(8080, 80);
+        assert_eq!(config(&defaults).spec.network.tcp_accept_queue_size, None);
+        let tuned = Sandbox::restore("saved")
+            .port(8080, 80)
+            .tcp_accept_queue_size(4096);
+        assert_eq!(
+            config(&tuned).spec.network.tcp_accept_queue_size,
+            Some(4096)
+        );
+        assert_eq!(
+            config(&tuned)
+                .local_network_config()
+                .unwrap()
+                .tcp_accept_queue_size
+                .map(microsandbox_network::config::TcpAcceptQueueSize::get),
+            Some(4096)
+        );
+        let invalid = Sandbox::restore("saved").tcp_accept_queue_size(0);
+        assert!(invalid.inner.build_error.is_some());
+    }
+
     #[test]
     fn restore_starts_without_host_bindings() {
         let restore = Sandbox::restore("saved").name("child");
@@ -501,5 +555,30 @@ mod tests {
         let restore = restore.volume("/data", |v| v.captured());
         assert!(!config(&restore).restore_resources.mapped.contains("/data"));
         assert!(config(&restore).spec.mounts.is_empty());
+    }
+
+    #[test]
+    fn restore_disk_volume_adds_one_disk_image_mount() {
+        let restore = Sandbox::restore("saved").volume("/data2", |v| {
+            v.disk("/images/seed.img").fstype("ext4").readonly()
+        });
+        let mounts = &config(&restore).spec.mounts;
+        assert_eq!(mounts.len(), 1);
+        match &mounts[0] {
+            crate::sandbox::VolumeMount::DiskImage {
+                host,
+                guest,
+                fstype,
+                options,
+                ..
+            } => {
+                assert_eq!(host, std::path::Path::new("/images/seed.img"));
+                assert_eq!(guest, "/data2");
+                assert_eq!(fstype.as_deref(), Some("ext4"));
+                assert!(options.readonly);
+            }
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+        assert!(config(&restore).restore_resources.mapped.contains("/data2"));
     }
 }

@@ -1,7 +1,9 @@
-//! Transactional SDK/CLI catalog upgrades that preserve already-running VMs.
+//! Guarded catalog reads and transactional SDK/CLI upgrades that preserve already-running VMs.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
+use microsandbox_db::DbReadConnection;
 use microsandbox_db::catalog::has_table;
 use microsandbox_migration::{Migrator, MigratorTrait, schema_metadata};
 use microsandbox_runtime::maintenance;
@@ -10,8 +12,21 @@ use sea_orm::{
     Statement, TransactionTrait,
 };
 
-use super::LocalBackend;
+use super::{
+    LocalBackend, MigrationLock, acquire_migration_lock, refuse_incomplete_self_downgrade,
+    refuse_schema_ahead,
+};
 use crate::{MicrosandboxError, MicrosandboxResult};
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Retain installation coordination through the caller's catalog queries.
+pub(crate) struct CurrentCatalog {
+    pub(crate) read: DbReadConnection,
+    _migration_lock: MigrationLock,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -27,6 +42,69 @@ impl LocalBackend {
     pub async fn prepare_cli_catalog(&self) -> MicrosandboxResult<()> {
         self.db().await?;
         Ok(())
+    }
+
+    /// Read a current schema without reconciling snapshot files. Missing or older catalogs
+    /// return `None` so callers can use normal setup; unsafe installation states remain errors.
+    pub(crate) async fn read_current_catalog(&self) -> MicrosandboxResult<Option<CurrentCatalog>> {
+        let db_dir = self.config().home().join(microsandbox_utils::DB_SUBDIR);
+        let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
+        match std::fs::metadata(&db_path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+
+        // Usage and control lookups may open a legacy catalog before the normal writable
+        // connection path runs. Tighten the directory at this boundary as well.
+        microsandbox_db::pool::ensure_private_database_directory(&db_dir)?;
+
+        // Use the same installation coordination as the slow path. In particular, a rolled
+        // back database can look current while an incomplete downgrade still owns its files.
+        let migration_lock = acquire_migration_lock(&db_dir).await?;
+        refuse_incomplete_self_downgrade(&db_dir)?;
+        let database = &self.config().database;
+        let read = if let Some(pools) = self.db.get() {
+            pools.read().clone()
+        } else {
+            DbReadConnection::open_read_only(
+                &db_path,
+                Duration::from_secs(database.connect_timeout_secs),
+                Duration::from_secs(database.busy_timeout_secs),
+            )
+            .await
+            .map_err(|error| {
+                MicrosandboxError::Custom(format!(
+                    "read current catalog {}: {error}",
+                    db_path.display()
+                ))
+            })?
+        };
+
+        microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(&read)
+            .await
+            .map_err(|error| MicrosandboxError::Runtime(error.to_string()))?;
+        refuse_schema_ahead(read.inner()).await?;
+
+        let row = match read
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM seaql_migrations",
+            ))
+            .await
+        {
+            Ok(Some(row)) => row,
+            Ok(None) => return Ok(None),
+            Err(error) if super::is_missing_migrations_table(&error) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if row.try_get_by_index::<i64>(0)? != schema_metadata::migration_ids().count() as i64 {
+            return Ok(None);
+        }
+        Ok(Some(CurrentCatalog {
+            read,
+            _migration_lock: migration_lock,
+        }))
     }
 }
 
@@ -82,9 +160,7 @@ pub(super) async fn requires_initialization<C: ConnectionTrait>(
     {
         return Ok(prefix.len() < schema_metadata::BASELINE_0_6_0_MIGRATIONS.len());
     }
-    Err(MicrosandboxError::Runtime(
-        "database schema is newer than this msb binary or has an unknown migration prefix; refusing to change an unrecognized catalog".into(),
-    ))
+    Err(newer_schema_error("unrecognized migration history"))
 }
 
 pub(super) async fn upgrade(pools: &microsandbox_db::pool::DbPools) -> MicrosandboxResult<()> {
@@ -176,6 +252,17 @@ pub(super) async fn recover_abandoned_lease(
     Ok(())
 }
 
+/// Recovery guidance shared by every SDK/CLI schema admission path.
+pub(super) fn newer_schema_error(detail: &str) -> MicrosandboxError {
+    MicrosandboxError::Runtime(format!(
+        "This MSB_HOME has a newer or unrecognized database schema.\n\n\
+         Update your SDK and msb to a version that supports this database,\n\
+         or set MSB_HOME to a different directory to use a separate environment.\n\n\
+         Your existing sandboxes remain in the original MSB_HOME.\n\n\
+         Details: {detail}"
+    ))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -189,8 +276,9 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
+    use crate::config::layers::BackendConfig;
     use crate::runtime::launch_contract;
-    use crate::{SandboxConfig, test_support};
+    use crate::{BackendSelectionSource, LocalBackend, SandboxConfig, test_support};
 
     //--------------------------------------------------------------------------------------------------
     // Constants
@@ -266,7 +354,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(requires_initialization(&db).await.is_err());
+        let error = requires_initialization(&db).await.unwrap_err().to_string();
+        assert!(error.contains("schema.\n\nUpdate your SDK and msb"));
+        assert!(error.contains("set MSB_HOME to a different directory"));
+        assert!(error.contains("\n\nYour existing sandboxes remain in the original MSB_HOME."));
     }
 
     #[tokio::test]
@@ -425,22 +516,20 @@ mod tests {
         use std::sync::Arc;
 
         let home = std::env::var("MSB_CATALOG_TEST_HOME").expect("explicit disposable test home");
-        let local = Arc::new(crate::test_support::local_backend(
-            crate::config::GlobalConfig {
-                home: Some(std::path::PathBuf::from(&home)),
-                // This isolated backend does not read environment paths. Supply the
-                // released runtime pair selected by the previous fixture explicitly.
-                paths: crate::config::PathsConfig {
-                    msb: Some(std::env::var_os("MSB_PATH").expect("previous msb").into()),
-                    libkrunfw: Some(
-                        std::env::var_os("MSB_LIBKRUNFW_PATH")
-                            .expect("previous firmware")
-                            .into(),
-                    ),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
+        let local = Arc::new(LocalBackend::from_backend_config(
+            BackendConfig::new(
+                serde_json::from_value(serde_json::json!({
+                    "home": home,
+                    "paths": {
+                        "msb": std::env::var("MSB_PATH").expect("previous msb"),
+                        "libkrunfw": std::env::var("MSB_LIBKRUNFW_PATH").expect("previous firmware")
+                    }
+                }))
+                .unwrap(),
+                Default::default(),
+            ),
+            BackendSelectionSource::Programmatic,
+            None,
         ));
 
         let expected = launch_contract::resolve(
@@ -530,13 +619,40 @@ mod tests {
             assert_eq!(current_pid, pid, "upgrade must not restart the old VM");
             active.stop().await.unwrap();
             crate::Sandbox::remove("catalog-running").await.unwrap();
+            // Existing VMs remain usable after catalog migration. New launches
+            // fail the protected-state prerequisite before the nesting-policy check.
+            if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+                let rejected = crate::Sandbox::builder("catalog-unsupported")
+                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                    .create().await;
+                let error = match rejected {
+                    Ok(unexpected) => {
+                        unexpected.stop().await.unwrap();
+                        crate::Sandbox::remove("catalog-unsupported").await.unwrap();
+                        panic!("previous runtime accepted a launch without protected sandbox state");
+                    }
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    error.contains("upgrade required")
+                        && error.contains("does not advertise protected sandbox state"),
+                    "{error}"
+                );
+                assert!(matches!(crate::Sandbox::get("catalog-unsupported").await,
+                    Err(MicrosandboxError::SandboxNotFound(_))));
+                assert!(!local.config().sandboxes_dir().join("catalog-unsupported").exists());
+                let after = Migrator::get_applied_migrations(pools.write().inner()).await.unwrap();
+                assert_eq!(after.iter().map(|migration| migration.name()).collect::<Vec<_>>(), before.iter().map(|migration| migration.name()).collect::<Vec<_>>());
+                println!("previous runtime 0.6.{expected}: existing VM retained; new launch refused without a sandbox or schema change");
+                return;
+            }
             #[cfg(feature = "net")]
             {
                 // A newer SDK must not silently omit a security/resource
                 // request that the selected previous runtime cannot honor.
                 let rejected = crate::Sandbox::builder("catalog-unsupported")
                     .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
-                    .network(|network| network.max_udp_connections(0))
+                    .network(|network| network.max_udp_connections(0).http(|http| http.deny_response(false)))
                     .create().await;
                 let error = match rejected {
                     Ok(unexpected) => {
@@ -557,7 +673,12 @@ mod tests {
             for count in [0, 1, 3] {
                 let name = format!("catalog-mounts-{count}");
                 let started = std::time::Instant::now();
+                // Keep catalog compatibility independent of newer HTTP denial support.
                 let mut builder = crate::Sandbox::builder(&name).image("alpine:3.21").cpus(1).memory(256u32).max_duration(120);
+                #[cfg(feature = "net")]
+                {
+                    builder = builder.network(|network| network.http(|http| http.deny_response(false)));
+                }
                 for index in 0..count {
                     builder = builder.volume(format!("/catalog-{index}"), |mount| mount.tmpfs().size(16u32));
                 }
@@ -566,7 +687,7 @@ mod tests {
                     #[cfg(feature = "net")]
                     {
                         let error = crate::Sandbox::builder(&name).image("alpine:3.21")
-                            .network(|network| network.max_udp_connections(0)).replace()
+                            .network(|network| network.max_udp_connections(0).http(|http| http.deny_response(false))).replace()
                             .create().await.err().expect("unsupported replacement must fail");
                         assert!(error.to_string().contains("UDP connection limits"), "{error}");
                     }
@@ -609,10 +730,12 @@ mod tests {
             }
             let host_file = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(host_file.path(), b"file-mount-compatible").unwrap();
-            let result = crate::Sandbox::builder("catalog-file-mount")
+            let builder = crate::Sandbox::builder("catalog-file-mount")
                 .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
-                .volume("/compat-file", |mount| mount.bind(host_file.path()).readonly())
-                .create().await;
+                .volume("/compat-file", |mount| mount.bind(host_file.path()).readonly());
+            #[cfg(feature = "net")]
+            let builder = builder.network(|network| network.http(|http| http.deny_response(false)));
+            let result = builder.create().await;
             if expected < 16 {
                 let error = result.err().expect("old runtime must reject isolated file mounts");
                 assert!(error.to_string().contains("file mounts"), "{error}");

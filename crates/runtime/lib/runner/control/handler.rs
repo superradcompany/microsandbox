@@ -19,6 +19,26 @@ pub struct ControlContext {
 pub(crate) trait Handler: Send + Sync + 'static {
     fn handle(&self, request: ControlOperation, generation: u8) -> Response;
 
+    fn handle_exec_signal(
+        &self,
+        _request: microsandbox_protocol::exec_control::ExecControlRequest,
+    ) -> microsandbox_protocol::exec_control::ExecControlResponse {
+        microsandbox_protocol::exec_control::ExecControlResponse::error(
+            "unsupported_feature",
+            "independent exec control is unavailable",
+        )
+    }
+
+    fn handle_job(
+        &self,
+        _request: microsandbox_protocol::jobs::JobRequest,
+    ) -> microsandbox_protocol::jobs::JobResponse {
+        microsandbox_protocol::jobs::JobResponse::error(
+            "unsupported_feature",
+            "managed jobs are unavailable in this runtime",
+        )
+    }
+
     fn handle_json_with_memory(
         &self,
         value: serde_json::Value,
@@ -54,6 +74,8 @@ pub(crate) struct Response {
 }
 
 pub(crate) enum Reply {
+    ExecSignal(microsandbox_protocol::exec_control::ExecControlResponse),
+    Job(microsandbox_protocol::jobs::JobResponse),
     Capabilities(Capabilities),
     RuntimeCapabilities(RuntimeCapabilities),
     Memory(MemoryState),
@@ -88,6 +110,14 @@ impl Response {
 impl Reply {
     pub(crate) fn envelope(&self, generation: u8) -> Result<Envelope, WireError> {
         match self {
+            Self::ExecSignal(value) => Envelope::new(
+                generation,
+                microsandbox_protocol::exec_control::EXEC_CONTROL_RESPONSE,
+                value,
+            ),
+            Self::Job(value) => {
+                Envelope::new(generation, microsandbox_protocol::jobs::JOB_RESPONSE, value)
+            }
             Self::Capabilities(value) => {
                 Envelope::new(generation, "control.capabilities.result", value)
             }
@@ -119,6 +149,19 @@ impl Reply {
 //--------------------------------------------------------------------------------------------------
 
 impl Handler for ControlContext {
+    fn handle_exec_signal(
+        &self,
+        request: microsandbox_protocol::exec_control::ExecControlRequest,
+    ) -> microsandbox_protocol::exec_control::ExecControlResponse {
+        self.executor.exec_signal(request)
+    }
+    fn handle_job(
+        &self,
+        request: microsandbox_protocol::jobs::JobRequest,
+    ) -> microsandbox_protocol::jobs::JobResponse {
+        self.executor.job_request(request)
+    }
+
     fn handle_json_with_memory(
         &self,
         value: serde_json::Value,

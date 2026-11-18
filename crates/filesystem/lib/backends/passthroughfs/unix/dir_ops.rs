@@ -117,7 +117,7 @@ pub(crate) fn do_readdirplus(
             continue;
         }
 
-        if name_bytes == init_binary::INIT_FILENAME {
+        if fs.injects_init() && name_bytes == init_binary::INIT_FILENAME {
             let entry = init_binary::init_entry(fs.cfg.entry_timeout, fs.cfg.attr_timeout);
             result.push((de, entry));
             continue;
@@ -179,7 +179,7 @@ pub(crate) fn do_readdirplus_for_each(
             name: name_bytes,
         };
 
-        if name_bytes == init_binary::INIT_FILENAME {
+        if fs.injects_init() && name_bytes == init_binary::INIT_FILENAME {
             let entry = init_binary::init_entry(fs.cfg.entry_timeout, fs.cfg.attr_timeout);
             if add_entry(dir_entry, entry)? == 0 {
                 break;

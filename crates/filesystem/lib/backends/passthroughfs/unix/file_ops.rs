@@ -41,11 +41,16 @@ pub(crate) fn do_open(
     kill_priv: bool,
     flags: u32,
 ) -> io::Result<(Option<u64>, OpenOptions)> {
+    let mut open_flags = inode::translate_open_flags(flags as i32);
     if fs.is_virtual_init_inode(inode) {
+        // `init.krun` is a read-only synthetic file (mode 0555): refuse
+        // write-intent opens rather than handing out a handle `write` then
+        // rejects.
+        if open_flags_mutate(open_flags) {
+            return Err(platform::eacces());
+        }
         return Ok((Some(init_binary::INIT_HANDLE), OpenOptions::KEEP_CACHE));
     }
-
-    let mut open_flags = inode::translate_open_flags(flags as i32);
     if fs.cfg.readonly() && open_flags_mutate(open_flags) {
         return Err(platform::erofs());
     }

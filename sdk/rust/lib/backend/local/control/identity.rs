@@ -1,10 +1,13 @@
 //! OS identity without any new runtime handshake field or persisted schema.
 
+#[cfg(not(target_os = "macos"))]
 use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
@@ -12,6 +15,8 @@ use std::path::{Path, PathBuf};
 #[cfg(not(any(target_os = "macos", windows)))]
 use microsandbox_control_client::ErrorKind;
 use microsandbox_control_client::{ClientError, ControlClientError, ControlClientResult};
+#[cfg(target_os = "macos")]
+use sea_orm::sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{FILETIME, WAIT_TIMEOUT},
@@ -27,10 +32,9 @@ use windows_sys::Win32::{
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ProcessStart(pub u64, pub u64);
+pub(in crate::backend::local) struct ProcessStart(pub u64, pub u64);
 
-/// One process instance: its PID plus the kernel birth token a recycled PID cannot reproduce.
-pub(crate) struct ProcessIdentity {
+pub(in crate::backend::local) struct ProcessIdentity {
     pub pid: i32,
     pub start: ProcessStart,
     #[cfg(target_os = "linux")]
@@ -39,12 +43,15 @@ pub(crate) struct ProcessIdentity {
     handle: OwnedHandle,
 }
 
-pub(super) struct DatabaseIdentity {
+pub(in crate::backend::local) struct DatabaseIdentity {
     path: PathBuf,
     id: (u64, u64, u64),
     // Keep the original object alive so an unlinked inode/file ID cannot be
     // recycled and mistaken for this backend's database.
+    #[cfg(not(target_os = "macos"))]
     _file: File,
+    #[cfg(target_os = "macos")]
+    _connection: SqliteConnection,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -135,6 +142,33 @@ impl ProcessIdentity {
         Ok(())
     }
 
+    /// Reject a reused PID whose current process was born after the catalog run.
+    /// The cached OS birth token remains the authority for later revalidation.
+    pub fn started_by(&self, started: chrono::NaiveDateTime) -> bool {
+        #[cfg(target_os = "macos")]
+        let born_ms = (self.start.0 as i128) * 1000 + (self.start.1 as i128) / 1000;
+        #[cfg(windows)]
+        let born_ms = (self.start.0 as i128) / 10_000 - 11_644_473_600_000i128;
+        #[cfg(target_os = "linux")]
+        let born_ms = {
+            let mut uptime = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+            if hz <= 0 || unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut uptime) } != 0 {
+                return false;
+            }
+            let boot_ms = chrono::Utc::now().timestamp_millis() as i128
+                - uptime.tv_sec as i128 * 1000
+                - uptime.tv_nsec as i128 / 1_000_000;
+            boot_ms + self.start.0 as i128 * 1000 / hz as i128
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        return false;
+        born_ms <= started.and_utc().timestamp_millis() as i128
+    }
+
     pub fn verify_peer(&self, pid: i32) -> ControlClientResult<()> {
         if pid != self.pid {
             return Err(ControlClientError::RuntimeChanged);
@@ -221,19 +255,51 @@ impl ProcessIdentity {
 }
 
 impl DatabaseIdentity {
-    pub fn capture(path: impl AsRef<Path>) -> ControlClientResult<Self> {
-        let file = File::open(path.as_ref()).map_err(ClientError::from)?;
-        let id = file_id(&file)?;
-        Ok(Self {
-            path: path.as_ref().to_owned(),
+    pub async fn capture(path: impl AsRef<Path>) -> ControlClientResult<Self> {
+        let path = path.as_ref().to_owned();
+        #[cfg(target_os = "macos")]
+        let (id, connection) = {
+            let id = database_path_id(&path)?;
+            // SQLite coordinates descriptor teardown with its other connections.
+            // An idle pool connection could expire before this identity is dropped.
+            let options = SqliteConnectOptions::new()
+                .filename(&path)
+                .read_only(true)
+                .create_if_missing(false);
+            let connection = SqliteConnection::connect_with(&options)
+                .await
+                .map_err(|error| ClientError::from(std::io::Error::other(error)))?;
+            (id, connection)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let (id, file) = {
+            let file = open_database_identity(&path).map_err(ClientError::from)?;
+            let id = file_id(&file)?;
+            (id, file)
+        };
+        let identity = Self {
+            path,
             id,
+            #[cfg(target_os = "macos")]
+            _connection: connection,
+            #[cfg(not(target_os = "macos"))]
             _file: file,
-        })
+        };
+        identity.verify()?;
+        Ok(identity)
     }
 
     pub fn verify(&self) -> ControlClientResult<()> {
-        let current = File::open(&self.path).map_err(|_| ControlClientError::RuntimeChanged)?;
-        if file_id(&current)? != self.id {
+        #[cfg(unix)]
+        let current =
+            database_path_id(&self.path).map_err(|_| ControlClientError::RuntimeChanged)?;
+        #[cfg(not(unix))]
+        let current = {
+            let file = open_database_identity(&self.path)
+                .map_err(|_| ControlClientError::RuntimeChanged)?;
+            file_id(&file)?
+        };
+        if current != self.id {
             return Err(ControlClientError::RuntimeChanged);
         }
         Ok(())
@@ -243,6 +309,33 @@ impl DatabaseIdentity {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(not(target_os = "macos"))]
+fn open_database_identity(path: &Path) -> std::io::Result<File> {
+    #[cfg(target_os = "linux")]
+    {
+        // Closing an ordinary descriptor releases this process's POSIX locks
+        // on the inode, including SQLite's locks on other descriptors. O_PATH
+        // pins the inode for replacement detection without participating in
+        // those locks, including when a retained identity is dropped.
+        File::options()
+            .read(true)
+            .custom_flags(libc::O_PATH)
+            .open(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        File::open(path)
+    }
+}
+
+#[cfg(unix)]
+fn database_path_id(path: &Path) -> ControlClientResult<(u64, u64, u64)> {
+    // A raw open/close would release this process's SQLite locks. stat follows
+    // the same path without opening a descriptor; the retained file prevents reuse.
+    let metadata = std::fs::metadata(path).map_err(ClientError::from)?;
+    Ok((metadata.dev(), metadata.ino(), 0))
+}
 
 #[cfg(target_os = "linux")]
 fn linux_start(pid: i32) -> ControlClientResult<ProcessStart> {
@@ -336,6 +429,7 @@ fn windows_start(handle: &OwnedHandle) -> ControlClientResult<ProcessStart> {
     ))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn file_id(file: &File) -> ControlClientResult<(u64, u64, u64)> {
     #[cfg(unix)]
     {

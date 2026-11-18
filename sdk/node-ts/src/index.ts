@@ -1,3 +1,5 @@
+import { remapKeysToCamel } from "./internal/config.js";
+import { deprecate } from "node:util";
 import { mapNapiError } from "./internal/error-mapping.js";
 import { napi } from "./internal/napi.js";
 
@@ -19,7 +21,7 @@ export {
 } from "./runtime.js";
 export type { BackendInfo, DefaultBackend } from "./runtime.js";
 export { SecretSource } from "./network-config.js";
-export type { OutboundProxy } from "./network-config.js";
+export type { OutboundProxy, SecretSubstitution } from "./network-config.js";
 export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution
@@ -46,6 +48,8 @@ export type {
   SandboxPingResult,
   SandboxTouchResult,
   ExternalMountWarning,
+  ForkOptions,
+  ForkOutcome,
   BranchOutcome,
 } from "./sandbox.js";
 export type {
@@ -56,6 +60,8 @@ export type {
   ModificationPolicy,
   ModificationWarning,
   ModifyOptions,
+  ModifyPort,
+  ModifyPortEndpoint,
   PlannedChange,
   ResourceConvergenceState,
   ResourceKind,
@@ -106,6 +112,15 @@ export {
   VolumeFsWriteSink,
 } from "./volume-fs.js";
 
+// Services
+export { Service, ServiceBuilder, ServiceListBuilder } from "./service.js";
+export type {
+  ServicePage,
+  ServiceStatus,
+  ServiceTarget,
+  ServiceUpdateOptions,
+} from "./service.js";
+
 // Snapshots
 export { Snapshot, SnapshotArchive } from "./snapshot.js";
 export type { DiskCompactionOptions, DiskCompactionDiskResult, DiskCompactionResult } from "./compact.js";
@@ -132,6 +147,19 @@ export type {
   SnapshotState,
   SnapshotVerifyReport,
 } from "./snapshot.js";
+
+// Local storage observations and runtime cache cleanup
+export { Storage } from "./storage.js";
+export type {
+  StorageUsage,
+  StorageCategoryUsage,
+  StorageItemUsage,
+  StoragePruneOptions,
+  MemoryCacheKind,
+  MemoryCacheState,
+  MemoryCacheEntry,
+  MemoryCacheReport,
+} from "./storage.js";
 
 // Image management
 export { Image, ImageHandle } from "./image.js";
@@ -208,18 +236,6 @@ wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
   const proto: any = napi.SandboxBuilder.prototype;
   if (!proto.__buildWrapped) {
     const origBuild = proto.build;
-    const snakeToCamel = (k: string): string =>
-      k.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const remapKeys = (v: any): any => {
-      if (Array.isArray(v)) return v.map(remapKeys);
-      if (v && typeof v === "object") {
-        const out: Record<string, unknown> = {};
-        for (const [k, val] of Object.entries(v)) out[snakeToCamel(k)] = remapKeys(val);
-        return out;
-      }
-      return v;
-    };
     proto.build = async function () {
       let json: string;
       try {
@@ -227,7 +243,7 @@ wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
       } catch (e) {
         throw mapNapiError(e);
       }
-      const config = remapKeys(JSON.parse(json));
+      const config = remapKeysToCamel(JSON.parse(json));
       // Preserve the deprecated read accessor on built configurations.
       config.network.maxTcpConnections = config.network.maxConnections;
       Object.defineProperty(config.network, "maxConnections", {
@@ -275,18 +291,6 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const proto: any = napi.NetworkBuilder.prototype;
   if (!proto.__buildWrapped) {
-    const snakeToCamel = (k: string): string =>
-      k.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const remapKeys = (v: any): any => {
-      if (Array.isArray(v)) return v.map(remapKeys);
-      if (v && typeof v === "object") {
-        const out: Record<string, unknown> = {};
-        for (const [k, val] of Object.entries(v)) out[snakeToCamel(k)] = remapKeys(val);
-        return out;
-      }
-      return v;
-    };
     proto.build = function () {
       let json: string;
       try {
@@ -294,7 +298,7 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
       } catch (e) {
         throw mapNapiError(e);
       }
-      const config = remapKeys(JSON.parse(json));
+      const config = remapKeysToCamel(JSON.parse(json));
       // Preserve the deprecated read accessor on built configurations.
       config.maxTcpConnections = config.maxConnections;
       Object.defineProperty(config, "maxConnections", {
@@ -380,6 +384,10 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
   }
   // Restore shares policy conversion, but never exposes the broad NetworkBuilder callback.
   const restoreProto = napi.RestoreBuilder.prototype;
+  // Keep old fluent calls working, with Node's standard once-per-process warning.
+  restoreProto.forked = deprecate(function (this: import("./internal/napi.js").NapiRestoreBuilder) {
+    return this.cowMemory();
+  }, "RestoreBuilder.forked() is deprecated; use cowMemory() instead", "MSB_RESTORE_FORKED");
   if (!restoreProto.networkPolicy) {
     restoreProto.networkPolicy = function (p: unknown) {
       if (p instanceof napi.NetworkPolicyBuilder) {
@@ -393,10 +401,12 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
 }
 
 export const DnsBuilder = napi.DnsBuilder;
+export const HttpBuilder = napi.HttpBuilder;
 export const TlsBuilder = napi.TlsBuilder;
 export const SecretBuilder = napi.SecretBuilder;
 export const NetworkBuilder = napi.NetworkBuilder;
 export const OutboundProxyBuilder = napi.OutboundProxyBuilder;
+export const HttpConnectProxyBuilder = napi.HttpConnectProxyBuilder;
 export const Socks4ProxyBuilder = napi.Socks4ProxyBuilder;
 export const Socks5ProxyBuilder = napi.Socks5ProxyBuilder;
 export const MountBuilder = napi.MountBuilder;
@@ -410,6 +420,7 @@ export const InitOptionsBuilder = napi.InitOptionsBuilder;
 export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
 import type {
   NapiNetworkPolicyBuilder,
+  NapiHttpConnectProxyBuilder,
   NapiOutboundProxyBuilder,
   NapiRootDiskBuilder,
   NapiRuleBuilder,
@@ -418,6 +429,7 @@ import type {
   NapiSocks5ProxyBuilder,
 } from "./internal/napi.js";
 export type OutboundProxyBuilder = NapiOutboundProxyBuilder;
+export type HttpConnectProxyBuilder = NapiHttpConnectProxyBuilder;
 export type Socks4ProxyBuilder = NapiSocks4ProxyBuilder;
 export type Socks5ProxyBuilder = NapiSocks5ProxyBuilder;
 export const NetworkPolicyBuilder = napi.NetworkPolicyBuilder;
@@ -476,6 +488,7 @@ export {
   MetricsDisabledError,
   MetricsUnavailableError,
   MicrosandboxError,
+  ModificationNotConfirmedError,
   NixError,
   PatchFailedError,
   ProtocolError,
@@ -489,6 +502,9 @@ export {
   SandboxStopTimedOutError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  ServiceAlreadyExistsError,
+  ServiceError,
+  ServiceNotFoundError,
   SnapshotSourceRecoveryError,
   TerminalError,
   UnsupportedOperationError,
@@ -497,8 +513,11 @@ export {
   VolumeNotFoundError,
 } from "./errors.js";
 export type {
+  ChangeState,
   MicrosandboxErrorCode,
   PublishedSnapshotArtifact,
+  ServiceErrorDetails,
+  ServiceErrorReason,
   SnapshotSourceRecoveryDetails,
 } from "./errors.js";
 
@@ -629,3 +648,11 @@ export type PortRange = _Types.PortRange;
 
 export const Rule = _Factories.Rule;
 export type Rule = _Types.Rule;
+
+export { Job, JobAttachment, JobError, JobLogStream, JobListBuilder, JobAttachOptionsBuilder } from "./jobs.js";
+export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState } from "./jobs.js";
+
+export { diagnoseStorage } from "./storage-diagnosis.js";
+export type { StorageSelection, StorageDiagnosticStatus, StorageCandidate, StorageInspection, StorageSandboxDiagnosis, StorageDiagnosis } from "./storage-diagnosis.js";
+
+export type { StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection } from "./storage-recovery.js";

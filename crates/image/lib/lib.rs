@@ -17,6 +17,7 @@
 )]
 
 mod archive;
+mod async_gate;
 mod cache;
 pub mod checkpoint;
 mod config;
@@ -34,6 +35,7 @@ mod pull;
 mod registry;
 pub mod snapshot;
 pub(crate) mod stitch;
+pub mod storage_lease;
 pub mod tar;
 pub mod tree;
 
@@ -43,7 +45,8 @@ pub mod tree;
 
 pub use archive::{
     ImageArchiveFormat, ImageLoadOptions, ImageSaveConfig, ImageSaveLayer, ImageSaveRequest,
-    LoadedImage, load_archive, save_archive, save_docker_archive,
+    LoadedImage, load_archive, load_archive_into, load_archive_with, save_archive,
+    save_docker_archive,
 };
 pub use cache::{CachedImageMetadata, CachedLayerMetadata, FlatRootfsRef, GlobalCache};
 pub use config::ImageConfig;
@@ -56,3 +59,4 @@ pub use platform::{Arch, Os, Platform};
 pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};
 pub use pull::{PullOptions, PullPolicy, PullResult, RootfsMaterialization};
 pub use registry::{Registry, RegistryBuilder};
+pub use stitch::vmdk::write_vmdk_descriptor;

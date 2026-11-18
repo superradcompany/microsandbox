@@ -73,13 +73,13 @@ impl MemoryCache {
             if page_size <= 0 {
                 return Err(io::Error::last_os_error());
             }
-            std::fs::create_dir_all(&root)?;
+            microsandbox_utils::private_file::create_private_dir_all(&root)?;
             // Cache contents are guest RAM, not public image data. Restrict traversal even
             // when the caller's umask permits other local users to read ordinary cache files.
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
             let root = root.join(namespace);
-            std::fs::create_dir_all(&root)?;
+            microsandbox_utils::private_file::create_private_dir_all(&root)?;
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
             Ok(Self {
                 root,
@@ -94,10 +94,10 @@ impl MemoryCache {
             unsafe {
                 GetSystemInfo(&mut info);
             }
-            std::fs::create_dir_all(&root)?;
+            microsandbox_utils::private_file::create_private_dir_all(&root)?;
             restrict_cache_directory(&root)?;
             let root = root.join(namespace);
-            std::fs::create_dir_all(&root)?;
+            microsandbox_utils::private_file::create_private_dir_all(&root)?;
             restrict_cache_directory(&root)?;
             Ok(Self {
                 root,
@@ -268,6 +268,8 @@ impl MemoryCache {
         let staging_dir = tempfile::Builder::new()
             .prefix(".memory-")
             .tempdir_in(&self.root)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_directory(staging_dir.path())?;
         let staging_path = staging_dir.path().join("memory");
         let baseline = baseline.filter(|(_, cached)| cached.regions == regions);
         if let Some((previous, cached)) = baseline {
@@ -285,6 +287,7 @@ impl MemoryCache {
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o600))?;
+                microsandbox_utils::private_file::harden_existing_file(&staging_path)?;
             }
         }
         let mut staging = OpenOptions::new()
@@ -292,6 +295,8 @@ impl MemoryCache {
             .create(true)
             .truncate(false)
             .open(&staging_path)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden(&staging, false)?;
         // A fresh sparse file supplies all zero extents without allocating or writing RAM-sized
         // buffers. Only immutable nonzero object slices are copied into it.
         staging.set_len(length)?;
@@ -488,45 +493,16 @@ fn memory_regions(
 
 /// Both cache namespaces use the same inode/lock checks and never mutate mapped RAM.
 pub(super) fn evict_unpinned(path: &Path) -> io::Result<bool> {
-    let file = match open_readonly(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if !microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
-        return Ok(false);
-    }
-    // A competing evictor can have removed this same inode while we waited to acquire it.
-    // Do not unlink a new realization published at the old name in the meantime.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let opened = file.metadata()?;
-        let current = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        if (opened.dev(), opened.ino()) != (current.dev(), current.ino()) {
-            return Ok(false);
-        }
-    }
-    #[cfg(windows)]
-    {
-        let current = match open_readonly(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        if windows_file_identity(&file)? != windows_file_identity(&current)? {
-            return Ok(false);
-        }
-    }
-    std::fs::remove_file(path)?;
-    Ok(true)
+    super::cache_storage::reclaim_memory_file(
+        path,
+        true,
+        std::time::Duration::ZERO,
+        std::time::SystemTime::now(),
+    )
+    .map(|entry| entry.state == super::MemoryCacheState::Removed)
 }
 
-fn open_readonly(path: &Path) -> io::Result<File> {
+pub(super) fn open_readonly(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -560,7 +536,7 @@ pub(super) fn open_pinned(path: &Path, length: u64) -> io::Result<Option<File>> 
 }
 
 #[cfg(windows)]
-fn windows_file_identity(file: &File) -> io::Result<(u32, u32, u32)> {
+pub(super) fn windows_file_identity(file: &File) -> io::Result<(u32, u32, u32)> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,

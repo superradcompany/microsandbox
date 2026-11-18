@@ -114,7 +114,7 @@ class Suite:
                      "--from-sandbox", "ci-source", "--full")
             self.msb("stop-source", "stop", "ci-source")
             self.msb("warm", "restore", self.env["MSB_PROGRESS_SNAPSHOT"],
-                     "--name", "ci-warm", "--forked")
+                     "--name", "ci-warm", "--cow-mem")
             self.msb("stop-warm", "stop", "ci-warm")
             self.msb("remove-warm", "remove", "ci-warm")
             shim = self.output / "slow-eager.so"

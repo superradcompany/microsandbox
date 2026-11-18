@@ -215,13 +215,53 @@ def package_all(packages: list[Package]) -> None:
         subprocess.run(["cargo", "package", "-p", package.name, "--no-verify"], check=True)
 
 
+def run_with_index_retry(command: list[str], published: list[Package], timeout: int) -> None:
+    """Retry pre-upload resolution failures for this release's published dependencies."""
+    deadline = time.monotonic() + timeout
+    delay = 1
+    resolution_errors = tuple(
+        diagnostic
+        for package in published
+        for diagnostic in (
+            f'failed to select a version for the requirement `{package.name} = "={package.version}"`',
+            f'no matching package named `{package.name}` found',
+        )
+    )
+    while True:
+        missing_published_dependency = False
+        with subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        ) as process:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                if any(diagnostic in line for diagnostic in resolution_errors):
+                    missing_published_dependency = True
+            returncode = process.wait()
+        if returncode == 0:
+            return
+        # A separate sparse-index probe can see a new version before Cargo's
+        # registry view does. Cargo packages again during `publish`, so protect
+        # both operations. Never retry an ambiguous upload or unrelated error.
+        remaining = deadline - time.monotonic()
+        if not missing_published_dependency or remaining <= 0:
+            raise subprocess.CalledProcessError(returncode, command)
+        pause = min(delay, remaining)
+        print(f"waiting {pause:g}s for Cargo to resolve published release dependencies", flush=True)
+        time.sleep(pause)
+        delay = min(delay * 2, 20)
+
+
 def publish(waves: list[list[Package]], timeout: int) -> None:
+    published: list[Package] = []
     for number, wave in enumerate(waves, start=1):
         # Cargo normalizes path dependencies to registry dependencies while it
         # packages a crate. Package one wave at a time, after the prior wave is
         # indexed, so a brand-new release never tries to resolve unpublished
         # internal versions.
-        package_all(wave)
+        for package in sorted(wave, key=lambda item: item.name):
+            run_with_index_retry(
+                ["cargo", "package", "-p", package.name, "--no-verify"], published, timeout
+            )
         newly_published = []
         names = ", ".join(package.name for package in wave)
         print(f"publishing wave {number}: {names}", flush=True)
@@ -235,13 +275,14 @@ def publish(waves: list[list[Package]], timeout: int) -> None:
                     )
                 print(f"{package.name} {package.version} already published; checksum matches")
                 continue
-            subprocess.run(
+            run_with_index_retry(
                 ["cargo", "publish", "-p", package.name, "--no-verify"],
-                check=True,
+                published, timeout,
             )
             newly_published.append(package)
         if newly_published:
             wait_until_indexed(newly_published, timeout)
+        published.extend(wave)
 
 
 def main() -> None:

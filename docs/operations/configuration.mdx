@@ -1,6 +1,7 @@
 ---
 title: Configuration
-description: How sandbox settings resolve across defaults, global config, YAML, and explicit inputs
+"og:title": Microsandbox configuration precedence
+description: Understand how global defaults, sandbox YAML, CLI flags, SDK inputs, and managed settings determine sandbox configuration.
 icon: "sliders"
 ---
 
@@ -84,9 +85,8 @@ same value, the later layer wins.
     <Note>
       Sandbox YAML is a CLI configuration surface. SDKs do not load
       `sandbox.yaml`, root configuration files, or scoped configuration files.
-      Rust applications can use
-      [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) for a typed
-      sparse-overlay model instead.
+      For typed sparse patches, see the
+      [Rust configuration reference](/sdk/rust/configuration#sandbox-configuration-patches).
     </Note>
   </Tab>
 </Tabs>
@@ -150,7 +150,7 @@ rather than workload files.
 ## References
 
 <CardGroup cols={2}>
-  <Card title="Global config reference" icon="list" href="/configuration">
+  <Card title="Global configuration" icon="list" href="/configuration">
     Look up shared defaults, host policy, registries, metrics, and backend
     profiles.
   </Card>

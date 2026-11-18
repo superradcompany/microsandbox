@@ -6,6 +6,7 @@
 
 pub(crate) mod addr;
 pub mod dns;
+pub mod http_deny;
 pub mod icmp;
 pub mod netstack;
 pub mod network;

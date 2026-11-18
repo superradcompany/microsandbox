@@ -17,8 +17,12 @@
 //!   so a stale file from a previous attempt cannot misattribute a
 //!   later failure.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
+use microsandbox_protocol::core::InitFailureReason;
 use serde::{Deserialize, Serialize};
 
 use crate::RuntimeError;
@@ -72,6 +76,10 @@ pub struct BootError {
     /// `errno` if the underlying failure was a syscall, else `None`.
     pub errno: Option<i32>,
 
+    /// Typed guest startup failure used for actionable hints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<InitFailureReason>,
+
     /// Human-readable message — the same string that goes to `runtime.log`.
     pub message: String,
 }
@@ -86,10 +94,20 @@ impl BootError {
     pub fn from_runtime_error(err: &RuntimeError) -> Self {
         let message = err.to_string();
         let errno = extract_errno(err);
-        let stage = classify_stage(&message);
+        let reason = match err {
+            RuntimeError::GuestInitialization { reason, .. } => *reason,
+            _ => None,
+        };
+        let stage = match reason {
+            Some(InitFailureReason::UserNotFound | InitFailureReason::GroupNotFound) => {
+                BootErrorStage::Config
+            }
+            _ => classify_stage(&message),
+        };
         Self {
             t: now_rfc3339(),
             stage,
+            reason,
             errno,
             message,
         }
@@ -102,15 +120,18 @@ impl BootError {
 
     /// Atomically write the record to `<log_dir>/boot-error.json`.
     ///
-    /// Writes to a sibling `.tmp` file then renames over the target so a
-    /// reader never observes a half-written file.
+    /// Writes a private sibling temporary file and renames it over the target so a reader never
+    /// observes a half-written record or follows a stale temporary path.
     pub fn write_atomic(&self, log_dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(log_dir)?;
+        microsandbox_utils::private_file::create_private_dir_all(log_dir)?;
         let final_path = Self::path_in(log_dir);
-        let tmp_path = log_dir.join(format!("{BOOT_ERROR_FILENAME}.tmp"));
         let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(&tmp_path, &json)?;
-        std::fs::rename(&tmp_path, &final_path)?;
+        let mut staging = tempfile::NamedTempFile::new_in(log_dir)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden(staging.as_file(), false)?;
+        staging.write_all(&json)?;
+        staging.as_file().sync_all()?;
+        staging.persist(final_path).map_err(|error| error.error)?;
         Ok(())
     }
 
@@ -262,6 +283,7 @@ mod tests {
         let err = BootError {
             t: "2026-04-30T20:32:59.690Z".to_string(),
             stage: BootErrorStage::Mount,
+            reason: None,
             errno: Some(2),
             message: "mount foo: No such file or directory (os error 2)".to_string(),
         };
@@ -272,6 +294,18 @@ mod tests {
         assert_eq!(read.errno, Some(2));
         assert_eq!(read.t, err.t);
         assert_eq!(read.message, err.message);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(BootError::path_in(dir.path()))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

@@ -294,7 +294,8 @@ impl JsRuleBuilder {
 
     /// Add a single port to the ports set. `0..=65535`.
     #[napi]
-    pub fn port(&mut self, port: u32) -> Result<&Self> {
+    pub fn port(&mut self, port: f64) -> Result<&Self> {
+        let port = crate::numeric::uint32(port, "port")?;
         let p = u16::try_from(port)
             .map_err(|_| napi::Error::from_reason("port out of range (0..=65535)"))?;
         self.ops.push(RuleOp::Port(p));
@@ -304,7 +305,9 @@ impl JsRuleBuilder {
     /// Add an inclusive port range. `lo > hi` records an error surfaced
     /// at `.build()` time.
     #[napi(js_name = "portRange")]
-    pub fn port_range(&mut self, lo: u32, hi: u32) -> Result<&Self> {
+    pub fn port_range(&mut self, lo: f64, hi: f64) -> Result<&Self> {
+        let lo = crate::numeric::uint32(lo, "lo")?;
+        let hi = crate::numeric::uint32(hi, "hi")?;
         let lo = u16::try_from(lo)
             .map_err(|_| napi::Error::from_reason("lo out of range (0..=65535)"))?;
         let hi = u16::try_from(hi)
@@ -315,7 +318,11 @@ impl JsRuleBuilder {
 
     /// Add multiple single ports.
     #[napi]
-    pub fn ports(&mut self, ports: Vec<u32>) -> Result<&Self> {
+    pub fn ports(&mut self, ports: Vec<f64>) -> Result<&Self> {
+        let ports: Vec<u32> = ports
+            .into_iter()
+            .map(|value| crate::numeric::uint32(value, "ports"))
+            .collect::<Result<_>>()?;
         let mut converted = Vec::with_capacity(ports.len());
         for p in ports {
             let p = u16::try_from(p)

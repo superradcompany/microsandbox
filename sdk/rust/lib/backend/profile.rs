@@ -21,11 +21,11 @@ use std::{path::Path, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use super::Backend;
 #[cfg(feature = "cloud")]
 use super::BackendSelectionSource;
 #[cfg(feature = "local")]
 use super::LocalBackend;
+use super::{Backend, BackendKind};
 #[cfg(feature = "cloud")]
 use super::{CloudBackend, CloudBackendBuilder};
 #[cfg(feature = "cloud")]
@@ -98,6 +98,19 @@ impl Profile {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl From<ProfileBackend> for BackendKind {
+    fn from(kind: ProfileBackend) -> Self {
+        match kind {
+            ProfileBackend::Local => Self::Local,
+            ProfileBackend::Cloud => Self::Cloud,
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -135,11 +148,14 @@ fn resolve_default_backend_from(
                 .with_selection_metadata(source, None),
         )),
 
+        #[cfg(not(feature = "cloud"))]
+        BackendSelection::Cloud { .. } => Err(crate::config::backend::feature_disabled("cloud")),
         #[cfg(feature = "cloud")]
         BackendSelection::Cloud {
-            profile: Some((name, builder)),
+            profile: Some(name),
         } => Ok(Arc::new(
-            builder
+            config.resolved_config().profiles[&name]
+                .cloud_builder(&name)?
                 .config_sources(config)
                 .build()?
                 .with_selection_metadata(source, Some(name)),
@@ -150,6 +166,7 @@ fn resolve_default_backend_from(
 #[cfg(feature = "cloud")]
 pub(crate) fn cloud_backend_from_profile(name: &str) -> MicrosandboxResult<CloudBackend> {
     let config = BackendConfig::load()?;
+    config.require_backend(BackendKind::Cloud, Some(BackendSelectionSource::Profile))?;
     let resolved = config.global_layers().build();
     let profile = resolved
         .get_profiles()
@@ -418,7 +435,7 @@ mod tests {
         )
         .unwrap();
         let backend = resolve_default_backend_from(&user, Some(&managed)).unwrap();
-        assert_eq!(backend.info().profile.as_deref(), Some("company"));
+        assert_eq!(backend.info().unwrap().profile.as_deref(), Some("company"));
         assert_eq!(
             backend.as_local().unwrap().config().sandbox_defaults.cpus,
             2
@@ -511,7 +528,7 @@ mod tests {
         }
         for (profile, backend) in backends {
             let backend = backend.unwrap();
-            let info = backend.info();
+            let info = backend.info().unwrap();
             assert_eq!(info.profile.as_deref(), Some(profile.unwrap_or("prod")));
             assert_eq!(
                 info.source,
@@ -577,11 +594,17 @@ mod tests {
 
         let local = local.unwrap();
         assert_eq!(local.kind(), super::super::BackendKind::Local);
-        assert_eq!(local.info().source, BackendSelectionSource::MsbBackend);
+        assert_eq!(
+            local.info().unwrap().source,
+            BackendSelectionSource::MsbBackend
+        );
         let cloud = cloud.unwrap();
         assert_eq!(cloud.kind(), super::super::BackendKind::Cloud);
-        assert_eq!(cloud.info().source, BackendSelectionSource::MsbBackend);
-        assert_eq!(cloud.info().profile, None);
+        assert_eq!(
+            cloud.info().unwrap().source,
+            BackendSelectionSource::MsbBackend
+        );
+        assert_eq!(cloud.info().unwrap().profile, None);
     }
 
     #[cfg(feature = "cloud")]

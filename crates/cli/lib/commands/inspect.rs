@@ -8,7 +8,7 @@ use microsandbox::sandbox::{
 };
 use serde::Serialize;
 
-use crate::ui;
+use crate::ui::{self, OutputFormat};
 
 /// Render a non-default mount policy suffix for `msb inspect` output.
 ///
@@ -64,9 +64,13 @@ pub struct InspectArgs {
     /// Sandbox to inspect.
     pub name: String,
 
+    /// Inspect a managed job instead of the sandbox.
+    #[arg(long)]
+    pub job: Option<String>,
+
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,6 +87,10 @@ struct PendingConfigChange {
 
 /// Execute the `msb inspect` command.
 pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
+    if let Some(job) = &args.job {
+        return super::jobs::inspect(&args.name, job, args.format == Some(OutputFormat::Json))
+            .await;
+    }
     let handle = Sandbox::get(&args.name).await?;
     let desired_config = handle.config().ok();
     let active_config = handle.active_config().ok().flatten();
@@ -102,8 +110,9 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         desired_config.as_ref(),
         active_config.as_ref(),
     );
+    let storage = handle.storage_usage().await;
 
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         let config: serde_json::Value =
             serde_json::from_str(handle.config_json()).unwrap_or(serde_json::Value::Null);
         let mut json = serde_json::json!({
@@ -120,6 +129,10 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             .unwrap_or(serde_json::Value::Null);
         json["active_config"] = active_config_json;
         json["pending_changes"] = serde_json::to_value(&pending_changes)?;
+        json["storage"] = match &storage {
+            Ok(usage) => serde_json::to_value(usage)?,
+            Err(error) => serde_json::json!({ "unavailable_reason": error.to_string() }),
+        };
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
@@ -228,6 +241,10 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             ),
         );
         ui::detail_kv_indent("THP", config.spec.resources.thp.as_str());
+        ui::detail_kv(
+            "Guest Clock",
+            config.spec.runtime.guest_clock.unwrap_or_default().as_str(),
+        );
 
         let security = match config.spec.security_profile {
             SecurityProfile::Default => "default",
@@ -365,6 +382,13 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         }
     }
 
+    match storage {
+        Ok(usage) => super::storage::display_item(&usage),
+        Err(error) => {
+            ui::detail_header("Storage");
+            ui::detail_kv_indent("Unavailable", &error.to_string());
+        }
+    }
     Ok(())
 }
 

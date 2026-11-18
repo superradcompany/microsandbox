@@ -48,12 +48,13 @@ chrono.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 console.workspace = true
+crossterm.workspace = true
 dirs.workspace = true
 futures.workspace = true
 indicatif.workspace = true
 ipnetwork = { workspace = true, optional = true }
 libc.workspace = true
-microsandbox = { workspace = true, features = ["local"] }
+microsandbox = { workspace = true, features = ["local", "cloud"] }
 microsandbox-db.workspace = true
 microsandbox-filesystem.workspace = true
 microsandbox-image.workspace = true

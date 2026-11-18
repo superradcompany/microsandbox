@@ -63,10 +63,11 @@ impl JsDnsBuilder {
 
     /// Set the per-query timeout in milliseconds. Default: 5000.
     #[napi(js_name = "queryTimeoutMs")]
-    pub fn query_timeout_ms(&mut self, ms: u32) -> &Self {
+    pub fn query_timeout_ms(&mut self, ms: f64) -> Result<&Self> {
+        let ms = crate::numeric::uint32(ms, "ms")?;
         let prev = self.take_inner();
         self.inner = Some(prev.query_timeout_ms(ms as u64));
-        self
+        Ok(self)
     }
 
     /// Materialize the accumulated state into a `DnsConfig`.

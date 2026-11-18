@@ -70,6 +70,49 @@ fn rust_identity_and_generated_patch_surface_is_backend_neutral() {
     );
 }
 
+#[test]
+fn rust_service_surface_stays_available() {
+    use microsandbox::{
+        ChangeState, MicrosandboxError, Operation, Service, ServiceBackend, ServiceBuilder,
+        ServiceError, ServiceListBuilder, ServicePage, ServiceTarget, ServiceUpdate,
+    };
+
+    let _ = Service::get;
+    let _ = Service::list;
+    let _ = Service::refresh;
+    let _ = Service::remove;
+    let _: ServiceBuilder = Service::builder("shop").target("web-1", 8080);
+    let _ = Service::enable;
+    let _ = Service::disable;
+    let _ = ServiceUpdate::default().target("web-1", 8080);
+    let _ = ServiceListBuilder::default()
+        .sandbox("web-1")
+        .cursor("c2hvcA")
+        .limit(20);
+    let _: Option<(ServicePage, ServiceTarget, &dyn ServiceBackend)> = None;
+    let _ = [
+        Operation::ServiceCreate,
+        Operation::ServiceGet,
+        Operation::ServiceList,
+        Operation::ServiceUpdate,
+        Operation::ServiceEnable,
+        Operation::ServiceDisable,
+        Operation::ServiceRemove,
+    ];
+
+    let error = MicrosandboxError::Service {
+        slug: "shop".into(),
+        error: ServiceError::OutcomeUnknown,
+    };
+    assert_eq!(error.changed(), ChangeState::Unknown);
+    let reason = ServiceError::Other {
+        code: "new_service_refusal".into(),
+        status: 409,
+        message: "change refused".into(),
+    };
+    assert_eq!(reason.changed(), ChangeState::Unchanged);
+}
+
 #[allow(dead_code)]
 async fn rust_sandbox_fs_handle_api_stays_available(
     fs: &microsandbox::sandbox::SandboxFsOps<'_>,
@@ -107,4 +150,57 @@ async fn rust_sandbox_fs_handle_api_stays_available(
     let _ = (metadata.uid, metadata.gid, metadata.accessed);
 
     Ok(())
+}
+
+#[test]
+fn boot_error_reason_is_preserved_in_every_backend_build() {
+    use microsandbox::logs::{BootError, InitFailureReason};
+
+    for (wire, expected) in [
+        (
+            Some("user_not_found"),
+            Some(InitFailureReason::UserNotFound),
+        ),
+        (
+            Some("group_not_found"),
+            Some(InitFailureReason::GroupNotFound),
+        ),
+        (Some("future_reason"), Some(InitFailureReason::Unknown)),
+        (None, None),
+    ] {
+        let mut record = serde_json::json!({
+            "t": "2026-10-03T00:00:00Z",
+            "stage": "config",
+            "errno": null,
+            "message": "guest initialization failed",
+        });
+        if let Some(wire) = wire {
+            record["reason"] = wire.into();
+        }
+        let error: BootError = serde_json::from_value(record).unwrap();
+        assert_eq!(error.reason, expected);
+        let encoded = serde_json::to_value(&error).unwrap();
+        if wire.is_none() {
+            assert!(encoded.get("reason").is_none());
+        } else {
+            assert_eq!(encoded["reason"], serde_json::to_value(expected).unwrap());
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "cloud")]
+fn rust_modify_surface_is_available_on_cloud_builds() {
+    let _ = microsandbox::Sandbox::modify;
+    let _ = microsandbox::sandbox::SandboxHandle::modify;
+    let _ = microsandbox::SandboxModificationBuilder::dry_run;
+    let _ = microsandbox::SandboxModificationBuilder::apply;
+    let _: Option<microsandbox::SandboxModificationPlan> = None;
+    let not_confirmed = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+        cause: "the running sandbox does not hold the secret".into(),
+    };
+    assert_eq!(
+        not_confirmed.to_string(),
+        "the change did not complete as asked: the running sandbox does not hold the secret"
+    );
 }

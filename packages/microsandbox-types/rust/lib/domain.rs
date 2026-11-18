@@ -29,6 +29,9 @@ pub const DEFAULT_SANDBOX_MEMORY_MIB: u32 = 512;
 /// Default metrics sampling interval in milliseconds.
 pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 
+/// The well-known NAT64 prefix from RFC 6052.
+pub const WELL_KNOWN_NAT64_PREFIX: &str = "64:ff9b::/96";
+
 //--------------------------------------------------------------------------------------------------
 // Types: Root Filesystems
 //--------------------------------------------------------------------------------------------------
@@ -573,10 +576,55 @@ pub enum Patch {
 // Types: Networking
 //--------------------------------------------------------------------------------------------------
 
+/// Wire format of HTTP denial responses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum HttpDenyResponseFormat {
+    /// Legacy plain-text network denials with host substitution.
+    Text,
+
+    /// JSON network and secret denials with literal messages.
+    #[default]
+    Json,
+}
+
+/// HTTP responses returned for network and secret policy denials.
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct HttpConfig {
+    /// Return readable HTTP 403 responses for supported denied requests. Default: true.
+    pub deny_response: bool,
+
+    /// Omission uses the runtime default: JSON.
+    pub deny_response_format: HttpDenyResponseFormat,
+
+    /// Legacy plain-text message with `{host}` substitution. Deprecated: use JSON mode
+    /// and `network_deny_message` for new integrations. Ignored in JSON mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deny_message: Option<String>,
+
+    /// Network-denial JSON `message`. Used as-is.
+    /// Used only when `deny_response` is enabled in JSON mode. Omission uses the default;
+    /// an empty string preserves the error code with an empty `message`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_deny_message: Option<String>,
+
+    /// Secret-denial JSON `message`. Used as-is when `deny_response` is enabled in JSON mode.
+    /// Omission uses the default; an empty string leaves `message` empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_deny_message: Option<String>,
+}
+
 /// Complete network specification for a sandbox.
 ///
 /// Common, backend-visible fields are typed directly. Rich local-engine subdocuments such as policy, DNS, TLS, secrets, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -619,17 +667,37 @@ pub struct NetworkSpec {
     #[serde(rename = "max_connections", alias = "max_tcp_connections")]
     pub max_tcp_connections: Option<usize>,
 
+    /// Active inbound TCP connection cap across published ports. Omitted uses the runtime default; zero is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inbound_tcp_connections: Option<usize>,
+
     /// Max concurrent UDP relay sessions. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_udp_connections: Option<usize>,
+
+    /// Accept-queue depth for published TCP port listeners, `1..=2147483647`. Omitted is 1024.
+    /// The host kernel clamps it to `net.core.somaxconn` (Linux) or `kern.ipc.somaxconn` (macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_accept_queue_size: Option<u32>,
 
     /// Local network rate limits. Missing means unlimited in both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[config_patch(nested)]
     pub rate_limiter: Option<NetworkRateLimiterConfig>,
 
+    /// NAT64 `/96` prefixes for policy classification.
+    #[serde(default = "default_nat64_prefixes")]
+    #[cfg_attr(feature = "ts", ts(type = "Array<string>"))]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
+    pub nat64_prefixes: Vec<Ipv6Network>,
+
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
+
+    /// HTTP denial response settings.
+    #[config_patch(nested)]
+    #[serde(default)]
+    pub http: HttpConfig,
 
     /// Proxy used for outbound sandbox connections and supported datagram flows.
     ///
@@ -646,6 +714,16 @@ pub struct NetworkSpec {
 #[serde(tag = "protocol", rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum OutboundProxy {
+    /// An HTTP proxy that opens TCP tunnels with CONNECT.
+    #[serde(rename = "http_connect")]
+    HttpConnect {
+        /// Proxy socket address.
+        address: String,
+        /// Optional username/password authentication configuration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credentials: Option<HttpConnectCredentials>,
+    },
+
     /// A SOCKS4 proxy at the given `IP:port` address.
     Socks4 {
         /// Proxy socket address.
@@ -663,6 +741,21 @@ pub enum OutboundProxy {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credentials: Option<Socks5Credentials>,
     },
+}
+
+/// Environment-backed username/password credentials for an HTTP CONNECT proxy.
+///
+/// This durable configuration contains only the host-side password source.
+/// The resolved password is carried by the private launch contract instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct HttpConnectCredentials {
+    /// HTTP CONNECT authentication username.
+    pub username: String,
+
+    /// Host-side source for the HTTP CONNECT authentication password.
+    pub password: SecretSource,
 }
 
 /// Environment-backed username/password credentials for a SOCKS5 proxy.
@@ -720,6 +813,7 @@ pub enum PortProtocol {
 
 /// Host services exposed to a sandbox through virtio-vsock.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -795,6 +889,7 @@ pub struct HandoffInit {
 
 /// Sandbox lifecycle policy.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxPolicy {
@@ -868,6 +963,7 @@ pub struct SnapshotSpec {
 ///
 /// This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -936,6 +1032,7 @@ pub struct SandboxSpec {
 
 /// CPU and memory resources for a sandbox.
 #[derive(Debug, Clone, Serialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxResources {
@@ -964,6 +1061,12 @@ pub struct SandboxResources {
     /// Guest transparent huge-page policy selected at boot.
     #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
     pub thp: TransparentHugePagePolicy,
+
+    /// Explicit hardware virtualization policy. Omission inherits configuration,
+    /// with nesting disabled by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[config_patch(nullable)]
+    pub nested_virt: Option<bool>,
 }
 
 /// Controls how Microsandbox places vCPU threads on host processors.
@@ -1041,8 +1144,32 @@ pub enum TransparentHugePagePolicy {
     Never,
 }
 
+/// Host control over the guest wall clock (`CLOCK_REALTIME`).
+///
+/// Serializes as the lowercase variant name (`"sync"`, `"off"`) to match the CLI spelling.
+/// The guest monotonic clock is never adjusted by either policy.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum GuestClockPolicy {
+    /// Keep the guest wall clock in step with the host.
+    ///
+    /// The runtime sends the host time at boot and about once a minute, and steps the
+    /// guest clock to host time when a full snapshot is restored or a paused sandbox resumes.
+    #[default]
+    Sync,
+
+    /// Never set the guest wall clock after boot.
+    ///
+    /// The guest keeps the time it read at boot and advances it on its own. A restored full
+    /// snapshot continues from the captured guest time instead of jumping to host time.
+    Off,
+}
+
 /// Guest runtime options for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -1085,6 +1212,11 @@ pub struct SandboxRuntimeOptions {
 
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
     pub disable_metrics_sample: bool,
+
+    /// Host control over the guest wall clock. `None` selects [`GuestClockPolicy::Sync`];
+    /// a full snapshot restore without an explicit value keeps the policy recorded in the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_clock: Option<GuestClockPolicy>,
 }
 
 /// Environment variable entry.
@@ -1273,6 +1405,21 @@ impl TransparentHugePagePolicy {
             Self::Always => "always",
             Self::Madvise => "madvise",
             Self::Never => "never",
+        }
+    }
+}
+
+impl GuestClockPolicy {
+    /// Whether the runtime keeps the guest wall clock in step with the host.
+    pub fn is_sync(&self) -> bool {
+        matches!(self, Self::Sync)
+    }
+
+    /// Return the lowercase configuration spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sync => "sync",
+            Self::Off => "off",
         }
     }
 }
@@ -1688,6 +1835,26 @@ impl FromStr for TransparentHugePagePolicy {
     }
 }
 
+impl fmt::Display for GuestClockPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GuestClockPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "sync" => Ok(Self::Sync),
+            "off" => Ok(Self::Off),
+            _ => Err(format!(
+                "unknown guest clock policy: {value}; expected sync or off"
+            )),
+        }
+    }
+}
+
 impl Default for RootfsSource {
     fn default() -> Self {
         Self::oci(String::new())
@@ -1704,6 +1871,7 @@ impl Default for SandboxResources {
             cpu_placement: CpuPlacement::Inherit,
             placement_profile: None,
             thp: TransparentHugePagePolicy::Madvise,
+            nested_virt: None,
         }
     }
 }
@@ -1727,6 +1895,8 @@ impl<'de> Deserialize<'de> for SandboxResources {
             placement_profile: Option<String>,
             #[serde(default)]
             thp: TransparentHugePagePolicy,
+            #[serde(default)]
+            nested_virt: Option<bool>,
         }
 
         let raw = RawResources::deserialize(deserializer)?;
@@ -1741,6 +1911,7 @@ impl<'de> Deserialize<'de> for SandboxResources {
             cpu_placement: raw.cpu_placement,
             placement_profile: raw.placement_profile,
             thp: raw.thp,
+            nested_virt: raw.nested_virt,
         })
     }
 }
@@ -1792,6 +1963,19 @@ impl Default for SandboxRuntimeOptions {
             log_level: None,
             metrics_sample_interval_ms: Some(DEFAULT_METRICS_SAMPLE_INTERVAL_MS),
             disable_metrics_sample: false,
+            guest_clock: None,
+        }
+    }
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            deny_response: true,
+            deny_response_format: HttpDenyResponseFormat::Json,
+            deny_message: None,
+            network_deny_message: None,
+            secret_deny_message: None,
         }
     }
 }
@@ -1809,11 +1993,23 @@ impl Default for NetworkSpec {
             secrets: None,
             max_tcp_connections: None,
             max_udp_connections: None,
+            tcp_accept_queue_size: None,
+            max_inbound_tcp_connections: None,
             rate_limiter: None,
+            nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,
             outbound_proxy: None,
+            http: HttpConfig::default(),
         }
     }
+}
+
+pub(crate) fn default_nat64_prefixes() -> Vec<Ipv6Network> {
+    vec![
+        WELL_KNOWN_NAT64_PREFIX
+            .parse()
+            .expect("well-known NAT64 prefix must be valid"),
+    ]
 }
 
 impl Default for PublishedPortSpec {
@@ -2279,6 +2475,7 @@ pub const MAX_SECRET_PLACEHOLDER_BYTES: usize = 1024;
 /// The global `passthrough_hosts` field preserves historical defaults; its addition
 /// requires updating older exhaustive struct literals and patterns.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretsConfig {
@@ -2390,6 +2587,27 @@ pub struct SecretSubstitution {
     #[serde(default = "default_true")]
     pub headers: bool,
 
+    /// Restrict header substitution to these header field names.
+    ///
+    /// Requires [`headers`](Self::headers) to be true; a non-empty list with
+    /// header substitution disabled is rejected as contradictory. An empty list
+    /// (the default) allows every header field. When non-empty, the
+    /// placeholder is substituted only in the named fields (matched ASCII
+    /// case-insensitively); a placeholder found in any other header field is
+    /// treated as a disabled location: on a verified allowed destination it is
+    /// forwarded unchanged, while other destinations follow the violation
+    /// policy.
+    ///
+    /// Prefer an allowlist containing only the intended credential header
+    /// (typically `Authorization`). Substituting in every header lets an
+    /// untrusted guest place the placeholder in a header the upstream host
+    /// reflects back in its response (or otherwise exposes), which would let
+    /// the guest read the real secret out of that response.
+    ///
+    /// Names must be valid HTTP field names (RFC 9110 `token`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_fields: Vec<String>,
+
     /// Substitute in URL query parameters (default: false).
     #[serde(default)]
     pub query: bool,
@@ -2459,6 +2677,24 @@ pub enum SecretConfigError {
     MissingSubstitutionLocation {
         /// Index of the invalid secret entry.
         secret_index: usize,
+    },
+
+    /// Header field restrictions were configured while header substitution is disabled.
+    #[error(
+        "secret #{secret_index}: header field substitutions require header substitution to be enabled"
+    )]
+    HeaderFieldsRequireHeaders {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+    },
+
+    /// A configured header field name is not a valid HTTP token.
+    #[error("secret #{secret_index}: invalid header field name {field:?}")]
+    InvalidHeaderFieldName {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+        /// The rejected header field name.
+        field: String,
     },
 
     /// The placeholder is empty.
@@ -2531,6 +2767,14 @@ impl SecretEntry {
             return Err(SecretConfigError::MissingSubstitutionLocation { secret_index });
         }
 
+        if !self.substitution.headers && !self.substitution.header_fields.is_empty() {
+            return Err(SecretConfigError::HeaderFieldsRequireHeaders { secret_index });
+        }
+
+        for field in &self.substitution.header_fields {
+            validate_header_field_name(field, secret_index)?;
+        }
+
         validate_placeholder(&self.placeholder, secret_index)
     }
 }
@@ -2592,6 +2836,7 @@ impl Default for SecretSubstitution {
     fn default() -> Self {
         Self {
             headers: true,
+            header_fields: Vec::new(),
             query: false,
             body: false,
         }
@@ -2600,6 +2845,39 @@ impl Default for SecretSubstitution {
 
 fn default_true() -> bool {
     true
+}
+
+/// Validate an HTTP header field name (RFC 9110 `token`).
+fn validate_header_field_name(field: &str, secret_index: usize) -> Result<(), SecretConfigError> {
+    if field.is_empty() || !field.bytes().all(is_http_tchar) {
+        return Err(SecretConfigError::InvalidHeaderFieldName {
+            secret_index,
+            field: field.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// `tchar` from RFC 9110, the character set allowed in a header field name.
+fn is_http_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 fn validate_env_var(env_var: &str, secret_index: usize) -> Result<(), SecretConfigError> {
@@ -2649,6 +2927,7 @@ fn validate_placeholder(placeholder: &str, secret_index: usize) -> Result<(), Se
 /// is handled by proxy tasks — these fields configure which ports/domains are
 /// intercepted and how the interception CA is sourced.
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TlsConfig {
@@ -2947,6 +3226,7 @@ fn action_deny() -> Action {
 
 /// DNS interception and filtering settings. Carried in [`NetworkSpec::dns`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -2974,6 +3254,7 @@ impl Default for DnsConfig {
 /// sandbox slot by the local network engine. Carried in
 /// [`NetworkSpec::interface`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -3025,6 +3306,7 @@ pub enum NetworkRateLimitDirection {
 
 /// Egress and ingress rate limits for a local sandbox network.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -3246,6 +3528,81 @@ mod tests {
         assert_eq!(DiskImageFormat::from_extension(""), None);
     }
 
+    fn secret_with_header_fields(fields: Vec<&str>) -> SecretEntry {
+        SecretEntry {
+            env_var: "API_KEY".into(),
+            value: Zeroizing::new("secret".into()),
+            source: None,
+            placeholder: "$MSB_API_KEY".into(),
+            allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
+            substitution: SecretSubstitution {
+                headers: true,
+                header_fields: fields.into_iter().map(ToString::to_string).collect(),
+                query: false,
+                body: false,
+            },
+            passthrough_hosts: Vec::new(),
+            violation_action: None,
+            require_tls_identity: true,
+        }
+    }
+
+    #[test]
+    fn secret_substitution_header_fields_round_trip_and_default() {
+        let entry = secret_with_header_fields(vec!["Authorization", "X-Api-Key"]);
+        entry.validate(0).expect("valid header fields");
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            json["substitution"]["header_fields"],
+            serde_json::json!(["Authorization", "X-Api-Key"])
+        );
+
+        let omitted: SecretSubstitution =
+            serde_json::from_value(serde_json::json!({ "headers": true })).unwrap();
+        assert!(omitted.header_fields.is_empty());
+
+        // An empty allowlist means "all headers" and is omitted on the wire.
+        let default = SecretSubstitution::default();
+        assert!(
+            serde_json::to_value(&default)
+                .unwrap()
+                .get("header_fields")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn secret_validation_rejects_invalid_header_fields() {
+        for field in ["", "bad header", "bad:name", "bad\0name"] {
+            let entry = secret_with_header_fields(vec![field]);
+            let error = entry.validate(0).unwrap_err();
+            assert!(
+                matches!(error, SecretConfigError::InvalidHeaderFieldName { .. }),
+                "{field:?} should be rejected, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_validation_rejects_header_fields_when_headers_disabled() {
+        // The allowlist is inert without header substitution, so requesting both
+        // is contradictory rather than an implicit "all headers".
+        let mut entry = secret_with_header_fields(vec!["authorization"]);
+        entry.substitution.headers = false;
+        entry.substitution.query = true;
+        let error = entry.validate(0).unwrap_err();
+        assert!(
+            matches!(error, SecretConfigError::HeaderFieldsRequireHeaders { .. }),
+            "{error}"
+        );
+
+        // With query substitution enabled and no allowlist the entry stays valid.
+        entry.substitution.header_fields.clear();
+        entry
+            .validate(0)
+            .expect("disabled headers without fields is valid");
+    }
+
     #[test]
     fn sandbox_resources_deserialize_legacy_capacity_from_effective_values() {
         let resources: SandboxResources =
@@ -3288,6 +3645,33 @@ mod tests {
             assert_eq!(decoded.cpu_placement, policy);
             assert_eq!(policy.to_string().parse::<CpuPlacement>().unwrap(), policy);
         }
+    }
+
+    #[test]
+    fn guest_clock_policy_is_omitted_until_set_and_roundtrips() {
+        let defaults = serde_json::to_value(SandboxRuntimeOptions::default()).unwrap();
+        assert!(defaults.get("guest_clock").is_none());
+
+        let legacy: SandboxRuntimeOptions = serde_json::from_str(r#"{"workdir":"/app"}"#).unwrap();
+        assert_eq!(legacy.guest_clock, None);
+
+        for policy in [GuestClockPolicy::Sync, GuestClockPolicy::Off] {
+            let runtime = SandboxRuntimeOptions {
+                guest_clock: Some(policy),
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&runtime).unwrap();
+            assert_eq!(json["guest_clock"], serde_json::json!(policy.as_str()));
+            let decoded: SandboxRuntimeOptions = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.guest_clock, Some(policy));
+            assert_eq!(
+                policy.to_string().parse::<GuestClockPolicy>().unwrap(),
+                policy
+            );
+        }
+
+        assert_eq!(GuestClockPolicy::default(), GuestClockPolicy::Sync);
+        assert!("host_sync".parse::<GuestClockPolicy>().is_err());
     }
 
     #[test]

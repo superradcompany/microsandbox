@@ -92,7 +92,10 @@ impl MerkleAccumulator {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<SnapshotVerifyReport> {
+pub(super) async fn verify_snapshot(
+    snap: &Snapshot,
+    fs_state_limit: usize,
+) -> MicrosandboxResult<SnapshotVerifyReport> {
     if matches!(snap.manifest().state, SnapshotState::File(_)) {
         let owned = snap.manifest().owned_volumes()?;
         microsandbox_image::snapshot::verify_owned_directory_payloads(snap.path(), &owned)?;
@@ -129,6 +132,7 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
             snap.path().join(super::create::CHECKPOINT_DIRECTORY),
             checkpoint_state.checkpoint_root.clone(),
             snap.manifest().clone(),
+            fs_state_limit,
         )
         .await?;
         return Ok(SnapshotVerifyReport {
@@ -206,12 +210,16 @@ async fn verify_checkpoint_closure(
     closure_path: PathBuf,
     expected_root: String,
     manifest: microsandbox_image::snapshot::Manifest,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<CheckpointVerifyStatus> {
+    let pin = super::lease::pin_source(&closure_path)?;
     tokio::task::spawn_blocking(move || {
+        let _lease = pin;
         let expected = ObjectId::new(&expected_root)
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-        let closure = CheckpointClosure::open_portable(closure_path, Some(&expected))
-            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let closure =
+            CheckpointClosure::open_portable(closure_path, Some(&expected), fs_state_limit)
+                .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         super::validate_checkpoint_owned_inventory(&manifest, closure.checkpoint())?;
         closure
             .verify_memory_objects()
@@ -226,10 +234,14 @@ async fn verify_checkpoint_closure(
 
 pub(super) async fn compute_merkle_integrity(path: &Path) -> MicrosandboxResult<UpperIntegrity> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || merkle_integrity_blocking(&path))
-        .await
-        .map_err(|error| MicrosandboxError::Custom(format!("snapshot integrity task: {error}")))?
-        .map_err(Into::into)
+    let pin = super::lease::pin_source(&path)?;
+    tokio::task::spawn_blocking(move || {
+        let _pin = pin;
+        merkle_integrity_blocking(&path)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot integrity task: {error}")))?
+    .map_err(Into::into)
 }
 
 /// Compute current integrity through a handle the caller has already confined

@@ -66,6 +66,10 @@ pub enum FsOp {
 
         /// Symlink path to create.
         link_path: String,
+
+        /// Guest user (`user[:group]`) to create the symlink as. `None` uses root.
+        #[serde(default)]
+        user: Option<String>,
     },
 
     /// Create a directory (and parents).
@@ -76,6 +80,10 @@ pub enum FsOp {
         /// Permission bits to set on creation (e.g. 0o755).
         #[serde(default)]
         mode: Option<u32>,
+
+        /// Guest user (`user[:group]`) to create the directories as. `None` uses root.
+        #[serde(default)]
+        user: Option<String>,
     },
 
     /// Remove a file.
@@ -224,6 +232,10 @@ pub struct FsOpenOptions {
 
     /// Permission bits to set on creation.
     pub mode: Option<u32>,
+
+    /// Guest user (`user[:group]`) to open the file as. `None` uses root.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// Request to perform a filesystem operation in the guest.

@@ -90,7 +90,11 @@ impl JsTlsBuilder {
 
     /// Set the ports to intercept (default: 443).
     #[napi(js_name = "interceptedPorts")]
-    pub fn intercepted_ports(&mut self, ports: Vec<u32>) -> Result<&Self> {
+    pub fn intercepted_ports(&mut self, ports: Vec<f64>) -> Result<&Self> {
+        let ports: Vec<u32> = ports
+            .into_iter()
+            .map(|value| crate::numeric::uint32(value, "ports"))
+            .collect::<Result<_>>()?;
         let ports16: std::result::Result<Vec<u16>, _> =
             ports.iter().map(|p| u16::try_from(*p)).collect();
         let ports16 =

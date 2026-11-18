@@ -1,6 +1,7 @@
 """Isolated live restore-resource qualification (macOS, Linux, Windows).
 
-Run explicitly with --msb PATH --firmware PATH --out DIRECTORY. The matching
+Run explicitly with --msb PATH --firmware PATH --out DIRECTORY. Add --plain-tar
+to exercise uncompressed archives. The matching
 guest agentd must sit beside the firmware. Requires working virtualization and
 network access to pull alpine:3.21. Leaves artifacts/logs for inspection, but
 stops/removes only its own uniquely named sandboxes, even after failures.
@@ -20,6 +21,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--msb', required=True, help='Candidate executable')
 p.add_argument('--firmware', required=True, help='Firmware beside matching agentd')
 p.add_argument('--out', required=True, help='New evidence directory')
+p.add_argument('--plain-tar', action='store_true', help='Exercise uncompressed snapshot archives')
 a = p.parse_args()
 out = Path(a.out).absolute()
 out.mkdir(parents=True, exist_ok=False)
@@ -36,6 +38,9 @@ results = []
 (out / 'home.txt').write_text(str(home))
 
 def run(*args, check=True, timeout=120):
+    if a.plain_tar and args[:2] == ('snapshot', 'create') and '-o' in args:
+        args = (*args, '--plain-tar')
+
     start = time.monotonic()
     cp = subprocess.run([a.msb, *map(str, args)], env=env, capture_output=True,
                         text=True, encoding='utf-8', errors='replace', timeout=timeout)
@@ -117,16 +122,16 @@ try:
     installed = prefix+'-loaded:capture'
     missing = ('disk /data', 'filesystem /work', '--allow-missing-resources')
     record('archive-default-missing', lambda: restore('default', archive, required=missing, rejected=True))
-    record('archive-forked-missing', lambda: restore('forkmiss', archive, ['--forked'], missing, True))
+    record('archive-forked-missing', lambda: restore('forkmiss', archive, ['--cow-mem'], missing, True))
     record('relaxed-is-not-opt-out', lambda: restore('relaxed', archive, ['--external-mount-policy', 'relaxed'], missing, True))
     record('installed-default-missing', lambda: restore('installed', installed, required=missing, rejected=True))
     record('partial-directory-mapping', lambda: restore('partialdir', archive, ['-v', directory+':/work'], ['disk /data'], True))
     record('partial-captured-disk', lambda: restore('partialdisk', archive, ['-v', '/data'], ['filesystem /work'], True))
     record('allow-missing-eager', lambda: restore('allowed', archive, ['--allow-missing-resources'], ['warn:', 'EIO']))
-    record('allow-missing-forked-quiet', lambda: restore('allowfork', installed, ['--forked', '--quiet', '--allow-missing-resources'], ['warn:', 'EIO']))
+    record('allow-missing-forked-quiet', lambda: restore('allowfork', installed, ['--cow-mem', '--quiet', '--allow-missing-resources'], ['warn:', 'EIO']))
     mapping = ['-v', directory+':/work', '-v', '/data']
     record('complete-eager', lambda: restore('complete', archive, mapping))
-    record('complete-forked', lambda: restore('completefork', installed, mapping+['--forked']))
+    record('complete-forked', lambda: restore('completefork', installed, mapping+['--cow-mem']))
     record('complete-relaxed', lambda: restore('completerel', archive, mapping+['--external-mount-policy', 'relaxed']))
     record('source-local-inheritance', lambda: restore('inherit', archive, ['--dangerously-inherit-resources']))
     absent = prefix+'-absent'
@@ -134,7 +139,10 @@ try:
     record('nonexistent-named-default', lambda: restore('absent', archive, absent_mapping, ['filesystem /work'], True))
     record('nonexistent-named-opt-out', lambda: restore('absentallow', archive, absent_mapping+['--allow-missing-resources'], ['warn:', 'EIO']))
     assert not (home/'volumes'/absent).exists(), 'missing named volume was created'
-    record('full-disk-only', lambda: restore('diskonly', archive, ['--disk-only'], cold=True))
+    disk_only_missing = ('mount /work', '--allow-missing-resources')
+    record('full-disk-only-missing', lambda: restore('diskonly', archive, ['--disk-only'], disk_only_missing, True))
+    record('full-disk-only-mapped', lambda: restore('diskonlymap', archive, ['--disk-only', '-v', directory+':/work'], cold=True))
+    record('installed-full-disk-only-mapped', lambda: restore('installeddiskonlymap', installed, ['--disk-only', '-v', directory+':/work'], cold=True))
     backing = home/'volumes'/directory
     hidden = backing.with_name(directory+'-held')
     backing.rename(hidden)
@@ -164,7 +172,9 @@ try:
     run('stop', source)
     disk_archive = out/'disk.msnap'
     run('snapshot', 'create', 'disk', '--from-sandbox', source, '-o', disk_archive)
-    record('ordinary-disk-snapshot', lambda: restore('disksnap', disk_archive, cold=True))
+    disk_missing = ('mount /data', 'mount /work', '--allow-missing-resources')
+    record('ordinary-disk-snapshot-missing', lambda: restore('disksnap', disk_archive, required=disk_missing, rejected=True))
+    record('ordinary-disk-snapshot-opt-out', lambda: restore('disksnapallow', disk_archive, ['--allow-missing-resources'], cold=True))
     owned = child('ownedsource')
     run('create', 'alpine:3.21', '--name', owned, '--cpus', '1', '--memory', '256M',
         '--mount-owned', '/cache:kind=disk,size=256M')

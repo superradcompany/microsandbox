@@ -144,7 +144,7 @@ def main():
         for mode in ('eager', 'forked'):
             child = mode; names.append(child)
             run('restore-' + mode, 'create', '--name', child, '--from-snapshot', 'source:dirty-full',
-                *(['--forked'] if mode == 'forked' else []))
+                *(['--cow-mem'] if mode == 'forked' else []))
             active = child
             matches(initial)
             if mode == 'forked':
@@ -164,7 +164,7 @@ def main():
                 matches(changed)
             stop(child)
         names.append('grandchild')
-        run('restore-incremental', 'create', '--name', 'grandchild', '--from-snapshot', 'forked:dirty-incremental', '--forked')
+        run('restore-incremental', 'create', '--name', 'grandchild', '--from-snapshot', 'forked:dirty-incremental', '--cow-mem')
         active = 'grandchild'
         matches(changed); stop('grandchild')
         names.append('disk-only')

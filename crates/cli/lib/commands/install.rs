@@ -10,6 +10,8 @@ use clap::Args;
 use crate::sandbox_config;
 use crate::ui;
 
+#[cfg(not(windows))]
+use super::common::shell_quote;
 use super::common::{
     SandboxConfigSources, SandboxOpts, apply_sandbox_opts_after_config, validate_mount_dir_spec,
     validate_mount_disk_spec, validate_mount_file_spec, validate_mount_named_spec,
@@ -245,21 +247,6 @@ fn derive_name(image: &str) -> &str {
     let without_digest = image.split('@').next().unwrap_or(image);
     let without_tag = without_digest.split(':').next().unwrap_or(without_digest);
     without_tag.rsplit('/').next().unwrap_or(without_tag)
-}
-
-/// Shell-quote a string, using single quotes only when necessary.
-#[cfg(not(windows))]
-fn shell_quote(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
-    }
-    if s.chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '+'))
-    {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
 }
 
 /// Quote an argument for the generated Windows command shim.

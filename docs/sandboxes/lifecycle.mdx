@@ -90,7 +90,7 @@ Stopping shuts down the sandbox and its processes while keeping its configuratio
 
 `stop()` waits for graceful shutdown with no default timeout. Use your SDK's stop-with-timeout method to limit the wait. A timeout returns an error without force-killing; the shutdown may still finish later. Resume a paused sandbox before stopping it.
 
-See the SDK references for timeout options and cancellation rules: [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). Cancelling a wait does not disable automatic cleanup or [lifetime limits](#automatic-lifecycle-policies).
+See the SDK references for timeout options and cancellation rules: [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), [Go](/sdk/go/sandbox), or [Ruby](/sdk/ruby/sandbox). Cancelling a wait does not disable automatic cleanup or [lifetime limits](#automatic-lifecycle-policies).
 
 <CodeGroup>
 ```typescript TypeScript
@@ -131,9 +131,11 @@ msb start worker
 
 Use `restart` to stop and start in one operation. If the sandbox is already stopped or crashed, it starts directly.
 
+<CodeGroup>
 ```bash CLI
 msb restart worker
 ```
+</CodeGroup>
 
 If graceful shutdown times out, restart fails without starting a new VM. For a sandbox that will not stop, see [Stop an unresponsive sandbox](#stop-an-unresponsive-sandbox).
 
@@ -301,6 +303,15 @@ handle, err := m.GetSandbox(ctx, "worker")
 fmt.Println(handle.Status())
 ```
 
+```ruby Ruby
+Microsandbox::Sandbox.list.fetch("sandboxes").each do |handle|
+  puts "#{handle.name}: #{handle.status}"
+end
+
+handle = Microsandbox::Sandbox.get("worker")
+puts handle.status
+```
+
 ```bash CLI
 msb ls
 msb ps worker
@@ -333,7 +344,7 @@ result = sb.wait_until_stopped
 ```
 </CodeGroup>
 
-Use `wait_for_status` (`waitForStatus` in TypeScript and `WaitForStatus` in Go) when you need to wait for a specific lifecycle state. It has no built-in timeout, so use the language's normal timeout or cancellation primitive around it.
+To wait for a specific lifecycle state, use the status-wait method in your SDK: [TypeScript](/sdk/typescript/sandbox#sandbox-waitforstatus), [Rust](/sdk/rust/sandbox#sb-wait_for_status), [Python](/sdk/python/sandbox#sb-wait_for_status), [Go](/sdk/go/sandbox#sb-waitforstatus), or [Ruby](/sdk/ruby/sandbox#sandbox-wait_for_status). These methods have no built-in timeout; the references explain cancellation limits and how to bound the wait.
 
 ## Change configuration
 
@@ -388,6 +399,32 @@ let ping = sb.ping().await?;
 println!("agent reachable in {:?}", ping.latency);
 
 sb.touch().await?;
+```
+
+```python Python
+ping = await sb.ping()
+print(f"agent reachable in {ping.latency_ms:.1f} ms")
+
+await sb.touch()
+```
+
+```go Go
+ping, err := sb.Ping(ctx)
+if err != nil {
+    return err
+}
+fmt.Printf("agent reachable in %s\n", ping.Latency)
+
+if _, err := sb.Touch(ctx); err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+ping = sb.ping
+puts "agent reachable in #{ping.fetch("latency_ms")} ms"
+
+sb.touch
 ```
 
 ```bash CLI
@@ -491,6 +528,14 @@ For a local sandbox, removal deletes sandbox-owned state while leaving independe
 
 Removing a sandbox does not undo writes made to a named volume, bind mount, or user-supplied disk image. On cloud, removal deletes the remote sandbox resource; the local disk details above do not apply.
 
+### Recover an interrupted local create
+
+If the creating process crashes, an incomplete sandbox stays recorded and cannot be started. Remove it with `msb rm <name>`, or recreate it with `--replace`. An ordinary create retry leaves the incomplete sandbox intact.
+
+Recovery removes partial sandbox files and any named volumes newly created by that attempt. Preexisting named volumes and bind-mounted files are preserved. The database records are deleted together only after file cleanup succeeds; if cleanup fails, fix the reported problem and retry removal.
+
+If preparation is still finishing, retry removal after its filesystem work completes. Background formatters retain a preparation lock even when the creating task is cancelled; the lock is released when their work finishes or the process exits. You do not need to close a long-running application after its workers finish.
+
 ## Automatic lifecycle policies
 
 For production workloads, configure a maximum lifetime or idle timeout so sandboxes shut down automatically.
@@ -529,7 +574,22 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithIdleTimeout(5*time.Minute),
 )
 ```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker",
+  image: "python",
+  max_duration: 3600,
+  idle_timeout: 300
+)
+```
 </CodeGroup>
+
+An attached exec session or an unexpired job attachment keeps the sandbox active.
+A detached job can keep running, but its existence alone does not reset the idle
+timeout. New activity from a job still does; after restore, inherited process
+output is not captured and therefore does not reset the timer. Set
+`max_duration` when a detached service must have a fixed lifetime.
 
 ## Lifecycle states
 
@@ -544,6 +604,8 @@ Use these states to display status or decide what to do next.
 | **Draining** | Existing commands may finish, but new commands are rejected. The sandbox stops when the drain completes. |
 | **Stopped** | The VM is off. Configuration and sandbox state are preserved for a later start. |
 | **Crashed** | The VM exited unexpectedly and can be started again. |
+
+Local status checks and startup maintenance mark abandoned starts as `Crashed`. If a runtime may still be active or the check times out, the sandbox stays `Starting` until a later check.
 
 ## Names, handles, and concurrent callers
 
@@ -578,6 +640,10 @@ await sb.kill()
 err := sb.Kill(ctx)
 ```
 
+```ruby Ruby
+sb.kill
+```
+
 ```bash CLI
 msb stop --force worker
 ```
@@ -599,4 +665,4 @@ Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to r
 
 ## Reference
 
-For exact lifecycle APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For lifecycle commands and the REST surface, see [Sandbox commands](/cli/sandbox-commands) and the [Cloud API](/api-reference/overview).
+For exact lifecycle APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), [Go](/sdk/go/sandbox), or [Ruby](/sdk/ruby/sandbox). For lifecycle commands and the REST surface, see [Sandbox commands](/cli/sandbox-commands) and the [Cloud API](/api-reference/overview).

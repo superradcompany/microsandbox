@@ -1,4 +1,4 @@
-// Snapshot/fork example for the microsandbox Go SDK.
+// Snapshot restore example for the microsandbox Go SDK.
 //
 // Exercises creating a snapshot from a stopped sandbox, opening it through the
 // snapshot index, verifying the artifact, and booting a second sandbox from it.

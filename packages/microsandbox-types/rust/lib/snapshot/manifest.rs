@@ -41,6 +41,7 @@ pub const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 pub const MAX_FILE_LAYERS: usize = 256;
 /// Must-understand extensions implemented by this runtime.
 pub const SUPPORTED_REQUIRES: &[&str] = &[
+    super::GUEST_CLOCK_EXTENSION,
     super::RESTORE_DEFAULTS_EXTENSION,
     super::OWNED_VOLUMES_EXTENSION,
 ];
@@ -478,7 +479,9 @@ impl Manifest {
             validate_json_value(value, 0)?;
         }
         self.restore_defaults()?;
+        self.guest_clock()?;
         self.owned_volumes()?;
+        self.external_mounts()?;
         Ok(())
     }
 
@@ -909,6 +912,57 @@ mod tests {
             serde_json::json!({"user":""}),
         );
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn guest_clock_off_is_required_and_sync_keeps_released_bytes() {
+        use crate::GuestClockPolicy;
+
+        let mut manifest = descriptor();
+        let original = manifest.to_canonical_bytes().unwrap();
+        assert_eq!(manifest.guest_clock().unwrap(), GuestClockPolicy::Sync);
+        manifest.set_guest_clock(GuestClockPolicy::Sync).unwrap();
+        assert_eq!(manifest.to_canonical_bytes().unwrap(), original);
+
+        manifest.set_guest_clock(GuestClockPolicy::Off).unwrap();
+        assert_eq!(
+            manifest.requires,
+            vec![super::super::GUEST_CLOCK_EXTENSION.to_string()]
+        );
+        assert!(manifest.unsupported_requires().is_empty());
+        let restored = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        assert_eq!(restored.guest_clock().unwrap(), GuestClockPolicy::Off);
+
+        manifest.set_guest_clock(GuestClockPolicy::Sync).unwrap();
+        assert_eq!(manifest.to_canonical_bytes().unwrap(), original);
+
+        manifest.extensions.insert(
+            super::super::GUEST_CLOCK_EXTENSION.into(),
+            serde_json::json!({"policy":"host"}),
+        );
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn external_mounts_are_optional_guest_paths_and_empty_keeps_released_bytes() {
+        let mut manifest = descriptor();
+        let original = manifest.to_canonical_bytes().unwrap();
+
+        assert!(manifest.external_mounts().unwrap().is_empty());
+
+        manifest.set_external_mounts(Vec::new()).unwrap();
+
+        assert_eq!(manifest.to_canonical_bytes().unwrap(), original);
+
+        manifest
+            .set_external_mounts(vec!["/logs".into(), "/data".into(), "/data".into()])
+            .unwrap();
+        let restored = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+
+        // Advisory only: older readers must keep restoring these snapshots.
+        assert!(manifest.requires.is_empty());
+        assert!(manifest.unsupported_requires().is_empty());
+        assert_eq!(restored.external_mounts().unwrap(), ["/data", "/logs"]);
     }
 
     #[test]

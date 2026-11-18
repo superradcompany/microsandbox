@@ -1,10 +1,11 @@
 ---
 title: Networking
-description: TypeScript SDK - Network API reference
+"og:title": TypeScript SDK Networking reference
+description: Configure sandbox network policies with the TypeScript SDK.
 keywords: ["TypeScript SDK", "TypeScript networking", "microsandbox networking"]
 ---
 
-Configure sandbox networking. See [Networking](/networking/overview) for usage and policy concepts.
+See [Networking](/networking/overview) for network policies, DNS, TLS, and port publishing.
 
 ## NetworkPolicy
 
@@ -575,6 +576,26 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
   </div>
 </div>
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">http()</span>
+
+```typescript
+http(configure: (h: HttpBuilder) => HttpBuilder): this
+```
+
+Configure HTTP denial responses. See [`HttpBuilder`](#httpbuilder).
+
+<Accordion title="Example">
+
+```typescript
+import { NetworkBuilder } from "microsandbox";
+
+const network = new NetworkBuilder()
+    .http((h) => h.denyResponse(true).denyResponseFormat("json").networkDenyMessage("Request blocked."))
+    .build();
+```
+
+</Accordion>
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
 
 ```typescript
@@ -591,6 +612,26 @@ Require hostname-based policy allows to use an inspectable request authority. De
     <div className="msb-param-desc">Enable strict hostname policy mode.</div>
   </div>
 </div>
+
+#### maxInboundTcpConnections()
+
+```typescript
+maxInboundTcpConnections(max: number): this
+```
+
+Limit active inbound TCP connections across published ports. Accepts non-negative safe integers; `0` means unlimited. When omitted, the runtime defaults to unlimited in **0.7.9+**, or **256** in older versions. Local-only; unsupported overrides fail with an upgrade-required error. Also available on `Sandbox.restore(...)`.
+
+#### tcpAcceptQueueSize()
+
+`network.tcpAcceptQueueSize(4096)` sets how many not-yet-accepted connections each published TCP port's host listener queues. The default is 1,024, and values from 1 to 2,147,483,647 are accepted; any other number, including a fraction, makes the `tcpAcceptQueueSize()` call itself throw.
+
+<Accordion title="Queue behavior and host limits">
+
+Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at its own `somaxconn` (4,096 by default on Linux, 128 on macOS).
+
+</Accordion>
+
+`Sandbox.restore(...).tcpAcceptQueueSize(n)` applies it to the listeners a restored child publishes.
 
 #### maxUdpConnections()
 
@@ -613,7 +654,7 @@ Omitted restore limits use destination defaults; zero selects unlimited. The sam
 maxTcpConnections(max: number): this
 ```
 
-Limit the maximum number of concurrent network connections from the sandbox.
+Limit the maximum number of concurrent network connections from the sandbox. TCP and UDP connection limits must be non-negative safe integers; zero explicitly selects unlimited. Fractional, negative, non-finite, and unsafe integers are rejected instead of being truncated or wrapped.
 
 <p className="msb-label">Parameters</p>
 
@@ -682,6 +723,23 @@ Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `
   <div className="msb-param">
     <div className="msb-param-key"><code>pool</code><span className="msb-type">string</span></div>
     <div className="msb-param-desc">IPv6 CIDR pool.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">nat64Prefix()</span>
+
+```typescript
+nat64Prefix(prefix: string): this
+```
+
+Add a NAT64 `/96` prefix for policy classification. Destinations inside NAT64 prefixes are evaluated against both their IPv6 address and the embedded IPv4 address. The well-known `64:ff9b::/96` prefix is configured by default.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>prefix</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">NAT64 IPv6 <code>/96</code> prefix.</div>
   </div>
 </div>
 
@@ -1710,6 +1768,58 @@ upstreamCaCertFor(pattern: string, path: string): this
 Path to a PEM file with extra root CAs the proxy should trust only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#tls-bypass): exact hosts and `*.suffix` wildcards are supported.
 
 
+## HttpBuilder
+
+#### <span className="msb-recv">HttpBuilder.</span><span className="msb-hn">constructor()</span>
+
+```typescript
+new HttpBuilder()
+```
+
+Create HTTP settings with JSON denial responses enabled. [`network.http()`](#network-http) supplies this builder automatically.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">denyResponse()</span>
+
+<Tooltip tip="HTTP denial responses are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```typescript
+denyResponse(enabled: boolean): this
+```
+
+Enable denial responses for supported HTTP/1.x requests. Default: `true`, with JSON responses. Set `false` to close denied connections without a response. HTTPS requires TLS interception. Requires a supporting local runtime; cloud behavior is unchanged. See [HTTP denial responses](/networking/overview#http-denial-responses).
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">denyResponseFormat()</span>
+
+```typescript
+denyResponseFormat(format: "text" | "json"): this
+```
+
+Choose `text` or `json` (default). JSON mode requires a supporting runtime.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">denyMessage()</span>
+
+```typescript
+denyMessage(message: string): this
+```
+
+Deprecated legacy text message with `{host}` substitution. Ignored in JSON mode; use `networkDenyMessage` there.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">networkDenyMessage()</span>
+
+```typescript
+networkDenyMessage(message: string): this
+```
+
+Set the network-denial JSON `message`. Custom messages are used as-is. Omission uses the default message; an empty string leaves `message` empty. Requires `denyResponse(true)` and JSON mode.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">secretDenyMessage()</span>
+
+```typescript
+secretDenyMessage(message: string): this
+```
+
+Set the secret-denial JSON `message`. Custom messages are used as-is. Omission uses the default message; an empty string leaves `message` empty. Requires `denyResponse(true)` and JSON mode.
+
 ## NetworkRateLimiterBuilder
 
 Groups local rate limits by traffic direction. Supplied to [`NetworkBuilder.rateLimiter()`](#network-ratelimiter).
@@ -1842,11 +1952,28 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | secretViolationAction | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
 | maxTcpConnections | `number \| null` | Maximum concurrent TCP connections |
 | maxUdpConnections | `number \| null` (optional) | Maximum concurrent UDP relay sessions |
+| tcpAcceptQueueSize | `number \| null` (optional) | Accept-queue depth for published TCP port listeners; absent means the default, 1,024 |
 | strict | `boolean` | Strict hostname policy mode |
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
+| nat64Prefixes | `readonly string[]` | NAT64 `/96` prefixes for policy classification. Defaults to `64:ff9b::/96` |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
 | outboundProxy | [`OutboundProxy`](/sdk/typescript/proxies#outboundproxy)` \| null` | Canonical outbound proxy configuration stored in the sandbox network spec; `null` when unset |
+
+#### http
+
+```typescript
+http: {
+  denyResponse: boolean;
+  denyResponseFormat: "text" | "json";
+  denyMessage?: string | null;
+  networkDenyMessage?: string | null;
+  secretDenyMessage?: string | null;
+}
+```
+
+`denyResponse` defaults to `true` and the format to `json`. When enabled, an omitted
+or `null` message uses the built-in message. See [HTTP denial responses](/networking/overview#http-denial-responses).
 
 ### NetworkProfile
 

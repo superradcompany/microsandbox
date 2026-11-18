@@ -4,18 +4,22 @@
 //! # Metric names
 //!
 //! - `microsandbox.cpu.utilization`     — gauge (vCPU-seconds per wall-second; can exceed 1.0)
-//! - `microsandbox.memory.usage`        — gauge (bytes)
-//! - `microsandbox.memory.limit`        — gauge (bytes)
+//! - `microsandbox.memory.usage`         — gauge (bytes)
+//! - `microsandbox.memory.limit`         — gauge (bytes)
+//! - `microsandbox.memory.host_resident` — gauge (bytes)
 //! - `microsandbox.disk.bytes_read`     — gauge (cumulative bytes)
 //! - `microsandbox.disk.bytes_written`  — gauge (cumulative bytes)
 //! - `microsandbox.network.bytes_received` — gauge (cumulative bytes)
 //! - `microsandbox.network.bytes_sent`     — gauge (cumulative bytes)
+//! - `microsandbox.network.inbound_tcp.rejected` — gauge (cumulative cap rejections)
+//! - `microsandbox.network.outbound_tcp.rejected` — gauge (cumulative cap rejections)
+//! - `microsandbox.network.outbound_udp.evicted` — gauge (cumulative cap evictions)
 //! - `microsandbox.upper.used`             — gauge (bytes)
 //! - `microsandbox.upper.free`             — gauge (bytes)
 //! - `microsandbox.upper.host_allocated`   — gauge (bytes)
 //! - `microsandbox.uptime`              — gauge (seconds)
 //!
-//! All cumulative byte counters are emitted as gauges carrying the
+//! All cumulative counters are emitted as gauges carrying the
 //! current cumulative value. Downstream `rate()` queries (Prometheus,
 //! PromQL-on-OTel) compute throughput from successive samples. We use
 //! gauges rather than monotonic counters because each snapshot already
@@ -135,12 +139,16 @@ impl Default for IdentityAttributes {
 #[derive(Clone, Debug)]
 struct SandboxMetricObservation {
     cpu_utilization: f64,
-    memory_usage: u64,
+    memory_usage: Option<u64>,
     memory_limit: u64,
+    memory_host_resident: Option<u64>,
     disk_bytes_read: u64,
     disk_bytes_written: u64,
     network_bytes_received: u64,
     network_bytes_sent: u64,
+    inbound_tcp_rejected: Option<u64>,
+    outbound_tcp_rejected: Option<u64>,
+    outbound_udp_evicted: Option<u64>,
     upper_used: Option<u64>,
     upper_free: Option<u64>,
     upper_host_allocated: Option<u64>,
@@ -612,10 +620,14 @@ fn register_sandbox_instruments(meter: &Meter) -> SandboxMetricObservations {
     let cpu_observations = observations.clone();
     let memory_usage_observations = observations.clone();
     let memory_limit_observations = observations.clone();
+    let memory_host_resident_observations = observations.clone();
     let disk_read_observations = observations.clone();
     let disk_write_observations = observations.clone();
     let network_received_observations = observations.clone();
     let network_sent_observations = observations.clone();
+    let inbound_rejected_observations = observations.clone();
+    let outbound_rejected_observations = observations.clone();
+    let outbound_evicted_observations = observations.clone();
     let upper_used_observations = observations.clone();
     let upper_free_observations = observations.clone();
     let upper_host_allocated_observations = observations.clone();
@@ -641,24 +653,40 @@ fn register_sandbox_instruments(meter: &Meter) -> SandboxMetricObservations {
         .build();
     meter
         .u64_observable_gauge("microsandbox.memory.usage")
-        .with_description("Resident memory usage")
+        .with_description("Guest memory in use")
         .with_unit("By")
         .with_callback(move |observer| {
             memory_usage_observations.with_observations(|observations| {
                 for observation in observations {
-                    observer.observe(observation.memory_usage, &observation.attrs);
+                    if let Some(value) = observation.memory_usage {
+                        observer.observe(value, &observation.attrs);
+                    }
                 }
             });
         })
         .build();
     meter
         .u64_observable_gauge("microsandbox.memory.limit")
-        .with_description("Configured guest memory limit")
+        .with_description("Guest memory limit")
         .with_unit("By")
         .with_callback(move |observer| {
             memory_limit_observations.with_observations(|observations| {
                 for observation in observations {
                     observer.observe(observation.memory_limit, &observation.attrs);
+                }
+            });
+        })
+        .build();
+    meter
+        .u64_observable_gauge("microsandbox.memory.host_resident")
+        .with_description("Host-resident guest memory")
+        .with_unit("By")
+        .with_callback(move |observer| {
+            memory_host_resident_observations.with_observations(|observations| {
+                for observation in observations {
+                    if let Some(value) = observation.memory_host_resident {
+                        observer.observe(value, &observation.attrs);
+                    }
                 }
             });
         })
@@ -711,6 +739,60 @@ fn register_sandbox_instruments(meter: &Meter) -> SandboxMetricObservations {
             });
         })
         .build();
+
+    meter
+        .u64_observable_gauge("microsandbox.network.inbound_tcp.rejected")
+        .with_description("Cumulative published TCP connections rejected by the admission queue")
+        .with_unit("{connection}")
+        .with_callback(move |observer| {
+            inbound_rejected_observations.with_observations(|observations| {
+                for observation in observations {
+                    if let Some(rejected) = observation.inbound_tcp_rejected {
+                        let mut attrs = observation.attrs.clone();
+                        attrs.push(KeyValue::new("reason", "connection_limit"));
+                        observer.observe(rejected, &attrs);
+                    }
+                }
+            });
+        })
+        .build();
+
+    meter
+        .u64_observable_gauge("microsandbox.network.outbound_tcp.rejected")
+        .with_description(
+            "Cumulative outbound TCP connections rejected by the active connection cap",
+        )
+        .with_unit("{connection}")
+        .with_callback(move |observer| {
+            outbound_rejected_observations.with_observations(|observations| {
+                for observation in observations {
+                    if let Some(value) = observation.outbound_tcp_rejected {
+                        let mut attrs = observation.attrs.clone();
+                        attrs.push(KeyValue::new("reason", "connection_limit"));
+                        observer.observe(value, &attrs);
+                    }
+                }
+            });
+        })
+        .build();
+
+    meter
+        .u64_observable_gauge("microsandbox.network.outbound_udp.evicted")
+        .with_description("Cumulative outbound UDP sessions evicted to enforce the session cap")
+        .with_unit("{session}")
+        .with_callback(move |observer| {
+            outbound_evicted_observations.with_observations(|observations| {
+                for observation in observations {
+                    if let Some(value) = observation.outbound_udp_evicted {
+                        let mut attrs = observation.attrs.clone();
+                        attrs.push(KeyValue::new("reason", "session_limit"));
+                        observer.observe(value, &attrs);
+                    }
+                }
+            });
+        })
+        .build();
+
     meter
         .u64_observable_gauge("microsandbox.upper.used")
         .with_description("Guest-visible used bytes on the OCI upper filesystem")
@@ -813,12 +895,16 @@ fn build_observation(
     // for `*.utilization` is a 0..1 ratio.
     SandboxMetricObservation {
         cpu_utilization: f64::from(m.cpu_percent) / 100.0,
-        memory_usage: m.memory_bytes,
+        memory_usage: m.memory_bytes_reported.then_some(m.memory_bytes),
         memory_limit: m.memory_limit_bytes,
+        memory_host_resident: m.memory_host_resident_bytes,
         disk_bytes_read: m.disk_read_bytes,
         disk_bytes_written: m.disk_write_bytes,
         network_bytes_received: m.net_rx_bytes,
         network_bytes_sent: m.net_tx_bytes,
+        inbound_tcp_rejected: m.net_inbound_tcp_rejected,
+        outbound_tcp_rejected: m.net_outbound_tcp_rejected,
+        outbound_udp_evicted: m.net_outbound_udp_evicted,
         upper_used: m.upper_used_bytes,
         upper_free: m.upper_free_bytes,
         upper_host_allocated: m.upper_host_allocated_bytes,
@@ -835,7 +921,10 @@ fn build_observation(
 mod tests {
     use std::time::Duration;
 
-    use microsandbox_metrics::SandboxMetrics;
+    use microsandbox_metrics::{
+        ActivateSlot, MetricsRegistry, MetricsRegistryReader, REGISTRY_ABI_VERSION, ReserveSlot,
+        SampleWrite, SandboxMetrics,
+    };
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
 
     use super::*;
@@ -850,6 +939,7 @@ mod tests {
                 cpu_percent: 1.0,
                 vcpu_time_ns: 1,
                 memory_bytes: 1,
+                memory_bytes_reported: true,
                 memory_available_bytes: Some(2),
                 memory_host_resident_bytes: Some(3),
                 memory_limit_bytes: 2,
@@ -857,6 +947,9 @@ mod tests {
                 disk_write_bytes: 4,
                 net_rx_bytes: 5,
                 net_tx_bytes: 6,
+                net_inbound_tcp_rejected: Some(7),
+                net_outbound_tcp_rejected: Some(41),
+                net_outbound_udp_evicted: Some(43),
                 upper_used_bytes: Some(7),
                 upper_free_bytes: Some(8),
                 upper_host_allocated_bytes: Some(7),
@@ -982,15 +1075,184 @@ mod tests {
     }
 
     #[test]
+    fn registry_optional_metrics_omit_missing_samples_and_recover_with_zero() {
+        let name = format!(
+            "/msb-usage-{:x}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reserved = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "resize",
+                memory_limit_bytes: 512 * 1024 * 1024,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reserved.slot,
+                generation: reserved.generation,
+                run_id: 70,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let registry_reader = MetricsRegistryReader::open(&name, REGISTRY_ABI_VERSION).unwrap();
+
+        // Keep the mappings alive but remove the Unix name, including on assertion failure.
+        #[cfg(unix)]
+        unsafe {
+            libc::shm_unlink(std::ffi::CString::new(name).unwrap().as_ptr());
+        }
+
+        let (_provider, reader, observations) = test_reader();
+
+        for (used, limit, rejected, tcp_rejected, udp_evicted) in [
+            (
+                Some(128 * 1024 * 1024),
+                1_024 * 1024 * 1024,
+                Some(37),
+                Some(41),
+                Some(43),
+            ),
+            (None, 512 * 1024 * 1024, None, None, None),
+            (Some(0), 512 * 1024 * 1024, Some(0), Some(0), Some(0)),
+            (Some(0), 512 * 1024 * 1024, Some(37), None, Some(43)),
+        ] {
+            writer
+                .write_sample(SampleWrite {
+                    sampled_at: chrono::Utc::now(),
+                    cpu_percent: Some(0.0),
+                    vcpu_time_ns: Some(1),
+                    memory_bytes: used,
+                    memory_available_bytes: Some(
+                        used.map_or(768 * 1024 * 1024, |used| limit - used),
+                    ),
+                    memory_host_resident_bytes: None,
+                    memory_limit_bytes: Some(limit),
+                    disk_read_bytes: 0,
+                    disk_write_bytes: 0,
+                    net_rx_bytes: 0,
+                    net_tx_bytes: 0,
+                    net_inbound_tcp_rejected: rejected,
+                    net_outbound_tcp_rejected: tcp_rejected,
+                    net_outbound_udp_evicted: udp_evicted,
+                    upper_used_bytes: None,
+                    upper_free_bytes: None,
+                    upper_host_allocated_bytes: None,
+                })
+                .unwrap();
+
+            let current =
+                SandboxMetricSnapshot::from(registry_reader.active_snapshot().unwrap().remove(0));
+            let attrs = build_attributes(&current, &IdentityAttributes::default(), None);
+            observations.replace(vec![build_observation(&current, attrs)]);
+            let mut exported = ResourceMetrics::default();
+            reader.collect(&mut exported).unwrap();
+
+            for (name, expected) in [
+                (
+                    "microsandbox.memory.usage",
+                    used.into_iter().collect::<Vec<_>>(),
+                ),
+                ("microsandbox.memory.limit", vec![limit]),
+                (
+                    "microsandbox.network.inbound_tcp.rejected",
+                    rejected.into_iter().collect(),
+                ),
+                (
+                    "microsandbox.network.outbound_tcp.rejected",
+                    tcp_rejected.into_iter().collect(),
+                ),
+                (
+                    "microsandbox.network.outbound_udp.evicted",
+                    udp_evicted.into_iter().collect(),
+                ),
+            ] {
+                let values: Vec<_> = exported
+                    .scope_metrics()
+                    .flat_map(|scope| scope.metrics())
+                    .filter(|metric| metric.name() == name)
+                    .flat_map(|metric| match metric.data() {
+                        AggregatedMetrics::U64(MetricData::Gauge(gauge)) => gauge
+                            .data_points()
+                            .map(|point| {
+                                if name.starts_with("microsandbox.network.") {
+                                    let reason = if name.ends_with("evicted") {
+                                        "session_limit"
+                                    } else {
+                                        "connection_limit"
+                                    };
+                                    assert!(
+                                        point
+                                            .attributes()
+                                            .any(|attr| attr.key.as_str() == "reason"
+                                                && attr.value.to_string() == reason)
+                                    );
+                                    assert!(
+                                        point
+                                            .attributes()
+                                            .any(|attr| attr.key.as_str() == "sandbox.name"
+                                                && attr.value.to_string() == "resize")
+                                    );
+                                }
+                                point.value()
+                            })
+                            .collect::<Vec<_>>(),
+                        _ => panic!("{name} should be a u64 gauge"),
+                    })
+                    .collect();
+
+                assert_eq!(values, expected, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn optional_host_resident_metric_follows_sample_flag() {
+        let (_provider, reader, observations) = test_reader();
+        let current = snapshot();
+        let attrs = build_attributes(&current, &IdentityAttributes::default(), None);
+
+        observations.replace(vec![build_observation(&current, attrs)]);
+        let mut with_resident = ResourceMetrics::default();
+        reader
+            .collect(&mut with_resident)
+            .expect("collect with host resident");
+        assert_eq!(
+            metric_point_count(&with_resident, "microsandbox.memory.host_resident"),
+            1
+        );
+
+        let mut absent = snapshot();
+        absent.metrics.memory_host_resident_bytes = None;
+        let attrs = build_attributes(&absent, &IdentityAttributes::default(), None);
+        observations.replace(vec![build_observation(&absent, attrs)]);
+
+        let mut without_resident = ResourceMetrics::default();
+        reader
+            .collect(&mut without_resident)
+            .expect("collect without host resident");
+        assert_eq!(
+            metric_point_count(&without_resident, "microsandbox.memory.host_resident"),
+            0
+        );
+    }
+
+    #[test]
     fn per_sandbox_metrics_only_report_the_current_identity_set() {
-        const METRICS: [&str; 11] = [
+        const METRICS: [&str; 15] = [
             "microsandbox.cpu.utilization",
             "microsandbox.memory.usage",
             "microsandbox.memory.limit",
+            "microsandbox.memory.host_resident",
             "microsandbox.disk.bytes_read",
             "microsandbox.disk.bytes_written",
             "microsandbox.network.bytes_received",
             "microsandbox.network.bytes_sent",
+            "microsandbox.network.inbound_tcp.rejected",
+            "microsandbox.network.outbound_tcp.rejected",
+            "microsandbox.network.outbound_udp.evicted",
             "microsandbox.upper.used",
             "microsandbox.upper.free",
             "microsandbox.upper.host_allocated",

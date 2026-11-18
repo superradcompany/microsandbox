@@ -1,16 +1,17 @@
 //! Runtime-owned serialization and fencing for host control mutations.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rand::Rng as _;
 use sha2::{Digest as _, Sha256};
 
 use crate::checkpoint::{CheckpointCoordinator, CheckpointResult, UserPause};
 use crate::control::*;
+use crate::relay::RelayIdleState;
+use crate::runner::jobs::JobManager;
 use crate::vm::VmConfig;
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 
@@ -28,6 +29,9 @@ const RUNTIME_BOOT_ID_FILE: &str = "runtime-boot-id";
 
 /// One in-process authority for all host-owned runtime mutations.
 pub struct RuntimeControlExecutor {
+    signal_runtime: tokio::runtime::Handle,
+    signal_workload: std::sync::Arc<crate::runner::workload_control::WorkloadControl>,
+    jobs: Arc<JobManager>,
     pause_observation: std::sync::RwLock<ControlResponse>,
     resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     vm: msb_krun::VmControl,
@@ -57,6 +61,10 @@ struct DedupEntry {
 //--------------------------------------------------------------------------------------------------
 
 impl RuntimeControlExecutor {
+    pub(crate) fn jobs(&self) -> Arc<JobManager> {
+        Arc::clone(&self.jobs)
+    }
+
     /// Construct an executor and atomically publish a fresh runtime boot identity.
     // Construction binds the VM, guest channel, and host lifecycle resources once.
     #[allow(clippy::too_many_arguments)]
@@ -70,6 +78,7 @@ impl RuntimeControlExecutor {
         guest_bootstrap: &GuestBootstrap,
         runtime: tokio::runtime::Handle,
         agent_sock: &Path,
+        relay_idle: Arc<RelayIdleState>,
         workload_control: std::sync::Arc<crate::runner::workload_control::WorkloadControl>,
         resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
         inherited_memory: Option<crate::checkpoint::LocalMemoryPin>,
@@ -79,19 +88,31 @@ impl RuntimeControlExecutor {
         >,
     ) -> Result<Self, String> {
         let runtime_boot_id = new_runtime_boot_id();
+        let jobs = crate::runner::jobs::JobManager::open(
+            runtime_boot_id.clone(),
+            runtime_dir
+                .parent()
+                .ok_or("runtime directory has no sandbox parent")?,
+            agent_sock,
+            runtime.clone(),
+            relay_idle,
+        )?;
         persist_runtime_boot_id(runtime_dir, &runtime_boot_id)
             .map_err(|error| error.to_string())?;
         let mut checkpoint = CheckpointCoordinator::open(
             runtime_dir,
             vm_config,
             guest_bootstrap,
-            runtime,
+            runtime.clone(),
             agent_sock,
-            workload_control,
+            workload_control.clone(),
             owned_directory_checkpoints,
         )?;
         checkpoint.inherit_local_memory(inherited_memory);
         Ok(Self {
+            signal_runtime: runtime.clone(),
+            signal_workload: std::sync::Arc::clone(&workload_control),
+            jobs,
             pause_observation: std::sync::RwLock::new(ControlResponse {
                 ok: true,
                 pause: Some(crate::control::PauseControlState {
@@ -206,11 +227,100 @@ impl RuntimeControlExecutor {
         snapshot_state(&self.state.lock().unwrap())
     }
 
+    /// Admit a bounded job operation under the same lifecycle lock as full capture and pause.
+    pub(crate) fn job_request(
+        &self,
+        request: microsandbox_protocol::jobs::JobRequest,
+    ) -> microsandbox_protocol::jobs::JobResponse {
+        let state = self.state.lock().unwrap();
+        if matches!(
+            request.operation,
+            microsandbox_protocol::jobs::JobOperation::Hello
+                | microsandbox_protocol::jobs::JobOperation::Start { .. }
+        ) && !self
+            .signal_workload
+            .ordinary_writer()
+            .ok()
+            .flatten()
+            .is_some_and(|writer| {
+                writer
+                    .exec_controls
+                    .enabled
+                    .load(std::sync::atomic::Ordering::Acquire)
+            })
+        {
+            return microsandbox_protocol::jobs::JobResponse::error(
+                "unsupported_feature",
+                "managed jobs require a guest with bounded stdin and execution control support",
+            );
+        }
+        if self
+            .signal_workload
+            .ordinary_writer()
+            .ok()
+            .flatten()
+            .is_some_and(|writer| {
+                writer
+                    .exec_controls
+                    .stopping
+                    .load(std::sync::atomic::Ordering::Acquire)
+            })
+            && matches!(
+                request.operation,
+                microsandbox_protocol::jobs::JobOperation::Start { .. }
+                    | microsandbox_protocol::jobs::JobOperation::Write { .. }
+                    | microsandbox_protocol::jobs::JobOperation::Eof { .. }
+            )
+        {
+            return microsandbox_protocol::jobs::JobResponse::error(
+                "runtime_stopping",
+                "sandbox is stopping; new job input is closed",
+            );
+        }
+        self.jobs.request(
+            request,
+            state.lifecycle == RuntimeLifecycle::Running && state.user_pause.is_none(),
+        )
+    }
+
+    pub(crate) fn exec_signal(
+        &self,
+        request: microsandbox_protocol::exec_control::ExecControlRequest,
+    ) -> microsandbox_protocol::exec_control::ExecControlResponse {
+        let writer = match self.signal_workload.ordinary_writer() {
+            Ok(Some(writer)) => writer,
+            _ => {
+                return microsandbox_protocol::exec_control::ExecControlResponse::error(
+                    "runtime_closed",
+                    "execution transport is unavailable",
+                );
+            }
+        };
+        // The dispatch worker is blocking, while guest I/O runs on the independent runtime.
+        // No lifecycle lock crosses this wait: snapshot gates still apply inside relay admission.
+        self.signal_runtime
+            .block_on(writer.exec_controls.signal(&writer, request))
+    }
+
     fn execute_locked(
         &self,
         state: &mut ExecutorState,
         request: ControlRequest,
     ) -> ControlResponse {
+        // Capturing an active job without its host ownership would restore an unattachable
+        // process. Gate every full-capture entry point, including legacy and descriptor forms.
+        if matches!(
+            request,
+            ControlRequest::CheckpointCreate { .. }
+                | ControlRequest::BranchCreate { .. }
+                | ControlRequest::BranchCreateMemfd { .. }
+        ) && self.jobs.active()
+        {
+            return control_error(
+                "active_jobs",
+                "full capture and fork are unavailable while managed jobs are active; wait for or terminate those jobs first",
+            );
+        }
         let memory_backing = match &request {
             ControlRequest::BranchCreateMemfd {
                 backing: Some(file),
@@ -741,13 +851,10 @@ fn checkpoint_response(
 }
 
 fn persist_runtime_boot_id(runtime_dir: &Path, boot_id: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(runtime_dir)?;
+    microsandbox_utils::private_file::create_private_dir_all(runtime_dir)?;
     let target = runtime_dir.join(RUNTIME_BOOT_ID_FILE);
     let temporary = unique_temporary_path(runtime_dir, RUNTIME_BOOT_ID_FILE);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
     file.write_all(boot_id.as_bytes())?;
     file.write_all(b"\n")?;
     // This file is diagnostic/live discovery, not a restart journal. Fencing uses the new

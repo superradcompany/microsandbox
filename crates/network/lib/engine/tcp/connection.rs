@@ -14,7 +14,11 @@ use bytes::Bytes;
 use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::wire::IpListenEndpoint;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+
+use crate::tcp::deferred_close::DeferredClose;
+use crate::tcp::pending::PendingConnect;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -85,9 +89,32 @@ pub struct TcpConnectionTracker {
 #[deprecated(note = "use TcpConnectionTracker instead")]
 pub type ConnectionTracker = TcpConnectionTracker;
 
-/// Maximum number of poll iterations to attempt flushing remaining data
-/// after the proxy task has exited before force-aborting the socket.
-const DEFERRED_CLOSE_LIMIT: u16 = 64;
+/// How to handle a guest TCP handshake after evaluating policy.
+pub enum TcpAcceptMode {
+    /// Complete the handshake only after the host connection succeeds.
+    WaitForUpstream,
+    /// Accept for hostname inspection or local DNS handling.
+    AcceptImmediately,
+    /// Accept only to send an HTTP denial response.
+    RespondWithDenial,
+    /// Leave the destination without a socket so smoltcp sends a reset.
+    Reject,
+}
+
+/// Ownership of an optional connect-before-accept host socket.
+enum UpstreamConnection {
+    /// The handshake does not require a host dial here; the proxy dials if needed.
+    Deferred,
+    /// The dial failed or its stream was handed off; no host socket is owned here.
+    Finished,
+    /// Wait for smoltcp to validate a guest SYN before starting the host dial.
+    Waiting,
+    /// Host dial is in progress while the guest's SYN-ACK remains paused.
+    Connecting(PendingConnect),
+    /// Host connection succeeded; resume the guest handshake, then pass this
+    /// stream to the proxy for reuse.
+    Connected(TcpStream),
+}
 
 /// Internal state for a single tracked TCP connection.
 struct Connection {
@@ -109,6 +136,8 @@ struct Connection {
     proxy_channels: Option<ProxyChannels>,
     /// Whether a proxy task has been spawned for this connection.
     proxy_spawned: bool,
+    /// Host dial and socket held until the guest handshake completes.
+    upstream: UpstreamConnection,
     /// Status reported by the proxy task before it exits.
     proxy_connect: Arc<ProxyConnectState>,
     /// Partial data from proxy that couldn't be fully written to smoltcp socket.
@@ -116,8 +145,11 @@ struct Connection {
     /// Data read from smoltcp socket that couldn't be sent to proxy (channel full).
     /// Must be sent before reading more from the socket to preserve stream order.
     read_buf: Option<Bytes>,
-    /// Counter for deferred close attempts (prevents stalling forever).
-    close_attempts: u16,
+    /// Progress deadline while draining after the host task exits.
+    deferred_close: DeferredClose,
+    /// Egress policy already denied this flow at SYN time; the connection
+    /// was accepted only so an HTTP/HTTPS client can be answered with 403.
+    policy_denied: bool,
 }
 
 /// Proxy-side channel ends, created at socket creation time and taken when
@@ -134,6 +166,9 @@ struct ProxyChannels {
 /// Returned by [`TcpConnectionTracker::take_new_connections()`]. The poll loop
 /// passes this to the proxy task spawner.
 pub struct NewConnection {
+    /// Host socket opened before completing the guest handshake, if authorized.
+    /// `None` for deferred hostname checks, local DNS handling, or denial responses.
+    pub upstream: Option<TcpStream>,
     /// Original destination the guest was connecting to.
     pub dst: SocketAddr,
     /// Receive data from smoltcp socket (guest → proxy task).
@@ -142,6 +177,9 @@ pub struct NewConnection {
     pub to_smoltcp: mpsc::Sender<Bytes>,
     /// Status the proxy task updates before it exits.
     pub proxy_connect: Arc<ProxyConnectState>,
+    /// Egress policy already denied this flow at SYN time. The dispatcher
+    /// must answer it (HTTP 403) and never dial upstream.
+    pub policy_denied: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -213,34 +251,95 @@ impl TcpConnectionTracker {
         }
     }
 
+    /// Cumulative connections refused because the active connection cap was full.
+    pub(crate) fn rejected_connections(&self) -> u64 {
+        self.rejected_connections
+    }
+
     /// Returns `true` if a tracked socket already exists for this exact
     /// connection (same source AND destination). O(1) via HashSet lookup.
     pub fn has_socket_for(&self, src: &SocketAddr, dst: &SocketAddr) -> bool {
         self.connection_keys.contains(&(*src, *dst))
     }
 
-    /// Create a smoltcp TCP socket for an incoming SYN and register it.
-    ///
-    /// The socket is put into LISTEN state on the destination IP + port so
-    /// smoltcp will complete the three-way handshake when it processes the
-    /// SYN frame. Binding to the specific destination IP (not just port)
-    /// prevents socket dispatch ambiguity when multiple connections target
-    /// different IPs on the same port.
-    ///
-    /// Returns `false` if at `max_tcp_connections` limit.
+    /// Attach a host dial to the socket `handle` returned by [`Self::poll_connects`].
+    /// Removing that connection also cancels its pending dial.
+    pub(crate) fn track_connect(&mut self, handle: SocketHandle, pending: PendingConnect) {
+        if let Some(conn) = self.connections.get_mut(&handle) {
+            conn.upstream = UpstreamConnection::Connecting(pending);
+        }
+    }
+
+    /// Finish host dials and collect sockets whose validated SYN needs a dial.
+    /// Returns `(socket handle, guest destination)` pairs to dial and track.
+    pub(crate) fn poll_connects(
+        &mut self,
+        sockets: &mut SocketSet<'_>,
+    ) -> Vec<(SocketHandle, SocketAddr)> {
+        // Drop sockets returned to Listen by a guest reset, including any
+        // pending dial or connected host stream they still own.
+        self.cleanup_closed(sockets);
+        let mut requests = Vec::new();
+        for (&handle, conn) in &mut self.connections {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            match &mut conn.upstream {
+                UpstreamConnection::Waiting => {
+                    if socket.state() == tcp::State::SynReceived {
+                        requests.push((handle, conn.dst));
+                    }
+                }
+                UpstreamConnection::Connecting(pending) => {
+                    if socket.state() != tcp::State::SynReceived {
+                        // The guest is no longer waiting for this dial.
+                        conn.upstream = UpstreamConnection::Finished;
+                        socket.abort();
+                        continue;
+                    }
+                    let Some(result) = pending.take_result() else {
+                        continue;
+                    };
+
+                    match result {
+                        Ok(stream) => {
+                            conn.upstream = UpstreamConnection::Connected(stream);
+                            conn.proxy_connect.mark_connected();
+                            socket.pause_synack(false);
+                        }
+                        Err(error) => {
+                            tracing::debug!(dst = %conn.dst, %error, "upstream TCP connect failed before guest handshake");
+                            conn.upstream = UpstreamConnection::Finished;
+                            socket.abort();
+                        }
+                    }
+                }
+                UpstreamConnection::Deferred
+                | UpstreamConnection::Finished
+                | UpstreamConnection::Connected(_) => {}
+            }
+        }
+        requests
+    }
+
+    /// Create a destination-bound socket using the policy's handshake mode.
+    /// `src` and `dst` are guest-visible addresses; `mode` is the policy decision.
+    /// Returns `false` when the mode rejects the connection or the budget is full.
     pub fn create_tcp_socket(
         &mut self,
         src: SocketAddr,
         dst: SocketAddr,
         sockets: &mut SocketSet<'_>,
+        mode: TcpAcceptMode,
     ) -> bool {
+        if matches!(mode, TcpAcceptMode::Reject) {
+            return false;
+        }
+
+        let pause_synack = matches!(mode, TcpAcceptMode::WaitForUpstream);
+        let policy_denied = matches!(mode, TcpAcceptMode::RespondWithDenial);
         if self
             .max_tcp_connections
             .is_some_and(|max| self.connections.len() >= max.get())
         {
-            // Reclaim completed flows before rejecting a burst. Existing
-            // listeners have already consumed their SYN in the poll loop;
-            // an idle listener here is an invalid or reset handshake.
             self.cleanup_closed(sockets);
             if self
                 .max_tcp_connections
@@ -255,6 +354,9 @@ impl TcpConnectionTracker {
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_RX_BUF_SIZE]);
         let tx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_TX_BUF_SIZE]);
         let mut socket = tcp::Socket::new(rx_buf, tx_buf);
+        if pause_synack {
+            socket.pause_synack(true);
+        }
 
         // Listen on the specific destination IP + port. With any_ip mode,
         // binding to the IP ensures the correct socket accepts each SYN
@@ -275,6 +377,7 @@ impl TcpConnectionTracker {
         let (to_proxy_tx, to_proxy_rx) = mpsc::channel(CHANNEL_CAPACITY);
         // proxy → smoltcp (server sends data, proxy relays to guest):
         let (from_proxy_tx, from_proxy_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let proxy_connect = Arc::new(ProxyConnectState::new());
 
         self.connection_keys.insert((src, dst));
         self.connections.insert(
@@ -289,14 +392,28 @@ impl TcpConnectionTracker {
                     to_smoltcp: from_proxy_tx,
                 }),
                 proxy_spawned: false,
-                proxy_connect: Arc::new(ProxyConnectState::new()),
+                upstream: if pause_synack {
+                    UpstreamConnection::Waiting
+                } else {
+                    UpstreamConnection::Deferred
+                },
+                proxy_connect,
                 write_buf: None,
                 read_buf: None,
-                close_attempts: 0,
+                deferred_close: DeferredClose::default(),
+                policy_denied,
             },
         );
 
         true
+    }
+
+    /// Earliest pending drain deadline for the network poll loop.
+    pub(crate) fn deferred_close_delay(&self) -> Option<std::time::Duration> {
+        self.connections
+            .values()
+            .filter_map(|conn| conn.deferred_close.poll_delay())
+            .min()
     }
 
     /// Relay data between smoltcp sockets and proxy task channels.
@@ -317,6 +434,7 @@ impl TcpConnectionTracker {
             // Already torn down (e.g. abort fired on a previous pass).
             // Leave it for `cleanup_closed` to evict.
             if matches!(socket.state(), tcp::State::Closed) {
+                conn.deferred_close = DeferredClose::default();
                 continue;
             }
 
@@ -324,9 +442,9 @@ impl TcpConnectionTracker {
             // ends, close the smoltcp socket so the guest gets a FIN.
             //
             // If the proxy attempted and failed to reach upstream,
-            // an RST via `abort()` is instead sent so happy-eyeballs
-            // clients fall back to another family instead of committing
-            // to this half-open connection.
+            // an RST via `abort()` reports the upstream error. For flows
+            // that required a hostname before dialing, the guest handshake
+            // already succeeded, so this cannot guarantee address fallback.
             let proxy_exited = match &conn.to_proxy {
                 Some(to_proxy) => to_proxy.is_closed(),
                 // The guest already half-closed (sender dropped below), so
@@ -347,17 +465,11 @@ impl TcpConnectionTracker {
                     socket.abort();
                     continue;
                 }
+                let queued_before = socket.send_queue();
                 write_proxy_data(socket, conn);
-                if conn.write_buf.is_none() {
-                    socket.close();
-                } else {
-                    // Abort if we've been trying to flush for too long
-                    // (guest stopped reading, socket send buffer full).
-                    conn.close_attempts += 1;
-                    if conn.close_attempts >= DEFERRED_CLOSE_LIMIT {
-                        socket.abort();
-                    }
-                }
+                let written = socket.send_queue() - queued_before;
+                conn.deferred_close
+                    .finish(socket, conn.write_buf.is_some(), written);
                 continue;
             }
 
@@ -415,7 +527,7 @@ impl TcpConnectionTracker {
                 continue;
             }
 
-            let socket = sockets.get::<tcp::Socket>(handle);
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
             if matches!(
                 socket.state(),
                 tcp::State::Established | tcp::State::CloseWait
@@ -423,11 +535,22 @@ impl TcpConnectionTracker {
                 conn.proxy_spawned = true;
 
                 if let Some(channels) = conn.proxy_channels.take() {
+                    let upstream =
+                        match std::mem::replace(&mut conn.upstream, UpstreamConnection::Finished) {
+                            UpstreamConnection::Connected(stream) => Some(stream),
+                            UpstreamConnection::Deferred
+                            | UpstreamConnection::Finished
+                            | UpstreamConnection::Waiting
+                            | UpstreamConnection::Connecting(_) => None,
+                        };
+
                     new.push(NewConnection {
+                        upstream,
                         dst: conn.dst,
                         from_smoltcp: channels.from_smoltcp,
                         to_smoltcp: channels.to_smoltcp,
                         proxy_connect: conn.proxy_connect.clone(),
+                        policy_denied: conn.policy_denied,
                     });
                 }
             }
@@ -544,6 +667,40 @@ fn write_proxy_data(socket: &mut tcp::Socket<'_>, conn: &mut Connection) {
 mod tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn exited_proxy_drains_slow_guest_and_times_out_only_when_stalled() {
+        use crate::tcp::test_support::TestNetwork;
+
+        for stalled in [false, true] {
+            let mut network = TestNetwork::new(true);
+            let mut tracker = TcpConnectionTracker::new(None);
+            assert!(tracker.create_tcp_socket(
+                "10.0.0.1:12345".parse().unwrap(),
+                "10.0.0.2:8099".parse().unwrap(),
+                &mut network.sockets,
+                TcpAcceptMode::AcceptImmediately,
+            ));
+            for _ in 0..16 {
+                network.poll();
+            }
+            let mut connections = tracker.take_new_connections(&mut network.sockets);
+            assert_eq!(connections.len(), 1);
+            let conn = connections.remove(0);
+            conn.proxy_connect.mark_connected();
+            let payload: Vec<u8> = (0..262144).map(|i| (i % 251) as u8).collect();
+            for chunk in payload.chunks(16384) {
+                conn.to_smoltcp
+                    .try_send(Bytes::copy_from_slice(chunk))
+                    .unwrap();
+            }
+            drop(conn);
+
+            network
+                .check_drain(|sockets| tracker.relay_data(sockets), &payload, stalled)
+                .await;
+        }
+    }
+
     #[test]
     fn omitted_limit_tracks_more_than_the_previous_default() {
         let mut tracker = TcpConnectionTracker::new(None);
@@ -551,7 +708,12 @@ mod tests {
         let dst = "198.51.100.1:443".parse().unwrap();
         for port in 10000..10300 {
             let src = SocketAddr::from(([192, 0, 2, 1], port));
-            assert!(tracker.create_tcp_socket(src, dst, &mut sockets));
+            assert!(tracker.create_tcp_socket(
+                src,
+                dst,
+                &mut sockets,
+                TcpAcceptMode::AcceptImmediately
+            ));
         }
         assert_eq!(tracker.connections.len(), 300);
     }

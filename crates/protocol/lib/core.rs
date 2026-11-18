@@ -1,5 +1,6 @@
 //! Core protocol message payloads.
 
+use microsandbox_types::ExecLimits;
 use serde::{Deserialize, Serialize};
 
 use crate::transport::{BulkTransportReady, LocalTransportReady, RelayLeaseReady};
@@ -78,6 +79,10 @@ pub struct Ready {
     /// pause require the supported contract instead of assuming frame safety.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_transport_barrier_version: Option<u8>,
+
+    /// Runtime-authorized sandbox execution policy, absent on released older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_limits: Option<ExecLimits>,
 }
 
 /// Payload for `core.clock.sync` messages.
@@ -234,7 +239,9 @@ pub struct RootDiskState {
 /// Sent when a peer can identify a recoverable protocol error for a specific
 /// correlation ID. Unrecoverable frame-level errors, such as stream
 /// desynchronization or impossible frame lengths, should close the transport
-/// instead.
+/// instead. Before `core.ready`, agentd may send `InitializationFailed` with
+/// id=0 and the terminal flag. The host saves this fatal startup error before sending
+/// `core.init.ack` with `failure=true`, allowing the guest to exit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreError {
     /// Machine-readable error kind.
@@ -247,9 +254,26 @@ pub struct CoreError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offending_type: Option<String>,
 
+    /// Typed reason for a fatal guest initialization failure, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_failure: Option<InitFailureReason>,
+
     /// Attempt-scoped freezer disposition. Absence is ambiguous, not proof that no work froze.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_failure: Option<WorkloadFailure>,
+}
+
+/// Guest initialization failures with actionable configuration guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitFailureReason {
+    /// The configured named user does not exist in the guest image.
+    UserNotFound,
+    /// The configured named group does not exist in the guest image.
+    GroupNotFound,
+    /// A reason introduced by a newer guest; no specific hint is available.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Additional recovery information for a workload control error.
@@ -278,6 +302,9 @@ pub enum WorkloadFailureDisposition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoreErrorKind {
+    /// Guest initialization failed before the agent became ready.
+    InitializationFailed,
+
     /// The protocol message envelope could not be decoded.
     MalformedMessage,
 
@@ -324,9 +351,13 @@ pub struct ResolvedUser {
 /// Payload for `core.init.ack` messages.
 ///
 /// Sent by the host after it has consumed the init context and completed any
-/// dependent setup.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitAck {}
+/// dependent setup, or saved a fatal guest initialization error.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct InitAck {
+    /// True only when acknowledging a persisted initialization failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failure: bool,
+}
 
 /// Payload for `core.relay.client.disconnected` messages.
 ///
@@ -352,6 +383,7 @@ pub struct RelayClientDisconnected {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_types::ExecLimits;
     use serde::{Deserialize, Serialize};
 
     use super::{Ready, RelayClientDisconnected};
@@ -380,6 +412,7 @@ mod tests {
             agent_version: "0.6.8".into(),
         };
         let current = Ready {
+            exec_limits: None,
             boot_time_ns: legacy.boot_time_ns,
             init_time_ns: legacy.init_time_ns,
             ready_time_ns: legacy.ready_time_ns,
@@ -400,6 +433,20 @@ mod tests {
         assert!(decoded.relay_lease.is_none());
         assert!(decoded.local_transport.is_none());
         assert!(decoded.workload_transport_barrier_version.is_none());
+        assert!(decoded.exec_limits.is_none());
+
+        let advertised = Ready {
+            exec_limits: Some(ExecLimits::default()),
+            ..current
+        };
+        let mut advertised_bytes = Vec::new();
+        ciborium::into_writer(&advertised, &mut advertised_bytes).unwrap();
+        let legacy_decoded: LegacyReady =
+            ciborium::from_reader(advertised_bytes.as_slice()).unwrap();
+        assert_eq!(
+            legacy_decoded, legacy,
+            "older clients must ignore the new policy field"
+        );
     }
 
     #[test]

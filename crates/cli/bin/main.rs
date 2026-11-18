@@ -10,9 +10,9 @@ use microsandbox_cli::{
     commands::{
         completion, context, image, install, pull, registry,
         sandbox::{self, SandboxCommands},
-        self_cmd,
+        self_cmd, service,
         snapshot::{self, SnapshotCommands},
-        uninstall, volume,
+        storage, uninstall, volume,
     },
     log_args::{self, LogArgs},
     machine_cmd::{self, MachineArgs},
@@ -26,7 +26,7 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         heading: "Sandboxes",
         commands: &[
-            "run", "create", "restore", "modify", "start", "stop", "pause", "resume", "branch",
+            "run", "create", "restore", "modify", "start", "stop", "pause", "resume", "fork",
             "restart", "wait", "ping", "touch", "list", "status", "metrics", "remove", "exec",
             "copy", "logs", "ssh", "inspect", "sandbox",
         ],
@@ -37,7 +37,11 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     },
     CommandGroup {
         heading: "Storage",
-        commands: &["volume", "snapshot"],
+        commands: &["df", "prune", "volume", "snapshot"],
+    },
+    CommandGroup {
+        heading: "Services",
+        commands: &["service"],
     },
     CommandGroup {
         heading: "Installation",
@@ -66,9 +70,8 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     styles = microsandbox_cli::styles::styles()
 )]
 struct Cli {
-    /// Print the full command tree and exit.
-    #[arg(long, global = true)]
-    tree: bool,
+    #[command(flatten)]
+    tree: microsandbox_cli::tree::TreeArgs,
 
     #[command(flatten)]
     logs: LogArgs,
@@ -100,7 +103,7 @@ enum Commands {
     #[command(name = "__schema-baseline", hide = true)]
     SchemaBaseline(self_cmd::SchemaBaselineArgs),
 
-    /// Show the active backend and its selection source.
+    /// Inspect backend selection and manage saved profiles.
     #[command(visible_alias = "ctx")]
     Context(context::ContextArgs),
 
@@ -148,6 +151,12 @@ enum Commands {
     #[command(hide = true)]
     Rmi(image::ImageRemoveArgs),
 
+    /// Show aggregate local storage usage.
+    Df(storage::DfArgs),
+
+    /// Remove unused runtime memory cache files.
+    Prune(storage::PruneArgs),
+
     /// Manage named volumes.
     #[command(visible_alias = "vol")]
     Volume(volume::VolumeArgs),
@@ -156,13 +165,16 @@ enum Commands {
     #[command(visible_alias = "snap")]
     Snapshot(snapshot::SnapshotArgs),
 
+    /// Manage public URLs for sandbox ports.
+    Service(service::ServiceArgs),
+
     /// Install a sandbox as a system command.
     Install(install::InstallArgs),
 
     /// Remove an installed sandbox command.
     Uninstall(uninstall::UninstallArgs),
 
-    /// Check local runtime and host virtualization prerequisites.
+    /// Check host setup, or inspect a named sandbox.
     Doctor(self_cmd::DoctorArgs),
 
     /// Update msb and libkrunfw to the latest release (alias for `self update`).
@@ -293,8 +305,22 @@ fn main() {
             println!(
                 "{}",
                 serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
+                    storage_reader: microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
+                    protected_guest_state: true,
                     protocols: vec![2, 1],
                     required_restore_backing: true,
+                    tcp_accept_queue_size: true,
+                    max_inbound_tcp_connections: cfg!(feature = "net"),
+                    http_deny_message: cfg!(feature = "net"),
+                    http_deny_json: cfg!(feature = "net"),
+                    http_connect_proxy: cfg!(feature = "net"),
+                    http_connect_proxy_auth: cfg!(feature = "net"),
+                    guest_clock: true,
+                    fs_state_limit: true,
+                    nested_virt: Some(
+                        microsandbox_runtime::nested_virt_supported().unwrap_or(false)
+                    ),
+                    exec_limits: true,
                 })
                 .expect("serialize capabilities")
             );
@@ -316,7 +342,19 @@ fn main() {
             // runtime.log via setup_log_capture(), so disable ANSI —
             // color escapes have nowhere useful to render.
             log_args::init_tracing(sandbox_level, false);
-            if let Err(error) = microsandbox_filesystem::agentd::initialize_agentd_payload() {
+            if args.require_storage_reader {
+                // The capability belongs to the compiled host/guest pair. Never consult a
+                // configured agent override for a VM receiving private recovery captures.
+                if !microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER
+                    || microsandbox_filesystem::agentd::initialize_embedded_reader().is_err()
+                {
+                    eprintln!(
+                        "upgrade required: install a runtime with the embedded storage recovery reader"
+                    );
+                    std::process::exit(2);
+                }
+            } else if let Err(error) = microsandbox_filesystem::agentd::initialize_agentd_payload()
+            {
                 eprintln!("msb: failed to select agentd payload: {error}");
                 std::process::exit(1);
             }
@@ -491,6 +529,9 @@ fn format_command_help_line(
 /// `MicrosandboxError::ExecFailed`. Returns the appropriate exit
 /// code so callers don't conflate "rendered an error" with "1".
 fn render_anyhow_error(err: &anyhow::Error) -> i32 {
+    if let Some(diagnostic) = err.downcast_ref::<self_cmd::StorageDoctorExit>() {
+        return diagnostic.code;
+    }
     if err.chain().any(|cause| {
         cause
             .downcast_ref::<microsandbox_cli::ui::AlreadyRenderedError>()
@@ -651,11 +692,12 @@ fn run_async_command_anyhow(
     let runtime = builder.enable_all().build()?;
 
     runtime.block_on(async move {
+        let mut cleanup_backend = None;
         // Stale-sandbox reaping and ephemeral cleanup are owned by host
         // runtime processes (`msb machine`) now, not the CLI; see
         // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
         // reaper here.
-        if !is_backend_independent_maintenance_command(&command) {
+        if !is_backend_independent_command(&command) {
             // Resolve once, fallibly, before backend-dependent dispatch. Unlike
             // the SDK's ambient convenience fallback, the CLI must not run a
             // sandbox operation locally after an invalid explicit cloud selection.
@@ -665,10 +707,11 @@ fn run_async_command_anyhow(
             {
                 local.prepare_cli_catalog().await?;
             }
+            cleanup_backend = Some(backend.clone());
             microsandbox::set_default_backend(backend);
         }
 
-        match command {
+        let result = match command {
             Commands::Machine(_) | Commands::LaunchProtocol => {
                 unreachable!("handled before Tokio starts")
             }
@@ -706,16 +749,28 @@ fn run_async_command_anyhow(
                 .await
             }
             Commands::Rmi(args) => image::run_remove(args).await,
+            Commands::Df(args) => storage::run_df(args).await,
+            Commands::Prune(args) => storage::run_prune(args).await,
             Commands::Volume(args) => volume::run(args).await,
             Commands::Snapshot(args) => snapshot::run(args).await,
+            Commands::Service(args) => service::run(args).await,
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
-            Commands::Doctor(args) => self_cmd::run_doctor(args),
+            Commands::Doctor(args) => self_cmd::run_doctor_command(args).await,
             Commands::Update(args) => self_cmd::run_update(args).await,
             Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
             Commands::Completion(args) => completion::run(args, Cli::command()),
+        };
+        // A CLI runtime would cancel the deferred worker when this function returns.
+        // Drain after dispatch so graceful-stop deadlines still cover only VM teardown.
+        if let Some(local) = cleanup_backend
+            .as_ref()
+            .and_then(|backend| backend.as_local())
+        {
+            local.finish_stopped_memory_cleanup().await;
         }
+        result
     })
 }
 
@@ -731,19 +786,20 @@ fn requires_current_catalog(command: &Commands) -> bool {
                 | sandbox::SandboxCommands::Restore(_)
                 | sandbox::SandboxCommands::Start(_)
                 | sandbox::SandboxCommands::Restart(_)
-                | sandbox::SandboxCommands::Branch(_)
+                | sandbox::SandboxCommands::Fork(_)
         ),
         Commands::Snapshot(_) | Commands::Snapshots(_) | Commands::Volume(_) => true,
         _ => false,
     }
 }
 
-/// Return whether a command manages the CLI installation rather than a backend.
+/// Return whether a command can run without constructing the selected backend.
 ///
 /// These commands are deliberately available even when backend configuration is
 /// invalid so users can diagnose, repair, downgrade, or uninstall that setup.
-fn is_backend_independent_maintenance_command(command: &Commands) -> bool {
+fn is_backend_independent_command(command: &Commands) -> bool {
     match command {
+        Commands::Context(args) => args.command.is_some(),
         Commands::SchemaBaseline(_)
         | Commands::Doctor(_)
         | Commands::Update(_)
@@ -761,6 +817,21 @@ mod command_tests {
     use super::*;
 
     #[test]
+    fn storage_reader_capability_matches_the_actual_embedded_protocol() {
+        let marker = microsandbox_protocol::storage_preview::HANDSHAKE.as_bytes();
+        let has_reader =
+            microsandbox_filesystem::agentd::embedded_agentd_payload().is_some_and(|agent| {
+                agent
+                    .as_bytes()
+                    .windows(marker.len())
+                    .any(|part| part == marker)
+            });
+        assert_eq!(
+            microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
+            has_reader
+        );
+    }
+    #[test]
     fn catalog_upgrade_leaves_stop_and_diagnostics_available() {
         for (arguments, expected) in [
             (vec!["msb", "sandbox", "create", "alpine"], true),
@@ -773,10 +844,40 @@ mod command_tests {
                 false,
             ),
             (vec!["msb", "doctor"], false),
+            (vec!["msb", "doctor", "app"], false),
+            (vec!["msb", "doctor", "--sandbox", "app"], false),
+            (vec!["msb", "self", "repair", "app"], false),
+            (vec!["msb", "self", "repair", "--sandbox", "app"], false),
             (vec!["msb", "context"], false),
         ] {
             let cli = Cli::try_parse_from(arguments).unwrap();
             assert_eq!(requires_current_catalog(&cli.command), expected);
+        }
+    }
+
+    #[test]
+    fn sandbox_repair_and_both_doctor_target_spellings_stay_backend_independent() {
+        for args in [
+            vec!["msb", "self", "repair"],
+            vec!["msb", "self", "repair", "app"],
+            vec!["msb", "self", "repair", "--sandbox", "app"],
+            vec!["msb", "doctor", "app"],
+            vec!["msb", "doctor", "--sandbox", "app"],
+            vec!["msb", "self", "doctor", "app"],
+            vec!["msb", "self", "doctor", "--sandbox", "app"],
+            vec!["msb", "doctor", "--all"],
+        ] {
+            let command = Cli::try_parse_from(args).unwrap().command;
+            assert!(is_backend_independent_command(&command));
+            assert!(!requires_current_catalog(&command));
+        }
+        for args in [
+            vec!["msb", "repair", "app"],
+            vec!["msb", "recover-storage", "app"],
+            vec!["msb", "sandbox", "recover-storage", "app"],
+            vec!["msb", "doctor", "--storage", "--sandbox", "app"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
         }
     }
 
@@ -808,7 +909,30 @@ mod command_tests {
     }
 
     #[test]
+    fn unconfirmed_modification_prints_display_and_exits_one() {
+        let error: anyhow::Error = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+            cause: "the running sandbox does not hold the secret".into(),
+        }
+        .into();
+
+        assert_eq!(render_anyhow_error(&error), 1);
+        assert_eq!(
+            error.to_string(),
+            "the change did not complete as asked: the running sandbox does not hold the secret"
+        );
+    }
+
+    #[test]
     fn maintenance_commands_do_not_require_backend_resolution() {
+        for arguments in [
+            vec!["msb", "context", "list"],
+            vec!["msb", "context", "use", "work"],
+            vec!["msb", "context", "reset"],
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(is_backend_independent_command(&cli.command));
+            assert!(!requires_current_catalog(&cli.command));
+        }
         let maintenance_commands = [
             Cli::try_parse_from(["msb", "doctor"]).unwrap().command,
             Cli::try_parse_from(["msb", "update"]).unwrap().command,
@@ -824,15 +948,69 @@ mod command_tests {
         ];
 
         for command in &maintenance_commands {
-            assert!(is_backend_independent_maintenance_command(command));
+            assert!(is_backend_independent_command(command));
         }
 
         let context = Cli::try_parse_from(["msb", "context"]).unwrap();
         let create = Cli::try_parse_from(["msb", "create", "alpine:3.19"]).unwrap();
-        assert!(!is_backend_independent_maintenance_command(
-            &context.command
-        ));
-        assert!(!is_backend_independent_maintenance_command(&create.command));
+        assert!(!is_backend_independent_command(&context.command));
+        assert!(!is_backend_independent_command(&create.command));
+    }
+
+    #[test]
+    fn storage_commands_parse_and_use_backend_resolution() {
+        let df = Cli::try_parse_from(["msb", "df", "--verbose"]).unwrap();
+        assert!(matches!(df.command, Commands::Df(_)));
+        assert!(!is_backend_independent_command(&df.command));
+        assert!(!requires_current_catalog(&df.command));
+        assert!(Cli::try_parse_from(["msb", "df", "-q"]).is_err());
+        let prune =
+            Cli::try_parse_from(["msb", "prune", "--dry-run", "--older-than", "2h"]).unwrap();
+        assert!(matches!(prune.command, Commands::Prune(_)));
+        assert!(!is_backend_independent_command(&prune.command));
+        assert!(!requires_current_catalog(&prune.command));
+        let storage = TOP_LEVEL_COMMAND_GROUPS
+            .iter()
+            .find(|group| group.heading == "Storage")
+            .unwrap();
+        assert!(storage.commands.contains(&"df"));
+        assert!(storage.commands.contains(&"prune"));
+    }
+
+    #[test]
+    fn service_commands_use_the_default_backend_without_the_catalog_gate() {
+        for arguments in [
+            vec![
+                "msb",
+                "service",
+                "create",
+                "my-app",
+                "--target",
+                "web-1:8080",
+            ],
+            vec![
+                "msb",
+                "service",
+                "update",
+                "my-app",
+                "--target",
+                "web-2:8080",
+            ],
+            vec!["msb", "service", "enable", "my-app"],
+            vec!["msb", "service", "disable", "my-app"],
+            vec!["msb", "service", "get", "my-app"],
+            vec!["msb", "service", "ls"],
+            vec!["msb", "service", "remove", "my-app"],
+        ] {
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            assert!(matches!(cli.command, Commands::Service(_)));
+            assert!(!is_backend_independent_command(&cli.command));
+            assert!(!requires_current_catalog(&cli.command));
+        }
+
+        let help = render_grouped_commands(&Cli::command(), &HelpStyles::detect());
+        let services = help.split("Services:").nth(1).unwrap();
+        assert!(services.lines().nth(1).unwrap().contains("service"));
     }
 
     #[test]
@@ -872,7 +1050,7 @@ mod command_tests {
 
     #[test]
     fn snapshot_restore_aliases_share_sandbox_routing_and_controls() {
-        let flags = ["app:ready", "--name", "worker", "--forked", "--disk-only"];
+        let flags = ["app:ready", "--name", "worker", "--cow-mem", "--disk-only"];
         let mut expected = None;
         for prefix in [
             vec!["restore"],
@@ -894,7 +1072,7 @@ mod command_tests {
             );
             let command = cli.command.into_canonical();
             assert!(requires_current_catalog(&command));
-            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(!is_backend_independent_command(&command));
             let Commands::Sandbox(sandbox::SandboxArgs {
                 command: sandbox::SandboxCommands::Restore(args),
             }) = command
@@ -974,6 +1152,48 @@ mod sandbox_command_tests {
     use super::*;
 
     #[test]
+    fn tree_controls_are_global_and_require_tree_mode() {
+        for args in [
+            vec!["msb", "--tree", "-L", "2", "--commands", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "-L2", "--commands"],
+            vec!["msb", "--tree", "--brief", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "--brief"],
+            vec!["msb", "--tree", "-C", "-b", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "-CbL2"],
+            vec![
+                "msb",
+                "image",
+                "ls",
+                "--tree",
+                "--commands",
+                "--brief",
+                "-L2",
+            ],
+        ] {
+            Cli::try_parse_from(args).unwrap();
+        }
+        for flag in [
+            "-L2",
+            "--levels=2",
+            "--commands",
+            "--brief",
+            "-C",
+            "-b",
+            "-Cb",
+        ] {
+            let error = Cli::try_parse_from(["msb", "image", "ls", flag])
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+            assert!(error.to_string().contains("--tree"));
+        }
+        Cli::try_parse_from(["msb", "modify", "demo", "--compact"]).unwrap();
+    }
+
+    #[test]
     fn repeated_long_flags_have_consistent_short_forms() {
         fn collect(
             command: &clap::Command,
@@ -1025,7 +1245,7 @@ mod sandbox_command_tests {
     fn short_flag_additions_parse_like_their_long_forms() {
         let cases: &[&[&str]] = &[
             &["restore", "saved"],
-            &["branch", "source"],
+            &["fork", "source"],
             &["volume", "create"],
             #[cfg(feature = "ssh")]
             &["ssh"],
@@ -1087,7 +1307,7 @@ mod sandbox_command_tests {
                 ],
             );
             assert_eq!(format!("{short:?}"), format!("{long:?}"));
-            for verb in ["restore", "branch"] {
+            for verb in ["restore", "fork"] {
                 assert_eq!(
                     format!(
                         "{:?}",
@@ -1127,7 +1347,7 @@ mod sandbox_command_tests {
                 };
                 assert_eq!(args.name, "worker");
                 assert_eq!(args.timeout.as_deref(), Some("30s"));
-                assert_eq!(args.format.as_deref(), Some("json"));
+                assert_eq!(args.format, Some(microsandbox_cli::ui::OutputFormat::Json));
             }
         }
     }
@@ -1143,7 +1363,7 @@ mod sandbox_command_tests {
                 "./saved.msb",
                 "--name",
                 "child",
-                "--forked",
+                "--cow-mem",
                 "--snapshot-base",
                 "source:base",
                 "-v",
@@ -1172,10 +1392,10 @@ mod sandbox_command_tests {
             &["stop", "demo", "--timeout", "3"],
             &["pause", "demo"],
             &["resume", "demo"],
-            &["branch", "demo", "--name", "child"],
+            &["fork", "demo", "--name", "child"],
             #[cfg(feature = "net")]
             &[
-                "branch", "demo", "--name", "child", "-v", "/data", "-p", "8081:80",
+                "fork", "demo", "--name", "child", "-v", "/data", "-p", "8081:80",
             ],
             &["restart", "demo"],
             &["wait", "demo", "--timeout", "30s", "--format", "json"],
@@ -1263,7 +1483,7 @@ mod sandbox_command_tests {
             assert!(cli.logs.debug);
             let command = cli.command.into_canonical();
             assert!(command.is_resident_control());
-            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(!is_backend_independent_command(&command));
         }
         for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
             for verb in ["pause", "resume"] {
@@ -1305,7 +1525,7 @@ mod sandbox_command_tests {
     #[test]
     fn restore_preserves_geometry_controls_through_all_public_forms() {
         for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
-            for mode in [&[][..], &["--forked"][..], &["--disk-only"][..]] {
+            for mode in [&[][..], &["--cow-mem"][..], &["--disk-only"][..]] {
                 for (controls, cpus, memory) in [
                     (&[][..], None, None),
                     (&["--cpus", "2"][..], Some(2), None),
@@ -1328,10 +1548,35 @@ mod sandbox_command_tests {
                     // checks these values against captured geometry after resolving the snapshot.
                     assert_eq!(restored.controls.cpus, cpus);
                     assert_eq!(restored.controls.memory.as_deref(), memory);
-                    assert_eq!(restored.forked, mode.contains(&"--forked"));
+                    assert_eq!(restored.cow_mem, mode.contains(&"--cow-mem"));
                     assert_eq!(restored.disk_only, mode.contains(&"--disk-only"));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn fork_and_restore_keep_deprecated_aliases() {
+        for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
+            for verb in ["fork", "branch"] {
+                let command = parse_sandbox(prefix, &[verb, "source", "--name", "child"]);
+                assert!(matches!(command, SandboxCommands::Fork(_)));
+            }
+            let command =
+                parse_sandbox(prefix, &["restore", "saved", "--name", "child", "--forked"]);
+            let SandboxCommands::Restore(args) = command else {
+                panic!("expected restore")
+            };
+            assert!(args.forked);
+            assert!(!args.cow_mem);
+        }
+        for prefix in ["snap", "snapshot"] {
+            assert!(
+                Cli::try_parse_from([
+                    "msb", prefix, "restore", "saved", "--name", "child", "--forked",
+                ])
+                .is_ok()
+            );
         }
     }
 
@@ -1342,6 +1587,7 @@ mod sandbox_command_tests {
             assert!(matches!(restored, sandbox::SandboxCommands::Restore(_)));
             assert!(!restored.is_resident_control());
             for extra in [
+                &["--cow-mem", "--disk-only"][..],
                 &["--forked", "--disk-only"][..],
                 &["--conf", "sandbox.yaml"][..],
                 &["--entrypoint", "sh"][..],
@@ -1387,7 +1633,7 @@ mod sandbox_command_tests {
             assert!(cli.logs.debug);
             let command = cli.command.into_canonical();
             assert!(!command.is_resident_control());
-            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(!is_backend_independent_command(&command));
             assert!(matches!(
                 command,
                 Commands::Sandbox(sandbox::SandboxArgs {
@@ -1412,7 +1658,7 @@ mod sandbox_command_tests {
         let help = render_grouped_commands(&command, &HelpStyles::detect());
         assert!(help.contains("sandbox"));
         assert!(help.contains("sbx"));
-        assert!(help.contains("branch"));
+        assert!(help.contains("fork"));
         assert!(help.contains("restore"));
         assert!(group.find_subcommand("restore").is_some());
         assert!(!help.contains("machine"));

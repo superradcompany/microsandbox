@@ -99,6 +99,9 @@ static const char *dlerror(void) {
 // ---------------------------------------------------------------------------
 typedef void     (*msb_free_string_fn)(char *ptr);
 typedef void     (*msb_set_sdk_msb_path_fn)(const char *path);
+typedef char *(*msb_jobs_fn)(uint64_t cancel_id, uint64_t sandbox, const char *request, uint8_t *buf, size_t buf_len);
+static msb_jobs_fn ptr_msb_jobs = NULL;
+
 typedef uint64_t (*msb_cancel_alloc_fn)(void);
 typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
@@ -199,6 +202,7 @@ typedef char *(*msb_sandbox_modify_fn)(uint64_t cancel_id, uint64_t handle, cons
 
 typedef char *(*msb_sandbox_attach_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_default_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_shell_path_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_shell_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_all_sandbox_metrics_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_metrics_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -223,6 +227,18 @@ typedef char *(*msb_image_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_
 typedef char *(*msb_image_inspect_fn)(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_remove_fn)(uint64_t cancel_id, const char *reference, bool force, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_prune_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_storage_usage_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_storage_usage_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_storage_prune_fn)(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_create_fn)(uint64_t cancel_id, const char *request_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_get_fn)(uint64_t cancel_id, const char *slug, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_list_fn)(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_update_fn)(uint64_t cancel_id, uint64_t handle, const char *request_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_enable_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_disable_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_remove_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_refresh_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_load_fn)(uint64_t cancel_id, const char *input_path, const char *tags_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_save_fn)(uint64_t cancel_id, const char *references_json, const char *output_path, const char *format, uint8_t *buf, size_t buf_len);
 
@@ -370,6 +386,7 @@ static msb_exec_id_fn              ptr_msb_exec_id              = NULL;
 static msb_sandbox_attach_fn      ptr_msb_sandbox_attach      = NULL;
 static msb_sandbox_attach_default_fn ptr_msb_sandbox_attach_default = NULL;
 static msb_sandbox_attach_shell_fn ptr_msb_sandbox_attach_shell = NULL;
+static msb_sandbox_shell_path_fn ptr_msb_sandbox_shell_path = NULL;
 static msb_all_sandbox_metrics_fn  ptr_msb_all_sandbox_metrics  = NULL;
 static msb_sandbox_handle_metrics_fn ptr_msb_sandbox_handle_metrics = NULL;
 static msb_sandbox_logs_fn          ptr_msb_sandbox_logs          = NULL;
@@ -407,6 +424,18 @@ static msb_image_list_fn           ptr_msb_image_list           = NULL;
 static msb_image_inspect_fn        ptr_msb_image_inspect        = NULL;
 static msb_image_remove_fn         ptr_msb_image_remove         = NULL;
 static msb_image_prune_fn         ptr_msb_image_prune         = NULL;
+static msb_storage_usage_fn       ptr_msb_storage_usage       = NULL;
+static msb_sandbox_storage_usage_fn ptr_msb_sandbox_storage_usage = NULL;
+static msb_storage_prune_fn       ptr_msb_storage_prune       = NULL;
+static msb_service_create_fn      ptr_msb_service_create      = NULL;
+static msb_service_get_fn         ptr_msb_service_get         = NULL;
+static msb_service_list_fn        ptr_msb_service_list        = NULL;
+static msb_service_update_fn      ptr_msb_service_update      = NULL;
+static msb_service_enable_fn      ptr_msb_service_enable      = NULL;
+static msb_service_disable_fn     ptr_msb_service_disable     = NULL;
+static msb_service_remove_fn      ptr_msb_service_remove      = NULL;
+static msb_service_refresh_fn     ptr_msb_service_refresh     = NULL;
+static msb_service_close_fn       ptr_msb_service_close       = NULL;
 static msb_image_load_fn           ptr_msb_image_load           = NULL;
 static msb_image_save_fn           ptr_msb_image_save           = NULL;
 static msb_sandbox_handle_snapshot_fn ptr_msb_sandbox_handle_snapshot = NULL;
@@ -430,6 +459,14 @@ static msb_sandbox_compact_fn ptr_msb_sandbox_compact = NULL;
 
 // dlopen handle — set once by load_microsandbox, never closed.
 static void *lib_handle = NULL;
+
+bool has_port_modification(void) {
+    return lib_handle && dlsym(lib_handle, "msb_supports_port_modification") != NULL;
+}
+
+bool has_secret_policy_modification(void) {
+    return lib_handle && dlsym(lib_handle, "msb_supports_secret_policy_modification") != NULL;
+}
 
 // load_error holds a static error string on dlopen/dlsym failure.
 // Not freed by callers — it lives for the process lifetime.
@@ -511,6 +548,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_request_kill);
 	RESOLVE(msb_sandbox_list);
 	RESOLVE(msb_sandbox_remove);
+	RESOLVE_OPTIONAL(msb_jobs);
 	RESOLVE(msb_sandbox_exec);
 	RESOLVE(msb_sandbox_exec_default);
 	RESOLVE(msb_sandbox_exec_stream);
@@ -568,6 +606,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_attach);
 	RESOLVE(msb_sandbox_attach_default);
 	RESOLVE(msb_sandbox_attach_shell);
+	RESOLVE_OPTIONAL(msb_sandbox_shell_path);
 	RESOLVE(msb_all_sandbox_metrics);
 	RESOLVE(msb_sandbox_handle_metrics);
 	RESOLVE(msb_sandbox_logs);
@@ -605,6 +644,18 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_image_inspect);
 	RESOLVE(msb_image_remove);
 	RESOLVE(msb_image_prune);
+	RESOLVE_OPTIONAL(msb_storage_usage);
+	RESOLVE_OPTIONAL(msb_sandbox_storage_usage);
+	RESOLVE_OPTIONAL(msb_storage_prune);
+	RESOLVE_OPTIONAL(msb_service_create);
+	RESOLVE_OPTIONAL(msb_service_get);
+	RESOLVE_OPTIONAL(msb_service_list);
+	RESOLVE_OPTIONAL(msb_service_update);
+	RESOLVE_OPTIONAL(msb_service_enable);
+	RESOLVE_OPTIONAL(msb_service_disable);
+	RESOLVE_OPTIONAL(msb_service_remove);
+	RESOLVE_OPTIONAL(msb_service_refresh);
+	RESOLVE_OPTIONAL(msb_service_close);
 	RESOLVE(msb_image_load);
 	RESOLVE(msb_image_save);
 	RESOLVE(msb_sandbox_handle_snapshot);
@@ -652,6 +703,10 @@ void call_msb_cancel_trigger(uint64_t id) {
 }
 void call_msb_cancel_unregister(uint64_t id) {
 	if (ptr_msb_cancel_unregister) ptr_msb_cancel_unregister(id);
+}
+bool has_sandbox_shell_path(void) { return ptr_msb_sandbox_shell_path != NULL; }
+char *call_msb_sandbox_shell_path(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_sandbox_shell_path ? ptr_msb_sandbox_shell_path(cancel_id, handle, buf, buf_len) : NULL;
 }
 bool has_sandbox_restore(void) { return ptr_msb_sandbox_restore != NULL; }
 char *call_msb_sandbox_restore(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
@@ -770,6 +825,10 @@ char *call_msb_sandbox_list(uint64_t cancel_id, const char *filter_json, uint8_t
 }
 char *call_msb_sandbox_remove(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_remove ? ptr_msb_sandbox_remove(cancel_id, name, buf, buf_len) : NULL;
+}
+int has_msb_jobs(void) { return ptr_msb_jobs != NULL; }
+char *call_msb_jobs(uint64_t cancel_id, uint64_t sandbox, const char *request, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_jobs ? ptr_msb_jobs(cancel_id, sandbox, request, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_exec(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_exec ? ptr_msb_sandbox_exec(cancel_id, handle, cmd, opts, buf, buf_len) : NULL;
@@ -1053,6 +1112,51 @@ char *call_msb_image_remove(uint64_t cancel_id, const char *reference, bool forc
 char *call_msb_image_prune(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_prune ? ptr_msb_image_prune(cancel_id, buf, buf_len) : NULL;
 }
+bool has_msb_storage_usage(void) { return ptr_msb_storage_usage != NULL; }
+bool has_msb_sandbox_storage_usage(void) { return ptr_msb_sandbox_storage_usage != NULL; }
+char *call_msb_sandbox_storage_usage(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_storage_usage ? ptr_msb_sandbox_storage_usage(cancel_id, handle, buf, buf_len) : NULL;
+}
+bool has_msb_storage_prune(void) { return ptr_msb_storage_prune != NULL; }
+char *call_msb_storage_usage(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_storage_usage ? ptr_msb_storage_usage(cancel_id, buf, buf_len) : NULL;
+}
+char *call_msb_storage_prune(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_storage_prune ? ptr_msb_storage_prune(cancel_id, options_json, buf, buf_len) : NULL;
+}
+bool has_msb_service(void) {
+	return ptr_msb_service_create != NULL && ptr_msb_service_get != NULL && ptr_msb_service_list != NULL &&
+		ptr_msb_service_update != NULL && ptr_msb_service_enable != NULL &&
+		ptr_msb_service_disable != NULL && ptr_msb_service_remove != NULL &&
+		ptr_msb_service_refresh != NULL && ptr_msb_service_close != NULL;
+}
+char *call_msb_service_create(uint64_t cancel_id, const char *request_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_create ? ptr_msb_service_create(cancel_id, request_json, buf, buf_len) : NULL;
+}
+char *call_msb_service_get(uint64_t cancel_id, const char *slug, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_get ? ptr_msb_service_get(cancel_id, slug, buf, buf_len) : NULL;
+}
+char *call_msb_service_list(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_list ? ptr_msb_service_list(cancel_id, options_json, buf, buf_len) : NULL;
+}
+char *call_msb_service_update(uint64_t cancel_id, uint64_t handle, const char *request_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_update ? ptr_msb_service_update(cancel_id, handle, request_json, buf, buf_len) : NULL;
+}
+char *call_msb_service_enable(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_enable ? ptr_msb_service_enable(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_disable(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_disable ? ptr_msb_service_disable(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_remove(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_remove ? ptr_msb_service_remove(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_refresh(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_refresh ? ptr_msb_service_refresh(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_close ? ptr_msb_service_close(cancel_id, handle, buf, buf_len) : NULL;
+}
 char *call_msb_image_load(uint64_t cancel_id, const char *input_path, const char *tags_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_load ? ptr_msb_image_load(cancel_id, input_path, tags_json, buf, buf_len) : NULL;
 }
@@ -1121,7 +1225,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1219,6 +1325,10 @@ func ensureLoaded() error {
 // KindBufferTooSmall; streaming is a follow-up.
 const defaultBufSize = 1 << 20
 
+// storageDiagnosisMaxBufSize bounds a whole-home report, including its trailing NUL.
+// Larger inventories must be inspected as smaller named subsets.
+const storageDiagnosisMaxBufSize = 32 << 20
+
 // fsStreamBufSize is the output buffer used for fs read-stream Recv calls.
 // The protocol's FS_CHUNK_SIZE is 3 MiB; after base64 inflation (~33%) plus
 // the {"chunk_b64":"..."} JSON wrapper, each Recv response can reach ~4.1
@@ -1235,9 +1345,32 @@ const logsBufSize = 48 << 20
 // serialises {kind, message} JSON with optional recovery metadata; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
 type Error struct {
-	Kind     string                         `json:"kind"`
-	Message  string                         `json:"message"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+	// Changed reports whether a failed Service change may have been applied.
+	Changed  string                         `json:"changed,omitempty"`
 	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+	Service  *ServiceErrorDetails           `json:"service,omitempty"`
+	// Local volume errors retain host errno/Win32 identity. Older libraries omit it.
+	OSError *int32 `json:"os_error,omitempty"`
+}
+
+// UndispatchedServiceChangeError records a Service change failure that happened
+// before the native request was called.
+type UndispatchedServiceChangeError struct {
+	err error
+}
+
+func (e *UndispatchedServiceChangeError) Error() string { return e.err.Error() }
+
+// Unwrap preserves the original pre-dispatch failure.
+func (e *UndispatchedServiceChangeError) Unwrap() error { return e.err }
+
+func undispatchedServiceChange(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &UndispatchedServiceChangeError{err: err}
 }
 
 // SnapshotSourceRecoveryDetails preserves native recovery metadata across the FFI.
@@ -1263,37 +1396,42 @@ func (e *Error) Error() string { return e.Message }
 
 // Error kind strings. Keep in sync with sdk/go/native/src/lib.rs FfiError::kind.
 const (
-	KindSandboxNotFound        = "sandbox_not_found"
-	KindSandboxAlreadyExists   = "sandbox_already_exists"
-	KindSandboxReplaced        = "sandbox_replaced"
-	KindSandboxStopTimedOut    = "sandbox_stop_timed_out"
-	KindSandboxStillRunning    = "sandbox_still_running"
-	KindVolumeNotFound         = "volume_not_found"
-	KindVolumeAlreadyExists    = "volume_already_exists"
-	KindExecTimeout            = "exec_timeout"
-	KindStopTimeout            = "stop_timeout"
-	KindNoDefaultCommand       = "no_default_command"
-	KindInvalidConfig          = "invalid_config"
-	KindInvalidArgument        = "invalid_argument"
-	KindInvalidHandle          = "invalid_handle"
-	KindBufferTooSmall         = "buffer_too_small"
-	KindCancelled              = "cancelled"
-	KindInternal               = "internal"
-	KindFilesystem             = "filesystem"
-	KindImageNotFound          = "image_not_found"
-	KindImageInUse             = "image_in_use"
-	KindSnapshotNotFound       = "snapshot_not_found"
-	KindSnapshotAlreadyExists  = "snapshot_already_exists"
-	KindSnapshotSandboxRunning = "snapshot_sandbox_running"
-	KindSnapshotImageMissing   = "snapshot_image_missing"
-	KindSnapshotIntegrity      = "snapshot_integrity"
-	KindSnapshotMigration      = "snapshot_migration"
-	KindSnapshotSourceRecovery = "snapshot_source_recovery"
-	KindPatchFailed            = "patch_failed"
-	KindMetricsDisabled        = "metrics_disabled"
-	KindMetricsUnavailable     = "metrics_unavailable"
-	KindUnsupportedOperation   = "unsupported_operation"
-	KindIO                     = "io"
+	KindSandboxNotFound          = "sandbox_not_found"
+	KindSandboxAlreadyExists     = "sandbox_already_exists"
+	KindSandboxReplaced          = "sandbox_replaced"
+	KindSandboxStopTimedOut      = "sandbox_stop_timed_out"
+	KindSandboxStillRunning      = "sandbox_still_running"
+	KindVolumeNotFound           = "volume_not_found"
+	KindVolumeAlreadyExists      = "volume_already_exists"
+	KindExecTimeout              = "exec_timeout"
+	KindStopTimeout              = "stop_timeout"
+	KindNoDefaultCommand         = "no_default_command"
+	KindInvalidConfig            = "invalid_config"
+	KindInvalidArgument          = "invalid_argument"
+	KindInvalidHandle            = "invalid_handle"
+	KindBufferTooSmall           = "buffer_too_small"
+	KindCancelled                = "cancelled"
+	KindInternal                 = "internal"
+	KindFilesystem               = "filesystem"
+	KindImageNotFound            = "image_not_found"
+	KindImageInUse               = "image_in_use"
+	KindSnapshotNotFound         = "snapshot_not_found"
+	KindSnapshotAlreadyExists    = "snapshot_already_exists"
+	KindSnapshotSandboxRunning   = "snapshot_sandbox_running"
+	KindSnapshotImageMissing     = "snapshot_image_missing"
+	KindSnapshotIntegrity        = "snapshot_integrity"
+	KindSnapshotMigration        = "snapshot_migration"
+	KindSnapshotSourceRecovery   = "snapshot_source_recovery"
+	KindPatchFailed              = "patch_failed"
+	KindMetricsDisabled          = "metrics_disabled"
+	KindMetricsUnavailable       = "metrics_unavailable"
+	KindUnsupportedOperation     = "unsupported_operation"
+	KindCloudOnly                = "cloud_only"
+	KindModificationNotConfirmed = "modification_not_confirmed"
+	KindServiceNotFound          = "service_not_found"
+	KindServiceAlreadyExists     = "service_already_exists"
+	KindService                  = "service"
+	KindIO                       = "io"
 )
 
 // Sandbox is an opaque handle to a Rust-side sandbox. Call Close to release.
@@ -1720,6 +1858,7 @@ type CreateOptions struct {
 	MaxCPUs              uint8                `json:"max_cpus,omitempty"`
 	CPUPlacement         string               `json:"cpu_placement,omitempty"`
 	PlacementProfile     string               `json:"placement_profile,omitempty"`
+	NestedVirt           *bool                `json:"nested_virt,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
@@ -1743,6 +1882,9 @@ type CreateOptions struct {
 	MaxDurationSecs      uint64               `json:"max_duration_secs,omitempty"`
 	IdleTimeoutSecs      uint64               `json:"idle_timeout_secs,omitempty"`
 	RegistryAuth         *RegistryAuthOptions `json:"registry_auth,omitempty"`
+	// RegistryAnonymous pulls without credentials. Mutually exclusive with
+	// RegistryAuth; libraries that predate it reject the request.
+	RegistryAnonymous bool `json:"registry_anonymous,omitempty"`
 	// RegistryInsecure pulls over plain HTTP instead of HTTPS.
 	RegistryInsecure bool `json:"registry_insecure,omitempty"`
 	// RegistryCACerts holds PEM-encoded CA root certificate bundles trusted
@@ -1807,25 +1949,38 @@ type MountSpec struct {
 	OverrideGid        *uint32 `json:"override_gid,omitempty"`
 }
 
+// HTTPConfig carries HTTP denial settings to the native SDK.
+type HTTPConfig struct {
+	DenyResponseFormat string `json:"deny_response_format,omitempty"`
+	DenyMessage        string `json:"deny_message,omitempty"`
+	DenyResponse       bool   `json:"deny_response"`
+	NetworkDenyMessage string `json:"network_deny_message,omitempty"`
+	SecretDenyMessage  string `json:"secret_deny_message,omitempty"`
+}
+
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
-	CustomPolicy          *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
-	DNS                   *DNSOptions                `json:"dns,omitempty"`
-	DNSRebindProtection   *bool                      `json:"dns_rebind_protection,omitempty"`
-	DenyDomains           []string                   `json:"deny_domains,omitempty"`
-	DenyDomainSuffixes    []string                   `json:"deny_domain_suffixes,omitempty"`
-	TLS                   *TLSOptions                `json:"tls,omitempty"`
-	Strict                *bool                      `json:"strict,omitempty"`
-	Ports                 map[uint16]uint16          `json:"ports,omitempty"`
-	PortBindings          []PortBindingOptions       `json:"port_bindings,omitempty"`
-	IPv4Pool              string                     `json:"ipv4_pool,omitempty"`
-	IPv6Pool              string                     `json:"ipv6_pool,omitempty"`
-	MaxConnections        *uint                      `json:"max_connections,omitempty"`
-	MaxTCPConnections     *uint                      `json:"max_tcp_connections,omitempty"`
-	MaxUDPConnections     *uint                      `json:"max_udp_connections,omitempty"`
-	RateLimiter           *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
-	SecretViolationAction string                     `json:"secret_violation_action,omitempty"`
-	TrustHostCAs          *bool                      `json:"trust_host_cas,omitempty"`
+	CustomPolicy             *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
+	DNS                      *DNSOptions                `json:"dns,omitempty"`
+	DNSRebindProtection      *bool                      `json:"dns_rebind_protection,omitempty"`
+	DenyDomains              []string                   `json:"deny_domains,omitempty"`
+	DenyDomainSuffixes       []string                   `json:"deny_domain_suffixes,omitempty"`
+	TLS                      *TLSOptions                `json:"tls,omitempty"`
+	Strict                   *bool                      `json:"strict,omitempty"`
+	Ports                    map[uint16]uint16          `json:"ports,omitempty"`
+	PortBindings             []PortBindingOptions       `json:"port_bindings,omitempty"`
+	TCPAcceptQueueSize       *uint32                    `json:"tcp_accept_queue_size,omitempty"`
+	MaxInboundTCPConnections *uint                      `json:"max_inbound_tcp_connections,omitempty"`
+	IPv4Pool                 string                     `json:"ipv4_pool,omitempty"`
+	IPv6Pool                 string                     `json:"ipv6_pool,omitempty"`
+	NAT64Prefixes            []string                   `json:"nat64_prefixes,omitempty"`
+	MaxConnections           *uint                      `json:"max_connections,omitempty"`
+	MaxTCPConnections        *uint                      `json:"max_tcp_connections,omitempty"`
+	MaxUDPConnections        *uint                      `json:"max_udp_connections,omitempty"`
+	RateLimiter              *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
+	SecretViolationAction    string                     `json:"secret_violation_action,omitempty"`
+	TrustHostCAs             *bool                      `json:"trust_host_cas,omitempty"`
+	HTTP                     *HTTPConfig                `json:"http,omitempty"`
 }
 
 // RateLimiterOptions limits one traffic direction; a nil bucket leaves that
@@ -1944,9 +2099,10 @@ type SecretOptions struct {
 
 // SecretSubstitutionOptions selects request locations for substitution.
 type SecretSubstitutionOptions struct {
-	Headers *bool `json:"headers,omitempty"`
-	Query   bool  `json:"query,omitempty"`
-	Body    bool  `json:"body,omitempty"`
+	Headers      *bool    `json:"headers,omitempty"`
+	HeaderFields []string `json:"header_fields,omitempty"`
+	Query        bool     `json:"query,omitempty"`
+	Body         bool     `json:"body,omitempty"`
 }
 
 // PatchOptions is the JSON representation of a single rootfs patch.
@@ -2756,18 +2912,18 @@ type BranchOutcome struct {
 	Error   error
 }
 
-func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool, volumes map[string]MountSpec, policy ...string) ([]BranchOutcome, error) {
 	// Zero selects name lookup in the shared native entry point. A closed live handle
 	// must not take that path, including when Close races with this call.
 	handle := s.handle.Load()
 	if handle == 0 {
 		return nil, &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
 	}
-	return BranchManyByName(ctx, handle, s.name, "", names, integrity, policy...)
+	return BranchManyByName(ctx, handle, s.name, "", names, integrity, volumes, policy...)
 }
 
 // BranchManyByName uses one native operation, never a loop of branch captures.
-func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
+func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool, volumes map[string]MountSpec, policy ...string) ([]BranchOutcome, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -2785,10 +2941,11 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 		names = []string{}
 	}
 	encoded, err := json.Marshal(struct {
-		Names      []string `json:"names"`
-		Identity   string   `json:"source_identity"`
-		GuestFlush string   `json:"guest_flush,omitempty"`
-	}{names, identity, flush})
+		Names      []string             `json:"names"`
+		Identity   string               `json:"source_identity"`
+		GuestFlush string               `json:"guest_flush,omitempty"`
+		Volumes    map[string]MountSpec `json:"volumes,omitempty"`
+	}{names, identity, flush, volumes})
 	if err != nil {
 		return nil, err
 	}
@@ -2829,18 +2986,18 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 }
 
 // Branch creates an independent local child through the host runtime.
-func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
-	if len(policy) > 0 && policy[0] != "" {
-		rows, err := s.BranchMany(ctx, []string{name}, recordIntegrity, policy...)
+func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool, volumes map[string]MountSpec, policy ...string) (*Sandbox, error) {
+	if len(volumes) > 0 || (len(policy) > 0 && policy[0] != "") {
+		rows, err := s.BranchMany(ctx, []string{name}, recordIntegrity, volumes, policy...)
 		return oneBranchOutcome(rows, err)
 	}
 	return branchSandbox(ctx, uint64(s.h()), s.name, name, recordIntegrity)
 }
 
 // BranchSandboxByName branches execution without an agent connection to the source.
-func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
-	if len(policy) > 0 && policy[0] != "" {
-		rows, err := BranchManyByName(ctx, 0, source, "", []string{name}, recordIntegrity, policy...)
+func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool, volumes map[string]MountSpec, policy ...string) (*Sandbox, error) {
+	if len(volumes) > 0 || (len(policy) > 0 && policy[0] != "") {
+		rows, err := BranchManyByName(ctx, 0, source, "", []string{name}, recordIntegrity, volumes, policy...)
 		return oneBranchOutcome(rows, err)
 	}
 	return branchSandbox(ctx, 0, source, name, recordIntegrity)
@@ -3139,6 +3296,29 @@ type ExecResult struct {
 	ExitCode int // -1 if the guest did not report a code
 }
 
+// ShellPath reads from the native handle, avoiding a lookup through a changed default backend.
+func (s *Sandbox) ShellPath(ctx context.Context) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_sandbox_shell_path()) {
+		return "", &Error{Kind: KindUnsupportedOperation, Message: "configured shell execution requires an updated microsandbox native library"}
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_shell_path(cancelID, s.h(), buf, bufLen)
+	})
+	if err != nil {
+		return "", err
+	}
+	var response struct {
+		Shell string `json:"shell"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		return "", fmt.Errorf("parse shell path: %w", err)
+	}
+	return response.Shell, nil
+}
+
 // Exec runs cmd in the sandbox and collects its output.
 func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*ExecResult, error) {
 	if err := ensureLoaded(); err != nil {
@@ -3159,19 +3339,7 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*Exec
 	if err != nil {
 		return nil, err
 	}
-	var raw struct {
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		ExitCode *int   `json:"exit_code"`
-	}
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
-		return nil, fmt.Errorf("parse exec response: %w", err)
-	}
-	code := -1
-	if raw.ExitCode != nil {
-		code = *raw.ExitCode
-	}
-	return &ExecResult{Stdout: raw.Stdout, Stderr: raw.Stderr, ExitCode: code}, nil
+	return decodeCollectedOutput(out)
 }
 
 // ExecDefault runs the sandbox's effective OCI entrypoint and CMD and collects its output.
@@ -3192,19 +3360,7 @@ func (s *Sandbox) ExecDefault(ctx context.Context, opts ExecOptions) (*ExecResul
 	if err != nil {
 		return nil, err
 	}
-	var raw struct {
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		ExitCode *int   `json:"exit_code"`
-	}
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
-		return nil, fmt.Errorf("parse exec_default response: %w", err)
-	}
-	code := -1
-	if raw.ExitCode != nil {
-		code = *raw.ExitCode
-	}
-	return &ExecResult{Stdout: raw.Stdout, Stderr: raw.Stderr, ExitCode: code}, nil
+	return decodeCollectedOutput(out)
 }
 
 // =============================================================================
@@ -5082,9 +5238,27 @@ func VolumeFsOp(ctx context.Context, name, op string, args any, result any) erro
 	defer C.free(unsafe.Pointer(cName))
 	defer C.free(unsafe.Pointer(cOp))
 	defer C.free(unsafe.Pointer(cArgs))
-	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+	invoke := func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_volume_fs_op(cancelID, cName, cOp, cArgs, buf, bufLen)
-	})
+	}
+	out, err := call(ctx, invoke)
+	// Local reads historically used os.ReadFile and had no fixed response-size
+	// limit. Only retry this read-only operation; never replay a mutation.
+	for size := defaultBufSize; op == "local_read" && err != nil; {
+		var native *Error
+		if !errors.As(err, &native) || native.Kind != KindBufferTooSmall {
+			break
+		}
+		var needed, available int
+		if _, parseErr := fmt.Sscanf(native.Message, "output buffer too small: need %d, have %d", &needed, &available); parseErr != nil || needed <= size {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		size = needed
+		out, err = callBuf(ctx, size, invoke)
+	}
 	if err != nil {
 		return err
 	}
@@ -5144,6 +5318,7 @@ type ImageDetailInfo struct {
 
 // ImagePruneReportInfo is the JSON shape returned by image prune.
 type ImagePruneReportInfo struct {
+	SkippedInUse     uint32  `json:"skipped_in_use"`
 	ImageRefsRemoved uint32  `json:"image_refs_removed"`
 	ManifestsRemoved uint32  `json:"manifests_removed"`
 	LayersRemoved    uint32  `json:"layers_removed"`
@@ -5240,6 +5415,237 @@ func ImagePrune(ctx context.Context) (*ImagePruneReportInfo, error) {
 		return nil, fmt.Errorf("parse image_prune: %w", err)
 	}
 	return &info, nil
+}
+
+// StorageUsage observes this live sandbox through its retained native backend and identity.
+func (s *Sandbox) StorageUsage(ctx context.Context) (*StorageItemUsage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	handle := s.handle.Load()
+	if handle == 0 {
+		return nil, &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
+	}
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_msb_sandbox_storage_usage()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support sandbox storage usage; update the native SDK"}
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_storage_usage(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var report *StorageItemUsage
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		return nil, fmt.Errorf("parse sandbox storage usage: %w", err)
+	}
+	if report == nil {
+		return nil, fmt.Errorf("native SDK returned no sandbox storage usage report")
+	}
+	return report, nil
+}
+
+// StorageUsage observes storage in the selected backend. Older native bundles remain loadable;
+// only this new capability returns unsupported when its optional symbol is absent.
+func StorageUsage(ctx context.Context) (*StorageUsageReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_msb_storage_usage()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support storage usage; update the native SDK"}
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_storage_usage(cancelID, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var report *StorageUsageReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		return nil, fmt.Errorf("parse storage usage: %w", err)
+	}
+	if report == nil {
+		return nil, fmt.Errorf("native SDK returned no storage usage report")
+	}
+	return report, nil
+}
+
+// PruneStorage revalidates runtime cache ownership before removal and never prompts.
+func PruneStorage(ctx context.Context, options StoragePruneOptions) (*StoragePruneReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_msb_storage_prune()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support storage pruning; update the native SDK"}
+	}
+	payload, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+	cOptions := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOptions))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_storage_prune(cancelID, cOptions, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var report *StoragePruneReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		return nil, fmt.Errorf("parse storage prune: %w", err)
+	}
+	if report == nil {
+		return nil, fmt.Errorf("native SDK returned no storage prune report")
+	}
+	return report, nil
+}
+
+// CreateService creates a Service and returns it once the change is committed.
+func CreateService(ctx context.Context, request ServiceCreateRequest) (*ServiceInfo, error) {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, undispatchedServiceChange(err)
+	}
+	cRequest := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cRequest))
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_create(cancelID, cRequest, buf, bufLen)
+	})
+}
+
+// GetService returns a Service by slug.
+func GetService(ctx context.Context, slug string) (*ServiceInfo, error) {
+	// The slug is passed as a C string, which ends at the first NUL, so a slug with one
+	// would fetch a different Service.
+	if strings.IndexByte(slug, 0) >= 0 {
+		return nil, &Error{Kind: KindInvalidConfig, Message: fmt.Sprintf("invalid config: service slug %q is not valid", slug)}
+	}
+	cSlug := C.CString(slug)
+	defer C.free(unsafe.Pointer(cSlug))
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_get(cancelID, cSlug, buf, bufLen)
+	})
+}
+
+// UpdateService sends one change and returns the Service once it is committed.
+func UpdateService(ctx context.Context, handle uint64, request ServiceUpdateRequest) (*ServiceInfo, error) {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, undispatchedServiceChange(err)
+	}
+	cRequest := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cRequest))
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_update(cancelID, C.uint64_t(handle), cRequest, buf, bufLen)
+	})
+}
+
+// EnableService enables a Service and returns it once committed.
+func EnableService(ctx context.Context, handle uint64) (*ServiceInfo, error) {
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_enable(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// DisableService disables a Service and returns it once committed.
+func DisableService(ctx context.Context, handle uint64) (*ServiceInfo, error) {
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_disable(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// ListServices returns one page of Services.
+func ListServices(ctx context.Context, options ServiceListOptions) (*ServicePage, error) {
+	if err := ensureService(ctx); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+	cOptions := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOptions))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_list(cancelID, cOptions, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var page *ServicePage
+	if err := json.Unmarshal([]byte(out), &page); err != nil {
+		return nil, fmt.Errorf("parse service page: %w", err)
+	}
+	if page == nil {
+		return nil, fmt.Errorf("native SDK returned no service page")
+	}
+	return page, nil
+}
+
+// RemoveService removes a Service.
+func RemoveService(ctx context.Context, handle uint64) error {
+	if err := ensureService(ctx); err != nil {
+		return undispatchedServiceChange(err)
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_remove(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+	return err
+}
+
+// RefreshService gets a Service through the backend retained by its handle.
+func RefreshService(ctx context.Context, handle uint64) (*ServiceInfo, error) {
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_refresh(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// CloseService releases a Service handle. It runs with context.Background so a finalizer can always complete it.
+func CloseService(handle uint64) error {
+	_, err := call(context.Background(), func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_close(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+	return err
+}
+
+// ensureService loads the library and refuses before dispatch when it predates Services.
+func ensureService(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if !bool(C.has_msb_service()) {
+		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support services; update the native SDK"}
+	}
+	return nil
+}
+
+func callService(ctx context.Context, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char) (*ServiceInfo, error) {
+	if err := ensureService(ctx); err != nil {
+		return nil, undispatchedServiceChange(err)
+	}
+	out, err := call(ctx, fn)
+	if err != nil {
+		return nil, err
+	}
+	var info *ServiceInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse service: %w", err)
+	}
+	if info == nil {
+		return nil, fmt.Errorf("native SDK returned no service")
+	}
+	return info, nil
 }
 
 // ImageLoad imports images from a local archive into the cache and returns
@@ -5805,7 +6211,80 @@ func RuntimeSetup(ctx context.Context, operation, configJSON, optionsJSON string
 	defer C.free(unsafe.Pointer(op))
 	defer C.free(unsafe.Pointer(config))
 	defer C.free(unsafe.Pointer(options))
-	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_runtime_setup(cancelID, op, config, options, buf, bufLen)
+	return runtimeSetupOutput(ctx, operation, func(size int) (string, error) {
+		return callBuf(ctx, size, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+			return C.call_msb_runtime_setup(cancelID, op, config, options, buf, bufLen)
+		})
 	})
+}
+
+func runtimeSetupOutput(ctx context.Context, operation string, invoke func(int) (string, error)) (string, error) {
+	for size := defaultBufSize; ; {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		output, err := invoke(size)
+		// Only diagnosis is read-only. Retrying install, ensure or recovery after an
+		// undersized response could repeat an already-completed mutation.
+		var native *Error
+		if operation != "diagnose_storage" || !errors.As(err, &native) || native.Kind != KindBufferTooSmall {
+			return output, err
+		}
+		var needed, available int
+		if _, parseErr := fmt.Sscanf(native.Message, "output buffer too small: need %d, have %d", &needed, &available); parseErr != nil || needed <= size || available != size {
+			return "", err
+		}
+		if needed > storageDiagnosisMaxBufSize || size == storageDiagnosisMaxBufSize {
+			return "", &Error{
+				Kind:    KindBufferTooSmall,
+				Message: "storage diagnosis exceeds the 32 MiB response limit; inspect smaller named subsets",
+			}
+		}
+		// Grow geometrically even if a concurrently changing inventory requests only
+		// one extra byte each time. The cap bounds both allocation and retry count.
+		size = min(storageDiagnosisMaxBufSize, max(needed, size*2))
+	}
+}
+
+// Jobs invokes the optional managed-job ABI without changing existing library requirements.
+func Jobs(ctx context.Context, sandbox uint64, request any) (json.RawMessage, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if C.has_msb_jobs() == 0 {
+		return nil, &Error{Kind: "unsupported_feature", Message: "native SDK bundle does not support managed jobs"}
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	arg := C.CString(string(data))
+	defer C.free(unsafe.Pointer(arg))
+	raw, err := callBuf(ctx, 4<<20, func(cancelID C.uint64_t, buf *C.uint8_t, length C.size_t) *C.char {
+		return C.call_msb_jobs(cancelID, C.uint64_t(sandbox), arg, buf, length)
+	})
+	return json.RawMessage(raw), err
+}
+
+// RequirePortModification rejects requests that an older library would ignore.
+func RequirePortModification() error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if !bool(C.has_port_modification()) {
+		return fmt.Errorf("published-port modification requires an updated native library")
+	}
+	return nil
+}
+
+// RequireSecretPolicyModification rejects secret policy edits that an older
+// library would skip.
+func RequireSecretPolicyModification() error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if !bool(C.has_secret_policy_modification()) {
+		return fmt.Errorf("secret policy modification requires an updated native library")
+	}
+	return nil
 }

@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import type { NetworkConfig } from "../network-config.js";
+import type { NetworkConfig, SecretSubstitution } from "../network-config.js";
 import type { NetworkPolicy } from "../policy/types.js";
 import { msbPath } from "./resolve-binary.js";
 
@@ -21,6 +21,8 @@ export const napi = native;
 // dependency on the generated d.ts.
 
 export interface NativeBindings {
+  readonly supportsPortModification?: () => boolean;
+  readonly supportsSecretPolicyModification?: () => boolean;
   readonly setPackagedMsbPath: (path: string) => void;
   readonly setRuntimeMsbPath?: (path: string) => void;
   readonly setRuntimeLibkrunfwPath?: (path: string) => void;
@@ -44,16 +46,19 @@ export interface NativeBindings {
   readonly RestoreBuilder: new (snapshot: string, referenceKind?: "auto" | "id" | "path") => NapiRestoreBuilder;
   readonly Volume: NapiVolumeStatic;
   readonly VolumeBuilder: NapiVolumeBuilderCtor;
+  readonly Service: NapiServiceStatic;
   readonly Snapshot: NapiSnapshotStatic;
   readonly SnapshotBuilder: NapiSnapshotBuilderCtor;
   readonly ExecOptionsBuilder: NapiExecOptionsBuilderCtor;
   readonly InitOptionsBuilder: NapiInitOptionsBuilderCtor;
   readonly AttachOptionsBuilder: NapiAttachOptionsBuilderCtor;
   readonly DnsBuilder: NapiBuilderCtor<NapiDnsBuilder>;
+  readonly HttpBuilder: NapiBuilderCtor<NapiHttpBuilder>;
   readonly TlsBuilder: NapiBuilderCtor<NapiTlsBuilder>;
   readonly SecretBuilder: NapiBuilderCtor<NapiSecretBuilder>;
   readonly NetworkBuilder: NapiBuilderCtor<NapiNetworkBuilder>;
   readonly OutboundProxyBuilder: NapiBuilderCtor<NapiOutboundProxyBuilder>;
+  readonly HttpConnectProxyBuilder: { prototype: NapiHttpConnectProxyBuilder };
   readonly Socks4ProxyBuilder: { prototype: NapiSocks4ProxyBuilder };
   readonly Socks5ProxyBuilder: { prototype: NapiSocks5ProxyBuilder };
   readonly NetworkPolicyBuilder: NapiBuilderCtor<NapiNetworkPolicyBuilder>;
@@ -74,6 +79,8 @@ export interface NativeBindings {
   readonly imageInspect: (reference: string) => Promise<NapiImageDetail>;
   readonly imageRemove: (reference: string, force?: boolean) => Promise<void>;
   readonly imagePrune: () => Promise<NapiImagePruneReport>;
+  readonly storageUsage?: () => Promise<NapiStorageUsage>;
+  readonly storagePrune?: (dryRun?: boolean, olderThanSeconds?: number) => Promise<NapiMemoryCacheReport>;
   readonly imageLoad: (
     inputPath: string,
     tag?: string,
@@ -83,6 +90,7 @@ export interface NativeBindings {
     outputPath: string,
     format?: string,
   ) => Promise<void>;
+  readonly diagnoseStorage?: (configJson: string, selectionJson: string) => Promise<string>;
   readonly resolveRuntimeVersion: (executable: string) => Promise<string | null>;
   readonly resolveRuntime: (configJson: string) => string;
   readonly isRuntimeInstalled: (configJson: string) => boolean;
@@ -152,6 +160,7 @@ export interface NapiSandboxPage {
 }
 
 export interface NapiSandboxStatic {
+  recoverStorage?(name: string, optionsJson: string): Promise<string>;
   start(name: string): Promise<NapiSandbox>;
   startDetached(name: string): Promise<NapiSandbox>;
   get(name: string): Promise<NapiSandboxHandle>;
@@ -193,6 +202,8 @@ export interface NapiSandboxBuilderSetters {
   placementProfile(profile: string): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this;
   thp(policy: "always" | "madvise" | "never"): this;
   logLevel(level: string): this;
   quietLogs(): this;
@@ -219,12 +230,14 @@ export interface NapiSandboxBuilderSetters {
   user(user: string): this;
   pullPolicy(policy: string): this;
   disableNetwork(): this;
+  /** Enable TLS interception, preserving existing network and TLS settings. */
+  interceptTls(): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   network(configure: (b: any) => any): this;
   proxy(
     configure: (
       b: NapiOutboundProxyBuilder,
-    ) => NapiSocks4ProxyBuilder | NapiSocks5ProxyBuilder,
+    ) => NapiHttpConnectProxyBuilder | NapiSocks4ProxyBuilder | NapiSocks5ProxyBuilder,
   ): this;
   port(host: number, guest: number): this;
   portBind(bind: string, host: number, guest: number): this;
@@ -279,6 +292,8 @@ export interface NapiRestoreBuilderSetters {
   security(profile: "default" | "restricted"): this;
   maxDuration(secs: number): this;
   idleTimeout(secs: number): this;
+  cowMemory(): this;
+  /** @deprecated Use cowMemory() instead. */
   forked(): this;
   diskOnly(): this;
   snapshotBase(base: string): this;
@@ -292,6 +307,10 @@ export interface NapiRestoreBuilderSetters {
   portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
   portUdpBind(bind: string, host: number, guest: number): this;
+  /** 1..=2147483647; omission keeps the default, 1024. */
+  tcpAcceptQueueSize(size: number): this;
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this;
   vsock(path: string, port: number): this;
   vsockDgram(path: string, port: number): this;
 }
@@ -315,6 +334,10 @@ export interface NapiSandboxDestroyOptions {
 }
 
 export interface NapiSandbox {
+  execDetached(cmd: string, args?: string[]): Promise<NapiJob>;
+  execDetachedWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiJob>;
+  getJob(id: string): Promise<NapiJob>;
+  listJobs(all: boolean, limit: number, cursor?: string): Promise<string>;
   readonly backendKind: "local" | "cloud";
   readonly id: string;
   readonly ownsLifecycle: boolean;
@@ -345,8 +368,12 @@ export interface NapiSandbox {
   attachShell(): Promise<number>;
   restoreWarnings(): Promise<Array<{ guestPath: string; reason: string; staleInodes: bigint[] }>>;
   stop(): Promise<void>;
-  branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
-  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  fork(name: string, recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<NapiSandbox>;
+  /** @deprecated Use fork() instead. */
+  branch(name: string, recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<NapiSandbox>;
+  forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  /** @deprecated Use forkMany() instead. */
+  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(guestFlush?: string): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;
@@ -365,6 +392,9 @@ export interface NapiSandbox {
 }
 
 export interface NapiSandboxHandle {
+  getJob(id: string): Promise<NapiJob>;
+  listJobs(all: boolean, limit: number, cursor?: string): Promise<string>;
+  storageUsage?(): Promise<NapiStorageItemUsage>;
   readonly id: string;
   readonly name: string;
   readonly status: string;
@@ -384,8 +414,12 @@ export interface NapiSandboxHandle {
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   connectOrStart(detached?: boolean): Promise<NapiSandbox>;
   stop(): Promise<void>;
-  branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
-  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  fork(name: string, recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<NapiSandbox>;
+  /** @deprecated Use fork() instead. */
+  branch(name: string, recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<NapiSandbox>;
+  forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  /** @deprecated Use forkMany() instead. */
+  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(guestFlush?: string): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;
@@ -425,6 +459,8 @@ export interface NapiSandboxTouchResult {
 
 /** Native option object accepted by `modify()`. */
 export interface NapiSandboxModifyOptions {
+  ports?: import("../modify.js").ModifyPort[];
+  portsRemove?: import("../modify.js").ModifyPortEndpoint[];
   cpus?: number;
   maxCpus?: number;
   memoryMib?: number;
@@ -448,6 +484,10 @@ export interface NapiSecretModifySpec {
   store?: string;
   placeholder?: string;
   allowedHosts?: string[];
+  substitution?: SecretSubstitution;
+  violationAction?: string;
+  requireTlsIdentity?: boolean;
+  allowPlaceholderFor?: string[];
 }
 
 /** Native shape returned by `Sandbox.logs()` / `SandboxHandle.logs()`. */
@@ -628,6 +668,51 @@ export interface NapiVolumeInfo {
 }
 
 //-----------------------------------------------------------------------------
+// Service
+//-----------------------------------------------------------------------------
+
+export interface NapiServiceTarget {
+  sandbox: string;
+  port: number;
+}
+
+export interface NapiServiceUpdateOptions {
+  target: NapiServiceTarget;
+}
+
+export interface NapiServiceListOptions {
+  sandbox?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface NapiServicePage {
+  services: NapiService[];
+  nextCursor?: string;
+}
+
+export interface NapiServiceStatic {
+  create(slug: string, target?: NapiServiceTarget): Promise<NapiService>;
+  get(slug: string): Promise<NapiService>;
+  list(): Promise<NapiServicePage>;
+  listWith(options: NapiServiceListOptions): Promise<NapiServicePage>;
+}
+
+export interface NapiService {
+  readonly slug: string;
+  readonly url: string;
+  readonly status: string;
+  readonly target: NapiServiceTarget | null | undefined;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  update(options: NapiServiceUpdateOptions): Promise<NapiService>;
+  enable(): Promise<NapiService>;
+  disable(): Promise<NapiService>;
+  remove(): Promise<void>;
+  refresh(): Promise<NapiService>;
+}
+
+//-----------------------------------------------------------------------------
 // Snapshot
 //-----------------------------------------------------------------------------
 
@@ -696,6 +781,7 @@ export interface NapiSnapshotCopyBuilder
 }
 
 export interface NapiSnapshot {
+  storageUsage?(): Promise<NapiStorageItemUsage>;
   readonly id: string;
   readonly path: string;
   readonly headUpdate: NapiHeadUpdate | null | undefined;
@@ -726,6 +812,7 @@ export interface NapiSnapshot {
 }
 
 export interface NapiSnapshotHandle {
+  storageUsage?(): Promise<NapiStorageItemUsage>;
   readonly path: string;
   readonly id: string;
   readonly digest: string;
@@ -845,6 +932,7 @@ export interface NapiImageDetail extends NapiImageInfo {
 }
 
 export interface NapiImagePruneReport {
+  readonly skippedInUse?: number;
   readonly imageRefsRemoved: number;
   readonly manifestsRemoved: number;
   readonly layersRemoved: number;
@@ -1012,6 +1100,16 @@ export interface NapiDnsConfig {
   readonly queryTimeoutMs: number;
 }
 
+export interface NapiHttpBuilder {
+  denyResponse(enabled: boolean): this;
+  denyResponseFormat(format: 'text' | 'json'): this;
+  /** @deprecated Legacy text message with {host} substitution. */
+  denyMessage(message: string): this;
+  networkDenyMessage(message: string): this;
+  /** Set the literal secret-denial JSON message. */
+  secretDenyMessage(message: string): this;
+}
+
 export interface NapiTlsBuilder {
   bypass(pattern: string): this;
   verifyUpstream(verify: boolean): this;
@@ -1059,6 +1157,7 @@ export interface NapiSecretBuilder {
   allowPassthroughFor(host: string): this;
   requireTlsIdentity(enabled: boolean): this;
   substituteInHeaders(enabled: boolean): this;
+  substituteInHeaderFields(fields: string[]): this;
   substituteInQuery(enabled: boolean): this;
   substituteInBody(enabled: boolean): this;
   violationAction(action: string): this;
@@ -1073,12 +1172,14 @@ export interface NapiSecretEntry {
   readonly allowedHostPatterns: string[];
   readonly allowAnyHost: boolean;
   readonly passthroughHosts: string[];
+  readonly violationAction?: string;
   readonly requireTlsIdentity: boolean;
   readonly substitution: NapiSecretSubstitution;
 }
 
 export interface NapiSecretSubstitution {
   readonly headers: boolean;
+  readonly headerFields: string[];
   readonly query: boolean;
   readonly body: boolean;
 }
@@ -1105,10 +1206,15 @@ export interface NapiNetworkBuilder {
   maxConnections(max: number): this;
   maxTcpConnections(max: number): this;
   maxUdpConnections(max: number): this;
+  tcpAcceptQueueSize(size: number): this;
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this;
   strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
+  nat64Prefix(prefix: string): this;
   trustHostCAs(enabled: boolean): this;
+  http(configure: (h: NapiHttpBuilder) => NapiHttpBuilder): this;
   rateLimiter(
     configure: (b: NapiNetworkRateLimiterBuilder) => NapiNetworkRateLimiterBuilder,
   ): this;
@@ -1116,8 +1222,16 @@ export interface NapiNetworkBuilder {
 }
 
 export interface NapiOutboundProxyBuilder {
+  httpConnect(address: string): NapiHttpConnectProxyBuilder;
   socks4(address: string): NapiSocks4ProxyBuilder;
   socks5(address: string): NapiSocks5ProxyBuilder;
+}
+
+export interface NapiHttpConnectProxyBuilder {
+  credentials(
+    username: string,
+    password: { kind: "env"; var: string },
+  ): this;
 }
 
 export interface NapiSocks4ProxyBuilder {
@@ -1375,4 +1489,75 @@ export interface NapiRootDiskBuilder {
   fstype(fstype: string): this;
   /** Private flat-root clone strategy. */
   cloneStrategy(strategy: "auto" | "copy" | "reflink"): this;
+}
+
+export interface NapiJob {
+  readonly id: string;
+  inspect(): Promise<string>;
+  wait(): Promise<string>;
+  signal(signal: number): Promise<void>;
+  kill(): Promise<void>;
+  eof(): Promise<void>;
+  logs(options: string): Promise<string>;
+  logStream(options: string): Promise<NapiJobLogStream>;
+  attach(readOnly: boolean, replayBytes?: number, cursor?: string): Promise<NapiJobAttachment>;
+}
+export interface NapiJobAttachment {
+  recv(): Promise<string | null>;
+  writeStdin(data: Buffer): Promise<void>;
+  resize(rows: number, cols: number): Promise<void>;
+  detach(): Promise<void>;
+}
+export interface NapiJobLogStream {
+  next(): Promise<string | null>;
+  close(): Promise<void>;
+}
+
+export interface NapiStorageUsage {
+  readonly images: NapiStorageCategoryUsage;
+  readonly snapshots: NapiStorageCategoryUsage;
+  readonly sandboxes: NapiStorageCategoryUsage;
+  readonly volumes: NapiStorageCategoryUsage;
+  readonly branchMemory: NapiStorageCategoryUsage;
+  readonly snapshotMemory: NapiStorageCategoryUsage;
+  readonly notes: string[];
+}
+
+export interface NapiStorageCategoryUsage {
+  readonly count: number | null | undefined;
+  readonly inUse: number | null | undefined;
+  readonly logicalBytes: bigint | null | undefined;
+  readonly allocatedBytes: bigint | null | undefined;
+  readonly reclaimableLogicalBytes: bigint | null | undefined;
+  readonly items: NapiStorageItemUsage[];
+  readonly notes: string[];
+}
+
+export interface NapiStorageItemUsage {
+  readonly name: string;
+  readonly path: string;
+  readonly logicalBytes: bigint | null | undefined;
+  readonly allocatedBytes: bigint | null | undefined;
+  readonly inUse: boolean | null | undefined;
+  readonly reclaimable: boolean | null | undefined;
+  readonly reasons: string[];
+}
+
+export interface NapiMemoryCacheEntry {
+  readonly path: string;
+  readonly kind: "branch_memory" | "snapshot_memory";
+  readonly logicalBytes: bigint | null | undefined;
+  readonly allocatedBytes: bigint | null | undefined;
+  readonly state: "reclaimable" | "in_use" | "pending_handoff" | "too_young" |
+    "missing_handoff_lock" | "changed" | "removed" | "error";
+  readonly error: string | null | undefined;
+}
+
+export interface NapiMemoryCacheReport {
+  readonly dryRun: boolean;
+  readonly entries: NapiMemoryCacheEntry[];
+  readonly filesRemoved: number;
+  readonly logicalBytesRemoved: bigint;
+  readonly physicalBytesReclaimed: bigint | null | undefined;
+  readonly truncated: boolean;
 }

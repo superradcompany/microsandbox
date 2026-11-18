@@ -12,6 +12,14 @@ on:
       - .github/workflows/release-macos.yml
       - .github/workflows/release-windows.yml
       - .github/actions/cache-libkrunfw-kernel/action.yml
+      - scripts/ci/release-channel.cjs
+      - scripts/ci/test-release-channel.mjs
+      - scripts/ci/install-apt-packages.sh
+      - scripts/ci/prepare-apt-fallback.py
+      - scripts/ci/test_apt_fallback.py
+      - .github/workflows/apt-mirrors.yml
+      - scripts/ci/release-context.cjs
+      - scripts/ci/test-release-context.cjs
       - scripts/ci/publish-crates.py
       - scripts/ci/test_publish_crates.py
       - scripts/ci/validate-release-artifacts.py
@@ -23,15 +31,22 @@ on:
       - scripts/ci/test_validate_linux_glibc.py
       - scripts/ci/wait-for-npm-packages.mjs
       - scripts/ci/publish-npm-package.mjs
-  # Manual runs exercise the full release build and validation graph. Every
-  # irreversible job below is independently guarded to tag pushes only.
+  # Empty input is build-only; recovery explicitly publishes an existing tag.
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing unpublished tag to recover (empty = build only)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
   cancel-in-progress: false
 
 env:
+  # Used only after release-context validates the selected tag.
+  MSB_RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_TIMEOUT: "120"
@@ -44,13 +59,59 @@ permissions:
   contents: read
 
 jobs:
+  release-context:
+    name: Resolve release source
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      channel: ${{ steps.resolve.outputs.channel }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      # Load the recovery helper from the workflow commit, then pin all build
+      # and publication checkouts to the resolved release source instead.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Resolve and validate release source
+        id: resolve
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RECOVERY_TAG: ${{ inputs.release_tag }}
+        with:
+          script: |
+            const { resolveReleaseContext } = require('./scripts/ci/release-context.cjs');
+            const release = await resolveReleaseContext({ context, github, releaseTag: process.env.RECOVERY_TAG });
+            for (const [name, value] of Object.entries(release)) core.setOutput(name, value);
+            await core.summary.addHeading('Release source').addTable([
+              ['Tag', release.tag || '(build only)'],
+              ['Source commit', release.source_sha],
+              ['Publishing enabled', release.publish],
+            ]).write();
+
+      # Recovery builds retain the tagged source, but package installation must
+      # use the fix from this workflow revision, not the old helper in that tag.
+      # Keep this internal artifact outside release-* so asset collectors skip it.
+      - name: Upload release CI tools
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-release-tools
+          path: |
+            scripts/ci/install-apt-packages.sh
+            scripts/ci/prepare-apt-fallback.py
+          if-no-files-found: error
+
   # Fetch and verify the large kernel archive once, then fan it out to both
   # firmware architectures over GitHub's artifact network.
   kernel-sources:
+    needs: release-context
     name: Kernel sources
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
       - name: Checkout libkrunfw sources
         run: git submodule update --init --depth 1 vendor/libkrunfw
@@ -59,7 +120,7 @@ jobs:
         uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Upload kernel source archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kernel-source
           path: vendor/libkrunfw/tarballs/*.tar.gz
@@ -69,10 +130,12 @@ jobs:
   # kernel.c; Linux relinks it inside its baseline container.
   firmware-aarch64:
     name: Firmware (aarch64)
-    needs: kernel-sources
+    needs: [release-context, kernel-sources]
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
       - name: Checkout libkrunfw sources
         run: git submodule update --init --depth 1 vendor/libkrunfw
@@ -86,13 +149,20 @@ jobs:
             vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
           key: release-firmware-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
 
+      - name: Download release CI tools
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-release-tools
+          path: ${{ runner.temp }}/ci-release-tools
+
       - name: Install firmware build dependencies
         if: steps.cache-firmware.outputs.cache-hit != 'true'
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+        run: bash "$RUNNER_TEMP/ci-release-tools/install-apt-packages.sh" libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Download kernel source archive
         if: steps.cache-firmware.outputs.cache-hit != 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: kernel-source
           path: vendor/libkrunfw/tarballs
@@ -103,7 +173,7 @@ jobs:
         run: make -j$(nproc)
 
       - name: Upload firmware
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-aarch64
           path: |
@@ -112,11 +182,23 @@ jobs:
           compression-level: 0
 
   firmware-x86_64:
-    name: Firmware (x86_64)
-    needs: kernel-sources
+    name: Firmware (${{ matrix.host }} x86_64)
+    needs: [release-context, kernel-sources]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: Linux
+            artifact: firmware-x86_64
+            make_args: ""
+          - host: Windows
+            artifact: firmware-windows-x86_64
+            make_args: OS=Windows kernel.c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
       - name: Checkout libkrunfw sources
         run: git submodule update --init --depth 1 vendor/libkrunfw
@@ -128,15 +210,22 @@ jobs:
           path: |
             vendor/libkrunfw/kernel.c
             vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
-          key: release-firmware-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+          key: release-${{ matrix.artifact }}-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Download release CI tools
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-release-tools
+          path: ${{ runner.temp }}/ci-release-tools
 
       - name: Install firmware build dependencies
         if: steps.cache-firmware.outputs.cache-hit != 'true'
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+        run: bash "$RUNNER_TEMP/ci-release-tools/install-apt-packages.sh" libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Download kernel source archive
         if: steps.cache-firmware.outputs.cache-hit != 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: kernel-source
           path: vendor/libkrunfw/tarballs
@@ -144,12 +233,12 @@ jobs:
       - name: Build firmware
         if: steps.cache-firmware.outputs.cache-hit != 'true'
         working-directory: vendor/libkrunfw
-        run: make -j$(nproc)
+        run: make -j$(nproc) ${{ matrix.make_args }}
 
       - name: Upload firmware
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: firmware-x86_64
+          name: ${{ matrix.artifact }}
           path: |
             vendor/libkrunfw/kernel.c
             vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
@@ -158,58 +247,76 @@ jobs:
   # The guest daemon is independent from each host build, so compile it once
   # per guest architecture and fan it out to every matching host platform.
   agentd-aarch64:
+    needs: release-context
     name: Agentd (aarch64-linux-musl)
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: aarch64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
           cache-targets: true
           shared-key: release-agentd-aarch64
 
+      - name: Download release CI tools
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-release-tools
+          path: ${{ runner.temp }}/ci-release-tools
+
       - name: Install musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: bash "$RUNNER_TEMP/ci-release-tools/install-apt-packages.sh" musl-tools
 
       - name: Build agentd
         run: cargo build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-aarch64-linux-musl
           path: target/aarch64-unknown-linux-musl/release/agentd
           compression-level: 0
 
   agentd-x86_64:
+    needs: release-context
     name: Agentd (x86_64-linux-musl)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: x86_64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
           cache-targets: true
           shared-key: release-agentd-x86_64
 
+      - name: Download release CI tools
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-release-tools
+          path: ${{ runner.temp }}/ci-release-tools
+
       - name: Install musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: bash "$RUNNER_TEMP/ci-release-tools/install-apt-packages.sh" musl-tools
 
       - name: Build agentd
         run: cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-x86_64-linux-musl
           path: target/x86_64-unknown-linux-musl/release/agentd
@@ -217,9 +324,10 @@ jobs:
 
   linux-x86_64:
     name: Linux x86_64
-    needs: [firmware-x86_64, agentd-x86_64]
+    needs: [release-context, firmware-x86_64, agentd-x86_64]
     uses: ./.github/workflows/release-linux.yml
     with:
+      source_sha: ${{ needs.release-context.outputs.source_sha }}
       target: linux-x86_64
       runner: ubuntu-latest
       manylinux_image: quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b
@@ -236,9 +344,10 @@ jobs:
 
   linux-aarch64:
     name: Linux aarch64
-    needs: [firmware-aarch64, agentd-aarch64]
+    needs: [release-context, firmware-aarch64, agentd-aarch64]
     uses: ./.github/workflows/release-linux.yml
     with:
+      source_sha: ${{ needs.release-context.outputs.source_sha }}
       target: linux-aarch64
       runner: ubuntu-24.04-arm
       manylinux_image: quay.io/pypa/manylinux_2_28_aarch64@sha256:561427136aabf3787bffb294b3515748241e0962d1527ae28bea1e076bfb9d99
@@ -255,11 +364,12 @@ jobs:
 
   darwin-aarch64:
     name: macOS aarch64
-    needs: [firmware-aarch64, agentd-aarch64]
+    needs: [release-context, firmware-aarch64, agentd-aarch64]
     uses: ./.github/workflows/release-macos.yml
     with:
+      source_sha: ${{ needs.release-context.outputs.source_sha }}
       target: darwin-aarch64
-      runner: macos-14
+      runner: macos-15
       os: darwin
       arch: aarch64
       agentd_artifact: agentd-aarch64-linux-musl
@@ -274,13 +384,14 @@ jobs:
 
   windows-x86_64:
     name: Windows x86_64
-    needs: [firmware-x86_64, agentd-x86_64]
+    needs: [release-context, firmware-x86_64, agentd-x86_64]
     uses: ./.github/workflows/release-windows.yml
     with:
+      source_sha: ${{ needs.release-context.outputs.source_sha }}
       target: windows-x86_64
       runner: windows-latest
       rust_target: x86_64-pc-windows-msvc
-      firmware_artifact: firmware-x86_64
+      firmware_artifact: firmware-windows-x86_64
       agentd_artifact: agentd-x86_64-linux-musl
       vs_arch: amd64
       vs_host_arch: amd64
@@ -294,9 +405,10 @@ jobs:
 
   windows-aarch64:
     name: Windows aarch64
-    needs: [firmware-aarch64, agentd-aarch64]
+    needs: [release-context, firmware-aarch64, agentd-aarch64]
     uses: ./.github/workflows/release-windows.yml
     with:
+      source_sha: ${{ needs.release-context.outputs.source_sha }}
       target: windows-aarch64
       runner: windows-11-arm
       rust_target: aarch64-pc-windows-msvc
@@ -350,7 +462,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload kernel.c
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/kernel.c
@@ -388,7 +500,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload kernel.c
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kernel-c-x86_64
           path: vendor/libkrunfw/kernel.c
@@ -407,7 +519,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
 
@@ -422,7 +534,7 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/agentd build/agentd
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-aarch64-linux-musl
           path: build/agentd
@@ -438,7 +550,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
 
@@ -453,7 +565,7 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-x86_64-linux-musl
           path: build/agentd
@@ -491,7 +603,7 @@ jobs:
             node_file: microsandbox.linux-arm64-gnu.node
             npm_dir: linux-arm64-gnu
           - target: darwin-aarch64
-            runner: macos-14
+            runner: macos-15
             arch: aarch64
             os: darwin
             agentd_target: ""
@@ -508,7 +620,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
 
@@ -529,7 +641,7 @@ jobs:
       # -- agentd (macOS: download prebuilt Linux artifact) --
       - name: Download agentd (macOS)
         if: matrix.os == 'darwin'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agentd-aarch64-linux-musl
           path: build/
@@ -562,7 +674,7 @@ jobs:
 
       - name: Download kernel.c (macOS)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/
@@ -571,7 +683,9 @@ jobs:
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
         run: |
           cd vendor/libkrunfw
-          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
+          # Homebrew rewrites the dylib ID when relocating its bottle. Reserve
+          # load-command space so its longer cellar path fits without relinking.
+          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -Wl,-headerpad_max_install_names -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
           cd ../..
           mkdir -p build
           cp vendor/libkrunfw/libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib build/
@@ -581,7 +695,7 @@ jobs:
       # -- msb --
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
+          cargo build --release --no-default-features --features embed-binaries,net,ssh,keyring -p microsandbox-cli
           mkdir -p build
           cp target/release/msb build/msb
 
@@ -609,7 +723,7 @@ jobs:
         run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
 
       # -- Node SDK --
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -626,7 +740,7 @@ jobs:
         run: node scripts/prepare-platform-package.mjs ${{ matrix.npm_dir }}
 
       - name: Upload Node SDK artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: node-sdk-${{ matrix.npm_dir }}
           path: |
@@ -638,7 +752,7 @@ jobs:
             sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
 
       # -- Python SDK --
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -663,7 +777,7 @@ jobs:
           before-script-linux: dnf install -y libcap-ng-devel
 
       - name: Upload Python SDK wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-sdk-${{ matrix.target }}
           path: sdk/python/dist/*.whl
@@ -706,7 +820,7 @@ jobs:
           cp "build/$go_ffi_file" "artifacts/$bundle_name"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
           path: artifacts/
@@ -759,18 +873,18 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
 
       - name: Download kernel.c
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.kernel_artifact }}
           path: vendor/libkrunfw/
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.agentd_artifact }}
           path: build/
@@ -797,7 +911,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          cargo build --release --no-default-features --features embed-binaries,net,ssh,keyring -p microsandbox-cli --target ${{ matrix.rust_target }}
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item target\${{ matrix.rust_target }}\release\msb.exe build\msb.exe -Force
 
@@ -827,7 +941,7 @@ jobs:
           Copy-Item target\${{ matrix.rust_target }}\release\microsandbox_go_ffi.dll build\microsandbox_go_ffi.dll -Force
 
       # -- Node SDK --
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -849,7 +963,7 @@ jobs:
         run: node scripts/prepare-platform-package.mjs ${{ matrix.npm_dir }}
 
       - name: Upload Node SDK artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: node-sdk-${{ matrix.npm_dir }}
           path: |
@@ -861,7 +975,7 @@ jobs:
             sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
 
       # -- Python SDK --
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -883,7 +997,7 @@ jobs:
           args: --release --out dist --target ${{ matrix.rust_target }}
 
       - name: Upload Python SDK wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-sdk-${{ matrix.target }}
           path: sdk/python/dist/*.whl
@@ -905,7 +1019,7 @@ jobs:
           Copy-Item build\microsandbox_go_ffi.dll "artifacts\libmicrosandbox_go_ffi-windows-$goArch.dll" -Force
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
           path: artifacts/
@@ -916,6 +1030,7 @@ jobs:
     name: Validate complete release
     if: always()
     needs:
+      - release-context
       - linux-x86_64
       - linux-aarch64
       - darwin-aarch64
@@ -925,6 +1040,7 @@ jobs:
     steps:
       - name: Assert every platform build succeeded
         run: |
+          test "${{ needs.release-context.result }}" = success
           test "${{ needs.linux-x86_64.result }}" = success
           test "${{ needs.linux-aarch64.result }}" = success
           test "${{ needs.darwin-aarch64.result }}" = success
@@ -932,22 +1048,34 @@ jobs:
           test "${{ needs.windows-aarch64.result }}" = success
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
+
+      # Detect a changed tag before any publishing job becomes eligible.
+      - name: Verify release tag still identifies the built source
+        if: needs.release-context.outputs.publish == 'true'
+        env:
+          EXPECTED_SHA: ${{ needs.release-context.outputs.source_sha }}
+        run: |
+          git ls-remote --exit-code origin "refs/tags/$MSB_RELEASE_TAG" "refs/tags/$MSB_RELEASE_TAG^{}" > "$RUNNER_TEMP/release-tag-refs"
+          actual=$(awk '/\^\{\}$/ { peeled=$1 } !/\^\{\}$/ { direct=$1 } END { print peeled ? peeled : direct }' "$RUNNER_TEMP/release-tag-refs")
+          test "$actual" = "$EXPECTED_SHA"
 
       - name: Download release assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: release-artifacts
           pattern: release-*
           merge-multiple: true
 
       - name: Download Node SDK artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: node-artifacts
           pattern: node-sdk-*
 
       - name: Download Python SDK wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: python-artifacts
           pattern: python-sdk-*
@@ -977,7 +1105,7 @@ jobs:
           python3 -m unittest scripts.ci.test_publish_crates
           python3 scripts/ci/publish-crates.py --validate-only
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -996,7 +1124,7 @@ jobs:
       - name: Install candidate SDK for production smoke test
         id: smoke-install
         if: >-
-          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (needs.release-context.outputs.publish == 'true') ||
           (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         run: |
           platform=sdk/node-ts/npm/linux-x64-gnu
@@ -1046,7 +1174,7 @@ jobs:
         run: node --experimental-strip-types "$RUNNER_TEMP/cloud-smoke-consumer/cloud-release-smoke.mts" cleanup
 
       - name: Upload validation manifest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-validation
           path: release-validation/manifest.json
@@ -1056,18 +1184,20 @@ jobs:
   # ---------------------------------------------------------------------------
   assemble:
     name: Assemble Release
-    needs: release-ready
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, release-ready]
+    if: needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
       issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: release-artifacts
           pattern: release-*
@@ -1086,12 +1216,12 @@ jobs:
         run: sha256sum * > checksums.sha256
 
       - name: Prepare categorized release notes
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const { prepareReleaseNotes } = require('./scripts/ci/release-notes.cjs');
             const body = await prepareReleaseNotes({
-              github, repo: context.repo, tag: process.env.GITHUB_REF_NAME,
+              github, repo: context.repo, tag: process.env.MSB_RELEASE_TAG,
               serverUrl: context.serverUrl,
             });
             require('node:fs').writeFileSync(`${process.env.RUNNER_TEMP}/release-notes.md`, body);
@@ -1100,16 +1230,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Auto-prerelease for rc / alpha / beta / dev tags so consumers
-          # querying /releases/latest (e.g. install.microsandbox.dev) don't
-          # accidentally promote them. Matches v0.5.0-rc-1, v1.2.3-rc1,
-          # v1.0.0-alpha.4, etc.
+          # Every SemVer prerelease is excluded from GitHub latest.
           PRERELEASE=""
-          if [[ "${{ github.ref_name }}" =~ -(rc|alpha|beta|dev) ]]; then
-            PRERELEASE="--prerelease"
+          if [ "${{ needs.release-context.outputs.prerelease }}" = true ]; then
+            PRERELEASE="--prerelease --latest=false"
           fi
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
+          gh release create "${{ needs.release-context.outputs.tag }}" \
+            --verify-tag \
+            --title "${{ needs.release-context.outputs.tag }}" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             $PRERELEASE \
             release-artifacts/*
@@ -1129,8 +1257,8 @@ jobs:
   # ---------------------------------------------------------------------------
   sync-mintlify:
     name: Sync mintlify branch
-    needs: assemble
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, assemble]
+    if: needs.release-context.outputs.publish == 'true' && needs.release-context.outputs.channel == 'stable'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1149,9 +1277,9 @@ jobs:
       - name: Check whether the release commit merges cleanly
         id: merge
         run: |
-          if git merge-base --is-ancestor ${{ github.sha }} HEAD; then
+          if git merge-base --is-ancestor ${{ needs.release-context.outputs.source_sha }} HEAD; then
             echo "result=uptodate" >> "$GITHUB_OUTPUT"
-          elif git merge --no-commit --no-ff ${{ github.sha }}; then
+          elif git merge --no-commit --no-ff ${{ needs.release-context.outputs.source_sha }}; then
             git merge --abort
             echo "result=clean" >> "$GITHUB_OUTPUT"
           else
@@ -1164,41 +1292,41 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          branch="mintlify-sync-${{ github.ref_name }}"
-          git switch --detach "${{ github.sha }}"
-          git commit --allow-empty -m "chore(docs): sync mintlify to ${{ github.ref_name }}"
+          branch="mintlify-sync-${{ needs.release-context.outputs.tag }}"
+          git switch --detach "${{ needs.release-context.outputs.source_sha }}"
+          git commit --allow-empty -m "chore(docs): sync mintlify to ${{ needs.release-context.outputs.tag }}"
           git push --force origin HEAD:refs/heads/"$branch"
           if [ "${{ steps.merge.outputs.result }}" = "clean" ]; then
-            body="Syncs mintlify to ${{ github.ref_name }}. The release commit merges cleanly, so this PR was enqueued automatically; the merge queue lands it as a merge commit."
+            body="Syncs mintlify to ${{ needs.release-context.outputs.tag }}. The release commit merges cleanly, so this PR was enqueued automatically; the merge queue lands it as a merge commit."
           else
-            body="Releasing ${{ github.ref_name }} could not merge into mintlify cleanly. mintlify carries docs that conflict with this release. Resolve by merging mintlify into this branch and pushing, then add the PR to the merge queue (merge when ready). The queue lands it as a merge commit, which keeps the history shared with main intact. Do not bypass the queue with a squash: that erases the shared history and turns the next sync into a wall of false conflicts."
+            body="Releasing ${{ needs.release-context.outputs.tag }} could not merge into mintlify cleanly. mintlify carries docs that conflict with this release. Resolve by merging mintlify into this branch and pushing, then add the PR to the merge queue (merge when ready). The queue lands it as a merge commit, which keeps the history shared with main intact. Do not bypass the queue with a squash: that erases the shared history and turns the next sync into a wall of false conflicts."
           fi
           gh pr create \
             --base mintlify \
             --head "$branch" \
-            --title "sync mintlify to ${{ github.ref_name }}" \
+            --title "sync mintlify to ${{ needs.release-context.outputs.tag }}" \
             --body "$body"
 
       - name: Enqueue clean sync PR
         if: steps.merge.outputs.result == 'clean'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr merge --auto --merge "mintlify-sync-${{ github.ref_name }}"
+        run: gh pr merge --auto --merge "mintlify-sync-${{ needs.release-context.outputs.tag }}"
 
   # ---------------------------------------------------------------------------
   # Update Homebrew formula in the tap repo
   # ---------------------------------------------------------------------------
   update-homebrew:
     name: Update Homebrew Formula
-    needs: assemble
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, assemble]
+    if: needs.release-context.outputs.publish == 'true' && needs.release-context.outputs.channel == 'stable'
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch to homebrew tap
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_PAT }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${MSB_RELEASE_TAG#v}"
           gh api repos/superradcompany/homebrew-tap/dispatches \
             -f event_type=update-formula \
             -f "client_payload[version]=$VERSION"
@@ -1226,32 +1354,26 @@ jobs:
   # The job is skipped unless publishing is enabled, and the submit step is a
   # no-op when WINGET_TOKEN is unset. This keeps releases from failing before
   # the initial package is accepted or for forks that have not configured
-  # winget publishing. Prerelease tags (rc/alpha/beta/dev) are skipped to match
-  # the assemble job's --prerelease detection.
+  # winget publishing. All prereleases are excluded by the shared release classification.
   # ---------------------------------------------------------------------------
   update-winget:
     name: Update winget package
-    needs: assemble
+    needs: [release-context, assemble]
     if: >-
-      github.event_name == 'push'
-      && startsWith(github.ref, 'refs/tags/v')
+      needs.release-context.outputs.publish == 'true' && needs.release-context.outputs.channel == 'stable'
       && vars.WINGET_RELEASE_ENABLED == 'true'
-      && !contains(github.ref_name, '-rc')
-      && !contains(github.ref_name, '-alpha')
-      && !contains(github.ref_name, '-beta')
-      && !contains(github.ref_name, '-dev')
     runs-on: ubuntu-latest
     env:
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
     steps:
       - name: Submit to winget-pkgs
         if: env.WINGET_TOKEN != ''
-        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        uses: vedantmgoyal9/winget-releaser@b7370d4d152efdce803a26cc6ca9eee58cb2ad54 # v2
         with:
           identifier: SuperRadCompany.Microsandbox
           installers-regex: 'microsandbox-windows-.+\.zip$'
-          release-tag: ${{ github.ref_name }}
-          release-notes-url: https://github.com/superradcompany/microsandbox/releases/tag/${{ github.ref_name }}
+          release-tag: ${{ needs.release-context.outputs.tag }}
+          release-notes-url: https://github.com/superradcompany/microsandbox/releases/tag/${{ needs.release-context.outputs.tag }}
           fork-user: ${{ vars.WINGET_FORK_USER || github.repository_owner }}
           token: ${{ secrets.WINGET_TOKEN }}
 
@@ -1260,8 +1382,8 @@ jobs:
   # ---------------------------------------------------------------------------
   npm-publish:
     name: Publish npm packages
-    needs: release-ready
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, release-ready]
+    if: needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1272,14 +1394,16 @@ jobs:
       NPM_CONFIG_PROVENANCE: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
       - name: Download Node SDK artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: node-artifacts
           pattern: node-sdk-*
@@ -1321,7 +1445,7 @@ jobs:
 
       - name: Wait for shared dependencies to be indexed
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${MSB_RELEASE_TAG#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
             @microsandbox/types @microsandbox/protocol-client
 
@@ -1335,7 +1459,7 @@ jobs:
 
       - name: Wait for shared clients to be indexed
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${MSB_RELEASE_TAG#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
             @microsandbox/agent-client @microsandbox/control-client
 
@@ -1352,7 +1476,7 @@ jobs:
 
       - name: Wait for npm to index platform packages
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${MSB_RELEASE_TAG#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
             @superradcompany/microsandbox-darwin-arm64 \
             @superradcompany/microsandbox-linux-arm64-gnu \
@@ -1405,8 +1529,8 @@ jobs:
   # ---------------------------------------------------------------------------
   refresh-lockfile:
     name: Refresh lockfiles
-    needs: [npm-publish, crates-publish]
-    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.npm-publish.result == 'success' || needs.crates-publish.result == 'success') }}
+    needs: [release-context, npm-publish, crates-publish]
+    if: ${{ !cancelled() && needs.release-context.outputs.publish == 'true' && needs.release-context.outputs.channel == 'stable' && (needs.npm-publish.result == 'success' || needs.crates-publish.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1416,7 +1540,7 @@ jobs:
         with:
           ref: main
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: needs.npm-publish.result == 'success'
         with:
           node-version: 22
@@ -1424,7 +1548,7 @@ jobs:
       - name: Wait for npm to index platform packages
         if: needs.npm-publish.result == 'success'
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${MSB_RELEASE_TAG#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
             @superradcompany/microsandbox-darwin-arm64 \
             @superradcompany/microsandbox-linux-arm64-gnu \
@@ -1444,19 +1568,19 @@ jobs:
         if: needs.crates-publish.result == 'success'
         working-directory: sdk/ruby/ext/microsandbox
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${MSB_RELEASE_TAG#v}"
           cargo update -p microsandbox --precise "$VERSION"
 
       - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          title: "chore: refresh lockfiles after ${{ github.ref_name }}"
+          title: "chore: refresh lockfiles after ${{ needs.release-context.outputs.tag }}"
           body: |
-            Regenerates SDK lockfiles against the packages published for ${{ github.ref_name }}.
+            Regenerates SDK lockfiles against the packages published for ${{ needs.release-context.outputs.tag }}.
 
             ${{ needs.npm-publish.result != 'success' && 'Node lockfile not refreshed: npm publication did not succeed.' || '' }}
             ${{ needs.crates-publish.result != 'success' && 'Ruby lockfile not refreshed: crates.io publication did not succeed.' || '' }}
-          branch: refresh-lockfile-${{ github.ref_name }}
-          commit-message: "chore: refresh lockfiles after ${{ github.ref_name }}"
+          branch: refresh-lockfile-${{ needs.release-context.outputs.tag }}
+          commit-message: "chore: refresh lockfiles after ${{ needs.release-context.outputs.tag }}"
           base: main
           add-paths: |
             sdk/node-ts/package-lock.json
@@ -1468,22 +1592,23 @@ jobs:
   # ---------------------------------------------------------------------------
   mcp-publish:
     name: Publish MCP server
-    needs: npm-publish
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, npm-publish]
+    if: needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
           submodules: true
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
       - name: Wait for the root SDK package
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${MSB_RELEASE_TAG#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" microsandbox
 
       - name: Build MCP server
@@ -1509,11 +1634,13 @@ jobs:
   # ---------------------------------------------------------------------------
   crates-publish:
     name: Publish crates
-    needs: release-ready
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, release-ready]
+    if: needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -1527,8 +1654,8 @@ jobs:
   # ---------------------------------------------------------------------------
   pypi-publish:
     name: Publish Python SDK
-    needs: release-ready
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, release-ready]
+    if: needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1538,11 +1665,13 @@ jobs:
       url: https://pypi.org/p/microsandbox
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
 
       - name: Download Python SDK wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           pattern: python-sdk-*
@@ -1564,24 +1693,25 @@ jobs:
   # be committed under sdk/go/internal/bundle/bundles/ on that commit.
   #
   # main keeps 0-byte sentinel bundles; this job lays a one-off release
-  # commit on top of GITHUB_SHA with the real binaries, tags it, and
+  # commit on top of the resolved source SHA with the real binaries, tags it, and
   # pushes only the tag. The release commit is reachable solely via the
   # tag, never via a branch (wasmtime-go's distribution pattern).
   # ---------------------------------------------------------------------------
   go-sdk-tag:
     name: Tag Go SDK module
-    needs: assemble
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, assemble]
+    if: needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
           fetch-depth: 0
 
       - name: Download per-platform release artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: release-dl
           pattern: release-*
@@ -1590,7 +1720,7 @@ jobs:
       - name: Populate embedded bundles and tag
         run: |
           set -euo pipefail
-          ROOT_TAG="${GITHUB_REF_NAME}"          # e.g. v0.4.6
+          ROOT_TAG="${MSB_RELEASE_TAG}"          # e.g. v0.4.6
           GO_TAG="sdk/go/${ROOT_TAG}"
           if git rev-parse "refs/tags/${GO_TAG}" >/dev/null 2>&1; then
             echo "tag ${GO_TAG} already exists — skipping"
@@ -1623,7 +1753,7 @@ jobs:
         # can take 10-60 minutes and leaves `go get @<new-version>`
         # returning 404 for users on default GOPROXY in the meantime.
         run: |
-          ROOT_TAG="${GITHUB_REF_NAME}"
+          ROOT_TAG="${MSB_RELEASE_TAG}"
           MODULE="github.com/superradcompany/microsandbox/sdk/go"
           curl -sSf "https://proxy.golang.org/${MODULE}/@v/${ROOT_TAG}.info" >/dev/null || true
           curl -sSf "https://proxy.golang.org/${MODULE}/@v/${ROOT_TAG}.mod"  >/dev/null || true
@@ -1636,8 +1766,8 @@ jobs:
   # ---------------------------------------------------------------------------
   docker-build:
     name: Docker (${{ matrix.arch }})
-    needs: release-ready
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, release-ready]
+    if: needs.release-context.outputs.publish == 'true'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -1649,17 +1779,21 @@ jobs:
             runner: ubuntu-latest
             artifact: release-linux-x86_64
             msb_asset: msb-linux-x86_64
+            metrics_asset: msb-metrics-linux-x86_64
             libkrunfw_asset: libkrunfw-linux-x86_64.so
           - arch: arm64
             runner: ubuntu-24.04-arm
             artifact: release-linux-aarch64
             msb_asset: msb-linux-aarch64
+            metrics_asset: msb-metrics-linux-aarch64
             libkrunfw_asset: libkrunfw-linux-aarch64.so
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-context.outputs.source_sha }}
 
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.artifact }}
           path: release-artifacts
@@ -1668,12 +1802,13 @@ jobs:
         run: |
           mkdir -p packaging/docker/build/${{ matrix.arch }}
           cp release-artifacts/${{ matrix.msb_asset }} packaging/docker/build/${{ matrix.arch }}/msb
+          cp release-artifacts/${{ matrix.metrics_asset }} packaging/docker/build/${{ matrix.arch }}/msb-metrics
           cp release-artifacts/${{ matrix.libkrunfw_asset }} packaging/docker/build/${{ matrix.arch }}/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
-          chmod +x packaging/docker/build/${{ matrix.arch }}/msb
+          chmod +x packaging/docker/build/${{ matrix.arch }}/{msb,msb-metrics}
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1694,7 +1829,7 @@ jobs:
           echo "${{ steps.push.outputs.digest }}" > /tmp/digests/${{ matrix.arch }}.txt
 
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docker-digest-${{ matrix.arch }}
           path: /tmp/digests/${{ matrix.arch }}.txt
@@ -1704,20 +1839,20 @@ jobs:
   # ---------------------------------------------------------------------------
   docker-manifest:
     name: Docker manifest
-    needs: docker-build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release-context, docker-build]
+    if: needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       packages: write
     steps:
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: digests
           pattern: docker-digest-*
           merge-multiple: true
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1727,10 +1862,12 @@ jobs:
         id: meta
         with:
           images: ghcr.io/superradcompany/microsandbox
+          flavor: latest=false
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=semver,pattern={{version}},value=${{ needs.release-context.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-context.outputs.tag }},enable=${{ needs.release-context.outputs.channel == 'stable' }}
+            type=raw,value=latest,enable=${{ needs.release-context.outputs.channel == 'stable' }}
+            type=raw,value=rc,enable=${{ needs.release-context.outputs.channel == 'rc' }}
 
       - name: Create multi-arch manifest
         run: |

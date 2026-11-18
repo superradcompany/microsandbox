@@ -13,6 +13,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
+// Each test creates a fresh sandbox name. Avoid replacement: its conservative
+// stale-runtime probe can time out on a busy CI host before this test boots a VM.
+
 // Constants
 
 const CURL_IMAGE: &str = "mirror.gcr.io/curlimages/curl";
@@ -336,14 +339,13 @@ async fn https_connect_proxy_substitutes_secret_in_authorization_header() {
         .await
         .expect("proxy fixture");
     let proxy_port = proxy.port();
-    let name = "http-connect-secret-auth";
+    let name = format!("http-connect-secret-auth-{:016x}", rand::random::<u64>());
 
-    let sb = Sandbox::builder(name)
+    let sb = Sandbox::builder(&name)
         .image(CURL_IMAGE)
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
@@ -396,7 +398,7 @@ async fn https_connect_proxy_substitutes_secret_in_authorization_header() {
     );
 
     let _ = proxy.join().await;
-    teardown(sb, name).await;
+    teardown(sb, &name).await;
 }
 
 #[msb_test]
@@ -409,14 +411,16 @@ async fn https_connect_proxy_blocks_secret_for_wrong_host() {
         .await
         .expect("proxy fixture");
     let proxy_port = proxy.port();
-    let name = "http-connect-secret-wrong-host";
+    let name = format!(
+        "http-connect-secret-wrong-host-{:016x}",
+        rand::random::<u64>()
+    );
 
-    let sb = Sandbox::builder(name)
+    let sb = Sandbox::builder(&name)
         .image(CURL_IMAGE)
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
@@ -434,31 +438,34 @@ async fn https_connect_proxy_blocks_secret_for_wrong_host() {
 
     let out = sb
         .shell(format!(
-            r#"set +e
-curl -k --http1.1 -m 10 -sS -o /dev/null \
-  -w 'code=%{{http_code}}' \
+            r#"curl -k --http1.1 -m 10 -sS -o /tmp/denial \
+  -w '%{{http_code}}\n' \
   -H "Authorization: Bearer $API_KEY" \
   --proxytunnel \
   --proxy http://host.microsandbox.internal:{proxy_port} \
-  https://host.microsandbox.internal:{target_port}/api
-echo "status=$?"
+  https://host.microsandbox.internal:{target_port}/api && cat /tmp/denial
 "#
         ))
         .await
         .expect("curl wrong host");
 
     let stdout = out.stdout().unwrap_or_default();
-    if stdout.trim_end().ends_with("status=0") {
-        let auth =
-            tokio::time::timeout(std::time::Duration::from_secs(5), target.received_auth()).await;
-        let auth_val = match auth {
-            Ok(Ok(a)) => a,
-            _ => String::new(),
-        };
-        panic!(
-            "expected curl to fail when secret host does not match tunnel target; got: {stdout:?}; target auth: {auth_val:?}"
-        );
-    }
+    let (code, body) = stdout.split_once('\n').expect("HTTP status and body");
+    assert_eq!(
+        code,
+        "403",
+        "stdout: {stdout}, stderr: {}",
+        out.stderr().unwrap_or_default()
+    );
+    let error: serde_json::Value = serde_json::from_str(body).expect("complete JSON body");
+    assert_eq!(
+        error,
+        serde_json::json!({
+            "code": "secret_policy_denied",
+            "message": "Request blocked by secret policy.",
+            "domain": "host.microsandbox.internal"
+        })
+    );
 
     let auth =
         tokio::time::timeout(std::time::Duration::from_secs(5), target.received_auth()).await;
@@ -472,7 +479,7 @@ echo "status=$?"
     );
 
     drop(proxy);
-    teardown(sb, name).await;
+    teardown(sb, &name).await;
 }
 
 #[msb_test]
@@ -486,14 +493,16 @@ async fn https_connect_proxy_leaves_non_intercepted_target_port_opaque() {
         .expect("proxy fixture");
     let proxy_port = proxy.port();
     let intercepted_port = if target_port == 443 { 444 } else { 443 };
-    let name = "http-connect-secret-non-intercepted";
+    let name = format!(
+        "http-connect-secret-non-intercepted-{:016x}",
+        rand::random::<u64>()
+    );
 
-    let sb = Sandbox::builder(name)
+    let sb = Sandbox::builder(&name)
         .image(CURL_IMAGE)
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
@@ -549,7 +558,7 @@ async fn https_connect_proxy_leaves_non_intercepted_target_port_opaque() {
     );
 
     let _ = proxy.join().await;
-    teardown(sb, name).await;
+    teardown(sb, &name).await;
 }
 
 #[msb_test]
@@ -558,14 +567,16 @@ async fn https_connect_proxy_blocks_secret_in_outer_connect_headers() {
         .await
         .expect("proxy capture fixture");
     let proxy_port = proxy.port();
-    let name = "http-connect-secret-outer-header";
+    let name = format!(
+        "http-connect-secret-outer-header-{:016x}",
+        rand::random::<u64>()
+    );
 
-    let sb = Sandbox::builder(name)
+    let sb = Sandbox::builder(&name)
         .image(CURL_IMAGE)
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
@@ -605,7 +616,7 @@ echo "status=$?"
         "CONNECT proxy must not receive a raw placeholder or real secret in outer headers; got: {proxy_auth:?}"
     );
 
-    teardown(sb, name).await;
+    teardown(sb, &name).await;
 }
 
 /// Corporate proxy topology where the target is never DNS-resolved by the guest.
@@ -620,14 +631,16 @@ async fn https_connect_proxy_substitutes_secret_when_target_not_in_dns_cache() {
         .await
         .expect("proxy fixture");
     let proxy_port = proxy.port();
-    let name = "http-connect-secret-no-dns-cache";
+    let name = format!(
+        "http-connect-secret-no-dns-cache-{:016x}",
+        rand::random::<u64>()
+    );
 
-    let sb = Sandbox::builder(name)
+    let sb = Sandbox::builder(&name)
         .image(CURL_IMAGE)
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| s.env("API_KEY").value(REAL_SECRET).allow(FAKE_TARGET_HOST))
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
@@ -680,7 +693,7 @@ curl -k --http1.1 -m 30 -sS -o /dev/null \
     );
 
     let _ = proxy.join().await;
-    teardown(sb, name).await;
+    teardown(sb, &name).await;
 }
 
 /// Same corporate proxy topology, but the guest DNS-resolves the target before
@@ -696,14 +709,16 @@ async fn https_connect_proxy_substitutes_secret_after_prior_dns_lookup() {
         .await
         .expect("proxy fixture");
     let proxy_port = proxy.port();
-    let name = "http-connect-secret-dns-pre-resolved";
+    let name = format!(
+        "http-connect-secret-dns-pre-resolved-{:016x}",
+        rand::random::<u64>()
+    );
 
-    let sb = Sandbox::builder(name)
+    let sb = Sandbox::builder(&name)
         .image(CURL_IMAGE)
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| s.env("API_KEY").value(REAL_SECRET).allow(FAKE_TARGET_HOST))
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
@@ -758,5 +773,5 @@ curl -k --http1.1 -m 30 -sS -o /dev/null \
     );
 
     let _ = proxy.join().await;
-    teardown(sb, name).await;
+    teardown(sb, &name).await;
 }

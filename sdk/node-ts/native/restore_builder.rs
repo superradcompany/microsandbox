@@ -5,6 +5,7 @@ use napi_derive::napi;
 
 use crate::error::to_napi_error;
 use crate::mount_builder::JsMountBuilder;
+use crate::network_builder::accept_queue_size;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::pull_progress::JsPullProgressStream;
 use crate::sandbox::Sandbox;
@@ -55,7 +56,8 @@ impl JsRestoreBuilder {
 
     /// Set destination CPUs; full execution restore requires the captured count.
     #[napi]
-    pub fn cpus(&mut self, count: u32) -> Result<&Self> {
+    pub fn cpus(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::uint32(count, "count")?;
         let count =
             u8::try_from(count).map_err(|_| napi::Error::from_reason("cpus out of u8 range"))?;
         self.inner = Some(self.take_inner()?.cpus(count));
@@ -64,7 +66,8 @@ impl JsRestoreBuilder {
 
     /// Set destination memory in MiB; full execution restore requires captured geometry.
     #[napi]
-    pub fn memory(&mut self, mib: u32) -> Result<&Self> {
+    pub fn memory(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
         self.inner = Some(self.take_inner()?.memory(Mebibytes::from(mib)));
         Ok(self)
     }
@@ -104,20 +107,22 @@ impl JsRestoreBuilder {
 
     /// @deprecated Use maxTcpConnections instead.
     #[napi(js_name = "maxConnections")]
-    pub fn max_connections(&mut self, count: u32) -> Result<&Self> {
+    pub fn max_connections(&mut self, count: f64) -> Result<&Self> {
         self.max_tcp_connections(count)
     }
 
     /// Cap destination host-side TCP connections; zero selects unlimited.
     #[napi(js_name = "maxTcpConnections")]
-    pub fn max_tcp_connections(&mut self, count: u32) -> Result<&Self> {
+    pub fn max_tcp_connections(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::safe_integer(count, "count")?;
         self.inner = Some(self.take_inner()?.max_tcp_connections(count as usize));
         Ok(self)
     }
 
     /// Cap destination host-side UDP sessions; zero selects unlimited.
     #[napi(js_name = "maxUdpConnections")]
-    pub fn max_udp_connections(&mut self, count: u32) -> Result<&Self> {
+    pub fn max_udp_connections(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::safe_integer(count, "count")?;
         self.inner = Some(self.take_inner()?.max_udp_connections(count as usize));
         Ok(self)
     }
@@ -191,14 +196,20 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
-    /// Restore a full snapshot with private copy-on-write memory.
+    /// @deprecated Use cowMemory() instead.
     #[napi]
     pub fn forked(&mut self) -> Result<&Self> {
+        self.cow_memory()
+    }
+
+    /// Restore a full snapshot with private copy-on-write memory.
+    #[napi]
+    pub fn cow_memory(&mut self) -> Result<&Self> {
         let prev = self
             .inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("builder already consumed"))?;
-        self.inner = Some(prev.forked());
+        self.inner = Some(prev.cow_memory());
         Ok(self)
     }
 
@@ -271,7 +282,9 @@ impl JsRestoreBuilder {
 
     /// Publish a TCP port from host -> guest.
     #[napi]
-    pub fn port(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -283,7 +296,9 @@ impl JsRestoreBuilder {
 
     /// Publish a TCP port from host -> guest on a specific host bind address.
     #[napi(js_name = "portBind")]
-    pub fn port_bind(&mut self, bind: String, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_bind(&mut self, bind: String, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -296,7 +311,9 @@ impl JsRestoreBuilder {
 
     /// Publish a UDP port from host -> guest.
     #[napi(js_name = "portUdp")]
-    pub fn port_udp(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_udp(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -311,9 +328,11 @@ impl JsRestoreBuilder {
     pub fn port_udp_bind(
         &mut self,
         bind: String,
-        host_port: u32,
-        guest_port: u32,
+        host_port: f64,
+        guest_port: f64,
     ) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -324,9 +343,27 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default.
+    #[napi(js_name = "maxInboundTcpConnections")]
+    pub fn max_inbound_tcp_connections(&mut self, value: f64) -> Result<&Self> {
+        let value = crate::numeric::safe_integer(value, "maxInboundTcpConnections")?;
+        let prev = self.take_inner()?;
+        self.inner = Some(prev.max_inbound_tcp_connections(value as usize));
+        Ok(self)
+    }
+
+    /// Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647.
+    #[napi(js_name = "tcpAcceptQueueSize")]
+    pub fn tcp_accept_queue_size(&mut self, size: f64) -> Result<&Self> {
+        let size = accept_queue_size(size).map_err(napi::Error::from_reason)?;
+        self.inner = Some(self.take_inner()?.tcp_accept_queue_size(size));
+        Ok(self)
+    }
+
     /// Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port.
     #[napi]
-    pub fn vsock(&mut self, host_path: String, port: u32) -> Result<&Self> {
+    pub fn vsock(&mut self, host_path: String, port: f64) -> Result<&Self> {
+        let port = crate::numeric::uint32(port, "port")?;
         let prev = self.take_inner()?;
         self.inner = Some(prev.vsock(host_path, port));
         Ok(self)
@@ -334,7 +371,8 @@ impl JsRestoreBuilder {
 
     /// Expose a host Unix datagram socket on a guest-to-host vsock port.
     #[napi(js_name = "vsockDgram")]
-    pub fn vsock_dgram(&mut self, host_path: String, port: u32) -> Result<&Self> {
+    pub fn vsock_dgram(&mut self, host_path: String, port: f64) -> Result<&Self> {
+        let port = crate::numeric::uint32(port, "port")?;
         let prev = self.take_inner()?;
         self.inner = Some(prev.vsock_dgram(host_path, port));
         Ok(self)
@@ -399,6 +437,26 @@ fn duration_seconds(seconds: f64) -> std::result::Result<u64, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::duration_seconds;
+    use crate::network_builder::accept_queue_size;
+
+    #[test]
+    fn accept_queue_size_rejects_values_n_api_would_wrap_or_truncate() {
+        for value in [1.0, 4096.0, 2_147_483_647.0] {
+            assert_eq!(accept_queue_size(value).unwrap(), value as u32);
+        }
+        for value in [
+            0.0,
+            -1.0,
+            1.5,
+            4_294_967_297.0,
+            -4_294_967_295.0,
+            2_147_483_648.0,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            assert!(accept_queue_size(value).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn restore_duration_preserves_zero_and_rounds_positive_limits_up() {

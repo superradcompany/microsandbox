@@ -60,6 +60,22 @@ pub const SNAPSHOT_GROUPS_MIGRATION_ID: &str = "m20260910_000001_snapshot_groups
 /// Normalizes saved secret policies to the current representation.
 pub const SECRET_CONFIG_MIGRATION_ID: &str = "m20260922_000001_migrate_secret_config";
 
+/// Migration that prevents old binaries from discarding the guest clock policy.
+pub const GUEST_CLOCK_CONFIG_MIGRATION_ID: &str = "m20261001_000001_guest_clock_config";
+
+/// Migration that retains sparse caller overrides beside resolved sandbox settings.
+pub const SANDBOX_CALLER_CONFIG_OVERRIDES_MIGRATION_ID: &str =
+    "m20261022_000001_sandbox_caller_config_overrides";
+
+/// Migration that retains ownership of unfinished sandbox creation.
+pub const SANDBOX_CREATION_MIGRATION_ID: &str = "m20261024_000001_sandbox_creation";
+
+/// Migration that retains ownership of unfinished standalone volume creation.
+pub const VOLUME_CREATION_MIGRATION_ID: &str = "m20261029_000001_volume_creation";
+
+/// Migration that excludes old tools from protected sandbox state.
+pub const PROTECTED_SANDBOX_STATE_MIGRATION_ID: &str = "m20261030_000001_protected_sandbox_state";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -285,6 +301,41 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "retain secret policies only when the target can represent them",
     },
+    MigrationMetadata {
+        id: GUEST_CLOCK_CONFIG_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove the compatibility marker only when no sandbox disables guest clock sync",
+    },
+    MigrationMetadata {
+        id: SANDBOX_CALLER_CONFIG_OVERRIDES_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: true,
+        summary: "drop sparse caller intent while keeping resolved sandbox configuration",
+    },
+    MigrationMetadata {
+        id: SANDBOX_CREATION_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: true,
+        summary: "remove creation recovery columns only when no incomplete creates remain",
+    },
+    MigrationMetadata {
+        id: VOLUME_CREATION_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: true,
+        summary: "remove volume recovery state only when no incomplete volumes remain",
+    },
+    MigrationMetadata {
+        id: PROTECTED_SANDBOX_STATE_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: true,
+        summary: "refuse downgrade while protected or migrating sandboxes remain",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -371,6 +422,11 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            PROTECTED_SANDBOX_STATE_MIGRATION_ID,
+            VOLUME_CREATION_MIGRATION_ID,
+            SANDBOX_CREATION_MIGRATION_ID,
+            SANDBOX_CALLER_CONFIG_OVERRIDES_MIGRATION_ID,
+            GUEST_CLOCK_CONFIG_MIGRATION_ID,
             SECRET_CONFIG_MIGRATION_ID,
             SNAPSHOT_GROUPS_MIGRATION_ID,
             SNAPSHOT_IDENTITY_MIGRATION_ID,
@@ -458,7 +514,12 @@ mod tests {
             &[
                 SNAPSHOT_IDENTITY_MIGRATION_ID,
                 SNAPSHOT_GROUPS_MIGRATION_ID,
-                SECRET_CONFIG_MIGRATION_ID
+                SECRET_CONFIG_MIGRATION_ID,
+                GUEST_CLOCK_CONFIG_MIGRATION_ID,
+                SANDBOX_CALLER_CONFIG_OVERRIDES_MIGRATION_ID,
+                SANDBOX_CREATION_MIGRATION_ID,
+                VOLUME_CREATION_MIGRATION_ID,
+                PROTECTED_SANDBOX_STATE_MIGRATION_ID,
             ],
         );
         assert!(canonical_applied_prefix(released).is_some());

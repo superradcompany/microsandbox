@@ -62,10 +62,14 @@ impl JsImageBuilder {
         &mut self,
         env: &Env,
         size_mib_or_configure: Either<
-            u32,
+            f64,
             Function<ClassInstance<JsRootDiskBuilder>, ClassInstance<JsRootDiskBuilder>>,
         >,
     ) -> Result<&Self> {
+        let size_mib_or_configure = match size_mib_or_configure {
+            Either::A(size) => Either::A(crate::numeric::uint32(size, "sizeMib")?),
+            Either::B(configure) => Either::B(configure),
+        };
         let prev = self.take_inner();
         match size_mib_or_configure {
             Either::A(size_mib) => {
@@ -85,10 +89,12 @@ impl JsImageBuilder {
     ///
     /// @deprecated Use `rootDisk` instead.
     #[napi(js_name = "upperSize")]
-    pub fn upper_size(&mut self, size_mib: u32) -> &Self {
+    pub fn upper_size(&mut self, size_mib: f64) -> Result<&Self> {
+        let size_mib = crate::numeric::uint32(size_mib, "size_mib")?;
+
         let prev = self.take_inner();
         self.inner = Some(prev.root_disk(Mebibytes::from(size_mib)));
-        self
+        Ok(self)
     }
 
     /// Use a host disk image file as the root filesystem. The format is

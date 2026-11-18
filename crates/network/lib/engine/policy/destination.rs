@@ -5,7 +5,7 @@ use std::net::IpAddr;
 
 use ipnetwork::IpNetwork;
 
-use crate::addr::normalize_ip_addr;
+use crate::addr::{nat64_embedded_ipv4_addr, normalize_ip_addr};
 use crate::netstack::shared::SharedState;
 use crate::policy::DestinationGroup;
 
@@ -39,6 +39,7 @@ pub fn matches_group(group: DestinationGroup, addr: IpAddr, shared: &SharedState
 /// a public profile cannot make `0.0.0.0` or `::` reachable.
 fn addr_classify(addr: IpAddr, shared: &SharedState) -> Option<DestinationGroup> {
     let addr = normalize_ip_addr(addr);
+    let addr = nat64_ipv4_projection(addr, shared).unwrap_or(addr);
 
     if addr.is_unspecified() {
         None
@@ -48,7 +49,7 @@ fn addr_classify(addr: IpAddr, shared: &SharedState) -> Option<DestinationGroup>
         Some(DestinationGroup::Metadata)
     } else if is_loopback(addr) {
         Some(DestinationGroup::Loopback)
-    } else if is_private(addr) {
+    } else if is_private(addr, shared) {
         Some(DestinationGroup::Private)
     } else if is_link_local(addr) {
         Some(DestinationGroup::LinkLocal)
@@ -64,8 +65,12 @@ fn addr_classify(addr: IpAddr, shared: &SharedState) -> Option<DestinationGroup>
 /// unit tests that don't exercise Host rules).
 fn matches_host(addr: IpAddr, shared: &SharedState) -> bool {
     match addr {
-        IpAddr::V4(v4) => shared.gateway_ipv4().is_some_and(|gw| gw == v4),
-        IpAddr::V6(v6) => shared.gateway_ipv6().is_some_and(|gw| gw == v6),
+        IpAddr::V4(v4) => {
+            shared.gateway_ipv4().is_some_and(|gw| gw == v4) || shared.host_ipv4().contains(&v4)
+        }
+        IpAddr::V6(v6) => {
+            shared.gateway_ipv6().is_some_and(|gw| gw == v6) || shared.host_ipv6().contains(&v6)
+        }
     }
 }
 
@@ -76,7 +81,7 @@ fn is_loopback(addr: IpAddr) -> bool {
     }
 }
 
-fn is_private(addr: IpAddr) -> bool {
+fn is_private(addr: IpAddr, shared: &SharedState) -> bool {
     match addr {
         IpAddr::V4(v4) => {
             let octets = v4.octets();
@@ -88,11 +93,21 @@ fn is_private(addr: IpAddr) -> bool {
             || (octets[0] == 192 && octets[1] == 168)
             // 100.64.0.0/10 (Carrier-grade NAT / shared address space)
             || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+                || shared
+                    .host_ipv4_networks()
+                    .iter()
+                    .any(|network| network.contains(v4))
         }
         IpAddr::V6(v6) => {
             let segments = v6.segments();
             // fc00::/7 (ULA — Unique Local Address)
             (segments[0] & 0xfe00) == 0xfc00
+                // Global addresses on the host's on-link prefixes are local
+                // network destinations, even though they are not ULA.
+                || shared
+                    .host_ipv6_networks()
+                    .iter()
+                    .any(|network| network.contains(v6))
         }
     }
 }
@@ -130,10 +145,22 @@ fn is_multicast(addr: IpAddr) -> bool {
 }
 
 /// Returns `true` if `addr` matches a CIDR network.
-pub fn matches_cidr(network: &IpNetwork, addr: IpAddr) -> bool {
+pub fn matches_cidr(network: &IpNetwork, addr: IpAddr, shared: &SharedState) -> bool {
     let addr = normalize_ip_addr(addr);
 
     network.contains(addr)
+        || nat64_ipv4_projection(addr, shared).is_some_and(|v4| network.contains(v4))
+}
+
+/// Return the embedded IPv4 policy projection for a NAT64 destination.
+///
+/// The returned address is only for policy matching. The original IPv6 address
+/// remains the transport destination.
+fn nat64_ipv4_projection(addr: IpAddr, shared: &SharedState) -> Option<IpAddr> {
+    match addr {
+        IpAddr::V6(v6) => nat64_embedded_ipv4_addr(v6, shared.nat64_prefixes()).map(IpAddr::V4),
+        IpAddr::V4(_) => None,
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -157,6 +184,17 @@ mod tests {
         s.set_gateway_ips(
             Some(Ipv4Addr::new(198, 18, 0, 1)),
             Some("fd42:6d73:62::1".parse().unwrap()),
+        );
+        s
+    }
+
+    fn with_host_addresses() -> SharedState {
+        let s = SharedState::new(4);
+        s.set_host_networks(
+            vec![Ipv4Addr::new(192, 0, 2, 10)],
+            vec!["192.0.2.0/24".parse().unwrap()],
+            vec!["2001:db8:1:2::10".parse().unwrap()],
+            vec!["2001:db8:1:2::/64".parse().unwrap()],
         );
         s
     }
@@ -230,6 +268,56 @@ mod tests {
     }
 
     #[test]
+    fn host_interface_addresses_are_host_group() {
+        let s = with_host_addresses();
+        assert!(matches_group(
+            DestinationGroup::Host,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            &s,
+        ));
+        assert!(matches_group(
+            DestinationGroup::Host,
+            IpAddr::V6("2001:db8:1:2::10".parse().unwrap()),
+            &s,
+        ));
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("2001:db8:1:2::10".parse().unwrap()),
+            &s,
+        ));
+    }
+
+    #[test]
+    fn global_ipv6_on_host_link_is_private() {
+        let s = with_host_addresses();
+        assert!(matches_group(
+            DestinationGroup::Private,
+            IpAddr::V6("2001:db8:1:2::1".parse().unwrap()),
+            &s,
+        ));
+        assert!(matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("2001:db8:1:3::1".parse().unwrap()),
+            &s,
+        ));
+    }
+
+    #[test]
+    fn ipv4_on_host_link_is_private() {
+        let s = with_host_addresses();
+        assert!(matches_group(
+            DestinationGroup::Private,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+            &s,
+        ));
+        assert!(matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 11)),
+            &s,
+        ));
+    }
+
+    #[test]
     fn ipv4_mapped_ipv6_uses_embedded_ipv4_group() {
         let s = no_host();
 
@@ -253,6 +341,42 @@ mod tests {
             IpAddr::V6("::ffff:10.0.0.1".parse().unwrap()),
             &s,
         ));
+    }
+
+    #[test]
+    fn nat64_addresses_use_embedded_ipv4_group() {
+        let s = no_host();
+        s.set_nat64_prefixes(vec![
+            "64:ff9b::/96".parse().unwrap(),
+            "2001:db8:64::/96".parse().unwrap(),
+        ]);
+        let cases = [
+            ("64:ff9b::a9fe:a9fe", DestinationGroup::Metadata),
+            ("64:ff9b::7f00:1", DestinationGroup::Loopback),
+            ("2001:db8:64::a00:1", DestinationGroup::Private),
+        ];
+
+        for (addr, expected) in cases {
+            let addr = IpAddr::V6(addr.parse().unwrap());
+            assert!(matches_group(expected, addr, &s));
+            assert!(!matches_group(DestinationGroup::Public, addr, &s));
+        }
+    }
+
+    #[test]
+    fn untrusted_transition_addresses_remain_ordinary_ipv6() {
+        let s = no_host();
+
+        for addr in [
+            "2002:0808:0808::1",
+            "2001:0000:4136:e378:8000:63bf:f7f7:f7f7",
+        ] {
+            assert!(matches_group(
+                DestinationGroup::Public,
+                IpAddr::V6(addr.parse().unwrap()),
+                &s,
+            ));
+        }
     }
 
     #[test]
@@ -323,18 +447,56 @@ mod tests {
 
     #[test]
     fn cidr_match() {
+        let s = no_host();
         let net: IpNetwork = "10.0.0.0/8".parse().unwrap();
-        assert!(matches_cidr(&net, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))));
-        assert!(!matches_cidr(&net, IpAddr::V4(Ipv4Addr::new(11, 0, 0, 1))));
+        assert!(matches_cidr(
+            &net,
+            IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)),
+            &s,
+        ));
+        assert!(!matches_cidr(
+            &net,
+            IpAddr::V4(Ipv4Addr::new(11, 0, 0, 1)),
+            &s,
+        ));
     }
 
     #[test]
     fn cidr_match_uses_embedded_ipv4_for_ipv4_mapped_ipv6() {
+        let s = no_host();
         let net: IpNetwork = "169.254.0.0/16".parse().unwrap();
 
         assert!(matches_cidr(
             &net,
             IpAddr::V6("::ffff:169.254.169.254".parse().unwrap()),
+            &s,
+        ));
+    }
+
+    #[test]
+    fn cidr_match_uses_embedded_ipv4_for_nat64_addresses() {
+        let s = no_host();
+        s.set_nat64_prefixes(vec![
+            "64:ff9b::/96".parse().unwrap(),
+            "2001:db8:64::/96".parse().unwrap(),
+        ]);
+        let metadata: IpNetwork = "169.254.0.0/16".parse().unwrap();
+        let private: IpNetwork = "10.0.0.0/8".parse().unwrap();
+
+        assert!(matches_cidr(
+            &metadata,
+            IpAddr::V6("64:ff9b::a9fe:a9fe".parse().unwrap()),
+            &s,
+        ));
+        assert!(matches_cidr(
+            &private,
+            IpAddr::V6("2001:db8:64::a00:1".parse().unwrap()),
+            &s,
+        ));
+        assert!(!matches_cidr(
+            &private,
+            IpAddr::V6("2002:0a00:0001::1".parse().unwrap()),
+            &s,
         ));
     }
 

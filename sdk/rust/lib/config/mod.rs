@@ -25,6 +25,9 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use microsandbox_protocol::{
+    FS_STATE_LIMIT_DEFAULT_MIB, FS_STATE_LIMIT_MAX_MIB, FS_STATE_LIMIT_MIN_MIB,
+};
 use microsandbox_types::SandboxLogLevel as LogLevel;
 use microsandbox_types::{
     ConfigPatch, CpuPlacement, DeploymentProfile, OutboundProxy, PlacementProfile, RootDisk,
@@ -32,14 +35,14 @@ use microsandbox_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::backend::Profile;
+use crate::backend::{BackendKind, Profile};
 #[cfg(feature = "local")]
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
 #[cfg(test)]
 use std::path::Path;
 
-mod runtime_paths;
+pub(crate) mod runtime_paths;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -122,10 +125,10 @@ mod deployment_profile_serde {
 
 /// Explicit process-level executable override, below `MSB_PATH` and above
 /// configuration and filesystem candidates. Package discovery uses its own fallback.
-static SDK_MSB_PATH: OnceLock<PathBuf> = OnceLock::new();
+static SDK_MSB_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 /// Explicit process-level firmware override set via [`set_sdk_libkrunfw_path`].
-static SDK_LIBKRUNFW_PATH: OnceLock<PathBuf> = OnceLock::new();
+static SDK_LIBKRUNFW_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -141,6 +144,10 @@ static SDK_LIBKRUNFW_PATH: OnceLock<PathBuf> = OnceLock::new();
 #[derive(Default, ConfigPatch)]
 #[config_patch(serde)]
 pub struct GlobalConfig {
+    /// Backends permitted on this device. `None` allows both; an empty list is invalid.
+    /// Managed values replace user restrictions, including an explicit null clear.
+    pub allowed_backends: Option<Vec<BackendKind>>,
+
     /// Profile selected when no backend or profile is explicitly requested.
     /// Empty or absent uses the local backend fallback.
     pub active_profile: Option<String>,
@@ -197,6 +204,10 @@ pub struct GlobalConfig {
     /// Live metrics registry configuration.
     #[config_patch(nested)]
     pub metrics: MetricsConfig,
+
+    /// Snapshot capture and restore limits.
+    #[config_patch(nested)]
+    pub snapshots: SnapshotsConfig,
 }
 
 /// Compatibility alias for the backend-owned global configuration.
@@ -213,6 +224,16 @@ pub struct SshConfig {
     ///
     /// A value of `0` disables the inactivity timeout.
     pub inactivity_timeout_secs: u64,
+}
+
+/// Snapshot capture and restore limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[derive(ConfigPatch)]
+#[config_patch(serde)]
+pub struct SnapshotsConfig {
+    /// Virtio-fs backend state budget per device, in MiB. Valid values are 1 through 4095.
+    pub max_filesystem_state_mib: u32,
 }
 
 /// Live metrics registry configuration.
@@ -316,6 +337,10 @@ pub struct SandboxDefaults {
 
     /// Default guest transparent huge-page policy.
     pub thp: TransparentHugePagePolicy,
+
+    /// Explicit default nested virtualization policy. Omission uses the runtime default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nested_virt: Option<bool>,
 
     /// Default OCI rootfs settings.
     #[config_patch(nested)]
@@ -447,6 +472,29 @@ impl GlobalConfig {
         Ok(())
     }
 
+    /// Validate the snapshot limits.
+    pub(crate) fn validate_snapshots(&self) -> MicrosandboxResult<()> {
+        let mib = self.snapshots.max_filesystem_state_mib;
+        if !(FS_STATE_LIMIT_MIN_MIB..=FS_STATE_LIMIT_MAX_MIB).contains(&mib) {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "snapshots.max_filesystem_state_mib must be between \
+                 {FS_STATE_LIMIT_MIN_MIB} and {FS_STATE_LIMIT_MAX_MIB}, got {mib}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Virtio-fs backend state budget per device, in bytes.
+    pub(crate) fn fs_state_limit(&self) -> usize {
+        self.snapshots.max_filesystem_state_mib as usize * 1024 * 1024
+    }
+
+    /// Launch override for the virtio-fs state budget, or `None` at the default.
+    pub(crate) fn fs_state_limit_override(&self) -> Option<u64> {
+        (self.snapshots.max_filesystem_state_mib != FS_STATE_LIMIT_DEFAULT_MIB)
+            .then(|| self.fs_state_limit() as u64)
+    }
+
     /// Resolve and structurally validate a host-owned placement profile.
     pub(crate) fn resolve_placement_profile(
         &self,
@@ -564,17 +612,23 @@ impl GlobalConfig {
 
 impl PathsConfigPatch {
     /// Capture runtime paths from the environment, falling back to SDK-provided paths.
-    pub(crate) fn from_env_or_sdk() -> Self {
-        let libkrunfw = std::env::var("MSB_LIBKRUNFW_PATH")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(sdk_libkrunfw_path);
-
-        let msb = std::env::var("MSB_PATH")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(sdk_msb_path);
-
+    pub(crate) fn from_env_or_sdk(managed: &Self) -> MicrosandboxResult<Self> {
+        // A failed infallible SDK registration must not silently fall back to another
+        // runtime. Higher-priority environment or managed values can replace it.
+        let runtime_path =
+            |name: &str, managed: bool, sdk: fn() -> MicrosandboxResult<Option<PathBuf>>| {
+                match std::env::var(name).ok() {
+                    Some(path) => Ok(Some(PathBuf::from(path))),
+                    None if managed => Ok(None),
+                    None => sdk(),
+                }
+            };
+        let libkrunfw = runtime_path(
+            "MSB_LIBKRUNFW_PATH",
+            managed.libkrunfw.is_some(),
+            sdk_libkrunfw_path,
+        )?;
+        let msb = runtime_path("MSB_PATH", managed.msb.is_some(), sdk_msb_path)?;
         let mut patch = Self::new();
         if let Some(msb) = msb {
             patch.msb_mut(msb);
@@ -585,7 +639,7 @@ impl PathsConfigPatch {
         if let Some(agentd) = std::env::var_os("MSB_AGENTD_PATH") {
             patch.agentd_mut(PathBuf::from(agentd));
         }
-        patch
+        Ok(patch)
     }
 }
 
@@ -612,6 +666,14 @@ impl Default for SshConfig {
     }
 }
 
+impl Default for SnapshotsConfig {
+    fn default() -> Self {
+        Self {
+            max_filesystem_state_mib: FS_STATE_LIMIT_DEFAULT_MIB,
+        }
+    }
+}
+
 impl Default for SandboxDefaults {
     fn default() -> Self {
         Self {
@@ -620,6 +682,7 @@ impl Default for SandboxDefaults {
             cpu_placement: CpuPlacement::Inherit,
             placement_profile: None,
             thp: TransparentHugePagePolicy::Madvise,
+            nested_virt: None,
             oci: OciSandboxDefaults::default(),
             shell: "/bin/sh".into(),
             workdir: None,
@@ -672,7 +735,9 @@ pub fn load_persisted_config_or_default() -> MicrosandboxResult<GlobalConfig> {
     Ok(GlobalConfigPatch::load()?.into_config())
 }
 
-/// Persist the provided local config to disk as pretty JSON.
+/// Persist every resolved local setting, including defaults, as pretty JSON.
+/// Use [`GlobalConfigPatch::load`] and [`GlobalConfigPatch::save`] to edit settings while
+/// preserving omitted fields.
 pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
     let patch: GlobalConfigPatch = serde_json::from_value(serde_json::to_value(config)?)?;
     patch.save()
@@ -685,12 +750,17 @@ pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
 /// This is an internal SDK bridge for runtimes where mutating `process.env`
 /// does not update the native process environment. User-provided `MSB_PATH`
 /// still wins over this value. Set-once: subsequent calls are ignored.
+/// Relative paths are captured at registration, before runtime discovery.
+///
+/// Resolution errors are retained and returned when runtime resolution is requested.
 pub fn set_sdk_msb_path(path: impl Into<PathBuf>) {
-    let _ = SDK_MSB_PATH.set(path.into());
+    if SDK_MSB_PATH.get().is_none() {
+        let _ = SDK_MSB_PATH.set(runtime_paths::anchor_registered_path(path.into()));
+    }
 }
 
-pub(crate) fn sdk_msb_path() -> Option<PathBuf> {
-    SDK_MSB_PATH.get().cloned()
+pub(crate) fn sdk_msb_path() -> MicrosandboxResult<Option<PathBuf>> {
+    runtime_paths::registered_path(&SDK_MSB_PATH)
 }
 
 /// Resolve the ambient runtime executable as part of a complete runtime pair.
@@ -706,12 +776,17 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
 /// `MSB_LIBKRUNFW_PATH` environment override still wins.
 ///
 /// Mirrors [`set_sdk_msb_path`]; both share the same precedence shape.
+/// Relative paths are captured at registration, before runtime discovery.
+///
+/// Resolution errors are retained and returned when runtime resolution is requested.
 pub fn set_sdk_libkrunfw_path(path: impl Into<PathBuf>) {
-    let _ = SDK_LIBKRUNFW_PATH.set(path.into());
+    if SDK_LIBKRUNFW_PATH.get().is_none() {
+        let _ = SDK_LIBKRUNFW_PATH.set(runtime_paths::anchor_registered_path(path.into()));
+    }
 }
 
-pub(crate) fn sdk_libkrunfw_path() -> Option<PathBuf> {
-    SDK_LIBKRUNFW_PATH.get().cloned()
+pub(crate) fn sdk_libkrunfw_path() -> MicrosandboxResult<Option<PathBuf>> {
+    runtime_paths::registered_path(&SDK_LIBKRUNFW_PATH)
 }
 
 /// Resolve the ambient firmware library as part of a complete runtime pair.
@@ -729,12 +804,16 @@ fn resolve_default_home() -> PathBuf {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use backend::{BackendContext, ContextProfile};
 pub(crate) use registry::RegistrySettingsPatch;
 pub use registry::{
     RegistriesConfig, RegistriesConfigPatch, RegistryAuthEntry, RegistryConfig,
     RegistryCredentialStore, RegistryEntry, RegistryEntryPatch, RegistryOptions,
     delete_registry_keyring_auth, get_registry_keyring_auth, set_registry_keyring_auth,
 };
+
+pub(crate) use runtime_paths::sdk_packaged_msb_path;
+pub use runtime_paths::set_sdk_packaged_msb_path;
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -756,6 +835,7 @@ mod tests {
     #[test]
     fn test_saved_patch_preserves_values_across_all_sections() {
         let expected = serde_json::json!({
+            "allowed_backends": ["local", "cloud"],
             "active_profile": "work",
             "profiles": {"work": {
                 "backend": "cloud",
@@ -822,7 +902,8 @@ mod tests {
                 }}
             },
             "ssh": {"inactivity_timeout_secs": 45},
-            "metrics": {"capacity": 128}
+            "metrics": {"capacity": 128},
+            "snapshots": {"max_filesystem_state_mib": 64}
         });
         let config: GlobalConfig = serde_json::from_value(expected.clone()).unwrap();
         let patch: GlobalConfigPatch = saved_patch(&config);
@@ -1327,6 +1408,31 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_filesystem_state_budget_is_range_checked() {
+        let parse = |mib: u32| -> GlobalConfig {
+            serde_json::from_value(serde_json::json!({
+                "snapshots": {"max_filesystem_state_mib": mib}
+            }))
+            .unwrap()
+        };
+        for mib in [0, 4096] {
+            let error = parse(mib).validate_snapshots().unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("snapshots.max_filesystem_state_mib must be between 1 and 4095")
+            );
+        }
+        for mib in [1, 4, 4095] {
+            parse(mib).validate_snapshots().unwrap();
+        }
+        let cfg = parse(64);
+        assert_eq!(cfg.fs_state_limit(), 64 * 1024 * 1024);
+        assert_eq!(cfg.fs_state_limit_override(), Some(64 * 1024 * 1024));
+        assert_eq!(GlobalConfig::default().fs_state_limit_override(), None);
+    }
+
+    #[test]
     fn test_deserialize_ssh_timeout_disabled() {
         let json = r#"{"ssh": {"inactivity_timeout_secs": 0}}"#;
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
@@ -1371,10 +1477,3 @@ mod tests {
         assert!(result.unwrap().is_empty());
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub(crate) use runtime_paths::sdk_packaged_msb_path;
-pub use runtime_paths::set_sdk_packaged_msb_path;

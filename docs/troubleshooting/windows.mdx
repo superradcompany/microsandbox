@@ -10,23 +10,29 @@ Windows support is currently in preview. To run sandboxes locally, use Windows 1
 
 Run the installer in PowerShell, then open a new terminal:
 
-```powershell
+<CodeGroup>
+```powershell PowerShell
 irm https://install.microsandbox.dev/windows | iex
 ```
+</CodeGroup>
 
 ## Quick checks
 
 Start with the doctor command:
 
-```powershell
+<CodeGroup>
+```powershell PowerShell
 msb doctor
 ```
+</CodeGroup>
 
 If the only failure is Windows Hypervisor Platform setup, let `msb` open the elevated fix prompt:
 
-```powershell
+<CodeGroup>
+```powershell PowerShell
 msb doctor --fix
 ```
+</CodeGroup>
 
 `msb doctor --fix` keeps the normal doctor command free of host-configuration changes. The normal check may create and immediately remove a small clone-capability probe inside `MSB_HOME`. The fix path opens an elevated PowerShell window and applies the supported host setup change.
 
@@ -34,17 +40,21 @@ msb doctor --fix
 
 microsandbox uses Windows Hypervisor Platform through libkrun. If you prefer to enable it manually, run this from an elevated PowerShell and reboot after it completes:
 
-```powershell
+<CodeGroup>
+```powershell PowerShell
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart
 ```
+</CodeGroup>
 
 `HypervisorPlatform` is separate from `VirtualMachinePlatform`, which Docker Desktop and WSL2 commonly enable. microsandbox needs `HypervisorPlatform` because that exposes the WHP API used by libkrun.
 
 You can check the feature state with:
 
-```powershell
+<CodeGroup>
+```powershell PowerShell
 Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 ```
+</CodeGroup>
 
 If the feature is enabled but `msb doctor` still reports that the hypervisor is unavailable, confirm that virtualization is enabled in firmware/UEFI, then reboot once.
 
@@ -54,9 +64,11 @@ The default Windows runtime root is `%USERPROFILE%\.microsandbox`. The CLI binar
 
 If Windows is finding a stale binary, check the command path:
 
-```powershell
+<CodeGroup>
+```powershell PowerShell
 where.exe msb
 ```
+</CodeGroup>
 
 If an error mentions `libkrunfw.so` or `libkrunfw.dylib`, clear any old Unix/macOS override in `MSB_LIBKRUNFW_PATH` or `config.json`, or point it at `libkrunfw.dll`.
 

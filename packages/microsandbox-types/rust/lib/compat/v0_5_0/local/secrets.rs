@@ -170,6 +170,9 @@ impl From<SecretInjection> for SecretSubstitution {
     fn from(value: SecretInjection) -> Self {
         Self {
             headers: value.headers || value.basic_auth,
+            // The previous format has no per-header allowlist, so every
+            // header is a substitution target.
+            header_fields: Vec::new(),
             query: value.query_params,
             body: value.body,
         }

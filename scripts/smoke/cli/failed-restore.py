@@ -57,7 +57,7 @@ try:
         cache.rename(held)
     cache.write_bytes(b"intentional isolated test obstruction")
     blocked = True
-    failure = call("restore-fails", "create", "--name", child, "--from-snapshot", snapshot, "--forked", expected=None)
+    failure = call("restore-fails", "create", "--name", child, "--from-snapshot", snapshot, "--cow-mem", expected=None)
     assert failure.returncode != 0
     call("failed-row-exists", "inspect", child)
     cache.unlink()
@@ -71,7 +71,7 @@ try:
         refused = call(label + "-refused", *args, expected=None)
         assert refused.returncode != 0 and "incomplete restore" in refused.stderr, rows[-1]
     assert layers() == before, "failed restore or later lifecycle mutated sealed disk bytes"
-    call("healthy-restore", "create", "--name", healthy, "--from-snapshot", snapshot, "--forked")
+    call("healthy-restore", "create", "--name", healthy, "--from-snapshot", snapshot, "--cow-mem")
     assert call("healthy-marker", "exec", healthy, "--", "cat", "/dev/shm/restore-marker").stdout.strip() == "preserved"
     call("healthy-stop", "stop", healthy)
     call("healthy-later-start", "start", healthy)

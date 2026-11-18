@@ -159,8 +159,16 @@ impl SingleFileFs {
     }
 
     /// Validate an external single-file checkpoint without opening destination paths.
+    pub fn validate_external_state_with_limit(bytes: &[u8], limit: usize) -> io::Result<()> {
+        mobility::validate_unavailable(bytes, limit)
+    }
+
+    /// Validate external state with the default filesystem budget.
     pub fn validate_external_state(bytes: &[u8]) -> io::Result<()> {
-        mobility::validate_unavailable(bytes)
+        Self::validate_external_state_with_limit(
+            bytes,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
     }
 
     /// Resolve the selected name and update its admission state.

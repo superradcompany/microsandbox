@@ -84,7 +84,7 @@ try:
 
     for storage, source in (("installed", "source:saved"), ("archive", archive)):
         for mode in ("eager", "forked"):
-            flags = ["--forked"] if mode == "forked" else []
+            flags = ["--cow-mem"] if mode == "forked" else []
             for case, options in cases.items():
                 name = f"{storage}-{mode}-{case}"
                 names.append(name)

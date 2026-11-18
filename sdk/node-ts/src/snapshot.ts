@@ -1,4 +1,5 @@
 import { UnsupportedError } from "./errors.js";
+import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import {
   napi,
@@ -474,6 +475,11 @@ export class Snapshot {
   async verify(): Promise<SnapshotVerifyReport> {
     const report = await withMappedErrors(() => this.inner.verify());
     return verifyReportToTs(report);
+  }
+
+  /** Observe this artifact's storage using its captured backend. */
+  async storageUsage(): Promise<StorageItemUsage> {
+    return storageUsageFromHandle(this.inner, "Snapshot.storageUsage()");
   }
 }
 

@@ -32,6 +32,9 @@ pub enum HostPermissions {
 /// Configuration for the Windows passthrough filesystem backend.
 #[derive(Debug, Clone)]
 pub struct PassthroughConfig {
+    /// Maximum serialized filesystem state per device, in bytes.
+    pub max_state_bytes: usize,
+
     /// Path to the root directory on the host.
     pub root_dir: PathBuf,
 
@@ -196,6 +199,8 @@ impl PassthroughFs {
             stat_store,
             quota,
             invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
+            map_windows: Mutex::new(DaxWindows::default()),
+            dax_files: DaxFiles::default(),
         })
     }
 
@@ -248,6 +253,7 @@ impl PassthroughFs {
 impl Default for PassthroughConfig {
     fn default() -> Self {
         Self {
+            max_state_bytes: msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
             root_dir: PathBuf::new(),
             no_symlink_root: false,
             stat_virtualization: StatVirtualization::Strict,

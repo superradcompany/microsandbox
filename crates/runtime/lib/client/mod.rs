@@ -10,6 +10,7 @@ pub mod control;
 #[cfg(windows)]
 pub mod disk_lock_handoff;
 pub mod ipc;
+pub mod jobs;
 pub mod launch;
 pub mod logging;
 pub mod maintenance;

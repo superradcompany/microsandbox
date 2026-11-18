@@ -39,7 +39,7 @@ struct InstallOptionsInput {
 //--------------------------------------------------------------------------------------------------
 
 impl RuntimeConfigInput {
-    fn resolve(self, sources: BackendConfig) -> MicrosandboxResult<GlobalConfig> {
+    fn options(self) -> GlobalConfigPatch {
         let mut options = GlobalConfigPatch::new();
         let mut paths = PathsConfigPatch::new();
         if let Some(home) = self.home {
@@ -51,7 +51,11 @@ impl RuntimeConfigInput {
         if let Some(library) = self.libkrunfw_path {
             paths.libkrunfw_mut(library);
         }
-        let sources = sources.prepare_for_local_backend(options.paths(paths))?;
+        options.paths(paths)
+    }
+
+    fn resolve(self, sources: BackendConfig) -> MicrosandboxResult<GlobalConfig> {
+        let sources = sources.prepare_for_local_backend(self.options())?;
         Ok(sources.resolved_config().as_ref().clone())
     }
 }
@@ -66,6 +70,26 @@ pub fn binding_runtime_config(json: &str) -> MicrosandboxResult<GlobalConfig> {
     let input: RuntimeConfigInput = serde_json::from_str(json)
         .map_err(|error| MicrosandboxError::Custom(format!("invalid runtime config: {error}")))?;
     input.resolve(BackendConfig::load()?)
+}
+
+/// Inspect storage through the common engine without constructing a backend.
+#[cfg(feature = "local")]
+#[doc(hidden)]
+pub async fn binding_diagnose_storage(
+    config_json: &str,
+    selection_json: &str,
+) -> MicrosandboxResult<String> {
+    let config: RuntimeConfigInput = serde_json::from_str(config_json).map_err(|_| {
+        MicrosandboxError::InvalidConfig("invalid storage diagnostic configuration".into())
+    })?;
+    let selection: super::StorageSelection =
+        serde_json::from_str(selection_json).map_err(|_| {
+            MicrosandboxError::InvalidConfig(
+                "storage diagnostics require named sandboxes or an explicit all selection".into(),
+            )
+        })?;
+    let diagnosis = super::diagnose_storage(config.options(), selection).await?;
+    Ok(serde_json::to_string(&diagnosis)?)
 }
 
 /// Decode the common installation options without acquiring any artifacts.
@@ -99,6 +123,29 @@ pub fn binding_install_options(json: &str) -> MicrosandboxResult<InstallOptions>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_lookup_allows_cloud_only_policy_but_rejects_invalid_policy() {
+        let _guard = crate::test_support::lock_env();
+        for (user, managed, valid) in [
+            (r#"{"allowed_backends":["cloud"]}"#, "{}", true),
+            ("{}", r#"{"allowed_backends":["cloud"]}"#, true),
+            (r#"{"allowed_backends":[]}"#, "{}", false),
+            ("{}", r#"{"allowed_backends":[]}"#, false),
+        ] {
+            let sources = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            let result = RuntimeConfigInput::default().resolve(sources);
+
+            if valid {
+                result.unwrap();
+            } else {
+                assert!(result.unwrap_err().to_string().contains("allowed_backends"));
+            }
+        }
+    }
 
     #[test]
     fn runtime_bindings_keep_process_paths_below_managed_policy() {

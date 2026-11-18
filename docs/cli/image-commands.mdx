@@ -1,7 +1,8 @@
 ---
 title: Image commands
+"og:title": Microsandbox CLI OCI image commands
 sidebarTitle: "Images"
-description: Pull and manage OCI images from the CLI
+description: Pull, inspect, and manage cached OCI images with the microsandbox CLI.
 icon: "layer-group"
 ---
 
@@ -11,13 +12,15 @@ icon: "layer-group"
 
 Download an image to the local cache. Shared layers are stored once.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb pull python
 msb pull alpine
 msb pull ghcr.io/my-org/my-image:v1
 msb pull python --materialize flat
 msb pull python --materialize all
 ```
+</CodeGroup>
 
 Expanded form: `msb image pull`.
 
@@ -42,13 +45,15 @@ Without `--materialize`, the configured `sandbox_defaults.oci.root_disk` selects
 
 ## msb load
 
-Load a Docker image archive or OCI Image Layout archive into the local microsandbox cache.
+Load a Docker image archive or OCI Image Layout archive into the local microsandbox cache. References are installed and recorded individually; if a later reference fails, earlier completed references remain installed. A cache eviction during a warm import is recovered from the supplied archive.
 
-```bash
+<CodeGroup>
+```bash Shell
 docker save my-image:latest | msb load
 msb load --input my-image.tar
 msb load --input oci-layout.tar --tag my-image:latest
 ```
+</CodeGroup>
 
 Expanded form: `msb image load`.
 
@@ -62,11 +67,13 @@ Expanded form: `msb image load`.
 
 Save one or more cached images as a Docker-compatible archive or OCI Image Layout archive.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb save --output my-image.tar my-image:latest
 msb save --format oci --output my-image.oci.tar my-image:latest
 msb save my-image:latest > my-image.tar
 ```
+</CodeGroup>
 
 Expanded form: `msb image save`.
 
@@ -82,11 +89,13 @@ Exports preserve image contents, but regenerated layers can change image and lay
 
 List images in the local cache.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb images
 msb images --format json
 msb images -q               # References only
 ```
+</CodeGroup>
 
 Expanded form: `msb image ls`.
 
@@ -99,10 +108,12 @@ Expanded form: `msb image ls`.
 
 Show detailed metadata for a cached image (manifest, layers, config).
 
-```bash
+<CodeGroup>
+```bash Shell
 msb image inspect python
 msb image inspect python --format json
 ```
+</CodeGroup>
 
 | Flag | Description |
 |------|-------------|
@@ -112,29 +123,37 @@ msb image inspect python --format json
 
 Remove one or more cached images and their layers (layers shared with other images are kept).
 
-```bash
+<CodeGroup>
+```bash Shell
 msb rmi python
 msb rmi alpine ubuntu   # Remove multiple
 ```
+</CodeGroup>
 
 Expanded form: `msb image rm`.
 
 | Flag | Description |
 |------|-------------|
-| `-f`, `--force` | Remove even if the image is used by existing sandboxes |
+| `-f`, `--force` | Remove the image reference while preserving backing needed by sandboxes or snapshots |
 | `-q`, `--quiet` | Suppress output |
 
 ## msb image prune
 
 Remove cached images that are not used by any sandbox or indexed snapshot, then clean up dangling image artifacts.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb image prune
 msb image prune --yes
 msb image prune --format json
 ```
+</CodeGroup>
 
-Images referenced by sandboxes or indexed snapshots are kept. To remove a specific referenced image, use `msb rmi --force`.
+Images referenced by sandboxes or indexed snapshots are kept. `msb rmi --force` can remove a specific reference, but retains backing and cached metadata needed by those dependencies and refuses to remove a reference held by an active operation. Retained metadata files may remain after the last dependency is removed; pruning does not sweep unindexed metadata files.
+
+Prune skips cache entries held by participating pulls, imports, exports, or sandbox creation and continues with unrelated entries. Cleanup commits bounded batches, so an error can leave earlier batches completed. Shared aliases are checked together before removing their metadata file. JSON reports include `skipped_in_use`, counting busy references, manifests, and layers. Stable lock files remain in the cache. Interrupted cleanup is recovered on a later image prune or removal, with the catalog and exact file identity checked again before deletion.
+
+Concurrent cleanup requires every accessing CLI and SDK to participate in the lease protocol. Older clients can ignore these locks; coordinate a maintenance window when they share the same storage. Ordinary runtime and snapshot formats are unchanged. Pull and sandbox creation report an error if image ownership cannot be persisted in the catalog.
 
 | Flag | Description |
 |------|-------------|

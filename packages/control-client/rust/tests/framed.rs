@@ -474,7 +474,12 @@ fn checked_failures_retain_original_frames_and_future_error_codes() {
     let peer = ControlError::rejected("future_refusal", "safe diagnostic");
     let response = message("control.error", &peer);
     let original = response.raw().body.clone();
-    match GetMemoryState.decode(response).unwrap_err() {
+    let failure = GetMemoryState.decode(response).unwrap_err();
+    assert_eq!(
+        failure.to_string(),
+        "control operation rejected by peer: safe diagnostic"
+    );
+    match failure {
         ControlClientError::Peer { error, response } => {
             assert_eq!(error, peer);
             assert_eq!(response.raw().body, original);

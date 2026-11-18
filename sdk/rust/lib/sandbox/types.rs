@@ -287,6 +287,18 @@ impl MountBuilder {
         self
     }
 
+    /// Anchor a relative bind or disk host path to the current directory.
+    ///
+    /// Language bindings call this when a mount is accepted, so a later working
+    /// directory change does not move the path.
+    #[doc(hidden)]
+    pub fn capture_local_host_paths(mut self) -> crate::MicrosandboxResult<Self> {
+        if let MountKind::Bind(path) | MountKind::Disk(path) = &mut self.mount {
+            *path = std::path::absolute(&*path)?;
+        }
+        Ok(self)
+    }
+
     /// Create an empty private directory, retained until this sandbox is removed.
     pub fn owned(mut self) -> Self {
         self.mount = MountKind::Owned(OwnedVolumeStorage::Directory { quota_mib: None });
@@ -484,7 +496,7 @@ impl MountBuilder {
     }
 
     /// Select the snapshot's disk contents at this guest path for a private child disk.
-    /// Only restore and branch builders accept this operation-local choice.
+    /// Only restore and fork builders accept this operation-local choice.
     pub fn captured(mut self) -> Self {
         self.mount = MountKind::Captured;
         self
@@ -1517,6 +1529,16 @@ impl From<PathBuf> for ImageSource {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::{
+    DeploymentProfile, DiskImageFormat, FlatClone, HostPermissions, MountOptions,
+    NamedVolumeCreate, NamedVolumeMode, OciRootfsSource, OwnedVolumeStorage, Patch, RootDisk,
+    RootfsSource, SecurityProfile, StatVirtualization, VolumeKind, VolumeMount,
+};
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -1537,6 +1559,25 @@ mod tests {
                     .contains("cannot be supplied as restore overrides")
             );
         }
+    }
+
+    #[test]
+    fn capture_local_host_paths_anchors_relative_bind_and_disk_paths() {
+        let cwd = std::env::current_dir().unwrap();
+        let host = |mount: MountBuilder| match mount
+            .capture_local_host_paths()
+            .unwrap()
+            .build()
+            .unwrap()
+        {
+            VolumeMount::Bind { host, .. } | VolumeMount::DiskImage { host, .. } => host,
+            _ => panic!("expected a bind or disk mount"),
+        };
+        assert_eq!(
+            host(MountBuilder::new("/a").disk("seed.img")),
+            cwd.join("seed.img")
+        );
+        assert_eq!(host(MountBuilder::new("/b").bind("data")), cwd.join("data"));
     }
 
     #[test]
@@ -2413,13 +2454,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub use microsandbox_types::{
-    DeploymentProfile, DiskImageFormat, FlatClone, HostPermissions, MountOptions,
-    NamedVolumeCreate, NamedVolumeMode, OciRootfsSource, OwnedVolumeStorage, Patch, RootDisk,
-    RootfsSource, SecurityProfile, StatVirtualization, VolumeKind, VolumeMount,
-};

@@ -6,6 +6,7 @@ use bytes::Bytes;
 use microsandbox_protocol::codec;
 use microsandbox_protocol::core::ClockSync;
 use microsandbox_protocol::message::{Message, MessageType};
+use microsandbox_types::GuestClockPolicy;
 use tokio::task::JoinHandle;
 
 use crate::relay::{ControlWrite, ControlWriter};
@@ -25,15 +26,67 @@ const CLOCK_SYNC_INTERVAL: Duration = Duration::from_secs(60);
 const CLOCK_SYNC_WAKE_THRESHOLD: Duration = Duration::from_secs(6);
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Kernel request published before a restored full snapshot runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreActivationMode {
+    /// Publish a new VM generation and step the guest wall clock to host time.
+    IdentityAndClock,
+    /// Publish a new VM generation only; the guest keeps its captured wall clock.
+    IdentityOnly,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl RestoreActivationMode {
+    /// Select the restore activation for a guest clock policy.
+    pub(crate) fn for_policy(policy: GuestClockPolicy) -> Self {
+        match policy {
+            GuestClockPolicy::Sync => Self::IdentityAndClock,
+            GuestClockPolicy::Off => Self::IdentityOnly,
+        }
+    }
+
+    /// Describe the kernel activation required by this restore policy.
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::IdentityAndClock => "identity-and-clock activation",
+            Self::IdentityOnly => "VM Generation ID activation",
+        }
+    }
+
+    /// Publish this activation. `None` means the guest kernel lacks the needed transport.
+    pub(crate) fn install(
+        self,
+        vm: &msb_krun::VmControl,
+        id: msb_krun::VmGenerationId,
+    ) -> Option<msb_krun::VmGenerationRequest> {
+        match self {
+            Self::IdentityAndClock => vm.install_vm_generation_and_clock(id),
+            Self::IdentityOnly => vm.install_vm_generation_id(id),
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
 /// Spawns a background task that keeps the guest wall clock aligned with the host.
+///
+/// Returns `None` without sending anything when the policy leaves the guest clock alone.
 pub(crate) fn spawn_clock_sync_task(
     agent_tx: ControlWriter,
+    policy: GuestClockPolicy,
     already_synchronized: bool,
-) -> JoinHandle<()> {
-    tokio::spawn(clock_sync_task(agent_tx, already_synchronized))
+) -> Option<JoinHandle<()>> {
+    policy
+        .is_sync()
+        .then(|| tokio::spawn(clock_sync_task(agent_tx, already_synchronized)))
 }
 
 async fn clock_sync_task(agent_tx: ControlWriter, already_synchronized: bool) {
@@ -108,4 +161,25 @@ pub(crate) fn encode_clock_sync_frame(unix_time_nanos: u64) -> RuntimeResult<Byt
     codec::encode_to_buf(&msg, &mut buf)
         .map_err(|e| RuntimeError::Custom(format!("encode clock sync frame: {e}")))?;
     Ok(Bytes::from(buf))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_activation_steps_the_clock_only_when_synchronizing() {
+        assert_eq!(
+            RestoreActivationMode::for_policy(GuestClockPolicy::Sync),
+            RestoreActivationMode::IdentityAndClock
+        );
+        assert_eq!(
+            RestoreActivationMode::for_policy(GuestClockPolicy::Off),
+            RestoreActivationMode::IdentityOnly
+        );
+    }
 }

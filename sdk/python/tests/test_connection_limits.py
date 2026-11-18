@@ -9,15 +9,22 @@ from microsandbox.types import Network, ViolationAction
 class ConnectionLimitTests(unittest.TestCase):
     def test_omission_is_not_unlimited(self):
         config = Network()._to_dict()
-        for key in ("max_connections", "max_tcp_connections", "max_udp_connections"):
+        for key in (
+            "max_connections", "max_tcp_connections", "max_udp_connections",
+            "max_inbound_tcp_connections",
+        ):
             self.assertNotIn(key, config)
         self.assertEqual(Network(max_udp_connections=0)._to_dict()["max_udp_connections"], 0)
 
     def test_canonical_tcp_and_udp(self):
-        config = Network(max_tcp_connections=0, max_udp_connections=7)._to_dict()
+        config = Network(
+            max_tcp_connections=0, max_udp_connections=7,
+            max_inbound_tcp_connections=0,
+        )._to_dict()
         self.assertEqual(config["max_tcp_connections"], 0)
         self.assertEqual(config["max_udp_connections"], 7)
         self.assertNotIn("max_connections", config)
+        self.assertEqual(config["max_inbound_tcp_connections"], 0)
 
     def test_limits_preserve_secret_violation_action(self):
         config = Network(

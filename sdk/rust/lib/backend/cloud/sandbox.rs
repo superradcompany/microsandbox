@@ -2,6 +2,7 @@
 //! plus the conversions between the SDK's [`SandboxConfig`] and the cloud's
 //! create wire shape.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,11 +21,11 @@ use crate::sandbox::{
     SandboxPage, SandboxStatus,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_types::RegistryAuth;
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, RootDisk,
-    SandboxRuntimeOptions, TlsConfig,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, NamedVolumeMode,
+    NetworkSpec, RootDisk, SandboxRuntimeOptions, TlsConfig, VolumeKind, VolumeMount,
 };
+use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -79,6 +80,59 @@ pub(in crate::backend) enum CloudRegistrySelection {
 //--------------------------------------------------------------------------------------------------
 
 impl CloudBackend {
+    /// Stop the captured cloud identity and observe completion, including ephemeral deletion.
+    pub(crate) async fn stop_complete(&self, id: &str) -> MicrosandboxResult<()> {
+        let current = self.get_sandbox_by_id(id).await?;
+        let unrecognized_status = || {
+            MicrosandboxError::Runtime(format!(
+                "cloud sandbox {:?} reported a status this SDK does not recognize; upgrade the SDK",
+                current.name
+            ))
+        };
+        match current.status {
+            CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed => return Ok(()),
+            CloudSandboxStatus::Stopping | CloudSandboxStatus::SavingState => {}
+            CloudSandboxStatus::Created
+            | CloudSandboxStatus::Starting
+            | CloudSandboxStatus::Running
+            | CloudSandboxStatus::TemporarilyUnavailable
+            | CloudSandboxStatus::RecoveryDecisionRequired => {
+                self.stop_sandbox_by_id(id).await?;
+            }
+            CloudSandboxStatus::Unknown => return Err(unrecognized_status()),
+            _ => return Err(unrecognized_status()),
+        }
+
+        loop {
+            match self.get_sandbox_by_id(id).await {
+                Ok(observed) => match observed.status {
+                    CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed => return Ok(()),
+                    CloudSandboxStatus::RecoveryDecisionRequired => {
+                        return Err(MicrosandboxError::Runtime(format!(
+                            "cloud sandbox {:?} needs a recovery decision before it can stop",
+                            current.name
+                        )));
+                    }
+                    CloudSandboxStatus::Unknown => return Err(unrecognized_status()),
+                    CloudSandboxStatus::Created
+                    | CloudSandboxStatus::Starting
+                    | CloudSandboxStatus::Running
+                    | CloudSandboxStatus::Stopping
+                    | CloudSandboxStatus::SavingState
+                    | CloudSandboxStatus::TemporarilyUnavailable => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    _ => return Err(unrecognized_status()),
+                },
+                // Only disappearance after a successful stop of a confirmed ephemeral
+                // sandbox is completion. Missing persistent sandboxes and failed stop
+                // requests still surface their errors, and a reused name is never followed.
+                Err(MicrosandboxError::SandboxNotFound(_)) if current.ephemeral => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Apply captured device settings before validating or sending a cloud create request.
     pub(crate) async fn create_from_builder(
         &self,
@@ -86,8 +140,7 @@ impl CloudBackend {
         builder: SandboxBuilder,
         start: bool,
     ) -> MicrosandboxResult<Sandbox> {
-        let config = self.build_sandbox_config(builder).await?;
-        let (req, config) = cloud_create_body_and_config(config)?;
+        let (req, config) = self.build_create_request(builder).await?;
         let cloud = self.create_sandbox(&req, start).await?;
         if start {
             ensure_cloud_sandbox_ready(&cloud)?;
@@ -96,24 +149,72 @@ impl CloudBackend {
         Ok(Sandbox::from_cloud(backend, cloud, config))
     }
 
+    /// Resolve the request body and runtime config for a cloud create.
+    pub(in crate::backend) async fn build_create_request(
+        &self,
+        builder: SandboxBuilder,
+    ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
+        let mut config = self.build_sandbox_config(builder).await?;
+        let mut names = BTreeSet::new();
+        for mount in &mut config.spec.mounts {
+            let VolumeMount::Named { name, create, .. } = mount else {
+                continue;
+            };
+            let Some(requested) = create.take() else {
+                continue;
+            };
+            if requested.name != *name {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "named volume {name:?} has a different creation name"
+                )));
+            }
+            if requested.mode != NamedVolumeMode::EnsureExists
+                || requested.kind != VolumeKind::Directory
+                || requested.quota_mib.is_some()
+                || requested.capacity_mib.is_some()
+                || !requested.labels.is_empty()
+            {
+                return Err(MicrosandboxError::unsupported(
+                    Operation::SandboxCreate,
+                    UnsupportedReason::ConfigField("named volume inline create"),
+                ));
+            }
+            names.insert(name.clone());
+        }
+
+        // Validate the whole request before provisioning anything. Only the default
+        // ensure-exists behavior is resolved here; the wire and retained config use
+        // plain named mounts, while the local backend keeps its inline-create path.
+        let (request, config) = cloud_create_body_and_config(config)?;
+        for name in names {
+            match self.find_volume(&name).await {
+                Ok(_) => {}
+                Err(MicrosandboxError::VolumeNotFound(_)) => {
+                    match self.create_volume(&name, None, &[]).await {
+                        Ok(_) => {}
+                        // Another client may have created the same volume since lookup.
+                        Err(MicrosandboxError::VolumeAlreadyExists(_)) => {
+                            self.find_volume(&name).await?;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok((request, config))
+    }
+
     /// Resolve cloud request settings for both explicit build and immediate creation.
     pub(crate) async fn build_sandbox_config(
         &self,
         mut builder: SandboxBuilder,
     ) -> MicrosandboxResult<SandboxConfig> {
-        let options = builder.prepare(Arc::new(self.clone())).await?;
-        // Cloud has no hotplug aperture. Equal maxima on concrete configs track the
-        // requested size, so let them follow any managed CPU or memory override.
-        let resources = &mut options.spec.resources;
-        if resources.max_cpus == resources.cpus {
-            resources.max_cpus = None;
-        }
-        if resources.max_memory_mib == resources.memory_mib {
-            resources.max_memory_mib = None;
-        }
+        builder.prepare(Arc::new(self.clone())).await?;
 
         // The cloud worker resolves image metadata. Device policy is applied on this client.
-        builder.finish(Some(self.config_sources()), None)
+        builder.finish_cloud(self.config_sources())
     }
 }
 
@@ -145,7 +246,7 @@ impl SandboxBackend for CloudBackend {
         config: SandboxConfig,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         // Cloud has no notion of "detached" — the sandbox lifecycle is owned
-        // by msb-cloud, not by this process. Reuse the eager-start path.
+        // by the cloud API, not by this process. Reuse the eager-start path.
         self.create(backend, config, true)
     }
 
@@ -553,6 +654,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
         )
     };
 
+    if config.spec.resources.nested_virt == Some(true) {
+        return Err(unsupported("nested_virt (local-only)"));
+    }
     if config.spec.resources.max_cpus != config.spec.resources.cpus {
         return Err(unsupported("max_cpus"));
     }
@@ -561,6 +665,15 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     }
     if config.spec.runtime.hostname.is_some() {
         return Err(unsupported("hostname"));
+    }
+    // The cloud wire has no clock policy field; refuse `off` rather than drop it.
+    if config
+        .spec
+        .runtime
+        .guest_clock
+        .is_some_and(|policy| !policy.is_sync())
+    {
+        return Err(unsupported("guest_clock"));
     }
 
     // The shared default is harmless because Cloud owns metrics collection.
@@ -592,8 +705,31 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.network.rate_limiter.is_some() {
         return Err(unsupported("network.rate_limiter"));
     }
+    if config.spec.network.nat64_prefixes != NetworkSpec::default().nat64_prefixes {
+        return Err(unsupported("network.nat64_prefixes"));
+    }
+
+    let http = &config.spec.network.http;
+    // Cloud has no HTTP denial-response configuration. Accept the local defaults
+    // so ordinary creation still works; reject enabled custom/legacy settings.
+    if http.deny_response
+        && (http.deny_response_format != HttpDenyResponseFormat::Json
+            || http.deny_message.is_some()
+            || http.network_deny_message.is_some()
+            || http.secret_deny_message.is_some())
+    {
+        return Err(unsupported("network.http.deny_response (local-only)"));
+    }
+
     if config.spec.network.outbound_proxy.is_some() {
         return Err(unsupported("network.outbound_proxy"));
+    }
+    if config.spec.network.max_inbound_tcp_connections.is_some() {
+        return Err(unsupported("network.max_inbound_tcp_connections"));
+    }
+    // Tunes published-port listeners, which the cloud create contract does not carry.
+    if config.spec.network.tcp_accept_queue_size.is_some() {
+        return Err(unsupported("network.tcp_accept_queue_size"));
     }
 
     if config
@@ -706,17 +842,22 @@ fn cloud_tls_config_is_harmless(
 
 /// Map [`CloudSandboxStatus`] to the SDK's [`SandboxStatus`] enum.
 ///
-/// `Stopping` collapses to `Draining` (microsandbox uses `Draining` for
-/// the graceful-stop state); `Failed` collapses to `Crashed`. All other
-/// variants map 1:1.
+/// `Stopping` and `SavingState` collapse to `Draining`; `Failed` collapses to
+/// `Crashed`; `TemporarilyUnavailable`, `RecoveryDecisionRequired`, `Unknown`,
+/// and any unrecognized status collapse to `Paused`. All other variants map 1:1.
 pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxStatus {
     match s {
         CloudSandboxStatus::Created => SandboxStatus::Created,
         CloudSandboxStatus::Starting => SandboxStatus::Starting,
         CloudSandboxStatus::Running => SandboxStatus::Running,
         CloudSandboxStatus::Stopping => SandboxStatus::Draining,
+        CloudSandboxStatus::SavingState => SandboxStatus::Draining,
+        CloudSandboxStatus::TemporarilyUnavailable => SandboxStatus::Paused,
+        CloudSandboxStatus::RecoveryDecisionRequired => SandboxStatus::Paused,
         CloudSandboxStatus::Stopped => SandboxStatus::Stopped,
         CloudSandboxStatus::Failed => SandboxStatus::Crashed,
+        CloudSandboxStatus::Unknown => SandboxStatus::Paused,
+        _ => SandboxStatus::Paused,
     }
 }
 
@@ -731,7 +872,7 @@ fn ensure_cloud_sandbox_ready(cloud: &CloudCreateSandboxResponse) -> Microsandbo
             cloud
                 .last_failure_message
                 .as_deref()
-                .unwrap_or("the cloud control plane reported no failure reason")
+                .unwrap_or("the cloud API reported no failure reason")
         ))),
         CloudSandboxStatus::Starting => Err(MicrosandboxError::Runtime(format!(
             "cloud sandbox {:?} did not reach running before the readiness wait expired",
@@ -798,6 +939,7 @@ mod tests {
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
     use crate::snapshot::SnapshotReference;
     use microsandbox_types::CloudSnapshotLocation;
+    use microsandbox_types::HttpDenyResponseFormat;
 
     #[test]
     fn cloud_default_stop_timeout_covers_checkpoint_convergence() {
@@ -813,7 +955,15 @@ mod tests {
     async fn every_cloud_create_entry_point_sends_captured_file_policy() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-        for entry in 0..6 {
+        for (entry, cpus, memory, explicit_max) in (0..6).flat_map(|entry| {
+            [
+                (1, 512, false),
+                (1, 512, true),
+                (8, 2048, false),
+                (8, 2048, true),
+            ]
+            .map(|(cpus, memory, explicit_max)| (entry, cpus, memory, explicit_max))
+        }) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
@@ -874,12 +1024,17 @@ mod tests {
             );
             let backend: Arc<dyn Backend> = Arc::new(backend);
             let request = || {
-                SandboxBuilder::new("policy-request")
+                let builder = SandboxBuilder::new("policy-request")
                     .image("alpine")
-                    .cpus(8)
-                    .memory(2048)
+                    .cpus(cpus)
+                    .memory(memory)
                     .workdir("/request")
-                    .shell("/bin/request")
+                    .shell("/bin/request");
+                if explicit_max {
+                    builder.max_cpus(cpus).max_memory(memory)
+                } else {
+                    builder
+                }
             };
             let empty =
                 crate::config::layers::BackendConfig::new(Default::default(), Default::default());
@@ -946,6 +1101,82 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn http_deny_response_is_rejected_before_cloud_http() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = CloudBackend::builder()
+            .url(format!("http://{}", listener.local_addr().unwrap()))
+            .api_key("test-key")
+            .build()
+            .unwrap();
+        let error = crate::backend::with_backend(backend, async {
+            SandboxBuilder::new("http-deny-cloud")
+                .image("alpine")
+                .network(|network| {
+                    network.http(|h| {
+                        h.deny_response(true)
+                            .deny_response_format(HttpDenyResponseFormat::Text)
+                    })
+                })
+                .create()
+                .await
+                .err()
+                .expect("cloud must reject the local-only option")
+        })
+        .await;
+
+        assert!(
+            matches!(
+                error,
+                MicrosandboxError::Unsupported {
+                    reason: UnsupportedReason::ConfigField(
+                        "network.http.deny_response (local-only)"
+                    ),
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+
+        let mut defaults = base_cloud_config();
+        defaults.spec.network.http = Default::default();
+        reject_dropped_cloud_create_fields(&defaults).unwrap();
+
+        for message in [None, Some(""), Some("blocked {host}")] {
+            let mut config = base_cloud_config();
+            config.spec.network.http.deny_response = false;
+            config.spec.network.http.deny_response_format = HttpDenyResponseFormat::Text;
+            config.spec.network.http.network_deny_message = message.map(str::to_owned);
+            reject_dropped_cloud_create_fields(&config).unwrap();
+            config.spec.network.http.deny_response = true;
+            assert_unsupported_config_field(config, "network.http.deny_response (local-only)");
+        }
+        for field in [
+            "deny_message",
+            "network_deny_message",
+            "secret_deny_message",
+        ] {
+            for message in ["", "Check policy."] {
+                let mut config = base_cloud_config();
+                config.spec.network.http = Default::default();
+                let http = &mut config.spec.network.http;
+                match field {
+                    "deny_message" => http.deny_message = Some(message.into()),
+                    "network_deny_message" => http.network_deny_message = Some(message.into()),
+                    "secret_deny_message" => http.secret_deny_message = Some(message.into()),
+                    _ => unreachable!(),
+                }
+                assert_unsupported_config_field(config, "network.http.deny_response (local-only)");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1231,7 +1462,9 @@ mod tests {
         config.spec.resources.memory_mib = 1024;
         config.spec.resources.max_memory_mib = 1024;
         config.spec.security_profile = microsandbox_types::SecurityProfile::Restricted;
-        config.restore_boot_overrides.security = true;
+        let mut options = crate::SandboxConfigPatch::new();
+        options.spec.security_profile = Some(config.spec.security_profile);
+        config.caller_config_overrides = Some(Box::new(options));
         config.spec.lifecycle.max_duration_secs = Some(60);
         config.spec.lifecycle.idle_timeout_secs = Some(10);
 
@@ -1416,13 +1649,19 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, ConfigMutation); 9] = [
+        let cases: [(&str, ConfigMutation); 13] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
             }),
             ("hostname", |config| {
                 config.spec.runtime.hostname = Some("worker".into())
+            }),
+            ("nested_virt (local-only)", |config| {
+                config.spec.resources.nested_virt = Some(true)
+            }),
+            ("guest_clock", |config| {
+                config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off)
             }),
             ("metrics_sample_interval", |config| {
                 config.spec.runtime.metrics_sample_interval_ms = Some(2500)
@@ -1435,6 +1674,12 @@ mod tests {
                     mtu: Some(1400),
                     ..Default::default()
                 })
+            }),
+            ("network.nat64_prefixes", |config| {
+                config.spec.network.nat64_prefixes = vec!["2001:db8::/96".parse().unwrap()];
+            }),
+            ("network.nat64_prefixes", |config| {
+                config.spec.network.nat64_prefixes.clear();
             }),
             ("network.tls", |config| {
                 let mut tls = TlsConfig::default();
@@ -1652,6 +1897,14 @@ mod tests {
     }
 
     #[test]
+    fn cloud_create_request_rejects_tcp_accept_queue_size() {
+        let mut config = base_cloud_config();
+        config.spec.network.tcp_accept_queue_size = Some(4096);
+
+        assert_unsupported_config_field(config, "network.tcp_accept_queue_size");
+    }
+
+    #[test]
     fn sandbox_config_from_cloud_round_trips_d13_fields() {
         // The cloud response carries the source-tagged create request, which
         // converts back into the shared `SandboxSpec`. Populate a full spec and
@@ -1755,30 +2008,30 @@ mod tests {
     }
 
     #[test]
-    fn cloud_status_maps_created_and_starting_one_to_one() {
-        assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Created),
-            SandboxStatus::Created,
-        );
-        assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Starting),
-            SandboxStatus::Starting,
-        );
-        assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Running),
-            SandboxStatus::Running,
-        );
+    fn cloud_status_maps_to_existing_sandbox_states() {
         assert_eq!(
             cloud_status_to_sandbox_status(CloudSandboxStatus::Stopping),
             SandboxStatus::Draining,
         );
         assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Stopped),
-            SandboxStatus::Stopped,
+            cloud_status_to_sandbox_status(CloudSandboxStatus::SavingState),
+            SandboxStatus::Draining,
+        );
+        assert_eq!(
+            cloud_status_to_sandbox_status(CloudSandboxStatus::TemporarilyUnavailable),
+            SandboxStatus::Paused,
+        );
+        assert_eq!(
+            cloud_status_to_sandbox_status(CloudSandboxStatus::RecoveryDecisionRequired),
+            SandboxStatus::Paused,
         );
         assert_eq!(
             cloud_status_to_sandbox_status(CloudSandboxStatus::Failed),
             SandboxStatus::Crashed,
+        );
+        assert_eq!(
+            cloud_status_to_sandbox_status(CloudSandboxStatus::Unknown),
+            SandboxStatus::Paused,
         );
     }
 
@@ -1790,8 +2043,12 @@ mod tests {
             CloudSandboxStatus::Created,
             CloudSandboxStatus::Starting,
             CloudSandboxStatus::Stopping,
+            CloudSandboxStatus::SavingState,
+            CloudSandboxStatus::TemporarilyUnavailable,
+            CloudSandboxStatus::RecoveryDecisionRequired,
             CloudSandboxStatus::Stopped,
             CloudSandboxStatus::Failed,
+            CloudSandboxStatus::Unknown,
         ] {
             assert!(ensure_cloud_sandbox_ready(&cloud_response(status)).is_err());
         }

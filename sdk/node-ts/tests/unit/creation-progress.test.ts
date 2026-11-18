@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const native = vi.hoisted(() => ({
   ownsLifecycle: false,
+  backendKind: "local" as "local" | "cloud",
+  detach: vi.fn(async () => {}),
   requestedDetached: undefined as boolean | undefined,
   stop: vi.fn(async () => {}),
   cancel: vi.fn(),
@@ -14,7 +16,8 @@ const native = vi.hoisted(() => ({
 vi.mock("../../dist/internal/napi.js", () => {
   const sandbox = () => ({
     id: "restored-id",
-    backendKind: "local",
+    backendKind: native.backendKind,
+    detach: native.detach,
     ownsLifecycle: native.ownsLifecycle,
     stop: native.stop,
   });
@@ -34,7 +37,7 @@ vi.mock("../../dist/internal/napi.js", () => {
           native.create();
           return sandbox();
         }
-        async connectOrCreate() { throw new Error("not used by progress tests"); }
+        async connectOrCreate() { return sandbox(); }
         async createWithPullProgress() { return progress(); }
         async createWithProgress() { return progress(); }
       },
@@ -68,6 +71,8 @@ import { Sandbox } from "../../dist/sandbox.js";
 describe("creation result lifecycle ownership", () => {
   beforeEach(() => {
     native.ownsLifecycle = false;
+    native.backendKind = "local";
+    native.detach.mockClear();
     native.requestedDetached = undefined;
     native.stop.mockClear();
     native.cancel.mockClear();
@@ -157,4 +162,51 @@ describe("creation result lifecycle ownership", () => {
       }
     }
   }
+});
+
+
+describe("cloud scope cleanup", () => {
+  beforeEach(() => {
+    native.backendKind = "cloud";
+    native.ownsLifecycle = false;
+    native.stop.mockClear();
+    native.detach.mockClear();
+  });
+
+  for (const method of ["create", "createWithProgress", "createWithPullProgress"] as const) {
+    for (const detached of [false, true]) {
+      it(`${method} cleans up cloud creation only when attached (${detached})`, async () => {
+        const builder = Sandbox.builder("cloud-scope").detached(detached);
+        const sandbox = method === "create"
+          ? await builder.create()
+          : await (await builder[method]()).awaitSandbox();
+        expect(sandbox.ownsLifecycle).toBe(!detached);
+        await sandbox[Symbol.asyncDispose]();
+        expect(native.stop).toHaveBeenCalledTimes(detached ? 0 : 1);
+      });
+    }
+  }
+
+  it("cleans up on exceptional scope exit", async () => {
+    await expect((async () => {
+      await using sandbox = await Sandbox.builder("cloud-error").create();
+      throw new Error("guest failed");
+    })()).rejects.toThrow("guest failed");
+    expect(native.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors detaching a created handle", async () => {
+    const sandbox = await Sandbox.builder("cloud-detach").create();
+    await sandbox.detach();
+    await sandbox[Symbol.asyncDispose]();
+    expect(native.detach).toHaveBeenCalledTimes(1);
+    expect(native.stop).not.toHaveBeenCalled();
+  });
+
+  it("does not acquire ownership of connected cloud handles", async () => {
+    const sandbox = await Sandbox.builder("existing-cloud").connectOrCreate();
+    expect(sandbox.ownsLifecycle).toBe(false);
+    await sandbox[Symbol.asyncDispose]();
+    expect(native.stop).not.toHaveBeenCalled();
+  });
 });

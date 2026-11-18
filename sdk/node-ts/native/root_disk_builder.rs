@@ -45,10 +45,12 @@ impl JsRootDiskBuilder {
     /// Size in MiB. Valid for the managed (default), tmpfs, and flat kinds; a
     /// user-supplied disk image is sized by the image file itself.
     #[napi]
-    pub fn size(&mut self, mib: u32) -> &Self {
+    pub fn size(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
+
         let prev = self.take_inner();
         self.inner = Some(prev.size(Mebibytes::from(mib)));
-        self
+        Ok(self)
     }
 
     /// Use a RAM-backed tmpfs upper. Ephemeral: the rootfs is pristine on

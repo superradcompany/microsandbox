@@ -541,7 +541,8 @@ pub(super) async fn selection(
             "incremental export takes either since or last_layers, without with_parents".into(),
         ));
     }
-    let layers = physical_layers(head.manifest(), head.path())?;
+    let fs_state_limit = local.config().fs_state_limit();
+    let layers = physical_layers(head.manifest(), head.path(), fs_state_limit)?;
     let selected_layers = layers
         .iter()
         .filter(|layer| layer.root_chain)
@@ -552,14 +553,18 @@ pub(super) async fn selection(
         // Base archives carry buffered decoder/verification futures; keep them off the caller's
         // stack, including when this planner is nested inside a direct restore or SDK call.
         let base = Box::pin(open_base(local, base)).await?;
-        let baseline = physical_layers(base.snapshot.manifest(), base.snapshot.path())?;
+        let baseline = physical_layers(
+            base.snapshot.manifest(),
+            base.snapshot.path(),
+            fs_state_limit,
+        )?;
         let baseline = baseline
             .iter()
             .filter(|layer| layer.root_chain)
             .collect::<Vec<_>>();
-        let available = memory_objects(&base.snapshot)?;
+        let available = memory_objects(&base.snapshot, fs_state_limit)?;
         owned = owned_since_dependencies(head.manifest(), base.snapshot.manifest())?;
-        memory = memory_objects(head)?
+        memory = memory_objects(head, fs_state_limit)?
             .intersection(&available)
             .cloned()
             .collect();
@@ -766,6 +771,7 @@ pub(super) async fn resolve(
                 .into(),
         )
     })?;
+    let fs_state_limit = local.config().fs_state_limit();
     let base = Box::pin(open_base(local, base)).await?;
     let required_disks = dependencies
         .owned
@@ -793,7 +799,11 @@ pub(super) async fn resolve(
             ));
         }
     }
-    let available = physical_layers(base.snapshot.manifest(), base.snapshot.path())?;
+    let available = physical_layers(
+        base.snapshot.manifest(),
+        base.snapshot.path(),
+        fs_state_limit,
+    )?;
     // This dependency list describes only the root chain. Owned prefixes have their own
     // inventory; other additional disks stay complete regardless of checkpoint ordering.
     let available = available
@@ -811,7 +821,7 @@ pub(super) async fn resolve(
             "supplied base is not the exact required physical disk prefix".into(),
         ));
     }
-    let available_memory = memory_objects(&base.snapshot)?;
+    let available_memory = memory_objects(&base.snapshot, fs_state_limit)?;
     if dependencies
         .memory
         .iter()
@@ -876,13 +886,14 @@ async fn validate_resolved(
     cache_dir: &Path,
     dependencies: &Dependencies,
 ) -> MicrosandboxResult<()> {
+    let fs_state_limit = local.config().fs_state_limit();
     // Open the complete target only after filling omissions. This retains its normal metadata,
     // range, epoch and disk-integrity validation instead of introducing a partial-closure mode.
     let artifact = snapshots_dir.join(&inventory.head);
     let manifest =
         Manifest::from_bytes(&tokio::fs::read(artifact.join(DESCRIPTOR_FILENAME)).await?)
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let target = physical_layers(&manifest, &artifact)?;
+    let target = physical_layers(&manifest, &artifact, fs_state_limit)?;
     let target_owned = owned_payloads(&manifest, &artifact)?;
     for payload in &dependencies.owned {
         if !target_owned.iter().any(|(expected, _)| expected == payload) {
@@ -940,8 +951,9 @@ async fn validate_resolved(
     let target_memory = if dependencies.memory.is_empty() {
         BTreeSet::new()
     } else {
-        let snapshot = store::open_snapshot(local, artifact.to_string_lossy().as_ref()).await?;
-        memory_objects(&snapshot)?
+        let snapshot =
+            store::open_snapshot_leased(local, artifact.to_string_lossy().as_ref()).await?;
+        memory_objects(&snapshot, fs_state_limit)?
     };
     if dependencies
         .memory
@@ -983,9 +995,13 @@ async fn copy_dependency(source: &Path, target: &Path) -> MicrosandboxResult<()>
     }
     let source = source.to_path_buf();
     let target = target.to_path_buf();
-    tokio::task::spawn_blocking(move || microsandbox_utils::copy::fast_copy(&source, &target))
-        .await
-        .map_err(|error| MicrosandboxError::Runtime(format!("base payload copy: {error}")))??;
+    let pin = super::super::lease::pin_source(&source)?;
+    tokio::task::spawn_blocking(move || {
+        let _pin = pin;
+        microsandbox_utils::copy::fast_copy(&source, &target)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Runtime(format!("base payload copy: {error}")))??;
     Ok(())
 }
 
@@ -1032,7 +1048,10 @@ fn dependency_paths(head: &str, dependencies: &Dependencies) -> BTreeSet<String>
 }
 
 /// Return reusable RAM payload IDs, never metadata objects, even if bytes happen to coincide.
-fn memory_objects(snapshot: &Snapshot) -> MicrosandboxResult<BTreeSet<ObjectId>> {
+fn memory_objects(
+    snapshot: &Snapshot,
+    fs_state_limit: usize,
+) -> MicrosandboxResult<BTreeSet<ObjectId>> {
     let SnapshotState::Checkpoint(state) = &snapshot.manifest().state else {
         return Ok(BTreeSet::new());
     };
@@ -1041,6 +1060,7 @@ fn memory_objects(snapshot: &Snapshot) -> MicrosandboxResult<BTreeSet<ObjectId>>
     let closure = CheckpointClosure::open_portable(
         snapshot.path().join(CHECKPOINT_DIRECTORY),
         Some(&expected),
+        fs_state_limit,
     )
     .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let checkpoint = closure.checkpoint();
@@ -1067,6 +1087,7 @@ fn memory_objects(snapshot: &Snapshot) -> MicrosandboxResult<BTreeSet<ObjectId>>
 fn physical_layers(
     manifest: &Manifest,
     directory: &Path,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<Vec<PhysicalLayer>> {
     match &manifest.state {
         SnapshotState::File(file) => file
@@ -1087,7 +1108,7 @@ fn physical_layers(
             let root = directory.join(CHECKPOINT_DIRECTORY);
             let expected = ObjectId::new(&state.checkpoint_root)
                 .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-            let closure = CheckpointClosure::open_portable(&root, Some(&expected))
+            let closure = CheckpointClosure::open_portable(&root, Some(&expected), fs_state_limit)
                 .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
             Ok(closure
                 .disks()
@@ -1115,10 +1136,12 @@ pub(super) async fn open_base(
     input: &str,
 ) -> MicrosandboxResult<BaseSnapshot> {
     let path = Path::new(input);
-    if !path.is_file() {
-        let snapshot = store::open_snapshot(local, input).await?;
+    // Admission has already anchored archive filenames. A remaining bare selector
+    // belongs to the snapshot store and must not be reclassified after a cwd change.
+    if !store::looks_like_path(input) || !path.is_file() {
+        let snapshot = store::open_snapshot_leased(local, input).await?;
         if matches!(snapshot.manifest().state, SnapshotState::File(_)) {
-            Box::pin(snapshot.verify()).await?;
+            Box::pin(snapshot.verify(local.config().fs_state_limit())).await?;
         }
         return Ok(BaseSnapshot {
             snapshot,
@@ -1165,10 +1188,14 @@ pub(super) async fn open_base(
         None => select_head_snapshot(&imported)?,
     };
     if let Some(inventory) = &unpacked.inventory {
-        validate_inventory_snapshot_bindings(inventory, &imported)?;
+        validate_inventory_snapshot_bindings(
+            inventory,
+            &imported,
+            local.config().fs_state_limit(),
+        )?;
     }
     if matches!(imported[head].manifest().state, SnapshotState::File(_)) {
-        Box::pin(imported[head].verify()).await?;
+        Box::pin(imported[head].verify(local.config().fs_state_limit())).await?;
     }
     Ok(BaseSnapshot {
         snapshot: imported[head].clone(),
@@ -1191,6 +1218,108 @@ mod tests {
         DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, SnapshotCapture,
         SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope,
     };
+
+    #[test]
+    fn admitted_archive_and_group_bases_survive_cwd_changes() {
+        const CHILD: &str = "MSB_TEST_ARCHIVE_BASE_CWD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("backend::local::snapshot::archive::delta::tests::admitted_archive_and_group_bases_survive_cwd_changes")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("archive base lifetime checked")
+            );
+            return;
+        }
+        // The test owns the process-wide cwd; no other SDK tests run in this child.
+        let original_cwd = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().canonicalize().unwrap().join("first");
+        let second = root.path().canonicalize().unwrap().join("second");
+        let source = first.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let wire = microsandbox_types::snapshot::cloud_manifest::Manifest::from_bytes(
+            br#"{"schema":1,"artifact":"snapshot","scope":"disk","created_at":"2026-05-01T12:00:00Z","parent":null,"image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"source_sandbox":"source","state":{"kind":"file","format":"raw","fstype":"ext4","upper":{"file":"upper.ext4","size_bytes":512,"integrity":null}},"labels":{},"extensions":{},"requires":[]}"#
+        ).unwrap();
+        let manifest = microsandbox_types::snapshot::legacy::project_cloud_descriptor(
+            &wire,
+            &wire.digest().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join(DESCRIPTOR_FILENAME),
+            manifest.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(source.join("upper.ext4"), [42; 512]).unwrap();
+        std::fs::write(second.join("base.tar"), b"unrelated archive shadow").unwrap();
+        std::fs::write(second.join("group"), b"unrelated group shadow").unwrap();
+        unsafe {
+            std::env::set_var("MSB_CONFIG_PATH", root.path().join("missing-config.json"));
+        }
+        std::env::set_current_dir(&first).unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let local = LocalBackend::builder()
+                    .home(root.path().join("home"))
+                    .build()
+                    .await
+                    .unwrap();
+                let archive = first.join("base.tar");
+                save_snapshot(
+                    &local,
+                    source.to_str().unwrap(),
+                    &archive,
+                    SaveOpts {
+                        plain_tar: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                super::super::load_snapshot_with_options(
+                    &local,
+                    &archive,
+                    LoadOpts {
+                        group: Some("group".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let archive_selector =
+                    super::super::super::dispatch::anchor_archive_selector("base.tar".into())
+                        .unwrap();
+                let group_selector =
+                    super::super::super::dispatch::anchor_archive_selector("group".into()).unwrap();
+                assert_eq!(Path::new(&archive_selector), archive);
+                assert_eq!(group_selector, "group");
+                std::env::set_current_dir(&second).unwrap();
+                for selector in [&archive_selector, &group_selector] {
+                    let base = open_base(&local, selector).await.unwrap();
+                    assert_eq!(base.snapshot.id(), &manifest.snapshot_id);
+                }
+                assert_eq!(
+                    std::fs::read(second.join("group")).unwrap(),
+                    b"unrelated group shadow"
+                );
+            });
+        std::env::set_current_dir(original_cwd).unwrap();
+        println!("archive base lifetime checked");
+    }
 
     #[tokio::test]
     async fn batch_rejects_corrupt_borrowed_file_layer_before_publication() {
@@ -1547,9 +1676,19 @@ mod tests {
             recorded.to_canonical_bytes().unwrap(),
         )
         .unwrap();
-        let snapshot = store::open_snapshot(&local, head_name).await.unwrap();
-        snapshot.verify().await.unwrap();
+        let snapshot = store::open_snapshot_leased(&local, head_name)
+            .await
+            .unwrap();
+        snapshot
+            .verify(crate::test_support::DEFAULT_FS_STATE_LIMIT)
+            .await
+            .unwrap();
         std::fs::write(head_dir.join(&base_path), vec![92u8; 65536]).unwrap();
-        assert!(snapshot.verify().await.is_err());
+        assert!(
+            snapshot
+                .verify(crate::test_support::DEFAULT_FS_STATE_LIMIT)
+                .await
+                .is_err()
+        );
     }
 }

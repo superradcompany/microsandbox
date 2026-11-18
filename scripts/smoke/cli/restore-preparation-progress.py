@@ -51,7 +51,7 @@ reader.start()
 with locks[0].open("rb") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     started = time.monotonic()
-    child = subprocess.Popen([binary, "create", "--name", name, "--from-snapshot", "checks:grown", "--forked"],
+    child = subprocess.Popen([binary, "create", "--name", name, "--from-snapshot", "checks:grown", "--cow-mem"],
                              env=env, stdout=subprocess.PIPE, stderr=slave)
     os.close(slave)
     try:

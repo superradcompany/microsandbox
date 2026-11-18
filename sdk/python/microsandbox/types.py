@@ -81,9 +81,49 @@ class SandboxStatus(StrEnum):
     PAUSED = "paused"
 
 
+class ServiceStatus(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    DETACHED = "detached"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceTarget:
+    """The sandbox and port that receive a Service's requests."""
+
+    sandbox: str
+    port: int
+
+
 class BackendKind(StrEnum):
     LOCAL = "local"
     CLOUD = "cloud"
+
+
+class ServiceErrorReason(StrEnum):
+    """Why a Service change did not complete.
+
+    ``OTHER`` is an unrecognized reason; ``ServiceError.raw_code`` keeps its raw code,
+    and ``ServiceError.changed`` still reports the outcome.
+    """
+
+    SERVICE_QUOTA_EXCEEDED = "service_quota_exceeded"
+    SANDBOX_SERVICE_LIMIT_EXCEEDED = "sandbox_service_limit_exceeded"
+    SERVICE_CONFLICT = "service_conflict"
+    SERVICE_DETACHED = "service_detached"
+    TARGET_UNREACHABLE = "target_unreachable"
+    SANDBOX_NOT_RUNNING = "sandbox_not_running"
+    SERVICE_CHANGES_PAUSED = "service_changes_paused"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    OTHER = "other"
+
+
+class ChangeState(StrEnum):
+    """Whether a failed Service change may have been applied."""
+
+    UNCHANGED = "unchanged"
+    UNKNOWN = "unknown"
 
 
 class ModificationPolicy(StrEnum):
@@ -383,6 +423,8 @@ class SecretModifySpec(TypedDict, total=False):
     """Desired state for one secret passed to ``Sandbox.modify``.
 
     ``env``, ``value``, and ``store`` are mutually exclusive secret sources.
+    Omitted policy fields preserve existing settings. ``passthrough`` is a
+    deprecated alias for ``allow_placeholder_for``; both host lists are combined.
     """
 
     env: str
@@ -390,6 +432,11 @@ class SecretModifySpec(TypedDict, total=False):
     store: str
     placeholder: str
     allowed_hosts: list[str]
+    substitution: SecretSubstitution
+    violation_action: ViolationAction
+    require_tls_identity: bool
+    allow_placeholder_for: Sequence[str]
+    passthrough: Sequence[str]
 
 
 class DiskCompactionDiskResult(TypedDict):
@@ -1158,16 +1205,31 @@ class Patch:
 
 @dataclass(frozen=True, slots=True)
 class SecretSubstitution:
-    """Where in the HTTP request the secret value can be substituted."""
+    """Where in the HTTP request the secret value can be substituted.
+
+    Set ``header_fields`` to restrict header substitution to specific fields
+    (for example ``("authorization",)``). Prefer that over substituting in
+    every header: an untrusted guest can otherwise place the placeholder in a
+    header the upstream host reflects back and read the real secret.
+    """
 
     headers: bool = True
+    # Keyword-only so inserting the field does not shift the positional
+    # ``query``/``body`` arguments of existing callers.
+    header_fields: tuple[str, ...] = field(default=(), kw_only=True)
     query: bool = False
     body: bool = False
 
     def _to_dict(self) -> dict:
+        if self.header_fields and not self.headers:
+            raise ValueError(
+                "SecretSubstitution.header_fields requires headers to be enabled"
+            )
         d: dict = {}
         if not self.headers:
             d["headers"] = False
+        if self.header_fields:
+            d["header_fields"] = list(self.header_fields)
         if self.query:
             d["query"] = True
         if self.body:
@@ -1559,6 +1621,22 @@ class DnsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PortEndpoint:
+    """Published host endpoint to remove through modify(ports_rm=...)."""
+
+    host_port: int
+    bind: str = "127.0.0.1"
+    protocol: PortProtocol = PortProtocol.TCP
+
+    def _to_dict(self) -> dict:
+        return {
+            "host_port": self.host_port,
+            "bind": self.bind,
+            "protocol": _enum_value(self.protocol, PortProtocol, "PortEndpoint.protocol"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PortBinding:
     """Published host-to-guest port with an optional host bind address."""
 
@@ -1610,7 +1688,7 @@ class SecretSource:
 class OutboundProxy:
     """Proxy used for outbound sandbox connections."""
 
-    protocol: Literal["socks4", "socks5"]
+    protocol: Literal["http_connect", "socks4", "socks5"]
     address: str
     user_id: str | None = None
     username: str | None = None
@@ -1619,10 +1697,19 @@ class OutboundProxy:
     def __post_init__(self) -> None:
         if self.protocol != "socks4" and self.user_id is not None:
             raise ValueError("user_id is only supported for SOCKS4 proxies")
-        if self.protocol != "socks5" and (self.username is not None or self.password is not None):
-            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        if self.protocol == "socks4" and (self.username is not None or self.password is not None):
+            raise ValueError("credentials are only supported for SOCKS5 and HTTP CONNECT proxies")
         if (self.username is None) != (self.password is None):
-            raise ValueError("SOCKS5 username and password must be provided together")
+            if self.protocol == "socks5":
+                raise ValueError("SOCKS5 username and password must be provided together")
+            raise ValueError(
+                "HTTP CONNECT username and password must be provided together"
+            )
+
+    @classmethod
+    def http_connect(cls, address: str) -> OutboundProxy:
+        """Create an HTTP CONNECT outbound proxy."""
+        return cls(protocol="http_connect", address=address)
 
     @classmethod
     def socks4(cls, address: str, *, user_id: str | None = None) -> OutboundProxy:
@@ -1635,9 +1722,16 @@ class OutboundProxy:
         return cls(protocol="socks5", address=address)
 
     def credentials(self, username: str, password: SecretSource) -> OutboundProxy:
-        """Set username authentication and a host-side password source."""
-        if self.protocol != "socks5":
-            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        """Set username authentication and a host-side password source.
+
+        Supported for SOCKS5 and HTTP CONNECT proxies. HTTP CONNECT permits an
+        empty username for token-only authentication. The values are stored as
+        given: the backend validates them when the sandbox configuration is
+        built, where an HTTP CONNECT username containing ``:`` or control
+        characters is rejected.
+        """
+        if self.protocol == "socks4":
+            raise ValueError("credentials are only supported for SOCKS5 and HTTP CONNECT proxies")
         return OutboundProxy(
             protocol=self.protocol,
             address=self.address,
@@ -1747,6 +1841,29 @@ class VsockRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class HttpConfig:
+    """HTTP denial settings. Text preserves legacy behavior; JSON uses literal messages."""
+
+    deny_response: bool = True
+    """Enable readable HTTP denial responses. Enabled by default locally."""
+
+    deny_message: str | None = None
+    """Deprecated legacy text message with {host} substitution. Ignored in JSON mode."""
+
+    deny_response_format: Literal["text", "json"] = field(default="json", kw_only=True)
+    """Response format. JSON requires a supporting runtime."""
+
+    network_deny_message: str | None = field(default=None, kw_only=True)
+    """Literal network-denial message. Requires deny_response and JSON mode.
+
+    ``None`` uses the default; an empty string leaves ``message`` empty.
+    """
+
+    secret_deny_message: str | None = field(default=None, kw_only=True)
+    """Literal secret-denial message for JSON mode. None uses the default; empty stays empty."""
+
+
+@dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
 
@@ -1772,15 +1889,24 @@ class Network:
     ipv6_pool: str | None = None
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
+    nat64_prefixes: tuple[str, ...] = field(default=("64:ff9b::/96",), kw_only=True)
+    """NAT64 /96 prefixes used for policy classification."""
     max_connections: int | None = None
     """Deprecated: use ``max_tcp_connections`` instead."""
     max_tcp_connections: int | None = field(default=None, kw_only=True)
     max_udp_connections: int | None = field(default=None, kw_only=True)
     """UDP session limit. Defaults to unlimited for single-tenant and 1024 for
     multi-tenant; zero means unlimited."""
+    max_inbound_tcp_connections: int | None = field(default=None, kw_only=True)
+    """Active inbound TCP cap; zero is unlimited. None uses the runtime default."""
+    tcp_accept_queue_size: int | None = field(default=None, kw_only=True)
+    """Accept-queue depth for published TCP port listeners, 1 to 2147483647.
+    Defaults to 1024; the host kernel clamps it to its own ``somaxconn``."""
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG
+    http: HttpConfig | None = None
+    """HTTP denial response settings."""
 
     @classmethod
     def none(cls) -> Network:
@@ -1834,6 +1960,8 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None and self.max_tcp_connections is not None:
             raise ValueError("max_connections and max_tcp_connections are mutually exclusive")
+        if self.nat64_prefixes:
+            d["nat64_prefixes"] = list(self.nat64_prefixes)
         if self.max_connections is not None:
             warnings.warn(
                 "max_connections is deprecated; use max_tcp_connections",
@@ -1845,6 +1973,10 @@ class Network:
             d["max_tcp_connections"] = self.max_tcp_connections
         if self.max_udp_connections is not None:
             d["max_udp_connections"] = self.max_udp_connections
+        if self.max_inbound_tcp_connections is not None:
+            d["max_inbound_tcp_connections"] = self.max_inbound_tcp_connections
+        if self.tcp_accept_queue_size is not None:
+            d["tcp_accept_queue_size"] = self.tcp_accept_queue_size
         if self.rate_limiter is not None:
             if not isinstance(self.rate_limiter, NetworkRateLimiter):
                 raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")
@@ -1856,6 +1988,29 @@ class Network:
         )
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["secret_violation_action"] = violation
+        if self.http is not None:
+            if not isinstance(self.http, HttpConfig):
+                raise TypeError("Network.http must be HttpConfig or None")
+            if not isinstance(self.http.deny_response, bool):
+                raise TypeError("HttpConfig.deny_response must be a bool")
+            if self.http.deny_response_format not in ("text", "json"):
+                raise ValueError("HttpConfig.deny_response_format must be text or json")
+            d["http"] = {
+                "deny_response": self.http.deny_response,
+                "deny_response_format": self.http.deny_response_format,
+            }
+            if self.http.deny_message is not None:
+                if not isinstance(self.http.deny_message, str):
+                    raise TypeError("HttpConfig.deny_message must be a str or None")
+                d["http"]["deny_message"] = self.http.deny_message
+            if self.http.network_deny_message is not None:
+                if not isinstance(self.http.network_deny_message, str):
+                    raise TypeError("HttpConfig.network_deny_message must be a str or None")
+                d["http"]["network_deny_message"] = self.http.network_deny_message
+            if self.http.secret_deny_message is not None:
+                if not isinstance(self.http.secret_deny_message, str):
+                    raise TypeError("HttpConfig.secret_deny_message must be a str or None")
+                d["http"]["secret_deny_message"] = self.http.secret_deny_message
         return d
 
 

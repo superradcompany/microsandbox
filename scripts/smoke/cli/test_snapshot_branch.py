@@ -175,8 +175,8 @@ class SnapshotBranchSmokeTests(unittest.TestCase):
 
     def test_restore_uses_dedicated_command_and_registers_cleanup(self):
         smoke = self.smoke()
-        smoke.restore("child", "saved.msb", "--forked")
-        self.assertEqual(self.commands(), [["restore", "saved.msb", "--name", "child", "--forked"]])
+        smoke.restore("child", "saved.msb", "--cow-mem")
+        self.assertEqual(self.commands(), [["restore", "saved.msb", "--name", "child", "--cow-mem"]])
         self.assertEqual(smoke.active, ["child"])
 
     def test_failed_create_is_still_registered_for_cleanup(self):

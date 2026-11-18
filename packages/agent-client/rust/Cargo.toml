@@ -17,12 +17,13 @@ default = []
 # adapted to bytes). No extra dependencies.
 stream = []
 # Unix domain socket transport. Builds on the generic byte-stream path.
-uds = ["microsandbox-protocol-client/uds", "stream", "dep:bytes", "dep:libc", "dep:memmap2", "dep:nix", "dep:tempfile"]
+uds = ["microsandbox-protocol-client/uds", "microsandbox-control-client/uds", "stream", "dep:bytes", "dep:libc", "dep:memmap2", "dep:nix", "dep:tempfile"]
 # Windows named-pipe transport. Builds on the generic byte-stream path.
-named-pipe = ["stream", "microsandbox-protocol-client/named-pipe"]
+named-pipe = ["stream", "microsandbox-protocol-client/named-pipe", "microsandbox-control-client/named-pipe"]
 
 [dependencies]
 microsandbox-protocol-client.workspace = true
+microsandbox-control-client.workspace = true
 ciborium.workspace = true
 bytes = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }

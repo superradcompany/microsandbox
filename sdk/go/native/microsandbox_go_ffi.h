@@ -60,6 +60,16 @@ char *msb_sandbox_create(uint64_t cancel_id,
                          unsigned char *buf,
                          uintptr_t buf_len);
 
+/**
+ * Capability marker for published-port modification in the Go bindings.
+ */
+bool msb_supports_port_modification(void);
+
+/**
+ * Capability marker for secret policy modification in the Go bindings.
+ */
+bool msb_supports_secret_policy_modification(void);
+
 char *msb_sandbox_lookup(uint64_t cancel_id,
                          const char *name,
                          unsigned char *buf,
@@ -1063,6 +1073,24 @@ char *msb_creation_progress_recv(uint64_t cancel_id,
 char *msb_creation_progress_close(uint64_t id, unsigned char *buf, uintptr_t len);
 
 /**
+ * Return the configured shell from the bound sandbox, including connected/restored handles.
+ */
+char *msb_sandbox_shell_path(uint64_t cancel_id,
+                             Handle handle,
+                             unsigned char *buf,
+                             uintptr_t buf_len);
+
+/**
+ * Run a cancellable managed-job operation. Cancellation never terminates a job.
+ * The caller supplies borrowed request text and a writable output buffer.
+ */
+char *msb_jobs(uint64_t cancel_id,
+               uint64_t sandbox_handle,
+               const char *request,
+               unsigned char *buf,
+               uintptr_t buf_len);
+
+/**
  * Restore a detached sandbox through a dedicated C entry point.
  */
 char *msb_sandbox_restore(uint64_t cancel_id,
@@ -1070,6 +1098,73 @@ char *msb_sandbox_restore(uint64_t cancel_id,
                           const char *opts_json,
                           unsigned char *buf,
                           uintptr_t buf_len);
+
+/**
+ * Create a Service from `{"slug", "target"}` JSON and return it once committed.
+ */
+char *msb_service_create(uint64_t cancel_id,
+                         const char *request_json,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Get a Service by slug.
+ */
+char *msb_service_get(uint64_t cancel_id, const char *slug, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * List one page of Services from `{"sandbox", "cursor", "limit"}` JSON.
+ */
+char *msb_service_list(uint64_t cancel_id,
+                       const char *options_json,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+/**
+ * Send one target change and return the Service once committed.
+ */
+char *msb_service_update(uint64_t cancel_id,
+                         uint64_t handle,
+                         const char *request_json,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Enable a Service and return it once committed.
+ */
+char *msb_service_enable(uint64_t cancel_id,
+                         uint64_t handle,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Disable a Service and return it once committed.
+ */
+char *msb_service_disable(uint64_t cancel_id,
+                          uint64_t handle,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+/**
+ * Remove a Service and release the slug.
+ */
+char *msb_service_remove(uint64_t cancel_id,
+                         uint64_t handle,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Get a Service through the backend retained by its handle.
+ */
+char *msb_service_refresh(uint64_t cancel_id,
+                          uint64_t handle,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+/**
+ * Release a Service handle. The Service itself is not changed.
+ */
+char *msb_service_close(uint64_t cancel_id, uint64_t handle, unsigned char *buf, uintptr_t buf_len);
 
 /**
  * Resolve, install, or ensure a runtime pair, returning its JSON description.
@@ -1080,6 +1175,27 @@ char *msb_sandbox_restore(uint64_t cancel_id,
 char *msb_runtime_setup(uint64_t cancel_id,
                         const char *operation,
                         const char *config_json,
+                        const char *options_json,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
+
+/**
+ * Observe one live sandbox through its retained native backend and stable identity.
+ */
+char *msb_sandbox_storage_usage(uint64_t cancel_id,
+                                uint64_t handle,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
+/**
+ * Observe the selected backend's storage, returning the shared Rust report as JSON.
+ */
+char *msb_storage_usage(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Prune unused runtime RAM using explicit JSON options; no interactive confirmation is performed.
+ */
+char *msb_storage_prune(uint64_t cancel_id,
                         const char *options_json,
                         unsigned char *buf,
                         uintptr_t buf_len);

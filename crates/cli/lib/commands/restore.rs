@@ -1,14 +1,20 @@
 //! Restore a snapshot into a detached sandbox with explicit host resource bindings.
 
 use clap::Args;
-use microsandbox::sandbox::{
-    BranchBuilder, BranchManyBuilder, RestoreBuilder, Sandbox, SecurityProfile,
+use microsandbox::{
+    MicrosandboxError, RestoreKind,
+    sandbox::{
+        ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
+    },
 };
 
 #[cfg(feature = "net")]
 use super::common::parse_port_mapping;
-use super::common::{display_restore_warnings, parse_restore_volume, parse_vsock_route};
-use crate::ui;
+use super::common::{
+    display_restore_warnings, guest_clock_parser, parse_explicit_disk_mount, parse_restore_volume,
+    parse_vsock_route,
+};
+use crate::ui::{self, ErrorLine};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -24,6 +30,9 @@ pub struct RestoreArgs {
     pub name: String,
     /// Restore captured RAM using private copy-on-write mappings.
     #[arg(long, conflicts_with = "disk_only")]
+    pub cow_mem: bool,
+    /// Deprecated alias for --cow-mem.
+    #[arg(long, hide = true, conflicts_with = "disk_only")]
     pub forked: bool,
     /// Cold-boot only the captured disk, without restoring processes or RAM.
     #[arg(long)]
@@ -54,10 +63,22 @@ pub struct RestoreResourceArgs {
     /// Map `SOURCE:GUEST[:OPTIONS]`, or select a captured private disk with GUEST alone.
     #[arg(short, long, value_name = "SOURCE:GUEST|GUEST")]
     pub volume: Vec<String>,
-    /// Publish a child listener: `[BIND:]HOST:GUEST[/tcp|udp]`.
+    /// Attach a host disk image (`SOURCE:DEST[:OPTIONS]`), like `create --mount-disk`.
+    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_disk: Vec<String>,
+    /// Publish child listeners: `[BIND:]HOST:GUEST[/tcp|udp]`, with equal-length port ranges.
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
+    /// Accept-queue depth for the child's published TCP ports (default: 1024; clamped to somaxconn).
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "DEPTH", value_parser = clap::value_parser!(u32).range(1..=i64::from(i32::MAX)))]
+    pub tcp_accept_queue_size: Option<u32>,
+
+    /// Maximum active inbound TCP connections across published ports; zero is unlimited.
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub max_inbound_tcp_connections: Option<usize>,
     /// Default user for new exec commands; captured processes keep their credentials.
     #[arg(short, long)]
     pub user: Option<String>,
@@ -81,6 +102,9 @@ pub struct RestoreControlArgs {
     /// Guest security profile for disk boot; rejected for full execution restore.
     #[arg(long, value_parser = ["default", "restricted"])]
     pub security: Option<String>,
+    /// Guest wall-clock policy (`sync` or `off`); defaults to the policy recorded in the snapshot.
+    #[arg(long = "guest-clock", value_name = "POLICY", value_parser = guest_clock_parser())]
+    pub guest_clock: Option<GuestClockPolicy>,
     /// Maximum lifetime of the destination sandbox (e.g. 30s, 5m, 1h).
     #[arg(long, value_name = "DURATION")]
     pub max_duration: Option<String>,
@@ -134,6 +158,9 @@ impl RestoreControlArgs {
                 other => anyhow::bail!("invalid security profile {other:?}"),
             };
             builder = builder.security(profile);
+        }
+        if let Some(policy) = self.guest_clock {
+            builder = builder.guest_clock(policy);
         }
         if let Some(duration) = &self.max_duration {
             builder = builder.max_duration(super::common::parse_duration_secs(duration)?);
@@ -191,7 +218,10 @@ pub async fn run(
         builder = builder.log_level(level);
     }
     if args.forked {
-        builder = builder.forked();
+        ui::warn("--forked is deprecated; use --cow-mem instead");
+    }
+    if args.cow_mem || args.forked {
+        builder = builder.cow_memory();
     }
     if args.disk_only {
         builder = builder.disk_only();
@@ -215,10 +245,37 @@ pub async fn run(
     }
     let result = task.await;
     display.finish();
-    let sandbox = result.map_err(|error| anyhow::anyhow!("restore task failed: {error}"))??;
+    let sandbox = match result.map_err(|error| anyhow::anyhow!("restore task failed: {error}"))? {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            if let Some(hints) = missing_bindings_hints(&error) {
+                let lines: Vec<_> = hints.into_iter().map(ErrorLine::Hint).collect();
+                ui::error_with_lines(&error.to_string(), &lines);
+                return Err(ui::AlreadyRenderedError.into());
+            }
+
+            return Err(error.into());
+        }
+    };
     display_restore_warnings(&sandbox).await;
     sandbox.detach().await;
     Ok(())
+}
+
+/// CLI guidance for a restore refused because guest paths lack destination bindings.
+fn missing_bindings_hints(error: &MicrosandboxError) -> Option<Vec<&'static str>> {
+    let MicrosandboxError::MissingRestoreBindings { restore, .. } = error else {
+        return None;
+    };
+
+    let mut hints = vec!["map each path with -v SOURCE:GUEST or --mount-disk SOURCE:GUEST"];
+    // Only a full restore can select disks it captured; a disk restore never offers that.
+    if *restore == RestoreKind::Full {
+        hints.push("select a captured disk with -v GUEST");
+    }
+    hints.push("or pass --allow-missing-resources to start without them");
+
+    Some(hints)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -245,6 +302,10 @@ macro_rules! apply_resources {
                     let (guest, mount) = parse_restore_volume(volume)?;
                     builder = builder.volume(guest, |_| mount);
                 }
+                for spec in &self.mount_disk {
+                    let (guest, mount) = parse_explicit_disk_mount(spec)?;
+                    builder = builder.volume(guest, |_| mount);
+                }
                 for route in &self.vsock {
                     let (host, port, kind) = parse_vsock_route(route)?;
                     builder = match kind {
@@ -256,15 +317,23 @@ macro_rules! apply_resources {
                 }
                 #[cfg(feature = "net")]
                 for port in &self.port {
-                    let (bind, host, guest, udp) = parse_port_mapping(port)?;
-                    #[cfg(feature = "net")]
-                    {
-                        builder = if udp {
-                            builder.port_udp_bind(bind, host, guest)
-                        } else {
-                            builder.port_bind(bind, host, guest)
+                    for port in parse_port_mapping(port)? {
+                        builder = match port.protocol {
+                            microsandbox_network::config::PortProtocol::Udp => builder
+                                .port_udp_bind(port.host_bind, port.host_port, port.guest_port),
+                            microsandbox_network::config::PortProtocol::Tcp => {
+                                builder.port_bind(port.host_bind, port.host_port, port.guest_port)
+                            }
                         };
                     }
+                }
+                #[cfg(feature = "net")]
+                if let Some(value) = self.max_inbound_tcp_connections {
+                    builder = builder.max_inbound_tcp_connections(value);
+                }
+                #[cfg(feature = "net")]
+                if let Some(size) = self.tcp_accept_queue_size {
+                    builder = builder.tcp_accept_queue_size(size);
                 }
                 Ok(builder)
             }
@@ -273,8 +342,8 @@ macro_rules! apply_resources {
 }
 
 apply_resources!(apply_restore, RestoreBuilder);
-apply_resources!(apply_branch, BranchBuilder);
-apply_resources!(apply_branch_many, BranchManyBuilder);
+apply_resources!(apply_branch, ForkBuilder);
+apply_resources!(apply_branch_many, ForkManyBuilder);
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -290,6 +359,44 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         args: RestoreArgs,
+    }
+
+    #[test]
+    fn missing_bindings_refusal_gets_flag_hints() {
+        let disk_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into()],
+            restore: RestoreKind::Disk,
+        };
+        let full_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["disk /data".into(), "filesystem /work".into()],
+            restore: RestoreKind::Full,
+        };
+        let other = MicrosandboxError::InvalidConfig("invalid volume".into());
+
+        let disk_hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
+        let full_hints = missing_bindings_hints(&full_refusal).unwrap().join("\n");
+
+        assert!(disk_hints.contains("-v SOURCE:GUEST"));
+        assert!(disk_hints.contains("--mount-disk SOURCE:GUEST"));
+        assert!(disk_hints.contains("--allow-missing-resources"));
+        assert!(!disk_hints.contains("-v GUEST"));
+        assert!(full_hints.contains("-v SOURCE:GUEST"));
+        assert!(full_hints.contains("-v GUEST"));
+        assert!(full_hints.contains("--allow-missing-resources"));
+        assert!(missing_bindings_hints(&other).is_none());
+    }
+
+    #[test]
+    fn missing_bindings_hint_ignores_guest_paths() {
+        let disk_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /captured disk".into()],
+            restore: RestoreKind::Disk,
+        };
+
+        let hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
+
+        assert!(hints.contains("-v SOURCE:GUEST"));
+        assert!(!hints.contains("-v GUEST"));
     }
 
     #[test]
@@ -316,6 +423,70 @@ mod tests {
     }
 
     #[test]
+    fn restore_attaches_mount_disk_like_create() {
+        let spec = "/images/seed.img:/data2:ro,fstype=ext4";
+        let cli =
+            TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
+                .unwrap();
+        assert_eq!(cli.args.resources.mount_disk, [spec]);
+        let (guest, mount) = parse_explicit_disk_mount(&cli.args.resources.mount_disk[0]).unwrap();
+        assert_eq!(guest, "/data2");
+        match mount.build().unwrap() {
+            microsandbox::sandbox::VolumeMount::DiskImage {
+                host,
+                guest,
+                fstype,
+                options,
+                ..
+            } => {
+                assert_eq!(host, std::path::Path::new("/images/seed.img"));
+                assert_eq!(guest, "/data2");
+                assert_eq!(fstype.as_deref(), Some("ext4"));
+                assert!(options.readonly);
+            }
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mount_disk_reaches_run_builder_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let cli = TestCli::try_parse_from([
+            "restore",
+            missing.to_str().unwrap(),
+            "--name",
+            "restore-disk-binding",
+            "--mount-disk",
+            "/images/seed.img:/:ro,fstype=ext4",
+        ])
+        .unwrap();
+        // A root guest path is rejected by mount validation before the snapshot is
+        // opened, so this fails only if `run` hands the disk to the restore builder.
+        let error = run(cli.args, None).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mount a volume at guest root /"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn mount_disk_specs_are_applied_to_the_restore_builder() {
+        let args = |spec: &str| {
+            TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
+                .unwrap()
+                .args
+                .resources
+        };
+        let good = args("/images/seed.img:/data2:ro,fstype=ext4");
+        assert!(good.apply_restore(Sandbox::restore("group:snap")).is_ok());
+        let bad = args("/images/seed.img");
+        assert!(bad.apply_restore(Sandbox::restore("group:snap")).is_err());
+    }
+
+    #[test]
     fn restore_parses_destination_controls_without_creation_aliases() {
         let cli = TestCli::try_parse_from([
             "restore",
@@ -328,6 +499,8 @@ mod tests {
             "2G",
             "--security",
             "restricted",
+            "--guest-clock",
+            "off",
             "--max-duration",
             "10m",
             "--idle-timeout",
@@ -337,6 +510,7 @@ mod tests {
         assert_eq!(cli.args.controls.cpus, Some(2));
         assert_eq!(cli.args.controls.memory.as_deref(), Some("2G"));
         assert_eq!(cli.args.controls.security.as_deref(), Some("restricted"));
+        assert_eq!(cli.args.controls.guest_clock, Some(GuestClockPolicy::Off));
         assert!(
             cli.args
                 .controls
@@ -352,6 +526,18 @@ mod tests {
 
     #[test]
     fn invalid_destination_controls_fail_before_source_resolution() {
+        assert!(
+            TestCli::try_parse_from([
+                "restore",
+                "source-not-opened",
+                "--name",
+                "worker",
+                "--guest-clock",
+                "host",
+            ])
+            .is_err()
+        );
+
         for controls in [
             RestoreControlArgs {
                 memory: Some("not-a-size".into()),
@@ -413,6 +599,39 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn restore_parses_accept_queue_size_for_child_listeners() {
+        let cli = TestCli::try_parse_from([
+            "restore",
+            "ready",
+            "--name",
+            "child",
+            "-p",
+            "8080:80",
+            "--tcp-accept-queue-size",
+            "4096",
+        ])
+        .unwrap();
+        assert_eq!(cli.args.resources.tcp_accept_queue_size, Some(4096));
+        let defaults = TestCli::try_parse_from(["restore", "ready", "--name", "child"]).unwrap();
+        assert_eq!(defaults.args.resources.tcp_accept_queue_size, None);
+        for invalid in ["0", "2147483648"] {
+            assert!(
+                TestCli::try_parse_from([
+                    "restore",
+                    "ready",
+                    "--name",
+                    "child",
+                    "--tcp-accept-queue-size",
+                    invalid,
+                ])
+                .is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[cfg(feature = "net")]

@@ -8,6 +8,7 @@ use microsandbox_network::builder::NetworkBuilder as RustNetworkBuilder;
 use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
 
 use crate::dns_builder::JsDnsBuilder;
+use crate::http_builder::JsHttpBuilder;
 use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::rate_limiter_builder::{JsNetworkRateLimiterBuilder, RateLimiterValues};
@@ -47,7 +48,9 @@ impl JsNetworkBuilder {
 
     /// Publish a TCP port.
     #[napi]
-    pub fn port(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -59,7 +62,9 @@ impl JsNetworkBuilder {
 
     /// Publish a TCP port on a specific host bind address.
     #[napi(js_name = "portBind")]
-    pub fn port_bind(&mut self, bind: String, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_bind(&mut self, bind: String, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -72,7 +77,9 @@ impl JsNetworkBuilder {
 
     /// Publish a UDP port.
     #[napi(js_name = "portUdp")]
-    pub fn port_udp(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_udp(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -87,9 +94,11 @@ impl JsNetworkBuilder {
     pub fn port_udp_bind(
         &mut self,
         bind: String,
-        host_port: u32,
-        guest_port: u32,
+        host_port: f64,
+        guest_port: f64,
     ) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -167,7 +176,10 @@ impl JsNetworkBuilder {
         let mut returned = configure.call(initial)?;
         let entry = returned.take_built()?;
         let prev = self.take_inner();
-        self.inner = Some(prev.secret_entry(entry));
+        self.inner = Some(
+            prev.secret_entry(entry)
+                .tls_overlay(|tls| tls.enabled(true)),
+        );
         Ok(self)
     }
 
@@ -181,14 +193,15 @@ impl JsNetworkBuilder {
         allowed_host: String,
     ) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.secret_env(env_var, value, placeholder, allowed_host));
+        self.inner = Some(
+            prev.secret_env(env_var, value, placeholder, allowed_host)
+                .tls_overlay(|tls| tls.enabled(true)),
+        );
         self
     }
 
-    /// 3-arg shorthand matching the Rust core's `secret_env(env_var,
-    /// value, allowed_host)`. The placeholder defaults to the original
-    /// value (env-var injection only — header injection is disabled
-    /// without an explicit placeholder).
+    /// Add a secret using the same generated placeholder as SandboxBuilder.
+    /// Enables TLS interception while preserving existing TLS settings.
     #[napi(js_name = "secretEnvSimple")]
     pub fn secret_env_simple(
         &mut self,
@@ -196,9 +209,12 @@ impl JsNetworkBuilder {
         value: String,
         allowed_host: String,
     ) -> &Self {
-        let placeholder = value.clone();
         let prev = self.take_inner();
-        self.inner = Some(prev.secret_env(env_var, value, placeholder, allowed_host));
+        // SecretBuilder owns placeholder generation; never use the secret as guest data.
+        self.inner = Some(
+            prev.secret(|secret| secret.env(env_var).value(value).allow(allowed_host))
+                .tls_overlay(|tls| tls.enabled(true)),
+        );
         self
     }
 
@@ -233,26 +249,48 @@ impl JsNetworkBuilder {
     /// @deprecated Use maxTcpConnections instead.
     #[allow(deprecated)]
     #[napi(js_name = "maxConnections")]
-    pub fn max_connections(&mut self, max: u32) -> &Self {
+    pub fn max_connections(&mut self, max: f64) -> Result<&Self> {
+        let max = crate::numeric::safe_integer(max, "max")?;
         let prev = self.take_inner();
         self.inner = Some(prev.max_connections(max as usize));
-        self
+        Ok(self)
     }
 
     /// Set the TCP connection cap; zero selects unlimited.
     #[napi(js_name = "maxTcpConnections")]
-    pub fn max_tcp_connections(&mut self, max: u32) -> &Self {
+    pub fn max_tcp_connections(&mut self, max: f64) -> Result<&Self> {
+        let max = crate::numeric::safe_integer(max, "max")?;
         let prev = self.take_inner();
         self.inner = Some(prev.max_tcp_connections(max as usize));
-        self
+        Ok(self)
     }
 
     /// Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant.
     #[napi(js_name = "maxUdpConnections")]
-    pub fn max_udp_connections(&mut self, max: u32) -> &Self {
+    pub fn max_udp_connections(&mut self, max: f64) -> Result<&Self> {
+        let max = crate::numeric::safe_integer(max, "max")?;
         let prev = self.take_inner();
         self.inner = Some(prev.max_udp_connections(max as usize));
-        self
+        Ok(self)
+    }
+
+    /// Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default.
+    #[napi(js_name = "maxInboundTcpConnections")]
+    pub fn max_inbound_tcp_connections(&mut self, value: f64) -> Result<&Self> {
+        let value = crate::numeric::safe_integer(value, "maxInboundTcpConnections")?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.max_inbound_tcp_connections(value as usize));
+        Ok(self)
+    }
+
+    /// Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
+    /// 1024; the host kernel clamps it to its own somaxconn.
+    #[napi(js_name = "tcpAcceptQueueSize")]
+    pub fn tcp_accept_queue_size(&mut self, size: f64) -> Result<&Self> {
+        let size = accept_queue_size(size).map_err(napi::Error::from_reason)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.tcp_accept_queue_size(size));
+        Ok(self)
     }
 
     /// Require hostname-based policy allows to use inspectable application authority.
@@ -283,12 +321,55 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
+    /// Add a NAT64 /96 prefix for policy classification.
+    #[napi(js_name = "nat64Prefix")]
+    pub fn nat64_prefix(&mut self, prefix: String) -> Result<&Self> {
+        let parsed = ipnetwork::Ipv6Network::from_str(&prefix).map_err(|e| {
+            napi::Error::from_reason(format!("invalid NAT64 prefix `{prefix}`: {e}"))
+        })?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.nat64_prefix(parsed));
+        Ok(self)
+    }
+
     /// Trust the host's root CAs inside the guest. Default: false.
     #[napi(js_name = "trustHostCAs")]
     pub fn trust_host_cas(&mut self, enabled: bool) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.trust_host_cas(enabled));
         self
+    }
+
+    /// Configure HTTP denial responses via a callback.
+    #[napi]
+    pub fn http(
+        &mut self,
+        env: &Env,
+        configure: Function<ClassInstance<JsHttpBuilder>, ClassInstance<JsHttpBuilder>>,
+    ) -> Result<&Self> {
+        let initial = JsHttpBuilder::new().into_instance(env)?;
+        let returned = configure.call(initial)?;
+        if let Some(enabled) = returned.response {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.deny_response(enabled)));
+        }
+        if let Some(format) = returned.format {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.deny_response_format(format)));
+        }
+        if let Some(message) = returned.message.clone() {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.deny_message(message)));
+        }
+        if let Some(message) = returned.network_message.clone() {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.network_deny_message(message)));
+        }
+        if let Some(message) = returned.secret_message.clone() {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.secret_deny_message(message)));
+        }
+        Ok(self)
     }
 
     /// Configure local egress and ingress rate limits. Applies on the next
@@ -342,9 +423,48 @@ impl JsNetworkBuilder {
     }
 }
 
+impl JsNetworkBuilder {
+    pub(crate) fn from_inner(inner: RustNetworkBuilder) -> Self {
+        Self { inner: Some(inner) }
+    }
+
+    fn take_inner(&mut self) -> RustNetworkBuilder {
+        self.inner
+            .take()
+            .expect("NetworkBuilder used after consumption")
+    }
+
+    /// Internal: extract the underlying Rust builder. Used by
+    /// `SandboxBuilder.network()` to route through the core SDK closure.
+    #[allow(dead_code)]
+    pub(crate) fn take_inner_builder(&mut self) -> Result<RustNetworkBuilder> {
+        self.inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("NetworkBuilder already consumed"))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
 fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
     bind.parse::<IpAddr>()
         .map_err(|_| napi::Error::from_reason(format!("invalid bind address: {bind}")))
+}
+
+/// Accept only a whole JS number in `1..=i32::MAX`. N-API's `u32` conversion wraps and truncates,
+/// so `2 ** 32 + 1`, `-(2 ** 32) + 1` and `1.5` would otherwise all silently become 1.
+/// Kept free of N-API symbols so standalone Rust tests can call it.
+pub(crate) fn accept_queue_size(value: f64) -> std::result::Result<u32, String> {
+    if value.fract() == 0.0 && (1.0..=f64::from(i32::MAX)).contains(&value) {
+        Ok(value as u32)
+    } else {
+        Err(format!(
+            "tcpAcceptQueueSize must be an integer from 1 to {}, got {value}",
+            i32::MAX
+        ))
+    }
 }
 
 /// Apply the values a JS callback accumulated on a `RateLimiterBuilder`
@@ -366,21 +486,4 @@ fn apply_rate_limiter(
         r = r.ops_burst(burst);
     }
     r
-}
-
-impl JsNetworkBuilder {
-    fn take_inner(&mut self) -> RustNetworkBuilder {
-        self.inner
-            .take()
-            .expect("NetworkBuilder used after consumption")
-    }
-
-    /// Internal: extract the underlying Rust builder. Used by
-    /// `SandboxBuilder.network()` to route through the core SDK closure.
-    #[allow(dead_code)]
-    pub(crate) fn take_inner_builder(&mut self) -> Result<RustNetworkBuilder> {
-        self.inner
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("NetworkBuilder already consumed"))
-    }
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   GiB,
   ImageBuilder,
@@ -438,6 +438,7 @@ describe("SandboxBuilder.build", () => {
       .cpuPlacement("spread")
       .placementProfile("latency")
       .thp("always")
+      .nestedVirt(false)
       .build();
     expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
     expect((cfg.resources as { maxMemoryMib: number }).maxMemoryMib).toBe(8192);
@@ -450,6 +451,7 @@ describe("SandboxBuilder.build", () => {
       (cfg.resources as { placementProfile: string }).placementProfile,
     ).toBe("latency");
     expect((cfg.resources as { thp: string }).thp).toBe("always");
+    expect((cfg.resources as { nestedVirt: boolean }).nestedVirt).toBe(false);
   });
 
   it("renders a configured outbound proxy in canonical form", async () => {
@@ -486,6 +488,29 @@ describe("SandboxBuilder.build", () => {
         password: {
           kind: "env",
           var: "SOCKS5_PASSWORD",
+        },
+      },
+    });
+  });
+
+  it("renders HTTP CONNECT credentials in canonical form", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .proxy((p) =>
+        p
+          .httpConnect("127.0.0.1:3128")
+          .credentials("sandbox", SecretSource.env("HTTP_CONNECT_PASSWORD")),
+      )
+      .build();
+
+    expect(cfg.network?.outboundProxy).toEqual({
+      protocol: "http_connect",
+      address: "127.0.0.1:3128",
+      credentials: {
+        username: "sandbox",
+        password: {
+          kind: "env",
+          var: "HTTP_CONNECT_PASSWORD",
         },
       },
     });
@@ -718,8 +743,8 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
     };
     expect(cfg.secrets.secrets).toHaveLength(1);
     expect(cfg.secrets.secrets[0].envVar).toBe("API_KEY");
-    // Placeholder defaults to the value when omitted.
-    expect(cfg.secrets.secrets[0].placeholder).toBe("sk-abc");
+    // The guest must receive a token rather than the credential.
+    expect(cfg.secrets.secrets[0].placeholder).toBe("$MSB_API_KEY");
   });
 });
 
@@ -744,6 +769,7 @@ describe("NetworkBuilder secret passthrough", () => {
         .value("sk-abc")
         .allow("api.github.com")[method]("api.anthropic.com")
         .allowPlaceholderFor("*.anthropic.com")
+        .substituteInHeaderFields(["authorization"])
         .substituteInBody(true)
         .violationAction("block-and-log")
         .build();
@@ -753,6 +779,7 @@ describe("NetworkBuilder secret passthrough", () => {
         "api.anthropic.com",
         "*.anthropic.com",
       ]);
+      expect(secret.substitution.headerFields).toEqual(["authorization"]);
       expect(secret.substitution.body).toBe(true);
     },
   );
@@ -983,5 +1010,91 @@ describe("TCP connection limit aliases", () => {
     expect(config.network.maxTcpConnections).toBe(64);
     expect(config.network.maxConnections).toBe(64);
     expect(config.network.maxUdpConnections).toBe(7);
+  });
+});
+
+describe("Published TCP configuration", () => {
+  it("is absent unless set and survives into the sandbox configuration", async () => {
+    const defaults = new NetworkBuilder().build();
+    expect(defaults.tcpAcceptQueueSize).toBeUndefined();
+    expect(defaults.maxInboundTcpConnections).toBeUndefined();
+    expect(new NetworkBuilder().tcpAcceptQueueSize(4096).build().tcpAcceptQueueSize).toBe(4096);
+    const config = await Sandbox.builder("x").image("alpine").port(8080, 80)
+      .network(n => n.tcpAcceptQueueSize(4096).maxInboundTcpConnections(0)).build();
+    expect(config.network.tcpAcceptQueueSize).toBe(4096);
+    expect(config.network.maxInboundTcpConnections).toBe(0);
+  });
+
+  it("rejects values instead of wrapping or truncating them", () => {
+    // N-API's u32 conversion would turn the last three into 1.
+    for (const invalid of [0, 2_147_483_648, 4_294_967_297, -4_294_967_295, 1.5]) {
+      expect(() => new NetworkBuilder().tcpAcceptQueueSize(invalid))
+        .toThrow(/tcpAcceptQueueSize must be an integer/);
+      expect(() => Sandbox.restore("saved").tcpAcceptQueueSize(invalid))
+        .toThrow(/tcpAcceptQueueSize must be an integer/);
+    }
+  });
+});
+
+describe("NetworkBuilder HTTP denial messages", () => {
+  it("defaults to JSON and preserves explicit opt-outs across callbacks", () => {
+    expect(new NetworkBuilder().build().http.denyResponse).toBe(true);
+    expect(new NetworkBuilder().http((h) => h.networkDenyMessage("custom")).build().http.denyResponse).toBe(true);
+    expect(new NetworkBuilder().http((h) => h.denyMessage("blocked {host}")).build().http)
+      .toEqual({ denyResponse: true, denyResponseFormat: "json", denyMessage: "blocked {host}" });
+    expect(new NetworkBuilder().http((h) => h.denyResponseFormat("json")).build().http.denyResponseFormat).toBe("json");
+    expect(() => new NetworkBuilder().http((h) => h.denyResponseFormat("xml" as "json"))).toThrow();
+    expect(new NetworkBuilder().http((h) => h.denyResponseFormat("text")).build().http.denyResponseFormat).toBe("text");
+    const builder = new NetworkBuilder().http((h) => h.denyResponse(true));
+    expect(builder.build().http).toEqual({ denyResponseFormat: "json", denyResponse: true });
+    builder.http((h) => h.networkDenyMessage("keep"));
+    builder.http((h) => h.secretDenyMessage("secret {host}"));
+    expect(builder.build().http).toEqual({ denyResponseFormat: "json", denyResponse: true, networkDenyMessage: "keep", secretDenyMessage: "secret {host}" });
+    builder.http((h) => h.denyResponse(false));
+    expect(builder.build().http).toEqual({ denyResponseFormat: "json", denyResponse: false, networkDenyMessage: "keep", secretDenyMessage: "secret {host}" });
+    expect(new NetworkBuilder().http((h) => h.networkDenyMessage("blocked {host}")).build().http.networkDenyMessage)
+      .toBe("blocked {host}");
+    expect(new NetworkBuilder().http((h) => h.networkDenyMessage("")).build().http.networkDenyMessage).toBe("");
+    expect(new NetworkBuilder().http((h) => h.secretDenyMessage("")).build().http.secretDenyMessage).toBe("");
+    expect(new NetworkBuilder().http((h) => h.secretDenyMessage("secret")).build().http.denyResponse).toBe(true);
+    expect(new NetworkBuilder().http((h) => h).build().http.networkDenyMessage).toBeUndefined();
+    expect(new NetworkBuilder().http((h) => h.networkDenyMessage("keep")).http((h) => h).build().http.networkDenyMessage).toBe("keep");
+  });
+});
+
+
+describe("restore copy-on-write memory naming", () => {
+  it("keeps forked as a fluent alias and warns only for the deprecated spelling", async () => {
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    try {
+      const builder = Sandbox.restore("saved").name("child");
+      expect(builder.cowMemory()).toBe(builder);
+      expect(warning).not.toHaveBeenCalled();
+      expect(builder.forked()).toBe(builder);
+      expect(builder.forked()).toBe(builder);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(warning.mock.calls[0][0]).toContain("use cowMemory()");
+      expect(warning.mock.calls[0][1]).toBe("DeprecationWarning");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+});
+
+describe("SandboxBuilder TLS shortcut", () => {
+  it("enables interception through the native builder without resetting TLS options", async () => {
+    const defaults = await Sandbox.builder("tls-defaults").image("alpine")
+      .interceptTls()
+      .build();
+    expect(defaults.network.tls.enabled).toBe(true);
+
+    const config = await Sandbox.builder("tls-shortcut").image("alpine")
+      .network(n => n.tls(t => t.bypass("pinned.example.com")))
+      .interceptTls()
+      .build();
+
+    expect(config.network.tls.enabled).toBe(true);
+    expect(config.network.tls.bypass).toEqual(["pinned.example.com"]);
   });
 });

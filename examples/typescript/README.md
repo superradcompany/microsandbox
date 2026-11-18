@@ -54,3 +54,5 @@ Configuration-focused examples intentionally replace their fixed-name sandbox so
 | `net-ports` | Port publishing |
 | `net-secrets` | Secret injection |
 | `net-tls` | TLS interception |
+
+The `snapshot-fork` example keeps its historical directory name; it demonstrates restoring a saved disk snapshot. Live forking uses the `fork` API.

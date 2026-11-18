@@ -1,0 +1,10 @@
+{
+  "target": {
+    "sandbox": "web-2",
+    "port": 8080
+  },
+  "targte": {
+    "sandbox": "web-3",
+    "port": 8081
+  }
+}

@@ -1,11 +1,11 @@
 //! Backend abstraction: routes SDK calls to either a local libkrun runtime or
-//! a remote msb-cloud control plane.
+//! the remote cloud API.
 //!
 //! The [`Backend`] trait + its sub-traits ([`SandboxBackend`], `VolumeBackend`,
 //! `SnapshotBackend`) are the dispatch surface every SDK handle (`Sandbox`,
 //! `Volume`, `ExecHandle`, …) routes through. Two implementations are planned:
 //! [`LocalBackend`] (wraps today's libkrun + agentd path) and `CloudBackend`
-//! (HTTP to msb-cloud, lives in this crate once the cloud-side wire surface is
+//! (HTTP to the cloud API, lives in this crate once the cloud-side wire surface is
 //! complete).
 //!
 //! ## Ambient default
@@ -24,6 +24,10 @@
 mod cloud;
 mod dispatch;
 #[cfg(feature = "local")]
+mod inspection;
+#[cfg(feature = "local")]
+pub(crate) use inspection::initialized_backend_config;
+#[cfg(feature = "local")]
 pub(crate) mod local;
 
 #[cfg(feature = "local")]
@@ -31,6 +35,7 @@ pub(crate) use local::ControlSession;
 mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
+pub(crate) mod service;
 pub(crate) mod snapshot;
 pub(crate) mod volume;
 
@@ -46,8 +51,10 @@ pub use local::snapshot_downgrade as local_snapshot_downgrade;
 #[cfg(feature = "local")]
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
+    CloudErrorBody, CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudSandboxStatusReason, CloudService, CloudServiceStatus, CloudServiceTarget,
+    CloudUpdateServiceRequest,
 };
 pub use profile::{Profile, ProfileBackend, resolve_default_backend};
 pub use sandbox::{
@@ -55,6 +62,7 @@ pub use sandbox::{
     SandboxIdentity, SandboxInner,
 };
 pub use sandbox::{SandboxHandleLocalState, SandboxLocalState};
+pub use service::ServiceBackend;
 pub use snapshot::SnapshotBackend;
 pub use volume::{
     CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
@@ -77,7 +85,7 @@ use serde::{Deserialize, Serialize};
 pub enum BackendKind {
     /// Local libkrun + agentd backend. Spawns microVMs on the calling host.
     Local,
-    /// Remote backend talking to an msb-cloud control plane over HTTP.
+    /// Remote backend talking to the cloud API over HTTP.
     Cloud,
 }
 
@@ -93,7 +101,7 @@ pub enum BackendSelectionSource {
     /// Selected explicitly by `MSB_BACKEND`.
     #[serde(rename = "MSB_BACKEND")]
     MsbBackend,
-    /// Selected implicitly by a non-empty `MSB_API_KEY`.
+    /// Legacy diagnostic value. API credentials no longer select a backend.
     #[serde(rename = "MSB_API_KEY")]
     MsbApiKey,
     /// Selected by the profile named in `MSB_PROFILE`.
@@ -130,6 +138,21 @@ pub struct BackendInfo {
 //--------------------------------------------------------------------------------------------------
 
 impl BackendKind {
+    pub(crate) fn is_available(self) -> bool {
+        match self {
+            Self::Local => cfg!(feature = "local"),
+            Self::Cloud => cfg!(feature = "cloud"),
+        }
+    }
+
+    pub(crate) fn require_available(self) -> crate::MicrosandboxResult<()> {
+        if self.is_available() {
+            Ok(())
+        } else {
+            Err(crate::config::backend::feature_disabled(self.as_str()))
+        }
+    }
+
     /// Stable lowercase name used by language bindings and diagnostics.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -208,7 +231,8 @@ pub fn default_backend() -> Arc<dyn Backend> {
 ///
 /// Like [`default_backend`], the first call freezes ambient environment and
 /// profile resolution for the process.
-pub fn default_backend_info() -> BackendInfo {
+/// Returns the configuration error if the selected backend could not be constructed.
+pub fn default_backend_info() -> crate::MicrosandboxResult<BackendInfo> {
     default_backend().info()
 }
 
@@ -264,6 +288,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backend_info_preserves_configuration_errors() {
+        let backend: Arc<dyn Backend> = Arc::new(misconfigured::ConfigurationErrorBackend::new(
+            crate::MicrosandboxError::InvalidConfig("local backend is prohibited".into()),
+        ));
+        let error = with_backend(backend, async { default_backend_info() })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("local backend is prohibited"));
+    }
+
+    #[tokio::test]
     async fn with_backend_overrides_for_scope() {
         struct Fake(BackendKind);
         impl Backend for Fake {
@@ -281,6 +316,10 @@ mod tests {
 
             fn snapshots(&self) -> &dyn SnapshotBackend {
                 unimplemented!("fake backend only tests kind routing")
+            }
+
+            fn services(&self) -> &dyn ServiceBackend {
+                unreachable!("fake backend only tests kind routing")
             }
         }
         let fake: Arc<dyn Backend> = Arc::new(Fake(BackendKind::Cloud));
@@ -312,6 +351,10 @@ mod tests {
 
             fn snapshots(&self) -> &dyn SnapshotBackend {
                 unimplemented!("fake backend only tests kind routing")
+            }
+
+            fn services(&self) -> &dyn ServiceBackend {
+                unreachable!("fake backend only tests kind routing")
             }
         }
 

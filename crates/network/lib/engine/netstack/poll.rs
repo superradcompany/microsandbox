@@ -22,7 +22,7 @@ use smoltcp::wire::{
     Ipv6Repr, TcpPacket, UdpPacket,
 };
 
-use crate::config::{ConnectionLimit, DnsConfig, PublishedPort};
+use crate::config::{ConnectionLimit, DnsConfig};
 use crate::engine::dns::common::ports::DnsPortType;
 use crate::engine::dns::{
     interceptor::DnsInterceptor,
@@ -31,10 +31,16 @@ use crate::engine::dns::{
 use crate::engine::tls::{proxy::TlsProxy, state::TlsState};
 use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::ports::PortPublisher;
+use crate::ports::{BoundPublishedPorts, PortPublisher};
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
-use crate::tcp::{connection::TcpConnectionTracker, proxy::TcpProxy, upstream::UpstreamTcpTarget};
+use crate::tcp::{
+    connection::{TcpAcceptMode, TcpConnectionTracker},
+    deny as tcp_deny,
+    pending::PendingConnect,
+    proxy::TcpProxy,
+    upstream::UpstreamTcpTarget,
+};
 use crate::udp::fragments::{
     Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
     is_ipv4_udp_fragment, is_ipv6_fragment, is_ipv6_udp_fragment,
@@ -46,6 +52,8 @@ use super::{device::SmoltcpDevice, shared::SharedState};
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
+
+const CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[cfg(windows)]
 const TX_WAKE_TOKEN: u64 = 1;
@@ -218,10 +226,11 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// * `dns_config` - DNS interception settings (block lists, upstreams, timeout).
 /// * `tls_state` - Optional TLS MITM state; drives interception of intercepted ports and DoT
 ///   when present.
-/// * `published_ports` - Host → guest port publishes; the publisher accepts inbound
-///   connections on the host-bind address and forwards into the guest.
+/// * `published_ports` - Host sockets for host → guest port publishes; the publisher accepts
+///   inbound connections on them and forwards into the guest.
 /// * `max_tcp_connections` - Optional cap on concurrent guest connections tracked by
 ///   [`TcpConnectionTracker`]; `None` uses the default.
+/// * `max_udp_connections` - Optional cap on concurrent UDP relay sessions.
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
@@ -232,10 +241,11 @@ pub fn smoltcp_poll_loop(
     platform_policy: Option<NetworkPolicy>,
     dns_config: DnsConfig,
     tls_state: Option<Arc<TlsState>>,
-    published_ports: Vec<PublishedPort>,
+    published_ports: BoundPublishedPorts,
     strict: bool,
     max_tcp_connections: Option<NonZeroUsize>,
     max_udp_connections: Option<ConnectionLimit>,
+    max_inbound_tcp_connections: Option<ConnectionLimit>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
@@ -278,11 +288,10 @@ pub fn smoltcp_poll_loop(
         config.guest_mac,
     );
     let mut port_publisher = PortPublisher::new(
-        &published_ports,
+        published_ports,
+        max_inbound_tcp_connections,
         config.guest_ipv4,
         config.guest_ipv6,
-        config.gateway.ipv4,
-        config.gateway.ipv6,
         config.gateway_mac,
         config.guest_mac,
         network_policy.clone(),
@@ -362,11 +371,11 @@ pub fn smoltcp_poll_loop(
 
             match classify_frame(frame) {
                 FrameAction::TcpSyn { src, dst } => {
-                    let allow = match DnsPortType::from_tcp(dst.port()) {
+                    let accept_mode = match DnsPortType::from_tcp(dst.port()) {
                         // Plain DNS: the interceptor enforces policy at
                         // the application layer (block list + rebind
                         // protection); bypass the network egress check.
-                        DnsPortType::Dns => true,
+                        DnsPortType::Dns => TcpAcceptMode::AcceptImmediately,
                         // DoT: intercept only when TLS MITM is
                         // configured. Without it, the block list can't
                         // apply (traffic is encrypted end-to-end), so
@@ -377,10 +386,10 @@ pub fn smoltcp_poll_loop(
                         // per query by the forwarder.
                         DnsPortType::EncryptedDns => {
                             if tls_state.is_some() {
-                                true
+                                TcpAcceptMode::AcceptImmediately
                             } else {
                                 tracing::debug!(%dst, "DoT port refused (TLS interception not configured); stub should fall back to TCP/53");
-                                false
+                                TcpAcceptMode::Reject
                             }
                         }
                         // Alternative DNS protocol we can't proxy:
@@ -390,7 +399,7 @@ pub fn smoltcp_poll_loop(
                         // plain TCP/53.
                         DnsPortType::AlternativeDns => {
                             tracing::debug!(%dst, "alternative-DNS TCP port refused; stub should fall back to TCP/53");
-                            false
+                            TcpAcceptMode::Reject
                         }
                         // Other: regular outbound — defer Domain rules to first-flight;
                         // accept unless an IP-layer rule denies.
@@ -400,23 +409,53 @@ pub fn smoltcp_poll_loop(
                                     .evaluate_egress(dst, Protocol::Tcp, &shared)
                                     .is_allow()
                             });
-                            platform_allows
-                                && matches!(
-                                    network_policy.evaluate_egress_with_source(
-                                        dst,
-                                        Protocol::Tcp,
-                                        &shared,
-                                        HostnameSource::Deferred,
-                                    ),
-                                    EgressEvaluation::Allow | EgressEvaluation::DeferUntilHostname
-                                )
+                            let evaluation = network_policy.evaluate_egress_with_source(
+                                dst,
+                                Protocol::Tcp,
+                                &shared,
+                                HostnameSource::Deferred,
+                            );
+
+                            match (platform_allows, evaluation) {
+                                (false, _) => TcpAcceptMode::Reject,
+                                (true, EgressEvaluation::Allow) => TcpAcceptMode::WaitForUpstream,
+                                // Hostname rules need guest bytes before they
+                                // can authorize a host connection.
+                                (true, EgressEvaluation::DeferUntilHostname) => {
+                                    TcpAcceptMode::AcceptImmediately
+                                }
+                                // Only default denies may receive an HTTP
+                                // response; explicit denies remain resets.
+                                (true, EgressEvaluation::Deny)
+                                    if shared.http_deny_response_enabled()
+                                        && tcp_deny::answers_denied_http(
+                                            dst.port(),
+                                            tls_state.as_deref(),
+                                        )
+                                        && network_policy.egress_denied_by_default(
+                                            dst,
+                                            Protocol::Tcp,
+                                            &shared,
+                                            HostnameSource::Deferred,
+                                        ) =>
+                                {
+                                    TcpAcceptMode::RespondWithDenial
+                                }
+                                (true, EgressEvaluation::Deny) => TcpAcceptMode::Reject,
+                            }
                         }
                     };
-                    if allow && !conn_tracker.has_socket_for(&src, &dst) {
-                        conn_tracker.create_tcp_socket(src, dst, &mut sockets);
+                    // A reset can return a passive socket to Listen. Retire it
+                    // before another SYN can reuse its previous host connection,
+                    // including when both packets arrive in the same batch.
+                    conn_tracker.cleanup_closed(&mut sockets);
+                    if !conn_tracker.has_socket_for(&src, &dst) {
+                        conn_tracker.create_tcp_socket(src, dst, &mut sockets, accept_mode);
+                        shared.set_outbound_tcp_rejected(conn_tracker.rejected_connections());
                     }
-                    // Let smoltcp process — matching socket completes
-                    // handshake, no socket means auto-RST.
+
+                    // smoltcp validates the packet before any host-side dial.
+                    // A paused socket accepts SYN but withholds SYN-ACK.
                     iface.poll_ingress_single(now, &mut device, &mut sockets);
                 }
 
@@ -492,6 +531,17 @@ pub fn smoltcp_poll_loop(
             }
         }
 
+        for (handle, dst) in conn_tracker.poll_connects(&mut sockets) {
+            let target = resolve_tcp_host_target(dst, config.gateway);
+            let proxy = ResolvedOutboundProxy::select_for_destination(
+                &outbound_proxy,
+                dst,
+                target.primary(),
+            );
+            let pending = PendingConnect::start(target, proxy, shared.clone(), &tokio_handle);
+            conn_tracker.track_connect(handle, pending);
+        }
+
         // ── Phase 2: Ingress egress + maintenance ─────────────────────────
         // Flush frames generated by Phase 1 ingress (ACKs, SYN-ACKs, etc.)
         // before relaying data so smoltcp has up-to-date state.
@@ -523,6 +573,19 @@ pub fn smoltcp_poll_loop(
         // Detect newly-established connections and spawn proxy tasks.
         let new_conns = conn_tracker.take_new_connections(&mut sockets);
         for conn in new_conns {
+            if conn.policy_denied {
+                // Accepted only to answer 403; never dials upstream.
+                tcp_deny::spawn_deny_responder(
+                    &tokio_handle,
+                    conn.dst,
+                    conn.from_smoltcp,
+                    conn.to_smoltcp,
+                    shared.clone(),
+                    tls_state.clone(),
+                    conn.proxy_connect,
+                );
+                continue;
+            }
             if let Some(ref tls_state) = tls_state
                 && tls_state
                     .config
@@ -537,6 +600,7 @@ pub fn smoltcp_poll_loop(
                     connect_target.primary(),
                 );
                 let proxy = TlsProxy::new(
+                    conn.upstream,
                     conn.dst,
                     connect_target,
                     conn.from_smoltcp,
@@ -547,6 +611,7 @@ pub fn smoltcp_poll_loop(
                     strict,
                     conn.proxy_connect,
                     connection_outbound_proxy,
+                    dns_forwarder_handle.clone(),
                 );
                 tokio_handle.spawn(proxy.run());
                 continue;
@@ -609,6 +674,7 @@ pub fn smoltcp_poll_loop(
                 connect_target.primary(),
             );
             let proxy = TcpProxy::new(
+                conn.upstream,
                 conn.dst,
                 connect_target,
                 conn.from_smoltcp,
@@ -622,13 +688,14 @@ pub fn smoltcp_poll_loop(
                 strict,
                 conn.proxy_connect,
                 connection_outbound_proxy,
+                dns_forwarder_handle.clone(),
             );
             tokio_handle.spawn(proxy.run());
         }
 
         // Periodic cleanup is the idle fallback. TCP creation also reclaims
         // completed flows when the table is full, before rejecting a new SYN.
-        if last_cleanup.elapsed() >= std::time::Duration::from_secs(1) {
+        if last_cleanup.elapsed() >= CLEANUP_INTERVAL {
             conn_tracker.cleanup_closed(&mut sockets);
             conn_tracker.trace_stats(&sockets);
             port_publisher.cleanup_closed(&mut sockets);
@@ -653,10 +720,18 @@ pub fn smoltcp_poll_loop(
             shared.rx_wake.wake();
         }
 
-        let timeout_ms = iface
+        let stack_delay = iface
             .poll_delay(now, &sockets)
-            .map(|d| d.total_millis().min(i32::MAX as u64) as i32)
-            .unwrap_or(100); // 100ms fallback when no timers pending.
+            .map(|delay| std::time::Duration::from_millis(delay.total_millis()));
+
+        // Packet/proxy events wake us immediately. Otherwise sleep to the next
+        // actual deadline, including cleanup even when the stack timer is later.
+        let timeout_ms = poll_timeout_ms(
+            stack_delay,
+            conn_tracker.deferred_close_delay(),
+            port_publisher.next_deadline_delay(),
+            CLEANUP_INTERVAL.saturating_sub(last_cleanup.elapsed()),
+        );
 
         #[cfg(unix)]
         sleep_until_stack_wake(&shared, timeout_ms, &mut poll_fds);
@@ -668,6 +743,22 @@ pub fn smoltcp_poll_loop(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Bound sleep by every maintenance deadline without polling an idle stack.
+fn poll_timeout_ms(
+    stack_delay: Option<std::time::Duration>,
+    connection_close_delay: Option<std::time::Duration>,
+    port_close_delay: Option<std::time::Duration>,
+    cleanup_delay: std::time::Duration,
+) -> i32 {
+    let delay = [stack_delay, connection_close_delay, port_close_delay]
+        .into_iter()
+        .flatten()
+        .fold(cleanup_delay, std::cmp::min);
+    // Round up fractional milliseconds to avoid spinning just before cleanup.
+    // A deadline that is already due still requests an immediate poll.
+    delay.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32
+}
 
 #[cfg(unix)]
 fn sleep_until_stack_wake(shared: &SharedState, timeout_ms: i32, poll_fds: &mut [libc::pollfd; 2]) {
@@ -1271,6 +1362,30 @@ mod tests {
         .emit(&mut ArpPacket::new_unchecked(&mut frame[14..]));
 
         frame
+    }
+
+    #[test]
+    fn poll_sleep_honors_cleanup_and_earlier_transport_deadlines() {
+        use std::time::Duration;
+
+        let second = Duration::from_secs(1);
+        assert_eq!(poll_timeout_ms(None, None, None, second), 1000);
+        assert_eq!(poll_timeout_ms(Some(second * 60), None, None, second), 1000);
+        for index in 0..3 {
+            let mut timers = [None; 3];
+            timers[index] = Some(Duration::from_millis(25));
+            assert_eq!(poll_timeout_ms(timers[0], timers[1], timers[2], second), 25);
+            assert_eq!(
+                poll_timeout_ms(timers[0], timers[1], timers[2], Duration::ZERO),
+                0
+            );
+        }
+        assert_eq!(poll_timeout_ms(Some(Duration::ZERO), None, None, second), 0);
+        assert_eq!(
+            poll_timeout_ms(None, None, None, Duration::from_nanos(1)),
+            1
+        );
+        assert_eq!(poll_timeout_ms(None, None, None, Duration::MAX), i32::MAX);
     }
 
     #[test]
@@ -1889,6 +2004,287 @@ mod tests {
         frame
     }
 
+    /// An abandoned handshake must not donate its host stream to a retry.
+    #[test]
+    fn reset_before_guest_ack_requires_a_fresh_host_connection() {
+        const CHILD_ENV: &str = "MSB_TEST_RESET_PRECONNECTED_HANDSHAKE";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "engine::netstack::poll::tests::reset_before_guest_ack_requires_a_fresh_host_connection",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // Cover both reuse of the old four-tuple and a new ephemeral port.
+            for retry_port in [40000, 40001] {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    check_reset_before_guest_ack(retry_port),
+                )
+                .await
+                .expect("reset/retry regression timed out");
+            }
+        });
+    }
+
+    async fn check_reset_before_guest_ack(retry_port: u16) {
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let shared = Arc::new(SharedState::new(256));
+        let loop_shared = shared.clone();
+        let handle = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            smoltcp_poll_loop(
+                loop_shared,
+                leak_poll_config(),
+                NetworkPolicy::allow_all(),
+                None,
+                DnsConfig::default(),
+                None,
+                BoundPublishedPorts::default(),
+                false,
+                None,
+                None,
+                None,
+                handle,
+                SecretsHandle::new(Default::default()),
+                None,
+            );
+        });
+        let send = |guest_port, control, seq, ack, payload: &[u8]| {
+            let mut frame = build_tcp_frame(guest_port, port, control, seq, ack, payload);
+            let guest = IpAddress::Ipv4(Ipv4Addr::from(GUEST_IP));
+            let gateway = IpAddress::Ipv4(Ipv4Addr::from(GATEWAY_IP));
+            let mut ip = Ipv4Packet::new_unchecked(&mut frame[14..34]);
+            ip.set_dst_addr(Ipv4Addr::from(GATEWAY_IP));
+            ip.fill_checksum();
+            TcpPacket::new_unchecked(&mut frame[34..]).fill_checksum(&guest, &gateway);
+            shared.tx_ring.push(frame).unwrap();
+        };
+        shared
+            .tx_ring
+            .push(build_arp_request_frame(GUEST_MAC, GUEST_IP, GATEWAY_IP))
+            .unwrap();
+        send(40000, TcpControl::Syn, 1000, None, &[]);
+        shared.tx_wake.wake();
+        let (mut abandoned, _) = listener.accept().await.unwrap();
+        let first_isn = loop {
+            if let Some((seq, ack, syn, _, rst)) = last_tcp_reply(&shared) {
+                assert!(!rst);
+                if syn {
+                    assert_eq!(ack, 1001);
+                    break seq;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        // Queue both packets before waking the loop: a fix must work even
+        // when reset and retry are processed in a single ingress batch.
+        send(
+            40000,
+            TcpControl::Rst,
+            1001,
+            Some(first_isn.wrapping_add(1)),
+            &[],
+        );
+        send(retry_port, TcpControl::Syn, 2000, None, &[]);
+        shared.tx_wake.wake();
+        let retry_isn = loop {
+            if let Some((seq, ack, syn, _, rst)) = last_tcp_reply(&shared) {
+                assert!(!rst, "retry was unexpectedly reset");
+                if syn && ack == 2001 {
+                    break seq;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        send(
+            retry_port,
+            TcpControl::None,
+            2001,
+            Some(retry_isn.wrapping_add(1)),
+            b"fresh",
+        );
+        shared.tx_wake.wake();
+        let (mut fresh, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .expect("retry reused the abandoned host stream instead of opening a fresh connection")
+            .unwrap();
+        let mut request = [0; 5];
+        fresh.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"fresh");
+        assert_eq!(
+            abandoned.read(&mut request).await.unwrap(),
+            0,
+            "abandoned host socket must close without receiving retry data"
+        );
+    }
+
+    /// Run the real OS-thread loop in a subprocess because it has no shutdown API.
+    #[test]
+    fn stalled_drain_wakes_poll_loop_without_network_events() {
+        const CHILD_ENV: &str = "MSB_TEST_STALLED_DRAIN_WAKE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "engine::netstack::poll::tests::stalled_drain_wakes_poll_loop_without_network_events",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "poll-loop child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(65), async {
+                check_stalled_drain_wakeup().await;
+            })
+            .await
+            .expect("poll-loop regression timed out");
+        });
+    }
+
+    async fn check_stalled_drain_wakeup() {
+        use std::time::Duration;
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+        let host = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 6];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"hello\n");
+            stream.write_all(&vec![b'x'; 131072]).await.unwrap();
+            sent_tx.send(()).unwrap();
+
+            // Let zero-window retransmission backoff grow before host EOF starts
+            // the drain timer. The next TCP timer alone would wake too late.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let shared = Arc::new(SharedState::new(256));
+        let loop_shared = shared.clone();
+        let handle = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            smoltcp_poll_loop(
+                loop_shared,
+                leak_poll_config(),
+                NetworkPolicy::allow_all(),
+                None,
+                DnsConfig::default(),
+                None,
+                BoundPublishedPorts::default(),
+                false,
+                None,
+                None,
+                None,
+                handle,
+                SecretsHandle::new(Default::default()),
+                None,
+            );
+        });
+
+        let send = |control, seq, ack, payload: &[u8]| {
+            let mut frame = build_tcp_frame(54321, port, control, seq, ack, payload);
+            let guest = IpAddress::Ipv4(Ipv4Addr::from(GUEST_IP));
+            let gateway = IpAddress::Ipv4(Ipv4Addr::from(GATEWAY_IP));
+            let mut ip = Ipv4Packet::new_unchecked(&mut frame[14..34]);
+            ip.set_dst_addr(Ipv4Addr::from(GATEWAY_IP));
+            ip.fill_checksum();
+            let mut tcp = TcpPacket::new_unchecked(&mut frame[34..]);
+            tcp.set_window_len(0);
+            tcp.fill_checksum(&guest, &gateway);
+            shared.tx_ring.push(frame).unwrap();
+            shared.tx_wake.wake();
+        };
+        shared
+            .tx_ring
+            .push(build_arp_request_frame(GUEST_MAC, GUEST_IP, GATEWAY_IP))
+            .unwrap();
+        send(TcpControl::Syn, 1000, None, &[]);
+        let server_isn = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some((seq, _, syn, _, rst)) = last_tcp_reply(&shared) {
+                    assert!(!rst, "unexpected reset during handshake");
+                    if syn {
+                        break seq;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("guest handshake timed out");
+        send(
+            TcpControl::None,
+            1001,
+            Some(server_isn.wrapping_add(1)),
+            b"hello\n",
+        );
+        tokio::time::timeout(Duration::from_secs(5), sent_rx)
+            .await
+            .expect("host did not receive request")
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        // From here on, never send guest packets or wake the network thread.
+        // Reading its output ring does not signal either of its wake sources.
+        tokio::time::timeout(Duration::from_secs(55), async {
+            loop {
+                if let Some((_, _, _, fin, rst)) = last_tcp_reply(&shared) {
+                    assert!(!fin, "queued response must not be discarded with FIN");
+                    if rst {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("drain deadline did not wake the idle poll loop");
+        assert!(
+            started.elapsed() >= Duration::from_secs(30),
+            "premature reset"
+        );
+        host.await.unwrap();
+    }
+
     /// Push one guest frame, run a single ingress pass, then drain egress.
     fn ingress(
         frame: Vec<u8>,
@@ -1977,7 +2373,7 @@ mod tests {
         // 1) Guest SYN — tracker creates the listening socket first (as the
         //    real poll loop does), then smoltcp completes the handshake.
         assert!(
-            tracker.create_tcp_socket(src, dst, sockets),
+            tracker.create_tcp_socket(src, dst, sockets, TcpAcceptMode::AcceptImmediately),
             "socket creation should succeed under the limit"
         );
         ingress(
@@ -2328,10 +2724,17 @@ mod tests {
         );
         let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40001);
         let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
+        assert!(!tracker.create_tcp_socket(src, dst, &mut sockets, TcpAcceptMode::Reject));
+        assert_eq!(
+            tracker.rejected_connections(),
+            0,
+            "policy denials are not cap rejections"
+        );
         assert!(
-            !tracker.create_tcp_socket(src, dst, &mut sockets),
+            !tracker.create_tcp_socket(src, dst, &mut sockets, TcpAcceptMode::AcceptImmediately),
             "the pending reset still owns its socket budget"
         );
+        assert_eq!(tracker.rejected_connections(), 1);
         loop {
             if matches!(
                 iface.poll_egress(now, &mut device, &mut sockets),
@@ -2343,7 +2746,17 @@ mod tests {
         let (_, _, _, _, rst) = last_tcp_reply(&shared).expect("RST must reach guest");
         assert!(rst);
         // No periodic cleanup call: allocating the next SYN reclaims the slot.
-        assert!(tracker.create_tcp_socket(src, dst, &mut sockets));
+        assert!(tracker.create_tcp_socket(
+            src,
+            dst,
+            &mut sockets,
+            TcpAcceptMode::AcceptImmediately
+        ));
+        assert_eq!(
+            tracker.rejected_connections(),
+            1,
+            "admitted retries do not increment it"
+        );
         assert!(!tracker.has_socket_for(
             &SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40000),
             &dst
@@ -2369,7 +2782,12 @@ mod tests {
         );
         let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40000);
         let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
-        assert!(tracker.create_tcp_socket(src, dst, &mut sockets));
+        assert!(tracker.create_tcp_socket(
+            src,
+            dst,
+            &mut sockets,
+            TcpAcceptMode::AcceptImmediately
+        ));
         ingress(
             build_tcp_frame(40000, 443, TcpControl::Syn, 1000, None, &[]),
             &mut device,
@@ -2391,7 +2809,12 @@ mod tests {
         );
         assert_eq!(only_tcp_state(&sockets), Some(tcp::State::Listen));
         let next_src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40001);
-        assert!(tracker.create_tcp_socket(next_src, dst, &mut sockets));
+        assert!(tracker.create_tcp_socket(
+            next_src,
+            dst,
+            &mut sockets,
+            TcpAcceptMode::AcceptImmediately
+        ));
         assert!(!tracker.has_socket_for(&src, &dst));
     }
 
@@ -2459,7 +2882,12 @@ mod tests {
         tracker.cleanup_closed(&mut sockets);
         let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40001);
         let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
-        assert!(!tracker.create_tcp_socket(src, dst, &mut sockets));
+        assert!(!tracker.create_tcp_socket(
+            src,
+            dst,
+            &mut sockets,
+            TcpAcceptMode::AcceptImmediately
+        ));
         assert_eq!(only_tcp_state(&sockets), Some(tcp::State::TimeWait));
     }
 
@@ -2493,7 +2921,7 @@ mod tests {
         // sees egress as unreachable.
         let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40004);
         assert!(
-            !tracker.create_tcp_socket(src, dst, &mut sockets),
+            !tracker.create_tcp_socket(src, dst, &mut sockets, TcpAcceptMode::AcceptImmediately),
             "creation at the limit must be refused",
         );
     }

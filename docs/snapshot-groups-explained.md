@@ -53,16 +53,16 @@ msb snap create cp01 --sandbox worker --full
 msb snap create cp02 --sandbox worker --full
 
 # A bare group selects its head, currently cp02.
-msb snap restore worker --name latest --forked
+msb snap restore worker --name latest --cow-mem
 
 # A qualified name selects an exact checkpoint.
-msb snap restore worker:cp01 --name earlier --forked
+msb snap restore worker:cp01 --name earlier --cow-mem
 
 # You can choose a different group, or let a member name be generated.
 msb snap create --sandbox worker --group experiments --full
 ```
 
-`--forked` shares clean restored RAM pages using copy-on-write; child writes remain private. It does not change which snapshot is selected. Omit `--full` at capture for a disk-only snapshot, and omit `--forked` when cold-booting disk state.
+`--cow-mem` shares clean restored RAM pages using copy-on-write; child writes remain private. It does not change which snapshot is selected. Omit `--full` at capture for a disk-only snapshot, and omit `--cow-mem` when cold-booting disk state.
 
 ## The head moves forward, not sideways by surprise
 
@@ -116,7 +116,7 @@ msb snap export worker:cp02 --output checkpoints/cp02.msb --since worker:cp01
 
 # On the destination machine:
 msb snap import checkpoints/*.msb --group received
-msb snap restore received --name restored --forked
+msb snap restore received --name restored --cow-mem
 ```
 
 The shell expands `*.msb` into archive paths. Their order and filenames do not determine ancestry or load order. You can also list them explicitly, in any order:
@@ -154,4 +154,4 @@ For a batch, `--set-head` requires one unambiguous tip; it refuses competing tip
 
 Missing historical checkpoints are okay when payload dependencies are complete. But a missing parent may prevent proving a fast-forward. Filling a history hole does not retrospectively select some other retained tip; select that tip explicitly or import it again once its ancestry is known.
 
-Direct archive capture (`msb snap create --output PATH`, or `-o PATH`) and direct archive restore still skip installed snapshot directories. `msb branch` still creates a local child without publishing a durable snapshot. Neither operation implicitly moves a group's head; a later explicit capture can join a group using the child's recorded ancestry.
+Direct archive capture (`msb snap create --output PATH`, or `-o PATH`) and direct archive restore still skip installed snapshot directories. `msb fork` still creates a local child without publishing a durable snapshot. Neither operation implicitly moves a group's head; a later explicit capture can join a group using the child's recorded ancestry.

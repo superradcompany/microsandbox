@@ -1,10 +1,11 @@
 ---
 title: Filesystem
-description: Go SDK - Filesystem API reference
+"og:title": Go SDK Filesystem reference
+description: Read, write, and stream sandbox files with the Go SDK.
 keywords: ["Go SDK", "Go filesystem", "microsandbox filesystem"]
 ---
 
-Read and write files inside a running sandbox. See [Filesystem](/sandboxes/filesystem) for usage examples.
+See [Filesystem](/sandboxes/filesystem) for usage examples.
 
 ## SandboxFSOps
 
@@ -26,7 +27,7 @@ fmt.Printf("%d bytes\n", len(data))
 
 </Accordion>
 
-Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB; for files larger than ~750 KiB (after base64 inflation) the runtime returns `BufferTooSmall` on the single-shot path, and this method transparently falls back to [`ReadStream`](#fs-readstream) so callers get a uniform bytes-returning interface up to runtime memory limits.
+Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB. For files larger than ~750 KiB (after base64 inflation), the runtime returns `BufferTooSmall` on the single-shot path. This method then transparently falls back to [`ReadStream`](#fs-readstream), so you get a uniform bytes-returning interface up to runtime memory limits.
 
 <p className="msb-label">Parameters</p>
 
@@ -535,7 +536,7 @@ _, err = rs.WriteTo(os.Stdout)
 
 </Accordion>
 
-Open a streaming reader for a file. Use this for files too large to fit in memory; data is delivered in chunks. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream). [`Read`](#fs-read) falls back to this automatically when a file exceeds the single-shot buffer.
+Open a streaming reader for a file. Use this for files too large to fit in memory; data is delivered in chunks. You must `Close` the returned [`*FsReadStream`](#fsreadstream). [`Read`](#fs-read) falls back to this automatically when a file exceeds the single-shot buffer.
 
 <p className="msb-label">Parameters</p>
 
@@ -583,7 +584,7 @@ if err := ws.Close(ctx); err != nil {
 
 </Accordion>
 
-Open a streaming writer for a file. Use this for files too large to fit in memory. The caller must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the write.
+Open a streaming writer for a file. Use this for files too large to fit in memory. You must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalize the write.
 
 <p className="msb-label">Parameters</p>
 
@@ -603,7 +604,7 @@ Open a streaming writer for a file. Use this for files too large to fit in memor
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#fswritestream">*FsWriteStream</a></div>
-    <div className="msb-param-desc">Open write stream; <code>Close(ctx)</code> it to finalise.</div>
+    <div className="msb-param-desc">Open write stream; <code>Close(ctx)</code> it to finalize.</div>
   </div>
 </div>
 
@@ -645,7 +646,7 @@ Drain the stream into `w` using `context.Background()`; implements `io.WriterTo`
 CopyTo(ctx context.Context, w io.Writer)
 ```
 
-Drain into `w` honouring `ctx` for per-chunk cancellation
+Drain into `w` honoring `ctx` for per-chunk cancellation
 
 <p className="msb-label">Returns</p>
 
@@ -663,14 +664,14 @@ Release the read stream handle
 
 `error`
 
-On a write error or partial write, `WriteTo` and `CopyTo` return the partial byte count and leave the stream open so the caller can recover; close it explicitly in either case.
+On a write error or partial write, `WriteTo` and `CopyTo` return the partial byte count and leave the stream open so you can recover; close it explicitly in either case.
 
 ## FsWriteStream
 
 
 <p className="msb-backref">Returned by <a href="#fs-writestream">WriteStream()</a></p>
 
-An open streaming write to a guest file. Must be closed with `Close(ctx)` to finalise the write.
+An open streaming write to a guest file. Must be closed with `Close(ctx)` to finalize the write.
 
 
 #### <span className="msb-recv">writeStream.</span><span className="msb-hn">Write()</span>

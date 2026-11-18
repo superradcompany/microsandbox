@@ -1,13 +1,19 @@
-//! Fixture decoding, isolated backend construction, and synchronization for crate unit tests.
+//! Fixture decoding, isolated backend construction, a scripted HTTP server, and synchronization
+//! for crate unit tests.
 
 use std::sync::{Mutex, MutexGuard};
 
+#[cfg(feature = "cloud")]
+pub(crate) mod fake_server;
 pub(crate) mod fixtures;
 mod json;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
+
+/// Virtio-fs backend state budget of a default configuration, in bytes.
+pub(crate) const DEFAULT_FS_STATE_LIMIT: usize = 4 * 1024 * 1024;
 
 /// Serializes process-global environment mutation across SDK unit tests.
 static ENV_LOCK: Mutex<()> = Mutex::new(());

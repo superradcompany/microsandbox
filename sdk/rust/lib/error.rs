@@ -1,8 +1,16 @@
 //! Error types for microsandbox.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::Serialize;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Cloud error code for Service changes paused before any change was made.
+pub(crate) const SERVICE_CHANGES_PAUSED_CODE: &str = "service_changes_paused";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -60,6 +68,7 @@ pub struct SnapshotSourceRecoveryError {
 
 /// Errors that can occur in microsandbox operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MicrosandboxError {
     /// An I/O error occurred.
     #[error("io error: {0}")]
@@ -73,11 +82,11 @@ pub enum MicrosandboxError {
     /// A cloud control-plane request failed with an HTTP status.
     #[error("cloud HTTP {status}: {message}")]
     CloudHttp {
-        /// HTTP status code returned by msb-cloud.
+        /// HTTP status code returned by the cloud API.
         status: u16,
-        /// Machine-readable msb-cloud error code, when present.
+        /// Machine-readable cloud API error code, when present.
         code: Option<String>,
-        /// Human-readable msb-cloud error message.
+        /// Human-readable cloud API error message.
         message: String,
     },
 
@@ -101,6 +110,23 @@ pub enum MicrosandboxError {
     /// Invalid configuration.
     #[error("invalid config: {0}")]
     InvalidConfig(String),
+
+    /// A restore was refused because guest paths lack destination bindings.
+    ///
+    /// Callers can branch on `restore` to offer interface-specific remedies, such as selecting a
+    /// captured disk, which only a full restore accepts.
+    #[error(
+        "invalid config: restore requires destination bindings for: {}; {}",
+        .missing.join(", "),
+        .restore.missing_bindings_remedy()
+    )]
+    MissingRestoreBindings {
+        /// Sorted resources without a destination, each a kind and guest path such as
+        /// `mount /data`, `disk /data`, or `filesystem /work`.
+        missing: Vec<String>,
+        /// Which restore refused, which decides how the missing resources can be supplied.
+        restore: RestoreKind,
+    },
 
     /// The sandbox's effective entrypoint and CMD do not provide an executable default command.
     #[error(
@@ -200,11 +226,11 @@ pub enum MicrosandboxError {
     #[error("control client error: {0}")]
     ControlClient(#[source] std::sync::Arc<microsandbox_control_client::ControlClientError>),
 
-    /// The run or active configuration changed after a live control operation.
-    /// The live operation may have applied; callers must inspect fresh state
-    /// before deciding whether to submit a new modification.
+    /// The run or active configuration changed while saving a modification.
+    /// Earlier live operations may have applied; callers must inspect fresh
+    /// state before deciding whether to retry.
     #[error(
-        "runtime or active configuration changed while recording a live control result; the live change may already have applied"
+        "sandbox state changed while saving a modification; inspect its current state before retrying because earlier live changes may have applied"
     )]
     ControlStateChanged,
 
@@ -266,6 +292,25 @@ pub enum MicrosandboxError {
     /// The volume already exists.
     #[error("volume already exists: {0}")]
     VolumeAlreadyExists(String),
+
+    /// No visible Service has this slug.
+    #[error("service not found: {0}")]
+    ServiceNotFound(String),
+
+    /// The slug is unavailable.
+    #[error("service slug unavailable: {0}; choose another slug")]
+    ServiceAlreadyExists(String),
+
+    /// A Service change was refused, or its outcome is unknown.
+    ///
+    /// Use [`MicrosandboxError::changed`] to learn whether the change may have been applied.
+    #[error("service {slug}: {error}")]
+    Service {
+        /// Slug of the Service the change addressed.
+        slug: String,
+        /// Why the change did not complete.
+        error: ServiceError,
+    },
 
     /// An OCI image operation failed.
     #[cfg(feature = "local")]
@@ -356,9 +401,85 @@ pub enum MicrosandboxError {
         reason: UnsupportedReason,
     },
 
+    /// A modification did not complete as asked: it may be saved without being in effect on the
+    /// running sandbox, or its result is unknown. Only Cloud returns it; `cause` never holds a
+    /// secret value.
+    #[error("the change did not complete as asked: {cause}")]
+    ModificationNotConfirmed {
+        /// What is known about the change: what failed, whether it was saved, and whether
+        /// sending the same change again retries it.
+        cause: String,
+    },
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
+}
+
+/// Why a Service change did not complete.
+///
+/// Every reason except [`OutcomeUnknown`](Self::OutcomeUnknown) means nothing changed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ServiceError {
+    /// The organization Service limit was reached.
+    #[error("organization service limit reached; remove a service or request a higher limit")]
+    QuotaExceeded,
+    /// The target sandbox Service limit was reached.
+    #[error("sandbox service limit reached; remove or move a service, or request a higher limit")]
+    SandboxLimitExceeded,
+    /// The Service changed; get it before retrying.
+    #[error("changed by another request; get it before retrying")]
+    Conflict,
+    /// The Service has no target; set a target.
+    #[error("detached; set a target")]
+    Detached,
+    /// The target cannot be reached; retry later.
+    #[error("target cannot be reached right now; retry later")]
+    TargetUnreachable {
+        /// Retry delay returned with the refusal, when available.
+        retry_after: Option<Duration>,
+    },
+    /// Service changes are paused; retry later.
+    #[error("service changes are paused; retry later")]
+    ChangesPaused {
+        /// Retry delay returned with the refusal, when available.
+        retry_after: Option<Duration>,
+    },
+    /// The target sandbox is not running; start it, then retry.
+    #[error("target sandbox is not running; start it, then retry")]
+    TargetNotRunning,
+    /// The change may have been applied; get and check the Service before retrying.
+    #[error("change may have been applied; get and check the service before retrying")]
+    OutcomeUnknown,
+    /// The server refused the change with an error code this SDK does not recognize.
+    #[error("HTTP {status} ({code}): {message}")]
+    Other {
+        /// Raw error code returned with the refusal.
+        code: String,
+        /// HTTP status returned with the refusal.
+        status: u16,
+        /// Human-readable message returned with the refusal.
+        message: String,
+    },
+}
+
+/// Whether a failed Service change may have been applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeState {
+    /// Nothing changed.
+    Unchanged,
+    /// The change may have been applied; get and check the Service before retrying.
+    Unknown,
+}
+
+/// Which restore operation reported missing destination bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreKind {
+    /// A disk restore; only destination mounts can satisfy its recorded guest paths.
+    Disk,
+    /// A full restore; destination mounts or its captured disks can satisfy missing resources.
+    Full,
 }
 
 /// An SDK operation that a backend may decline to perform.
@@ -424,6 +545,8 @@ pub enum Operation {
     SandboxHandleConnect,
     /// `SandboxHandle::metrics`.
     SandboxHandleMetrics,
+    /// Read the retained local runtime exit.
+    SandboxHandleTerminalExit,
     /// `SandboxHandle::remove`.
     SandboxHandleRemove,
     /// `SandboxHandle::snapshot`.
@@ -490,8 +613,26 @@ pub enum Operation {
     VolumeFsReadStream,
     /// `VolumeFs::write_stream`.
     VolumeFsWriteStream,
+    /// `Service::create`.
+    ServiceCreate,
+    /// `Service::get`.
+    ServiceGet,
+    /// `Service::list`.
+    ServiceList,
+    /// `Service::update`.
+    ServiceUpdate,
+    /// `Service::enable`.
+    ServiceEnable,
+    /// `Service::disable`.
+    ServiceDisable,
+    /// `Service::remove`.
+    ServiceRemove,
     /// `Image::get`.
     ImageGet,
+    /// `Storage::usage` and per-object storage observations.
+    StorageUsage,
+    /// `Storage::prune`.
+    StoragePrune,
     /// `Image::list`.
     ImageList,
     /// `Image::inspect`.
@@ -571,6 +712,7 @@ impl Operation {
             Operation::SandboxHandleConfig => "SandboxHandle::config",
             Operation::SandboxHandleConnect => "SandboxHandle::connect",
             Operation::SandboxHandleMetrics => "SandboxHandle::metrics",
+            Operation::SandboxHandleTerminalExit => "SandboxHandle::terminal_exit",
             Operation::SandboxHandleRemove => "SandboxHandle::remove",
             Operation::SandboxHandleSnapshot => "SandboxHandle::snapshot",
             Operation::SandboxHandleSnapshotTo => "SandboxHandle::snapshot_to",
@@ -604,7 +746,16 @@ impl Operation {
             Operation::VolumeFsExists => "VolumeFs::exists",
             Operation::VolumeFsReadStream => "VolumeFs::read_stream",
             Operation::VolumeFsWriteStream => "VolumeFs::write_stream",
+            Operation::ServiceCreate => "Service::create",
+            Operation::ServiceGet => "Service::get",
+            Operation::ServiceList => "Service::list",
+            Operation::ServiceUpdate => "Service::update",
+            Operation::ServiceEnable => "Service::enable",
+            Operation::ServiceDisable => "Service::disable",
+            Operation::ServiceRemove => "Service::remove",
             Operation::ImageGet => "Image::get",
+            Operation::StorageUsage => "Storage::usage",
+            Operation::StoragePrune => "Storage::prune",
             Operation::ImageList => "Image::list",
             Operation::ImageInspect => "Image::inspect",
             Operation::ImageRemove => "Image::remove",
@@ -652,6 +803,73 @@ impl MicrosandboxError {
     /// [`Unsupported`](Self::Unsupported) for operations only a cloud backend honors.
     pub fn cloud_only(op: Operation) -> MicrosandboxError {
         Self::unsupported(op, UnsupportedReason::CloudOnly)
+    }
+
+    /// Whether the Service change that returned this error may have been applied.
+    ///
+    /// Call this on every [`MicrosandboxError`] returned by Service create, update, enable,
+    /// disable, or remove, including errors outside [`MicrosandboxError::Service`]. Bindings can
+    /// project the result onto their base error type so callers do not need to identify a specific
+    /// error variant first.
+    ///
+    /// Errors that are returned before a change can commit report [`ChangeState::Unchanged`]:
+    /// invalid arguments, refused requests, missing Services or sandboxes, unavailable slugs,
+    /// unsupported backends, and connections that failed before the request was sent. Every other
+    /// error reports [`ChangeState::Unknown`].
+    pub fn changed(&self) -> ChangeState {
+        match self {
+            MicrosandboxError::Service { error, .. } => error.changed(),
+            MicrosandboxError::InvalidConfig(_)
+            | MicrosandboxError::ServiceNotFound(_)
+            | MicrosandboxError::ServiceAlreadyExists(_)
+            | MicrosandboxError::SandboxNotFound(_)
+            | MicrosandboxError::Unsupported { .. } => ChangeState::Unchanged,
+            #[cfg(any(feature = "cloud", feature = "local"))]
+            MicrosandboxError::Http(error) if error.is_connect() => ChangeState::Unchanged,
+            MicrosandboxError::CloudHttp { status, code, .. } => {
+                if (400..500).contains(status)
+                    || code.as_deref() == Some(SERVICE_CHANGES_PAUSED_CODE)
+                {
+                    ChangeState::Unchanged
+                } else {
+                    ChangeState::Unknown
+                }
+            }
+            // The wildcard fails closed, so a new variant reports Unknown.
+            _ => ChangeState::Unknown,
+        }
+    }
+}
+
+impl ServiceError {
+    /// Whether the change that failed with this reason may have been applied.
+    pub fn changed(&self) -> ChangeState {
+        match self {
+            ServiceError::QuotaExceeded
+            | ServiceError::SandboxLimitExceeded
+            | ServiceError::Conflict
+            | ServiceError::Detached
+            | ServiceError::TargetUnreachable { .. }
+            | ServiceError::ChangesPaused { .. }
+            | ServiceError::TargetNotRunning
+            | ServiceError::Other { .. } => ChangeState::Unchanged,
+            ServiceError::OutcomeUnknown => ChangeState::Unknown,
+        }
+    }
+}
+
+impl RestoreKind {
+    /// Interface-neutral remedy for resources this restore is missing.
+    fn missing_bindings_remedy(self) -> &'static str {
+        match self {
+            RestoreKind::Disk => {
+                "provide a destination mount for each path or explicitly allow missing resources"
+            }
+            RestoreKind::Full => {
+                "provide a destination mount or select a \
+                 captured disk for each path, or explicitly allow missing resources"
+            }
+        }
     }
 }
 
@@ -727,6 +945,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn missing_restore_bindings_name_each_restore_remedy() {
+        let disk = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into(), "mount /logs".into()],
+            restore: RestoreKind::Disk,
+        };
+        let full = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["disk /data".into(), "filesystem /work".into()],
+            restore: RestoreKind::Full,
+        };
+
+        assert_eq!(
+            disk.to_string(),
+            "invalid config: restore requires destination bindings for: mount /data, \
+             mount /logs; provide a destination mount for each path or explicitly allow \
+             missing resources"
+        );
+        assert_eq!(
+            full.to_string(),
+            "invalid config: restore requires destination bindings for: disk /data, \
+             filesystem /work; provide a destination mount or select a captured disk for \
+             each path, or explicitly allow missing resources"
+        );
+    }
+
+    #[test]
     fn snapshot_source_recovery_details_keep_artifact_and_diagnostics_structured() {
         let mut details = SnapshotSourceRecoveryError {
             source_sandbox: "box".into(),
@@ -800,6 +1043,21 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "timed out after 360s waiting for sandbox \"cloud-sandbox\" to stop; the accepted stop may still complete"
+        );
+    }
+
+    #[test]
+    fn modification_not_confirmed_shows_the_cause_as_given() {
+        let error = MicrosandboxError::ModificationNotConfirmed {
+            cause: "the change was saved, but the running sandbox does not hold the secret; it \
+                    applies at the next start"
+                .into(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "the change did not complete as asked: the change was saved, but the running sandbox \
+             does not hold the secret; it applies at the next start"
         );
     }
 }

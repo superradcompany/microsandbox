@@ -33,6 +33,7 @@ struct SingleFileState {
 //--------------------------------------------------------------------------------------------------
 
 pub(super) fn capture(fs: &SingleFileFs) -> io::Result<Vec<u8>> {
+    let limit = fs.inner.max_state_bytes();
     let state = SingleFileState {
         inner_name: fs.inner_name.to_bytes().to_vec(),
         guest_name: fs.guest_name.to_vec(),
@@ -53,10 +54,14 @@ pub(super) fn capture(fs: &SingleFileFs) -> io::Result<Vec<u8>> {
             .collect(),
         inner: fs.inner.capture_state()?,
     };
-    let (_, index) =
-        PassthroughFs::prepare_single_file_state(&state.inner, &fs.inner_name, &fs.inner_name)?;
+    let (_, index) = PassthroughFs::prepare_single_file_state(
+        &state.inner,
+        &fs.inner_name,
+        &fs.inner_name,
+        limit,
+    )?;
     validate_admission(&state, &index)?;
-    mobility::encode(KIND, &state)
+    mobility::encode(KIND, &state, limit)
 }
 
 pub(super) fn validate(fs: &SingleFileFs, bytes: &[u8]) -> io::Result<()> {
@@ -76,16 +81,18 @@ pub(super) fn restore(fs: &SingleFileFs, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_unavailable(bytes: &[u8]) -> io::Result<()> {
-    let state: SingleFileState = mobility::decode(KIND, bytes)?;
+pub(super) fn validate_unavailable(bytes: &[u8], limit: usize) -> io::Result<()> {
+    let state: SingleFileState = mobility::decode(KIND, bytes, limit)?;
     let source = checked_name(&state.inner_name)?;
     checked_name(&state.guest_name)?;
-    let (_, index) = PassthroughFs::prepare_single_file_state(&state.inner, &source, &source)?;
+    let (_, index) =
+        PassthroughFs::prepare_single_file_state(&state.inner, &source, &source, limit)?;
     validate_admission(&state, &index)
 }
 
 fn prepare(fs: &SingleFileFs, bytes: &[u8]) -> io::Result<SingleFileState> {
-    let mut state: SingleFileState = mobility::decode(KIND, bytes)?;
+    let limit = fs.inner.max_state_bytes();
+    let mut state: SingleFileState = mobility::decode(KIND, bytes, limit)?;
     let source = checked_name(&state.inner_name)?;
     if state.guest_name != fs.guest_name || (!fs.checkpoint_remapped && source != fs.inner_name) {
         return Err(invalid(
@@ -95,7 +102,7 @@ fn prepare(fs: &SingleFileFs, bytes: &[u8]) -> io::Result<SingleFileState> {
     // The inner backend confirms every saved path is either its root or precisely
     // the admitted source basename. Translation can never expose a sibling path.
     let (inner, index) =
-        PassthroughFs::prepare_single_file_state(&state.inner, &source, &fs.inner_name)?;
+        PassthroughFs::prepare_single_file_state(&state.inner, &source, &fs.inner_name, limit)?;
     validate_admission(&state, &index)?;
     state.inner = inner;
     Ok(state)
@@ -297,18 +304,25 @@ mod tests {
         let entry = source.lookup(context(), ROOT_INODE, c"guest-file").unwrap();
         let bytes = source.capture_state().unwrap();
         let destination = mount(&path, true, true);
-        let mut state: SingleFileState = mobility::decode(KIND, &bytes).unwrap();
+        let mut state: SingleFileState =
+            mobility::decode(KIND, &bytes, msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES).unwrap();
         state.lookup_refs.insert(ROOT_INODE, 1);
         assert!(
             destination
-                .restore_state(&mobility::encode(KIND, &state).unwrap())
+                .restore_state(
+                    &mobility::encode(KIND, &state, msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES)
+                        .unwrap()
+                )
                 .is_err()
         );
         state.lookup_refs.remove(&ROOT_INODE);
         state.inner_name = b"sibling".to_vec();
         assert!(
             destination
-                .restore_state(&mobility::encode(KIND, &state).unwrap())
+                .restore_state(
+                    &mobility::encode(KIND, &state, msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES)
+                        .unwrap()
+                )
                 .is_err()
         );
         assert_eq!(destination.current_inode.load(Ordering::Acquire), 0);

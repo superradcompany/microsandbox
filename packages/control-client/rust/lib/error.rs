@@ -18,7 +18,7 @@ pub enum ControlClientError {
     #[error(transparent)]
     Wire(#[from] WireError),
     /// Valid structured peer error, retaining original frame and unknown fields.
-    #[error("control operation rejected by peer")]
+    #[error("control operation rejected by peer: {}", error.message)]
     Peer {
         /// Exact decoded public error, including unknown future codes.
         error: ControlError,

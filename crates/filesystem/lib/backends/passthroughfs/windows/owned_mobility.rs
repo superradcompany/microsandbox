@@ -171,13 +171,13 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
             .collect::<io::Result<_>>()?,
     };
     validate(fs, &state, &snapshot)?;
-    let bytes = mobility::encode(KIND, &state)?;
+    let bytes = mobility::encode(KIND, &state, fs.cfg.max_state_bytes)?;
     checkpoint.completed(snapshot)?;
     Ok(bytes)
 }
 
 pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedState> {
-    let state: OwnedState = mobility::decode(KIND, bytes)?;
+    let state: OwnedState = mobility::decode(KIND, bytes, fs.cfg.max_state_bytes)?;
     let generation = fs
         .cfg
         .owned_checkpoint
@@ -232,7 +232,7 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
         let data = Arc::new(InodeData {
             inode: detached.inode,
             path: RwLock::new(path.clone()),
-            identity: fs.owned_identity(&path)?,
+            identity: fs.path_identity(&path)?,
             virtual_meta: RwLock::new(VirtualMetadata {
                 uid,
                 gid,
@@ -274,7 +274,7 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
         let path = super::path_from_components(fs, &alias.components)?;
         fs.safe_metadata(&path)?;
         let data = prepared.inodes.by_inode[&alias.inode].clone();
-        if fs.owned_identity(&path)? != data.identity {
+        if fs.path_identity(&path)? != data.identity {
             return Err(invalid_state(
                 "owned alias no longer names its captured inode",
             ));

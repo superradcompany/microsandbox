@@ -76,7 +76,7 @@ def main():
     def restored(mode, group, marker):
         name = "batch-" + mode
         names.append(name)
-        options = ["--forked"] if mode == "forked" else []
+        options = ["--cow-mem"] if mode == "forked" else []
         run("restore-" + mode, "create", "--name", name, "--from-snapshot", group, *options)
         actual = run("state-" + mode, "exec", name, "--", "sh", "-ec",
                      "cat /disk-marker; cat /dev/shm/marker")

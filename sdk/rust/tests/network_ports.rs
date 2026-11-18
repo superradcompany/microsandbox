@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use microsandbox::{NetworkPolicy, Sandbox};
 use test_utils::msb_test;
-use tokio::net::UdpSocket;
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -16,6 +17,9 @@ use tokio::net::UdpSocket;
 
 const UDP_ECHO_LOG_PATH: &str = "/tmp/udp-echo.log";
 const UDP_ECHO_READY_PATH: &str = "/tmp/udp-echo.ready";
+
+/// No Content-Length: the client must receive EOF to finish reading.
+const CLOSE_DELIMITED_RESPONSE: &[u8] = b"HTTP/1.0 200 OK\r\n\r\nhi";
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -111,6 +115,66 @@ async fn udp_published_port_round_trips() {
     );
 }
 
+/// Regression for #1705: close-delimited HTTP must deliver EOF.
+#[msb_test]
+async fn tcp_published_port_delivers_guest_close_to_host() {
+    let name = "network-ports-tcp-guest-close";
+    let host_port = reserve_tcp_port().await;
+    let guest_port = 8080;
+
+    let sandbox = Sandbox::builder(name)
+        .image("mirror.gcr.io/library/alpine")
+        .cpus(1)
+        .memory(512)
+        .port(host_port, guest_port)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    sandbox
+        .shell(format!(
+            "printf 'HTTP/1.0 200 OK\\r\\n\\r\\nhi' | nc -l -p {guest_port} >/dev/null 2>&1 &"
+        ))
+        .await
+        .expect("start one-shot TCP server");
+    wait_for_tcp_listener(&sandbox, guest_port).await;
+
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut stream =
+            TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, host_port))).await?;
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await?;
+        Ok::<_, std::io::Error>(body)
+    })
+    .await;
+
+    stop_and_remove(name).await;
+
+    let body = result
+        .expect("host client did not see EOF after the guest closed")
+        .expect("read from published port");
+    assert_eq!(body, CLOSE_DELIMITED_RESPONSE);
+}
+
+async fn wait_for_tcp_listener(sandbox: &Sandbox, port: u16) {
+    for _ in 0..50 {
+        let ready = sandbox
+            .shell(format!(
+                "netstat -tln 2>/dev/null | grep -q ':{port} ' && echo ready || true"
+            ))
+            .await
+            .expect("check TCP listener readiness");
+        if ready.stdout().unwrap_or_default().trim() == "ready" {
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!("TCP listener on guest port {port} did not become ready");
+}
+
 async fn wait_for_udp_echo_server(sandbox: &Sandbox) {
     for _ in 0..50 {
         let ready = sandbox
@@ -139,6 +203,13 @@ async fn read_udp_echo_log(sandbox: &Sandbox) -> String {
         .ok()
         .and_then(|output| output.stdout().ok())
         .unwrap_or_default()
+}
+
+async fn reserve_tcp_port() -> u16 {
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .expect("reserve TCP port");
+    listener.local_addr().expect("local TCP addr").port()
 }
 
 async fn reserve_udp_port() -> u16 {

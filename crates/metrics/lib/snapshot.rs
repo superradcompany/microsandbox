@@ -42,14 +42,19 @@ pub struct LiveMetric {
     pub cpu_percent: f32,
     /// Cumulative guest vCPU execution time across all vCPUs.
     pub vcpu_time_ns: u64,
-    /// Guest-used memory in bytes.
+    /// Guest-used memory in bytes; 0 when `memory_bytes_reported` is false.
     pub memory_bytes: u64,
+    /// Whether `memory_bytes` holds a reported value for this sample.
+    pub memory_bytes_reported: bool,
     /// Guest-available memory in bytes when reported by the guest.
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
     pub memory_host_resident_bytes: Option<u64>,
-    /// Configured memory limit in bytes.
+    /// Effective guest memory limit in bytes: the boot allocation at reservation, refreshed by
+    /// runtimes that observe live memory state.
     pub memory_limit_bytes: u64,
+    /// Whether `memory_limit_bytes` came from live VM memory state rather than the reservation.
+    pub memory_limit_live: bool,
     /// Cumulative guest logical storage bytes read.
     pub disk_read_bytes: u64,
     /// Cumulative guest logical storage bytes written.
@@ -58,6 +63,12 @@ pub struct LiveMetric {
     pub net_rx_bytes: u64,
     /// Cumulative guest-facing network bytes transmitted.
     pub net_tx_bytes: u64,
+    /// Published TCP admission rejections; absent on older runtimes.
+    pub net_inbound_tcp_rejected: Option<u64>,
+    /// Outbound TCP cap rejections; absent on older runtimes.
+    pub net_outbound_tcp_rejected: Option<u64>,
+    /// Outbound UDP session-cap evictions; absent on older runtimes.
+    pub net_outbound_udp_evicted: Option<u64>,
     /// Guest-visible OCI upper filesystem used bytes when available.
     pub upper_used_bytes: Option<u64>,
     /// Guest-visible OCI upper filesystem free bytes when available.
@@ -73,13 +84,16 @@ pub struct SandboxMetrics {
     pub cpu_percent: f32,
     /// Cumulative guest vCPU execution time across all vCPUs.
     pub vcpu_time_ns: u64,
-    /// Guest-used memory in bytes.
+    /// Guest-used memory in bytes; 0 when `memory_bytes_reported` is false.
     pub memory_bytes: u64,
+    /// Whether `memory_bytes` holds a reported value for this sample.
+    pub memory_bytes_reported: bool,
     /// Guest-available memory in bytes when reported by the guest.
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
     pub memory_host_resident_bytes: Option<u64>,
-    /// Configured guest memory limit in bytes.
+    /// Effective guest memory limit in bytes: the boot allocation at reservation, refreshed by
+    /// runtimes that observe live memory state.
     pub memory_limit_bytes: u64,
     /// Cumulative guest logical storage bytes read.
     pub disk_read_bytes: u64,
@@ -89,6 +103,12 @@ pub struct SandboxMetrics {
     pub net_rx_bytes: u64,
     /// Cumulative network bytes transmitted from the guest into the runtime.
     pub net_tx_bytes: u64,
+    /// Published TCP admission rejections; absent on older runtimes.
+    pub net_inbound_tcp_rejected: Option<u64>,
+    /// Outbound TCP cap rejections; absent on older runtimes.
+    pub net_outbound_tcp_rejected: Option<u64>,
+    /// Outbound UDP session-cap evictions; absent on older runtimes.
+    pub net_outbound_udp_evicted: Option<u64>,
     /// Guest-visible OCI upper filesystem used bytes when available.
     pub upper_used_bytes: Option<u64>,
     /// Guest-visible OCI upper filesystem free bytes when available.
@@ -131,6 +151,7 @@ impl From<LiveMetric> for SandboxMetricSnapshot {
                 cpu_percent: live.cpu_percent,
                 vcpu_time_ns: live.vcpu_time_ns,
                 memory_bytes: live.memory_bytes,
+                memory_bytes_reported: live.memory_bytes_reported,
                 memory_available_bytes: live.memory_available_bytes,
                 memory_host_resident_bytes: live.memory_host_resident_bytes,
                 memory_limit_bytes: live.memory_limit_bytes,
@@ -138,6 +159,9 @@ impl From<LiveMetric> for SandboxMetricSnapshot {
                 disk_write_bytes: live.disk_write_bytes,
                 net_rx_bytes: live.net_rx_bytes,
                 net_tx_bytes: live.net_tx_bytes,
+                net_inbound_tcp_rejected: live.net_inbound_tcp_rejected,
+                net_outbound_tcp_rejected: live.net_outbound_tcp_rejected,
+                net_outbound_udp_evicted: live.net_outbound_udp_evicted,
                 upper_used_bytes: live.upper_used_bytes,
                 upper_free_bytes: live.upper_free_bytes,
                 upper_host_allocated_bytes: live.upper_host_allocated_bytes,

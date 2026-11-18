@@ -1,12 +1,12 @@
 //! Exec session management: spawning processes with PTY or pipe I/O.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::{iter, mem, ptr};
 
@@ -14,14 +14,15 @@ use nix::pty;
 use nix::sys::signal::Signal;
 use tokio::io::AsyncReadExt;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 
 use microsandbox_protocol::bulk::BulkRecord;
-use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecRequest};
-use microsandbox_protocol::transport::ClientIncarnation;
+use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecLimits, ExecRequest};
+use microsandbox_protocol::transport::{ClientIncarnation, relay_client_slot};
 
 use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
+use crate::exec_output::OutputWindow;
 use crate::process::{ProcessExitWatcher, ProcessIdentity, ProcessManager};
 use crate::rlimit;
 use crate::serial::InputCharge;
@@ -49,7 +50,7 @@ const SESSION_OUTPUT_BUDGET_GRANULE: usize = 4096;
 const SESSION_OUTPUT_ITEM_CAPACITY: usize = 1024;
 
 /// Maximum number of records waiting for the independently scheduled bulk writer.
-const SESSION_BULK_OUTPUT_ITEM_CAPACITY: usize = 256;
+pub(crate) const SESSION_BULK_OUTPUT_ITEM_CAPACITY: usize = 256;
 
 /// Maximum lifecycle commands waiting for the dedicated bulk scheduler.
 const SESSION_BULK_COMMAND_CAPACITY: usize = 128;
@@ -136,6 +137,9 @@ fn exec_failed_from_io_error(err: &std::io::Error, cmd: &str, stage: &str) -> Ex
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Bulk flow identity: owning client incarnation and stream id.
+pub(crate) type BulkFlowKey = (ClientIncarnation, u32);
+
 /// An active exec session handle for sending input to a running process.
 ///
 /// Output reading is handled by a background task that sends events
@@ -156,12 +160,38 @@ pub struct ExecSession {
 
     /// Accepted input stays ordered, including EOF, while a pipe or PTY backpressures.
     pending_stdin: VecDeque<PendingStdin>,
+
+    /// Flow-controlled mode state; absent for legacy executions.
+    flow: Option<FlowControl>,
+    /// Cumulative stdin payload bytes delivered into the child pipe or PTY.
+    stdin_consumed: u64,
+    /// Whether EOF was accepted; subsequent controlled stdin messages are rejected.
+    stdin_eof_received: bool,
+    /// Cumulative accepted stdin bytes, including input still awaiting child delivery.
+    stdin_received: u64,
+    /// Exit code retained until all published output has been acknowledged.
+    pending_exit: Option<i32>,
+}
+
+/// Runtime-authorized limits together with the output window and acknowledgement
+/// bookkeeping they govern, so flow-controlled and legacy modes cannot mix.
+#[derive(Debug)]
+struct FlowControl {
+    /// Runtime-authorized policy for this execution.
+    limits: ExecLimits,
+    /// Shared stdout/stderr allowance.
+    output_window: Arc<OutputWindow>,
+    /// Last consumed offset acknowledged to the host, used to coalesce updates.
+    stdin_ack_sent: u64,
 }
 
 #[derive(Debug)]
 struct PendingStdin {
+    /// Accepted stdin payload; an empty payload represents ordered EOF.
     data: Vec<u8>,
+    /// Prefix already delivered to the child; the remainder stays queued.
     written: usize,
+    /// Legacy transport reservation held until this queued input is released.
     _charge: Option<InputCharge>,
 }
 
@@ -198,7 +228,61 @@ pub struct SessionOutputEnvelope {
 
     /// Capacity follows the allocation and is released only after serial output consumes it.
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+
+    /// Shared-state accounting released with the dedicated bulk record.
+    _pending_bulk: Option<BulkPendingOutput>,
 }
+
+/// Bulk-output ownership the main loop publishes and the scheduler enforces.
+#[derive(Default)]
+struct BulkOwnership {
+    /// Epoch advanced whenever scheduler-visible cleanup state changes.
+    changed: u64,
+
+    /// Range owners that may still have output written.
+    live: HashSet<ClientIncarnation>,
+
+    /// Owner whose complete record the scheduler is writing right now, if any.
+    in_flight: Option<ClientIncarnation>,
+
+    /// Disconnects waiting only for their own in-flight record.
+    awaiting_write: HashMap<ClientIncarnation, oneshot::Sender<()>>,
+
+    /// Cancelled keys that may still have queued or in-channel output.
+    cancelled: HashSet<BulkFlowKey>,
+
+    /// Record counts in the scheduler input channel or per-flow queues.
+    pending_output: HashMap<BulkFlowKey, usize>,
+
+    /// Whether the dedicated scheduler has exited.
+    closed: bool,
+}
+
+/// Shared cleanup state for dedicated bulk output.
+#[derive(Clone, Default)]
+pub(crate) struct BulkCleanup {
+    state: Arc<Mutex<BulkOwnership>>,
+    wake: Arc<Notify>,
+}
+
+/// Scheduler-visible cleanup state captured after its change epoch advances.
+pub(crate) struct BulkCleanupSnapshot {
+    /// Epoch represented by this snapshot.
+    pub(crate) changed: u64,
+    /// Flow keys cancelled since the preceding snapshot.
+    pub(crate) cancelled: HashSet<BulkFlowKey>,
+    /// Range owners that may still have output written.
+    pub(crate) live: HashSet<ClientIncarnation>,
+}
+
+/// One record counted in [`BulkOwnership::pending_output`].
+struct BulkPendingOutput {
+    cleanup: BulkCleanup,
+    key: BulkFlowKey,
+}
+
+/// Scheduler-lifetime guard that closes shared cleanup state on every exit path.
+pub(crate) struct BulkCleanupCloseGuard(BulkCleanup);
 
 /// Lifecycle commands processed ahead of queued dedicated-lane output.
 pub enum BulkOutputCommand {
@@ -219,23 +303,6 @@ pub enum BulkOutputCommand {
         /// Resolves after the scheduler has crossed the cut.
         completion: oneshot::Sender<()>,
     },
-    /// Release queued records for one cancelled operation.
-    DropFlow {
-        /// Range owner that opened the operation.
-        incarnation: ClientIncarnation,
-        /// Correlation being cancelled.
-        id: u32,
-        /// Resolves after matching queued records and their permits are dropped.
-        completion: oneshot::Sender<()>,
-    },
-
-    /// Release every queued record owned by one disconnected SDK client.
-    DropIncarnation {
-        /// Range ownership period being removed.
-        incarnation: ClientIncarnation,
-        /// Resolves after matching queued records and their permits are dropped.
-        completion: oneshot::Sender<()>,
-    },
 }
 
 /// Capacity reserved before a producer reads or encodes a data-bearing event.
@@ -248,6 +315,7 @@ pub struct SessionOutputSender {
     control_tx: mpsc::Sender<SessionOutputEnvelope>,
     bulk_tx: Option<mpsc::Sender<SessionOutputEnvelope>>,
     bulk_command_tx: Option<mpsc::Sender<BulkOutputCommand>>,
+    bulk_cleanup: Option<BulkCleanup>,
     control_budget: Arc<Semaphore>,
     bulk_budget: Arc<Semaphore>,
     incarnation: Option<ClientIncarnation>,
@@ -372,6 +440,183 @@ impl BulkSessionOutput {
     }
 }
 
+impl BulkCleanup {
+    /// Lock ownership state, recovering from poison: the state is still needed to release
+    /// resources. Guest release builds abort on panic; tests need completion after an unwind.
+    fn lock(&self) -> MutexGuard<'_, BulkOwnership> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Clear ownership, advance the change epoch and fire every parked disconnect.
+    fn reset(&self, closed: bool) {
+        let completions = {
+            let mut state = self.lock();
+            let completions = mem::take(&mut state.awaiting_write)
+                .into_values()
+                .collect::<Vec<_>>();
+            let changed = state.changed.wrapping_add(1);
+            *state = BulkOwnership {
+                changed,
+                closed,
+                ..BulkOwnership::default()
+            };
+            completions
+        };
+
+        for completion in completions {
+            let _ = completion.send(());
+        }
+    }
+
+    /// Close shared cleanup state when the scheduler leaves its task.
+    pub(crate) fn close_guard(&self) -> BulkCleanupCloseGuard {
+        BulkCleanupCloseGuard(self.clone())
+    }
+
+    /// Publish one range owner to the dedicated scheduler.
+    pub(crate) fn connect(&self, incarnation: ClientIncarnation) {
+        let mut state = self.lock();
+        if !state.closed && state.live.insert(incarnation) {
+            state.changed = state.changed.wrapping_add(1);
+        }
+        drop(state);
+
+        self.wake.notify_one();
+    }
+
+    /// Mark one cancelled producer only when output can still be pending.
+    pub(crate) fn cancel_flow(
+        &self,
+        incarnation: ClientIncarnation,
+        id: u32,
+        producer_was_live: bool,
+    ) {
+        if relay_client_slot(id).is_none() {
+            return;
+        }
+
+        let key = (incarnation, id);
+        let mut state = self.lock();
+        if !state.closed
+            && (producer_was_live || state.pending_output.contains_key(&key))
+            && state.cancelled.insert(key)
+        {
+            state.changed = state.changed.wrapping_add(1);
+        }
+        drop(state);
+
+        self.wake.notify_one();
+    }
+
+    /// Remove one range owner and wait only for that owner's in-flight record.
+    pub(crate) fn drop_incarnation(&self, incarnation: ClientIncarnation) -> oneshot::Receiver<()> {
+        let (completion, completed) = oneshot::channel();
+        let mut immediate = None;
+        let mut state = self.lock();
+        state.live.remove(&incarnation);
+        state.changed = state.changed.wrapping_add(1);
+        if state.closed || state.in_flight != Some(incarnation) {
+            immediate = Some(completion);
+        } else {
+            state.awaiting_write.insert(incarnation, completion);
+        }
+        drop(state);
+
+        if let Some(completion) = immediate {
+            let _ = completion.send(());
+        }
+        self.wake.notify_one();
+        completed
+    }
+
+    /// Snapshot cleanup requests and owners only after scheduler-visible state changes.
+    pub(crate) fn snapshot_if_changed(&self, observed: Option<u64>) -> Option<BulkCleanupSnapshot> {
+        let mut state = self.lock();
+        if observed == Some(state.changed) {
+            return None;
+        }
+
+        Some(BulkCleanupSnapshot {
+            changed: state.changed,
+            cancelled: mem::take(&mut state.cancelled),
+            live: state.live.clone(),
+        })
+    }
+
+    /// Claim one complete record write if its owner is still live.
+    pub(crate) fn start_write(&self, incarnation: ClientIncarnation) -> bool {
+        let mut state = self.lock();
+        if state.closed || !state.live.contains(&incarnation) {
+            return false;
+        }
+        state.in_flight = Some(incarnation);
+        true
+    }
+
+    /// Complete one record write and release the matching disconnect, if any.
+    pub(crate) fn finish_write(&self, incarnation: ClientIncarnation) {
+        let mut completion = None;
+        let mut state = self.lock();
+        if state.in_flight == Some(incarnation) {
+            state.in_flight = None;
+            completion = state.awaiting_write.remove(&incarnation);
+        }
+        drop(state);
+
+        if let Some(completion) = completion {
+            let _ = completion.send(());
+        }
+    }
+
+    /// Fire parked disconnects and clear ownership at a restore cut.
+    pub(crate) fn restore(&self) {
+        self.reset(false);
+    }
+
+    /// Close the scheduler state and fire every parked disconnect.
+    pub(crate) fn close(&self) {
+        self.reset(true);
+        self.wake.notify_waiters();
+    }
+
+    /// Wait until ownership cleanup may have changed.
+    pub(crate) async fn notified(&self) {
+        self.wake.notified().await;
+    }
+
+    /// Count one record until the scheduler writes or discards it.
+    fn register_output(&self, key: BulkFlowKey) -> BulkPendingOutput {
+        let mut state = self.lock();
+        let count = state.pending_output.entry(key).or_default();
+        *count = count.saturating_add(1);
+        drop(state);
+
+        BulkPendingOutput {
+            cleanup: self.clone(),
+            key,
+        }
+    }
+
+    /// Release one record from shared pending-output accounting.
+    fn output_finished(&self, key: BulkFlowKey) {
+        let mut state = self.lock();
+        let Some(count) = state.pending_output.get_mut(&key) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            state.pending_output.remove(&key);
+        }
+    }
+
+    /// Return allocated cancellation and pending-output key counts.
+    #[cfg(test)]
+    pub(crate) fn pending_counts(&self) -> (usize, usize) {
+        let state = self.lock();
+        (state.cancelled.len(), state.pending_output.len())
+    }
+}
+
 impl SessionOutput {
     /// Bytes retained by this event that count against bulk output capacity.
     fn budget_bytes(&self) -> usize {
@@ -404,6 +649,7 @@ impl SessionOutputSender {
                 control_tx: tx,
                 bulk_tx: None,
                 bulk_command_tx: None,
+                bulk_cleanup: None,
                 control_budget: Arc::clone(&budget),
                 bulk_budget: budget,
                 incarnation: None,
@@ -422,12 +668,14 @@ impl SessionOutputSender {
         let (control_tx, control_rx) = mpsc::channel(SESSION_OUTPUT_ITEM_CAPACITY);
         let (bulk_tx, bulk_rx) = mpsc::channel(SESSION_BULK_OUTPUT_ITEM_CAPACITY);
         let (bulk_command_tx, bulk_command_rx) = mpsc::channel(SESSION_BULK_COMMAND_CAPACITY);
+        let bulk_cleanup = BulkCleanup::default();
         (
             Self {
                 generation: 0,
                 control_tx,
                 bulk_tx: Some(bulk_tx),
                 bulk_command_tx: Some(bulk_command_tx),
+                bulk_cleanup: Some(bulk_cleanup),
                 control_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
                 bulk_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
                 incarnation: None,
@@ -445,6 +693,7 @@ impl SessionOutputSender {
             control_tx: self.control_tx.clone(),
             bulk_tx: self.bulk_tx.clone(),
             bulk_command_tx: self.bulk_command_tx.clone(),
+            bulk_cleanup: self.bulk_cleanup.clone(),
             control_budget: Arc::clone(&self.control_budget),
             bulk_budget: Arc::clone(&self.bulk_budget),
             incarnation,
@@ -454,6 +703,18 @@ impl SessionOutputSender {
     /// Current local attachment generation, independent of the wire protocol version.
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Shared cleanup state for the dedicated scheduler, when enabled.
+    pub(crate) fn bulk_cleanup(&self) -> Option<BulkCleanup> {
+        self.bulk_cleanup.clone()
+    }
+
+    /// Publish one relay range owner to the dedicated scheduler.
+    pub(crate) fn connect_bulk_incarnation(&self, incarnation: ClientIncarnation) {
+        if let Some(cleanup) = &self.bulk_cleanup {
+            cleanup.connect(incarnation);
+        }
     }
 
     pub(crate) async fn park_bulk_output(&self) -> Result<u64, &'static str> {
@@ -509,43 +770,32 @@ impl SessionOutputSender {
         // must therefore enter one FIFO before sharing the physical console stream.
         self.bulk_tx = None;
         self.bulk_command_tx = None;
+        self.bulk_cleanup = None;
     }
 
-    /// Queue a high-priority purge for one operation without awaiting bulk-port progress.
-    pub fn drop_bulk_flow(&self, id: u32) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
+    /// Publish a purge for one operation without awaiting bulk-port progress.
+    pub fn drop_bulk_flow(&self, id: u32, producer_was_live: bool) {
         let Some(incarnation) = self.incarnation else {
-            return Ok(None);
+            return;
         };
-        let Some(commands) = self.bulk_command_tx.as_ref() else {
-            return Ok(None);
+        let Some(cleanup) = &self.bulk_cleanup else {
+            return;
         };
-        let (completion, completed) = oneshot::channel();
-        commands
-            .try_send(BulkOutputCommand::DropFlow {
-                incarnation,
-                id,
-                completion,
-            })
-            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
-        Ok(Some(completed))
+        cleanup.cancel_flow(incarnation, id, producer_was_live);
     }
 
-    /// Queue a high-priority purge for a disconnected range owner.
+    /// Publish a purge for a disconnected range owner.
+    ///
+    /// The receiver resolves once no record of that owner is being written. Combined mode has
+    /// no dedicated scheduler and returns `None`.
     pub fn drop_bulk_incarnation(
         &self,
         incarnation: ClientIncarnation,
-    ) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
-        let Some(commands) = self.bulk_command_tx.as_ref() else {
-            return Ok(None);
+    ) -> Option<oneshot::Receiver<()>> {
+        let Some(cleanup) = &self.bulk_cleanup else {
+            return None;
         };
-        let (completion, completed) = oneshot::channel();
-        commands
-            .try_send(BulkOutputCommand::DropIncarnation {
-                incarnation,
-                completion,
-            })
-            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
-        Ok(Some(completed))
+        Some(cleanup.drop_incarnation(incarnation))
     }
 
     /// Queue an event after its retained allocation has acquired aggregate capacity.
@@ -609,10 +859,19 @@ impl SessionOutputSender {
             return false;
         }
 
-        let tx = if matches!(&output, SessionOutput::Bulk(_)) {
+        let is_bulk = matches!(&output, SessionOutput::Bulk(_));
+        let tx = if is_bulk {
             self.bulk_tx.as_ref().unwrap_or(&self.control_tx)
         } else {
             &self.control_tx
+        };
+        let pending_bulk = if is_bulk {
+            self.bulk_cleanup
+                .as_ref()
+                .zip(self.incarnation)
+                .map(|(cleanup, incarnation)| cleanup.register_output((incarnation, id)))
+        } else {
+            None
         };
         tx.send(SessionOutputEnvelope {
             generation: self.generation,
@@ -620,6 +879,7 @@ impl SessionOutputSender {
             incarnation: self.incarnation,
             output,
             _permit: (charged != 0).then_some(permit.0),
+            _pending_bulk: pending_bulk,
         })
         .await
         .is_ok()
@@ -666,6 +926,7 @@ impl ExecSession {
         default_user: Option<&str>,
         security_profile: SecurityProfile,
         workload_placement: Option<WorkloadPlacement>,
+        policy: Option<ExecLimits>,
     ) -> AgentdResult<Self> {
         let process_manager = ProcessManager::get()?;
         if req.tty {
@@ -677,6 +938,7 @@ impl ExecSession {
                 security_profile,
                 &process_manager,
                 workload_placement,
+                policy,
             )
         } else {
             Self::spawn_pipe(
@@ -687,7 +949,50 @@ impl ExecSession {
                 security_profile,
                 &process_manager,
                 workload_placement,
+                policy,
             )
+        }
+    }
+
+    /// Retain execution admission until the last unread output is acknowledged.
+    pub(crate) fn finish(&mut self, code: i32) -> Option<i32> {
+        self.pending_exit = Some(code);
+        self.take_completed_exit()
+    }
+
+    pub(crate) fn take_completed_exit(&mut self) -> Option<i32> {
+        if self
+            .flow
+            .as_ref()
+            .is_none_or(|flow| flow.output_window.is_drained())
+        {
+            self.pending_exit.take()
+        } else {
+            None
+        }
+    }
+
+    /// Return output capacity without waiting for the output reader.
+    pub(crate) fn acknowledge_output(&self, consumed: u64) -> AgentdResult<()> {
+        if let Some(flow) = &self.flow {
+            flow.output_window.acknowledge(consumed)?;
+        }
+        Ok(())
+    }
+
+    /// Runtime-authorized limits when this session is flow controlled.
+    fn limits(&self) -> Option<ExecLimits> {
+        self.flow.as_ref().map(|flow| flow.limits)
+    }
+
+    pub(crate) fn take_stdin_ack(&mut self) -> Option<u64> {
+        if let Some(flow) = &mut self.flow
+            && self.stdin_consumed != flow.stdin_ack_sent
+        {
+            flow.stdin_ack_sent = self.stdin_consumed;
+            Some(self.stdin_consumed)
+        } else {
+            None
         }
     }
 
@@ -736,13 +1041,43 @@ impl ExecSession {
         }
     }
 
-    /// Retain only an already-admitted frame. The caller's aggregate wire credit bounds both
-    /// this allocation and zero-length EOF cardinality across every active and detached session.
+    /// Retain admitted stdin under the execution allowance. Coalesce small writes so message
+    /// metadata cannot grow independently of payload; legacy sessions retain transport charges.
     pub(crate) fn enqueue_stdin(
         &mut self,
         data: Vec<u8>,
         charge: Option<InputCharge>,
     ) -> std::io::Result<()> {
+        if let Some(limits) = self.limits() {
+            if self.stdin_eof_received {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stdin after EOF",
+                ));
+            }
+            let received = self
+                .stdin_received
+                .checked_add(data.len() as u64)
+                .ok_or_else(|| std::io::Error::other("stdin byte counter overflow"))?;
+            if data.len() > limits.stdin_chunk_size as usize
+                || received - self.stdin_consumed > u64::from(limits.input_limit)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stdin exceeds sandbox execution policy",
+                ));
+            }
+            self.stdin_received = received;
+            self.stdin_eof_received = data.is_empty();
+        }
+        // The execution reservation now owns this data. Return the transient forwarding charge
+        // immediately rather than making unrelated traffic wait for the child's pipe.
+        let charge = if self.flow.is_some() {
+            drop(charge);
+            None
+        } else {
+            charge
+        };
         let mut written = 0;
         if self.pending_stdin.is_empty() {
             if data.is_empty() {
@@ -750,18 +1085,33 @@ impl ExecSession {
                 return Ok(());
             }
             match self.try_write_stdin(&data) {
-                Ok(count) if count == data.len() => return Ok(()),
+                Ok(count) if count == data.len() => {
+                    self.stdin_consumed += count as u64;
+                    return Ok(());
+                }
                 Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-                Ok(count) => written = count,
+                Ok(count) => {
+                    self.stdin_consumed += count as u64;
+                    written = count;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error),
             }
         }
-        self.pending_stdin.push_back(PendingStdin {
-            data,
-            written,
-            _charge: charge,
-        });
+        if let Some(limits) = self.limits()
+            && !data.is_empty()
+            && let Some(tail) = self.pending_stdin.back_mut()
+            && !tail.data.is_empty()
+            && tail.data.len() + data.len() <= limits.stdin_chunk_size as usize
+        {
+            tail.data.extend_from_slice(&data);
+        } else {
+            self.pending_stdin.push_back(PendingStdin {
+                data,
+                written,
+                _charge: charge,
+            });
+        }
         Ok(())
     }
 
@@ -772,6 +1122,9 @@ impl ExecSession {
     /// The restored process no longer has a host-side stdin owner. Drain everything accepted
     /// before the cut, then close pipe input. A PTY has no separate write half to close safely.
     pub(crate) fn detach_stdin(&mut self) {
+        if let Some(flow) = self.flow.take() {
+            flow.output_window.detach();
+        }
         if self.stdin.is_none() {
             return;
         }
@@ -817,6 +1170,7 @@ impl ExecSession {
                         .front_mut()
                         .expect("polled pending input");
                     pending.written += count;
+                    self.stdin_consumed += count as u64;
                     if pending.written == pending.data.len() {
                         self.pending_stdin.pop_front();
                     }
@@ -878,6 +1232,7 @@ impl ExecSession {
 
 impl ExecSession {
     /// Spawns a process with a PTY.
+    #[allow(clippy::too_many_arguments)] // Keep both spawn modes explicit about their launch inputs.
     fn spawn_pty(
         id: u32,
         req: &ExecRequest,
@@ -886,7 +1241,9 @@ impl ExecSession {
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
         workload_placement: Option<WorkloadPlacement>,
+        policy: Option<ExecLimits>,
     ) -> AgentdResult<Self> {
+        let output_window = OutputWindow::new(policy.map(|p| p.output_limit))?;
         let pty = pty::openpty(None, None)?;
         let err_pipe = new_exec_error_pipe()?;
 
@@ -1026,6 +1383,20 @@ impl ExecSession {
                 unsafe { libc::_exit(1) };
             }
 
+            // Group lookup can open /etc/group; finish it before restrictive limits.
+            if let Some(ref user) = resolved_user
+                && apply_resolved_groups(user).is_err()
+            {
+                unsafe { libc::_exit(1) };
+            }
+
+            // Apply limits while privileged so non-root commands can raise hard limits.
+            for (resource, limit) in &parsed_rlimits {
+                if unsafe { libc::setrlimit(*resource as _, limit) } != 0 {
+                    unsafe { libc::_exit(1) };
+                }
+            }
+
             if let Some(ref user) = resolved_user
                 && apply_resolved_user(user).is_err()
             {
@@ -1035,13 +1406,6 @@ impl ExecSession {
             if let (Some(key), Some(home)) = (&home_key, &default_home) {
                 unsafe {
                     libc::setenv(key.as_ptr(), home.as_ptr(), 1);
-                }
-            }
-
-            // Apply resource limits.
-            for (resource, limit) in &parsed_rlimits {
-                if unsafe { libc::setrlimit(*resource as _, limit) } != 0 {
-                    unsafe { libc::_exit(1) };
                 }
             }
 
@@ -1092,7 +1456,14 @@ impl ExecSession {
         })?;
 
         // Spawn background reader task.
-        tokio::spawn(pty_reader_task(id, reader_fd, exit_watcher, tx));
+        tokio::spawn(pty_reader_task(
+            id,
+            reader_fd,
+            exit_watcher,
+            tx,
+            output_window.clone(),
+            policy.map_or(4096, |p| p.output_chunk_size as usize),
+        ));
 
         Ok(Self {
             process_identity,
@@ -1100,10 +1471,22 @@ impl ExecSession {
             pty_master: Some(pty_master),
             stdin: None,
             pending_stdin: VecDeque::new(),
+            flow: policy
+                .zip(output_window)
+                .map(|(limits, output_window)| FlowControl {
+                    limits,
+                    output_window,
+                    stdin_ack_sent: 0,
+                }),
+            stdin_consumed: 0,
+            stdin_eof_received: false,
+            stdin_received: 0,
+            pending_exit: None,
         })
     }
 
     /// Spawns a process with piped stdio.
+    #[allow(clippy::too_many_arguments)] // Keep both spawn modes explicit about their launch inputs.
     fn spawn_pipe(
         id: u32,
         req: &ExecRequest,
@@ -1112,7 +1495,9 @@ impl ExecSession {
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
         workload_placement: Option<WorkloadPlacement>,
+        policy: Option<ExecLimits>,
     ) -> AgentdResult<Self> {
+        let output_window = OutputWindow::new(policy.map(|p| p.output_limit))?;
         let mut cmd = Command::new(&req.cmd);
         cmd.args(&req.args)
             .stdin(Stdio::piped())
@@ -1151,13 +1536,21 @@ impl ExecSession {
                     return Err(std::io::Error::last_os_error());
                 }
                 apply_exec_security_profile(security_profile).map_err(agentd_to_io_error)?;
+
+                // Group lookup must finish before limits can prevent opening /etc/group.
                 if let Some(ref user) = resolved_user {
-                    apply_resolved_user(user).map_err(agentd_to_io_error)?;
+                    apply_resolved_groups(user).map_err(agentd_to_io_error)?;
                 }
+
+                // Apply limits before dropping the privilege needed to raise hard limits.
                 for (resource, limit) in &parsed_rlimits {
                     if libc::setrlimit(*resource as _, limit) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
+                }
+
+                if let Some(ref user) = resolved_user {
+                    apply_resolved_user(user).map_err(agentd_to_io_error)?;
                 }
                 Ok(())
             });
@@ -1180,7 +1573,15 @@ impl ExecSession {
             })?;
 
         // Spawn background reader task.
-        tokio::spawn(pipe_reader_task(id, stdout, stderr, exit_watcher, tx));
+        tokio::spawn(pipe_reader_task(
+            id,
+            stdout,
+            stderr,
+            exit_watcher,
+            tx,
+            output_window.clone(),
+            policy.map_or(4096, |p| p.output_chunk_size as usize),
+        ));
 
         Ok(Self {
             process_identity,
@@ -1188,6 +1589,17 @@ impl ExecSession {
             pty_master: None,
             stdin,
             pending_stdin: VecDeque::new(),
+            flow: policy
+                .zip(output_window)
+                .map(|(limits, output_window)| FlowControl {
+                    limits,
+                    output_window,
+                    stdin_ack_sent: 0,
+                }),
+            stdin_consumed: 0,
+            stdin_eof_received: false,
+            stdin_received: 0,
+            pending_exit: None,
         })
     }
 }
@@ -1196,8 +1608,23 @@ impl ExecSession {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Drop for BulkPendingOutput {
+    fn drop(&mut self) {
+        self.cleanup.output_finished(self.key);
+    }
+}
+
+impl Drop for BulkCleanupCloseGuard {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 impl Drop for ExecSession {
     fn drop(&mut self) {
+        if let Some(flow) = &self.flow {
+            flow.output_window.close();
+        }
         // The registration deliberately outlives the direct child so signals
         // can still reach descendants while their output is being drained.
         self.process_manager.release(self.process_identity);
@@ -1386,6 +1813,27 @@ pub(crate) fn resolve_default_user(default_user: Option<&str>) -> AgentdResult<(
     Ok((resolved.uid, resolved.gid))
 }
 
+/// Like [`resolve_default_user`], plus the supplementary groups exec would apply to that user.
+pub(crate) fn resolve_user_groups(user: &str) -> AgentdResult<(u32, u32, Vec<libc::gid_t>)> {
+    let resolved = resolve_user_spec(user)?;
+    let mut groups = Vec::new();
+    if let Some(ref name) = resolved.initgroups_user {
+        let mut count: libc::c_int = 32;
+        loop {
+            groups.resize(count as usize, 0);
+            if unsafe {
+                libc::getgrouplist(name.as_ptr(), resolved.gid, groups.as_mut_ptr(), &mut count)
+            } >= 0
+            {
+                groups.truncate(count as usize);
+                break;
+            }
+            count = count.max(groups.len() as libc::c_int + 1);
+        }
+    }
+    Ok((resolved.uid, resolved.gid, groups))
+}
+
 fn resolve_requested_user(
     req: &ExecRequest,
     default_user: Option<&str>,
@@ -1417,7 +1865,7 @@ fn resolve_user_spec(spec: &str) -> AgentdResult<ResolvedUser> {
         lookup_passwd_by_uid(uid)?
     } else {
         lookup_passwd_by_name(user_part)?
-            .ok_or_else(|| AgentdError::ExecSession(format!("guest user not found: {user_part}")))?
+            .ok_or_else(|| AgentdError::UserNotFound(user_part.to_owned()))?
             .into()
     };
 
@@ -1474,7 +1922,7 @@ fn resolve_group_spec(spec: &str) -> AgentdResult<libc::gid_t> {
 
     lookup_group_by_name(spec)?
         .map(|entry| entry.gid)
-        .ok_or_else(|| AgentdError::ExecSession(format!("guest group not found: {spec}")))
+        .ok_or_else(|| AgentdError::GroupNotFound(spec.to_owned()))
 }
 
 fn parse_id(value: &str) -> Result<u32, std::num::ParseIntError> {
@@ -1496,13 +1944,13 @@ fn lookup_passwd_by_name(name: &str) -> AgentdResult<Option<PasswdEntry>> {
             &mut result,
         )
     };
-    if rc != 0 {
+    if rc != 0 && !is_missing_entry_error(rc) {
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest user {name:?}: {}",
             std::io::Error::from_raw_os_error(rc)
         )));
     }
-    if result.is_null() {
+    if rc != 0 || result.is_null() {
         return Ok(None);
     }
 
@@ -1534,13 +1982,13 @@ fn lookup_passwd_by_uid(uid: libc::uid_t) -> AgentdResult<ResolvedUserLookup> {
             &mut result,
         )
     };
-    if rc != 0 {
+    if rc != 0 && !is_missing_entry_error(rc) {
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest uid {uid}: {}",
             std::io::Error::from_raw_os_error(rc)
         )));
     }
-    if result.is_null() {
+    if rc != 0 || result.is_null() {
         return Ok(ResolvedUserLookup::Numeric(uid));
     }
 
@@ -1574,13 +2022,13 @@ fn lookup_group_by_name(name: &str) -> AgentdResult<Option<GroupEntry>> {
             &mut result,
         )
     };
-    if rc != 0 {
+    if rc != 0 && !is_missing_entry_error(rc) {
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest group {name:?}: {}",
             std::io::Error::from_raw_os_error(rc)
         )));
     }
-    if result.is_null() {
+    if rc != 0 || result.is_null() {
         return Ok(None);
     }
 
@@ -1588,12 +2036,20 @@ fn lookup_group_by_name(name: &str) -> AgentdResult<Option<GroupEntry>> {
     Ok(Some(GroupEntry { gid: grp.gr_gid }))
 }
 
+/// Whether a `getpw*_r` or `getgr*_r` result means the entry does not exist.
+///
+/// POSIX allows these errors for a missing entry. musl returns `ENOENT` when the image has no
+/// `/etc/passwd` or `/etc/group`, which is normal for images built from scratch.
+fn is_missing_entry_error(rc: libc::c_int) -> bool {
+    matches!(rc, libc::ENOENT | libc::ESRCH | libc::EBADF | libc::EPERM)
+}
+
 fn lookup_buffer_len() -> usize {
     let size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
     if size > 0 { size as usize } else { 16 * 1024 }
 }
 
-fn apply_resolved_user(user: &ResolvedUser) -> AgentdResult<()> {
+fn apply_resolved_groups(user: &ResolvedUser) -> AgentdResult<()> {
     if let Some(ref name) = user.initgroups_user {
         if unsafe { libc::initgroups(name.as_ptr(), user.gid) } != 0 {
             return Err(std::io::Error::last_os_error().into());
@@ -1602,6 +2058,10 @@ fn apply_resolved_user(user: &ResolvedUser) -> AgentdResult<()> {
         return Err(std::io::Error::last_os_error().into());
     }
 
+    Ok(())
+}
+
+fn apply_resolved_user(user: &ResolvedUser) -> AgentdResult<()> {
     if unsafe { libc::setgid(user.gid) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -1649,7 +2109,8 @@ fn nonblocking_input(fd: OwnedFd) -> std::io::Result<AsyncFd<OwnedFd>> {
     {
         return Err(std::io::Error::last_os_error());
     }
-    AsyncFd::new(fd)
+    // SAFETY: OwnedFd keeps the descriptor open and unchanged until AsyncFd drops it.
+    unsafe { AsyncFd::register(fd) }.map_err(Into::into)
 }
 
 fn write_nonblocking_fd(fd: RawFd, data: &[u8]) -> std::io::Result<usize> {
@@ -1695,6 +2156,8 @@ async fn pty_reader_task(
     master_fd: OwnedFd,
     exit_watcher: ProcessExitWatcher,
     tx: SessionOutputSender,
+    output_window: Option<Arc<OutputWindow>>,
+    chunk_size: usize,
 ) {
     let tx_output = tx.clone();
     let runtime_handle = tokio::runtime::Handle::current();
@@ -1706,13 +2169,18 @@ async fn pty_reader_task(
         // The duplicated master shares O_NONBLOCK with stdin. Never clear that flag here:
         // a blocked write would otherwise strand lifecycle handling on the agent actor.
 
+        let mut buf = vec![0u8; chunk_size];
         loop {
-            let mut buf = [0u8; 4096];
             let n = unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
 
             if n > 0 {
                 let n = n as usize;
                 let sent = runtime_handle.block_on(async {
+                    if let Some(window) = &output_window
+                        && !window.acquire(n).await
+                    {
+                        return false;
+                    }
                     let Some(permit) = tx_output.reserve(n).await else {
                         return false;
                     };
@@ -1758,16 +2226,18 @@ async fn pipe_reader_task(
     stderr: Option<tokio::process::ChildStderr>,
     exit_watcher: ProcessExitWatcher,
     tx: SessionOutputSender,
+    output_window: Option<Arc<OutputWindow>>,
+    chunk_size: usize,
 ) {
     let mut stdout = stdout;
     let mut stderr = stderr;
     let mut stdout_eof = stdout.is_none();
     let mut stderr_eof = stderr.is_none();
 
-    while !stdout_eof || !stderr_eof {
-        let mut stdout_buf = [0u8; 4096];
-        let mut stderr_buf = [0u8; 4096];
+    let mut stdout_buf = vec![0u8; chunk_size];
+    let mut stderr_buf = vec![0u8; chunk_size];
 
+    while !stdout_eof || !stderr_eof {
         tokio::select! {
             result = async {
                 match stdout.as_mut() {
@@ -1781,6 +2251,10 @@ async fn pipe_reader_task(
                         stdout_eof = true;
                     }
                     Ok(n) => {
+                        if let Some(window) = &output_window
+                            && !window.acquire(n).await {
+                            break;
+                        }
                         let Some(permit) = tx.reserve(n).await else {
                             break;
                         };
@@ -1809,6 +2283,10 @@ async fn pipe_reader_task(
                         stderr_eof = true;
                     }
                     Ok(n) => {
+                        if let Some(window) = &output_window
+                            && !window.acquire(n).await {
+                            break;
+                        }
                         let Some(permit) = tx.reserve(n).await else {
                             break;
                         };
@@ -1839,11 +2317,13 @@ async fn pipe_reader_task(
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_protocol::exec::EXEC_OUTPUT_EVENT_OVERHEAD;
     use std::collections::HashMap;
     use std::io::Read;
     use std::process::{Command as StdCommand, Stdio as StdStdio};
     use std::time::Duration;
 
+    use tokio::sync::mpsc::error::TryRecvError;
     use tokio::time;
 
     use microsandbox_protocol::exec::ExecRequest;
@@ -1897,10 +2377,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn split_output_queues_keep_bulk_lifecycle_commands_independent() {
+    async fn split_output_queues_keep_bulk_cleanup_independent() {
         let incarnation = [0x55; 16];
         let (tx, mut control_rx, mut bulk_rx, mut command_rx) =
             SessionOutputSender::split_channel();
+        tx.connect_bulk_incarnation(incarnation);
         let scoped = tx.with_incarnation(Some(incarnation));
         let record = BulkRecord {
             id: 9,
@@ -1918,7 +2399,7 @@ mod tests {
                 .await
         );
         assert!(scoped.send(10, SessionOutput::Exited(0)).await);
-        let mut completed = scoped.drop_bulk_flow(9).unwrap().unwrap();
+        scoped.drop_bulk_flow(9, true);
 
         assert!(matches!(
             bulk_rx.recv().await.unwrap().output,
@@ -1928,18 +2409,8 @@ mod tests {
             control_rx.recv().await.unwrap().output,
             SessionOutput::Exited(0)
         ));
-        let BulkOutputCommand::DropFlow {
-            incarnation: command_incarnation,
-            id,
-            completion,
-        } = command_rx.recv().await.unwrap()
-        else {
-            panic!("expected flow cleanup command");
-        };
-        assert_eq!(command_incarnation, incarnation);
-        assert_eq!(id, 9);
-        completion.send(()).unwrap();
-        assert_eq!(completed.try_recv(), Ok(()));
+        assert!(matches!(command_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(tx.bulk_cleanup().unwrap().pending_counts(), (1, 0));
     }
 
     #[tokio::test]
@@ -1986,6 +2457,17 @@ mod tests {
     }
     const PIPE_OWNER_TEST_NAME: &str =
         "session::tests::test_piped_process_exit_outlives_spawning_runtime";
+
+    #[test]
+    fn test_missing_account_database_is_not_a_lookup_failure() {
+        for rc in [libc::ENOENT, libc::ESRCH, libc::EBADF, libc::EPERM] {
+            assert!(is_missing_entry_error(rc));
+        }
+
+        for rc in [libc::EIO, libc::ENOMEM, libc::ERANGE, libc::EMFILE] {
+            assert!(!is_missing_entry_error(rc));
+        }
+    }
 
     #[test]
     fn test_spawn_reaps_adopted_descendant() {
@@ -2046,7 +2528,7 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let session = ExecSession::spawn(17, &req, tx, None, SecurityProfile::Default, None)
+        let session = ExecSession::spawn(17, &req, tx, None, SecurityProfile::Default, None, None)
             .expect("spawn background descendant session");
         let leader_pid = session.pid() as i32;
         let mut stdout = Vec::new();
@@ -2189,7 +2671,15 @@ mod tests {
                     cols: 80,
                     rlimits: Vec::new(),
                 };
-                ExecSession::spawn(100 + offset, &req, tx, None, SecurityProfile::Default, None)
+                ExecSession::spawn(
+                    100 + offset,
+                    &req,
+                    tx,
+                    None,
+                    SecurityProfile::Default,
+                    None,
+                    None,
+                )
             }));
         }
         drop(tx);
@@ -2278,7 +2768,7 @@ mod tests {
             cols: 80,
             rlimits: Vec::new(),
         };
-        let _session = ExecSession::spawn(id, &req, tx, None, SecurityProfile::Default, None)
+        let _session = ExecSession::spawn(id, &req, tx, None, SecurityProfile::Default, None, None)
             .expect("spawn session on replacement runtime");
 
         let actual = time::timeout(Duration::from_secs(5), async {
@@ -2361,6 +2851,207 @@ mod tests {
         assert_eq!(code, 63);
     }
 
+    // Run on Linux as root with CAP_SYS_RESOURCE and a finite memlock hard limit.
+    // The test executable must be static so nofile=0 cannot block its loader.
+    // For Docker: --cap-add SYS_RESOURCE --ulimit memlock=8388608:8388608.
+    #[test]
+    #[ignore = "requires root, CAP_SYS_RESOURCE, finite memlock, and a static test binary"]
+    fn test_piped_nonroot_rlimits() {
+        check_nonroot_rlimits(false);
+    }
+
+    #[test]
+    #[ignore = "requires root, CAP_SYS_RESOURCE, finite memlock, and a static test binary"]
+    fn test_pty_nonroot_rlimits() {
+        check_nonroot_rlimits(true);
+    }
+
+    fn check_nonroot_rlimits(tty: bool) {
+        const PROBE_ENV: &str = "MSB_AGENTD_RLIMIT_PROBE";
+        if let Ok(expected) = std::env::var(PROBE_ENV) {
+            // This branch runs after the real session fork/exec and user switch.
+            assert_eq!(unsafe { libc::geteuid() }, 65534);
+            assert_eq!(unsafe { libc::getegid() }, 65534);
+            let expected: u64 = expected.parse().unwrap();
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) },
+                0
+            );
+            assert_eq!((limit.rlim_cur, limit.rlim_max), (expected, expected));
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+                0
+            );
+            assert_eq!((limit.rlim_cur, limit.rlim_max), (0, 0));
+            return;
+        }
+
+        assert_eq!(unsafe { libc::geteuid() }, 0, "requires guest root");
+        let mut baseline = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut baseline) },
+            0
+        );
+        assert_ne!(
+            baseline.rlim_max,
+            libc::RLIM_INFINITY,
+            "requires a finite baseline"
+        );
+        let raised = baseline.rlim_max.checked_add(1024 * 1024).unwrap();
+        let user = lookup_passwd_by_uid(65534).expect("look up nobody");
+        assert!(
+            matches!(user, ResolvedUserLookup::Known(_)),
+            "requires UID 65534 in /etc/passwd to exercise initgroups"
+        );
+        let test_name = if tty {
+            "session::tests::test_pty_nonroot_rlimits"
+        } else {
+            "session::tests::test_piped_nonroot_rlimits"
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for profile in [SecurityProfile::Default, SecurityProfile::Restricted] {
+                let (tx, mut rx) = SessionOutputSender::channel();
+                let req = ExecRequest {
+                    cmd: std::env::current_exe().unwrap().to_str().unwrap().into(),
+                    args: vec![
+                        "--exact".into(),
+                        test_name.into(),
+                        "--ignored".into(),
+                        "--nocapture".into(),
+                    ],
+                    env: vec![format!("{PROBE_ENV}={raised}")],
+                    cwd: None,
+                    user: Some("65534:65534".into()),
+                    tty,
+                    rows: 24,
+                    cols: 80,
+                    rlimits: vec![
+                        microsandbox_protocol::exec::ExecRlimit {
+                            resource: "memlock".into(),
+                            soft: raised,
+                            hard: raised,
+                        },
+                        microsandbox_protocol::exec::ExecRlimit {
+                            resource: "nofile".into(),
+                            soft: 0,
+                            hard: 0,
+                        },
+                    ],
+                };
+                let session = ExecSession::spawn(7, &req, tx, None, profile, None, None)
+                    .expect("spawn non-root command with raised memlock and nofile=0");
+                let result = time::timeout(Duration::from_secs(10), async {
+                    let mut output = Vec::new();
+                    while let Some(envelope) = rx.recv().await {
+                        match envelope.output {
+                            SessionOutput::Exited(code) => return (code, output),
+                            SessionOutput::Stdout(data) | SessionOutput::Stderr(data) => {
+                                output.extend(data)
+                            }
+                            _ => {}
+                        }
+                    }
+                    panic!("session closed without an exit status");
+                })
+                .await;
+                if result.is_err() {
+                    let _ = session.send_signal(libc::SIGKILL);
+                }
+                let (code, output) = result.expect("non-root command timed out");
+                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&output));
+            }
+        });
+
+        let mut after = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut after) },
+            0
+        );
+        assert_eq!(
+            (after.rlim_cur, after.rlim_max),
+            (baseline.rlim_cur, baseline.rlim_max)
+        );
+    }
+
+    #[tokio::test]
+    async fn stdin_acknowledgements_require_runtime_policy() {
+        for tty in [false, true] {
+            for policy in [None, Some(ExecLimits::default())] {
+                let (tx, mut rx) = SessionOutputSender::channel();
+                let req: ExecRequest = serde_json::from_value(serde_json::json!({
+                    "cmd": "/bin/sh",
+                    "args": ["-c", "IFS= read -r value; printf '%s' \"$value\""],
+                    "tty": tty,
+                }))
+                .unwrap();
+                let mut session =
+                    ExecSession::spawn(19, &req, tx, None, SecurityProfile::Default, None, policy)
+                        .expect("spawn stdin credit session");
+                assert_eq!(session.take_stdin_ack(), None);
+                session.enqueue_stdin(b"hello\n".to_vec(), None).unwrap();
+                assert_eq!(session.take_stdin_ack(), policy.map(|_| 6));
+                assert_eq!(session.take_stdin_ack(), None);
+
+                let mut output = Vec::new();
+                let mut consumed = 0_u64;
+                let result = time::timeout(Duration::from_secs(5), async {
+                    while let Some(envelope) = rx.recv().await {
+                        match envelope.output {
+                            SessionOutput::Stdout(data) => {
+                                consumed +=
+                                    data.len() as u64 + u64::from(EXEC_OUTPUT_EVENT_OVERHEAD);
+                                output.extend_from_slice(&data);
+                            }
+                            SessionOutput::Exited(code) => return code,
+                            _ => {}
+                        }
+                    }
+                    panic!("missing process exit");
+                })
+                .await;
+                if result.is_err() {
+                    let _ = session.send_signal(libc::SIGKILL);
+                }
+                assert_eq!(result.unwrap(), 0);
+                assert!(output.ends_with(b"hello"));
+                if policy.is_some() {
+                    assert_eq!(
+                        session.finish(0),
+                        None,
+                        "unread output must retain the execution"
+                    );
+                    session.acknowledge_output(consumed).unwrap();
+                    assert_eq!(session.take_completed_exit(), Some(0));
+                    assert_eq!(
+                        session.take_completed_exit(),
+                        None,
+                        "completion releases the execution only once"
+                    );
+                } else {
+                    assert_eq!(
+                        session.finish(0),
+                        Some(0),
+                        "legacy execution must not wait for acknowledgements"
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_pty_reader_drains_ready_fd() {
         let (tx, mut rx) = SessionOutputSender::channel();
@@ -2380,7 +3071,7 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default, None)
+        let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default, None, None)
             .expect("spawn pty session");
         let mut stdout = Vec::new();
         let mut exit = None;
@@ -2601,6 +3292,7 @@ mod tests {
             None,
             SecurityProfile::Default,
             &process_manager,
+            None,
             None,
         )
         .expect_err("spawn should fail");

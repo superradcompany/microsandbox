@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
 function detectTriple(): string {
   const p = process.platform;
@@ -25,8 +26,8 @@ function msbFileName(): string {
 function resolutionBases(): string[] {
   const bases = new Set<string>();
   bases.add(import.meta.url);
-  if (process.argv[1]) bases.add(`file://${process.argv[1]}`);
-  bases.add(`file://${process.cwd()}/`);
+  if (process.argv[1]) bases.add(pathToFileURL(process.argv[1]).href);
+  bases.add(pathToFileURL(process.cwd() + sep).href);
   return Array.from(bases);
 }
 

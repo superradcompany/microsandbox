@@ -63,6 +63,12 @@ export interface NetworkRateLimiterConfig {
 /** Where in the HTTP request the secret value can be substituted. */
 export interface SecretSubstitution {
   readonly headers?: boolean;
+  /**
+   * When set and non-empty, restrict header substitution to these field
+   * names (for example `["authorization"]`). A placeholder in any other
+   * header is treated as a disabled location.
+   */
+  readonly headerFields?: readonly string[];
   readonly query?: boolean;
   readonly body?: boolean;
 }
@@ -97,6 +103,14 @@ export interface SecretEntry {
 /** Proxy used for outbound sandbox connections. */
 export type OutboundProxy =
   | {
+      readonly protocol: "http_connect";
+      readonly address: string;
+      readonly credentials?: {
+        readonly username: string;
+        readonly password: SecretSource;
+      };
+    }
+  | {
       readonly protocol: "socks4";
       readonly address: string;
       readonly userId?: string;
@@ -123,6 +137,10 @@ export interface NetworkConfig {
   readonly maxConnections: number | null;
   readonly maxTcpConnections: number | null;
   readonly maxUdpConnections?: number | null;
+  /** Accept-queue depth for published TCP port listeners. Absent means the default, 1024. */
+  readonly tcpAcceptQueueSize?: number | null;
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  readonly maxInboundTcpConnections?: number | null;
   readonly strict: boolean;
   readonly rateLimiter: NetworkRateLimiterConfig | null;
   readonly interface?: {
@@ -133,7 +151,13 @@ export interface NetworkConfig {
     readonly mac?: readonly number[] | null;
     readonly mtu?: number | null;
   };
+  readonly nat64Prefixes: readonly string[];
   readonly trustHostCAs: boolean;
   /** Canonical proxy configuration for outbound connections. */
   readonly outboundProxy: OutboundProxy | null;
+  /**
+   * Local HTTP denial responses use JSON by default. In JSON mode, networkDenyMessage and secretDenyMessage
+   * override their respective JSON messages without interpolation.
+   */
+  readonly http: { readonly denyResponse: boolean; readonly denyResponseFormat: "text" | "json"; readonly denyMessage?: string | null; readonly networkDenyMessage?: string | null; readonly secretDenyMessage?: string | null };
 }

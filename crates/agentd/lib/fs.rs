@@ -8,7 +8,7 @@ use std::ffi::CString;
 use std::io::IoSlice;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -385,13 +385,17 @@ pub async fn handle_fs_request(
             encode_response(id, resp, out_buf)?;
             Ok(None)
         }
-        FsOp::Symlink { target, link_path } => {
-            let resp = handle_symlink(&target, &link_path).await;
+        FsOp::Symlink {
+            target,
+            link_path,
+            user,
+        } => {
+            let resp = handle_symlink(&target, &link_path, user).await;
             encode_response(id, resp, out_buf)?;
             Ok(None)
         }
-        FsOp::Mkdir { path, mode } => {
-            let resp = handle_mkdir(&path, mode).await;
+        FsOp::Mkdir { path, mode, user } => {
+            let resp = handle_mkdir(&path, mode, user).await;
             encode_response(id, resp, out_buf)?;
             Ok(None)
         }
@@ -815,13 +819,13 @@ async fn handle_readlink(path: &str) -> FsResponse {
     }
 }
 
-async fn handle_symlink(target: &str, link_path: &str) -> FsResponse {
+async fn handle_symlink(target: &str, link_path: &str, user: Option<String>) -> FsResponse {
     let target = target.to_string();
     let link_path = link_path.to_string();
-    match tokio::task::spawn_blocking(move || std::os::unix::fs::symlink(target, link_path)).await {
+    match run_as_user(user, move || std::os::unix::fs::symlink(target, link_path)).await {
         Ok(Ok(())) => ok_response(None),
         Ok(Err(e)) => error_response(format!("symlink: {e}")),
-        Err(e) => error_response(format!("symlink task: {e}")),
+        Err(e) => error_response(e),
     }
 }
 
@@ -831,7 +835,7 @@ async fn handle_open_file(
     path: &str,
     options: FsOpenOptions,
 ) -> FsResponse {
-    let mut open_options = tokio::fs::OpenOptions::new();
+    let mut open_options = std::fs::OpenOptions::new();
     open_options
         .read(options.read)
         .write(options.write)
@@ -843,10 +847,11 @@ async fn handle_open_file(
         open_options.mode(mode);
     }
 
-    match open_options.open(path).await {
-        Ok(file) => match state.insert_file(
+    let open_path = path.to_string();
+    match run_as_user(options.user, move || open_options.open(open_path)).await {
+        Ok(Ok(file)) => match state.insert_file(
             id,
-            file,
+            tokio::fs::File::from_std(file),
             options.read,
             options.write,
             options.append,
@@ -855,7 +860,8 @@ async fn handle_open_file(
             Ok(handle) => ok_response(Some(FsResponseData::Handle(handle))),
             Err(e) => error_response(format!("open: {e}")),
         },
-        Err(e) => error_response(format!("open: {e}")),
+        Ok(Err(e)) => error_response(format!("open: {e}")),
+        Err(e) => error_response(e),
     }
 }
 
@@ -963,19 +969,106 @@ async fn handle_fsetstat(id: u32, state: &FsState, handle: u64, attrs: FsSetAttr
     }
 }
 
-async fn handle_mkdir(path: &str, mode: Option<u32>) -> FsResponse {
-    match tokio::fs::create_dir_all(path).await {
-        Ok(()) => {
-            if let Some(mode) = mode
-                && let Err(e) =
-                    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await
-            {
-                return error_response(format!("chmod: {e}"));
-            }
-            ok_response(None)
+async fn handle_mkdir(path: &str, mode: Option<u32>, user: Option<String>) -> FsResponse {
+    let path = path.to_string();
+    match run_as_user(user, move || {
+        std::fs::create_dir_all(&path).map_err(|e| format!("mkdir: {e}"))?;
+        if let Some(mode) = mode {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("chmod: {e}"))?;
         }
-        Err(e) => error_response(format!("mkdir: {e}")),
+        Ok(())
+    })
+    .await
+    {
+        Ok(Ok(())) => ok_response(None),
+        Ok(Err(e)) => error_response(e),
+        Err(e) => error_response(e),
     }
+}
+
+/// Runs a blocking filesystem call with the filesystem identity of `user`.
+///
+/// The identity is thread-local (`setfsuid`/`setfsgid` and the raw `setgroups` syscall), so it never
+/// leaks into other requests or exec sessions, and the kernel enforces the user's permissions and
+/// assigns ownership of anything the call creates. `None` runs the call unchanged, as root.
+async fn run_as_user<T, F>(user: Option<String>, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let Some(user) = user else {
+        return tokio::task::spawn_blocking(f)
+            .await
+            .map_err(|e| format!("filesystem task: {e}"));
+    };
+    let (uid, gid, groups) =
+        crate::session::resolve_user_groups(&user).map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let _identity =
+            FsIdentity::switch(uid, gid, &groups).map_err(|e| format!("switch to {user}: {e}"))?;
+        Ok(f())
+    })
+    .await
+    .map_err(|e| format!("filesystem task: {e}"))?
+}
+
+/// Restores the thread's filesystem identity on drop, including when the call panics.
+struct FsIdentity {
+    uid: libc::c_int,
+    gid: libc::c_int,
+    groups: Vec<libc::gid_t>,
+}
+
+impl FsIdentity {
+    fn switch(uid: u32, gid: u32, groups: &[libc::gid_t]) -> std::io::Result<Self> {
+        let previous = current_groups()?;
+        set_groups(groups)?;
+        // Each call returns the previous id even when it fails, so a second call confirms the change.
+        let identity = unsafe {
+            Self {
+                gid: libc::setfsgid(gid),
+                uid: libc::setfsuid(uid),
+                groups: previous,
+            }
+        };
+        if unsafe { libc::setfsuid(uid) } != uid as libc::c_int
+            || unsafe { libc::setfsgid(gid) } != gid as libc::c_int
+        {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
+        Ok(identity)
+    }
+}
+
+impl Drop for FsIdentity {
+    fn drop(&mut self) {
+        unsafe {
+            libc::setfsuid(self.uid as libc::uid_t);
+            libc::setfsgid(self.gid as libc::gid_t);
+        }
+        let _ = set_groups(&self.groups);
+    }
+}
+
+fn current_groups() -> std::io::Result<Vec<libc::gid_t>> {
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    let mut groups = vec![0; count.max(0) as usize];
+    let count = unsafe { libc::getgroups(groups.len() as libc::c_int, groups.as_mut_ptr()) };
+    if count < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    groups.truncate(count as usize);
+    Ok(groups)
+}
+
+/// Sets the calling thread's supplementary groups. `libc::setgroups` would change every thread in
+/// the process, including concurrent root requests, so this calls the syscall directly.
+fn set_groups(groups: &[libc::gid_t]) -> std::io::Result<()> {
+    if unsafe { libc::syscall(libc::SYS_setgroups, groups.len(), groups.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 async fn handle_remove(path: &str) -> FsResponse {
@@ -1726,6 +1819,129 @@ mod tests {
         assert_eq!(response.t, MessageType::FsResponse);
         assert!(response.payload::<FsResponse>().unwrap().ok);
         tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn requested_user_owns_created_entries_and_is_bound_by_permissions() {
+        // Switching the filesystem identity needs root.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let user = Some("nobody".to_string());
+        let nobody = crate::session::resolve_default_user(user.as_deref()).unwrap();
+        let owner = |path: &std::path::Path| {
+            let meta = std::fs::symlink_metadata(path).unwrap();
+            (meta.uid(), meta.gid())
+        };
+        let dir = test_path("as-user");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let mut state = FsState::default();
+        let open = |user: Option<String>| FsOpenOptions {
+            write: true,
+            create: true,
+            user,
+            ..Default::default()
+        };
+
+        let file = dir.join("file");
+        let resp =
+            handle_open_file(1, &mut state, file.to_str().unwrap(), open(user.clone())).await;
+        assert!(resp.ok, "{:?}", resp.error);
+        assert_eq!(owner(&file), nobody);
+
+        let nested = dir.join("a/b");
+        let resp = handle_mkdir(nested.to_str().unwrap(), Some(0o755), user.clone()).await;
+        assert!(resp.ok, "{:?}", resp.error);
+        assert_eq!(owner(&dir.join("a")), nobody);
+        assert_eq!(owner(&nested), nobody);
+
+        let link = dir.join("link");
+        let resp = handle_symlink("file", link.to_str().unwrap(), user.clone()).await;
+        assert!(resp.ok, "{:?}", resp.error);
+        assert_eq!(owner(&link), nobody);
+
+        // Entries created without a user stay root-owned, and the user cannot open them.
+        let root_file = dir.join("root-file");
+        let resp = handle_open_file(2, &mut state, root_file.to_str().unwrap(), open(None)).await;
+        assert!(resp.ok, "{:?}", resp.error);
+        std::fs::set_permissions(&root_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(owner(&root_file), (0, 0));
+        let resp = handle_open_file(
+            3,
+            &mut state,
+            root_file.to_str().unwrap(),
+            open(user.clone()),
+        )
+        .await;
+        assert!(!resp.ok);
+
+        // The identity is confined to the request.
+        let after = dir.join("after");
+        let resp = handle_open_file(4, &mut state, after.to_str().unwrap(), open(None)).await;
+        assert!(resp.ok, "{:?}", resp.error);
+        assert_eq!(owner(&after), (0, 0));
+
+        // The rest edits /etc/group, so it runs only where the caller opted in (a throwaway container).
+        if std::env::var_os("MSB_TEST_EDIT_ETC_GROUP").is_none() {
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+        // A directory writable only through a supplementary group of the user.
+        struct RestoreGroupFile(Vec<u8>);
+        impl Drop for RestoreGroupFile {
+            fn drop(&mut self) {
+                std::fs::write("/etc/group", &self.0).unwrap();
+            }
+        }
+        let group_gid = 54321;
+        let original = std::fs::read("/etc/group").unwrap();
+        let _restore = RestoreGroupFile(original.clone());
+        let mut entries = original;
+        entries.extend_from_slice(format!("msb-shared:x:{group_gid}:nobody\n").as_bytes());
+        std::fs::write("/etc/group", entries).unwrap();
+        let shared = dir.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::os::unix::fs::chown(&shared, None, Some(group_gid)).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let root_groups = current_groups().unwrap();
+        let in_shared = shared.join("file");
+        let resp = handle_open_file(
+            5,
+            &mut state,
+            in_shared.to_str().unwrap(),
+            open(user.clone()),
+        )
+        .await;
+        assert!(resp.ok, "{:?}", resp.error);
+        assert_eq!(owner(&in_shared), nobody);
+        let resp = handle_mkdir(shared.join("sub").to_str().unwrap(), None, user.clone()).await;
+        assert!(resp.ok, "{:?}", resp.error);
+        // Only the calling thread takes the user's groups: a concurrent thread keeps root's.
+        let (ping, pinged) = std::sync::mpsc::channel::<()>();
+        let (pong, ponged) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while pinged.recv().is_ok() {
+                pong.send(current_groups().unwrap()).unwrap();
+            }
+        });
+        let concurrent = run_as_user(user.clone(), move || {
+            ping.send(()).unwrap();
+            ponged.recv().unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(concurrent, root_groups);
+        // The user's groups do not outlive the call, on this thread or on reused blocking threads.
+        assert_eq!(current_groups().unwrap(), root_groups);
+        let checks: Vec<_> = (0..64)
+            .map(|_| tokio::task::spawn_blocking(|| current_groups().unwrap()))
+            .collect();
+        for check in checks {
+            assert_eq!(check.await.unwrap(), root_groups);
+        }
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn decode_raw_output(output: SessionOutput) -> Message {

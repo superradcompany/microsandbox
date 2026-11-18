@@ -16,9 +16,12 @@ use tokio::net::TcpStream;
 use tokio_socks::tcp::Socks4Stream;
 use zeroize::Zeroizing;
 
+use super::http_connect::HttpConnectCredentials;
+#[cfg(feature = "engine")]
+use super::http_connect::HttpConnectProtocol;
 use super::types::{
     OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
-    OutboundProxyProtocol, ResolvedOutboundProxy,
+    OutboundProxyProtocol, ResolvedOutboundProxy, ResolvedProxyCredentials,
 };
 #[cfg(feature = "engine")]
 use crate::engine::dns::forwarder::{DnsForwarder, DnsForwarderHandle};
@@ -84,12 +87,12 @@ impl ResolvedOutboundProxy {
     #[doc(hidden)]
     pub fn build(
         configured: Option<&OutboundProxy>,
-        resolved: Option<ResolvedSocks5Credentials>,
+        resolved: Option<ResolvedProxyCredentials>,
     ) -> Result<Option<Self>, OutboundProxyBuildError> {
         let Some(configured) = configured else {
             if resolved.is_some() {
-                return Err(OutboundProxyBuildError::InvalidSocks5Credentials {
-                    reason: "launch credentials require a configured SOCKS5 proxy",
+                return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
+                    reason: "launch credentials require a configured outbound proxy",
                 });
             }
             return Ok(None);
@@ -97,10 +100,46 @@ impl ResolvedOutboundProxy {
 
         configured.validate()?;
         match configured {
+            OutboundProxy::HttpConnect {
+                address,
+                credentials,
+            } => {
+                let credentials = match (credentials, resolved) {
+                    (None, None) => None,
+                    (None, Some(_)) => {
+                        return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
+                            reason: "launch credentials require configured HTTP CONNECT credentials",
+                        });
+                    }
+                    (Some(_), None) => {
+                        return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
+                            reason: "configured HTTP CONNECT credentials were not resolved at launch",
+                        });
+                    }
+                    (Some(configured), Some(ResolvedProxyCredentials::HttpConnect(resolved))) => {
+                        if resolved.username() != configured.username() {
+                            return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
+                                reason: "launch username does not match the durable configuration",
+                            });
+                        }
+                        resolved.validate()?;
+                        Some(resolved)
+                    }
+                    (Some(_), Some(ResolvedProxyCredentials::Socks5(_))) => {
+                        return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
+                            reason: "resolved credentials do not match the configured proxy protocol",
+                        });
+                    }
+                };
+                Ok(Some(Self::HttpConnect {
+                    address: *address,
+                    credentials,
+                }))
+            }
             OutboundProxy::Socks4 { address, user_id } => {
                 if resolved.is_some() {
-                    return Err(OutboundProxyBuildError::InvalidSocks5Credentials {
-                        reason: "launch credentials require a configured SOCKS5 proxy",
+                    return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
+                        reason: "SOCKS4 does not support credentials",
                     });
                 }
                 Ok(Some(Self::Socks4 {
@@ -115,23 +154,28 @@ impl ResolvedOutboundProxy {
                 let credentials = match (credentials, resolved) {
                     (None, None) => None,
                     (None, Some(_)) => {
-                        return Err(OutboundProxyBuildError::InvalidSocks5Credentials {
+                        return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
                             reason: "launch credentials require configured SOCKS5 credentials",
                         });
                     }
                     (Some(_), None) => {
-                        return Err(OutboundProxyBuildError::InvalidSocks5Credentials {
+                        return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
                             reason: "configured SOCKS5 credentials were not resolved at launch",
                         });
                     }
-                    (Some(configured), Some(resolved)) => {
+                    (Some(configured), Some(ResolvedProxyCredentials::Socks5(resolved))) => {
                         if resolved.username != configured.username {
-                            return Err(OutboundProxyBuildError::InvalidSocks5Credentials {
+                            return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
                                 reason: "launch username does not match the durable configuration",
                             });
                         }
                         resolved.validate()?;
                         Some(resolved)
+                    }
+                    (Some(_), Some(ResolvedProxyCredentials::HttpConnect(_))) => {
+                        return Err(OutboundProxyBuildError::ProxyCredentialMismatch {
+                            reason: "resolved credentials do not match the configured proxy protocol",
+                        });
                     }
                 };
                 Ok(Some(Self::Socks5 {
@@ -146,6 +190,10 @@ impl ResolvedOutboundProxy {
     #[cfg(feature = "engine")]
     pub(crate) async fn connect(&self, destination: SocketAddr) -> io::Result<TcpStream> {
         match self {
+            Self::HttpConnect {
+                address,
+                credentials,
+            } => HttpConnectProtocol::connect(*address, destination, credentials.as_ref()).await,
             Self::Socks4 { address, user_id } => match user_id {
                 Some(user_id) => {
                     Socks4Stream::connect_with_userid(*address, destination, user_id).await
@@ -208,6 +256,9 @@ impl ResolvedOutboundProxy {
 impl OutboundProxy {
     fn validate(&self) -> Result<(), OutboundProxyBuildError> {
         match self {
+            Self::HttpConnect { credentials, .. } => credentials
+                .as_ref()
+                .map_or(Ok(()), HttpConnectCredentials::validate),
             Self::Socks4 { user_id, .. } => Self::validate_socks4_user_id(user_id.as_deref()),
             Self::Socks5 { credentials, .. } => credentials
                 .as_ref()
@@ -390,6 +441,11 @@ impl OutboundProxyBuilder {
     /// Creates a protocol selector.
     pub fn new() -> Self {
         Self
+    }
+
+    /// Starts building an HTTP CONNECT outbound proxy.
+    pub fn http_connect(self, address: impl Into<String>) -> super::HttpConnectProxyBuilder {
+        super::HttpConnectProxyBuilder::new(address)
     }
 
     /// Starts building a SOCKS4 outbound proxy.
@@ -758,7 +814,8 @@ mod tests {
 
     use super::{
         OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
-        OutboundProxyProtocol, ResolvedOutboundProxy, ResolvedSocks5Credentials,
+        OutboundProxyProtocol, ResolvedOutboundProxy, ResolvedProxyCredentials,
+        ResolvedSocks5Credentials,
     };
     use crate::engine::dns::forwarder::DnsForwarder;
     use crate::netstack::poll::GatewayIps;
@@ -922,20 +979,26 @@ mod tests {
         assert!(
             ResolvedOutboundProxy::build(
                 Some(&proxy),
-                Some(ResolvedSocks5Credentials::new("sandbox", "")),
+                Some(ResolvedProxyCredentials::Socks5(
+                    ResolvedSocks5Credentials::new("sandbox", ""),
+                )),
             )
             .is_err()
         );
         assert!(
             ResolvedOutboundProxy::build(
                 Some(&proxy),
-                Some(ResolvedSocks5Credentials::new("sandbox", "p".repeat(256),)),
+                Some(ResolvedProxyCredentials::Socks5(
+                    ResolvedSocks5Credentials::new("sandbox", "p".repeat(256)),
+                )),
             )
             .is_err()
         );
         ResolvedOutboundProxy::build(
             Some(&proxy),
-            Some(ResolvedSocks5Credentials::new("sandbox", "password")),
+            Some(ResolvedProxyCredentials::Socks5(
+                ResolvedSocks5Credentials::new("sandbox", "password"),
+            )),
         )
         .unwrap();
     }
@@ -951,7 +1014,9 @@ mod tests {
             .socks5("127.0.0.1:1080")
             .build()
             .unwrap();
-        let resolved = || ResolvedSocks5Credentials::new("sandbox", "password");
+        let resolved = || {
+            ResolvedProxyCredentials::Socks5(ResolvedSocks5Credentials::new("sandbox", "password"))
+        };
 
         assert!(ResolvedOutboundProxy::build(Some(&authenticated), None).is_err());
         assert!(ResolvedOutboundProxy::build(Some(&unauthenticated), Some(resolved())).is_err());
@@ -959,7 +1024,9 @@ mod tests {
         assert!(
             ResolvedOutboundProxy::build(
                 Some(&authenticated),
-                Some(ResolvedSocks5Credentials::new("different-user", "password")),
+                Some(ResolvedProxyCredentials::Socks5(
+                    ResolvedSocks5Credentials::new("different-user", "password"),
+                )),
             )
             .is_err()
         );
@@ -967,9 +1034,18 @@ mod tests {
 
     #[test]
     fn uri_parses_and_formats_for_cli() {
+        let http: OutboundProxy = "http://127.0.0.1:1080".parse().unwrap();
         let socks4: OutboundProxy = "socks4://127.0.0.1:1080".parse().unwrap();
         let socks5: OutboundProxy = "socks5://127.0.0.1:1080".parse().unwrap();
 
+        assert_eq!(
+            http,
+            OutboundProxy::HttpConnect {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                credentials: None,
+            }
+        );
+        assert_eq!(http.to_string(), "http://127.0.0.1:1080");
         assert_eq!(
             socks4,
             OutboundProxy::Socks4 {
@@ -992,7 +1068,7 @@ mod tests {
     fn uri_rejects_unsupported_forms() {
         for raw in [
             "127.0.0.1:1080",
-            "http://127.0.0.1:1080",
+            "ftp://127.0.0.1:1080",
             "socks4://user@127.0.0.1:1080",
             "socks5://user@127.0.0.1:1080",
             "socks5://127.0.0.1:1080/path",
@@ -1210,7 +1286,9 @@ mod tests {
             .unwrap();
         let proxy = ResolvedOutboundProxy::build(
             Some(&configured),
-            Some(ResolvedSocks5Credentials::new("sandbox", "password")),
+            Some(ResolvedProxyCredentials::Socks5(
+                ResolvedSocks5Credentials::new("sandbox", "password"),
+            )),
         )
         .unwrap()
         .unwrap();

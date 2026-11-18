@@ -24,7 +24,7 @@ pub use client::disk_lock_handoff;
 pub use client::memory_handoff;
 #[cfg(feature = "client")]
 pub use client::{
-    boot_error, compat, control, ipc, launch, logging, maintenance, startup_progress,
+    boot_error, compat, control, ipc, jobs, launch, logging, maintenance, startup_progress,
 };
 #[cfg(feature = "runner")]
 pub use runner::{console, cpu, exec_log, heartbeat, metrics, policy, relay, vm};
@@ -37,5 +37,8 @@ pub mod vm {
 pub(crate) use runner::bootstrap_fs;
 #[cfg(feature = "runner")]
 pub(crate) use runner::{clock, startup, writeback};
+
+#[cfg(feature = "runner")]
+pub use msb_krun::{default_nested_virt, nested_virt_supported};
 
 pub use error::*;

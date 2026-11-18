@@ -30,13 +30,7 @@ pub fn is_sqlite_busy(err: &DbErr) -> bool {
     let RuntimeErr::SqlxError(sqlx_err) = runtime_err else {
         return false;
     };
-    let sqlx::Error::Database(db_err) = sqlx_err.as_ref() else {
-        return false;
-    };
-    matches!(
-        db_err.code().as_deref(),
-        Some(SQLITE_BUSY) | Some(SQLITE_BUSY_SNAPSHOT)
-    )
+    sqlx_err.is_sqlite_busy()
 }
 
 /// Trait for application error types so the retry layer can recognise
@@ -50,6 +44,18 @@ pub fn is_sqlite_busy(err: &DbErr) -> bool {
 pub trait IsSqliteBusy {
     /// Whether this error represents a transient SQLite busy/lock state.
     fn is_sqlite_busy(&self) -> bool;
+}
+
+impl IsSqliteBusy for sqlx::Error {
+    fn is_sqlite_busy(&self) -> bool {
+        let Self::Database(error) = self else {
+            return false;
+        };
+        matches!(
+            error.code().as_deref(),
+            Some(SQLITE_BUSY) | Some(SQLITE_BUSY_SNAPSHOT)
+        )
+    }
 }
 
 impl IsSqliteBusy for DbErr {

@@ -51,14 +51,38 @@ pub struct SandboxModifyOptions {
     pub workdir: Option<String>,
     pub secrets: Option<HashMap<String, SecretModifySpec>>,
     pub secrets_remove: Option<Vec<String>>,
+    pub ports: Option<Vec<ModifyPort>>,
+    pub ports_remove: Option<Vec<ModifyPortEndpoint>>,
     pub policy: Option<String>,
     pub dry_run: Option<bool>,
+}
+
+/// Published port to add or update. Defaults to loopback TCP.
+#[napi(object)]
+#[derive(Clone)]
+pub struct ModifyPort {
+    pub host_port: f64,
+    pub guest_port: f64,
+    pub host_bind: Option<String>,
+    pub protocol: Option<String>,
+}
+
+/// Published host endpoint to remove. Defaults to loopback TCP.
+#[napi(object)]
+#[derive(Clone)]
+pub struct ModifyPortEndpoint {
+    pub host_port: f64,
+    pub host_bind: Option<String>,
+    pub protocol: Option<String>,
 }
 
 /// Desired state for one secret in `SandboxModifyOptions.secrets`, keyed by
 /// secret name. `env` / `value` / `store` are mutually exclusive ways to
 /// provide the secret material; setting more than one is rejected at the
 /// boundary. Only `value` may carry raw secret material.
+///
+/// Omitted policy fields keep the stored setting; a supplied `substitution`
+/// replaces the whole rule.
 #[napi(object)]
 #[derive(Default, Clone)]
 pub struct SecretModifySpec {
@@ -67,6 +91,21 @@ pub struct SecretModifySpec {
     pub store: Option<String>,
     pub placeholder: Option<String>,
     pub allowed_hosts: Option<Vec<String>>,
+    pub substitution: Option<SecretModifySubstitution>,
+    pub violation_action: Option<String>,
+    pub require_tls_identity: Option<bool>,
+    pub allow_placeholder_for: Option<Vec<String>>,
+}
+
+/// Substitution locations in `SecretModifySpec.substitution`. Omitted fields
+/// take the create defaults.
+#[napi(object)]
+#[derive(Default, Clone)]
+pub struct SecretModifySubstitution {
+    pub headers: Option<bool>,
+    pub header_fields: Option<Vec<String>>,
+    pub query: Option<bool>,
+    pub body: Option<bool>,
 }
 
 /// Exit status for an executed command.

@@ -14,11 +14,12 @@ use httlib_hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder};
 use percent_encoding::percent_decode;
 
 use super::config::SecretsConfigExt;
+use super::hpack::check_header_block;
+use crate::engine::http_deny::{classify_http_request, secret_http_forbidden_response};
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{
-    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretSubstitution,
-    SecretViolationAction, SecretsConfig,
+    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretViolationAction, SecretsConfig,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -117,6 +118,12 @@ pub struct SecretsHandler {
     unsupported_body_tail: Vec<u8>,
     /// HTTP/2 parser/rewriter state once an HTTP/2 preface is observed.
     http2_state: Option<Http2State>,
+    /// Saturating count used to avoid answering the wrong pipelined request.
+    http1_requests: u8,
+    /// Whether the first request can receive a normal HTTP/1 response body.
+    http1_response_allowed: bool,
+    /// Set only by an actual HTTP/1 placeholder violation, not parse failures.
+    http1_violation: bool,
 }
 
 /// HTTP request framing state for the guest→server byte stream.
@@ -157,6 +164,9 @@ struct Http2State {
     preface_seen: bool,
     buffer: Vec<u8>,
     header_block: Option<Http2HeaderBlock>,
+    /// Highest client-initiated stream id seen so far. New client streams must
+    /// use strictly increasing ids; a reused id is a protocol violation.
+    highest_client_stream_id: u32,
     open_request_streams: HashSet<u32>,
     data_tails: HashMap<u32, Vec<u8>>,
     request_summaries: HashMap<u32, RequestSummary>,
@@ -258,16 +268,17 @@ struct EligibleSecret {
     /// linger in freed memory.
     value: zeroize::Zeroizing<String>,
     substitute_headers: bool,
+    /// When non-empty, restrict header substitution to these field names.
+    header_fields: Vec<String>,
     substitute_query: bool,
     substitute_body: bool,
     require_tls_identity: bool,
 }
 
-/// A secret that did not pass substitution or passthrough host matching.
+/// A secret whose placeholder is not permitted on this connection.
 struct IneligibleSecret {
     env_var: String,
     placeholder: String,
-    substitution: SecretSubstitution,
     action: BlockingAction,
 }
 
@@ -342,6 +353,12 @@ impl EligibleSecret {
         self.substitute_headers || self.substitute_query
     }
 
+    /// Returns true when this secret may be substituted in a header with the
+    /// given field name.
+    fn header_field_allowed(&self, name: &[u8]) -> bool {
+        header_field_allowed(self.substitute_headers, &self.header_fields, name)
+    }
+
     /// Returns true when the current header bytes contain this secret's
     /// placeholder in a header-substitution scope.
     fn may_substitute_in_headers(&self, headers: &[u8]) -> bool {
@@ -392,16 +409,16 @@ impl EligibleSecret {
                 .flatten();
         }
 
-        if self.substitute_headers
-            && is_authorization_header(line)
+        if !self.header_field_allowed(header_field_name(line.as_bytes())) {
+            return None;
+        }
+
+        if is_authorization_header(line)
             && let Some(replaced) = self.substitute_basic_auth_header(line)
         {
             return Some(replaced);
         }
-        if self.substitute_headers {
-            return Some(line.replace(&self.placeholder, &self.value));
-        }
-        None
+        Some(line.replace(&self.placeholder, &self.value))
     }
 
     /// Decode `Basic <base64>` credentials, substitute the placeholder in the
@@ -420,25 +437,6 @@ impl EligibleSecret {
             "{name}: Basic {}",
             BASE64.encode(replaced.as_bytes())
         ))
-    }
-}
-
-impl IneligibleSecret {
-    /// Returns whether a match in this request location is substituted and
-    /// therefore must not be treated as an unchanged-placeholder violation.
-    fn substitution_allows(&self, location: RequestLocation) -> bool {
-        match location {
-            RequestLocation::Header | RequestLocation::BasicAuth => self.substitution.headers,
-            RequestLocation::Query => self.substitution.query,
-            RequestLocation::Body => self.substitution.body,
-            // Chunk framing metadata and trailers are not substitution targets.
-            // They therefore remain protected even when another substitution
-            // scope is enabled; only explicit placeholder passthrough may allow
-            // an unchanged placeholder there.
-            RequestLocation::ChunkMetadata
-            | RequestLocation::Trailer
-            | RequestLocation::Unknown => false,
-        }
     }
 }
 
@@ -515,6 +513,7 @@ impl Default for Http2State {
             preface_seen: false,
             buffer: Vec::new(),
             header_block: None,
+            highest_client_stream_id: 0,
             open_request_streams: HashSet::new(),
             data_tails: HashMap::new(),
             request_summaries: HashMap::new(),
@@ -664,9 +663,8 @@ impl SecretsHandler {
             let host_allowed =
                 !force_ineligible && secret_host_allowed(secret, sni, identity.as_ref());
 
-            // Substitution and placeholder passthrough are independent policies. An
-            // allowed host can substitute enabled locations while disabled locations
-            // remain protected by the violation detector below.
+            // A verified destination trusted with the credential may also receive
+            // its placeholder unchanged outside enabled substitution locations.
             if host_allowed {
                 if secret.substitution.body {
                     max_body_placeholder_len = max_body_placeholder_len
@@ -676,10 +674,14 @@ impl SecretsHandler {
                     placeholder: secret.placeholder.clone(),
                     value: secret.value.clone(),
                     substitute_headers: secret.substitution.headers,
+                    header_fields: secret.substitution.header_fields.clone(),
                     substitute_query: secret.substitution.query,
                     substitute_body: secret.substitution.body,
                     require_tls_identity: secret.require_tls_identity,
                 });
+                if !secret.require_tls_identity || tls_intercepted {
+                    continue;
+                }
             }
 
             if secret
@@ -702,16 +704,6 @@ impl SecretsHandler {
                 continue;
             }
 
-            let substitution = if host_allowed && (!secret.require_tls_identity || tls_intercepted)
-            {
-                secret.substitution.clone()
-            } else {
-                SecretSubstitution {
-                    headers: false,
-                    query: false,
-                    body: false,
-                }
-            };
             let action = secret
                 .violation_action
                 .as_ref()
@@ -719,26 +711,18 @@ impl SecretsHandler {
             ineligible_for_substitution.push(IneligibleSecret {
                 env_var: secret.env_var.clone(),
                 placeholder: secret.placeholder.clone(),
-                substitution,
                 action: BlockingAction::from_violation_action(action).unwrap_or_default(),
             });
         }
 
-        // A placeholder can be declared more than once (for example, with
-        // different host patterns). If any declaration is eligible for this
-        // connection, its enabled locations are safe to substitute and must
-        // not be rejected by an otherwise-ineligible duplicate declaration.
-        for ineligible in &mut ineligible_for_substitution {
-            for eligible in &eligible_for_substitution {
-                if ineligible.placeholder == eligible.placeholder
+        // Duplicate declarations must not revoke the placeholder permission
+        // granted by a declaration eligible on this verified connection.
+        ineligible_for_substitution.retain(|ineligible| {
+            !eligible_for_substitution.iter().any(|eligible| {
+                ineligible.placeholder == eligible.placeholder
                     && (!eligible.require_tls_identity || tls_intercepted)
-                {
-                    ineligible.substitution.headers |= eligible.substitute_headers;
-                    ineligible.substitution.query |= eligible.substitute_query;
-                    ineligible.substitution.body |= eligible.substitute_body;
-                }
-            }
-        }
+            })
+        });
 
         Self {
             eligible_for_substitution,
@@ -757,6 +741,9 @@ impl SecretsHandler {
             http_pending: Vec::new(),
             unsupported_body_tail: Vec::new(),
             http2_state: None,
+            http1_requests: 0,
+            http1_response_allowed: false,
+            http1_violation: false,
         }
     }
 
@@ -854,14 +841,14 @@ impl SecretsHandler {
                     || !looks_like_http_request_prefix(&self.http_pending)
                 {
                     let pending = std::mem::take(&mut self.http_pending);
-                    let output = self.substitute_ready(&pending)?.into_owned();
+                    let output = self.substitute_headers(&pending)?.into_owned();
                     return Ok(Cow::Owned(output));
                 }
                 return Ok(Cow::Owned(Vec::new()));
             }
 
             let pending = std::mem::take(&mut self.http_pending);
-            let output = self.substitute_ready(&pending)?.into_owned();
+            let output = self.substitute_headers(&pending)?.into_owned();
             return Ok(Cow::Owned(output));
         }
 
@@ -880,13 +867,20 @@ impl SecretsHandler {
             return Ok(Cow::Owned(Vec::new()));
         }
 
-        self.substitute_ready(data)
+        self.substitute_headers(data)
+    }
+
+    /// Build a secret-policy denial only for the first recognized HTTP/1 request.
+    /// The relay must also ensure no upstream response has reached the guest.
+    pub(crate) fn http1_violation_response(&self, message: &str) -> Option<Vec<u8>> {
+        (self.http1_response_allowed && self.http1_violation)
+            .then(|| secret_http_forbidden_response(message, &self.sni))
     }
 
     fn scan_opaque<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
         // Fail closed when invalid bytes still resemble an HTTP request that
         // requires authority validation. Conclusively opaque streams rely on
-        // the proxy's connection-level policy and still block placeholders.
+        // the proxy's connection-level placeholder policy.
         if !self.opaque && self.http_authority.is_some() && opaque_prefix_might_be_http(data) {
             return Err(SecretViolationAction::Block);
         }
@@ -949,6 +943,16 @@ impl SecretsHandler {
         let output = state.process(self, data)?;
         self.http2_state = Some(state);
         Ok(Cow::Owned(output))
+    }
+
+    fn substitute_headers<'a>(
+        &mut self,
+        data: &'a [u8],
+    ) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
+        self.http1_requests = self.http1_requests.saturating_add(1);
+        self.http1_response_allowed =
+            self.http1_requests == 1 && classify_http_request(data) == Some(true);
+        self.substitute_ready(data)
     }
 
     fn substitute_ready<'a>(
@@ -1474,6 +1478,7 @@ impl SecretsHandler {
 
             for (name, value) in headers.iter_mut() {
                 let is_pseudo = name.starts_with(b":");
+                let header_allowed = !is_pseudo && secret.header_field_allowed(name);
 
                 if name.eq_ignore_ascii_case(b":path")
                     && secret.substitute_query
@@ -1484,9 +1489,8 @@ impl SecretsHandler {
                     *value = replaced.into_bytes();
                 }
 
-                if !is_pseudo
+                if header_allowed
                     && name.eq_ignore_ascii_case(b"authorization")
-                    && secret.substitute_headers
                     && let Ok(header_value) = std::str::from_utf8(value)
                     && let Some(replaced) = substitute_basic_auth_value(
                         header_value,
@@ -1497,10 +1501,7 @@ impl SecretsHandler {
                     *value = replaced.into_bytes();
                 }
 
-                if !is_pseudo
-                    && secret.substitute_headers
-                    && contains_bytes(value, secret.placeholder.as_bytes())
-                {
+                if header_allowed && contains_bytes(value, secret.placeholder.as_bytes()) {
                     let replaced =
                         String::from_utf8_lossy(value).replace(&secret.placeholder, &secret.value);
                     *value = replaced.into_bytes();
@@ -1526,7 +1527,7 @@ impl SecretsHandler {
     }
 
     fn consume_chunked_body_with_violation_detection(
-        &self,
+        &mut self,
         state: &mut ChunkedBodyState,
         data: &[u8],
     ) -> Result<Option<usize>, SecretViolationAction> {
@@ -1562,7 +1563,7 @@ impl SecretsHandler {
     }
 
     fn rewrite_chunked_body_part(
-        &self,
+        &mut self,
         state: &mut ChunkedRewriteState,
         data: &[u8],
     ) -> Result<ChunkedRewriteResult, SecretViolationAction> {
@@ -1668,13 +1669,17 @@ impl SecretsHandler {
     }
 
     fn apply_blocking_action(
-        &self,
+        &mut self,
         report: Option<SecretViolationReport>,
     ) -> Result<(), SecretViolationAction> {
         let Some(report) = report else {
             return Ok(());
         };
+
         let action = report.action;
+        self.http1_violation = matches!(report.protocol, RequestProtocol::Http1)
+            && matches!(report.method.as_deref(), Some(method) if method != "HEAD" && method != "CONNECT");
+
         self.log_violation(&report);
         Err(action.into_violation_action())
     }
@@ -1711,7 +1716,7 @@ impl SecretsHandler {
                 match_form = %report.match_form,
                 guest_dst = %guest_dst,
                 http2_stream_id = %http2_stream_id,
-                "secret violation: placeholder detected for disallowed host"
+                "secret violation: placeholder detected where substitution or passthrough is not permitted"
             ),
             BlockingAction::BlockAndTerminate => tracing::error!(
                 action = %report.action,
@@ -1726,7 +1731,7 @@ impl SecretsHandler {
                 match_form = %report.match_form,
                 guest_dst = %guest_dst,
                 http2_stream_id = %http2_stream_id,
-                "secret violation: placeholder detected for disallowed host - terminating"
+                "secret violation: placeholder detected where substitution or passthrough is not permitted - terminating"
             ),
         }
     }
@@ -1780,7 +1785,7 @@ impl SecretsHandler {
     /// retain encoded Basic-auth detection; the explicit location keeps it
     /// outside the ordinary substitutable header section.
     fn apply_chunked_metadata_policy(
-        &self,
+        &mut self,
         line: &[u8],
         location: RequestLocation,
     ) -> Result<(), SecretViolationAction> {
@@ -1992,9 +1997,16 @@ impl Http2State {
         let mut headers = self.decode_headers(&block.block)?;
         let is_initial_request = !self.open_request_streams.contains(&block.stream_id);
         if is_initial_request {
+            // Client-initiated HTTP/2 stream ids must strictly increase. A
+            // reused id would let a previously completed stream be presented
+            // as a fresh request, so fail closed before substitution runs.
+            if block.stream_id <= self.highest_client_stream_id {
+                return Err(SecretViolationAction::Block);
+            }
             if self.open_request_streams.len() >= MAX_HTTP2_TRACKED_STREAMS {
                 return Err(SecretViolationAction::Block);
             }
+            self.highest_client_stream_id = block.stream_id;
             self.open_request_streams.insert(block.stream_id);
         } else if !block.end_stream {
             return Err(SecretViolationAction::Block);
@@ -2045,6 +2057,12 @@ impl Http2State {
     }
 
     fn decode_headers(&mut self, block: &[u8]) -> Result<Http2Headers, SecretViolationAction> {
+        // `httlib-hpack` panics on a truncated representation instead of
+        // returning an error, so it only gets structurally complete blocks.
+        check_header_block(block).map_err(|err| {
+            tracing::debug!(error = %err, "rejecting guest HTTP/2 header block");
+            SecretViolationAction::Block
+        })?;
         let mut block = block.to_vec();
         let mut headers = Vec::new();
         let mut decoded_bytes = 0usize;
@@ -2101,6 +2119,26 @@ impl Http2State {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Returns true when `name` is an allowed header field name.
+///
+/// `headers_enabled` gates all header substitution; an empty `header_fields`
+/// allowlist means every field name is allowed.
+fn header_field_allowed(headers_enabled: bool, header_fields: &[String], name: &[u8]) -> bool {
+    headers_enabled
+        && (header_fields.is_empty()
+            || header_fields
+                .iter()
+                .any(|field| name.eq_ignore_ascii_case(field.as_bytes())))
+}
+
+/// Returns the field-name portion of a header line.
+fn header_field_name(line: &[u8]) -> &[u8] {
+    match line.iter().position(|byte| *byte == b':') {
+        Some(end) => &line[..end],
+        None => line,
+    }
+}
 
 /// Returns true if `line` starts with the `Authorization:` header name
 /// (case-insensitive).
@@ -2460,7 +2498,7 @@ fn request_summary(headers: &str, protocol: RequestProtocol) -> RequestSummary {
 }
 
 fn http1_request_summary(headers: &str) -> RequestSummary {
-    let mut lines = headers.split("\r\n");
+    let mut lines = headers.split("\r\n").skip_while(|line| line.is_empty());
     let Some(request_line) = lines.next() else {
         return RequestSummary::default();
     };
@@ -2593,7 +2631,7 @@ pub(crate) fn first_line_is_not_http_request(data: &[u8]) -> bool {
     http_request_version(line.as_ref()).is_none()
 }
 
-fn skip_leading_empty_http_lines(mut data: &[u8]) -> &[u8] {
+pub(crate) fn skip_leading_empty_http_lines(mut data: &[u8]) -> &[u8] {
     while data.starts_with(b"\r\n") {
         data = &data[2..];
     }
@@ -2624,8 +2662,12 @@ fn is_http_token_byte(byte: u8) -> bool {
 }
 
 fn authority_matches_sni(authority: &str, sni: &str) -> bool {
-    authority_hostname(authority)
-        .is_some_and(|hostname| hostname.eq_ignore_ascii_case(sni.trim_end_matches('.')))
+    authority_hostname(authority).is_some_and(|hostname| {
+        if let Ok(address) = sni.parse::<IpAddr>() {
+            return hostname.parse::<IpAddr>().is_ok_and(|host| host == address);
+        }
+        hostname.eq_ignore_ascii_case(sni.trim_end_matches('.'))
+    })
 }
 
 fn authority_hostname(authority: &str) -> Option<&str> {
@@ -3178,8 +3220,8 @@ fn detect_http2_header_blocking_action(
     )
 }
 
-/// Check every forbidden location independently. An allowed match must never
-/// mask an encoded placeholder in a different, forbidden location.
+/// Check each location for placeholders not permitted on this connection.
+/// A permitted secret must not mask another secret's encoded placeholder.
 fn detect_blocking_action_in_fragments(
     secrets: &[IneligibleSecret],
     fragments: &[(&[u8], RequestLocation)],
@@ -3187,18 +3229,13 @@ fn detect_blocking_action_in_fragments(
     summary: &RequestSummary,
     http2_stream_id: Option<u32>,
 ) -> Option<SecretViolationReport> {
+    if secrets.is_empty() {
+        return None;
+    }
     let opaque = matches!(protocol, RequestProtocol::Opaque);
     let mut detected = None;
 
     for &(data, location) in fragments {
-        if !opaque
-            && secrets
-                .iter()
-                .all(|secret| secret.substitution_allows(location))
-        {
-            continue;
-        }
-
         let url_decoded = data
             .contains(&b'%')
             .then(|| percent_decode(data).collect::<Vec<u8>>());
@@ -3214,10 +3251,6 @@ fn detect_blocking_action_in_fragments(
             };
 
         for secret in secrets {
-            if !opaque && secret.substitution_allows(location) {
-                continue;
-            }
-
             let needle = secret.placeholder.as_bytes();
             let matched = if basic_auth_credentials
                 .iter()
@@ -3453,7 +3486,9 @@ impl SecretViolationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::secrets::hpack::tests::{PANICKING_BLOCKS, Rng, random_block};
     use crate::netstack::shared::{ResolvedHostnameFamily, SharedState};
+    use crate::secrets::config::SecretSubstitution;
     use microsandbox_types::compat;
 
     use std::net::{IpAddr, Ipv4Addr};
@@ -3533,15 +3568,15 @@ mod tests {
             "require_tls_identity":false
         }]});
         compat::v0_5_0::local::secrets::to_current(wire.as_object_mut().unwrap()).unwrap();
-        let mut config: SecretsConfig = serde_json::from_value(wire).unwrap();
+        let config: SecretsConfig = serde_json::from_value(wire).unwrap();
         let request = b"POST / HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 4\r\n\r\n$KEY";
         let mut handler = SecretsHandler::new(&config, "api.example.com", true);
-        assert!(handler.substitute(request).is_err());
-        config.secrets[0]
-            .passthrough_hosts
-            .push(HostPattern::Exact("api.example.com".into()));
-        let mut handler = SecretsHandler::new(&config, "api.example.com", true);
         assert_eq!(handler.substitute(request).unwrap().as_ref(), request);
+        let mut denied = SecretsHandler::new(&config, "denied.example", true);
+        assert_eq!(
+            denied.substitute(request).unwrap_err(),
+            SecretViolationAction::Block
+        );
     }
 
     #[test]
@@ -3614,6 +3649,7 @@ mod tests {
     fn basic_auth_only() -> SecretSubstitution {
         SecretSubstitution {
             headers: true,
+            header_fields: Vec::new(),
             query: false,
             body: false,
         }
@@ -3870,11 +3906,6 @@ mod tests {
         let secret = IneligibleSecret {
             env_var: "OPENAI_API_KEY".into(),
             placeholder: "$KEY".into(),
-            substitution: SecretSubstitution {
-                headers: false,
-                query: false,
-                body: false,
-            },
             action: BlockingAction::BlockAndLog,
         };
         let encoded = BASE64.encode(b"user:$KEY");
@@ -3911,11 +3942,6 @@ mod tests {
         let secret = IneligibleSecret {
             env_var: "SERVICE_TOKEN".into(),
             placeholder: "abc/key".into(),
-            substitution: SecretSubstitution {
-                headers: false,
-                query: false,
-                body: false,
-            },
             action: BlockingAction::BlockAndLog,
         };
         let headers =
@@ -4064,10 +4090,12 @@ mod tests {
             (0x80..=u8::MAX).map(|byte| [b"X-Note: ".as_slice(), &[byte], b"\r\n"].concat()),
         );
         for auth in ["Authorization: Bearer $KEY\r\n", basic.as_str()] {
-            for body in ["$KEY", "%24KEY", r"\u0024KEY"] {
+            for body in ["$BLOCKED", "%24BLOCKED", r"\u0024BLOCKED"] {
                 for note in &notes {
-                    let config =
-                        make_config(vec![make_secret("$KEY", "real-secret", "api.example.com")]);
+                    let config = make_config(vec![
+                        make_secret("$KEY", "real-secret", "api.example.com"),
+                        make_secret("$BLOCKED", "other-secret", "other.example"),
+                    ]);
                     let mut request =
                         format!("POST / HTTP/1.1\r\nHost: api.example.com\r\n{auth}").into_bytes();
                     request.extend_from_slice(note);
@@ -4106,9 +4134,19 @@ mod tests {
                         let mut secret = make_secret("$KEY", "real-secret", "api.example.com");
                         secret.substitution.headers = headers;
                         secret.substitution.query = query;
+                        secret.substitution.body = true;
                         let config = make_config(vec![secret]);
-                        let allowed = (!target.contains("KEY") || (target.contains('?') && query))
-                            && (header_value == "plain" || headers);
+                        let expected_target = match target.split_once('?') {
+                            Some((path, value)) if query => {
+                                format!("{path}?{}", value.replace("$KEY", "real-secret"))
+                            }
+                            _ => target.to_string(),
+                        };
+                        let expected_header = if headers {
+                            header_value.replace("$KEY", "real-secret")
+                        } else {
+                            header_value.to_string()
+                        };
                         for http2 in [false, true] {
                             let mut handler = SecretsHandler::new(&config, "api.example.com", true);
                             let request = if http2 {
@@ -4125,41 +4163,13 @@ mod tests {
                             } else {
                                 format!("GET {target} HTTP/1.1\r\nHost: api.example.com\r\nX-Key: {header_value}\r\n\r\n").into_bytes()
                             };
-                            let result = handler.substitute(&request);
-                            assert_eq!(
-                                result.is_ok(),
-                                allowed,
-                                "http2={http2}, target={target}, value={header_value}, headers={headers}, query={query}"
-                            );
-                            if allowed && http2 {
-                                let output = result.unwrap();
+                            let output = handler.substitute(&request).unwrap();
+                            if http2 {
                                 let fields = decode_first_h2_headers(&output);
-                                assert_eq!(
-                                    h2_header_value(&fields, b":path"),
-                                    if query {
-                                        target.replace("$KEY", "real-secret")
-                                    } else {
-                                        target.to_string()
-                                    }
-                                );
-                                assert_eq!(
-                                    h2_header_value(&fields, b"x-key"),
-                                    if headers {
-                                        header_value.replace("$KEY", "real-secret")
-                                    } else {
-                                        header_value.to_string()
-                                    }
-                                );
-                            } else if allowed {
-                                assert_eq!(
-                                    result.unwrap().as_ref(),
-                                    String::from_utf8(request.clone())
-                                        .unwrap()
-                                        .replace("$KEY", "real-secret")
-                                        .as_bytes()
-                                );
+                                assert_eq!(h2_header_value(&fields, b":path"), expected_target);
+                                assert_eq!(h2_header_value(&fields, b"x-key"), expected_header);
                             } else {
-                                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+                                assert_eq!(output.as_ref(), format!("GET {expected_target} HTTP/1.1\r\nHost: api.example.com\r\nX-Key: {expected_header}\r\n\r\n").as_bytes());
                             }
                         }
                     }
@@ -4178,6 +4188,154 @@ mod tests {
             String::from_utf8(output.into_owned()).unwrap(),
             "GET / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\n\r\n"
         );
+    }
+
+    #[test]
+    fn header_field_allowlist_scopes_substitution() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nX-Trace: redacted\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(
+            String::from_utf8(output.into_owned()).unwrap(),
+            "GET / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\nX-Trace: redacted\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn header_field_allowlist_forwards_placeholder_in_other_headers() {
+        // A placeholder in a non-allowlisted header is a disabled location: on
+        // a trusted destination it is forwarded unchanged, not substituted.
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nX-Other: $KEY\r\nAuthorization: Bearer redacted\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(output.as_ref(), input);
+    }
+
+    #[test]
+    fn empty_header_field_allowlist_substitutes_every_header() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nX-Custom: $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(
+            String::from_utf8(output.into_owned()).unwrap(),
+            "GET / HTTP/1.1\r\nX-Custom: real-secret\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn header_field_allowlist_scopes_basic_auth() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let encoded = BASE64.encode(b"user:$KEY");
+        let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
+        let output = handler.substitute(input.as_bytes()).unwrap();
+        let auth = String::from_utf8(output.into_owned())
+            .unwrap()
+            .split("Authorization: Basic ")
+            .nth(1)
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(BASE64.decode(auth).unwrap(), b"user:real-secret");
+    }
+
+    #[test]
+    fn header_field_allowlist_forwards_basic_auth_when_authorization_excluded() {
+        // Excluding `authorization` from the allowlist leaves the encoded Basic
+        // credential placeholder unchanged on a trusted destination.
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["x-api-key".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let encoded = BASE64.encode(b"user:$KEY");
+        let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
+        let output = handler.substitute(input.as_bytes()).unwrap();
+        assert_eq!(output.as_ref(), input.as_bytes());
+    }
+
+    #[test]
+    fn header_field_allowlist_scopes_http2_substitution() {
+        let ip = Ipv4Addr::new(203, 0, 113, 60);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+
+        let allowed = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        let output = handler.substitute(&allowed).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(
+            h2_header_value(&headers, b"authorization"),
+            "Bearer real-secret"
+        );
+
+        let forwarded = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+                (b"x-trace", b"$KEY"),
+            ],
+            true,
+        );
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        let output = handler.substitute(&forwarded).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(h2_header_value(&headers, b"x-trace"), "$KEY");
+    }
+
+    #[test]
+    fn tls_intercepted_http2_encoded_query_is_forwarded_when_query_scope_disabled() {
+        let ip = Ipv4Addr::new(203, 0, 113, 61);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        // Default substitution enables headers but not the query. On a trusted
+        // destination a percent-encoded placeholder in the `:path` query is a
+        // disabled location and is forwarded unchanged.
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/?token=%24KEY"),
+            ],
+            true,
+        );
+        let output = handler.substitute(&request).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(h2_header_value(&headers, b":path"), "/?token=%24KEY");
     }
 
     #[test]
@@ -4233,12 +4391,13 @@ mod tests {
         let config = make_config(vec![allowed, duplicate_host]);
         let mut handler = SecretsHandler::new(&config, "api.github.com", true);
 
-        let input = b"GET /user HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let input =
+            b"POST /user HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nContent-Length: 4\r\n\r\n$KEY";
         let output = handler.substitute(input).unwrap();
 
         assert_eq!(
             String::from_utf8(output.into_owned()).unwrap(),
-            "GET /user HTTP/1.1\r\nAuthorization: Bearer real-secret\r\n\r\n"
+            "POST /user HTTP/1.1\r\nAuthorization: Bearer real-secret\r\nContent-Length: 4\r\n\r\n$KEY"
         );
     }
 
@@ -4360,30 +4519,93 @@ mod tests {
     }
 
     #[test]
-    fn disabled_body_substitution_blocks_placeholder_on_allowed_host() {
-        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
-        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
-
-        let input = b"POST / HTTP/1.1\r\nContent-Length: 15\r\n\r\n{\"key\": \"$KEY\"}";
-        assert_eq!(
-            handler.substitute(input).unwrap_err(),
-            SecretViolationAction::Block
-        );
+    fn disabled_body_substitution_preserves_placeholder_only_for_verified_allowed_host() {
+        let body = b"{\"key\":\"$KEY\"}";
+        for action in [
+            SecretViolationAction::Block,
+            SecretViolationAction::BlockAndLog,
+            SecretViolationAction::BlockAndTerminate,
+        ] {
+            for host in ["api.example.com", "denied.example"] {
+                for pinned in [false, true] {
+                    for framing in ["fixed", "chunked", "http2"] {
+                        let ip = Ipv4Addr::new(203, 0, 113, 10);
+                        let shared = SharedState::new(16);
+                        if pinned {
+                            cache_host(&shared, host, ip);
+                        }
+                        let mut secret = make_secret("$KEY", "real-secret", "api.example.com");
+                        secret.violation_action = Some(action.clone());
+                        let config = make_config(vec![secret]);
+                        let mut handler = SecretsHandler::new_tls_intercepted(
+                            &config,
+                            host,
+                            IpAddr::V4(ip),
+                            &shared,
+                        );
+                        let request = if framing == "http2" {
+                            h2_request_with_data(
+                                &[
+                                    (b":method", b"POST"),
+                                    (b":scheme", b"https"),
+                                    (b":authority", host.as_bytes()),
+                                    (b":path", b"/"),
+                                ],
+                                body,
+                            )
+                        } else if framing == "chunked" {
+                            [
+                                format!(
+                                    "POST / HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                                body,
+                                b"\r\n0\r\n\r\n",
+                            ]
+                            .concat()
+                        } else {
+                            [
+                                format!(
+                                    "POST / HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\n\r\n",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                                body,
+                            ]
+                            .concat()
+                        };
+                        let result = handler.substitute(&request);
+                        if pinned && host == "api.example.com" {
+                            let output = result.unwrap();
+                            if framing == "http2" {
+                                assert!(output.ends_with(body));
+                                assert!(!contains_bytes(&output, b"real-secret"));
+                            } else {
+                                assert_eq!(output.as_ref(), request);
+                            }
+                        } else {
+                            assert_eq!(result.unwrap_err(), action);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
     #[allow(deprecated)] // Both public names must enforce the same network policy.
     fn placeholder_permission_keeps_substitution_and_blocking_independent() {
-        for legacy in [false, true] {
+        for legacy in [None, Some(false), Some(true)] {
             let secret = crate::config::builder::SecretBuilder::new()
                 .env("API_KEY")
                 .value("real-secret")
                 .placeholder("$KEY")
                 .allow("api.openai.com");
-            let secret = if legacy {
-                secret.allow_passthrough_for("api.openai.com")
-            } else {
-                secret.allow_placeholder_for("api.openai.com")
+            let secret = match legacy {
+                Some(true) => secret.allow_passthrough_for("placeholder.example"),
+                Some(false) => secret.allow_placeholder_for("placeholder.example"),
+                None => secret,
             };
             let config = make_config(vec![secret.build()]);
             let input = b"POST / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nContent-Length: 15\r\n\r\n{\"key\": \"$KEY\"}";
@@ -4392,6 +4614,15 @@ mod tests {
                 String::from_utf8(allowed.substitute(input).unwrap().into_owned()).unwrap();
             assert!(output.contains("Authorization: Bearer real-secret"));
             assert!(output.contains("{\"key\": \"$KEY\"}"));
+            let mut placeholder_host = SecretsHandler::new(&config, "placeholder.example", true);
+            if legacy.is_some() {
+                assert_eq!(placeholder_host.substitute(input).unwrap().as_ref(), input);
+            } else {
+                assert_eq!(
+                    placeholder_host.substitute(input).unwrap_err(),
+                    SecretViolationAction::Block
+                );
+            }
             let mut forbidden = SecretsHandler::new(&config, "evil.example.com", true);
             assert_eq!(
                 forbidden.substitute(input).unwrap_err(),
@@ -4658,21 +4889,21 @@ mod tests {
     }
 
     #[test]
-    fn split_chunked_trailer_blocks_when_header_substitution_is_enabled() {
+    fn split_chunked_trailer_preserves_placeholder_on_allowed_host() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution.body = true;
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
         // Trailers are not part of the substitutable header section. The
-        // rewrite path buffers this partial line, then blocks it unless the
-        // destination has explicit placeholder passthrough permission.
+        // rewrite path buffers this partial line, then forwards the placeholder
+        // unchanged because this destination is allowed to receive the credential.
         let first = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\nX-Token: $K";
         let output = handler.substitute(first).unwrap();
         assert!(!output.as_ref().ends_with(b"$K"));
         assert_eq!(
-            handler.substitute(b"EY\r\n\r\n").unwrap_err(),
-            SecretViolationAction::Block
+            handler.substitute(b"EY\r\n\r\n").unwrap().as_ref(),
+            b"X-Token: $KEY\r\n\r\n"
         );
     }
 
@@ -4694,14 +4925,17 @@ mod tests {
     fn split_chunk_extension_blocks_during_body_rewrite() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution.body = true;
-        let config = make_config(vec![secret]);
+        let config = make_config(vec![
+            secret,
+            make_secret("$BLOCKED", "other-secret", "other.example"),
+        ]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
-        let first = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n1;token=$K";
+        let first = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n1;token=$B";
         let output = handler.substitute(first).unwrap();
-        assert!(!output.as_ref().ends_with(b"$K"));
+        assert!(!output.as_ref().ends_with(b"$B"));
         assert_eq!(
-            handler.substitute(b"EY\r\nx\r\n0\r\n\r\n").unwrap_err(),
+            handler.substitute(b"LOCKED\r\nx\r\n0\r\n\r\n").unwrap_err(),
             SecretViolationAction::Block
         );
     }
@@ -4950,7 +5184,7 @@ mod tests {
         let mut handler =
             SecretsHandler::new_plain_http(&config, "api.openai.com", IpAddr::V4(ip), &shared);
 
-        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\n\r\n";
+        let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: 4\r\n\r\n$KEY";
         assert_eq!(
             handler.substitute(input).unwrap_err(),
             SecretViolationAction::Block
@@ -4969,13 +5203,9 @@ mod tests {
         let mut handler =
             SecretsHandler::new_plain_http(&config, "api.openai.com", IpAddr::V4(ip), &shared);
 
-        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\n\r\n";
+        let input = b"POST / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\nContent-Length: 4\r\n\r\n$KEY";
         let output = handler.substitute(input).unwrap();
-        assert!(
-            String::from_utf8(output.into_owned())
-                .unwrap()
-                .contains("real-secret")
-        );
+        assert_eq!(output.as_ref(), b"POST / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\nHost: api.openai.com\r\nContent-Length: 4\r\n\r\n$KEY");
     }
 
     #[test]
@@ -5037,14 +5267,13 @@ mod tests {
         let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
         let input = b"BINARY3 v1\0opaque\r\nAuthorization: $KEY\r\n\r\n";
 
-        assert_eq!(handler.substitute(input), Err(SecretViolationAction::Block));
+        assert_eq!(handler.substitute(input).unwrap().as_ref(), input);
     }
 
     #[test]
     fn opaque_prefix_blocks_basic_auth_encoded_placeholder() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.require_tls_identity = false;
-        secret.allowed_hosts = vec![HostPattern::Any];
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
         let input = b"BINARY3 v1\0\r\nAuthorization: Basic dXNlcjokS0VZ\r\n\r\n";
@@ -5056,7 +5285,6 @@ mod tests {
     fn opaque_prefix_blocks_basic_auth_split_after_long_prefix() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.require_tls_identity = false;
-        secret.allowed_hosts = vec![HostPattern::Any];
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
         let decoded_prefix = format!("user:{}", "x".repeat(97));
@@ -5232,8 +5460,9 @@ mod tests {
         let mut secret = make_secret("$MSB_PASSWORD", "s3cr3t", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: false,
+            header_fields: Vec::new(),
             query: false,
-            body: false,
+            body: true,
         };
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
@@ -5241,8 +5470,8 @@ mod tests {
         let encoded = BASE64.encode(b"user:$MSB_PASSWORD");
         let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
         assert_eq!(
-            handler.substitute(input.as_bytes()).unwrap_err(),
-            SecretViolationAction::Block
+            handler.substitute(input.as_bytes()).unwrap().as_ref(),
+            input.as_bytes()
         );
     }
 
@@ -5251,6 +5480,7 @@ mod tests {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: false,
+            header_fields: Vec::new(),
             query: true,
             body: false,
         };
@@ -5270,10 +5500,10 @@ mod tests {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: false,
+            header_fields: Vec::new(),
             query: true,
             body: false,
         };
-        secret.passthrough_hosts = vec![HostPattern::Exact("api.openai.com".into())];
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
@@ -5290,10 +5520,7 @@ mod tests {
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
         let input = b"GET /api?key=$KEY HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
-        assert_eq!(
-            handler.substitute(input).unwrap_err(),
-            SecretViolationAction::Block
-        );
+        assert_eq!(handler.substitute(input).unwrap().as_ref(), input);
     }
 
     #[test]
@@ -5536,7 +5763,7 @@ mod tests {
     }
 
     #[test]
-    fn header_only_secret_blocks_placeholder_in_body_continuation_chunk() {
+    fn header_only_secret_preserves_placeholder_in_body_continuation_chunk() {
         // Security regression: a secret with the default substitution scopes
         // (substitute_headers=true, substitute_body=false) must NOT substitute its
         // placeholder when the placeholder appears in body bytes. Without
@@ -5552,13 +5779,10 @@ mod tests {
         handler.substitute(chunk1).unwrap();
 
         // Chunk 2: ASCII body containing a literal `$KEY` token. The
-        // placeholder must be blocked, never replaced with the secret value.
+        // placeholder must remain unchanged, never replaced with the secret value.
         let body = b"prefix:$KEY:more-padding";
         assert_eq!(body.len(), 24);
-        assert_eq!(
-            handler.substitute(body).unwrap_err(),
-            SecretViolationAction::Block
-        );
+        assert_eq!(handler.substitute(body).unwrap().as_ref(), body);
     }
 
     #[test]
@@ -5822,6 +6046,34 @@ mod tests {
     }
 
     #[test]
+    fn tls_ip_authority_compares_addresses_without_allowing_hostname_fronting() {
+        let shared = SharedState::new(16);
+        let config = SecretsConfig::default();
+        for (identity, authority, allowed) in [
+            ("2001:db8::1", "[2001:db8::1]:443", true),
+            ("2001:db8::1", "[2001:0db8:0:0:0:0:0:1]:443", true),
+            ("2001:db8::1", "[2001:db8::2]:443", false),
+            ("2001:db8::1", "example.com", false),
+            ("192.0.2.1", "192.0.2.1:443", true),
+            ("192.0.2.1", "192.0.2.2", false),
+            ("192.0.2.1", "example.com", false),
+            ("example.com", "192.0.2.1", false),
+        ] {
+            let ip = identity
+                .parse()
+                .unwrap_or_else(|_| "192.0.2.1".parse().unwrap());
+            cache_host(&shared, "example.com", "192.0.2.1".parse().unwrap());
+            let mut handler = SecretsHandler::new_tls_intercepted(&config, identity, ip, &shared);
+            let request = format!("GET / HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+            assert_eq!(
+                handler.substitute(request.as_bytes()).is_ok(),
+                allowed,
+                "identity={identity}, authority={authority}"
+            );
+        }
+    }
+
+    #[test]
     fn tls_intercepted_http_host_must_match_sni() {
         let ip = Ipv4Addr::new(203, 0, 113, 30);
         let shared = SharedState::new(16);
@@ -6050,9 +6302,12 @@ mod tests {
     }
 
     #[test]
-    fn http2_trailers_require_passthrough_and_are_never_substituted() {
-        for passthrough in [false, true] {
+    fn http2_trailers_preserve_permitted_placeholders_and_block_other_hosts() {
+        for (allowed, passthrough) in [(true, false), (false, true), (false, false)] {
             let mut secret = make_secret("$KEY", "real-secret", "api.example.com");
+            if !allowed {
+                secret.allowed_hosts = vec![HostPattern::Exact("other.example".into())];
+            }
             if passthrough {
                 secret.passthrough_hosts = vec![HostPattern::Exact("api.example.com".into())];
             }
@@ -6071,7 +6326,7 @@ mod tests {
             let mut trailers = Vec::new();
             append_h2_headers(&mut trailers, 1, &[(b"x-key", b"$KEY")], true);
             let result = handler.substitute(&trailers);
-            if passthrough {
+            if allowed || passthrough {
                 let mut output = HTTP2_PREFACE.to_vec();
                 output.extend_from_slice(&result.unwrap());
                 assert_eq!(
@@ -6150,6 +6405,7 @@ mod tests {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: true,
+            header_fields: Vec::new(),
             query: true,
             body: false,
         };
@@ -6490,6 +6746,130 @@ mod tests {
         assert!(handler.substitute(&request).is_ok());
     }
 
+    // The HTTP/2 stream-id reuse checks below are ported from #1227
+    // (originally authored by Liraz Siri). They fail closed when a client
+    // presents a completed stream id as a new request.
+
+    #[test]
+    fn tls_intercepted_http2_rejects_reused_stream_id_after_headers_end_stream() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/first"),
+            ],
+            true,
+        );
+        handler.substitute(&request).unwrap();
+
+        let mut reused = Vec::new();
+        append_h2_headers(
+            &mut reused,
+            1,
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/reused"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            handler.substitute(&reused).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_rejects_reused_stream_id_after_data_end_stream() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"POST"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/first"),
+            ],
+            false,
+        );
+        handler.substitute(&request).unwrap();
+
+        let mut completed = Vec::new();
+        append_http2_frame(
+            &mut completed,
+            HTTP2_FRAME_DATA,
+            HTTP2_FLAG_END_STREAM,
+            1,
+            b"",
+        )
+        .unwrap();
+        handler.substitute(&completed).unwrap();
+
+        let mut reused = Vec::new();
+        append_h2_headers(
+            &mut reused,
+            1,
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/reused"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            handler.substitute(&reused).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_allows_higher_stream_id_after_close() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/first"),
+            ],
+            true,
+        );
+        handler.substitute(&request).unwrap();
+
+        let mut next = Vec::new();
+        append_h2_headers(
+            &mut next,
+            3,
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/next"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        let output = handler.substitute(&next).unwrap();
+        let mut framed = HTTP2_PREFACE.to_vec();
+        framed.extend_from_slice(&output);
+        let headers = decode_first_h2_headers(&framed);
+        assert_eq!(
+            h2_header_value(&headers, b"authorization"),
+            "Bearer real-secret"
+        );
+    }
+
     #[test]
     fn chunked_body_internal_terminator_bytes_do_not_end_request() {
         let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
@@ -6532,5 +6912,432 @@ mod tests {
             b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
         );
         assert_eq!(out3.as_ref(), expected.as_slice());
+    }
+
+    /// Frames carrying `block` as one request header block on `stream_id`,
+    /// split across HEADERS and CONTINUATION when `split_at` falls inside it.
+    fn append_h2_raw_block(out: &mut Vec<u8>, stream_id: u32, block: &[u8], split_at: usize) {
+        let end = HTTP2_FLAG_END_HEADERS | HTTP2_FLAG_END_STREAM;
+        if split_at == 0 || split_at >= block.len() {
+            append_http2_frame(out, HTTP2_FRAME_HEADERS, end, stream_id, block).unwrap();
+            return;
+        }
+        let (head, tail) = block.split_at(split_at);
+        append_http2_frame(
+            out,
+            HTTP2_FRAME_HEADERS,
+            HTTP2_FLAG_END_STREAM,
+            stream_id,
+            head,
+        )
+        .unwrap();
+        append_http2_frame(out, HTTP2_FRAME_CONTINUATION, end, stream_id, tail).unwrap();
+    }
+
+    #[test]
+    fn http2_malformed_hpack_block_is_blocked() {
+        // Each block made httlib-hpack 0.1.3 index out of bounds, which aborts
+        // the sandbox process in release builds (`panic = "abort"`).
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        for block in PANICKING_BLOCKS {
+            for split_at in 0..block.len() {
+                let mut request = HTTP2_PREFACE.to_vec();
+                append_h2_raw_block(&mut request, 1, block, split_at);
+                let handlers = [
+                    SecretsHandler::new(&config, "a.example", false),
+                    SecretsHandler::new(&config, "a.example", true),
+                    // A domain egress rule alone installs a handler on plain
+                    // TCP, with no secrets configured.
+                    plain_http_policy_handler(&make_config(Vec::new())),
+                ];
+                for mut handler in handlers {
+                    assert_eq!(
+                        handler.substitute(&request).unwrap_err(),
+                        SecretViolationAction::Block,
+                        "{block:02x?} split at {split_at}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn http2_random_header_blocks_never_panic() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let request_prefix = encode_h2_header_block(&[
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ]);
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut processed = [0usize; 3];
+        for _ in 0..500 {
+            // Up to three requests on one connection, so later blocks decode
+            // against dynamic-table entries added by earlier ones. Half of the
+            // blocks start with a valid request, so they also reach the checks
+            // that run after decoding.
+            let mut request = HTTP2_PREFACE.to_vec();
+            append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+            for stream_id in [1, 3, 5].into_iter().take(1 + rng.below(3)) {
+                let mut block = Vec::new();
+                if rng.below(2) == 0 {
+                    block.extend_from_slice(&request_prefix);
+                }
+                block.extend(random_block(&mut rng));
+                let split_at = rng.below(block.len() + 1);
+                append_h2_raw_block(&mut request, stream_id, &block, split_at);
+            }
+            let handlers = [
+                SecretsHandler::new(&config, "a.example", false),
+                SecretsHandler::new(&config, "a.example", true),
+                plain_http_policy_handler(&make_config(Vec::new())),
+            ];
+            for (index, mut handler) in handlers.into_iter().enumerate() {
+                if handler.substitute(&request).is_ok() {
+                    processed[index] += 1;
+                }
+            }
+        }
+        // Coverage witness: a parser regression that rejected every flight
+        // early would otherwise leave this test passing without exercising the
+        // decode path. Each handler variant must process at least one request.
+        for (index, count) in processed.iter().enumerate() {
+            assert!(
+                *count > 0,
+                "handler {index} never processed a random request successfully"
+            );
+        }
+    }
+
+    #[test]
+    fn http2_dynamic_table_reference_across_streams_is_decoded() {
+        // Deterministic later-stream dynamic reference: stream 1 inserts
+        // `x-a: 1` with incremental indexing, so index 62 names it; stream 3
+        // sends only `be` (indexed field 62). A successful decode proves the
+        // dynamic table carries across streams instead of every flight being
+        // rejected before it can reference an earlier entry.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let fields: [(&[u8], &[u8]); 4] = [
+            (b":method", b"POST"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ];
+        let mut request_block = encode_h2_header_block(&fields);
+        request_block.extend_from_slice(&[0x40, 0x03, b'x', b'-', b'a', 0x01, b'1']);
+        let mut reference_block = encode_h2_header_block(&fields);
+        reference_block.push(0xbe);
+
+        let mut handler = SecretsHandler::new(&config, "a.example", false);
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        append_http2_header_frames(&mut request, 1, true, &request_block).unwrap();
+        handler.substitute(&request).unwrap();
+
+        let mut next = Vec::new();
+        append_http2_header_frames(&mut next, 3, true, &reference_block).unwrap();
+        let mut output = HTTP2_PREFACE.to_vec();
+        output.extend_from_slice(&handler.substitute(&next).unwrap());
+        assert_eq!(
+            h2_header_value(&decode_first_h2_headers(&output), b"x-a"),
+            "1"
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_output_is_unchanged_for_indexed_guest_blocks() {
+        let ip = Ipv4Addr::new(203, 0, 113, 45);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        // The guest indexes every field (Huffman-coded) in the first block, so
+        // the second block is made only of dynamic-table references.
+        let flags = HpackEncoder::WITH_INDEXING
+            | HpackEncoder::HUFFMAN_NAME
+            | HpackEncoder::HUFFMAN_VALUE
+            | HpackEncoder::BEST_FORMAT;
+        let fields: [(&[u8], &[u8]); 5] = [
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"api.openai.com"),
+            (b":path", b"/"),
+            (b"authorization", b"Bearer $KEY"),
+        ];
+        let mut encoder = HpackEncoder::with_dynamic_size(4096);
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        for stream_id in [1, 3] {
+            let mut block = Vec::new();
+            for (name, value) in fields {
+                encoder
+                    .encode((name.to_vec(), value.to_vec(), flags), &mut block)
+                    .unwrap();
+            }
+            if stream_id == 3 {
+                assert!(block.iter().all(|octet| octet & 0x80 != 0), "{block:02x?}");
+            }
+            append_http2_header_frames(&mut request, stream_id, true, &block).unwrap();
+        }
+
+        let output = handler.substitute(&request).unwrap().into_owned();
+
+        // Every output field is a never-indexed literal with raw strings, so
+        // the bytes do not depend on how the guest encoded its block.
+        let mut substituted = fields;
+        substituted[4].1 = b"Bearer real-secret";
+        let mut expected = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut expected, 0x4, 0, 0, &[]).unwrap();
+        append_h2_headers(&mut expected, 1, &substituted, true);
+        append_h2_headers(&mut expected, 3, &substituted, true);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn http2_size_update_only_trailer_block_is_accepted_and_applied() {
+        // A trailer block may hold only table size updates (RFC 7541 §4.2).
+        // The request adds `x-a: 1` to the guest's dynamic table; `be` in the
+        // next request refers to it. `20` (size 0) evicts it, so that
+        // reference must fail after the update and succeed without it.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let fields: [(&[u8], &[u8]); 4] = [
+            (b":method", b"POST"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ];
+        let mut request_block = encode_h2_header_block(&fields);
+        request_block.extend_from_slice(&[0x40, 0x03, b'x', b'-', b'a', 0x01, b'1']);
+        let mut next_block = encode_h2_header_block(&fields);
+        next_block.push(0xbe);
+
+        for (trailer, evicted) in [
+            (&[][..], false),
+            (&[0x20][..], true),
+            (&[0x20, 0x3f, 0xe1, 0x1f][..], true),
+        ] {
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let mut request = HTTP2_PREFACE.to_vec();
+            append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+            append_http2_header_frames(&mut request, 1, false, &request_block).unwrap();
+            append_http2_header_frames(&mut request, 1, true, trailer).unwrap();
+            let output = handler.substitute(&request).unwrap().into_owned();
+            // The trailer is forwarded as an empty header block.
+            let mut empty_trailer = Vec::new();
+            append_http2_header_frames(&mut empty_trailer, 1, true, &[]).unwrap();
+            assert!(output.ends_with(&empty_trailer), "{trailer:02x?}");
+
+            let mut next = Vec::new();
+            append_http2_header_frames(&mut next, 3, true, &next_block).unwrap();
+            let result = handler.substitute(&next);
+            if evicted {
+                assert_eq!(
+                    result.unwrap_err(),
+                    SecretViolationAction::Block,
+                    "{trailer:02x?}"
+                );
+            } else {
+                let mut output = HTTP2_PREFACE.to_vec();
+                output.extend_from_slice(&result.unwrap());
+                assert_eq!(
+                    h2_header_value(&decode_first_h2_headers(&output), b"x-a"),
+                    "1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn http2_header_block_limit_is_64_kib_across_continuation_frames() {
+        // A trailer has no pseudo-header fields, so one raw literal can fill
+        // the block while its decoded size (name + value + 4) stays below the
+        // decoded-size limit. The block is sent as HEADERS plus three 16 KiB
+        // CONTINUATION frames.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        for extra in [0, 1] {
+            let mut request = h2_request(
+                &[
+                    (b":method", b"POST"),
+                    (b":scheme", b"https"),
+                    (b":authority", b"a.example"),
+                    (b":path", b"/"),
+                ],
+                false,
+            );
+            let value = vec![b'v'; 64 * 1024 - 12 + extra];
+            let block = encode_h2_header_block(&[(b"x-fill", &value)]);
+            assert_eq!(block.len(), MAX_HTTP2_HEADER_BLOCK_BYTES + extra);
+            append_http2_header_frames(&mut request, 1, true, &block).unwrap();
+
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let result = handler.substitute(&request);
+            if extra == 0 {
+                // Re-encoding uses the same never-indexed raw literals.
+                assert_eq!(result.unwrap().into_owned(), request);
+            } else {
+                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+            }
+        }
+    }
+
+    /// A request header block with the four pseudo-headers followed by one
+    /// `a: <value>` field whose value is Huffman-compressed. The decoded value
+    /// is exactly `value_len` bytes, so the caller controls the decoder's
+    /// decoded-size total. `b'a'` has a 5-bit Huffman code (the shortest), so
+    /// even a 100,000-byte value compresses to about 62.5 KiB and stays under
+    /// the 64 KiB block cap.
+    fn h2_request_block_with_huffman_value(value_len: usize) -> Vec<u8> {
+        let mut block = encode_h2_header_block(&[
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ]);
+        let mut encoder = HpackEncoder::with_dynamic_size(4096);
+        encoder
+            .encode(
+                (
+                    b"a".to_vec(),
+                    vec![b'a'; value_len],
+                    HpackEncoder::NEVER_INDEXED | HpackEncoder::HUFFMAN_VALUE,
+                ),
+                &mut block,
+            )
+            .unwrap();
+        block
+    }
+
+    /// A trailer block of `unit` repetitions filled to the 64 KiB block cap.
+    fn h2_size_update_storm_block(unit: &[u8]) -> Vec<u8> {
+        let mut block = Vec::new();
+        while block.len() + unit.len() <= MAX_HTTP2_HEADER_BLOCK_BYTES {
+            block.extend_from_slice(unit);
+        }
+        block
+    }
+
+    #[test]
+    fn http2_header_field_count_boundary_is_1024() {
+        // The field limit is checked before each field is pushed, so exactly
+        // 1,024 fields decode and the 1,025th blocks.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        for (extra, accepted) in [(1020usize, true), (1021, false)] {
+            let mut fields: Vec<(&[u8], &[u8])> = vec![
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"a.example"),
+                (b":path", b"/"),
+            ];
+            for _ in 0..extra {
+                fields.push((b"x-a", b"1"));
+            }
+            let request = h2_request(&fields, true);
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let result = handler.substitute(&request);
+            if accepted {
+                assert!(result.is_ok(), "1,024 fields must be accepted");
+            } else {
+                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+            }
+        }
+    }
+
+    #[test]
+    fn http2_decoded_size_boundary_is_exact_for_huffman_values() {
+        // Decoded size is `name + value + 4` per field; the four pseudo-headers
+        // contribute 63 bytes, so value length 65,468 reaches exactly 65,536
+        // and 65,469 reaches 65,537. Both Huffman-compressed blocks are far
+        // below the 64 KiB block cap, so only the decoded-size check decides.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        for (value_len, accepted) in [(65_468usize, true), (65_469, false)] {
+            let block = h2_request_block_with_huffman_value(value_len);
+            assert!(block.len() <= MAX_HTTP2_HEADER_BLOCK_BYTES);
+            let mut request = HTTP2_PREFACE.to_vec();
+            append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+            append_http2_header_frames(&mut request, 1, true, &block).unwrap();
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let result = handler.substitute(&request);
+            if accepted {
+                assert!(result.is_ok(), "decoded size at the limit must be accepted");
+            } else {
+                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+            }
+        }
+    }
+
+    #[test]
+    fn http2_block_under_the_cap_can_expand_past_the_decoded_limit() {
+        // A block under the 64 KiB cap can still expand past 64 KiB decoded: a
+        // ~62.5 KiB Huffman value decodes to 100,000 bytes, so only the
+        // decoded-size check can reject it.
+        let block = h2_request_block_with_huffman_value(100_000);
+        assert!(block.len() <= MAX_HTTP2_HEADER_BLOCK_BYTES);
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        append_http2_header_frames(&mut request, 1, true, &block).unwrap();
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let mut handler = SecretsHandler::new(&config, "a.example", false);
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn http2_size_update_storm_is_bounded_and_terminates() {
+        // Pre-existing behaviour, not introduced by the guard: `httlib-hpack`
+        // drains the front of its buffer once per representation, so a 64 KiB
+        // block that is almost all one-byte size updates moves on the order of
+        // 2 GiB and costs time quadratic in the capped block size. The guard
+        // itself is linear and allocation-free. This pins that the handler
+        // still completes with bounded decoder state; in a debug build 64 KiB
+        // takes about 40 ms.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let request_block = encode_h2_header_block(&[
+            (b":method", b"POST"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ]);
+
+        // Size-update-only trailers: `20` (size 0) and alternating 0/4096.
+        for unit in [&[0x20u8][..], &[0x20, 0x3f, 0xe1, 0x1f][..]] {
+            let trailer = h2_size_update_storm_block(unit);
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let mut request = HTTP2_PREFACE.to_vec();
+            append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+            append_http2_header_frames(&mut request, 1, false, &request_block).unwrap();
+            append_http2_header_frames(&mut request, 1, true, &trailer).unwrap();
+            let output = handler.substitute(&request).unwrap();
+            // A trailer of size updates decodes to no fields and is forwarded
+            // as an empty header block.
+            let mut empty_trailer = Vec::new();
+            append_http2_header_frames(&mut empty_trailer, 1, true, &[]).unwrap();
+            assert!(output.ends_with(&empty_trailer), "{unit:02x?}");
+        }
+
+        // Updates interspersed with indexed fields, as one request block: the
+        // pseudo-headers plus indexed `cookie` fields (every 64 bytes) and `20`
+        // updates filling the rest. The field count stays under the 1,024
+        // limit and the decoded size under 64 KiB, so the whole block decodes.
+        let mut interspersed = request_block;
+        let mut fields = 4usize;
+        while interspersed.len() < MAX_HTTP2_HEADER_BLOCK_BYTES {
+            if fields < MAX_HTTP2_HEADER_FIELDS && interspersed.len().is_multiple_of(64) {
+                // `a0` indexes static-table entry 32 (`cookie`).
+                interspersed.push(0xa0);
+                fields += 1;
+            } else {
+                interspersed.push(0x20);
+            }
+        }
+        let mut handler = SecretsHandler::new(&config, "a.example", false);
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        append_http2_header_frames(&mut request, 1, true, &interspersed).unwrap();
+        assert!(handler.substitute(&request).is_ok());
     }
 }

@@ -13,19 +13,22 @@ from integration.helpers import IMAGE, remove_sandbox, remove_volume, unique_nam
 from microsandbox import Sandbox, Volume
 
 
-def _isolate_xdist_worker_home() -> None:
-    """Give each pytest-xdist worker independent microsandbox state."""
-    worker = os.environ.get("PYTEST_XDIST_WORKER")
+def _prepare_integration_home() -> None:
+    """Resolve the test home and isolate each pytest-xdist worker's state."""
     root = os.environ.get("MSB_HOME")
-    if worker is None or root is None:
+    if root is None:
         return
 
-    worker_home = Path(root) / worker
-    worker_home.mkdir(parents=True, exist_ok=True)
-    os.environ["MSB_HOME"] = str(worker_home)
+    home = Path(root)
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker is not None:
+        home /= worker
+    home.mkdir(parents=True, exist_ok=True)
+    # Named-volume mounts reject symlinks in every path component, including macOS /tmp.
+    os.environ["MSB_HOME"] = str(home.resolve())
 
 
-_isolate_xdist_worker_home()
+_prepare_integration_home()
 
 
 @pytest.fixture

@@ -73,20 +73,24 @@ impl JsVolumeBuilder {
 
     /// Limit the volume's storage capacity (MiB). Omit for unlimited.
     #[napi]
-    pub fn quota(&mut self, mib: u32) -> &Self {
+    pub fn quota(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
+
         let prev = self.take_inner();
         self.inner = Some(prev.quota(Mebibytes::from(mib)));
         self.quota_mib = Some(mib);
-        self
+        Ok(self)
     }
 
     /// Set disk volume capacity in MiB.
     #[napi]
-    pub fn size(&mut self, mib: u32) -> &Self {
+    pub fn size(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
+
         let prev = self.take_inner();
         self.inner = Some(prev.size(Mebibytes::from(mib)));
         self.capacity_mib = Some(mib);
-        self
+        Ok(self)
     }
 
     /// Attach a key-value label. May be called multiple times.

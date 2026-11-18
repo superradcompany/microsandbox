@@ -94,6 +94,9 @@ describe("native receiver validation", () => {
     ["SandboxFsOps", "exists"],
     ["Sandbox", "fs"],
     ["LogStream", "recv"],
+    ["Job", "inspect"],
+    ["JobAttachment", "recv"],
+    ["JobLogStream", "next"],
     ["SandboxBuilder", "cpus"],
     ["SnapshotBuilder", "label"],
     ["SnapshotBuilder", "build"],
@@ -112,7 +115,7 @@ describe("native receiver validation", () => {
     }
   }
 
-  for (const className of ["SandboxFsOps", "Sandbox", "LogStream", "SnapshotArchive"]) {
+  for (const className of ["SandboxFsOps", "Sandbox", "LogStream", "SnapshotArchive", "Job", "JobAttachment", "JobLogStream"]) {
     it(`${className} rejects direct construction without crashing`, () => {
       expectCleanRefusal(className, "constructor", "constructor");
     });

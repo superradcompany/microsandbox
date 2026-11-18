@@ -45,12 +45,6 @@ Override the default with allow-all egress only when a workload genuinely needs 
 On AWS, GCP, Azure, and similar platforms, `169.254.169.254` is the instance metadata service. It's a classic SSRF target because it hands temporary credentials to anything that can connect. The default policy blocks it. For custom policies that flip egress to allow-by-default, deny it explicitly:
 
 <CodeGroup>
-```bash CLI
-msb create python --name worker \
-    --net-default-egress allow \
-    --net-rule "deny@meta"
-```
-
 ```typescript TypeScript
 NetworkPolicy.builder()
   .defaultAllow()
@@ -64,7 +58,39 @@ NetworkPolicy::builder()
     .rule(|r| r.egress().deny_meta())
     .build()?
 ```
+
+```python Python
+from microsandbox import Action, Destination, DestGroup, NetworkPolicy, Rule
+
+policy = NetworkPolicy(
+    default_egress=Action.ALLOW,
+    default_ingress=Action.ALLOW,
+    rules=(Rule.deny(destination=Destination.group(DestGroup.METADATA)),),
+)
+```
+
+```go Go
+network := &m.NetworkConfig{
+    DefaultEgress: m.PolicyActionAllow,
+    DefaultIngress: m.PolicyActionAllow,
+    Rules: []m.PolicyRule{
+        {
+            Action: m.PolicyActionDeny,
+            Direction: m.PolicyDirectionEgress,
+            Destination: "metadata",
+        },
+    },
+}
+```
+
+```bash CLI
+msb create python --name worker \
+    --net-default-egress allow \
+    --net-rule "deny@meta"
+```
 </CodeGroup>
+
+NAT64-translated access to IPv4 metadata and private ranges is treated the same way for NAT64 prefixes. The well-known `64:ff9b::/96` prefix is configured by default, and operators can add routed environment-specific `/96` prefixes with `--net-nat64-prefix`.
 
 ## DNS rebinding
 
@@ -72,17 +98,21 @@ An attacker who controls a domain can make it resolve to a public IP during the 
 
 Rebind protection catches this at the response level. microsandbox rewrites a private, loopback, or link-local answer to `NXDOMAIN` unless the first matching explicit, address-only egress rule permits the returned address. For example, the `private` profile allows private DNS answers while retaining protection against loopback, link-local, metadata, and unspecified addresses. Ordered address-specific denies still win; policy defaults, `Any` rules, and port-scoped rules do not disable the check. Disable rebind protection globally only when policy-aware exceptions cannot represent the intended access. See [DNS](/networking/dns).
 
+Through the gateway, private reverse lookups (`in-addr.arpa`, `ip6.arpa`) require explicit access to the address they describe. A zone covering both public and private addresses, such as `172.in-addr.arpa`, requires access to the entire zone. `.local` discovery requires broad private-network access, as provided by the `private` profile; allowing only one subnet does not enable it. Platform policy can further restrict these permissions. This prevents PTR, SRV and TXT queries from using the host resolver to discover networks the sandbox cannot access.
+
+Gateway replies are checked for restricted names and addresses in every record section, including aliases and configured NAT64 translations. Restricted extra records are removed only when a complete successful answer can stand on its own; otherwise the lookup returns `NXDOMAIN`. Replies changed by this filtering lose whole-message authentication and the DNSSEC authenticated-data flag, so clients that need those records may fail validation. Explicitly selected resolvers keep their existing routing and answer-address checks. Disabling rebinding protection disables these checks too.
+
 ## DNS-to-IP binding (TOCTOU)
 
 Even without rebinding, a time-of-check to time-of-use race exists: an allowed domain resolves to an allowed IP when policy is checked, then the guest looks it up again at connect time and reaches a different IP.
 
-Domain-based rules close this with a pin set of observed DNS answers. A connection matches a domain rule only if its destination IP was actually returned as an answer to a DNS query for that domain *from this sandbox*. A guest that hard-codes an IP it never resolved through the interceptor can't slip past a domain allowlist. The same pin set gates [secret injection](/security/secrets).
+Domain rules require a live DNS binding between the allowed name and destination IP. When an allowed TLS SNI name has no live binding, microsandbox re-resolves it through the policy-filtered resolver and requires the answer to contain the chosen IP. No prior guest lookup is required; connections without SNI still need a live binding. The same pin set gates [secret injection](/security/secrets).
 
 ## SNI spoofing
 
 A TLS client picks the SNI in its ClientHello, and it's plaintext and unsigned. Some servers don't reject a mismatched SNI and complete the handshake against their default certificate anyway. That gives a workload a way to claim an allowed name while actually connecting elsewhere.
 
-Domain rules require two things when SNI is present, and both must pass: the SNI matches the rule, and the destination IP is bound to that name in the DNS pin set. Real traffic clears both because the client resolves the name before connecting. A spoof fails because no lookup ever tied the claimed name to that IP. For intercepted HTTP, the decrypted request authority, meaning the HTTP/1 `Host` header or the HTTP/2 `:authority`, must also match the SNI, which closes domain-fronting.
+With SNI, both the name match and DNS-to-IP binding must pass. Refreshing a missing binding does not authorize an IP absent from the fresh answer. Intercepted HTTP also requires `Host` or `:authority` to match SNI, preventing domain-fronting.
 
 ## The DNS bypass surface
 

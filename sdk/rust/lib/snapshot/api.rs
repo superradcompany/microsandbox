@@ -204,6 +204,27 @@ impl Snapshot {
         &self.manifest.state
     }
 
+    /// Observe regular files in this snapshot's directory through its captured backend.
+    ///
+    /// External linked payloads are excluded. Reader ownership and retention eligibility remain
+    /// unknown; the result is not the physical space deletion would free.
+    pub async fn storage_usage(&self) -> MicrosandboxResult<crate::StorageItemUsage> {
+        #[cfg(feature = "local")]
+        {
+            let local = self.backend.as_local().ok_or_else(|| {
+                crate::MicrosandboxError::local_only(crate::Operation::StorageUsage)
+            })?;
+            crate::Storage::directory_usage(
+                self.id().to_string(), self.path()?.to_path_buf(), local.snapshots_dir(),
+                "Durable snapshot; external linked payloads are excluded. Active readers and retention eligibility are unknown.",
+            ).await
+        }
+        #[cfg(not(feature = "local"))]
+        Err(crate::MicrosandboxError::local_only(
+            crate::Operation::StorageUsage,
+        ))
+    }
+
     /// Get a handle by the active backend's public snapshot identifier.
     pub async fn get(name_or_digest: &str) -> MicrosandboxResult<SnapshotHandle> {
         let backend = crate::backend::default_backend();
@@ -265,6 +286,17 @@ impl Snapshot {
     /// or created. This artifact-file operation is currently local-only; other
     /// backends return [`crate::MicrosandboxError::Unsupported`].
     pub async fn save_to(&self, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()> {
+        #[cfg(feature = "local")]
+        if let Some(local) = self.backend.as_local() {
+            return crate::backend::local::snapshot::save_snapshot_expected(
+                local,
+                self.reference().value(),
+                out,
+                opts,
+                Some(&self.digest),
+            )
+            .await;
+        }
         self.backend
             .snapshots()
             .save(self.reference(), out, opts)
@@ -366,6 +398,24 @@ impl SnapshotReference {
 }
 
 impl SnapshotHandle {
+    /// Observe this indexed artifact's directory using the handle's captured backend.
+    pub async fn storage_usage(&self) -> MicrosandboxResult<crate::StorageItemUsage> {
+        #[cfg(feature = "local")]
+        {
+            let local = self.backend.as_local().ok_or_else(|| {
+                crate::MicrosandboxError::local_only(crate::Operation::StorageUsage)
+            })?;
+            crate::Storage::directory_usage(
+                self.id().to_string(), self.path()?.to_path_buf(), local.snapshots_dir(),
+                "Durable snapshot; external linked payloads are excluded. Active readers and retention eligibility are unknown.",
+            ).await
+        }
+        #[cfg(not(feature = "local"))]
+        Err(crate::MicrosandboxError::local_only(
+            crate::Operation::StorageUsage,
+        ))
+    }
+
     /// Digest of the source artifact descriptor (`sha256:hex`).
     pub fn digest(&self) -> &str {
         &self.digest
@@ -467,6 +517,16 @@ impl SnapshotHandle {
 
     /// Remove this snapshot. See [`Snapshot::remove`].
     pub async fn remove(&self, force: bool) -> MicrosandboxResult<()> {
+        #[cfg(feature = "local")]
+        if let Some(local) = self.backend.as_local() {
+            return crate::backend::local::snapshot::remove_snapshot_expected(
+                local,
+                self.reference().value(),
+                force,
+                Some(&self.digest),
+            )
+            .await;
+        }
         self.backend
             .snapshots()
             .remove(self.backend.clone(), self.reference(), force)
@@ -479,6 +539,17 @@ impl SnapshotHandle {
     /// artifact-file operation is currently local-only; other backends return
     /// [`crate::MicrosandboxError::Unsupported`].
     pub async fn save_to(&self, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()> {
+        #[cfg(feature = "local")]
+        if let Some(local) = self.backend.as_local() {
+            return crate::backend::local::snapshot::save_snapshot_expected(
+                local,
+                self.reference().value(),
+                out,
+                opts,
+                Some(&self.digest),
+            )
+            .await;
+        }
         self.backend
             .snapshots()
             .save(self.reference(), out, opts)

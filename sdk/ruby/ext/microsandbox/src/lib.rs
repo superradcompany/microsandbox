@@ -1,3 +1,7 @@
+mod jobs;
+mod services;
+mod storage;
+
 use std::{
     ffi::c_void,
     future::Future,
@@ -16,12 +20,10 @@ use magnus::{
     function, method, prelude::*, r_hash::ForEach, scan_args::scan_args, typed_data,
 };
 use microsandbox_core::{
-    AgentClientError, BackendKind, MicrosandboxError, MicrosandboxResult, Operation,
-    PublishedSnapshotArtifact, SnapshotArtifactKind, SnapshotSourceRecoveryError,
+    AgentClientError, BackendKind, ChangeState, MicrosandboxError, MicrosandboxResult, Operation,
+    PublishedSnapshotArtifact, ServiceError, SnapshotArtifactKind, SnapshotSourceRecoveryError,
     UnsupportedReason,
-    backend::{
-        CloudBackend, LocalBackend, default_backend, resolve_default_backend, set_default_backend,
-    },
+    backend::{CloudBackend, LocalBackend, resolve_default_backend, set_default_backend},
     image::{Image, ImageHandle},
     logs::{LogEntry, LogOptions, LogSource},
     sandbox::{
@@ -245,7 +247,9 @@ fn core_error_class_name(error: &MicrosandboxError) -> &'static str {
     match error {
         MicrosandboxError::RuntimeNotInstalled(_) => "RuntimeNotInstalledError",
         MicrosandboxError::RuntimeIncomplete(_) => "RuntimeIncompleteError",
-        MicrosandboxError::InvalidConfig(_) => "InvalidConfigError",
+        MicrosandboxError::InvalidConfig(_) | MicrosandboxError::MissingRestoreBindings { .. } => {
+            "InvalidConfigError"
+        }
         MicrosandboxError::NoDefaultCommand => "NoDefaultCommandError",
         MicrosandboxError::CloudHttp { .. } => "CloudHttpError",
         MicrosandboxError::SandboxNotFound(_) => "SandboxNotFoundError",
@@ -260,6 +264,9 @@ fn core_error_class_name(error: &MicrosandboxError) -> &'static str {
         MicrosandboxError::SandboxFsOps(_) => "FilesystemError",
         MicrosandboxError::VolumeNotFound(_) => "VolumeNotFoundError",
         MicrosandboxError::VolumeAlreadyExists(_) => "VolumeAlreadyExistsError",
+        MicrosandboxError::ServiceNotFound(_) => "ServiceNotFoundError",
+        MicrosandboxError::ServiceAlreadyExists(_) => "ServiceAlreadyExistsError",
+        MicrosandboxError::Service { .. } => "ServiceError",
         MicrosandboxError::ImageNotFound(_) => "ImageNotFoundError",
         MicrosandboxError::ImageInUse(_) => "ImageInUseError",
         MicrosandboxError::SnapshotNotFound(_) => "SnapshotNotFoundError",
@@ -298,16 +305,119 @@ fn exception_class(ruby: &Ruby, name: &str) -> ExceptionClass {
 /// always the core error's `Display` rendering, except for `Unsupported`,
 /// which names the Ruby API instead of the Rust path.
 fn core_error(ruby: &Ruby, error: MicrosandboxError) -> Error {
+    core_error_with_change(ruby, error, None)
+}
+
+/// Convert a core error from a Service change and attach whether that change may have been applied.
+fn service_change_error(ruby: &Ruby, error: MicrosandboxError) -> Error {
+    let changed = change_state_name(error.changed());
+    core_error_with_change(ruby, error, Some(changed))
+}
+
+fn core_error_with_change(ruby: &Ruby, error: MicrosandboxError, changed: Option<&str>) -> Error {
     if let MicrosandboxError::Unsupported { op, reason } = &error {
-        return unsupported_error(ruby, &ruby_api_name(*op), &ruby_hint(reason));
+        return unsupported_error(ruby, &ruby_api_name(*op), &ruby_hint(reason), changed);
     }
     if let MicrosandboxError::SnapshotSourceRecovery(recovery) = &error {
         return snapshot_source_recovery_error(ruby, error.to_string(), recovery);
     }
-    Error::new(
+    if let MicrosandboxError::Service {
+        slug,
+        error: reason,
+    } = &error
+    {
+        return service_error(ruby, error.to_string(), slug, reason);
+    }
+
+    structured_error(
         exception_class(ruby, core_error_class_name(&error)),
         error.to_string(),
+        changed,
     )
+}
+
+fn structured_error(class: ExceptionClass, message: String, changed: Option<&str>) -> Error {
+    let exception = match class.new_instance((message.as_str(),)) {
+        Ok(exception) => exception,
+        Err(_) => return Error::new(class, message),
+    };
+    if let (Some(object), Some(changed)) = (RObject::from_value(exception.as_value()), changed) {
+        let _ = object.ivar_set("@changed", changed);
+    }
+    exception.into()
+}
+
+fn service_error(ruby: &Ruby, message: String, slug: &str, error: &ServiceError) -> Error {
+    let class = exception_class(ruby, "ServiceError");
+    let exception = match class.new_instance((message.as_str(),)) {
+        Ok(exception) => exception,
+        Err(_) => return Error::new(class, message),
+    };
+    let (reason, retry_after, raw_code, raw_status, raw_message) = service_error_details(error);
+    if let Some(object) = RObject::from_value(exception.as_value()) {
+        let _ = object.ivar_set("@slug", slug);
+        let _ = object.ivar_set("@reason", reason);
+        let _ = object.ivar_set("@retry_after", retry_after);
+        let _ = object.ivar_set("@changed", change_state_name(error.changed()));
+        let _ = object.ivar_set("@raw_code", raw_code);
+        let _ = object.ivar_set("@raw_status", raw_status);
+        let _ = object.ivar_set("@raw_message", raw_message);
+    }
+    exception.into()
+}
+
+fn service_error_details(
+    error: &ServiceError,
+) -> (
+    &'static str,
+    Option<f64>,
+    Option<&str>,
+    Option<u16>,
+    Option<&str>,
+) {
+    match error {
+        ServiceError::QuotaExceeded => ("service_quota_exceeded", None, None, None, None),
+        ServiceError::SandboxLimitExceeded => {
+            ("sandbox_service_limit_exceeded", None, None, None, None)
+        }
+        ServiceError::Conflict => ("service_conflict", None, None, None, None),
+        ServiceError::Detached => ("service_detached", None, None, None, None),
+        ServiceError::TargetUnreachable { retry_after } => (
+            "target_unreachable",
+            retry_after.map(|duration| duration.as_secs_f64()),
+            None,
+            None,
+            None,
+        ),
+        ServiceError::TargetNotRunning => ("sandbox_not_running", None, None, None, None),
+        ServiceError::ChangesPaused { retry_after } => (
+            "service_changes_paused",
+            retry_after.map(|duration| duration.as_secs_f64()),
+            None,
+            None,
+            None,
+        ),
+        ServiceError::OutcomeUnknown => ("outcome_unknown", None, None, None, None),
+        ServiceError::Other {
+            code,
+            status,
+            message,
+        } => (
+            "other",
+            None,
+            Some(code.as_str()),
+            Some(*status),
+            Some(message.as_str()),
+        ),
+        _ => ("other", None, None, None, None),
+    }
+}
+
+fn change_state_name(changed: ChangeState) -> &'static str {
+    match changed {
+        ChangeState::Unchanged => "unchanged",
+        ChangeState::Unknown => "unknown",
+    }
 }
 
 /// Build a `Microsandbox::SnapshotSourceRecoveryError` carrying the recovery
@@ -361,7 +471,7 @@ fn published_artifact_hash(
 /// Build a `Microsandbox::UnsupportedError` carrying the rendered message plus
 /// the structured `@operation` / `@hint` attributes read by
 /// `UnsupportedError#operation` / `#hint`.
-fn unsupported_error(ruby: &Ruby, operation: &str, hint: &str) -> Error {
+fn unsupported_error(ruby: &Ruby, operation: &str, hint: &str, changed: Option<&str>) -> Error {
     let message = format!("{operation} is not supported by this backend: {hint}");
     let class = exception_class(ruby, "UnsupportedError");
     match class.new_instance((message.as_str(),)) {
@@ -370,6 +480,9 @@ fn unsupported_error(ruby: &Ruby, operation: &str, hint: &str) -> Error {
             if let Some(object) = RObject::from_value(exception.as_value()) {
                 let _ = object.ivar_set("@operation", operation);
                 let _ = object.ivar_set("@hint", hint);
+                if let Some(changed) = changed {
+                    let _ = object.ivar_set("@changed", changed);
+                }
             }
             exception.into()
         }
@@ -478,6 +591,15 @@ where
     T: Send + 'static,
 {
     block_without_gvl(ruby, future)?.map_err(|e| core_error(ruby, e))
+}
+
+/// Run a Service change and attach the core's change classification to every mapped error.
+fn run_service_change<F, T>(ruby: &Ruby, future: F) -> Result<T, Error>
+where
+    F: Future<Output = MicrosandboxResult<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    block_without_gvl(ruby, future)?.map_err(|error| service_change_error(ruby, error))
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -613,6 +735,10 @@ fn apply_secret_options(
 
 #[derive(Clone)]
 enum RubyOutboundProxyConfig {
+    HttpConnect {
+        address: String,
+        credentials: Option<(String, SecretSource)>,
+    },
     Socks4 {
         address: String,
         user_id: Option<String>,
@@ -625,6 +751,14 @@ enum RubyOutboundProxyConfig {
 
 fn apply_outbound_proxy(builder: SandboxBuilder, proxy: &RubyOutboundProxy) -> SandboxBuilder {
     match proxy.inner.borrow().clone() {
+        RubyOutboundProxyConfig::HttpConnect {
+            address,
+            credentials: Some((username, password)),
+        } => builder.proxy(|proxy| proxy.http_connect(address).credentials(username, password)),
+        RubyOutboundProxyConfig::HttpConnect {
+            address,
+            credentials: None,
+        } => builder.proxy(|proxy| proxy.http_connect(address)),
         RubyOutboundProxyConfig::Socks4 {
             address,
             user_id: Some(user_id),
@@ -766,6 +900,7 @@ fn apply_builder_options(
         "max_cpus",
         "memory",
         "max_memory",
+        "nested_virt",
         "detached",
         "workdir",
         "shell",
@@ -780,6 +915,8 @@ fn apply_builder_options(
         "replace_timeout",
         "root_disk",
         "disable_network",
+        "http",
+        "intercept_tls",
         "network",
         "proxy",
         "secrets",
@@ -803,6 +940,9 @@ fn apply_builder_options(
     }
     if let Some(v) = keyword::<u32>(kwargs, "memory")? {
         builder = builder.memory(v);
+    }
+    if let Some(enabled) = keyword::<bool>(kwargs, "nested_virt")? {
+        builder = builder.nested_virt(enabled);
     }
     if let Some(v) = keyword::<u32>(kwargs, "max_memory")? {
         builder = builder.max_memory(v);
@@ -859,6 +999,47 @@ fn apply_builder_options(
             let policy = restricted_network_policy(ruby, net)?;
             builder = builder.network(|n| n.policy(policy));
         }
+    }
+    if let Some(http) = keyword::<RHash>(kwargs, "http")? {
+        reject_unknown_keywords(
+            ruby,
+            http,
+            &[
+                "deny_response",
+                "deny_response_format",
+                "deny_message",
+                "network_deny_message",
+                "secret_deny_message",
+            ],
+        )?;
+        if let Some(enabled) = keyword::<bool>(http, "deny_response")? {
+            builder = builder.network(|network| network.http(|h| h.deny_response(enabled)));
+        }
+        if let Some(format) = keyword::<String>(http, "deny_response_format")? {
+            let format = match format.as_str() {
+                "text" => microsandbox_core::sandbox::HttpDenyResponseFormat::Text,
+                "json" => microsandbox_core::sandbox::HttpDenyResponseFormat::Json,
+                _ => {
+                    return Err(argument_error(
+                        ruby,
+                        "deny_response_format must be text or json",
+                    ));
+                }
+            };
+            builder = builder.network(|network| network.http(|h| h.deny_response_format(format)));
+        }
+        if let Some(message) = keyword::<String>(http, "deny_message")? {
+            builder = builder.network(|network| network.http(|h| h.deny_message(message)));
+        }
+        if let Some(message) = keyword::<String>(http, "network_deny_message")? {
+            builder = builder.network(|network| network.http(|h| h.network_deny_message(message)));
+        }
+        if let Some(message) = keyword::<String>(http, "secret_deny_message")? {
+            builder = builder.network(|network| network.http(|h| h.secret_deny_message(message)));
+        }
+    }
+    if keyword::<bool>(kwargs, "intercept_tls")?.unwrap_or(false) {
+        builder = builder.intercept_tls();
     }
     if let Some(proxy) = keyword::<typed_data::Obj<RubyOutboundProxy>>(kwargs, "proxy")? {
         builder = apply_outbound_proxy(builder, &proxy);
@@ -1075,6 +1256,9 @@ impl RubySandboxBuilder {
     fn memory(this: typed_data::Obj<Self>, v: u32) -> Result<(), Error> {
         put_builder(&this, |b| b.memory(v))
     }
+    fn nested_virt(this: typed_data::Obj<Self>, enabled: bool) -> Result<(), Error> {
+        put_builder(&this, |b| b.nested_virt(enabled))
+    }
     fn max_memory(this: typed_data::Obj<Self>, v: u32) -> Result<(), Error> {
         put_builder(&this, |b| b.max_memory(v))
     }
@@ -1122,8 +1306,59 @@ impl RubySandboxBuilder {
     fn root_disk(this: typed_data::Obj<Self>, v: u32) -> Result<(), Error> {
         put_builder(&this, |b| b.root_disk(v))
     }
+    fn intercept_tls(this: typed_data::Obj<Self>) -> Result<(), Error> {
+        put_builder(&this, SandboxBuilder::intercept_tls)
+    }
+
     fn disable_network(this: typed_data::Obj<Self>) -> Result<(), Error> {
         put_builder(&this, SandboxBuilder::disable_network)
+    }
+    fn http(
+        this: typed_data::Obj<Self>,
+        enabled: Option<bool>,
+        message: Option<String>,
+    ) -> Result<(), Error> {
+        Self::http_config(this, enabled, None, None, None, message)
+    }
+    fn http_config(
+        this: typed_data::Obj<Self>,
+        enabled: Option<bool>,
+        network_message: Option<String>,
+        secret_message: Option<String>,
+        format: Option<String>,
+        message: Option<String>,
+    ) -> Result<(), Error> {
+        let format = format
+            .map(|format| match format.as_str() {
+                "text" => Ok(microsandbox_core::sandbox::HttpDenyResponseFormat::Text),
+                "json" => Ok(microsandbox_core::sandbox::HttpDenyResponseFormat::Json),
+                _ => Err(argument_error(
+                    &current_ruby(),
+                    "deny_response_format must be text or json",
+                )),
+            })
+            .transpose()?;
+        put_builder(&this, |mut builder| {
+            if let Some(enabled) = enabled {
+                builder = builder.network(|network| network.http(|h| h.deny_response(enabled)));
+            }
+            if let Some(format) = format {
+                builder =
+                    builder.network(|network| network.http(|h| h.deny_response_format(format)));
+            }
+            if let Some(message) = message {
+                builder = builder.network(|network| network.http(|h| h.deny_message(message)));
+            }
+            if let Some(message) = network_message {
+                builder =
+                    builder.network(|network| network.http(|h| h.network_deny_message(message)));
+            }
+            if let Some(message) = secret_message {
+                builder =
+                    builder.network(|network| network.http(|h| h.secret_deny_message(message)));
+            }
+            builder
+        })
     }
     fn quiet_logs(this: typed_data::Obj<Self>) -> Result<(), Error> {
         put_builder(&this, SandboxBuilder::quiet_logs)
@@ -1985,12 +2220,10 @@ fn set_runtime_libkrunfw_path(path: String) {
     microsandbox_core::config::set_sdk_libkrunfw_path(path);
 }
 
-fn default_backend_kind_str() -> String {
-    match default_backend().kind() {
-        BackendKind::Local => "local",
-        BackendKind::Cloud => "cloud",
-    }
-    .to_owned()
+fn default_backend_kind_str(ruby: &Ruby) -> Result<String, Error> {
+    let info =
+        microsandbox_core::default_backend_info().map_err(|error| core_error(ruby, error))?;
+    Ok(info.kind.as_str().to_owned())
 }
 
 fn remember_backend_selection(ruby: &Ruby, selection: BackendSelection) -> Result<(), Error> {
@@ -2045,6 +2278,15 @@ fn outbound_proxy_socks4(address: String) -> RubyOutboundProxy {
     }
 }
 
+fn outbound_proxy_http_connect(address: String) -> RubyOutboundProxy {
+    RubyOutboundProxy {
+        inner: std::cell::RefCell::new(RubyOutboundProxyConfig::HttpConnect {
+            address,
+            credentials: None,
+        }),
+    }
+}
+
 fn outbound_proxy_socks5(address: String) -> RubyOutboundProxy {
     RubyOutboundProxy {
         inner: std::cell::RefCell::new(RubyOutboundProxyConfig::Socks5 {
@@ -2080,6 +2322,10 @@ impl RubyOutboundProxy {
                 ruby,
                 "user_id is only supported for SOCKS4 proxies",
             )),
+            RubyOutboundProxyConfig::HttpConnect { .. } => Err(argument_error(
+                ruby,
+                "user_id is only supported for SOCKS4 proxies",
+            )),
         }
     }
 
@@ -2092,9 +2338,10 @@ impl RubyOutboundProxy {
         match &mut *this.inner.borrow_mut() {
             RubyOutboundProxyConfig::Socks4 { .. } => Err(argument_error(
                 ruby,
-                "credentials are only supported for SOCKS5 proxies",
+                "credentials are only supported for SOCKS5 and HTTP CONNECT proxies",
             )),
-            RubyOutboundProxyConfig::Socks5 { credentials, .. } => {
+            RubyOutboundProxyConfig::HttpConnect { credentials, .. }
+            | RubyOutboundProxyConfig::Socks5 { credentials, .. } => {
                 *credentials = Some((username, password.inner.clone()));
                 Ok(())
             }
@@ -2586,6 +2833,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("Microsandbox")?;
     module.define_error("Error", ruby.exception_standard_error())?;
     module.define_module_function("version", function!(version, 0))?;
+    storage::register(module)?;
     module.define_module_function("installed?", function!(installed, 0))?;
     module.define_module_function("install", function!(install, 0))?;
     module.define_module_function("set_runtime_msb_path", function!(set_runtime_msb_path, 1))?;
@@ -2615,6 +2863,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     secret_source.define_singleton_method("env", function!(secret_source_env, 1))?;
 
     let outbound_proxy = module.define_class("OutboundProxy", ruby.class_object())?;
+    outbound_proxy
+        .define_singleton_method("http_connect", function!(outbound_proxy_http_connect, 1))?;
     outbound_proxy.define_singleton_method("socks4", function!(outbound_proxy_socks4, 1))?;
     outbound_proxy.define_singleton_method("socks5", function!(outbound_proxy_socks5, 1))?;
     outbound_proxy.define_method("user_id!", method!(RubyOutboundProxy::user_id, 1))?;
@@ -2730,6 +2980,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     builder.define_method("cpus!", method!(RubySandboxBuilder::cpus, 1))?;
     builder.define_method("max_cpus!", method!(RubySandboxBuilder::max_cpus, 1))?;
     builder.define_method("memory!", method!(RubySandboxBuilder::memory, 1))?;
+    builder.define_method("nested_virt!", method!(RubySandboxBuilder::nested_virt, 1))?;
     builder.define_method("max_memory!", method!(RubySandboxBuilder::max_memory, 1))?;
     builder.define_method("env!", method!(RubySandboxBuilder::env, 2))?;
     builder.define_method("label!", method!(RubySandboxBuilder::label, 2))?;
@@ -2754,9 +3005,15 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     )?;
     builder.define_method("root_disk!", method!(RubySandboxBuilder::root_disk, 1))?;
     builder.define_method(
+        "intercept_tls!",
+        method!(RubySandboxBuilder::intercept_tls, 0),
+    )?;
+    builder.define_method(
         "disable_network!",
         method!(RubySandboxBuilder::disable_network, 0),
     )?;
+    builder.define_method("http!", method!(RubySandboxBuilder::http, 2))?;
+    builder.define_method("http_config!", method!(RubySandboxBuilder::http_config, 5))?;
     builder.define_method("quiet_logs!", method!(RubySandboxBuilder::quiet_logs, 0))?;
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;
@@ -2865,14 +3122,21 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     snap_handle.define_method("open", method!(RubySnapshotHandle::open, 0))?;
     snap_handle.define_method("save_to", method!(RubySnapshotHandle::save_to, -1))?;
 
+    services::init(ruby, module)?;
+    jobs::init(ruby, module)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod runtime_tests {
+    use std::time::Duration;
     use std::{sync::Arc, thread};
 
-    use super::{BlockingState, catch_callback, panic_message};
+    use microsandbox_core::{ChangeState, MicrosandboxError, ServiceError};
+
+    use super::{
+        BlockingState, catch_callback, change_state_name, panic_message, service_error_details,
+    };
 
     #[test]
     fn blocking_state_waits_for_completion() {
@@ -2889,5 +3153,47 @@ mod runtime_tests {
         let result = catch_callback(|| panic!("callback panic"));
         let panic = result.expect_err("callback panic should be captured");
         assert_eq!(panic_message(panic.as_ref()), "callback panic");
+    }
+
+    #[test]
+    fn other_service_error_keeps_raw_details() {
+        let error = ServiceError::Other {
+            code: "new_service_reason".to_owned(),
+            status: 409,
+            message: "new refusal".to_owned(),
+        };
+
+        assert_eq!(
+            service_error_details(&error),
+            (
+                "other",
+                None,
+                Some("new_service_reason"),
+                Some(409),
+                Some("new refusal")
+            )
+        );
+    }
+
+    #[test]
+    fn service_change_state_is_available_for_non_service_errors() {
+        let unchanged = MicrosandboxError::InvalidConfig("bad target".to_owned());
+        let unknown = MicrosandboxError::Custom("transport ended".to_owned());
+
+        assert_eq!(change_state_name(unchanged.changed()), "unchanged");
+        assert_eq!(change_state_name(unknown.changed()), "unknown");
+        assert_eq!(change_state_name(ChangeState::Unknown), "unknown");
+        assert_eq!(
+            service_error_details(&ServiceError::TargetUnreachable {
+                retry_after: Some(Duration::from_millis(1250)),
+            }),
+            ("target_unreachable", Some(1.25), None, None, None)
+        );
+        assert_eq!(
+            service_error_details(&ServiceError::ChangesPaused {
+                retry_after: Some(Duration::from_secs(5)),
+            }),
+            ("service_changes_paused", Some(5.0), None, None, None)
+        );
     }
 }

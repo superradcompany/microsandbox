@@ -48,6 +48,7 @@ pub(crate) struct MigrationReport {
 
 struct PinnedCandidate {
     path: PathBuf,
+    _namespace: microsandbox_image::storage_lease::StorageLease,
     source_bytes: Vec<u8>,
     source: V066SourceInfo,
     payload: File,
@@ -276,6 +277,8 @@ async fn reconcile_paths(
 }
 
 fn pin_candidate(path: PathBuf) -> MicrosandboxResult<PinnedCandidate> {
+    // Descriptor replacement must not race retirement of its containing artifact.
+    let namespace = microsandbox_image::storage_lease::StorageLease::shared(&path)?;
     #[cfg(unix)]
     {
         let directory = open_directory_nofollow(&path)?;
@@ -341,6 +344,7 @@ fn pin_candidate(path: PathBuf) -> MicrosandboxResult<PinnedCandidate> {
         }
         Ok(PinnedCandidate {
             path,
+            _namespace: namespace,
             source_bytes,
             source,
             payload,
@@ -392,6 +396,7 @@ fn pin_candidate(path: PathBuf) -> MicrosandboxResult<PinnedCandidate> {
         let payload_before = file_identity(&payload)?;
         Ok(PinnedCandidate {
             path,
+            _namespace: namespace,
             source_bytes,
             source,
             payload,
@@ -596,6 +601,7 @@ fn visit_candidate(
 fn clone_pinned_for_plan(candidate: &InspectedCandidate) -> MicrosandboxResult<PinnedCandidate> {
     Ok(PinnedCandidate {
         path: candidate.pinned.path.clone(),
+        _namespace: candidate.pinned._namespace.clone(),
         source_bytes: candidate.pinned.source_bytes.clone(),
         source: candidate.pinned.source.clone(),
         payload: candidate.pinned.payload.try_clone()?,

@@ -1,0 +1,495 @@
+---
+title: Services
+"og:title": Rust SDK Services reference
+description: Manage public URLs for sandbox ports with the Rust SDK.
+keywords: ["Rust SDK", "Rust services", "microsandbox services", "public URL"]
+---
+
+<Tooltip tip="Available only on microsandbox cloud; the local backend returns MicrosandboxError::Unsupported."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+See [Services](/sandboxes/services) for usage and limits.
+
+## Service
+
+Accessors use the last response without making a request.
+
+#### <span className="msb-recv">Service::</span><span className="msb-hn">builder()</span>
+
+```rust
+fn builder(slug: impl Into<String>) -> ServiceBuilder
+```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::Service;
+
+let svc = Service::builder("my-app").target("my-sandbox", 8080).create().await?;
+println!("{}", svc.url());
+```
+
+</Accordion>
+
+Start a [`ServiceBuilder`](#servicebuilder).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Service slug, e.g. <code>"my-app"</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicebuilder">ServiceBuilder</a></div>
+    <div className="msb-param-desc">Builder for the new Service.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Service::</span><span className="msb-hn">get()</span>
+
+```rust
+async fn get(slug: &str) -> MicrosandboxResult<Service>
+```
+
+Get a Service by slug.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">&amp;str</span></div>
+    <div className="msb-param-desc">Service slug.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Service</a></div>
+    <div className="msb-param-desc">The Service's current state.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Service::</span><span className="msb-hn">list()</span>
+
+```rust
+async fn list() -> MicrosandboxResult<ServicePage>
+```
+
+List the first page in slug order, including disabled and detached Services.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicepage">ServicePage</a></div>
+    <div className="msb-param-desc">One page of Services.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Service::</span><span className="msb-hn">list_with()</span>
+
+```rust
+async fn list_with(
+    configure: impl FnOnce(ServiceListBuilder) -> ServiceListBuilder,
+) -> MicrosandboxResult<ServicePage>
+```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::Service;
+
+let page = Service::list_with(|l| l.sandbox("my-sandbox").limit(50)).await?;
+for svc in &page.services {
+    println!("{} -> {:?}", svc.url(), svc.target());
+}
+```
+
+</Accordion>
+
+List a configured page in slug order. A limit outside 1 through 100 fails with `MicrosandboxError::InvalidConfig` before any request.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>configure</code><span className="msb-type">impl FnOnce(ServiceListBuilder) -&gt; ServiceListBuilder</span></div>
+    <div className="msb-param-desc">Sets the <a href="#servicelistbuilder">list options</a>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicepage">ServicePage</a></div>
+    <div className="msb-param-desc">One page of Services.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">slug()</span>
+
+```rust
+fn slug(&self) -> &str
+```
+
+The Service slug.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">url()</span>
+
+```rust
+fn url(&self) -> &str
+```
+
+The public URL as returned by the backend.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">status()</span>
+
+```rust
+fn status(&self) -> ServiceStatus
+```
+
+Whether the Service routes requests, is disabled, or has no target, as of the read that returned this value. `refresh()` returns a current copy. An unrecognized backend value is `ServiceStatus::Unknown`.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">target()</span>
+
+```rust
+fn target(&self) -> Option<ServiceTarget>
+```
+
+The target, or <code>None</code> when the Service is detached.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicetarget">Option&lt;ServiceTarget&gt;</a></div>
+    <div className="msb-param-desc">The current target, or <code>None</code> when detached.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">created_at()</span>
+
+```rust
+fn created_at(&self) -> DateTime<Utc>
+```
+
+The creation time.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">updated_at()</span>
+
+```rust
+fn updated_at(&self) -> DateTime<Utc>
+```
+
+The last state-change time.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">update()</span>
+
+```rust
+async fn update(
+    &self,
+    configure: impl FnOnce(ServiceUpdate) -> ServiceUpdate,
+) -> MicrosandboxResult<Service>
+```
+
+<Accordion title="Example">
+
+```rust
+let svc = svc.update(|u| u.target("new-sandbox", 8080)).await?;
+```
+
+</Accordion>
+
+Change the target without retrying. After <code>OutcomeUnknown</code>, get and check the Service.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>configure</code><span className="msb-type">impl FnOnce(ServiceUpdate) -&gt; ServiceUpdate</span></div>
+    <div className="msb-param-desc">Sets the <a href="#serviceupdate">fields to change</a>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Service</a></div>
+    <div className="msb-param-desc">The Service as committed.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">enable()</span>
+
+```rust
+async fn enable(&self) -> MicrosandboxResult<Service>
+```
+
+Enable the Service without retrying. To enable a detached Service, set a running target with `update()` instead.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">disable()</span>
+
+```rust
+async fn disable(&self) -> MicrosandboxResult<Service>
+```
+
+Disable the Service without retrying while retaining its target.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">remove()</span>
+
+```rust
+async fn remove(self) -> MicrosandboxResult<()>
+```
+
+Remove the Service and release its slug without retrying. This consumes the Service.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">refresh()</span>
+
+```rust
+async fn refresh(&self) -> MicrosandboxResult<Service>
+```
+
+Get the Service again and return its current state. This value is not changed.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Service</a></div>
+    <div className="msb-param-desc">The Service's current state.</div>
+  </div>
+</div>
+
+## ServiceBuilder
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">target()</span>
+
+```rust
+fn target(self, sandbox: impl Into<String>, port: u16) -> Self
+```
+
+Set the running sandbox and port that receive requests.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sandbox</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Target sandbox name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>port</code><span className="msb-type">u16</span></div>
+    <div className="msb-param-desc">Sandbox port, 1 through 65535.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">create()</span>
+
+```rust
+async fn create(self) -> MicrosandboxResult<Service>
+```
+
+Create the Service without retrying. A missing target or port zero fails with `MicrosandboxError::InvalidConfig` before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Service</a></div>
+    <div className="msb-param-desc">The Service as committed.</div>
+  </div>
+</div>
+
+## ServiceUpdate
+
+Fields for one target update. No fields or port zero fails with `MicrosandboxError::InvalidConfig` before any request.
+
+#### <span className="msb-recv">u.</span><span className="msb-hn">target()</span>
+
+```rust
+fn target(self, sandbox: impl Into<String>, port: u16) -> Self
+```
+
+Set the running target. This also enables or reattaches the Service.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sandbox</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Target sandbox name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>port</code><span className="msb-type">u16</span></div>
+    <div className="msb-param-desc">Sandbox port, 1 through 65535.</div>
+  </div>
+</div>
+
+## ServiceListBuilder
+
+#### <span className="msb-recv">l.</span><span className="msb-hn">sandbox()</span>
+
+```rust
+fn sandbox(self, name: impl Into<String>) -> Self
+```
+
+Filter by target sandbox. An unknown name returns an empty page.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">l.</span><span className="msb-hn">limit()</span>
+
+```rust
+fn limit(self, limit: u32) -> Self
+```
+
+Set the page size from 1 to 100; the default is 20.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limit</code><span className="msb-type">u32</span></div>
+    <div className="msb-param-desc">Page size.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">l.</span><span className="msb-hn">cursor()</span>
+
+```rust
+fn cursor(self, cursor: impl Into<String>) -> Self
+```
+
+Continue from a previous <code>next_cursor</code>.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cursor</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Opaque cursor.</div>
+  </div>
+</div>
+
+## ServicePage
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>services</code><a className="msb-type" href="#service">Vec&lt;Service&gt;</a></div>
+    <div className="msb-param-desc">Services in this page, in slug order.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>next_cursor</code><span className="msb-type">Option&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Cursor for the next page, or <code>None</code> on the final page.</div>
+  </div>
+</div>
+
+## ServiceStatus
+
+This enum may gain variants, so a <code>match</code> needs a wildcard arm.
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Enabled</code></div>
+    <div className="msb-param-desc">Routes requests to its target.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Disabled</code></div>
+    <div className="msb-param-desc">Retains its target without routing requests.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Detached</code></div>
+    <div className="msb-param-desc">Has no target.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Unknown</code></div>
+    <div className="msb-param-desc">The backend returned an unrecognized status.</div>
+  </div>
+</div>
+
+## ServiceTarget
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sandbox</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Current name of the target sandbox.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>port</code><span className="msb-type">u16</span></div>
+    <div className="msb-param-desc">Sandbox port that receives requests.</div>
+  </div>
+</div>
+
+## ServiceError
+
+A refused Service change or an unknown outcome, returned as `MicrosandboxError::Service { slug, error }`. `changed()` on either error returns a [`ChangeState`](#changestate). A missing Service returns `MicrosandboxError::ServiceNotFound`, an unavailable slug returns `MicrosandboxError::ServiceAlreadyExists`, and a missing target sandbox returns `MicrosandboxError::SandboxNotFound`.
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>QuotaExceeded</code></div>
+<div className="msb-param-desc">The organization's Service limit was reached. Remove a Service or request a higher limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>SandboxLimitExceeded</code></div>
+<div className="msb-param-desc">The target sandbox's Service limit was reached. Remove or move a Service, or request a higher limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Conflict</code></div>
+<div className="msb-param-desc">Another change to the Service committed first. Get it, then retry.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Detached</code></div>
+    <div className="msb-param-desc">The Service is detached. Set a target.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>TargetUnreachable</code><span className="msb-type">retry_after: Option&lt;Duration&gt;</span></div>
+<div className="msb-param-desc">The target sandbox cannot be reached right now. Retry later, after <code>retry_after</code> when set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>TargetNotRunning</code></div>
+<div className="msb-param-desc">The target sandbox is not running. Start it, then retry.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ChangesPaused</code><span className="msb-type">retry_after: Option&lt;Duration&gt;</span></div>
+<div className="msb-param-desc">Service changes are paused. Retry later, after <code>retry_after</code> when set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>OutcomeUnknown</code></div>
+<div className="msb-param-desc">The change may have been applied. Get and check the Service before retrying.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Other</code><span className="msb-type">code: String, status: u16, message: String</span></div>
+<div className="msb-param-desc">The change was refused with a reason this SDK does not recognize. The raw code, HTTP status, and message remain available.</div>
+  </div>
+</div>
+
+## ChangeState
+
+Returned by `changed()` on `MicrosandboxError` and on `ServiceError`. Call `changed()` on every error from Service create, update, enable, disable, or remove, not only `MicrosandboxError::Service`. Invalid input, refusals, missing Services or sandboxes, unavailable slugs, unsupported backends, and connections that failed before the request was sent report `Unchanged`; other errors report `Unknown`.
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Unchanged</code></div>
+    <div className="msb-param-desc">Nothing changed.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Unknown</code></div>
+    <div className="msb-param-desc">The change may have been applied. Get and check the Service before retrying.</div>
+  </div>
+</div>

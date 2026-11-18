@@ -40,9 +40,11 @@ local = [
     "dep:rayon",
     "dep:reqwest",
     "dep:sea-orm",
+    "dep:socket2",
     "dep:tar",
 ]
 cloud = [
+    "dep:httpdate",
     "dep:reqwest",
     "dep:rustls",
     "dep:rustls-platform-verifier",
@@ -75,6 +77,7 @@ docker_credential = { version = "1.4.0", optional = true }
 flate2 = { workspace = true, optional = true }
 futures.workspace = true
 hex = { workspace = true, optional = true }
+httpdate = { workspace = true, optional = true }
 libc.workspace = true
 microsandbox-db = { workspace = true, optional = true }
 microsandbox-agent-client = { workspace = true, features = ["named-pipe", "uds"] }
@@ -101,6 +104,7 @@ russh = { workspace = true, optional = true }
 russh-sftp = { workspace = true, optional = true }
 scopeguard.workspace = true
 sea-orm = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
 serde.workspace = true
 serde_ignored.workspace = true
 serde_json.workspace = true
@@ -122,6 +126,9 @@ tar.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
+h2 = "0.4"
+http = "1"
 microsandbox-db.workspace = true
 ipnetwork.workspace = true
 microsandbox-network.workspace = true
@@ -129,7 +136,7 @@ rcgen.workspace = true
 rustls.workspace = true
 tempfile.workspace = true
 test-utils.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tokio-rustls.workspace = true
 tracing-subscriber.workspace = true
 

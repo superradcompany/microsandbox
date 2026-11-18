@@ -52,7 +52,7 @@ def create(name, snapshot=None, forked=False):
     else:
         args += [image, "--root-disk", layout, "--memory", "256M", "--cpus", "2"]
     if forked:
-        args.append("--forked")
+        args.append("--cow-mem")
     run("create-" + name, *args)
 
 

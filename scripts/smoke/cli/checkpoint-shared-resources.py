@@ -207,7 +207,7 @@ try:
         assert "child-new" in new.stdout
         assert any(message == "child-new" and identity not in source_ids for identity, message in messages)
         probe("child")
-        create("forked", "--from-snapshot", "network:baseline", "--forked", "--net-rule", "allow@host")
+        create("forked", "--from-snapshot", "network:baseline", "--cow-mem", "--net-rule", "allow@host")
         probe("forked")
         owned.append("branched")
         run("branch-source", "branch", "source", "--name", "branched")
@@ -217,7 +217,7 @@ try:
         probe("grandchild")
         archive = root / "network.msb"
         run("capture-archive", "snapshot", "create", "portable", "--from-sandbox", "child", "--full", "-o", str(archive))
-        create("archived", "--from-snapshot", str(archive), "--forked", "--net-rule", "allow@host")
+        create("archived", "--from-snapshot", str(archive), "--cow-mem", "--net-rule", "allow@host")
         probe("archived")
         # Keep siblings alive together and prove fresh host TCP state remains
         # independent even though all retain one virtual gateway identity.

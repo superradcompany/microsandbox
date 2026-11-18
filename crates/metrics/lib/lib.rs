@@ -24,7 +24,7 @@ pub use layout::{
     NAME_BYTES as SLOT_NAME_BYTES, READABLE_REGISTRY_ABI_VERSIONS, REGISTRY_ABI_VERSION,
 };
 pub use registry::{
-    ActivateSlot, MetricsRegistry, MetricsSlotWriter, ReleaseMode, ReserveSlot, SampleWrite,
-    SlotReservation, default_capacity,
+    ActivateSlot, IdentifiedMetric, MetricsRegistry, MetricsSlotWriter, ReleaseMode, ReserveSlot,
+    SampleWrite, SlotReservation, default_capacity,
 };
 pub use snapshot::{LiveMetric, LiveMetricState, SandboxMetricSnapshot, SandboxMetrics};

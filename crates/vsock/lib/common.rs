@@ -45,6 +45,8 @@ impl PeerLimit {
     }
 
     pub(crate) fn acquire(&self) -> io::Result<PeerLease> {
+        // Renamed `try_update` in Rust 1.99; keep older toolchains building.
+        #[allow(deprecated)]
         self.active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < self.max).then_some(active + 1)

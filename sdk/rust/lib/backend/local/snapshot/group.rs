@@ -181,6 +181,12 @@ pub(super) async fn publish_batch(
             ));
         }
         let incoming = read_members(&staged, false)?;
+        // Acquire member protection before the group publication lock: removers take the
+        // same order, and a reader must never wait on deletion while holding the group lock.
+        let _leases = incoming
+            .keys()
+            .map(|id| microsandbox_image::storage_lease::StorageLease::shared(&group_dir.join(id)))
+            .collect::<std::io::Result<Vec<_>>>()?;
         let _lock = lock_group(&group_dir)?;
         let state = read_group(&group_dir)?;
         let mut members = read_members(&group_dir, true)?;
@@ -335,9 +341,21 @@ pub(super) fn group_path(path: &Path) -> Option<PathBuf> {
 }
 
 /// Remove a grouped member under its publication lock, returning false for ungrouped paths.
+#[cfg(test)]
 pub(super) async fn remove_member(path: &Path) -> MicrosandboxResult<bool> {
+    let lease = super::lease::deletion(path)?.ok_or_else(|| {
+        MicrosandboxError::Custom("snapshot is in use by an active operation".into())
+    })?;
+    remove_member_leased(path, lease).await
+}
+
+pub(super) async fn remove_member_leased(
+    path: &Path,
+    lease: super::lease::DeletionLease,
+) -> MicrosandboxResult<bool> {
     let path = path.to_path_buf();
     blocking(move || {
+        let _lease = lease;
         let Some(directory) = group_path(&path) else {
             return Ok(false);
         };
@@ -362,7 +380,7 @@ pub(super) async fn remove_member(path: &Path) -> MicrosandboxResult<bool> {
             // A failed removal is recoverable by explicitly selecting the surviving member.
             write_group(&directory, None)?;
         }
-        fs::remove_dir_all(&path).map_err(|error| {
+        super::deletion::quarantine(&path).map_err(|error| {
             MicrosandboxError::Custom(format!(
                 "could not fully remove snapshot {}: {error}; inspect the group before retrying",
                 path.display()
@@ -493,6 +511,9 @@ fn read_members(directory: &Path, installed: bool) -> MicrosandboxResult<BTreeMa
         let name = filename
             .to_str()
             .ok_or_else(|| integrity("snapshot member directory name is not valid UTF-8".into()))?;
+        if name == ".msb-leases" {
+            continue;
+        }
         if installed && !name.starts_with("snap_") {
             continue;
         }

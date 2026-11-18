@@ -57,7 +57,7 @@ try:
     time.sleep(float(os.environ.get("CLOCK_DELAY", "8")))
     (out / "restore-start.ns").write_text(str(time.time_ns()))
     run("restore", "create", "-n", child, "--from-snapshot", snapshot,
-        *(["--forked"] if os.environ.get("CLOCK_FORKED") == "1" else []), "--info")
+        *(["--cow-mem"] if os.environ.get("CLOCK_FORKED") == "1" else []), "--info")
     (out / "restore-end.ns").write_text(str(time.time_ns()))
     time.sleep(6)
     records = run("records", "exec", child, "--", "cat", "/tmp/clock-records.csv")
