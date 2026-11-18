@@ -952,18 +952,9 @@ async fn endpoint_answers(path: &Path) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    if let Err(error) = tokio::fs::symlink_metadata(path).await {
-        // No endpoint can be reached through a malformed directory entry.
-        // Cleanup can remove the entry without following it.
-        if error.kind() == ErrorKind::NotFound
-            || matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
-        {
-            return Ok(false);
-        }
-
-        return Err(endpoint_error("inspect", path, error));
-    }
-
+    // Connect already distinguishes absent or malformed paths from listeners.
+    // An async metadata preflight would queue on Tokio's blocking pool and can
+    // exhaust the probe budget before reaching a completely absent endpoint.
     loop {
         match tokio::net::UnixStream::connect(path).await {
             Ok(_) => return Ok(true),
@@ -1114,18 +1105,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn endpoint_probe_timeout_retains_an_uncertain_owner() {
-        // The overall deadline is a caller-facing latency contract, so state it
-        // independently of the production constant. Widening the budget must
-        // fail here rather than silently lengthening this test's wait.
-        const EXPECTED_BUDGET: Duration = Duration::from_millis(50);
-
+    fn endpoint_probe_does_not_depend_on_the_filesystem_worker_pool() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let paths = SandboxSocketPaths::new(home.path(), home.path(), "worker");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .max_blocking_threads(1)
-            .start_paused(true)
             .build()
             .unwrap();
         let (release, wait) = std::sync::mpsc::channel();
@@ -1135,31 +1120,25 @@ mod tests {
             let _ = wait.recv();
         });
         started.recv().unwrap();
-        // A busy filesystem pool delays metadata past the probe's deadline.
-        // The caller must return conservatively without waiting for that work.
-        let result = runtime.block_on(async {
-            let probe = paths.may_be_live();
-            tokio::pin!(probe);
-            tokio::select! {
-                biased;
-                result = &mut probe => panic!("probe completed before deadline: {result:?}"),
-                () = tokio::task::yield_now() => {}
-            }
-            tokio::time::advance(EXPECTED_BUDGET).await;
-            // The budget has elapsed, so the next poll must already be ready.
-            // Never await the probe here: a paused clock auto-advances while
-            // idle and would hide a deadline longer than the contract.
-            tokio::select! {
-                biased;
-                result = &mut probe => result,
-                () = tokio::task::yield_now() => {
-                    panic!("probe still pending after {EXPECTED_BUDGET:?}")
-                }
-            }
-        });
+
+        // Filesystem work elsewhere in the process must not turn an absent
+        // endpoint into a live owner or prevent a real listener being detected.
+        let absent = runtime.block_on(paths.may_be_live());
+        std::fs::create_dir_all(paths.fallback_agent.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&paths.fallback_agent).unwrap();
+        let live = runtime.block_on(paths.may_be_live());
+
         release.send(()).unwrap();
         runtime.block_on(blocker).unwrap();
-        assert!(result.unwrap());
+        assert!(
+            !absent.unwrap(),
+            "absent endpoints were treated as a live runtime"
+        );
+        assert!(live.unwrap(), "a live listener was missed");
+        listener.set_nonblocking(true).unwrap();
+        listener
+            .accept()
+            .expect("the probe must actually reach the listener");
     }
 
     #[cfg(target_os = "linux")]
