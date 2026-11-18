@@ -1740,8 +1740,8 @@ mod tests {
         client
             .send_bulk(BulkRecord {
                 id: 1,
-                kind: microsandbox_protocol::bulk::BulkKind::Filesystem,
-                flow: microsandbox_protocol::bulk::BulkFlow::HostToGuest,
+                kind: BulkKind::Filesystem,
+                flow: BulkFlow::HostToGuest,
                 offset: 0,
                 payload: expected,
             })
