@@ -2180,7 +2180,7 @@ fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
 /// untracked namespace. A successful connection is direct evidence that an
 /// older runtime (which predates lifecycle locks) still owns the name.
 #[cfg(unix)]
-fn sandbox_runtime_endpoint_is_live(
+pub(super) fn sandbox_runtime_endpoint_is_live(
     run_dir: &Path,
     sandbox_dir: &Path,
     name: &str,
@@ -2196,8 +2196,10 @@ fn sandbox_runtime_endpoint_is_live(
         fallback_agent,
         fallback_control,
     ] {
-        if std::fs::symlink_metadata(&path).is_err() {
-            continue;
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+            Ok(_) => {}
         }
         match std::os::unix::net::UnixStream::connect(&path) {
             Ok(_) => return Ok(true),
@@ -2213,7 +2215,7 @@ fn sandbox_runtime_endpoint_is_live(
 }
 
 #[cfg(not(unix))]
-fn sandbox_runtime_endpoint_is_live(
+pub(super) fn sandbox_runtime_endpoint_is_live(
     _run_dir: &Path,
     _sandbox_dir: &Path,
     _name: &str,
@@ -3662,7 +3664,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (child, _bin) = super::super::runtime_identity::test_support::spawn_msb_sleep(30);
+        let (child, _bin) = super::super::runtime_identity::test_support::spawn_msb_child();
         let live_pid = child.id() as i32;
         let waiter = std::thread::spawn(move || {
             let mut child = child;
@@ -3732,7 +3734,7 @@ mod tests {
             .unwrap();
 
         let (mut child, _bin) = if msb {
-            let (child, bin) = super::super::runtime_identity::test_support::spawn_msb_sleep(30);
+            let (child, bin) = super::super::runtime_identity::test_support::spawn_msb_child();
             (child, Some(bin))
         } else {
             (Command::new("sleep").arg("30").spawn().unwrap(), None)

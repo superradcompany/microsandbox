@@ -12,6 +12,8 @@ mod process_exit;
 #[path = "process_exit_macos.rs"]
 mod process_exit;
 mod runtime_identity;
+#[cfg(target_os = "linux")]
+mod start;
 mod stop;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -87,6 +89,8 @@ impl LocalBackend {
         let write_db = pools.write();
         let model = self.load_sandbox_record_reconciled(pools, name).await?;
         ensure_local_identity(name, expected_id, model.id)?;
+        #[cfg(target_os = "linux")]
+        let model = self.recover_recycled_start(pools, model).await?;
         tracing::debug!(sandbox = name, status = ?model.status, "start_local: current status");
 
         if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
@@ -162,7 +166,7 @@ impl LocalBackend {
             })
             .transpose()?
             .flatten();
-        if let Some(pid) = previous_run.and_then(|run| run.pid) {
+        if let Some(pid) = previous_run.as_ref().and_then(|run| run.pid) {
             let alive = || -> MicrosandboxResult<bool> {
                 #[cfg(windows)]
                 if let Some(owner) = &previous_owner {
@@ -172,6 +176,19 @@ impl LocalBackend {
                         .map(|process| process.alive())
                         .transpose()?
                         .unwrap_or(false));
+                }
+                #[cfg(target_os = "linux")]
+                if matches!(
+                    Self::recorded_runtime(
+                        previous_run.as_ref(),
+                        &microsandbox_runtime::ipc::lifecycle_lock_path(
+                            &self.config().run_dir(),
+                            name
+                        )
+                    ),
+                    RecordedRuntime::Recycled
+                ) {
+                    return self.start_endpoint_is_live(name);
                 }
                 Ok(!Self::pid_has_exited(pid))
             };
@@ -2030,7 +2047,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let (mut child, _bin) = super::runtime_identity::test_support::spawn_msb_sleep(30);
+        let (mut child, _bin) = super::runtime_identity::test_support::spawn_msb_child();
         let pid = child.id() as i32;
         run_entity::Entity::insert(run_entity::ActiveModel {
             sandbox_id: Set(id),
@@ -2523,7 +2540,7 @@ mod tests {
 
         /// A process the identity check sees as the `msb` binary.
         fn spawn_msb() -> Self {
-            let (child, bin) = super::runtime_identity::test_support::spawn_msb_sleep(30);
+            let (child, bin) = super::runtime_identity::test_support::spawn_msb_child();
             Self(child, Some(bin))
         }
 

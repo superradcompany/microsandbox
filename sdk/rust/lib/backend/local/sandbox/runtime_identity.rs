@@ -603,42 +603,48 @@ fn exe_evidence_from_names(names: [Option<String>; 2]) -> ExeEvidence {
 /// Test processes the identity check recognises as the `msb` binary.
 #[cfg(all(test, unix))]
 pub(super) mod test_support {
-    use std::path::Path;
-    use std::process::{Child, Command};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::{Child, Command, Stdio};
 
-    /// Spawn `sleep secs` from a copy of the binary named `msb`, as a runtime stand-in.
-    ///
-    /// The returned directory holds the copy and must outlive the child. A multicall `sleep`
-    /// dispatches on `argv[0]`, so that stays `sleep`; the kernel still names the process after
-    /// the executed file.
-    pub(in crate::backend::local::sandbox) fn spawn_msb_sleep(
-        secs: u32,
-    ) -> (Child, tempfile::TempDir) {
-        use std::os::unix::process::CommandExt;
+    #[test]
+    fn runtime_identity_child() {
+        if std::env::var_os("MSB_TEST_IDENTITY_CHILD").is_none() {
+            return;
+        }
+        println!("identity-child-ready");
+        std::io::stdout().flush().unwrap();
+        let _ = std::io::stdin().read(&mut [0]);
+    }
 
+    /// Run the test binary under the runtime name. The handshake proves the
+    /// fixture executed before identity checks begin, including on Darwin.
+    pub(in crate::backend::local::sandbox) fn spawn_msb_child() -> (Child, tempfile::TempDir) {
         let bin = tempfile::tempdir().unwrap();
         let msb = bin.path().join("msb");
-        let sleep = ["/bin/sleep", "/usr/bin/sleep"]
-            .into_iter()
-            .find(|path| Path::new(path).exists())
-            .expect("a sleep binary");
-        std::fs::copy(sleep, &msb).unwrap();
-        // macOS kills a copied platform binary on launch; an ad-hoc signature lets it run.
-        #[cfg(target_os = "macos")]
-        assert!(
-            Command::new("/usr/bin/codesign")
-                .args(["--force", "--sign", "-"])
-                .arg(&msb)
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-        let child = Command::new(&msb)
-            .arg0("sleep")
-            .arg(secs.to_string())
+        let exe = std::env::current_exe().unwrap();
+        if std::fs::hard_link(&exe, &msb).is_err() {
+            std::fs::copy(&exe, &msb).unwrap();
+        }
+        let mut child = Command::new(&msb)
+            .args(["runtime_identity_child", "--nocapture", "--test-threads=1"])
+            .env("MSB_TEST_IDENTITY_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        let mut stdout = BufReader::new(child.stdout.as_mut().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(
+                stdout.read_line(&mut line).unwrap(),
+                0,
+                "identity fixture exited before readiness"
+            );
+            if line.trim_end().ends_with("identity-child-ready") {
+                break;
+            }
+        }
         (child, bin)
     }
 }
@@ -677,7 +683,7 @@ mod tests {
 
         /// A process the identity check sees as the `msb` binary.
         fn spawn_msb() -> Self {
-            let (child, bin) = super::test_support::spawn_msb_sleep(30);
+            let (child, bin) = super::test_support::spawn_msb_child();
             Self(child, Some(bin))
         }
 
