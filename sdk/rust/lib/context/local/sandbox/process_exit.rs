@@ -33,24 +33,13 @@ impl RuntimeExit {
         // pidfd_open sets CLOEXEC. Neither this handle nor disk descriptors are retained
         // after the stop future finishes, and observing exit never steals Child's wait status.
         let process = Self(unsafe { OwnedFd::from_raw_fd(fd as i32) });
-        let inherited = format!(
-            "/proc/{pid}/fd/{}",
-            microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
-        );
-        let actual = match std::fs::metadata(inherited) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let expected = match std::fs::metadata(lifecycle) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
         // A stale catalog PID can point to an unrelated process. Require the runtime's
         // inherited lifecycle file, not just a live PID or a terminal database row.
-        if (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
-            return Ok(None);
+        match lifecycle_matches(pid, lifecycle) {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
         }
         Ok(Some(process))
     }
@@ -96,6 +85,46 @@ impl RuntimeExit {
             };
         }
         Ok(true)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Whether `pid` holds the sandbox's lifecycle lock file on the runtime's inherited descriptor.
+///
+/// Only the live runtime of this sandbox name holds that exclusive lock, so a match identifies
+/// the process beyond its PID. A missing descriptor is `false`; other `/proc` failures are
+/// reported so callers can decide how much doubt to tolerate.
+pub(super) fn lifecycle_matches(pid: i32, lifecycle: &Path) -> std::io::Result<bool> {
+    let inherited = format!(
+        "/proc/{pid}/fd/{}",
+        microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
+    );
+    let actual = match std::fs::metadata(inherited) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let expected = std::fs::metadata(lifecycle)?;
+    Ok((actual.dev(), actual.ino()) == (expected.dev(), expected.ino()))
+}
+
+/// The path `pid`'s inherited lifecycle descriptor points at, as procfs renders it.
+///
+/// The link is rendered from the holder's own mount namespace, so it stays meaningful for a
+/// launcher whose run directory is a different mount of the same layout. `None` when the
+/// descriptor is not open; an unlinked target carries procfs's ` (deleted)` marker.
+pub(super) fn lifecycle_link(pid: i32) -> std::io::Result<Option<std::path::PathBuf>> {
+    let inherited = format!(
+        "/proc/{pid}/fd/{}",
+        microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
+    );
+    match std::fs::read_link(inherited) {
+        Ok(link) => Ok(Some(link)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
 }
 

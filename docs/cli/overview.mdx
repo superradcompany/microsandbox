@@ -53,6 +53,8 @@ msb rm worker
 
 `msb run` without `--name` creates an ephemeral sandbox, removed when its command finishes. Named sandboxes persist. Names must contain 1–128 UTF-8 bytes.
 
+To reuse sandbox settings, save them in a YAML file named `Sandboxfile` and run `msb run --file Sandboxfile`. See the [Sandboxfile example](/cli/configuration).
+
 ## Command forms
 
 Use short commands for everyday work. These forms are equivalent:

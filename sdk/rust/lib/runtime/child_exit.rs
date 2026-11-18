@@ -26,10 +26,9 @@ impl ChildExit {
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
-            // SAFETY: pidfd_open returned a new CLOEXEC descriptor owned by this caller.
-            let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-            // SAFETY: OwnedFd keeps the pidfd open and unchanged until AsyncFd is dropped.
-            unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)
+            // SAFETY: pidfd_open returned a fresh descriptor. The OwnedFd moves into
+            // AsyncFd and keeps the same descriptor open until deregistration.
+            unsafe { AsyncFd::register(OwnedFd::from_raw_fd(fd as i32)) }.map_err(io::Error::from)
         })();
         match descriptor {
             Ok(fd) => Some(Self(Some(fd))),

@@ -1293,7 +1293,7 @@ impl SandboxConfigKind {
     /// The long option spelling, without its leading dashes.
     const fn long(self) -> &'static str {
         match self {
-            Self::Root => "conf",
+            Self::Root => "file",
             Self::Network => "net-conf",
             Self::Resources => "resource-conf",
             Self::Runtime => "runtime-conf",
@@ -1305,13 +1305,19 @@ impl SandboxConfigKind {
 
     /// The long option spelling used when persisting an installed alias.
     pub(crate) fn flag(self) -> String {
-        format!("--{}", self.long())
+        // Installed commands can outlive the CLI that generated them.
+        match self {
+            Self::Root => "--conf".to_owned(),
+            _ => format!("--{}", self.long()),
+        }
     }
 
     /// User-facing help for this configuration source.
     const fn help(self) -> &'static str {
         match self {
-            Self::Root => "Load a sparse single-sandbox configuration",
+            Self::Root => {
+                "Load a Sandboxfile or another sandbox YAML file. Repeat to layer files in order"
+            }
             Self::Network => "Load an unwrapped network configuration",
             Self::Resources => "Load an unwrapped resource and lifecycle configuration",
             Self::Runtime => "Load an unwrapped runtime configuration",
@@ -1334,6 +1340,7 @@ impl Args for SandboxConfigSources {
                 command.arg(
                     Arg::new(kind.id())
                         .long(kind.long())
+                        .visible_aliases((kind == SandboxConfigKind::Root).then_some("conf"))
                         .value_name("PATH")
                         .help(kind.help())
                         .action(ArgAction::Append)
