@@ -841,9 +841,7 @@ impl Sandbox {
             .backend
             .as_local()
             .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxLogger))?;
-        let log_dir = crate::logs::log_dir_for_local(local, &self.name);
-        Ok(crate::logs::SandboxLogger::new(self.name.clone(), log_dir)
-            .with_strict_host_files(local.config().runtime.strict_host_files))
+        Ok(crate::logs::SandboxLogger::for_local(local, &self.name))
     }
 
     /// Check whether agentd is reachable without refreshing the sandbox idle timer.

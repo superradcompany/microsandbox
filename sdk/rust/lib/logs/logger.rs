@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use super::watch::LogRegistration;
 use super::{LogEntry, LogOptions, LogSnapshot, LogStreamOptions};
 use crate::MicrosandboxResult;
+use crate::backend::LocalBackend;
 use crate::backend::sandbox::LogStream;
 
 //--------------------------------------------------------------------------------------------------
@@ -31,8 +32,8 @@ use crate::backend::sandbox::LogStream;
 /// [`LogRegistry`](super::watch::LogRegistry).
 pub struct SandboxLogger {
     name: String,
-    log_dir: PathBuf,
-    strict_host_files: bool,
+    pub(super) log_dir: PathBuf,
+    pub(super) strict_host_files: bool,
 }
 
 impl SandboxLogger {
@@ -45,9 +46,14 @@ impl SandboxLogger {
         }
     }
 
-    pub(crate) fn with_strict_host_files(mut self, strict: bool) -> Self {
-        self.strict_host_files = strict;
-        self
+    /// Construct a logger for a sandbox of `local`, using its log directory and
+    /// host file policy.
+    pub(crate) fn for_local(local: &LocalBackend, name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            log_dir: super::log_dir_for_local(local, name),
+            strict_host_files: local.config().runtime.strict_host_files,
+        }
     }
 
     /// The sandbox name this logger reads.

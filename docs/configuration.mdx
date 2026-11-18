@@ -327,9 +327,24 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `strict_host_files` | `false` | Reject symlinks in SDK log-reader and disk-lock paths, including parent directories. Unix only. Strict paths cannot contain `..`. Existing symlinked paths keep working when disabled. |
+| `strict_host_files` | `false` | Reject symlinks, including parent directories, when the SDK opens sandbox log files and disk-image locks. Unix only. |
 | `block_writeback` | `{ "mode": "auto" }` | Buffered host writeback containment and live pressure sharing on Linux. Pool pressure never rejects sandbox creation; unconfigured `auto` is a no-op on other hosts. |
 | `placement_profiles` | `{}` | Host-owned named CPU and NUMA placement profiles selectable by sandboxes |
+
+### `runtime.strict_host_files`
+
+When enabled, the SDK refuses to follow a symlink anywhere in these host paths, and the paths cannot contain `..`. Existing symlinked paths keep working while it is off. Setting it on a non-Unix host fails backend construction.
+
+- Reads of a sandbox's `exec.log`, `runtime.log`, and `kernel.log`, including rotated `exec.log` files.
+- The lock opened at launch on each disk-image root filesystem, writable OCI root disk, disk-image mount, and disk volume.
+
+<Accordion title="Coverage limits and older releases">
+
+The setting applies only to those opens. The runtime opens each disk image again by path when the VM starts and follows symlinks, so a path changed after the lock is taken is not detected. Boot-error records, directory mounts, and other host files are read without it.
+
+Releases without this setting ignore it. They also drop unknown fields when they save `config.json`, for example while updating registry credentials, which turns the setting off for every release. A [managed](/enterprise/managed-configuration) value is never rewritten this way, though older releases still do not enforce it.
+
+</Accordion>
 
 ### `runtime.placement_profiles`
 

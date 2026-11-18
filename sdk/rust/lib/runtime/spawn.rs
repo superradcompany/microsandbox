@@ -76,6 +76,8 @@ use crate::backend::local::creation::CreationStorage;
 use crate::backend::local::volume::ResolvedNamedVolume;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
+#[cfg(unix)]
+use crate::host_file::{self, HostFileKind};
 #[cfg(windows)]
 use crate::runtime::handle::WindowsJob;
 use crate::runtime::handle::{ProcessHandle, StartupProcess};
@@ -1820,7 +1822,7 @@ fn lock_disk_image_unix(
     volume_name: Option<&str>,
     strict: bool,
 ) -> MicrosandboxResult<File> {
-    let file = crate::host_file::open_regular(path, !readonly, strict).map_err(|err| {
+    let file = host_file::open(path, HostFileKind::Disk, !readonly, strict).map_err(|err| {
         MicrosandboxError::InvalidConfig(format!("open disk image lock {}: {err}", path.display()))
     })?;
 
@@ -5366,6 +5368,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn strict_disk_admission_checks_the_original_path_before_locking() {
+        use std::os::fd::AsRawFd;
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();
@@ -5376,16 +5379,35 @@ mod tests {
         std::fs::write(&disk, b"disk").unwrap();
         symlink(&disk, root.join("alias.raw")).unwrap();
         symlink(&directory, root.join("alias-dir")).unwrap();
-        let config = oci_upper_lock_config("direct", disk);
+        let config = oci_upper_lock_config("direct", disk.clone());
         drop(super::lock_disk_mounts(&config, &HashMap::new(), &root, true).unwrap());
         for path in [root.join("alias.raw"), root.join("alias-dir/disk.raw")] {
             let config = oci_upper_lock_config("linked", path);
             drop(super::lock_disk_mounts(&config, &HashMap::new(), &root, false).unwrap());
             let error = super::lock_disk_mounts(&config, &HashMap::new(), &root, true).unwrap_err();
-            assert!(
-                error.to_string().contains("open disk image lock"),
-                "{error}"
-            );
+            let message = error.to_string();
+            assert!(message.contains("open disk image lock"), "{message}");
+            assert!(message.contains("runtime.strict_host_files"), "{message}");
+        }
+
+        // A read-only mount takes a shared lock through a read-only strict open.
+        let mut reader = SandboxConfig::default();
+        reader.spec.mounts.push(VolumeMount::DiskImage {
+            host: disk,
+            guest: "/data".into(),
+            format: DiskImageFormat::Raw,
+            fstype: None,
+            options: MountOptions {
+                readonly: true,
+                ..Default::default()
+            },
+        });
+        let first = super::lock_disk_mounts(&reader, &HashMap::new(), &root, true).unwrap();
+        let second = super::lock_disk_mounts(&reader, &HashMap::new(), &root, true).unwrap();
+
+        for lock in first.iter().chain(&second) {
+            let flags = unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_GETFL) };
+            assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
         }
     }
 

@@ -17,6 +17,7 @@ use microsandbox_utils::log_text::{base64_decode, split_leading_timestamp, strip
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+use crate::host_file::{self, HostFileKind};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::cursor::{FilePosition, LogCursor};
@@ -52,7 +53,7 @@ impl FileHandle {
     pub(super) async fn open(path: &Path, strict: bool) -> MicrosandboxResult<Option<Self>> {
         let path = path.to_path_buf();
         let file = match tokio::task::spawn_blocking(move || {
-            crate::host_file::open_regular(&path, false, strict)
+            host_file::open(&path, HostFileKind::Regular, false, strict)
         })
         .await
         .map_err(|error| MicrosandboxError::Runtime(format!("log open worker: {error}")))?

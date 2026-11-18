@@ -151,6 +151,7 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
+        resolved.validate_runtime()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         self.validate_backend_policy()?;
 
@@ -178,6 +179,7 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
+        resolved.validate_runtime()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         self.validate_backend_policy()?;
         Ok(self)
@@ -607,6 +609,31 @@ mod tests {
             layers.resolved_config().sandbox_defaults.oci.root_disk,
             Some(RootDisk::Tmpfs { .. }),
         ));
+    }
+
+    #[test]
+    fn local_preparation_accepts_strict_host_files_only_on_unix() {
+        for (user, managed) in [
+            (r#"{"runtime":{"strict_host_files":true}}"#, "{}"),
+            ("{}", r#"{"runtime":{"strict_host_files":true}}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            let result = layers.prepare_for_local_backend(Default::default());
+
+            #[cfg(unix)]
+            assert!(result.unwrap().resolved_config().runtime.strict_host_files);
+            #[cfg(not(unix))]
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("runtime.strict_host_files is supported only on Unix")
+            );
+        }
     }
 
     #[test]
