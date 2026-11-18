@@ -11,6 +11,7 @@
 //! No OAuth or session credentials are honored here.
 
 mod agent;
+mod client;
 mod http;
 mod modify;
 #[cfg(test)]
@@ -28,7 +29,6 @@ mod ws_io;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use rustls_platform_verifier::BuilderVerifierExt;
 use tokio_tungstenite::Connector;
 
@@ -339,47 +339,19 @@ impl CloudBackendBuilder {
         let url = url.trim_end_matches('/').to_string();
         let api_key = api_key.to_string();
 
-        let (http, stream_http, service_http) = if let Some(client) = self.custom_client {
-            (client.clone(), client.clone(), client)
-        } else {
-            let mut headers = HeaderMap::new();
-            let bearer = format!("Bearer {api_key}");
-            let mut auth_value = HeaderValue::from_str(&bearer).map_err(|e| {
-                MicrosandboxError::InvalidConfig(format!("invalid API key header value: {e}"))
-            })?;
-            auth_value.set_sensitive(true);
-            headers.insert(AUTHORIZATION, auth_value);
-            let ua = self.user_agent.unwrap_or_else(default_user_agent);
-            headers.insert(
-                USER_AGENT,
-                HeaderValue::from_str(&ua).map_err(|e| {
-                    MicrosandboxError::InvalidConfig(format!("invalid user-agent value: {e}"))
-                })?,
-            );
-
-            let build = |builder: reqwest::ClientBuilder| {
-                builder
-                    .default_headers(headers.clone())
-                    .build()
-                    .map_err(|e| {
-                        MicrosandboxError::InvalidConfig(format!(
-                            "failed to build HTTP client: {e}"
-                        ))
-                    })
-            };
-            (
-                build(reqwest::Client::builder().timeout(self.request_timeout))?,
-                build(reqwest::Client::builder().connect_timeout(self.request_timeout))?,
-                build(service::service_change_client_builder().timeout(self.request_timeout))?,
-            )
-        };
+        let clients = client::build_clients(
+            self.custom_client,
+            &api_key,
+            self.user_agent,
+            self.request_timeout,
+        )?;
 
         Ok(CloudBackend {
             url,
             api_key,
-            http,
-            stream_http,
-            service_http,
+            http: clients.http,
+            stream_http: clients.stream,
+            service_http: clients.service,
             request_timeout: self.request_timeout,
             config,
             selection_source: BackendSelectionSource::Programmatic,
