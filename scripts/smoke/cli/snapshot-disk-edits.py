@@ -2,6 +2,7 @@
 """Exercise the snapshot disk editor through create/run against live Linux guests."""
 
 import argparse
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import tempfile
 import time
 
 
-def qualify(binary, firmware, image, layout, directory, full, legacy_cli):
+def qualify(binary, firmware, image, layout, directory, full, legacy_cli, replacement_only):
     env = dict(os.environ, MSB_PATH=str(binary), MSB_LIBKRUNFW_PATH=str(firmware),
                MSB_HOME=str(directory / "home"))
     env.pop("MSB_AGENTD_PATH", None)
@@ -56,13 +57,14 @@ def qualify(binary, firmware, image, layout, directory, full, legacy_cli):
         msb("snapshot", "create", "--sandbox", "source", "--output", archive)
         msb("create", "--name", "destination", image)
         sentinel = guest("destination", "echo keep >/sentinel; cat /proc/sys/kernel/random/boot_id")
-        result = msb("create", "--replace", "--name", "destination", "--fs-conf", bad,
-                     "--from-snapshot", "history", success=False)
-        assert "/missing" in result.stderr and "edit 2" in result.stderr, result.stderr
-        assert guest("destination", "grep -q keep /sentinel; cat /proc/sys/kernel/random/boot_id") == sentinel
+        if not replacement_only:
+            result = msb("create", "--replace", "--name", "destination", "--fs-conf", bad,
+                         "--from-snapshot", "history", success=False)
+            assert "/missing" in result.stderr and "edit 2" in result.stderr, result.stderr
+            assert guest("destination", "grep -q keep /sentinel; cat /proc/sys/kernel/random/boot_id") == sentinel
         # An invalid guest workdir is checked after launch. It exercises recovery
         # after stopping the old VM, unlike the child-edit failure above.
-        with sqlite3.connect((directory / "home/db/msb.db").as_uri() + "?mode=ro", uri=True) as catalog:
+        with closing(sqlite3.connect((directory / "home/db/msb.db").as_uri() + "?mode=ro", uri=True)) as catalog:
             row = "SELECT id, status FROM sandbox WHERE name='destination'"
             original_id, _ = catalog.execute(row).fetchone()
             for command in ("create", "run"):
@@ -132,6 +134,17 @@ def qualify(binary, firmware, image, layout, directory, full, legacy_cli):
                 while catalog.execute(ephemeral_row, (ephemeral_id,)).fetchone() is not None:
                     assert time.monotonic() < deadline, "restarted ephemeral sandbox was not removed"
                     time.sleep(0.1)
+        if replacement_only:
+            # This mode also works with runtimes that can restore a disk but lack
+            # a working disk-editor VM. It still checks successful publication.
+            target = "history"
+            if full:
+                msb("snapshot", "create", "full", "--sandbox", "source", "--full", "--integrity")
+                target = "full"
+            msb("create", "--replace", "--name", "destination", "--from-snapshot", target)
+            guest("destination", 'test "$(cat /db)" = captured; test ! -e /sentinel')
+            msb("snapshot", "verify", target)
+            return
         msb("create", "--replace", "--name", "destination", "--fs-conf", good, "--from-snapshot", "history")
         guest("destination", check)
         msb("stop", "destination")
@@ -164,9 +177,24 @@ if __name__ == "__main__":
                         help="short path for the temporary runtime sockets")
     parser.add_argument("--full", action="store_true", help="also exercise a full checkpoint and disk-only boot")
     parser.add_argument("--legacy-cli", type=Path, help="released CLI used to check catalog readability during recovery")
+    parser.add_argument("--replacement-only", action="store_true",
+                        help="qualify replacement independently of filesystem edits")
     args = parser.parse_args()
     for root_layout in ["managed", "flat"]:
-        with tempfile.TemporaryDirectory(prefix="ed-", dir=args.temp_root) as scratch:
-            qualify(args.binary.resolve(), args.firmware.resolve(), args.image,
-                    root_layout, Path(scratch).resolve(), args.full, args.legacy_cli)
+        scratch = tempfile.TemporaryDirectory(prefix="ed-", dir=args.temp_root)
+        try:
+            qualify(args.binary.resolve(), args.firmware.resolve(), args.image, root_layout,
+                    Path(scratch.name).resolve(), args.full, args.legacy_cli, args.replacement_only)
+        finally:
+            # Windows refuses to unlink a mapping until the last exiting process
+            # releases it. Keep a finite deadline and surface persistent leaks.
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    scratch.cleanup()
+                    break
+                except PermissionError:
+                    if os.name != "nt" or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.1)
         print(f"PASS {root_layout}", flush=True)

@@ -109,6 +109,29 @@ fn sync_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+async fn move_stopped_directory(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        // Windows may briefly deny a directory rename while the filesystem
+        // finishes closing handles to a stopped guest's disk. Keep ownership
+        // throughout the retry and surface persistent denials to the caller.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match fs::rename(source, target) {
+                Err(error)
+                    if matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    fs::rename(source, target)
+}
+
 /// Sandbox files can be sparse. Link the stopped generation before releasing its
 /// name so even an older remover unlinking the public tree cannot destroy it.
 /// Each directory is independent. Links to external files are never followed.
@@ -119,7 +142,12 @@ fn retain_tree(source: &Path, target: &Path) -> io::Result<()> {
         fs::create_dir(target)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
-            retain_tree(&entry.path(), &target.join(entry.file_name()))?;
+            retain_tree(&entry.path(), &target.join(entry.file_name())).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("retaining {}: {error}", entry.path().display()),
+                )
+            })?;
         }
         fs::set_permissions(target, metadata.permissions())?;
         return sync_dir(target);
@@ -199,7 +227,12 @@ pub(super) async fn park(
     // This step must finish under the caller's transition and storage ownership,
     // including on cancellation; no detached copy worker may outlive either guard.
     if had_directory {
-        retain_tree(directory, &backup.join("original"))?;
+        retain_tree(directory, &backup.join("original")).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("back up sandbox {}: {error}", directory.display()),
+            )
+        })?;
     }
     sync_dir(&backup)?;
     sync_dir(&backups)?;
@@ -224,7 +257,14 @@ pub(super) async fn park(
     if had_directory {
         // Keep the actual directory too. Its inode, ACLs and directory metadata
         // return intact on rollback. The linked tree covers both rename/SQL gaps.
-        fs::rename(directory, backup.join("tree"))?;
+        move_stopped_directory(directory, &backup.join("tree"))
+            .await
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("park sandbox directory {}: {error}", directory.display()),
+                )
+            })?;
         sync_dir(&backup)?;
         sync_dir(root)?;
     }
@@ -392,7 +432,7 @@ impl LocalBackend {
             if record.had_directory {
                 let tree = saved.join("tree");
                 if tree.try_exists()? {
-                    fs::rename(tree, &public)?;
+                    move_stopped_directory(&tree, &public).await?;
                     sync_dir(&saved)?;
                 } else {
                     retain_tree(&source, &public)?;
