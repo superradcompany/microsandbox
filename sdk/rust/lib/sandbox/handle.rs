@@ -290,10 +290,10 @@ impl SandboxHandle {
     /// is malformed (e.g., schema changed since the sandbox was created).
     ///
     /// For local handles this deserializes the persisted [`SandboxConfig`].
-    /// For cloud handles this returns an `Unsupported` error: the cloud wire
-    /// shape is [`CloudCreateSandboxRequest`](crate::backend::CloudCreateSandboxRequest),
-    /// not `SandboxConfig`. Use [`config_json`](Self::config_json) to read the
-    /// raw JSON, or [`cloud`](Self::cloud) to access the typed cloud state.
+    /// For cloud handles this returns an `Unsupported` error: the spec the
+    /// cloud API returns is its own shape, not `SandboxConfig`. Use
+    /// [`config_json`](Self::config_json) to read the raw JSON, or
+    /// [`cloud`](Self::cloud) to access the typed cloud state.
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         match &self.inner {
             SandboxHandleInner::Local(s) => SandboxConfig::from_stored(
@@ -648,9 +648,8 @@ impl SandboxHandle {
                 }
                 #[cfg(feature = "cloud")]
                 {
-                    // The cloud handle stores the optional curated spec exactly as
-                    // returned by the API. Decode it on reconnect, falling back to
-                    // SDK defaults when the server intentionally omitted it.
+                    // Decode the optional spec returned by the cloud API, using
+                    // SDK defaults when it is absent or invalid.
                     let spec = serde_json::from_str(&cloud.config_json)?;
                     let config =
                         crate::backend::sandbox::sandbox_config_from_cloud_spec(&self.name, spec);
