@@ -157,6 +157,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >
 > ```sh
 > # Lifecycle
+> msb ls
 > msb stop app
 > msb start app
 > msb rm app
