@@ -74,7 +74,7 @@ Common flags:
 | `--max-cpus` | Boot-time maximum possible virtual CPUs for future resize capacity |
 | `-m`, `--memory` | Memory limit, such as `512M` or `1G` |
 | `--max-memory` | Boot-time maximum hotpluggable memory, such as `2G` or `8G` |
-| `--nested-virt`, `--nested-virt=false` | Enable or disable local nested virtualization. Defaults to off unless configured. See [requirements](/sandboxes/snapshots#nested-vm-snapshots). |
+| `--nested-virt`, `--nested-virt false` | Enable or disable local nested virtualization. Defaults to off unless configured. See [requirements](/sandboxes/snapshots#nested-vm-snapshots). |
 | `--thp` | Guest transparent huge-page policy: `always`, `madvise` (default), or `never` |
 | `--guest-clock` | `sync` (default) follows host time; `off` stops host clock updates after boot. Local-only. See [guest clock](/sandboxes/snapshots#keep-the-guest-clock) |
 | `--root-disk` | OCI root storage, such as `8G`, `tmpfs:2G`, `flat:8G,clone=auto`, or `./rootfs.qcow2:format=qcow2,fstype=ext4` |
@@ -101,7 +101,7 @@ Common flags:
 | `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
 | `--net-nat64-prefix` | Add a NAT64 `/96` prefix for network policy classification |
-| `--net-strict[=BOOL]` | Enabled by default; use `--net-strict=false` to opt out. Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
+| `--net-strict[=BOOL]` | Enabled by default; use `--net-strict false` to opt out. Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
 | `--proxy` | Route eligible outbound traffic through an `http://IP:PORT`, `socks4://IP:PORT`, or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
 | `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
 | `--socks5-username`, `--socks5-password-env` | SOCKS5 username and the host environment variable containing its password. Both flags are required together |

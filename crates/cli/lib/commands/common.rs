@@ -181,7 +181,7 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
     pub thp: Option<String>,
 
-    /// Enable or disable nested virtualization. Omission uses the runtime default.
+    /// Enable nested virtualization, or pass `--nested-virt false` to disable it. Omission uses the runtime default.
     #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub nested_virt: Option<bool>,
 
@@ -586,7 +586,7 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub max_udp_connections: Option<usize>,
 
-    /// Require inspectable request authority for hostname allows (default: true).
+    /// Require inspectable request authority for hostname allows (default: true). Use `--net-strict false` to disable.
     #[cfg(feature = "net")]
     #[arg(long = "net-strict", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub net_strict: Option<bool>,
