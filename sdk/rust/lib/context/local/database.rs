@@ -624,7 +624,7 @@ mod tests {
             // fail the protected-state prerequisite before the nesting-policy check.
             if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
                 let rejected = destination.sandboxes().builder("catalog-unsupported")
-                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(std::time::Duration::from_secs(120))
                     .create().await;
                 let error = match rejected {
                     Ok(unexpected) => {
@@ -652,7 +652,7 @@ mod tests {
                 // A newer SDK must not silently omit a security/resource
                 // request that the selected previous runtime cannot honor.
                 let rejected = destination.sandboxes().builder("catalog-unsupported")
-                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(std::time::Duration::from_secs(120))
                     .network(|network| network.max_udp_connections(0).http(|http| http.deny_response(false)))
                     .create().await;
                 let error = match rejected {
@@ -675,7 +675,7 @@ mod tests {
                 let name = format!("catalog-mounts-{count}");
                 let started = std::time::Instant::now();
                 // Keep catalog compatibility independent of newer HTTP denial support.
-                let mut builder = destination.sandboxes().builder(&name).image("alpine:3.21").cpus(1).memory(256u32).max_duration(120);
+                let mut builder = destination.sandboxes().builder(&name).image("alpine:3.21").cpus(1).memory(256u32).max_duration(std::time::Duration::from_secs(120));
                 #[cfg(feature = "net")]
                 {
                     builder = builder.network(|network| network.http(|http| http.deny_response(false)));
@@ -732,7 +732,7 @@ mod tests {
             let host_file = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(host_file.path(), b"file-mount-compatible").unwrap();
             let builder = destination.sandboxes().builder("catalog-file-mount")
-                .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                .image("alpine:3.21").cpus(1).memory(256u32).max_duration(std::time::Duration::from_secs(120))
                 .volume("/compat-file", |mount| mount.bind(host_file.path()).readonly());
             #[cfg(feature = "net")]
             let builder = builder.network(|network| network.http(|http| http.deny_response(false)));

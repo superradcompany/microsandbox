@@ -232,8 +232,8 @@ export interface NapiSandboxBuilderSetters {
   rlimitRange(resource: string, soft: number, hard: number): this;
   script(name: string, content: string): this;
   scripts(scripts: Record<string, string>): this;
-  maxDuration(secs: number): this;
-  idleTimeout(secs: number): this;
+  maxDurationSeconds(secs: number): this;
+  idleTimeoutSeconds(secs: number): this;
   volume(guest: string, configure: (b: NapiMountBuilder) => NapiMountBuilder): this;
   patch(configure: (b: NapiPatchBuilder) => NapiPatchBuilder): this;
   build(): Promise<NapiSandboxConfig>;
@@ -264,8 +264,8 @@ export interface NapiRestoreBuilderSetters {
   disableNetwork(): this;
   /** Requires disk scope or diskOnly(); full execution rejects even explicit default. */
   security(profile: "default" | "restricted"): this;
-  maxDuration(secs: number): this;
-  idleTimeout(secs: number): this;
+  maxDurationSeconds(secs: number): this;
+  idleTimeoutSeconds(secs: number): this;
   cowMemory(): this;
   /** @deprecated Use cowMemory() instead. */
   forked(): this;
@@ -903,7 +903,7 @@ export interface NapiExecOptionsBuilder {
   user(user: string): this;
   env(key: string, value: string): this;
   envs(vars: Record<string, string>): this;
-  timeout(ms: number): this;
+  timeoutMilliseconds(ms: number): this;
   stdinNull(): this;
   stdinPipe(): this;
   stdinBytes(data: Buffer): this;

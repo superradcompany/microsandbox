@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from datetime import timedelta
 
 import pytest
 
@@ -46,9 +47,11 @@ async def test_create_kwargs_affect_guest_defaults(sandbox_name):
         assert probe.success is True
         assert probe.stdout_text == "py-sdk-create-host:/tmp:nobody:guest-visible\n"
 
-        script = await sandbox.exec("create-kwarg-script")
+        script = await sandbox.exec("create-kwarg-script", timeout=timedelta(seconds=5))
         assert script.success is True
         assert script.stdout_text == "script:nobody:guest-visible\n"
+        output = await sandbox.exec("printf", {"args": ["ready"], "timeout": timedelta(milliseconds=1500)})
+        assert output.stdout_text == "ready"
     finally:
         await stop_and_remove_sandbox(name, sandbox)
 
@@ -75,7 +78,7 @@ async def test_create_kwargs_round_trip_through_config(sandbox_name):
         scripts={"bootstrap": "echo bootstrap-from-python"},
         entrypoint=["/bin/sh", "-c", "echo entrypoint-from-python"],
         init="auto",
-        max_duration=7200.0,
+        max_duration=timedelta(hours=2),
         idle_timeout=1800.0,
         ephemeral=True,
         pull_policy=PullPolicy.IF_MISSING,

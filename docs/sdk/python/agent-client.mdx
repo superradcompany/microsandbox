@@ -23,7 +23,7 @@ Low-level raw CBOR transport for communicating with `agentd` through a sandbox r
 
 ```python
 @classmethod
-async def connect_sandbox(cls, name: str, *, timeout: float | None = None) -> AgentClient
+async def connect_sandbox(cls, name: str, *, timeout: float | timedelta | None = None) -> AgentClient
 ```
 
 <Accordion title="Example">
@@ -44,7 +44,7 @@ Connect to a running sandbox by name. Sandbox names are limited to 128 UTF-8 byt
     <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | timedelta | None</span></div>
     <div className="msb-param-desc">Connection timeout in seconds. <code>None</code> uses the default.</div>
   </div>
 </div>
@@ -64,7 +64,7 @@ Connect to a running sandbox by name. Sandbox names are limited to 128 UTF-8 byt
 
 ```python
 @classmethod
-async def connect(cls, path: str, *, timeout: float | None = None) -> AgentClient
+async def connect(cls, path: str, *, timeout: float | timedelta | None = None) -> AgentClient
 ```
 
 <Accordion title="Example">
@@ -86,7 +86,7 @@ Connect to an agent relay socket by path. Use this when you already know the soc
     <div className="msb-param-desc">Path to the agentd relay socket.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | timedelta | None</span></div>
     <div className="msb-param-desc">Connection timeout in seconds. <code>None</code> uses the default.</div>
   </div>
 </div>

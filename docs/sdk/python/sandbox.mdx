@@ -951,7 +951,7 @@ Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` t
 <Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
-async def stop(self, timeout: float | None = None) -> None
+async def stop(self, timeout: float | timedelta | None = None) -> None
 ```
 
 <Accordion title="Example">
@@ -968,7 +968,7 @@ Wait indefinitely for graceful shutdown and release of the targeted runtime's ow
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | timedelta | None</span></div>
     <div className="msb-param-desc">Total graceful-completion budget in seconds. <code>None</code> waits indefinitely; expiry raises <code>StopTimeoutError</code> without killing.</div>
   </div>
 </div>
@@ -976,7 +976,7 @@ Wait indefinitely for graceful shutdown and release of the targeted runtime's ow
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
 
 ```python
-async def stop_with_timeout(self, timeout: float) -> None
+async def stop_with_timeout(self, timeout: float | timedelta) -> None
 ```
 
 Use `await sb.stop_with_timeout(seconds)` for an explicit total graceful-completion budget. Expiry raises `StopTimeoutError`; zero expires before dispatch. A delivered request may finish later, but the timeout never requests force termination.
@@ -1002,7 +1002,7 @@ Request graceful shutdown and return once the request is sent, without waiting f
 <Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
-async def kill(self, timeout: float | None = None) -> None
+async def kill(self, timeout: float | timedelta | None = None) -> None
 ```
 
 <Accordion title="Example">
@@ -1019,7 +1019,7 @@ Force-terminate the sandbox and wait until stopped state is observed. No gracefu
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | timedelta | None</span></div>
     <div className="msb-param-desc">Seconds to wait for the stopped state to be observed.</div>
   </div>
 </div>
@@ -1103,7 +1103,7 @@ async def restart(
     self,
     *,
     force: bool = False,
-    timeout: float | None = None,
+    timeout: float | timedelta | None = None,
     detached: bool = False,
 ) -> Sandbox
 ```
@@ -1113,7 +1113,7 @@ Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">destroy()</span>
 
 ```python
-async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None
+async def destroy(self, *, force: bool = False, timeout: float | timedelta | None = None) -> None
 ```
 
 Stop and remove this exact sandbox. Defaults to graceful shutdown with the SDK's ten-second timeout. Raises `SandboxReplacedError` rather than deleting a same-name replacement.
@@ -1552,9 +1552,9 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | cmd | `Sequence[str]` | - | Override the image's stored CMD used by `exec_default`; an empty sequence clears CMD |
 | init | `str \| `[`InitConfig`](#initconfig)` \| `[`InitOptions`](#initoptions) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/bootstrap#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | `False` | Replace an existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
-| replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
-| max_duration | `float` | - | Maximum sandbox lifetime in seconds; finite and non-negative, rounded up to whole seconds |
-| idle_timeout | `float` | - | Idle timeout in seconds; finite and non-negative, rounded up to whole seconds |
+| replace_with_timeout | `float \| timedelta` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
+| max_duration | `float \| timedelta` | - | Maximum sandbox lifetime in seconds; must be a non-negative whole number of seconds |
+| idle_timeout | `float \| timedelta` | - | Idle timeout in seconds; must be a non-negative whole number of seconds |
 | ephemeral | `bool` | `False` | If `True`, the sandbox and all its persisted state are removed automatically once it stops, rather than left on disk for restart |
 | env | `Mapping[str, str]` | `{}` | Environment variables visible to all commands |
 | labels | `Mapping[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Select in bulk](/sandboxes/labels#select-in-bulk). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |

@@ -52,7 +52,7 @@ describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("man
   it("enforces streaming deadlines without polling output", async () => {
     const sb = await Sandbox.getRunning(process.env.MSB_JOB_TEST_SANDBOX!);
     for (const tty of [false, true]) {
-      const handle = await sb.execStreamWith("sleep", b => b.args(["30"]).tty(tty).timeout(500));
+      const handle = await sb.execStreamWith("sleep", b => b.args(["30"]).tty(tty).timeoutMilliseconds(500));
       try {
         await new Promise(resolve => setTimeout(resolve, 1000));
         await expect(handle.collect()).rejects.toMatchObject({ name: "ExecTimeoutError" });
@@ -60,7 +60,7 @@ describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("man
         await handle.kill().catch(() => {});
       }
     }
-    const fast = await sb.execStreamWith("echo", b => b.args(["ok"]).timeout(5000));
+    const fast = await sb.execStreamWith("echo", b => b.args(["ok"]).timeoutMilliseconds(5000));
     expect((await fast.collect()).stdout()).toBe("ok\n");
   }, 20_000);
 });

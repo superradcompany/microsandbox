@@ -1182,16 +1182,22 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set a maximum sandbox lifetime in seconds.
-    pub fn max_duration(mut self, secs: u64) -> Self {
-        self.config.spec.lifecycle.max_duration_secs = Some(secs);
+    /// Set the maximum sandbox lifetime. The duration must be an exact number of seconds.
+    pub fn max_duration(mut self, duration: Duration) -> Self {
+        if duration.subsec_nanos() != 0 {
+            return self.config_error("max_duration must be a whole number of seconds");
+        }
+        self.config.spec.lifecycle.max_duration_secs = Some(duration.as_secs());
         self
     }
 
-    /// Auto-stop the sandbox after this many seconds of inactivity.
+    /// Auto-stop the sandbox after this duration of inactivity, in whole seconds.
     /// Inactivity is detected via agentd heartbeat. Omit to disable (default).
-    pub fn idle_timeout(mut self, secs: u64) -> Self {
-        self.config.spec.lifecycle.idle_timeout_secs = Some(secs);
+    pub fn idle_timeout(mut self, duration: Duration) -> Self {
+        if duration.subsec_nanos() != 0 {
+            return self.config_error("idle_timeout must be a whole number of seconds");
+        }
+        self.config.spec.lifecycle.idle_timeout_secs = Some(duration.as_secs());
         self
     }
 
@@ -3987,6 +3993,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifetime_limits_require_whole_seconds() {
+        use std::time::Duration;
+
+        let fractional = Duration::from_millis(1500);
+        for builder in [
+            SandboxBuilder::new("test").max_duration(fractional),
+            SandboxBuilder::new("test").idle_timeout(fractional),
+        ] {
+            assert!(
+                builder
+                    .image("alpine")
+                    .build()
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("whole number of seconds")
+            );
+        }
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .idle_timeout(Duration::ZERO)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(config.spec.lifecycle.idle_timeout_secs, Some(0));
+        assert_eq!(config.spec.lifecycle.max_duration_secs, None);
+    }
+
+    #[tokio::test]
     async fn test_builder_builds_config_with_shared_spec() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
@@ -3999,7 +4034,7 @@ mod tests {
             .log_level(LogLevel::Info)
             .env("A", "B")
             .script("setup", "echo hi")
-            .max_duration(60)
+            .max_duration(std::time::Duration::from_secs(60))
             .build()
             .await
             .unwrap();

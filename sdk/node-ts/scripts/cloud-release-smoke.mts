@@ -14,8 +14,8 @@ export async function exercise(sdk: SmokeSdk, name: string): Promise<void> {
     .cpus(1)
     .memory(512)
     .ephemeral(true)
-    .maxDuration(600)
-    .idleTimeout(120)
+    .maxDurationSeconds(600)
+    .idleTimeoutSeconds(120)
     .create();
   const output = await sandbox.shell(`printf '${MARKER}\\n'`);
   if (output.code !== 0 || output.stdout() !== `${MARKER}\n`) {

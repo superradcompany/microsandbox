@@ -67,7 +67,7 @@ describe("adapter security regressions", () => {
     expect(() => new TlsBuilder().interceptedPorts([value])).toThrow();
     expect(() => new RootDiskBuilder().size(value)).toThrow();
     expect(() => Sandbox.builder("invalid").cpus(value)).toThrow();
-    expect(() => new ExecOptionsBuilder().timeout(value)).toThrow();
+    expect(() => new ExecOptionsBuilder().timeoutMilliseconds(value)).toThrow();
     const reusable = new NetworkBuilder().maxTcpConnections(12);
     expect(() => reusable.maxTcpConnections(value)).toThrow();
     expect(reusable.build().maxTcpConnections).toBe(12);

@@ -800,10 +800,10 @@ fn apply_builder_options(
         builder = builder.ephemeral(v);
     }
     if let Some(v) = keyword::<u64>(kwargs, "max_duration")? {
-        builder = builder.max_duration(v);
+        builder = builder.max_duration(std::time::Duration::from_secs(v));
     }
     if let Some(v) = keyword::<u64>(kwargs, "idle_timeout")? {
-        builder = builder.idle_timeout(v);
+        builder = builder.idle_timeout(std::time::Duration::from_secs(v));
     }
     if keyword::<bool>(kwargs, "replace")?.unwrap_or(false) {
         builder = builder.replace();
@@ -1111,10 +1111,10 @@ impl RubySandboxBuilder {
         put_builder(&this, |b| b.ephemeral(v))
     }
     fn max_duration(this: typed_data::Obj<Self>, v: u64) -> Result<(), Error> {
-        put_builder(&this, |b| b.max_duration(v))
+        put_builder(&this, |b| b.max_duration(std::time::Duration::from_secs(v)))
     }
     fn idle_timeout(this: typed_data::Obj<Self>, v: u64) -> Result<(), Error> {
-        put_builder(&this, |b| b.idle_timeout(v))
+        put_builder(&this, |b| b.idle_timeout(std::time::Duration::from_secs(v)))
     }
     fn replace(this: typed_data::Obj<Self>) -> Result<(), Error> {
         put_builder(&this, SandboxBuilder::replace)

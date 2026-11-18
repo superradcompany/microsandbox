@@ -64,8 +64,8 @@ vi.mock("../../dist/internal/napi.js", () => {
         maxUdpConnections(value: number): this { native.controls("maxUdpConnections", value); return this; }
         disableNetwork(): this { native.controls("disableNetwork"); return this; }
         security(value: string): this { native.controls("security", value); return this; }
-        maxDuration(value: number): this { native.controls("maxDuration", value); return this; }
-        idleTimeout(value: number): this { native.controls("idleTimeout", value); return this; }
+        maxDurationSeconds(value: number): this { native.controls("maxDurationSeconds", value); return this; }
+        idleTimeoutSeconds(value: number): this { native.controls("idleTimeoutSeconds", value); return this; }
         async restore() {
           native.restore();
           return sandbox();
@@ -177,13 +177,13 @@ describe("creation result lifecycle ownership", () => {
       const policy = { defaultEgress: "deny" as const, defaultIngress: "deny" as const, rules: [] };
       const builder = Sandbox.restore("baseline").name("destination")
         .cpus(2).memory(512).networkPolicy(policy).maxTcpConnections(0).maxUdpConnections(7)
-        .disableNetwork().security("default").maxDuration(0).idleTimeout(0);
+        .disableNetwork().security("default").maxDurationSeconds(0).idleTimeoutSeconds(0);
       if (method === "restore") await builder.restore();
       else await (await builder.restoreWithProgress()).awaitSandbox();
       expect(native.controls.mock.calls).toEqual([
         ["cpus", 2], ["memory", 512], ["networkPolicy", policy],
         ["maxTcpConnections", 0], ["maxUdpConnections", 7],
-        ["disableNetwork"], ["security", "default"], ["maxDuration", 0], ["idleTimeout", 0],
+        ["disableNetwork"], ["security", "default"], ["maxDurationSeconds", 0], ["idleTimeoutSeconds", 0],
       ]);
       expect(native.create).not.toHaveBeenCalled();
     });

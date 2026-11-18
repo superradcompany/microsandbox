@@ -1619,7 +1619,7 @@ mod tests {
                 .cpus(8)
                 .memory(768u32)
                 .workdir("/")
-                .max_duration(120)
+                .max_duration(std::time::Duration::from_secs(120))
         };
         policy(1, 256);
         let captured = build();

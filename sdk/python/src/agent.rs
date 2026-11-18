@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use microsandbox::{AgentBridge, BridgeFrame};
 use pyo3::prelude::*;
@@ -31,7 +30,7 @@ impl PyAgentClient {
     fn connect_sandbox<'py>(
         py: Python<'py>,
         name: String,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         #[cfg(not(feature = "local"))]
         {
@@ -41,7 +40,7 @@ impl PyAgentClient {
         }
         #[cfg(feature = "local")]
         {
-            let timeout = timeout_duration(timeout)?;
+            let timeout = crate::helpers::timeout_input(timeout)?;
             pyo3_async_runtimes::tokio::future_into_py(py, async move {
                 let bridge = match timeout {
                     Some(timeout) => {
@@ -63,9 +62,9 @@ impl PyAgentClient {
     fn connect<'py>(
         py: Python<'py>,
         path: String,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let timeout = timeout_duration(timeout)?;
+        let timeout = crate::helpers::timeout_input(timeout)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let bridge = match timeout {
                 Some(timeout) => AgentBridge::connect_path_with_timeout(&path, timeout).await,
@@ -201,8 +200,4 @@ fn frame_to_py(frame: BridgeFrame) -> PyResult<Py<PyAny>> {
 
 fn to_py_err_agent(err: microsandbox::AgentClientError) -> PyErr {
     to_py_err(microsandbox::MicrosandboxError::AgentClient(err))
-}
-
-fn timeout_duration(timeout: Option<f64>) -> PyResult<Option<Duration>> {
-    crate::sandbox::optional_duration(timeout)
 }

@@ -1581,10 +1581,10 @@ fn apply_sandbox_opts_inner(
 
     // --- Lifecycle ---
     if let Some(ref dur) = opts.max_duration {
-        builder = builder.max_duration(parse_duration_secs(dur)?);
+        builder = builder.max_duration(std::time::Duration::from_secs(parse_duration_secs(dur)?));
     }
     if let Some(ref dur) = opts.idle_timeout {
-        builder = builder.idle_timeout(parse_duration_secs(dur)?);
+        builder = builder.idle_timeout(std::time::Duration::from_secs(parse_duration_secs(dur)?));
     }
 
     // --- Host communication ---

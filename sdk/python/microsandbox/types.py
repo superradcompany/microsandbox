@@ -8,7 +8,7 @@ import sys
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, TypeAlias, TypedDict
 
 # --------------------------------------------------------------------------------------------------
@@ -546,7 +546,7 @@ class ExecOptions(TypedDict, total=False):
     cwd: str
     user: str
     env: Mapping[str, str]
-    timeout: float
+    timeout: float | timedelta
     stdin: Stdin | bytes
     stdin_data: bytes
     tty: bool

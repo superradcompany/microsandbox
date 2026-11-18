@@ -1273,7 +1273,7 @@ Set the guest hostname.
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">idle_timeout()</span>
 
 ```rust
-fn idle_timeout(self, secs: u64) -> Self
+fn idle_timeout(self, duration: Duration) -> Self
 ```
 
 Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
@@ -1282,8 +1282,8 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>secs</code><span className="msb-type">u64</span></div>
-    <div className="msb-param-desc">Idle timeout in seconds.</div>
+    <div className="msb-param-key"><code>duration</code><span className="msb-type">Duration</span></div>
+    <div className="msb-param-desc">Idle timeout in whole seconds.</div>
   </div>
 </div>
 
@@ -1452,7 +1452,7 @@ Override the sandbox process's log verbosity.
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">max_duration()</span>
 
 ```rust
-fn max_duration(self, secs: u64) -> Self
+fn max_duration(self, duration: Duration) -> Self
 ```
 
 Set the maximum sandbox lifetime in seconds. When exceeded, the host drains and stops the sandbox. Enforced on the host side; the guest cannot override it.
@@ -1461,8 +1461,8 @@ Set the maximum sandbox lifetime in seconds. When exceeded, the host drains and 
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>secs</code><span className="msb-type">u64</span></div>
-    <div className="msb-param-desc">Maximum lifetime in seconds.</div>
+    <div className="msb-param-key"><code>duration</code><span className="msb-type">Duration</span></div>
+    <div className="msb-param-desc">Maximum lifetime in whole seconds.</div>
   </div>
 </div>
 

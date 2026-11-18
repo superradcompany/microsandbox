@@ -779,7 +779,7 @@ Restore rejects missing external filesystems (and, for full restore, additional 
 | `dangerously_inherit_resources` | Explicitly inherit host resources. Disabled by default. |
 | `external_mount_policy` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
-Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy`, not `Network`. `captured_volumes` contains guest paths.
+Omitted controls retain destination defaults. Lifetime limits accept numeric seconds or `datetime.timedelta` and require non-negative whole seconds. Network policy accepts `NetworkPolicy`, not `Network`. `captured_volumes` contains guest paths.
 
 </Accordion>
 

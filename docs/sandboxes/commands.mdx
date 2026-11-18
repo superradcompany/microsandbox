@@ -263,7 +263,7 @@ const output = await sb.execWith("python", (e) =>
     e.args(["compute.py"])
         .cwd("/app")
         .env("PYTHONPATH", "/app/lib")
-        .timeout(30_000)
+        .timeoutMilliseconds(30_000)
         .rlimit("nofile", 1024),
 );
 ```

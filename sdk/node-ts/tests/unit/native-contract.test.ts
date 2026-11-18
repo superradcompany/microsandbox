@@ -63,7 +63,7 @@ describe("native Sandbox lifecycle contract", () => {
   it("exposes narrow destination controls on the dedicated restore builder", () => {
     const builder = new napi.RestoreBuilder("snapshot").name("destination");
     expect(builder.cpus(2).memory(512).maxTcpConnections(0).maxUdpConnections(7).disableNetwork()
-      .security("default").maxDuration(0).idleTimeout(0)).toBe(builder);
+      .security("default").maxDurationSeconds(0).idleTimeoutSeconds(0)).toBe(builder);
     expect(builder.maxConnections(64).maxUdpConnections(0)).toBe(builder);
     expect(builder.port(8080, 80).tcpAcceptQueueSize(4096)).toBe(builder);
     expect(() => builder.networkPolicyJson(JSON.stringify({
@@ -73,13 +73,13 @@ describe("native Sandbox lifecycle contract", () => {
       .toThrow("restore network policy accepts only default actions and rules");
     expect(() => builder.cpus(256)).toThrow("cpus out of u8 range");
     expect(() => builder.security("invalid" as never)).toThrow("invalid security profile");
-    for (const value of [-1, NaN, Infinity, -Infinity, 2 ** 64]) {
-      expect(() => builder.maxDuration(value)).toThrow("restore duration must be finite");
-      expect(() => builder.idleTimeout(value)).toThrow("restore duration must be finite");
+    for (const value of [-1, NaN, Infinity, -Infinity, 0.5, 1.5, Number.MIN_VALUE, 2 ** 53]) {
+      expect(() => builder.maxDurationSeconds(value)).toThrow("must be a non-negative safe integer");
+      expect(() => builder.idleTimeoutSeconds(value)).toThrow("must be a non-negative safe integer");
     }
     // Rejected values must not consume the builder or change valid limit semantics.
-    for (const value of [0, -0, 0.5, 1.5, Number.MIN_VALUE]) {
-      expect(builder.maxDuration(value).idleTimeout(value)).toBe(builder);
+    for (const value of [0, -0, 1, Number.MAX_SAFE_INTEGER]) {
+      expect(builder.maxDurationSeconds(value).idleTimeoutSeconds(value)).toBe(builder);
     }
     for (const method of ["image", "network", "cmd", "entrypoint", "replace", "create"]) {
       expect((builder as unknown as Record<string, unknown>)[method], method).toBeUndefined();

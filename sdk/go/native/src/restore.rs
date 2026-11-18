@@ -125,10 +125,10 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
         builder = builder.security(parse_security_profile(profile)?);
     }
     if let Some(seconds) = opts.max_duration_secs {
-        builder = builder.max_duration(seconds);
+        builder = builder.max_duration(std::time::Duration::from_secs(seconds));
     }
     if let Some(seconds) = opts.idle_timeout_secs {
-        builder = builder.idle_timeout(seconds);
+        builder = builder.idle_timeout(std::time::Duration::from_secs(seconds));
     }
     if opts.forked {
         builder = builder.cow_memory();

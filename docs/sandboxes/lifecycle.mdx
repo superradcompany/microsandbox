@@ -606,16 +606,16 @@ For production workloads, configure a maximum lifetime or idle timeout so sandbo
 ```typescript TypeScript
 await using sb = await Sandbox.builder("worker")
     .image("python")
-    .maxDuration(3600)   // maximum sandbox lifetime in seconds
-    .idleTimeout(300)    // auto-drain after 5 minutes of inactivity
+    .maxDurationSeconds(3600)   // maximum sandbox lifetime in seconds
+    .idleTimeoutSeconds(300)    // auto-drain after 5 minutes of inactivity
     .create();
 ```
 
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
-    .max_duration(3600)
-    .idle_timeout(300)
+    .max_duration(std::time::Duration::from_secs(3600))
+    .idle_timeout(std::time::Duration::from_secs(300))
     .create()
     .await?;
 ```

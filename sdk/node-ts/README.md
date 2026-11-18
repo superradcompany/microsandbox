@@ -161,7 +161,7 @@ const configured = await sandbox.execWith("python3", (exec) =>
     .args(["script.py"])
     .cwd("/app")
     .env("PYTHONPATH", "/app/lib")
-    .timeout(30_000),
+    .timeoutMilliseconds(30_000),
 );
 
 const handle = await sandbox.execStream("tail", ["-f", "/var/log/app.log"]);

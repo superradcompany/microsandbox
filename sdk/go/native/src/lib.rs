@@ -2650,12 +2650,12 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(secs) = opts.max_duration_secs
                 && secs > 0
             {
-                builder = builder.max_duration(secs);
+                builder = builder.max_duration(std::time::Duration::from_secs(secs));
             }
             if let Some(secs) = opts.idle_timeout_secs
                 && secs > 0
             {
-                builder = builder.idle_timeout(secs);
+                builder = builder.idle_timeout(std::time::Duration::from_secs(secs));
             }
             // `registry` overwrites insecure and ca_certs wholesale, so all
             // three overrides have to be applied in one call.

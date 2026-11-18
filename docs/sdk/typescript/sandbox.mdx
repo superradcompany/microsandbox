@@ -551,7 +551,7 @@ console.log(`${keepalive.name}: ${keepalive.activitySeq}`);
 
 </Accordion>
 
-Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `maxDuration`.
+Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `maxDurationSeconds`.
 
 <p className="msb-label">Returns</p>
 
@@ -1211,10 +1211,10 @@ Deprecated compatibility alias for older builder chains. This sets the same proc
   </div>
 </div>
 
-#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">idleTimeout()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">idleTimeoutSeconds()</span>
 
 ```typescript
-idleTimeout(secs: number): this
+idleTimeoutSeconds(secs: number): this
 ```
 
 Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
@@ -1415,10 +1415,10 @@ Override the sandbox process's log verbosity.
   </div>
 </div>
 
-#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">maxDuration()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">maxDurationSeconds()</span>
 
 ```typescript
-maxDuration(secs: number): this
+maxDurationSeconds(secs: number): this
 ```
 
 Set the maximum sandbox lifetime in seconds. When exceeded, the sandbox is drained and stopped. Enforced on the host side - the guest cannot override it.

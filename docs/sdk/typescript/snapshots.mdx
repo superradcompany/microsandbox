@@ -901,14 +901,14 @@ Restore rejects missing external filesystems (and, for full restore, additional 
 | `maxConnections()` | Concurrent TCP limit; zero means unlimited. |
 | `disableNetwork()` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
-| `maxDuration(), idleTimeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
+| `maxDurationSeconds(), idleTimeoutSeconds()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
 | `port(), portBind(), portUdp(), portUdpBind()` | Bind destination TCP or UDP ports. |
 | `vsock(), vsockDgram()` | Bind destination vsock endpoints. |
 | `user(), logLevel()` | Default user for new execs and host runtime log level. |
 | `dangerouslyInheritResources()` | Explicitly inherit host resources. Disabled by default. |
 | `externalMountPolicy()` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
-Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy` or `NetworkPolicyBuilder`. Use `v => v.captured()` for a private captured volume.
+Omitted controls retain destination defaults. Lifetime limits take non-negative safe integers in seconds. Network policy accepts `NetworkPolicy` or `NetworkPolicyBuilder`. Use `v => v.captured()` for a private captured volume.
 
 </Accordion>
 

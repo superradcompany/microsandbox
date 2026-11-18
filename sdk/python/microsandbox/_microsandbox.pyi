@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
+from datetime import timedelta
 from typing import Any, Literal
 
 from microsandbox.inspection import SandboxConfigInspection
@@ -80,13 +81,13 @@ class PyAgentClient:
     async def connect_sandbox(
         name: str,
         *,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
     ) -> PyAgentClient: ...
     @staticmethod
     async def connect(
         path: str,
         *,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
     ) -> PyAgentClient: ...
     @staticmethod
     def socket_path(name: str) -> str: ...
@@ -156,8 +157,8 @@ class Sandbox:
         max_udp_connections: int | None = None,
         disable_network: bool = False,
         security: SecurityProfile | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         cow_memory: bool = False,
         forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
@@ -187,8 +188,8 @@ class Sandbox:
         max_udp_connections: int | None = None,
         disable_network: bool = False,
         security: SecurityProfile | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         cow_memory: bool = False,
         forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
@@ -228,9 +229,9 @@ class Sandbox:
         cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
-        replace_with_timeout: float | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         ephemeral: bool = False,
         env: Mapping[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -274,9 +275,9 @@ class Sandbox:
         cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
-        replace_with_timeout: float | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         ephemeral: bool = False,
         env: Mapping[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -342,9 +343,9 @@ class Sandbox:
         cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
-        replace_with_timeout: float | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         ephemeral: bool = False,
         env: Mapping[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -379,7 +380,7 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: builtins.list[Rlimit] | None = None,
@@ -390,7 +391,7 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: builtins.list[Rlimit] | None = None,
@@ -403,7 +404,7 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: builtins.list[Rlimit] | None = None,
@@ -416,7 +417,7 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: builtins.list[Rlimit] | None = None,
@@ -429,7 +430,7 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: builtins.list[Rlimit] | None = None,
@@ -441,7 +442,7 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: builtins.list[Rlimit] | None = None,
@@ -453,7 +454,7 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: builtins.list[Rlimit] | None = None,
@@ -526,8 +527,8 @@ class Sandbox:
         follow: bool = False,
     ) -> LogStream: ...
     async def restore_warnings(self) -> builtins.list[ExternalMountWarning]: ...
-    async def stop(self, timeout: float | None = None) -> None: ...
-    async def stop_with_timeout(self, timeout: float) -> None: ...
+    async def stop(self, timeout: float | timedelta | None = None) -> None: ...
+    async def stop_with_timeout(self, timeout: float | timedelta) -> None: ...
     async def fork(
         self,
         name: str,
@@ -565,7 +566,7 @@ class Sandbox:
     async def pause(self, *, guest_flush: GuestFlush | None = None) -> None: ...
     async def resume(self) -> None: ...
     async def request_stop(self) -> None: ...
-    async def kill(self, timeout: float | None = None) -> None: ...
+    async def kill(self, timeout: float | timedelta | None = None) -> None: ...
     async def request_kill(self) -> None: ...
     async def request_drain(self) -> None: ...
     async def wait_for_status(self, status: SandboxStatus) -> None: ...
@@ -573,10 +574,10 @@ class Sandbox:
         self,
         *,
         force: bool = False,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         detached: bool = False,
     ) -> Sandbox: ...
-    async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None: ...
+    async def destroy(self, *, force: bool = False, timeout: float | timedelta | None = None) -> None: ...
     async def wait_until_stopped(self) -> SandboxStopResult: ...
     async def detach(self) -> None: ...
     async def __aenter__(self) -> Sandbox: ...
@@ -654,7 +655,7 @@ class SandboxSshOps:
         user: str = "root",
         term: str | None = None,
         sftp: bool = True,
-        inactivity_timeout: float | None = None,
+        inactivity_timeout: float | timedelta | None = None,
     ) -> SshClient: ...
     async def prepare_server(
         self,
@@ -663,7 +664,7 @@ class SandboxSshOps:
         authorized_keys_path: str | os.PathLike[str] | None = None,
         user: str | None = None,
         sftp: bool = True,
-        inactivity_timeout: float | None = None,
+        inactivity_timeout: float | timedelta | None = None,
     ) -> SshServer: ...
 
 class SshOutput:
@@ -1432,9 +1433,9 @@ class Sandboxes:
         cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
-        replace_with_timeout: float | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         ephemeral: bool = False,
         env: Mapping[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -1480,9 +1481,9 @@ class Sandboxes:
         cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
-        replace_with_timeout: float | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         ephemeral: bool = False,
         env: Mapping[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -1526,9 +1527,9 @@ class Sandboxes:
         cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
-        replace_with_timeout: float | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         ephemeral: bool = False,
         env: Mapping[str, str] | None = None,
         labels: Mapping[str, str] | None = None,

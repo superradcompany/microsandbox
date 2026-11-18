@@ -142,3 +142,13 @@ Job log filters accept `stdout`, `stderr`, `output` and `stdin_error`. An unreco
 - **Python** — `(await sb.info())["status"]` returns a `SandboxStatus`, `context.kind` a `ContextKind`, and `(await volume.info())["kind"]` a `VolumeKind`. Job event tags narrow the payload to output, a replay gap or completed job information. Use `JobState.RUNNING` to compare job state.
 - **Go** — Use `JobStateRunning` for job state and `[]JobOutputSource{JobOutputStdout, JobOutputStderr}` for log filters. Progress phases, modification dispositions and live resize outcomes also have named string types. Use `string(value)` when passing one to a function requiring a string.
 - **Ruby** — Change `sb.status == "running"` to `sb.status == :running`, including comparisons against `sb.info.fetch("status")`. Context and volume kinds, snapshot kind accessors, job/event tags and log sources return symbols. Use `job.info` for live metadata. Ruby's `job.inspect` formats the object locally.
+
+## Lifetime limits and command timeouts
+
+| SDK | Migration |
+|---|---|
+| Rust | Pass `Duration::from_secs(60)` to `max_duration` or `idle_timeout` on create and restore builders. |
+| TypeScript | Rename `maxDuration` to `maxDurationSeconds`, `idleTimeout` to `idleTimeoutSeconds`, and exec builder `timeout` to `timeoutMilliseconds`. |
+| Python | Pass numeric seconds or `datetime.timedelta`. For example, `timeout=timedelta(milliseconds=500)` and `timeout=0.5` set the same command deadline. |
+
+For these SDKs, maximum lifetime and idle limits must be non-negative whole seconds. Choose the intended whole-second limit explicitly when migrating fractional values. Omission and explicit zero retain their operation-specific meanings.

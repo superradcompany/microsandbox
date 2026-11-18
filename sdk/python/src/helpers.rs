@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
     SecretSource, SecurityProfile, TransparentHugePagePolicy,
@@ -5,7 +7,7 @@ use microsandbox::sandbox::{
 use microsandbox::{LogLevel, RegistryAuth, SnapshotReference};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
-use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyModule};
+use pyo3::types::{PyByteArray, PyBytes, PyDelta, PyDict, PyInt, PyList, PyModule};
 
 use crate::snapshot::PySnapshot;
 
@@ -305,11 +307,11 @@ pub(crate) fn restore_builder_with_context(
             }
         });
     }
-    if let Some(seconds) = lifetime_duration(kwargs, "max_duration")? {
-        builder = builder.max_duration(seconds);
+    if let Some(duration) = lifetime_duration(kwargs, "max_duration")? {
+        builder = builder.max_duration(duration);
     }
-    if let Some(seconds) = lifetime_duration(kwargs, "idle_timeout")? {
-        builder = builder.idle_timeout(seconds);
+    if let Some(duration) = lifetime_duration(kwargs, "idle_timeout")? {
+        builder = builder.idle_timeout(duration);
     }
     let legacy_cow = extract_opt::<bool>(kwargs, "forked")?;
     if legacy_cow.is_some() {
@@ -392,17 +394,57 @@ pub(crate) fn restore_builder_with_context(
 }
 
 /// Keep explicit zero, and reject non-finite or negative durations before native conversion.
-fn lifetime_duration(kwargs: &Bound<'_, PyDict>, name: &str) -> PyResult<Option<u64>> {
-    extract_opt::<f64>(kwargs, name)?
-        .map(|seconds| {
-            if !seconds.is_finite() || seconds < 0.0 || seconds >= u64::MAX as f64 {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "{name} must be finite, non-negative, and fit in seconds"
-                )));
+/// Parse timedelta without converting through floating point, including for multi-day values.
+pub(crate) fn duration_input(
+    value: &Bound<'_, PyAny>,
+    name: &str,
+    whole_seconds: bool,
+) -> PyResult<Duration> {
+    let invalid = || {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} must be finite, non-negative, and fit in {}",
+            if whole_seconds {
+                "seconds"
+            } else {
+                "a duration"
             }
-            // Do not truncate a positive sub-second limit into immediate expiry.
-            Ok(seconds.ceil() as u64)
-        })
+        ))
+    };
+    let fractional = || {
+        pyo3::exceptions::PyValueError::new_err(format!("{name} must be a whole number of seconds"))
+    };
+    let duration = if value.is_instance_of::<PyDelta>() {
+        value.extract::<Duration>().map_err(|_| invalid())?
+    } else if value.is_instance_of::<PyInt>() {
+        Duration::from_secs(value.extract::<u64>().map_err(|_| invalid())?)
+    } else {
+        let seconds = value.extract::<f64>()?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(invalid());
+        }
+        // Check before converting: a positive fraction below nanosecond resolution rounds to zero.
+        if whole_seconds && seconds.fract() != 0.0 {
+            return Err(fractional());
+        }
+        Duration::try_from_secs_f64(seconds).map_err(|_| invalid())?
+    };
+    if whole_seconds && duration.subsec_nanos() != 0 {
+        return Err(fractional());
+    }
+    Ok(duration)
+}
+
+pub(crate) fn timeout_input(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Duration>> {
+    value
+        .map(|value| duration_input(value, "timeout", false))
+        .transpose()
+}
+
+fn lifetime_duration(kwargs: &Bound<'_, PyDict>, name: &str) -> PyResult<Option<Duration>> {
+    kwargs
+        .get_item(name)?
+        .filter(|value| !value.is_none())
+        .map(|value| duration_input(&value, name, true))
         .transpose()
 }
 
@@ -603,19 +645,18 @@ pub(crate) fn sandbox_builder_with_context(
     {
         builder = builder.replace();
     }
-    if let Some(timeout) = extract_opt::<f64>(kwargs, "replace_with_timeout")? {
-        let duration = std::time::Duration::try_from_secs_f64(timeout).map_err(|_| {
-            pyo3::exceptions::PyValueError::new_err(
-                "replace_with_timeout must be finite, non-negative, and fit in a duration",
-            )
-        })?;
-        builder = builder.replace_with_timeout(duration);
+    if let Some(value) = kwargs
+        .get_item("replace_with_timeout")?
+        .filter(|value| !value.is_none())
+    {
+        builder =
+            builder.replace_with_timeout(duration_input(&value, "replace_with_timeout", false)?);
     }
-    if let Some(seconds) = lifetime_duration(kwargs, "max_duration")? {
-        builder = builder.max_duration(seconds);
+    if let Some(duration) = lifetime_duration(kwargs, "max_duration")? {
+        builder = builder.max_duration(duration);
     }
-    if let Some(seconds) = lifetime_duration(kwargs, "idle_timeout")? {
-        builder = builder.idle_timeout(seconds);
+    if let Some(duration) = lifetime_duration(kwargs, "idle_timeout")? {
+        builder = builder.idle_timeout(duration);
     }
     if let Some(ephemeral) = extract_opt::<bool>(kwargs, "ephemeral")? {
         builder = builder.ephemeral(ephemeral);
@@ -2700,16 +2741,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn creation_and_restore_lifetime_validation_rounds_up() {
+    fn creation_and_restore_lifetime_validation_requires_whole_seconds() {
         Python::initialize();
         Python::attach(|py| {
             let kwargs = PyDict::new(py);
             for name in ["max_duration", "idle_timeout"] {
-                for (value, expected) in [(0.0, 0), (0.5, 1), (1.1, 2), (2.0, 2)] {
+                for (value, expected) in [(0.0, 0), (2.0, 2)] {
                     kwargs.set_item(name, value).unwrap();
-                    assert_eq!(lifetime_duration(&kwargs, name).unwrap(), Some(expected));
+                    assert_eq!(
+                        lifetime_duration(&kwargs, name).unwrap(),
+                        Some(Duration::from_secs(expected))
+                    );
                 }
                 for value in [
+                    0.5,
+                    1.1,
+                    f64::MIN_POSITIVE,
                     f64::NAN,
                     f64::INFINITY,
                     f64::NEG_INFINITY,

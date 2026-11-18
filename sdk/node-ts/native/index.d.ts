@@ -188,7 +188,7 @@ export declare class ExecOptionsBuilder {
   /** Set environment variables from an object. */
   envs(vars: Record<string, string>): this
   /** Kill the process if it hasn't exited within `ms` milliseconds. */
-  timeout(ms: number): this
+  timeoutMilliseconds(ms: number): this
   stdinNull(): this
   stdinPipe(): this
   stdinBytes(data: Buffer): this
@@ -882,9 +882,9 @@ export declare class RestoreBuilder {
   /** Set guest security for disk boot; explicit changes are rejected by full restore. */
   security(profile: 'default' | 'restricted'): this
   /** Apply the destination host's maximum runtime in seconds; zero expires immediately. */
-  maxDuration(secs: number): this
+  maxDurationSeconds(secs: number): this
   /** Apply the destination host's idle timeout in seconds; zero expires immediately. */
-  idleTimeout(secs: number): this
+  idleTimeoutSeconds(secs: number): this
   /** Accept missing restore resources without inheriting host resources. */
   allowMissingResources(): this
   /** Explicitly reuse locally validated source resource bindings. */
@@ -1497,9 +1497,9 @@ export declare class SandboxBuilder {
   /** Mount many scripts at once. */
   scripts(scripts: Record<string, string>): this
   /** Auto-stop after `secs` seconds. */
-  maxDuration(secs: number): this
+  maxDurationSeconds(secs: number): this
   /** Auto-stop after `secs` seconds of inactivity. */
-  idleTimeout(secs: number): this
+  idleTimeoutSeconds(secs: number): this
   /**
    * Configure a volume mount via a callback. The callback receives a
    * `MountBuilder` already pre-bound to `guestPath`.

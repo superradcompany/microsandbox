@@ -34,7 +34,7 @@ const sandbox = await Sandbox.builder(name)
     "-lc",
     "for i in 1 2 3; do echo typescript-cloud-$i; sleep 1; done",
   ])
-  .maxDuration(60)
+  .maxDurationSeconds(60)
   .create();
 
 try {

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -637,7 +638,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -673,7 +674,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -713,7 +714,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -753,7 +754,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -793,7 +794,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -831,7 +832,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -869,7 +870,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -1229,8 +1230,12 @@ impl PySandbox {
 
     /// Wait indefinitely for graceful completion and runtime ownership release.
     #[pyo3(signature = (timeout = None))]
-    fn stop<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
-        let timeout = optional_duration(timeout)?;
+    fn stop<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let timeout = crate::helpers::timeout_input(timeout)?;
         let inner = self.inner.clone();
         let name = self.stop_name.clone();
         let identity = self.stop_identity.clone();
@@ -1261,7 +1266,11 @@ impl PySandbox {
     }
 
     /// Wait for graceful completion within one seconds budget; expiry never kills.
-    fn stop_with_timeout<'py>(&self, py: Python<'py>, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+    fn stop_with_timeout<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         self.stop(py, Some(timeout))
     }
 
@@ -1415,9 +1424,13 @@ impl PySandbox {
 
     /// Kill the sandbox and wait until stopped.
     #[pyo3(signature = (timeout = None))]
-    fn kill<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
+    fn kill<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let timeout = optional_duration(timeout)?;
+        let timeout = crate::helpers::timeout_input(timeout)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
             match timeout {
@@ -1598,7 +1611,7 @@ impl PySandbox {
         &self,
         py: Python<'py>,
         force: bool,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         detached: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
@@ -1607,7 +1620,7 @@ impl PySandbox {
             detached,
             ..Default::default()
         };
-        if let Some(timeout) = optional_duration(timeout)? {
+        if let Some(timeout) = crate::helpers::timeout_input(timeout)? {
             options.timeout = timeout;
         }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1626,14 +1639,14 @@ impl PySandbox {
         &self,
         py: Python<'py>,
         force: bool,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let mut options = microsandbox::sandbox::DestroyOptions {
             force,
             ..Default::default()
         };
-        if let Some(timeout) = optional_duration(timeout)? {
+        if let Some(timeout) = crate::helpers::timeout_input(timeout)? {
             options.timeout = timeout;
         }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2137,7 +2150,7 @@ struct ExecOpts {
     cwd: Option<String>,
     user: Option<String>,
     env: Vec<(String, String)>,
-    timeout_secs: Option<f64>,
+    timeout: Option<Duration>,
     tty: bool,
     stdin_mode: Option<String>,
     stdin_data: Option<Vec<u8>>,
@@ -2158,7 +2171,7 @@ fn parse_exec_call(
     cwd: Option<String>,
     user: Option<String>,
     env: Option<HashMap<String, String>>,
-    timeout_secs: Option<f64>,
+    timeout: Option<&Bound<'_, PyAny>>,
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
@@ -2169,7 +2182,7 @@ fn parse_exec_call(
         cwd,
         user,
         env: env_to_pairs(env),
-        timeout_secs,
+        timeout: None,
         tty,
         stdin_mode,
         stdin_data,
@@ -2186,7 +2199,10 @@ fn parse_exec_call(
         }
     }
 
-    validate_timeout(opts.timeout_secs)?;
+    // As with cwd and env, an explicit options-dict value wins over the keyword.
+    if opts.timeout.is_none() {
+        opts.timeout = crate::helpers::timeout_input(timeout)?;
+    }
     Ok((parsed_args, opts))
 }
 
@@ -2225,8 +2241,8 @@ fn apply_exec_options_dict(opts: &mut ExecOpts, dict: &Bound<'_, PyDict>) -> PyR
     if let Some(env) = extract_optional_dict_value::<HashMap<String, String>>(dict, "env")? {
         opts.env = env_to_pairs(Some(env));
     }
-    if let Some(timeout) = extract_optional_dict_value::<f64>(dict, "timeout")? {
-        opts.timeout_secs = Some(timeout);
+    if let Some(timeout) = dict.get_item("timeout")?.filter(|value| !value.is_none()) {
+        opts.timeout = crate::helpers::timeout_input(Some(&timeout))?;
     }
     if let Some(tty) = extract_optional_dict_value::<bool>(dict, "tty")? {
         opts.tty = tty;
@@ -2266,18 +2282,17 @@ fn parse_shell_call(
     cwd: Option<String>,
     user: Option<String>,
     env: Option<HashMap<String, String>>,
-    timeout_secs: Option<f64>,
+    timeout: Option<&Bound<'_, PyAny>>,
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ExecOpts> {
     let (stdin_mode, stdin_data) = parse_stdin(stdin)?;
-    validate_timeout(timeout_secs)?;
     Ok(ExecOpts {
         cwd,
         user,
         env: env_to_pairs(env),
-        timeout_secs,
+        timeout: crate::helpers::timeout_input(timeout)?,
         tty,
         stdin_mode,
         stdin_data,
@@ -2436,10 +2451,6 @@ fn validate_rlimit_resource(resource: &str) -> PyResult<()> {
     }
 }
 
-fn validate_timeout(timeout_secs: Option<f64>) -> PyResult<()> {
-    optional_duration(timeout_secs).map(|_| ())
-}
-
 fn required_from_dict<'py, T: for<'a> FromPyObject<'a, 'py, Error = PyErr>>(
     dict: &Bound<'py, PyDict>,
     key: &str,
@@ -2477,8 +2488,8 @@ fn apply_exec_options(
     if let Some(user) = opts.user {
         builder = builder.user(user);
     }
-    if let Some(timeout) = opts.timeout_secs {
-        builder = builder.timeout(std::time::Duration::from_secs_f64(timeout));
+    if let Some(timeout) = opts.timeout {
+        builder = builder.timeout(timeout);
     }
     if opts.tty {
         builder = builder.tty(true);
@@ -3057,24 +3068,20 @@ mod tests {
     #[test]
     fn execution_timeouts_reject_non_finite_and_overflowing_values() {
         Python::initialize();
-        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, f64::MAX] {
-            assert!(validate_timeout(Some(value)).is_err());
-        }
-        assert!(validate_timeout(Some(0.5)).is_ok());
-        assert!(validate_timeout(Some(0.0)).is_ok());
-    }
-
-    #[test]
-    fn explicit_stop_duration_preserves_zero_and_fractional_seconds() {
-        assert_eq!(optional_duration(None).unwrap(), None);
-        assert_eq!(
-            optional_duration(Some(0.0)).unwrap(),
-            Some(std::time::Duration::ZERO)
-        );
-        assert_eq!(
-            optional_duration(Some(0.125)).unwrap(),
-            Some(std::time::Duration::from_millis(125))
-        );
+        Python::attach(|py| {
+            for seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, f64::MAX] {
+                let value = pyo3::types::PyFloat::new(py, seconds);
+                assert!(crate::helpers::timeout_input(Some(&value)).is_err());
+            }
+            assert_eq!(crate::helpers::timeout_input(None).unwrap(), None);
+            for seconds in [0.0, 0.125] {
+                let value = pyo3::types::PyFloat::new(py, seconds);
+                assert_eq!(
+                    crate::helpers::timeout_input(Some(&value)).unwrap(),
+                    Some(Duration::from_secs_f64(seconds))
+                );
+            }
+        });
     }
 
     fn secret_patch(

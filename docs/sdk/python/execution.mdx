@@ -19,7 +19,7 @@ async def exec(
     cwd: str | None = None,
     user: str | None = None,
     env: Mapping[str, str] | None = None,
-    timeout: float | None = None,
+    timeout: float | timedelta | None = None,
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
@@ -68,7 +68,7 @@ Run a command inside the sandbox and wait for it to complete, buffering all stdo
     <div className="msb-param-desc">Environment variables, merged on top of the sandbox defaults.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | timedelta | None</span></div>
     <div className="msb-param-desc">Seconds before the process is killed.</div>
   </div>
   <div className="msb-param">
@@ -103,7 +103,7 @@ async def shell(
     cwd: str | None = None,
     user: str | None = None,
     env: Mapping[str, str] | None = None,
-    timeout: float | None = None,
+    timeout: float | timedelta | None = None,
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
@@ -155,7 +155,7 @@ async def exec_stream(
     cwd: str | None = None,
     user: str | None = None,
     env: Mapping[str, str] | None = None,
-    timeout: float | None = None,
+    timeout: float | timedelta | None = None,
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
@@ -216,7 +216,7 @@ async def shell_stream(
     cwd: str | None = None,
     user: str | None = None,
     env: Mapping[str, str] | None = None,
-    timeout: float | None = None,
+    timeout: float | timedelta | None = None,
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
@@ -589,7 +589,7 @@ Typed dictionary for passing arguments and per-call options together as the seco
 | cwd | `str` | Working directory |
 | user | `str` | Guest user |
 | env | `Mapping[str, str]` | Per-command environment variables |
-| timeout | `float` | Timeout in seconds |
+| timeout | `float \| timedelta` | Seconds or a `datetime.timedelta`, such as `timedelta(milliseconds=500)` |
 | stdin | [`Stdin`](#stdin) `\| bytes` | Stdin configuration or inline bytes |
 | stdin_data | `bytes` | Inline stdin bytes when `stdin` is omitted |
 | tty | `bool` | Whether to allocate a pseudo-terminal |
@@ -700,7 +700,7 @@ async def exec_detached(
     cwd: str | None = None,
     user: str | None = None,
     env: Mapping[str, str] | None = None,
-    timeout: float | None = None,
+    timeout: float | timedelta | None = None,
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,

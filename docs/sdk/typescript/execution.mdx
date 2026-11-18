@@ -67,7 +67,7 @@ const out = await sandbox.execWith("python3", (e) =>
   e.args(["script.py"])
     .cwd("/app")
     .env("PYTHONPATH", "/app/lib")
-    .timeout(30_000),
+    .timeoutMilliseconds(30_000),
 );
 ```
 
@@ -679,10 +679,10 @@ Add many env vars
 
 `(vars: Record<string, string>) => this`
 
-#### <span className="msb-recv">execOptions.</span><span className="msb-hn">timeout()</span>
+#### <span className="msb-recv">execOptions.</span><span className="msb-hn">timeoutMilliseconds()</span>
 
 ```typescript
-timeout(ms)
+timeoutMilliseconds(ms)
 ```
 
 Kill the process after this many milliseconds
