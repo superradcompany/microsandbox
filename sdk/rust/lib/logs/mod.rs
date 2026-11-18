@@ -146,15 +146,7 @@ pub struct LogSnapshot {
 /// Compute the on-disk log directory for a sandbox name.
 #[cfg(feature = "local")]
 pub fn log_dir_for(name: &str) -> PathBuf {
-    crate::backend::default_backend()
-        .as_local()
-        .map(|local| log_dir_for_local(local, name))
-        .unwrap_or_else(|| {
-            microsandbox_utils::resolve_home()
-                .join(microsandbox_utils::SANDBOXES_SUBDIR)
-                .join(name)
-                .join("logs")
-        })
+    default_log_reader_settings(name).0
 }
 
 /// Compute the on-disk log directory for an explicit local backend.
@@ -238,7 +230,8 @@ pub(crate) async fn read_logs_snapshot_local(
 /// lines written between the snapshot drain and follow startup.
 #[cfg(feature = "local")]
 pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogSnapshot> {
-    read_logs_snapshot_from_dir(name, log_dir_for(name), opts, default_strict_host_files()).await
+    let (directory, strict) = default_log_reader_settings(name);
+    read_logs_snapshot_from_dir(name, directory, opts, strict).await
 }
 
 #[cfg(feature = "local")]
@@ -288,7 +281,8 @@ pub async fn log_stream(
     name: &str,
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
-    log_stream_from_dir(name, log_dir_for(name), opts, default_strict_host_files()).await
+    let (directory, strict) = default_log_reader_settings(name);
+    log_stream_from_dir(name, directory, opts, strict).await
 }
 
 /// Stream log entries through an explicit local backend.
@@ -363,8 +357,19 @@ pub(crate) async fn log_stream_from_dir_registry(
 }
 
 #[cfg(feature = "local")]
-fn default_strict_host_files() -> bool {
-    crate::backend::default_backend()
-        .as_local()
-        .is_some_and(|local| local.config().runtime.strict_host_files)
+fn default_log_reader_settings(name: &str) -> (PathBuf, bool) {
+    let backend = crate::backend::default_backend();
+    if let Some(local) = backend.as_local() {
+        return (
+            log_dir_for_local(local, name),
+            local.config().runtime.strict_host_files,
+        );
+    }
+    (
+        microsandbox_utils::resolve_home()
+            .join(microsandbox_utils::SANDBOXES_SUBDIR)
+            .join(name)
+            .join("logs"),
+        false,
+    )
 }

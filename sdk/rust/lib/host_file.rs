@@ -87,3 +87,58 @@ fn open_without_symlinks(_path: &Path, _writable: bool) -> io::Result<File> {
         "strict host file opens require Unix",
     ))
 }
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn fifo_opens_fail_without_waiting_for_a_peer() {
+        const PROBE: &str = "MSB_HOST_FILE_FIFO_PROBE";
+        if let Some(path) = std::env::var_os(PROBE) {
+            for strict in [false, true] {
+                for writable in [false, true] {
+                    let error = open_regular(Path::new(&path), writable, strict).unwrap_err();
+                    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+                }
+            }
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join("pipe");
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host_file::tests::fifo_opens_fail_without_waiting_for_a_peer",
+                "--nocapture",
+            ])
+            .env(PROBE, &path)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "FIFO child failed: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("FIFO opens must not wait for a peer");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
