@@ -539,6 +539,33 @@ where
     block_without_gvl(ruby, future)?.map_err(|e| core_error(ruby, e))
 }
 
+/// A one-shot list can be the last owner of an empty local catalog. Wait for
+/// its SQLite workers to close before handing control back to Ruby: an
+/// immediate fork could otherwise inherit a mutex held by an exiting worker.
+fn run_catalog_list<F, T>(
+    ruby: &Ruby,
+    context: Arc<dyn microsandbox_core::Context>,
+    list: impl FnOnce(Arc<dyn microsandbox_core::Context>) -> F,
+) -> Result<T, Error>
+where
+    F: Future<Output = MicrosandboxResult<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    let local = context.as_local().cloned();
+    let query = list(context);
+    run(ruby, async move {
+        let result = query.await;
+        if let Some(local) = local {
+            let cleanup = local.finish_unshared_catalog_query().await;
+            // Preserve a query failure if both the query and its cleanup failed.
+            if result.is_ok() {
+                cleanup?;
+            }
+        }
+        result
+    })
+}
+
 /// Run a Service change and attach the core's change classification to every mapped error.
 fn run_service_change<F, T>(ruby: &Ruby, future: F) -> Result<T, Error>
 where
@@ -2080,11 +2107,7 @@ impl RubyOutboundProxy {
 }
 
 fn sandbox_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
-    sandbox_create_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    sandbox_create_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn sandbox_create_in(
@@ -2105,11 +2128,7 @@ fn sandbox_create_in(
 }
 
 fn sandbox_connect_or_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
-    sandbox_connect_or_create_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    sandbox_connect_or_create_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn sandbox_connect_or_create_in(
@@ -2130,11 +2149,7 @@ fn sandbox_connect_or_create_in(
 }
 
 fn sandbox_start(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
-    sandbox_start_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    sandbox_start_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn sandbox_start_in(
@@ -2159,11 +2174,7 @@ fn sandbox_start_in(
 }
 
 fn sandbox_get(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
-    sandbox_get_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    sandbox_get_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn sandbox_get_in(
@@ -2183,11 +2194,7 @@ fn sandbox_get_in(
 }
 
 fn sandbox_get_running(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
-    sandbox_get_running_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    sandbox_get_running_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn sandbox_get_running_in(
@@ -2206,11 +2213,7 @@ fn sandbox_get_running_in(
 }
 
 fn sandbox_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
-    sandbox_remove_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    sandbox_remove_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn sandbox_remove_in(
@@ -2227,11 +2230,7 @@ fn sandbox_remove_in(
 }
 
 fn sandbox_list(ruby: &Ruby, args: &[Value]) -> Result<RHash, Error> {
-    sandbox_list_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    sandbox_list_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn sandbox_list_in(
@@ -2248,7 +2247,7 @@ fn sandbox_list_in(
         .get(symbol("labels"))
         .map(|value| string_map(value, "labels"))
         .transpose()?;
-    let page = run(ruby, async move {
+    let page = run_catalog_list(ruby, context, |context| async move {
         context
             .sandboxes()
             .list_with(move |mut builder| {
@@ -2271,11 +2270,7 @@ fn sandbox_list_in(
 // -- Volume statics ----------------------------------------------------------
 
 fn volume_get(ruby: &Ruby, args: &[Value]) -> Result<RubyVolume, Error> {
-    volume_get_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    volume_get_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn volume_get_in(
@@ -2293,11 +2288,7 @@ fn volume_get_in(
 }
 
 fn volume_list(ruby: &Ruby, args: &[Value]) -> Result<RArray, Error> {
-    volume_list_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    volume_list_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn volume_list_in(
@@ -2309,7 +2300,9 @@ fn volume_list_in(
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "list does not accept keywords"));
     }
-    let handles = run(ruby, async move { context.volumes().list().await })?;
+    let handles = run_catalog_list(ruby, context, |context| async move {
+        context.volumes().list().await
+    })?;
     let array = current_ruby().ary_new();
     for inner in handles {
         array.push(RubyVolume { inner })?;
@@ -2318,11 +2311,7 @@ fn volume_list_in(
 }
 
 fn volume_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
-    volume_remove_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    volume_remove_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn volume_remove_in(
@@ -2347,11 +2336,7 @@ fn volume_builder(name: String) -> RubyVolumeBuilder {
 // -- Snapshot statics --------------------------------------------------------
 
 fn snapshot_open(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshot, Error> {
-    snapshot_open_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    snapshot_open_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn snapshot_open_in(
@@ -2372,11 +2357,7 @@ fn snapshot_open_in(
 }
 
 fn snapshot_get(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshot, Error> {
-    snapshot_get_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    snapshot_get_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn snapshot_get_in(
@@ -2394,11 +2375,7 @@ fn snapshot_get_in(
 }
 
 fn snapshot_list(ruby: &Ruby, args: &[Value]) -> Result<RArray, Error> {
-    snapshot_list_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    snapshot_list_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn snapshot_list_in(
@@ -2410,7 +2387,9 @@ fn snapshot_list_in(
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "list does not accept keywords"));
     }
-    let handles = run(ruby, async move { context.snapshots().list().await })?;
+    let handles = run_catalog_list(ruby, context, |context| async move {
+        context.snapshots().list().await
+    })?;
     let array = current_ruby().ary_new();
     for inner in handles {
         array.push(RubySnapshot { inner })?;
@@ -2419,11 +2398,7 @@ fn snapshot_list_in(
 }
 
 fn snapshot_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
-    snapshot_remove_in(
-        microsandbox_core::context::configured_context(),
-        ruby,
-        args,
-    )
+    snapshot_remove_in(microsandbox_core::context::configured_context(), ruby, args)
 }
 
 fn snapshot_remove_in(
