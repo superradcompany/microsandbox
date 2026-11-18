@@ -1492,10 +1492,11 @@ impl PySandbox {
                 .info()
                 .await
                 .map_err(to_py_err)?;
-            let value = serde_json::to_value(info).map_err(|error| to_py_err(error.into()))?;
+            let value = serde_json::to_value(&info).map_err(|error| to_py_err(error.into()))?;
             Python::attach(|py| {
                 let result = crate::conversion::json_value_to_py(py, value)?;
                 let dict = result.bind(py).cast::<PyDict>()?;
+                dict.set_item("status", sandbox_status_member(py, info.status)?)?;
                 let datetime = py.import("datetime")?.getattr("datetime")?;
                 for field in ["created_at", "updated_at"] {
                     if let Some(timestamp) = dict.get_item(field)?
@@ -1533,9 +1534,7 @@ impl PySandbox {
                 .status()
                 .await
                 .map_err(to_py_err)?;
-            Python::attach(|py| {
-                str_enum_member(py, "SandboxStatus", &format!("{status:?}").to_lowercase())
-            })
+            Python::attach(|py| sandbox_status_member(py, status))
         })
     }
 
@@ -2848,6 +2847,13 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+fn sandbox_status_member(
+    py: Python<'_>,
+    status: microsandbox::sandbox::SandboxStatus,
+) -> PyResult<Py<PyAny>> {
+    str_enum_member(py, "SandboxStatus", &format!("{status:?}").to_lowercase())
+}
 
 pub(crate) fn branch_outcomes(
     outcomes: Vec<microsandbox::sandbox::ForkOutcome>,

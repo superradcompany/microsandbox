@@ -32,7 +32,7 @@ use microsandbox_core::{
         SandboxStopResult, SandboxTouchResult, SecretSource,
     },
     snapshot::{SaveOpts, Snapshot},
-    volume::{Volume, VolumeKind},
+    volume::Volume,
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -842,7 +842,10 @@ fn apply_builder_options(
         if let Some(enabled) = keyword::<bool>(http, "deny_response")? {
             builder = builder.network(|network| network.http(|h| h.deny_response(enabled)));
         }
-        if let Some(format) = keyword::<String>(http, "deny_response_format")? {
+        if let Some(format) = keyword::<Value>(http, "deny_response_format")?
+            .map(|value| string_value(value, "deny_response_format"))
+            .transpose()?
+        {
             let format = match format.as_str() {
                 "text" => microsandbox_core::sandbox::HttpDenyResponseFormat::Text,
                 "json" => microsandbox_core::sandbox::HttpDenyResponseFormat::Json,
@@ -884,7 +887,10 @@ fn apply_builder_options(
     if let Some(v) = keyword::<String>(kwargs, "init")? {
         builder = builder.init(v);
     }
-    if let Some(v) = keyword::<String>(kwargs, "pull_policy")? {
+    if let Some(v) = keyword::<Value>(kwargs, "pull_policy")?
+        .map(|value| string_value(value, "pull_policy"))
+        .transpose()?
+    {
         let p = match v.to_ascii_lowercase().as_str() {
             "if_missing" | "if-missing" => PullPolicy::IfMissing,
             "always" => PullPolicy::Always,
@@ -1276,15 +1282,18 @@ impl RubySandbox {
     }
 
     /// One backend observation; returned hashes do not refresh themselves.
-    fn info(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<Value, Error> {
+    fn info(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
         let sb = this.inner_clone()?;
         let info = run(ruby, async move { sb.info().await })?;
         let json = serde_json::to_string(&info)
             .map_err(|error| Error::new(ruby.exception_runtime_error(), error.to_string()))?;
         ruby.require("json")?;
-        ruby.class_object()
+        let hash: RHash = ruby
+            .class_object()
             .const_get::<_, Value>("JSON")?
-            .funcall("parse", (json,))
+            .funcall("parse", (json,))?;
+        hash.aset("status", symbol(status_name(info.status)))?;
+        Ok(hash)
     }
 
     fn ensure_running(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<(), Error> {
@@ -1292,10 +1301,10 @@ impl RubySandbox {
         run(ruby, async move { sb.ensure_running().await })
     }
 
-    fn status(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<String, Error> {
+    fn status(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<Symbol, Error> {
         let sb = this.inner_clone()?;
         let status = run(ruby, async move { sb.status().await })?;
-        Ok(status_name(status).to_owned())
+        Ok(symbol(status_name(status)))
     }
 
     fn last_failure_message(
@@ -1402,10 +1411,10 @@ impl RubySandbox {
     fn wait_for_status(
         ruby: &Ruby,
         this: typed_data::Obj<Self>,
-        status: String,
+        status: Value,
     ) -> Result<(), Error> {
         let sandbox = this.inner_clone()?;
-        let status = parse_status(ruby, &status)?;
+        let status = parse_status(ruby, &string_value(status, "status")?)?;
         run(ruby, async move { sandbox.wait_for_status(status).await })
     }
 
@@ -1670,8 +1679,8 @@ impl RubyLogEntry {
     fn timestamp(&self) -> String {
         self.inner.timestamp.to_rfc3339()
     }
-    fn source(&self) -> String {
-        log_source_name(&self.inner.source).to_owned()
+    fn source(&self) -> Symbol {
+        symbol(log_source_name(&self.inner.source))
     }
     fn data(&self) -> RString {
         current_ruby().str_from_slice(&self.inner.data)
@@ -1731,10 +1740,10 @@ impl RubyVolume {
     fn name(&self) -> String {
         self.inner.name().to_owned()
     }
-    fn kind(&self) -> String {
-        volume_kind_name(self.inner.kind()).to_owned()
+    fn kind(&self) -> Symbol {
+        symbol(self.inner.kind().as_str())
     }
-    fn info(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<Value, Error> {
+    fn info(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
         let volume = this.inner.clone();
         let info = run(ruby, async move { volume.info().await })?;
         let mut value =
@@ -1746,9 +1755,12 @@ impl RubyVolume {
         )
         .map_err(|error| argument_error(ruby, error.to_string()))?;
         ruby.require("json")?;
-        ruby.class_object()
+        let hash: RHash = ruby
+            .class_object()
             .const_get::<_, Value>("JSON")?
-            .funcall("parse", (value.to_string(),))
+            .funcall("parse", (value.to_string(),))?;
+        hash.aset("kind", symbol(info.kind.as_str()))?;
+        Ok(hash)
     }
     fn created_at(&self) -> Option<String> {
         self.inner.created_at().map(|dt| dt.to_rfc3339())
@@ -1803,14 +1815,14 @@ impl RubySnapshot {
     fn image_ref(&self) -> String {
         self.inner.image_ref().to_owned()
     }
-    fn state_kind(&self) -> String {
-        self.inner.state_kind().to_owned()
+    fn state_kind(&self) -> Symbol {
+        symbol(self.inner.state_kind().as_str())
     }
     fn reference(&self) -> String {
         self.inner.reference().value().to_owned()
     }
-    fn reference_kind(&self) -> &'static str {
-        self.inner.reference().kind()
+    fn reference_kind(&self) -> Symbol {
+        symbol(self.inner.reference().kind())
     }
     fn destroy(ruby: &Ruby, this: typed_data::Obj<Self>, force: bool) -> Result<(), Error> {
         let handle = this.inner.clone();
@@ -2461,13 +2473,6 @@ fn status_name(status: SandboxStatus) -> &'static str {
     }
 }
 
-fn volume_kind_name(kind: VolumeKind) -> &'static str {
-    match kind {
-        VolumeKind::Directory => "dir",
-        VolumeKind::Disk => "disk",
-    }
-}
-
 fn log_source_name(src: &LogSource) -> &'static str {
     match src {
         LogSource::Stdout => "stdout",
@@ -2490,7 +2495,7 @@ fn parse_log_source(ruby: &Ruby, name: &str) -> Result<LogSource, Error> {
 fn stop_result_hash(r: SandboxStopResult) -> Result<RHash, Error> {
     let h = current_ruby().hash_new();
     h.aset("name", r.name)?;
-    h.aset("status", status_name(r.status))?;
+    h.aset("status", symbol(status_name(r.status)))?;
     h.aset("exit_code", r.exit_code)?;
     h.aset("signal", r.signal)?;
     h.aset("observed_at", r.observed_at.to_rfc3339())?;

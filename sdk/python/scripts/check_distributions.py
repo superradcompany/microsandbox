@@ -47,12 +47,14 @@ async def probe():
         selected = remote.RemoteContext(url=f'http://127.0.0.1:{server.server_port}', api_key='key')
         retained = selected.sandboxes
         destination = local.LocalContext(home=home)
-        assert destination.kind == 'local' and selected.kind == 'remote'
+        assert destination.kind is core.ContextKind.LOCAL
+        assert selected.kind is core.ContextKind.REMOTE
         sb = await retained.get('task')
         assert isinstance(sb, core.Sandbox)
         assert isinstance(sb.context, core.Context)
         assert isinstance(sb.context.sandboxes, core.Sandboxes)
-        assert (await sb.info())['id'] == sb.id
+        observation = await sb.info()
+        assert observation['id'] == sb.id and observation['status'] is core.SandboxStatus.STOPPED
         assert await sb.status() is core.SandboxStatus.STOPPED
         # Unsupported remote jobs must retain their typed error in every package.
         try: await sb.exec_detached('true')
@@ -85,7 +87,7 @@ JOBS_PROBE = r"""
 import asyncio, importlib, os, uuid
 from contextlib import suppress
 sdk=importlib.import_module(os.environ['MSB_TEST_PACKAGE'])
-from microsandbox_core.jobs import JobExit, JobInfo, JobPage
+from microsandbox_core.jobs import JobExit, JobInfo, JobOutputSource, JobPage, JobState
 async def main():
     name='review-jobs-'+uuid.uuid4().hex[:8]
     sb=await sdk.Sandbox.create(name, image='mirror.gcr.io/library/alpine', memory=512, cpus=1)
@@ -94,10 +96,11 @@ async def main():
         outcome=await job.wait()
         assert isinstance(outcome, JobExit) and outcome.code==7
         info=await job.inspect()
-        assert isinstance(info, JobInfo) and info.id==job.id
+        assert isinstance(info, JobInfo) and info.id==job.id and info.state is JobState.EXITED
         page=await sb.list_jobs(all=True)
         assert isinstance(page, JobPage) and any(item.id==job.id for item in page.items)
-        logs=await job.logs()
+        logs=await job.logs(sources=[JobOutputSource.STDOUT])
+        assert all(entry.source is JobOutputSource.STDOUT for entry in logs)
         assert b'job-output' in b''.join(item.data for item in logs)
         print(os.environ['MSB_TEST_PACKAGE'], 'native wait/inspect/list/output decoded')
     finally:

@@ -215,7 +215,7 @@ A named persistent volume returned by creation, lookup, and listing. Identity ac
 func (v *Volume) Info(ctx context.Context) (*VolumeInfo, error)
 ```
 
-The observation includes identity, kind, quota, optional usage/capacity, labels, and creation time. Unknown measurements remain `nil`. A failed lookup returns an error without falling back to captured values.
+The observation includes identity, kind, quota, optional usage/capacity, labels, and creation time. Compare `info.Kind` with `VolumeKindDir` or `VolumeKindDisk`. Unknown measurements remain `nil`. A failed lookup returns an error without falling back to captured values.
 
 <Accordion title="Example">
 

@@ -112,7 +112,8 @@ pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts,
     Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotConfig, SnapshotCopyBuilder,
     SnapshotDescriptor, SnapshotFormat, SnapshotReference, SnapshotRootDisk, SnapshotScope,
-    SnapshotSpec, SnapshotState, SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
+    SnapshotSpec, SnapshotState, SnapshotStateKind, SnapshotVerifyReport, UpperIntegrity,
+    UpperVerifyStatus,
 };
 pub use storage::{Storage, StorageCategoryUsage, StorageItemUsage, StorageUsage};
 pub use volume::{Volume, VolumeConfig, VolumeId, VolumeKind, VolumeSpec};

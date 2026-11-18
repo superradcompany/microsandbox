@@ -45,6 +45,8 @@ class SnapshotTest < Test::Unit::TestCase
         end
         File.write(descriptor, bytes)
         [opened, fetched, listed].each do |snapshot|
+          raise "wrong state kind" unless snapshot.state_kind == :file
+          raise "wrong reference kind" unless snapshot.reference_kind.is_a?(Symbol)
           raise "wrong state" unless snapshot.state.fetch("kind") == "file"
           raise "wrong identity" unless snapshot.manifest.fetch("snapshot_id") == snapshot.id
         end

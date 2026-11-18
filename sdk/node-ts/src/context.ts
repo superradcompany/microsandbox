@@ -10,12 +10,14 @@ export interface LocalContextOptions {
   readonly configPath?: string;
 }
 
+export type ComputeType = "standard" | "shared";
+
 export interface RemoteContextOptions {
   readonly url?: string;
   readonly apiKey?: string;
   readonly requestTimeoutMs?: number;
   readonly userAgent?: string;
-  readonly computeType?: "standard" | "shared";
+  readonly computeType?: ComputeType;
 }
 
 /** Shared destination configuration; no process-wide routing changes. */
@@ -88,7 +90,7 @@ export class RemoteContextBuilder {
   url(url: string): this { this.options = { ...this.options, url }; return this; }
   apiKey(apiKey: string): this { this.options = { ...this.options, apiKey }; return this; }
   requestTimeoutMs(requestTimeoutMs: number): this { this.options = { ...this.options, requestTimeoutMs }; return this; }
-  computeType(computeType: "standard" | "shared"): this { this.options = { ...this.options, computeType }; return this; }
+  computeType(computeType: ComputeType): this { this.options = { ...this.options, computeType }; return this; }
   userAgent(userAgent: string): this { this.options = { ...this.options, userAgent }; return this; }
   build(): RemoteContext {
     const timeout = this.options.requestTimeoutMs;

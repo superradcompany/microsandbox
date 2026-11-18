@@ -87,10 +87,15 @@ class SandboxInfo(TypedDict):
 
     id: str
     name: str
-    status: Literal["created", "starting", "running", "draining", "paused", "stopped", "crashed"]
+    status: SandboxStatus
     last_failure_message: str | None
     created_at: datetime | None
     updated_at: datetime | None
+
+
+class ComputeType(StrEnum):
+    STANDARD = "standard"
+    SHARED = "shared"
 
 
 class ContextKind(StrEnum):
@@ -264,9 +269,26 @@ class DiskImageFormat(StrEnum):
     RAW = "raw"
     VMDK = "vmdk"
 
+
 class VolumeKind(StrEnum):
     DIRECTORY = "dir"
     DISK = "disk"
+
+
+class VolumeInfo(TypedDict):
+    """A fresh volume observation. Missing measurements remain None."""
+
+    id: str
+    name: str
+    kind: VolumeKind
+    is_default: bool
+    quota_mib: int | None
+    used_bytes: int | None
+    capacity_bytes: int | None
+    disk_format: str | None
+    disk_fstype: str | None
+    labels: dict[str, str]
+    created_at: str | None
 
 
 class NamedVolumeMode(StrEnum):

@@ -35,7 +35,7 @@ begin
   check('volume_info'){vol.info} if vol
   sb=check('sandbox_create'){s.create(name,image:'python',ephemeral:false,env:{'AUDIT_ENV'=>'retained'})}
   if sb
-    check('sandbox_identity'){eq(s.get(name).id,sb.id);eq(sb.name,name);eq(sb.context.kind,'remote');eq(sb.owns_lifecycle?,false)}
+    check('sandbox_identity'){eq(s.get(name).id,sb.id);eq(sb.name,name);eq(sb.context.kind,:remote);eq(sb.owns_lifecycle?,false)}
     %w[info status config last_failure_message ensure_running ping touch metrics logs].each{|m|check('sandbox_'+m){sb.public_send(m)}}
     check('get_running'){eq(s.get_running(name).id,sb.id)}
     check('exec'){eq(sb.exec('printf',['exec-ok']).stdout,'exec-ok')}
@@ -54,7 +54,7 @@ begin
     check('jobs_list'){sb.list_jobs}
     job=check('job_create'){sb.exec_detached('/bin/sh',['-c','printf job-ok; exit 6'])}
     if job
-      check('job_wait_repeat'){job.wait;job.wait};check('job_inspect'){job.inspect};check('job_logs'){job.logs};check('job_get'){eq(sb.get_job(job.id).id,job.id)}
+      check('job_wait_repeat'){job.wait;job.wait};check('job_inspect'){job.info};check('job_logs'){job.logs};check('job_get'){eq(sb.get_job(job.id).id,job.id)}
     end
     check('job_kill'){j=sb.exec_detached('sleep',['60']);j.kill;j.wait}
     check('detach'){sb.detach;sb.info}

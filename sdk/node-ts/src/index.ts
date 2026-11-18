@@ -83,7 +83,7 @@ export type {
 export { FsReadStream, FsWriteSink, SandboxFsOps } from "./fs.js";
 
 // Volumes
-export { Volume, type VolumeInfo } from "./volume.js";
+export { Volume, type VolumeInfo, type VolumeKind } from "./volume.js";
 import { Volume as _Volume, type VolumeBuilder as _VBT } from "./volume.js";
 /**
  * Native fluent builder for a named volume. `new VolumeBuilder(name)`
@@ -406,7 +406,7 @@ export const Rule = _Factories.Rule;
 export type Rule = _Types.Rule;
 
 export { Job, JobAttachment, JobError, JobLogStream, JobListBuilder, JobAttachOptionsBuilder } from "./jobs.js";
-export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState } from "./jobs.js";
+export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState, JobOutputSource } from "./jobs.js";
 
 export { diagnoseStorage } from "./storage-diagnosis.js";
 export type { StorageSelection, StorageDiagnosticStatus, StorageCandidate, StorageInspection, StorageSandboxDiagnosis, StorageDiagnosis } from "./storage-diagnosis.js";
@@ -414,6 +414,6 @@ export type { StorageSelection, StorageDiagnosticStatus, StorageCandidate, Stora
 export type { StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection } from "./storage-recovery.js";
 
 export { Context, LocalContext, RemoteContext, LocalContextBuilder, RemoteContextBuilder, Sandboxes, Volumes, Snapshots } from "./context.js";
-export type { LocalContextOptions, RemoteContextOptions } from "./context.js";
+export type { ComputeType, LocalContextOptions, RemoteContextOptions } from "./context.js";
 
 export type { SandboxConfigInspection, SandboxRuntimeInspection, RemoteSandboxInspection, LocalSandboxInspection, RemoteMountInspection, RemoteSecretInspection } from "./config-inspection.js";

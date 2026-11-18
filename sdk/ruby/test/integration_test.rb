@@ -16,7 +16,7 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     @names&.each do |name|
       begin
         handle = Microsandbox::Sandbox.get(name)
-        handle.stop if handle.status == "running"
+        handle.stop if handle.status == :running
         handle.destroy
       rescue Microsandbox::Error
         nil
@@ -106,7 +106,7 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
 
     GC.start(full_mark: true, immediate_sweep: true)
     assert_eventually("owned sandbox to stop after GC") do
-      Microsandbox::Sandbox.get(owned_name).status != "running"
+      Microsandbox::Sandbox.get(owned_name).status != :running
     end
 
     detached_name = unique_name("gc-detached")
@@ -116,7 +116,7 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     detached = nil
     GC.start(full_mark: true, immediate_sweep: true)
 
-    assert_equal "running", Microsandbox::Sandbox.get(detached_name).status
+    assert_equal :running, Microsandbox::Sandbox.get(detached_name).status
   end
 
   def test_blocking_native_calls_release_the_gvl
@@ -217,12 +217,12 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
       assert_true Microsandbox::Error === error
       assert_equal "stop-timeout", error.code
       assert_match(/timed out/, error.message)
-      assert_equal "running", Microsandbox::Sandbox.get(sandbox.name).status
+      assert_equal :running, Microsandbox::Sandbox.get(sandbox.name).status
     end
 
     # Omitted timeout uses the unbounded Rust stop, not a hidden default deadline.
     sandbox.stop
-    assert_equal "stopped", Microsandbox::Sandbox.get(sandbox.name).status
+    assert_equal :stopped, Microsandbox::Sandbox.get(sandbox.name).status
   ensure
     sandbox&.kill
   end

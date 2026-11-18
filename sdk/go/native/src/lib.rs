@@ -6772,7 +6772,7 @@ fn snapshot_handle_json(h: &microsandbox::Snapshot) -> serde_json::Value {
         "parent_digest": h.parent_digest(),
         "image_ref": h.image_ref(),
         "scope": snapshot_scope_str(h.scope()),
-        "state_kind": h.state_kind(),
+        "state_kind": h.state_kind().as_str(),
         "format": h.format().map(snapshot_format_str),
         "fstype": h.fstype(),
         "checkpoint_manifest_digest": h.checkpoint_manifest_digest(),

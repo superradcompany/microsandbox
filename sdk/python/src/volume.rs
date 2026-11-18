@@ -355,7 +355,14 @@ impl PyVolume {
             value["labels"] =
                 serde_json::to_value(info.labels.into_iter().collect::<HashMap<_, _>>())
                     .map_err(|error| to_py_err(error.into()))?;
-            Python::attach(|py| crate::conversion::json_value_to_py(py, value))
+            Python::attach(|py| {
+                let result = crate::conversion::json_value_to_py(py, value)?;
+                result.bind(py).cast::<PyDict>()?.set_item(
+                    "kind",
+                    str_enum_member(py, "VolumeKind", info.kind.as_str())?,
+                )?;
+                Ok::<_, PyErr>(result)
+            })
         })
     }
 

@@ -50,6 +50,18 @@ pub struct Snapshot {
     pub(crate) previous_upper: Option<PathBuf>,
 }
 
+/// Indexed snapshot payload type. Unknown tags retain their original spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotStateKind<'a> {
+    /// Filesystem payload.
+    File,
+    /// Machine checkpoint.
+    Checkpoint,
+    /// A tag produced by another index version.
+    Unknown(&'a str),
+}
+
 /// A backend-neutral reference used to open, remove, or restore a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotReference {
@@ -380,6 +392,17 @@ impl Snapshot {
     }
 }
 
+impl<'a> SnapshotStateKind<'a> {
+    /// Stable text used by the snapshot index and language bindings.
+    pub fn as_str(self) -> &'a str {
+        match self {
+            Self::File => "file",
+            Self::Checkpoint => "checkpoint",
+            Self::Unknown(tag) => tag,
+        }
+    }
+}
+
 impl SnapshotReference {
     /// Build a compatibility reference interpreted automatically by the backend.
     pub fn auto(value: impl Into<String>) -> Self {
@@ -435,8 +458,8 @@ impl Snapshot {
     }
 
     /// Stable file/checkpoint state discriminant.
-    pub fn state_kind(&self) -> &str {
-        &self.state_kind
+    pub fn state_kind(&self) -> SnapshotStateKind<'_> {
+        self.state_kind.as_str().into()
     }
 
     /// On-disk format for file state.
@@ -754,6 +777,16 @@ impl SnapshotArchive {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl<'a> From<&'a str> for SnapshotStateKind<'a> {
+    fn from(tag: &'a str) -> Self {
+        match tag {
+            "file" => Self::File,
+            "checkpoint" => Self::Checkpoint,
+            tag => Self::Unknown(tag),
+        }
+    }
+}
+
 impl fmt::Debug for Snapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -786,5 +819,27 @@ impl From<&str> for SnapshotReference {
 impl From<&String> for SnapshotReference {
     fn from(value: &String) -> Self {
         Self::auto(value)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::SnapshotStateKind;
+
+    #[test]
+    fn snapshot_state_kind_preserves_index_tags() {
+        use SnapshotStateKind::{Checkpoint, File, Unknown};
+        for (tag, expected) in [
+            ("file", File),
+            ("checkpoint", Checkpoint),
+            ("future", Unknown("future")),
+        ] {
+            assert_eq!(SnapshotStateKind::from(tag), expected);
+            assert_eq!(expected.as_str(), tag);
+        }
     }
 }

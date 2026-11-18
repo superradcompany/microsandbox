@@ -69,6 +69,13 @@ func (v *Volume) Info(ctx context.Context) (*VolumeInfo, error) {
 	if err := v.inner.Operation(ctx, "info", nil, &result); err != nil {
 		return nil, wrapFFI(err)
 	}
+	// Older and current native inspections serialize Rust's variant names.
+	switch result.Kind {
+	case "Directory":
+		result.Kind = VolumeKindDir
+	case "Disk":
+		result.Kind = VolumeKindDisk
+	}
 	result.Labels = make(map[string]string, len(result.LabelPairs))
 	for _, pair := range result.LabelPairs {
 		result.Labels[pair[0]] = pair[1]

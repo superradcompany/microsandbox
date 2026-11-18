@@ -1,4 +1,7 @@
 import { createRequire } from "node:module";
+import type { LogLevel } from "../log-level.js";
+import type { PullPolicy } from "../pull-policy.js";
+import type { RegistryAuth } from "../registry.js";
 import type { NetworkConfig, SecretSubstitution } from "../network-config.js";
 import type { NetworkPolicy } from "../policy/types.js";
 import { msbPath } from "./resolve-binary.js";
@@ -159,9 +162,7 @@ export type NapiSnapshotSeed =
 
 /** The auto-generated native SandboxBuilder class. Each setter mutates
  * in place and returns `this`; closure-callback sub-builders are typed
- * loosely as `(b: any) => any` here because their full type is the
- * generated one in `native/index.d.ts`. The TS public surface
- * (`Sandbox.builder(...)`) re-types this with the real shapes.
+ * with their seed and required return type, matching the native callback.
  *
  * Split intentionally into a setters-only base and a terminals
  * interface. The TS-side `SandboxBuilder` (in `src/sandbox.ts`)
@@ -170,8 +171,7 @@ export type NapiSnapshotSeed =
  * not preserve `this` correctly. */
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  imageWith(configure: (b: any) => any): this;
+  imageWith(configure: (b: NapiImageBuilder) => NapiImageBuilder): this;
   /** Managed root disk of the given size in MiB. Requires an OCI image. */
   rootDisk(sizeMiB: number): this;
   /** Configure the root disk (managed size, tmpfs, or disk image). Requires an OCI image. */
@@ -185,7 +185,7 @@ export interface NapiSandboxBuilderSetters {
   /** Enable or disable nested virtualization for local sandboxes. */
   nestedVirt(enabled: boolean): this;
   thp(policy: "always" | "madvise" | "never"): this;
-  logLevel(level: string): this;
+  logLevel(level: LogLevel): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
   ephemeral(enabled: boolean): this;
@@ -197,23 +197,20 @@ export interface NapiSandboxBuilderSetters {
   deploymentProfile(profile: "single-tenant" | "multi-tenant"): this;
   /** @deprecated Use setRuntimeLibkrunfwPath(path) before creating local sandboxes. */
   libkrunfwPath(path: string): this;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  registry(configure: (b: any) => any): this;
+  registry(configure: (b: NapiRegistryConfigBuilder) => NapiRegistryConfigBuilder): this;
   replace(): this;
   replaceWithTimeout(timeoutMs: number): this;
   entrypoint(cmd: string[]): this;
   cmd(cmd: string[]): this;
   init(cmd: string, args?: string[]): this;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  initWith(cmd: string, configure: (b: any) => any): this;
+  initWith(cmd: string, configure: (b: NapiInitOptionsBuilder) => NapiInitOptionsBuilder): this;
   hostname(name: string): this;
   user(user: string): this;
-  pullPolicy(policy: string): this;
+  pullPolicy(policy: PullPolicy): this;
   disableNetwork(): this;
   /** Enable TLS interception, preserving existing network and TLS settings. */
   interceptTls(): this;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  network(configure: (b: any) => any): this;
+  network(configure: (b: NapiNetworkBuilder) => NapiNetworkBuilder): this;
   proxy(
     configure: (
       b: NapiOutboundProxyBuilder,
@@ -225,8 +222,7 @@ export interface NapiSandboxBuilderSetters {
   portUdpBind(bind: string, host: number, guest: number): this;
   vsock(hostPath: string, port: number): this;
   vsockDgram(hostPath: string, port: number): this;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  secret(configure: (b: any) => any): this;
+  secret(configure: (b: NapiSecretBuilder) => NapiSecretBuilder): this;
   secretEnv(envVar: string, value: string, allowedHost: string): this;
   env(key: string, value: string): this;
   envs(vars: Record<string, string>): this;
@@ -238,10 +234,8 @@ export interface NapiSandboxBuilderSetters {
   scripts(scripts: Record<string, string>): this;
   maxDuration(secs: number): this;
   idleTimeout(secs: number): this;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  volume(guest: string, configure: (b: any) => any): this;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  patch(configure: (b: any) => any): this;
+  volume(guest: string, configure: (b: NapiMountBuilder) => NapiMountBuilder): this;
+  patch(configure: (b: NapiPatchBuilder) => NapiPatchBuilder): this;
   build(): Promise<NapiSandboxConfig>;
 }
 
@@ -277,7 +271,7 @@ export interface NapiRestoreBuilderSetters {
   forked(): this;
   diskOnly(): this;
   snapshotBase(base: string): this;
-  logLevel(level: string): this;
+  logLevel(level: LogLevel): this;
   user(user: string): this;
   externalMountPolicy(policy: "strict" | "relaxed"): this;
   dangerouslyInheritResources(): this;
@@ -1307,9 +1301,11 @@ export interface NapiBuiltPatch {
 }
 
 export interface NapiRegistryConfigBuilder {
-  auth(auth: { kind: string; username?: string; password?: string }): this;
+  auth(auth: RegistryAuth): this;
   insecure(): this;
   caCerts(pem: Buffer): this;
+  caCertsPath(path: string): this;
+  build(): { auth?: RegistryAuth; insecure: boolean; caCertsCount: number; caCertsPath?: string };
 }
 
 export interface NapiImageBuilder {

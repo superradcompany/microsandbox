@@ -67,7 +67,7 @@ server = HTTPServer(("127.0.0.1", 0), Provider)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 os.environ.update(MSB_BACKEND="cloud", MSB_API_KEY="test-key",
                   MSB_API_URL=f"http://127.0.0.1:{server.server_port}")
-from microsandbox import Sandbox, RemoteContext
+from microsandbox import Sandbox, RemoteContext, SandboxStatus
 selected = RemoteContext(url=os.environ["MSB_API_URL"], api_key="test-key")
 
 async def check():
@@ -81,11 +81,11 @@ async def check():
     listed = page.sandboxes[0]
     assert isinstance(listed, Sandbox) and listed.id == sb.id
     observation = await listed.info()
-    assert observation["status"] == "running"
+    assert observation["status"] is SandboxStatus.RUNNING
     assert observation["created_at"] == datetime(2026, 11, 15, tzinfo=timezone.utc)
     status = "stopped"
-    assert await listed.status() == "stopped"
-    assert observation["status"] == "running"
+    assert await listed.status() is SandboxStatus.STOPPED
+    assert observation["status"] is SandboxStatus.RUNNING
     assert await listed.last_failure_message() is None
     try:
         await listed.config()
@@ -167,7 +167,9 @@ import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import threading
-from microsandbox import LocalContext, RemoteContext, Sandbox, Volume, Snapshot
+from microsandbox import (
+    ComputeType, ContextKind, LocalContext, RemoteContext, Sandbox, Volume, VolumeKind, Snapshot,
+)
 import os
 
 servers = []
@@ -188,6 +190,10 @@ def provider(identity):
                 "created_at": "2026-11-15T00:00:00Z"}
             path = self.path.split("?")[0]
             value = {"data": [observation]} if path == "/v1/sandboxes" else observation
+            if path == "/v1/volumes/default":
+                value = {"id": identity, "kind": "host", "status": "active",
+                         "created_at": observation["created_at"],
+                         "updated_at": observation["created_at"]}
             body = json.dumps(value).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -215,7 +221,7 @@ async def check():
         else:
             raise AssertionError("invalid remote constructor accepted")
     a, b = provider("a"), provider("b")
-    for selected in (a.replace(), a.replace(compute_type="standard")):
+    for selected in (a.replace(), a.replace(compute_type=ComputeType.STANDARD)):
         try:
             await selected.sandboxes.create("task", image="python")
         except Exception as error:
@@ -223,7 +229,17 @@ async def check():
         else:
             raise AssertionError("fixture should deny creation")
     assert creates == ["shared", "standard"], creates
-    assert a.kind == "remote" and LocalContext().kind == "local"
+    assert a.kind is ContextKind.REMOTE and LocalContext().kind is ContextKind.LOCAL
+    shared_volume = await a.volumes.get_default()
+    assert shared_volume.kind is VolumeKind.DIRECTORY
+    assert (await shared_volume.info())["kind"] is shared_volume.kind
+    for kind in VolumeKind:
+        options = {"size_mib": 256} if kind is VolumeKind.DISK else {}
+        volume = await Volume.create("probe-" + kind.value, kind=kind, **options)
+        try:
+            assert volume.kind is kind and (await volume.info())["kind"] is kind
+        finally:
+            await volume.destroy()
     for resource in (Sandbox, Volume, Snapshot):
         try:
             resource.remote()
@@ -286,18 +302,15 @@ finally:
 """
     if use_core:
         staging = runpy.run_path(str(Path(__file__).parents[1] / "scripts/stage_distributions.py"))
-        for name, data in staging["core_files"]().items():
+        # Mirror the installed full wheel: native lookups of microsandbox.types
+        # must resolve to the very same enum classes exported by the shared core.
+        files = {**staging["core_files"](), **staging["full_wrapper_files"]()}
+        for name, data in files.items():
             destination = tmp_path / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
-        provider = tmp_path / "fixture_provider"
-        provider.mkdir()
-        (provider / "__init__.py").write_text("")
-        (provider / "_microsandbox.so").symlink_to(Path(library).resolve())
-        script = (
-            "from microsandbox_core._native import register_full_provider\n"
-            f"register_full_provider('fixture_provider._microsandbox', {staging['VERSION']!r})\n"
-            + script.replace("from microsandbox import", "from microsandbox_core import")
+        script = "import microsandbox\n" + script.replace(
+            "from microsandbox import", "from microsandbox_core import"
         )
     result = subprocess.run(
         [sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=30

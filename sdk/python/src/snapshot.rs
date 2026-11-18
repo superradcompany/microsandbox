@@ -419,7 +419,7 @@ impl PySnapshot {
 
     #[getter]
     fn state_kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        str_enum_member(py, "SnapshotStateKind", self.inner.state_kind())
+        str_enum_member(py, "SnapshotStateKind", self.inner.state_kind().as_str())
     }
 
     #[getter]

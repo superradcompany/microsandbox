@@ -263,7 +263,7 @@ impl JsSnapshot {
 
     #[napi(getter)]
     pub fn state_kind(&self) -> String {
-        self.inner.state_kind().into()
+        self.inner.state_kind().as_str().into()
     }
 
     #[napi(getter)]

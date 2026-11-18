@@ -21,9 +21,20 @@ export interface VolumeBuilder extends NapiVolumeBuilderSetters {
   create(): Promise<Volume>;
 }
 
+export type VolumeKind = "dir" | "disk";
+
+function volumeKind(value: unknown): VolumeKind {
+  // Native inspections serialize Rust variant names. Resource getters use SDK spellings.
+  switch (value) {
+    case "Directory": case "dir": return "dir";
+    case "Disk": case "disk": return "disk";
+    default: throw new TypeError(`Unknown volume kind: ${value}`);
+  }
+}
+
 /** A fresh backend observation; unavailable measurements remain null. */
 export interface VolumeInfo {
-  id: string; name: string; kind: string; isDefault: boolean;
+  id: string; name: string; kind: VolumeKind; isDefault: boolean;
   quotaMib: number | null; usedBytes: number | null; capacityBytes: number | null;
   diskFormat: string | null; diskFstype: string | null;
   labels: ReadonlyArray<readonly [string, string]>; createdAt: Date | null;
@@ -87,7 +98,7 @@ export class Volume {
   /** Stable identity within this resource's retained destination; no I/O. */
   get id(): string { return this.inner.id; }
   get isDefault(): boolean { return this.inner.isDefault; }
-  get kind(): string { return this.inner.kind; }
+  get kind(): VolumeKind { return volumeKind(this.inner.kind); }
   get diskFormat(): string | null { return this.inner.diskFormat ?? null; }
   get diskFstype(): string | null { return this.inner.diskFstype ?? null; }
   get createdAt(): Date | null {
@@ -98,7 +109,7 @@ export class Volume {
   /** Fetch mutable metadata together; returned values are one observation. */
   async info(): Promise<VolumeInfo> {
     const value = JSON.parse(await withMappedErrors(() => this.inner.info()));
-    return { id: value.id, name: value.name, kind: value.kind, isDefault: value.is_default,
+    return { id: value.id, name: value.name, kind: volumeKind(value.kind), isDefault: value.is_default,
       quotaMib: value.quota_mib, usedBytes: value.used_bytes, capacityBytes: value.capacity_bytes,
       diskFormat: value.disk_format, diskFstype: value.disk_fstype, labels: value.labels,
       createdAt: value.created_at == null ? null : new Date(value.created_at) };

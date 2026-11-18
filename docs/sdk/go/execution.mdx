@@ -1200,10 +1200,10 @@ type JobLogOptions struct {
     Tail       *uint
     Since      *int64
     Until      *int64
-    Sources    []string
+    Sources    []JobOutputSource
     FromCursor string
     Follow     bool
 }
 ```
 
-`Tail` selects the last N filtered records. `Since` is inclusive and `Until` exclusive, both in Unix milliseconds. Empty `Sources` selects program output. `FromCursor` resumes after a job cursor and cannot be combined with `Since`. `Follow` continues after retained output.
+`Tail` selects the last N filtered records. `Since` is inclusive and `Until` exclusive, both in Unix milliseconds. Use `JobOutputStdout`, `JobOutputStderr`, `JobOutputPTY` or `JobOutputStdinError` to filter by source. Empty `Sources` selects program output. `FromCursor` resumes after a job cursor and cannot be combined with `Since`. `Follow` continues after retained output.

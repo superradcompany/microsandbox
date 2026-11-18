@@ -16,6 +16,7 @@ class ManagedJobsTest < Test::Unit::TestCase
   def test_job_logs_preserve_binary_bytes
     bytes = "\xFF\x00\n".b
     entry = Microsandbox::JobLogEntry.from_hash("timestamp" => 42, "source" => "stdout", "data_base64" => [bytes].pack("m0"), "cursor" => "job:1")
+    assert_equal :stdout, entry.source
     assert_equal bytes, entry.data
     assert_equal Encoding::BINARY, entry.data.encoding
   end
@@ -27,6 +28,8 @@ class ManagedJobsTest < Test::Unit::TestCase
     Timeout.timeout(20) do
       sandbox = Microsandbox::Sandbox.get_running(ENV.fetch("MSB_JOB_TEST_SANDBOX"))
       job = sandbox.exec_detached("cat")
+      assert_kind_of String, job.inspect
+      assert_equal :running, job.info.state
       first = job.attach
       attachments << first
       error = assert_raise(Microsandbox::JobError) { job.attach }

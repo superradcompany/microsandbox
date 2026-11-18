@@ -232,7 +232,7 @@ info = await volume.info()
 print(info["quota_mib"], info["used_bytes"], info["capacity_bytes"], info["labels"])
 ```
 
-Fetch current metadata for the captured identity. Mutable quota, usage, capacity, and labels require this live lookup; `None` means a measurement is unavailable. Lookup failures propagate without stale fallback. The returned dictionary is one observation and does not refresh itself.
+Fetch current metadata for the captured identity. Mutable quota, usage, capacity, and labels require this live lookup; `None` means a measurement is unavailable. Lookup failures propagate without stale fallback. The returned `VolumeInfo` dictionary contains the same `VolumeKind` enum as the resource getter.
 
 <p className="msb-member-group" id="mount-factories">Mount factories</p>
 

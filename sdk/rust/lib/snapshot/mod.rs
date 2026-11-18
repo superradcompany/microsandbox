@@ -13,7 +13,7 @@ mod types;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use api::{Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotReference};
+pub use api::{Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotReference, SnapshotStateKind};
 pub use copy::SnapshotCopyBuilder;
 pub use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,

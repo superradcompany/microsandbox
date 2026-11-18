@@ -242,7 +242,7 @@ class MicrosandboxTest < Test::Unit::TestCase
       require "microsandbox"
       remote = Microsandbox::RemoteContext.new(api_key: "test-key", url: "http://127.0.0.1:9")
       settings = Microsandbox::HttpBuilder.new
-      settings.deny_message("legacy {host}").deny_response_format("json")
+      settings.deny_message("legacy {host}").deny_response_format(:json)
       abort "legacy config lost" unless settings.message == "legacy {host}" && settings.format == "json"
       settings.network_deny_message("dormant").secret_deny_message("secret")
       abort "secret message lost" unless settings.secret_message == "secret"

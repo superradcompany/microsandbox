@@ -54,6 +54,8 @@ import (
  {full_import}
 )
 func TestSharedTypesAndMissingProvider(t *testing.T) {{
+ var _ core.JobState = core.JobStateRunning
+ _ = core.JobLogOptions{{Sources: []core.JobOutputSource{{core.JobOutputStdout, core.JobOutputPTY}}}}
  var resource *core.Sandbox
  {full_identity}
  _ = core.SandboxLocal; _ = core.SandboxRemote

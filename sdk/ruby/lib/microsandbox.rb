@@ -32,6 +32,7 @@ module Microsandbox
     end
 
     def deny_response_format(value)
+      value = value.to_s if value.is_a?(Symbol)
       raise ArgumentError, "deny_response_format must be text or json" unless ["text", "json"].include?(value)
 
       @format = value

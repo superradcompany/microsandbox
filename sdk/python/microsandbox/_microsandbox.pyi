@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from typing import Any, Literal
 
 from microsandbox.inspection import SandboxConfigInspection
-from microsandbox.jobs import JobEvent, JobExit, JobInfo, JobLogEntry, JobPage
+from microsandbox.jobs import JobEvent, JobExit, JobInfo, JobLogEntry, JobOutputSource, JobPage
 from microsandbox.types import (
     ContextKind,
     DiskCompactionResult,
@@ -50,6 +51,7 @@ from microsandbox.types import (
     StatVirtualization,
     Stdin,
     ViolationAction,
+    VolumeInfo,
     VolumeKind,
     VsockRoute,
 )
@@ -334,7 +336,7 @@ class Sandbox:
         log_level: LogLevel | None = None,
         registry_auth: RegistryAuth | None = None,
         registry_insecure: bool = False,
-        registry_ca_certs: list[bytes | bytearray | str | os.PathLike[str]] | None = None,
+        registry_ca_certs: builtins.list[bytes | bytearray | str | os.PathLike[str]] | None = None,
         volumes: Mapping[str, MountConfig] | None = None,
         patches: Sequence[PatchConfig] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
@@ -362,7 +364,7 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def exec_default_stream(
         self,
@@ -373,12 +375,12 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     async def exec(
         self,
         cmd: str,
-        args: list[str] | ExecOptions | None = None,
+        args: builtins.list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
@@ -386,12 +388,12 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def exec_detached(
         self,
         cmd: str,
-        args: list[str] | ExecOptions | None = None,
+        args: builtins.list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
@@ -399,12 +401,12 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> Job: ...
     async def exec_stream(
         self,
         cmd: str,
-        args: list[str] | ExecOptions | None = None,
+        args: builtins.list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
@@ -412,7 +414,7 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     async def shell(
         self,
@@ -424,7 +426,7 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def shell_stream(
         self,
@@ -436,7 +438,7 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     def ssh(self) -> SandboxSshOps: ...
     async def attach_default(
@@ -450,7 +452,7 @@ class Sandbox:
     async def attach(
         self,
         cmd: str,
-        args: list[str] | None = None,
+        args: builtins.list[str] | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
@@ -478,12 +480,12 @@ class Sandbox:
         max_memory: int | Size | None = None,
         root_disk_size: int | None = None,
         env: Mapping[str, str] | None = None,
-        env_rm: list[str] | None = None,
+        env_rm: builtins.list[str] | None = None,
         labels: Mapping[str, str] | None = None,
-        labels_rm: list[str] | None = None,
+        labels_rm: builtins.list[str] | None = None,
         workdir: str | None = None,
         secrets: Mapping[str, SecretModifySpec] | None = None,
-        secrets_rm: list[str] | None = None,
+        secrets_rm: builtins.list[str] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
         ports_rm: Sequence[PortEndpoint] | None = None,
         policy: ModificationPolicy | None = None,
@@ -495,17 +497,17 @@ class Sandbox:
         tail: int | None = None,
         since_ms: float | None = None,
         until_ms: float | None = None,
-        sources: list[LogReadSource] | None = None,
-    ) -> list[LogEntry]: ...
+        sources: builtins.list[LogReadSource] | None = None,
+    ) -> builtins.list[LogEntry]: ...
     async def log_stream(
         self,
-        sources: list[LogReadSource] | None = None,
+        sources: builtins.list[LogReadSource] | None = None,
         since_ms: float | None = None,
         from_cursor: str | None = None,
         until_ms: float | None = None,
         follow: bool = False,
     ) -> LogStream: ...
-    async def restore_warnings(self) -> list[ExternalMountWarning]: ...
+    async def restore_warnings(self) -> builtins.list[ExternalMountWarning]: ...
     async def stop(self, timeout: float | None = None) -> None: ...
     async def stop_with_timeout(self, timeout: float) -> None: ...
     async def fork(
@@ -527,21 +529,21 @@ class Sandbox:
     ) -> Sandbox: ...
     async def fork_many(
         self,
-        names: list[str],
+        names: builtins.list[str],
         *,
         record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
         volumes: Mapping[str, MountConfig] | None = None,
-    ) -> list[ForkOutcome]: ...
+    ) -> builtins.list[ForkOutcome]: ...
     # Deprecated: use fork_many.
     async def branch_many(
         self,
-        names: list[str],
+        names: builtins.list[str],
         *,
         record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
         volumes: Mapping[str, MountConfig] | None = None,
-    ) -> list[ForkOutcome]: ...
+    ) -> builtins.list[ForkOutcome]: ...
     async def pause(self, *, guest_flush: GuestFlush | None = None) -> None: ...
     async def resume(self) -> None: ...
     async def request_stop(self) -> None: ...
@@ -875,7 +877,7 @@ class Volume:
     def created_at(self) -> float | None: ...
     @property
     def fs(self) -> VolumeFs: ...
-    async def info(self) -> dict[str, Any]: ...
+    async def info(self) -> VolumeInfo: ...
     async def destroy(self) -> None: ...
 
 class VolumeFs:
@@ -1015,7 +1017,7 @@ class Image:
     @staticmethod
     async def prune() -> ImagePruneReport: ...
     @staticmethod
-    async def load(input_path: str, *, tag: str | None = None) -> list[ImageHandle]: ...
+    async def load(input_path: str, *, tag: str | None = None) -> builtins.list[ImageHandle]: ...
     @staticmethod
     async def save(
         reference: str | Sequence[str],
@@ -1183,7 +1185,7 @@ class Snapshot:
         base: str | None = None,
         group: str | None = None,
         set_head: bool = False,
-    ) -> list[Snapshot]: ...
+    ) -> builtins.list[Snapshot]: ...
     @staticmethod
     async def group_head(selector: str) -> dict[str, str | bool | None]: ...
     @property
@@ -1223,7 +1225,7 @@ class Snapshot:
     async def labels(self) -> dict[str, str]: ...
     async def source_sandbox(self) -> str | None: ...
     @staticmethod
-    async def list_dir(dir: str | os.PathLike[str]) -> list[Snapshot]: ...
+    async def list_dir(dir: str | os.PathLike[str]) -> builtins.list[Snapshot]: ...
     async def save_to(
         self,
         out: str | os.PathLike[str],
@@ -1328,7 +1330,8 @@ class Job:
         tail: int | None = None,
         since: int | None = None,
         until: int | None = None,
-        sources: list[str] | None = None,
+        sources: Sequence[JobOutputSource | Literal["stdout", "stderr", "output", "stdin_error"]]
+        | None = None,
         from_cursor: str | None = None,
     ) -> list[JobLogEntry]: ...
     async def log_stream(
@@ -1337,7 +1340,8 @@ class Job:
         tail: int | None = None,
         since: int | None = None,
         until: int | None = None,
-        sources: list[str] | None = None,
+        sources: Sequence[JobOutputSource | Literal["stdout", "stderr", "output", "stdin_error"]]
+        | None = None,
         from_cursor: str | None = None,
         follow: bool = False,
     ) -> JobLogStream: ...
@@ -1347,7 +1351,8 @@ class Job:
         tail: int | None = None,
         since: int | None = None,
         until: int | None = None,
-        sources: list[str] | None = None,
+        sources: Sequence[JobOutputSource | Literal["stdout", "stderr", "output", "stdin_error"]]
+        | None = None,
         from_cursor: str | None = None,
     ) -> JobLogStream: ...
 
@@ -1369,7 +1374,7 @@ async def diagnose_storage(config_json: str, selection_json: str) -> str: ...
 class Context:
     def __new__(cls, options_json: str, base: Context | None = None) -> Context: ...
     @property
-    def kind(self) -> Literal["local", "remote"]: ...
+    def kind(self) -> ContextKind: ...
     @property
     def sandboxes(self) -> Sandboxes: ...
     @property

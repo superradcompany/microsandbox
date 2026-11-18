@@ -52,7 +52,7 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:smoke": "vitest run tests/smoke.test.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck:native",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit --strict --target ES2023 --module NodeNext --skipLibCheck tests/fixtures/public-types.ts && npm run typecheck:native",
     "typecheck:native": "tsc --noEmit --skipLibCheck false --target ES2022 --moduleResolution NodeNext --module NodeNext native/index.d.ts"
   },
   "devDependencies": {

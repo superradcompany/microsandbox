@@ -18,14 +18,16 @@ module Microsandbox
                        :pid, :created_at, :started_at, :finished_at, :exit_code,
                        :failure, :error, :timed_out) do
     def self.from_hash(value)
-      new(**value.transform_keys(&:to_sym).slice(*members))
+      fields = value.transform_keys(&:to_sym).slice(*members)
+      fields[:state] = fields.fetch(:state).to_sym
+      new(**fields)
     end
   end
   JobPage = Data.define(:items, :next_cursor)
   JobExit = Data.define(:code, :success, :timed_out)
   JobLogEntry = Data.define(:timestamp, :source, :data, :cursor) do
     def self.from_hash(value)
-      new(timestamp: value.fetch("timestamp"), source: value.fetch("source"),
+      new(timestamp: value.fetch("timestamp"), source: value.fetch("source").to_sym,
           data: value.fetch("data_base64").unpack1("m0"), cursor: value.fetch("cursor"))
     end
   end
@@ -40,7 +42,7 @@ module Microsandbox
   Sandbox.include(JobListing)
 
   class Job
-    def inspect = JobInfo.from_hash(JSON.parse(_inspect_json))
+    def info = JobInfo.from_hash(JSON.parse(_inspect_json))
     def wait = JobExit.new(**JSON.parse(_wait_json).transform_keys(&:to_sym))
 
     def logs(tail: nil, since: nil, until: nil, sources: [], from_cursor: nil)
@@ -67,7 +69,7 @@ module Microsandbox
               when "completed" then JobInfo.from_hash(event.fetch("value"))
               else event.fetch("value")
               end
-      JobEvent.new(type: event.fetch("type"), value: value)
+      JobEvent.new(type: event.fetch("type").to_sym, value: value)
     end
 
     def each

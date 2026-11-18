@@ -796,7 +796,7 @@ Permanently close pipe input after accepted bytes. PTYs reject this operation; u
 ```python
 async def logs(
     *, tail: int | None = None, since: int | None = None,
-    until: int | None = None, sources: list[str] | None = None,
+    until: int | None = None, sources: Sequence[JobOutputSource | Literal["stdout", "stderr", "output", "stdin_error"]] | None = None,
     from_cursor: str | None = None
 ) -> list[JobLogEntry]
 ```
@@ -808,7 +808,7 @@ Read retained output. Entries contain original bytes, a source, a Unix-milliseco
 ```python
 async def log_stream(
     *, tail: int | None = None, since: int | None = None,
-    until: int | None = None, sources: list[str] | None = None,
+    until: int | None = None, sources: Sequence[JobOutputSource | Literal["stdout", "stderr", "output", "stdin_error"]] | None = None,
     from_cursor: str | None = None, follow: bool = False
 ) -> JobLogStream
 ```
@@ -820,7 +820,7 @@ Read retained output and optionally follow new records. Supports async iteration
 ```python
 async def follow_logs(
     *, tail: int | None = None, since: int | None = None,
-    until: int | None = None, sources: list[str] | None = None,
+    until: int | None = None, sources: Sequence[JobOutputSource | Literal["stdout", "stderr", "output", "stdin_error"]] | None = None,
     from_cursor: str | None = None
 ) -> JobLogStream
 ```
@@ -845,6 +845,8 @@ Attach to live I/O. Only one attachment may own input; read-only observers may c
 ```python
 async def recv() -> JobEvent | None
 ```
+
+Check `event.type` to narrow the record to `JobOutputEvent`, `JobGapEvent` or `JobCompletedEvent`. The completed event carries a `JobInfo` with a `JobState` enum.
 
 Read an output, history-gap, or completion event. Also supports async iteration. One reader may run alongside input writes.
 

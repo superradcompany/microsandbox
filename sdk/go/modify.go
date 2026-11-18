@@ -16,6 +16,43 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
+// ResourceConvergenceState identifies the observed progress of an accepted resource resize.
+type ResourceConvergenceState string
+
+const (
+	ResourceConvergenceStateAccepted     ResourceConvergenceState = "accepted"
+	ResourceConvergenceStateConverging   ResourceConvergenceState = "converging"
+	ResourceConvergenceStateApplied      ResourceConvergenceState = "applied"
+	ResourceConvergenceStateGuestRefused ResourceConvergenceState = "guest-refused"
+	ResourceConvergenceStateFailed       ResourceConvergenceState = "failed"
+)
+
+// ResourceKind identifies the resource whose live resize is being observed.
+type ResourceKind string
+
+const (
+	ResourceCPUs   ResourceKind = "cpus"
+	ResourceMemory ResourceKind = "memory"
+)
+
+// PlannedChangeKind identifies the discriminator of a planned modification.
+type PlannedChangeKind string
+
+const (
+	PlannedChangeKindConfig PlannedChangeKind = "config"
+	PlannedChangeKindSecret PlannedChangeKind = "secret"
+)
+
+// ModificationDisposition describes when a planned modification can take effect.
+type ModificationDisposition string
+
+const (
+	ModificationDispositionLive            ModificationDisposition = "live"
+	ModificationDispositionNextStart       ModificationDisposition = "next start"
+	ModificationDispositionRequiresRestart ModificationDisposition = "requires restart"
+	ModificationDispositionUnsupported     ModificationDisposition = "unsupported"
+)
+
 // ModificationPolicy selects how a modification is planned or applied.
 type ModificationPolicy string
 
@@ -165,17 +202,17 @@ type SandboxModificationPlan struct {
 // config entries carry Before/After. Disposition is "live", "next start",
 // "requires restart", or "unsupported".
 type PlannedChange struct {
-	Kind        string   `json:"kind"`
-	Field       string   `json:"field"`
-	Name        string   `json:"name,omitempty"`
-	Change      string   `json:"change"`
-	Before      *string  `json:"before,omitempty"`
-	After       *string  `json:"after,omitempty"`
-	BeforeRef   *string  `json:"before_ref,omitempty"`
-	AfterRef    *string  `json:"after_ref,omitempty"`
-	Disposition string   `json:"disposition"`
-	AllowHosts  []string `json:"allow_hosts,omitempty"`
-	Reason      *string  `json:"reason,omitempty"`
+	Kind        PlannedChangeKind       `json:"kind"`
+	Field       string                  `json:"field"`
+	Name        string                  `json:"name,omitempty"`
+	Change      string                  `json:"change"`
+	Before      *string                 `json:"before,omitempty"`
+	After       *string                 `json:"after,omitempty"`
+	BeforeRef   *string                 `json:"before_ref,omitempty"`
+	AfterRef    *string                 `json:"after_ref,omitempty"`
+	Disposition ModificationDisposition `json:"disposition"`
+	AllowHosts  []string                `json:"allow_hosts,omitempty"`
+	Reason      *string                 `json:"reason,omitempty"`
 }
 
 // ModificationConflict blocks applying a modification.
@@ -192,11 +229,11 @@ type ModificationWarning struct {
 
 // ResourceResizeStatus reports runtime convergence for a live resize.
 type ResourceResizeStatus struct {
-	Resource  string `json:"resource"`
-	Requested string `json:"requested"`
-	Actual    string `json:"actual"`
-	Enforced  string `json:"enforced"`
-	State     string `json:"state"`
+	Resource  ResourceKind             `json:"resource"`
+	Requested string                   `json:"requested"`
+	Actual    string                   `json:"actual"`
+	Enforced  string                   `json:"enforced"`
+	State     ResourceConvergenceState `json:"state"`
 }
 
 // Modify plans or applies a sandbox modification on this live sandbox.

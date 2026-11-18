@@ -66,11 +66,11 @@ impl RubyContext {
         Ok(ruby.obj_wrap_as(Self { inner }, class))
     }
 
-    fn kind(&self) -> &'static str {
-        match self.inner.kind() {
+    fn kind(&self) -> magnus::Symbol {
+        crate::symbol(match self.inner.kind() {
             microsandbox_core::ContextKind::Local => "local",
             microsandbox_core::ContextKind::Remote => "remote",
-        }
+        })
     }
     fn sandboxes(&self) -> RubySandboxes {
         RubySandboxes {

@@ -111,7 +111,18 @@ from microsandbox.inspection import (
     SandboxInspectionSpec,
     SandboxRuntimeInspection,
 )
-from microsandbox.jobs import JobEvent, JobExit, JobInfo, JobLogEntry, JobPage, JobState
+from microsandbox.jobs import (
+    JobCompletedEvent,
+    JobEvent,
+    JobExit,
+    JobGapEvent,
+    JobInfo,
+    JobLogEntry,
+    JobOutputEvent,
+    JobOutputSource,
+    JobPage,
+    JobState,
+)
 from microsandbox.setup import (
     InstallOptions,
     ResolvedRuntime,
@@ -133,6 +144,7 @@ from microsandbox.storage_diagnosis import (
 from microsandbox.types import (
     Action,
     ChangeKind,
+    ComputeType,
     ConfigPlannedChange,
     ContextKind,
     CpuPlacement,
@@ -220,6 +232,7 @@ from microsandbox.types import (
     TlsConfig,
     TokenBucket,
     ViolationAction,
+    VolumeInfo,
     VolumeKind,
     VsockRoute,
     VsockSocketType,
@@ -242,6 +255,10 @@ __all__ = [
     "JobAttachment",
     "JobLogStream",
     "JobError",
+    "JobCompletedEvent",
+    "JobGapEvent",
+    "JobOutputEvent",
+    "JobOutputSource",
     "JobEvent",
     "JobExit",
     "JobInfo",
@@ -321,6 +338,7 @@ __all__ = [
     "MountKind",
     "StatVirtualization",
     "HostPermissions",
+    "VolumeInfo",
     "VolumeKind",
     "NamedVolumeMode",
     # Snapshots
@@ -457,6 +475,7 @@ __all__ = [
     "ResolvedRuntime",
     "RuntimeOrigin",
     "set_libkrunfw_path",
+    "ComputeType",
     "ContextKind",
     "version",
 ]

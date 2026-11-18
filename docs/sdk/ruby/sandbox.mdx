@@ -20,7 +20,7 @@ config = sb.config
 shell = config["spec"]["runtime"]["shell"]
 ```
 
-`info` returns a hash with string keys `id`, `name`, `status`, `last_failure_message`, `created_at` and `updated_at`. Optional timestamps are RFC3339 strings or `nil`. `name` and `id` require no backend I/O. List pages contain unprepared `Sandbox` objects without per-item connections or startup.
+`info` returns a hash with string keys `id`, `name`, `status`, `last_failure_message`, `created_at` and `updated_at`. The status value is a symbol. Optional timestamps are RFC3339 strings or `nil`. `name` and `id` require no backend I/O. List pages contain unprepared `Sandbox` objects without per-item connections or startup.
 
 Each inspection method performs a fresh backend lookup without starting the resource. A failed lookup raises or returns an error; it never substitutes cached data. Use `info` when several related fields are needed together. Configuration is the latest persisted settings, which may differ from settings applied to the current run. Retain the returned value when you want a snapshot.
 
@@ -522,14 +522,14 @@ sandbox.backend # => String
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">status</span>
 
 ```ruby
-sandbox.status # => String
+sandbox.status # => Symbol
 ```
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-key"><span className="msb-type">Symbol</span></div>
     <div className="msb-param-desc">Current lifecycle status, fetched from the backend: <code>created</code>, <code>starting</code>, <code>running</code>, <code>draining</code>, <code>paused</code>, <code>stopped</code>, or <code>crashed</code>.</div>
   </div>
 </div>
@@ -780,7 +780,7 @@ Wait without a built-in timeout until this exact sandbox reaches the requested [
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>status</code><span className="msb-type">String</span></div>
+    <div className="msb-param-key"><code>status</code><span className="msb-type">Symbol | String</span></div>
     <div className="msb-param-desc">Target lifecycle status.</div>
   </div>
 </div>
@@ -1614,7 +1614,7 @@ Return the metrics sample as a hash with string keys.
     <div className="msb-param-desc">Sandbox name.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>status</code><span className="msb-type">String</span></div>
+    <div className="msb-param-key"><code>status</code><span className="msb-type">Symbol</span></div>
     <div className="msb-param-desc">Observed terminal status.</div>
   </div>
   <div className="msb-param">
@@ -1725,10 +1725,10 @@ job.id # => String
 
 The job ID within its sandbox.
 
-#### <span className="msb-recv">job.</span><span className="msb-hn">inspect</span>
+#### <span className="msb-recv">job.</span><span className="msb-hn">info</span>
 
 ```ruby
-job.inspect # => JobInfo
+job.info # => JobInfo
 ```
 
 Read current metadata without starting a stopped sandbox.

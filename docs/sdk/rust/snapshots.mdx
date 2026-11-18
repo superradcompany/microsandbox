@@ -1212,6 +1212,7 @@ read the snapshot metadata. The handle retains its backend, so `open()` and
 | digest() | `&str` | Manifest digest (`sha256:hex`) |
 | name() | `Option<&str>` | Name alias; `None` for digest-only entries |
 | parent_digest() | `Option<&str>` | Parent snapshot digest, or `None` for a root |
+| state_kind() | `SnapshotStateKind<'_>` | Indexed payload type. Match `File`, `Checkpoint` or preserve the original tag with `as_str()`. |
 | scope() | [`SnapshotScope`](#snapshotscope) | Snapshot payload scope (`Disk` today) |
 | image_ref() | `&str` | Source image reference |
 | format() | [`SnapshotFormat`](#snapshotformat) | On-disk upper format |

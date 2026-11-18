@@ -295,8 +295,19 @@ func exercisePersistentResources(t *testing.T) {
 		t.Fatalf("unified large string read: %d bytes, %v", len(got), err)
 	}
 	info, err := a.Info(ctx)
-	if err != nil || info.ID != a.ID() {
+	if err != nil || info.ID != a.ID() || info.Kind != a.Kind() || info.Kind != VolumeKindDir {
 		t.Fatalf("volume info = %+v, %v", info, err)
+	}
+	disk, err := first.Volumes().Create(ctx, "scratch", WithVolumeKind(VolumeKindDisk), WithVolumeSize(256))
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskInfo, err := disk.Info(ctx)
+	if err != nil || diskInfo.Kind != VolumeKindDisk || diskInfo.Kind != disk.Kind() {
+		t.Fatalf("disk volume info = %+v, %v", diskInfo, err)
+	}
+	if err := disk.Destroy(ctx); err != nil {
+		t.Fatal(err)
 	}
 	if err := a.Destroy(ctx); err != nil {
 		t.Fatal(err)

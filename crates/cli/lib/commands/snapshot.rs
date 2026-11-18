@@ -406,7 +406,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
                     "group": s.group(),
                     "parent_digest": s.parent_digest(),
                     "scope": format_scope(s.scope()),
-                    "state_kind": s.state_kind(),
+                    "state_kind": s.state_kind().as_str(),
                     "image_ref": s.image_ref(),
                     "format": s.format().map(format_str),
                     "fstype": s.fstype(),

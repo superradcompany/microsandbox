@@ -1278,9 +1278,11 @@ interface JobExit { readonly code: number; readonly success: boolean; readonly t
 ### JobLogEntry
 
 ```typescript
+type JobOutputSource = "stdout" | "stderr" | "output" | "stdin_error";
+
 interface JobLogEntry {
   readonly timestamp: number;
-  readonly source: string;
+  readonly source: JobOutputSource;
   readonly data: Buffer;
   readonly cursor: string;
 }
@@ -1293,7 +1295,7 @@ interface JobLogOptions {
   tail?: number;
   since?: number;
   until?: number;
-  sources?: string[];
+  sources?: readonly JobOutputSource[];
   fromCursor?: string;
   follow?: boolean;
 }

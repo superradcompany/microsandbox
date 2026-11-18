@@ -7,7 +7,7 @@ use pyo3::types::PyDict;
 
 use crate::{
     error::to_py_err,
-    helpers::sandbox_builder_with_context,
+    helpers::{sandbox_builder_with_context, str_enum_member},
     sandbox::{PySandbox, PySandboxPage},
     snapshot::PySnapshot,
     volume::PyVolume,
@@ -57,11 +57,12 @@ impl PyContext {
         Ok(Self { inner })
     }
     #[getter]
-    fn kind(&self) -> &'static str {
-        match self.inner.kind() {
+    fn kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let kind = match self.inner.kind() {
             microsandbox::context::ContextKind::Local => "local",
             microsandbox::context::ContextKind::Remote => "remote",
-        }
+        };
+        str_enum_member(py, "ContextKind", kind)
     }
     #[getter]
     fn sandboxes(&self) -> PySandboxes {
