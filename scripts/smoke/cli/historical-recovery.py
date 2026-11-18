@@ -145,6 +145,7 @@ def qualify(args):
               "agent_sha256": history.digest(args.agent),
               "harness_sha256": history.digest(Path(__file__)), "cases": [],
               "originals_unchanged": False}
+    case_homes = []
     try:
         # Seed only the image cache through a genuine historical archive. Recovered directory
         # launches use their own private copies and never this seed group's descriptor.
@@ -158,7 +159,14 @@ def qualify(args):
                 (root / "snapshots").mkdir()
                 artifact = root / "snapshots/artifact"
                 history.copy_artifact(originals / "artifact", artifact)
-                row = {"action": action, "phase": phase, "root": str(root), "status": "running"}
+                # Each trial recovers the same historical ID at a different path. Keep
+                # its live catalog independent from the seed and every other trial.
+                case_home = Path(tempfile.mkdtemp(prefix="hc-", dir=args.temp_root)).resolve()
+                case_homes.append(case_home)
+                history.copy_artifact(home / "cache", case_home / "cache")
+                runner = history.Runner(args.candidate, history.environment(
+                    args.candidate, args.firmware, case_home, args.agent), case / "candidate")
+                row = {"home": str(case_home), "action": action, "phase": phase, "root": str(root), "status": "running"}
                 sandbox = "recovery-" + str(len(report["cases"]))
                 create_attempted = False
                 try:
@@ -189,13 +197,13 @@ def qualify(args):
                     # A failed create can still leave state to clean up. Earlier worker
                     # failures never dispatched create and must not invent cleanup failures.
                     create_attempted = True
-                    candidate.run(label + "-create", "create", "--name", sandbox,
+                    runner.run(label + "-create", "create", "--name", sandbox,
                                   "--from-snapshot", launch, "--pull", "never")
-                    candidate.run(label + "-guest", "exec", sandbox, "--", "sh", "-ec",
+                    runner.run(label + "-guest", "exec", sandbox, "--", "sh", "-ec",
                                   history.VERIFY + "\nprintf recovery-write > /root/historical/recovery-write; sync")
-                    candidate.run(label + "-stop", "stop", sandbox)
-                    candidate.run(label + "-restart", "start", sandbox)
-                    candidate.run(label + "-persistent", "exec", sandbox, "--", "sh", "-ec",
+                    runner.run(label + "-stop", "stop", sandbox)
+                    runner.run(label + "-restart", "start", sandbox)
+                    runner.run(label + "-persistent", "exec", sandbox, "--", "sh", "-ec",
                                   "test $(cat /root/historical/recovery-write) = recovery-write; " + history.VERIFY)
                     row["status"] = "passed"
                 except BaseException as error:
@@ -203,9 +211,9 @@ def qualify(args):
                     if not isinstance(error, Exception):
                         raise
                 finally:
-                    history.finish_case(candidate, label, sandbox, row, report,
+                    history.finish_case(runner, label, sandbox, row, report,
                                         args.output, attempted=create_attempted)
-        report["catalog_empty"] = catalog_empty(home)
+        report["catalog_empty"] = catalog_empty(home) and all(catalog_empty(path) for path in case_homes)
         if any(row["status"] != "passed" for row in report["cases"]) or not report["catalog_empty"]:
             raise RuntimeError("one or more recovery cases or final cleanup failed")
         report["status"] = "passed"
