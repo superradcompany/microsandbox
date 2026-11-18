@@ -201,7 +201,7 @@ Connect to an arbitrary agent relay socket by path with an explicit handshake de
 
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect_in_band_with_deadline()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connects to a local agent relay socket or named pipe."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_in_band_with_deadline(sock_path: impl AsRef<Path>, deadline: Instant) -> AgentClientResult<AgentClient>
