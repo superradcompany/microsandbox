@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use clap::Args;
-use microsandbox::sandbox::{DEFAULT_STOP_TIMEOUT, Sandbox, SandboxStatus};
+use microsandbox::sandbox::{Sandbox, SandboxStatus};
 
 use crate::ui;
 
@@ -31,6 +31,7 @@ pub struct RestartArgs {
     pub force: bool,
 
     /// Total graceful-completion budget in seconds; expiry fails without killing.
+    /// Defaults to the backend's budget: 10 locally, 360 on cloud.
     #[arg(short = 't', long)]
     pub timeout: Option<u64>,
 
@@ -107,16 +108,13 @@ async fn stop_for_restart(
     };
 
     let handle = Sandbox::get(name).await?;
+    // Expiry must not start a replacement or force-kill.
     let result = if force {
         handle.kill().await
-    } else if let Some(timeout_secs) = timeout_secs {
-        handle
-            .stop_with_timeout(Duration::from_secs(timeout_secs))
-            .await
     } else {
-        // Restart retains its existing explicit budget even though standalone Stop
-        // now waits indefinitely. Expiry must not start a replacement or force-kill.
-        handle.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
+        handle
+            .stop_with_timeout(graceful_stop_budget(timeout_secs))
+            .await
     };
 
     match result {
@@ -155,6 +153,17 @@ async fn start_for_restart(
     }
 }
 
+/// Restart always bounds the stop phase, unlike standalone Stop. Without `--timeout` it uses
+/// the active backend's budget.
+fn graceful_stop_budget(timeout_secs: Option<u64>) -> Duration {
+    match timeout_secs {
+        Some(timeout_secs) => Duration::from_secs(timeout_secs),
+        None => microsandbox::backend::default_backend()
+            .sandboxes()
+            .default_stop_timeout(),
+    }
+}
+
 fn restart_action(status: SandboxStatus) -> RestartAction {
     match status {
         // Paused still represents an active VM, so restart uses the same
@@ -176,6 +185,8 @@ fn restart_action(status: SandboxStatus) -> RestartAction {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use microsandbox::Backend;
+    use microsandbox::sandbox::DEFAULT_STOP_TIMEOUT;
 
     use super::*;
 
@@ -252,6 +263,21 @@ mod tests {
             restart_action(SandboxStatus::Crashed),
             RestartAction::StartOnly
         );
+    }
+
+    #[tokio::test]
+    async fn stop_budget_defaults_to_the_active_backends_budget() {
+        let cloud = microsandbox::CloudBackend::new("http://127.0.0.1:1", "msb_test_key").unwrap();
+        let cloud_default = cloud.sandboxes().default_stop_timeout();
+        assert!(cloud_default > DEFAULT_STOP_TIMEOUT);
+
+        let (defaulted, explicit) = microsandbox::with_backend(cloud, async {
+            (graceful_stop_budget(None), graceful_stop_budget(Some(30)))
+        })
+        .await;
+
+        assert_eq!(defaulted, cloud_default);
+        assert_eq!(explicit, Duration::from_secs(30));
     }
 
     #[test]
