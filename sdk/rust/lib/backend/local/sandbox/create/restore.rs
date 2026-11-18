@@ -556,7 +556,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "set MSB_TEST_RESTORE_ADMISSION_RUNTIME to the compiled current msb executable"]
     async fn native_runtime_reaches_image_admission_before_replacement() {
-        let runtime = std::env::var_os("MSB_TEST_RESTORE_ADMISSION_RUNTIME").unwrap();
+        let runtime = std::env::var_os("MSB_TEST_RESTORE_ADMISSION_RUNTIME")
+            .or_else(|| std::env::var_os("MSB_PATH"))
+            .expect("set MSB_TEST_RESTORE_ADMISSION_RUNTIME or MSB_PATH to the compiled CLI");
         check_rejected_snapshot_replacement(Some(Path::new(&runtime))).await;
     }
 

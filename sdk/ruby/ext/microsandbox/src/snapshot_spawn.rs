@@ -257,9 +257,14 @@ fn destination(ruby: &Ruby, args: &[Value], local: bool) -> Result<RestoreBuilde
     }
     if let Some(proxy) = keyword::<&RubyOutboundProxy>(options, "proxy")? {
         builder = match proxy.inner.borrow().clone() {
-            RubyOutboundProxyConfig::HttpConnect { address } => {
-                builder.proxy(|proxy| proxy.http_connect(address))
-            }
+            RubyOutboundProxyConfig::HttpConnect {
+                address,
+                credentials: Some((username, password)),
+            } => builder.proxy(|proxy| proxy.http_connect(address).credentials(username, password)),
+            RubyOutboundProxyConfig::HttpConnect {
+                address,
+                credentials: None,
+            } => builder.proxy(|proxy| proxy.http_connect(address)),
             RubyOutboundProxyConfig::Socks4 {
                 address,
                 user_id: Some(user_id),

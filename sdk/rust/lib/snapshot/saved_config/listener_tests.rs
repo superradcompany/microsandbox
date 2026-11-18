@@ -65,8 +65,10 @@ fn preparation_preserves_shared_tcp_udp_ephemeral_listeners_and_full_obligations
         true,
     )
     .unwrap();
-    let mut network = NetworkSpec::default();
-    network.strict = false;
+    let mut network = NetworkSpec {
+        strict: false,
+        ..Default::default()
+    };
     plan.apply_to(&mut network).unwrap();
     assert_eq!(network.ports.len(), 2);
     assert_eq!(network.ports[0].host_port, 0);

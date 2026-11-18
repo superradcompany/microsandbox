@@ -6,9 +6,11 @@ use magnus::{
     Error, RArray, RHash, RModule, Ruby, Value, function, method, prelude::*, scan_args::scan_args,
     typed_data,
 };
-use microsandbox_core::snapshot::{SnapshotVerifyCoverage, UpperVerifyStatus};
+use microsandbox_core::snapshot::{
+    PreparedSnapshotImport, SnapshotVerifyCoverage, UpperVerifyStatus,
+};
 use microsandbox_core::{
-    CheckpointCaptureResult, Snapshot, SnapshotCaptureOptions, SnapshotCreateResult,
+    BackendKind, CheckpointCaptureResult, Snapshot, SnapshotCaptureOptions, SnapshotCreateResult,
 };
 
 use super::{
@@ -66,8 +68,8 @@ impl RubySandboxHandle {
     ) -> Result<RubySnapshotCreateResult, Error> {
         let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
         let name = parsed.required.0;
-        let options = capture_options(ruby, parsed.keywords, true)?;
         let handle = Arc::clone(&this.inner);
+        let options = capture_options(ruby, parsed.keywords, Some(handle.backend_kind()))?;
         Ok(RubySnapshotCreateResult {
             inner: run(ruby, async move {
                 handle.snapshot_with(&name, |_| options).await
@@ -132,7 +134,8 @@ impl RubyGroup {
         let (group, files) = parsed.required;
         let keywords = parsed.keywords;
         reject_unknown_keywords(ruby, keywords, &["dest", "base", "set_head"])?;
-        let options = microsandbox_core::SnapshotImportOptions {
+        let options = microsandbox_core::snapshot::LoadOpts {
+            group: None,
             dest: keyword::<String>(keywords, "dest")?.map(Into::into),
             base: keyword(keywords, "base")?,
             set_head: keyword::<bool>(keywords, "set_head")?.unwrap_or(false),
@@ -141,10 +144,10 @@ impl RubyGroup {
             .into_iter()
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>();
+        let prepared = PreparedSnapshotImport::new(files, options)
+            .map_err(|error| super::core_error(ruby, error))?;
         Ok(RubySnapshotImportResult {
-            inner: run(ruby, async move {
-                Snapshot::load_with(group, &files, |_| options).await
-            })?,
+            inner: run(ruby, prepared.group(group))?,
         })
     }
 
@@ -216,7 +219,7 @@ impl RubyGroup {
         args: &[Value],
     ) -> Result<RubyCheckpointCaptureResult, Error> {
         let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let options = capture_options(ruby, parsed.keywords, false)?;
+        let options = capture_options(ruby, parsed.keywords, None)?;
         let group = this.inner.clone();
         Ok(RubyCheckpointCaptureResult {
             inner: run(
@@ -287,8 +290,8 @@ impl RubySandbox {
     ) -> Result<RubySnapshotCreateResult, Error> {
         let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
         let (name,) = parsed.required;
-        let options = capture_options(ruby, parsed.keywords, true)?;
         let sandbox = this.inner_clone()?;
+        let options = capture_options(ruby, parsed.keywords, Some(sandbox.backend_kind()))?;
         Ok(RubySnapshotCreateResult {
             inner: run(ruby, async move {
                 sandbox.snapshot_with(&name, |_| options).await
@@ -363,8 +366,9 @@ impl RubyCheckpointCaptureResult {
 pub(super) fn capture_options(
     ruby: &Ruby,
     keywords: RHash,
-    initial: bool,
+    initial_backend: Option<BackendKind>,
 ) -> Result<SnapshotCaptureOptions, Error> {
+    let initial = initial_backend.is_some();
     let allowed = if initial {
         &[
             "initial_checkpoint",
@@ -390,7 +394,13 @@ pub(super) fn capture_options(
         options = options.name(name);
     }
     if let Some(dest) = keyword::<String>(keywords, "dest_dir")? {
-        options = options.dest_dir(dest);
+        // Resolve local paths while the calling thread still owns Ruby's VM lock.
+        let destination = if initial_backend == Some(BackendKind::Local) {
+            std::path::absolute(dest).map_err(|e| super::core_error(ruby, e.into()))?
+        } else {
+            dest.into()
+        };
+        options = options.dest_dir(destination);
     }
     if keyword::<bool>(keywords, "full")?.unwrap_or(false) {
         options = options.full();

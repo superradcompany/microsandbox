@@ -206,11 +206,13 @@ fn full_captured_requirements_survive_selected_proxy_and_identity_replacement() 
 
 #[test]
 fn unknown_default_and_omitted_resource_fields_are_masked_independently() {
-    let mut saved = SavedNetworkConfig::default();
-    saved.tls = Some(SavedValue::Unknown {
-        reason: SavedUnknownReason::NotRecorded,
-    });
-    saved.outbound_proxy = Some(SavedValue::Default {});
+    let saved = SavedNetworkConfig {
+        tls: Some(SavedValue::Unknown {
+            reason: SavedUnknownReason::NotRecorded,
+        }),
+        outbound_proxy: Some(SavedValue::Default {}),
+        ..Default::default()
+    };
     let mut explicit = NetworkSpecPatch::new();
     explicit.tls = Some(TlsConfigPatch::new().upstream_ca_cert(vec![]));
     let plan = select_gateway_inputs(&saved, &explicit, true).unwrap();

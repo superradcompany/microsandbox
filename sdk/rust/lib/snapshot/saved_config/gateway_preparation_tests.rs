@@ -86,18 +86,20 @@ fn prepares_ordered_shared_material_without_reading_files_or_credential_sources(
     let input = inputs();
     let plan =
         prepare_gateway_configuration(&saved, &NetworkSpecPatch::new(), &input, true).unwrap();
-    let mut network = NetworkSpec::default();
-    network.strict = false;
-    network.dns = Some(DnsConfig {
-        rebind_protection: false,
-        query_timeout_ms: 17,
+    let mut network = NetworkSpec {
+        strict: false,
+        dns: Some(DnsConfig {
+            rebind_protection: false,
+            query_timeout_ms: 17,
+            ..Default::default()
+        }),
+        tls: Some(TlsConfig {
+            verify_upstream: false,
+            intercepted_ports: vec![8443],
+            ..Default::default()
+        }),
         ..Default::default()
-    });
-    network.tls = Some(TlsConfig {
-        verify_upstream: false,
-        intercepted_ports: vec![8443],
-        ..Default::default()
-    });
+    };
     plan.apply_inputs_to(&mut network).unwrap();
     let dns = network.dns.unwrap();
     assert_eq!(
@@ -110,7 +112,7 @@ fn prepares_ordered_shared_material_without_reading_files_or_credential_sources(
     assert!(!tls.verify_upstream);
     assert_eq!(tls.intercepted_ports, [8443]);
     let path = PathBuf::from("./symlink/../CA_SENTINEL.pem");
-    assert_eq!(tls.upstream_ca_cert, [path.clone()]);
+    assert_eq!(tls.upstream_ca_cert.as_slice(), std::slice::from_ref(&path));
     assert_eq!(tls.scoped_upstream_ca_cert[0].path, path);
     assert_eq!(tls.scoped_upstream_ca_cert[0].pattern, "*.example");
     assert_eq!(plan.guest_trust_certificates().unwrap(), [path]);
@@ -192,21 +194,23 @@ fn builtin_defaults_clear_lower_gateway_resources_without_changing_policy() {
     let plan =
         prepare_gateway_configuration(&saved, &NetworkSpecPatch::new(), &BTreeMap::new(), false)
             .unwrap();
-    let mut destination = NetworkSpec::default();
-    destination.dns = Some(DnsConfig {
-        nameservers: vec!["OLD_RESOLVER".into()],
-        query_timeout_ms: 27,
+    let mut destination = NetworkSpec {
+        dns: Some(DnsConfig {
+            nameservers: vec!["OLD_RESOLVER".into()],
+            query_timeout_ms: 27,
+            ..Default::default()
+        }),
+        tls: Some(TlsConfig {
+            enabled: true,
+            upstream_ca_cert: vec!["OLD_CA".into()],
+            ..Default::default()
+        }),
+        outbound_proxy: Some(OutboundProxy::HttpConnect {
+            address: "OLD_PROXY:80".into(),
+            credentials: None,
+        }),
         ..Default::default()
-    });
-    destination.tls = Some(TlsConfig {
-        enabled: true,
-        upstream_ca_cert: vec!["OLD_CA".into()],
-        ..Default::default()
-    });
-    destination.outbound_proxy = Some(OutboundProxy::HttpConnect {
-        address: "OLD_PROXY:80".into(),
-        credentials: None,
-    });
+    };
     plan.apply_inputs_to(&mut destination).unwrap();
     let dns = destination.dns.unwrap();
     assert!(dns.nameservers.is_empty());

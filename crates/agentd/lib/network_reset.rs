@@ -278,31 +278,18 @@ fn normalize(address: IpAddr) -> IpAddr {
 }
 
 fn local_addresses() -> io::Result<HashSet<IpAddr>> {
-    let mut list = std::ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut list) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
     let mut addresses = HashSet::new();
-    let mut cursor = list;
-    while !cursor.is_null() {
-        let entry = unsafe { &*cursor };
-        if !entry.ifa_addr.is_null() {
-            let family = unsafe { (*entry.ifa_addr).sa_family as i32 };
-            match family {
-                libc::AF_INET => {
-                    let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in>() };
-                    addresses.insert(Ipv4Addr::from(address.sin_addr.s_addr.to_ne_bytes()).into());
-                }
-                libc::AF_INET6 => {
-                    let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in6>() };
-                    addresses.insert(normalize(Ipv6Addr::from(address.sin6_addr.s6_addr).into()));
-                }
-                _ => {}
-            }
+    // getifaddrs owns the list until iteration finishes. Some entries have no IP address.
+    for interface in nix::ifaddrs::getifaddrs()? {
+        let Some(address) = interface.address else {
+            continue;
+        };
+        if let Some(ipv4) = address.as_sockaddr_in() {
+            addresses.insert(ipv4.ip().into());
+        } else if let Some(ipv6) = address.as_sockaddr_in6() {
+            addresses.insert(normalize(ipv6.ip().into()));
         }
-        cursor = entry.ifa_next;
     }
-    unsafe { libc::freeifaddrs(list) };
     Ok(addresses)
 }
 

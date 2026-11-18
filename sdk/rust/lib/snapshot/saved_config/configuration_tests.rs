@@ -71,11 +71,13 @@ pub(super) fn prepare(
     bindings: BTreeMap<String, ConfigurationBindingInput>,
 ) -> crate::MicrosandboxResult<SavedConfigurationPlan> {
     let full = matches!(context, SavedConfigurationContext::Full { .. });
-    let mut lower = SandboxSpec::default();
-    lower.env = vec![EnvVar {
-        key: "TOKEN".into(),
-        value: "LOWER_SENTINEL".into(),
-    }];
+    let lower = SandboxSpec {
+        env: vec![EnvVar {
+            key: "TOKEN".into(),
+            value: "LOWER_SENTINEL".into(),
+        }],
+        ..Default::default()
+    };
     let baseline = DestinationNetworkBaseline {
         strict: false,
         tls_enabled: false,

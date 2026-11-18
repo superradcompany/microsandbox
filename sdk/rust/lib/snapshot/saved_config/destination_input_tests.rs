@@ -273,8 +273,10 @@ fn destination_inputs_full_resume_retains_unavailable_future_init() {
 #[test]
 fn destination_inputs_pin_destination_identity_and_ownership_at_preparation() {
     let saved = document(active(), json!({}));
-    let mut lower = SandboxSpec::default();
-    lower.name = "destination".into();
+    let mut lower = SandboxSpec {
+        name: "destination".into(),
+        ..Default::default()
+    };
     lower
         .labels
         .insert("sandbox.id".into(), "DESTINATION_ID".into());

@@ -1687,7 +1687,7 @@ fn explicit_group_open_anchors_before_poll_in_subprocess() {
         std::os::unix::fs::symlink(target.join("child"), first.join("link")).unwrap();
         let directory = ensure(&target, Some("history")).await.unwrap();
         add(&directory, 2, None).await;
-        let local = crate::test_support::local_backend_builder(&temp.path().join("home"))
+        let local = crate::test_support::local_backend_builder(temp.path().join("home"))
             .build()
             .await
             .unwrap();

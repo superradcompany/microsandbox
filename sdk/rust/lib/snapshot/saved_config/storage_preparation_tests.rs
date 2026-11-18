@@ -118,8 +118,10 @@ fn prepares_shared_backing_each_mount_policy_and_routes_without_source_lookup() 
         ),
     ]);
     let plan = prepare(&saved, &inputs).unwrap();
-    let mut destination = SandboxSpec::default();
-    destination.name = "destination".into();
+    let mut destination = SandboxSpec {
+        name: "destination".into(),
+        ..Default::default()
+    };
     plan.apply_to(&mut destination).unwrap();
     assert_eq!(destination.name, "destination");
     assert_eq!(

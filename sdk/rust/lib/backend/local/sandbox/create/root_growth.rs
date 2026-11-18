@@ -224,8 +224,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
 
+    type WorkerGate = (PathBuf, Arc<Notify>, Arc<Notify>);
+
     // Key the gate by this test's private directory; concurrent growth tests never wait.
-    static PAUSE: Mutex<Option<(PathBuf, Arc<Notify>, Arc<Notify>)>> = Mutex::new(None);
+    static PAUSE: Mutex<Option<WorkerGate>> = Mutex::new(None);
 
     pub(super) async fn pause_staged_worker(directory: &Path) {
         let gate = PAUSE

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from microsandbox._microsandbox import CheckpointRemoveResult, SnapshotRemoveResult
+
     from .types import ResourceResizeStatus
 
 from microsandbox.types import ChangeState, ServiceErrorReason
