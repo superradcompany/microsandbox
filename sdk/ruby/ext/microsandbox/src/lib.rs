@@ -539,6 +539,33 @@ where
     block_without_gvl(ruby, future)?.map_err(|e| core_error(ruby, e))
 }
 
+/// A one-shot list can be the last owner of an empty local catalog. Wait for
+/// its SQLite workers to close before handing control back to Ruby: an
+/// immediate fork could otherwise inherit a mutex held by an exiting worker.
+fn run_catalog_list<F, T>(
+    ruby: &Ruby,
+    context: Arc<dyn microsandbox_core::Context>,
+    list: impl FnOnce(Arc<dyn microsandbox_core::Context>) -> F,
+) -> Result<T, Error>
+where
+    F: Future<Output = MicrosandboxResult<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    let local = context.as_local().cloned();
+    let query = list(context);
+    run(ruby, async move {
+        let result = query.await;
+        if let Some(local) = local {
+            let cleanup = local.finish_unshared_catalog_query().await;
+            // Preserve a query failure if both the query and its cleanup failed.
+            if result.is_ok() {
+                cleanup?;
+            }
+        }
+        result
+    })
+}
+
 /// Run a Service change and attach the core's change classification to every mapped error.
 fn run_service_change<F, T>(ruby: &Ruby, future: F) -> Result<T, Error>
 where
@@ -2220,7 +2247,7 @@ fn sandbox_list_in(
         .get(symbol("labels"))
         .map(|value| string_map(value, "labels"))
         .transpose()?;
-    let page = run(ruby, async move {
+    let page = run_catalog_list(ruby, context, |context| async move {
         context
             .sandboxes()
             .list_with(move |mut builder| {
@@ -2273,7 +2300,9 @@ fn volume_list_in(
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "list does not accept keywords"));
     }
-    let handles = run(ruby, async move { context.volumes().list().await })?;
+    let handles = run_catalog_list(ruby, context, |context| async move {
+        context.volumes().list().await
+    })?;
     let array = current_ruby().ary_new();
     for inner in handles {
         array.push(RubyVolume { inner })?;
@@ -2358,7 +2387,9 @@ fn snapshot_list_in(
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "list does not accept keywords"));
     }
-    let handles = run(ruby, async move { context.snapshots().list().await })?;
+    let handles = run_catalog_list(ruby, context, |context| async move {
+        context.snapshots().list().await
+    })?;
     let array = current_ruby().ary_new();
     for inner in handles {
         array.push(RubySnapshot { inner })?;

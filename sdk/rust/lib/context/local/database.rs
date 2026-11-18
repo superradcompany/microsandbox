@@ -1,6 +1,7 @@
 //! Guarded catalog reads and transactional SDK/CLI upgrades that preserve already-running VMs.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use microsandbox_db::DbReadConnection;
@@ -33,6 +34,23 @@ pub(crate) struct CurrentCatalog {
 //--------------------------------------------------------------------------------------------------
 
 impl LocalContext {
+    /// Finish SQLite worker teardown for a transient binding query before the caller can fork.
+    /// A retained context or resource continues to own its catalog.
+    #[doc(hidden)]
+    pub async fn finish_unshared_catalog_query(self) -> MicrosandboxResult<()> {
+        if let Ok(inner) = Arc::try_unwrap(self.inner)
+            && let Some(pools) = inner.db.into_inner()
+        {
+            let (read, write) = tokio::join!(
+                pools.read().inner().close_by_ref(),
+                pools.write().inner().close_by_ref(),
+            );
+            read?;
+            write?;
+        }
+        Ok(())
+    }
+
     /// Prepare this installation's catalog for a user-facing CLI operation.
     ///
     /// SDK and CLI opens use the same upgrade policy. The CLI calls this
@@ -312,6 +330,25 @@ mod tests {
             .ok_or_else(|| {
                 MicrosandboxError::Runtime(format!("unrecognized catalog release {version}"))
             })
+    }
+
+    #[tokio::test]
+    async fn transient_query_closes_both_pools_only_after_the_last_context() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .unwrap();
+        let pools = local.db().await.unwrap();
+        let read = pools.read().inner().clone();
+        let write = pools.write().inner().clone();
+
+        local.clone().finish_unshared_catalog_query().await.unwrap();
+        read.ping().await.unwrap();
+        write.ping().await.unwrap();
+
+        local.finish_unshared_catalog_query().await.unwrap();
+        assert!(read.ping().await.is_err());
+        assert!(write.ping().await.is_err());
     }
 
     #[tokio::test]
