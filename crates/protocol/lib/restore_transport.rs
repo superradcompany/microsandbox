@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::Ready;
+use crate::init_observation::{InitObservation, ObservedReady};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -15,6 +16,8 @@ pub struct GuestReady {
     pub public: Ready,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_tcp_reset_version: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_observation: Option<InitObservation>,
 }
 
 /// The distinct mode makes an unsupported guest reject a misdirected request
@@ -34,6 +37,20 @@ pub enum GuestThawMode {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl GuestReady {
+    /// Forward init evidence to clients while keeping guest-only reset capability in the relay.
+    pub fn client_ready(&self) -> ObservedReady {
+        ObservedReady {
+            ready: self.public.clone(),
+            init_observation: self.init_observation.clone(),
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -42,6 +59,7 @@ impl From<Ready> for GuestReady {
         Self {
             public,
             restore_tcp_reset_version: None,
+            init_observation: None,
         }
     }
 }
@@ -68,6 +86,7 @@ mod tests {
         let capable = GuestReady {
             public: legacy,
             restore_tcp_reset_version: Some(1),
+            init_observation: Some(InitObservation::Builtin),
         };
         wire.clear();
         ciborium::into_writer(&capable, &mut wire).unwrap();

@@ -27,8 +27,10 @@ use super::{
     config::{
         SandboxConfig, SandboxConfigPatch, SnapshotRestoreMode, sandbox_log_level_from_runtime,
     },
+    environment_provenance::EnvironmentOrigin,
     exec::{Rlimit, RlimitResource},
-    init::{HandoffInit, InitOptionsBuilder},
+    init::{HandoffInit, InitOptionsBuilder, PreparedInitOptions},
+    init_provenance::InitProvenance,
     types::{
         DeploymentProfile, ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder,
         RootDiskBuilder, RootfsSource, SecurityProfile, VolumeMount,
@@ -151,13 +153,88 @@ impl SandboxBuilder {
     }
 
     /// Overlay sparse sandbox configuration on the hardcoded and global defaults.
-    pub fn overlay(mut self, patch: SandboxConfigPatch) -> Self {
+    pub fn overlay(mut self, mut patch: SandboxConfigPatch) -> Self {
+        // Public sparse inputs are explicit even when the selected value equals the default.
+        if patch.has_http_override() {
+            patch.http_defaults_implicit = Some(false);
+        }
         self.record_prepared_boot_override(|boot| {
             boot.security |= patch.spec.security_profile.is_some();
             boot.init |= patch.spec.init.is_some();
             boot.hostname |= patch.spec.runtime.hostname.is_some();
             boot.thp |= patch.spec.resources.thp.is_some();
         });
+        if let Some(init) = &patch.spec.init {
+            // Replacement must not borrow evidence from the destination, even for the
+            // same path. Retained auto intent stays auto; only fresh declarations infer it.
+            self.config.init_provenance = None;
+            if patch.init_provenance_unknown == Some(true)
+                || patch
+                    .init_provenance
+                    .as_ref()
+                    .is_some_and(|origin| !origin.matches(Some(init)))
+            {
+                patch.init_provenance = None;
+                patch.init_provenance_unknown = Some(true);
+            } else if patch.init_provenance.is_none() {
+                patch.init_provenance = Some(InitProvenance::from_init(Some(init)));
+                patch.init_provenance_unknown = Some(false);
+            }
+        }
+        if patch.spec.runtime.cmd.is_some() {
+            if let ConfigSource::ExistingConfig(existing) = &mut self.config_source {
+                existing.command_provenance = None;
+                existing.command_provenance_unknown = Some(false);
+            }
+            // Clear destination evidence. The patch can restore matching retained intent
+            // or its unknown guard; a fresh declaration establishes new defaults.
+            self.config.command_provenance = None;
+            self.config.command_provenance_unknown = Some(false);
+            if self.config.launch_cmd_before_override.is_some() {
+                self.config.launch_cmd_before_override = Some(patch.spec.runtime.cmd.clone());
+            }
+        }
+        // Reconstruction patches are evidence, not new declarations of omitted defaults.
+        let mut presence = self.config.field_presence.take().unwrap_or_default();
+        if patch.field_presence_unknown == Some(true) {
+            // A reconstructed source must bring its own nested-default evidence,
+            // never borrow matching defaults from the destination it replaces.
+            presence.clear_nested_network();
+        }
+        if patch.spec.mounts.is_some() {
+            // Mount lists replace rather than merge. A historical replacement must not
+            // inherit evidence from a different list merely because guest paths coincide.
+            presence.clear_mounts();
+        }
+        if let Some(supplied) = patch.field_presence.take() {
+            presence.overlay(supplied);
+        }
+        if patch.field_presence_unknown != Some(true) {
+            presence.apply_explicit(&patch.spec);
+        }
+        patch.field_presence = Some(presence);
+        // Sparse public inputs are new declarations. Preserve origin for untouched keys;
+        // an explicit same-value declaration intentionally replaces a prior host forwarding.
+        let mut origin = self
+            .config
+            .environment_provenance
+            .take()
+            .unwrap_or_default();
+        // An older retained record may have no evidence map at all. Supply an empty
+        // map in that case so historical replacements cannot borrow literal evidence
+        // from the destination or masquerade as fresh public declarations.
+        let supplied_origin = patch.environment_provenance.take().or_else(|| {
+            (patch.environment_provenance_unknown == Some(true)).then(Default::default)
+        });
+        if let Some(env) = patch.spec.get_env() {
+            for value in env {
+                origin.declare_env_input(&value.key, &value.value, supplied_origin.as_ref());
+            }
+        }
+        if let Some(init) = &patch.spec.init {
+            origin.declare_init_input(init, supplied_origin.as_ref());
+        }
+        patch.environment_provenance = Some(origin);
         if let ConfigSource::ExistingConfig(existing) = &mut self.config_source {
             existing.overlay_mut(patch.clone());
         }
@@ -171,9 +248,21 @@ impl SandboxBuilder {
     /// on a builder from [`new`](Self::new). This is the Rust entry the FFI
     /// `create_from_spec` path calls into, so both share one implementation.
     pub fn from_spec_json(json: &str) -> MicrosandboxResult<Self> {
-        let spec: SandboxSpec = serde_json::from_str(json)
+        let value: serde_json::Value = serde_json::from_str(json)
             .map_err(|e| MicrosandboxError::InvalidConfig(e.to_string()))?;
-        Ok(Self::from(SandboxConfig::from(spec)))
+        let implicit_http = value
+            .pointer("/network/http")
+            .is_none_or(|http| http.as_object().is_some_and(serde_json::Map::is_empty));
+        let spec: SandboxSpec = serde_json::from_value(value)
+            .map_err(|e| MicrosandboxError::InvalidConfig(e.to_string()))?;
+        let mut builder = Self::from(SandboxConfig::from(spec));
+        builder.config.http_defaults_implicit = Some(implicit_http);
+        // This API accepts an explicit new task declaration, not a retained sandbox record.
+        builder.config.command_provenance_unknown = Some(false);
+        builder.config.init_provenance_unknown = Some(false);
+        builder.config.environment_provenance_unknown = Some(false);
+        builder.config.field_presence_unknown = Some(false);
+        Ok(builder)
     }
 
     /// Set the root filesystem image source.
@@ -339,6 +428,10 @@ impl SandboxBuilder {
         let mounts = self.config.spec.mounts.get_or_insert_with(Vec::new);
         match configure(MountBuilder::new(guest)).build_restore() {
             Ok(Ok(mount)) => {
+                self.config
+                    .field_presence
+                    .get_or_insert_with(Default::default)
+                    .declare_mount(&mount);
                 let guest = mount.guest();
                 resources.captured.remove(guest);
                 resources.mapped.insert(guest.into());
@@ -551,6 +644,10 @@ impl SandboxBuilder {
     pub fn thp(mut self, policy: super::TransparentHugePagePolicy) -> Self {
         self.record_prepared_boot_override(|boot| boot.thp = true);
         self.config.spec.resources.thp = Some(policy);
+        self.config
+            .field_presence
+            .get_or_insert_with(Default::default)
+            .declare_thp(policy);
         self
     }
 
@@ -720,7 +817,17 @@ impl SandboxBuilder {
     /// An empty array clears the image CMD. This describes durable configuration and does not
     /// execute the command during sandbox creation.
     pub fn cmd(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.config.spec.runtime.cmd = Some(cmd.into_iter().map(Into::into).collect());
+        let cmd = cmd.into_iter().map(Into::into).collect::<Vec<_>>();
+        if let ConfigSource::ExistingConfig(existing) = &mut self.config_source {
+            existing.command_provenance = None;
+            existing.command_provenance_unknown = Some(false);
+        }
+        self.config.command_provenance = None;
+        self.config.command_provenance_unknown = Some(false);
+        if self.config.launch_cmd_before_override.is_some() {
+            self.config.launch_cmd_before_override = Some(Some(cmd.clone()));
+        }
+        self.config.spec.runtime.cmd = Some(cmd);
         self
     }
 
@@ -744,6 +851,13 @@ impl SandboxBuilder {
         mut self,
         command: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
+        // Reconstructed builders separate resolved CMD from caller overrides. Preserve
+        // its original image default before a one-shot invocation shadows it.
+        if self.config.spec.runtime.cmd.is_none()
+            && let ConfigSource::ExistingConfig(existing) = &self.config_source
+        {
+            self.config.spec.runtime.cmd = existing.spec.runtime.cmd.clone();
+        }
         self.config
             .set_background_command(command.into_iter().map(Into::into).collect());
         self
@@ -792,16 +906,30 @@ impl SandboxBuilder {
         f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
     ) -> Self {
         self.record_prepared_boot_override(|boot| boot.init = true);
-        let (args, env) = f(InitOptionsBuilder::default()).build();
-        let init = HandoffInit {
+        let PreparedInitOptions { args, env, origins } = f(InitOptionsBuilder::default()).build();
+        self.config.spec.init = Some(HandoffInit {
             cmd: cmd.into(),
             args,
             env,
-        };
+        });
+        self.config
+            .environment_provenance
+            .get_or_insert_with(Default::default)
+            .declare_init(self.config.spec.init.as_ref());
+        self.config
+            .environment_provenance
+            .as_mut()
+            .expect("declared above")
+            .init_env = origins;
+        self.config.init_provenance =
+            Some(InitProvenance::from_init(self.config.spec.init.as_ref()));
+        self.config.init_provenance_unknown = Some(false);
         if let ConfigSource::ExistingConfig(existing) = &mut self.config_source {
-            existing.spec.init = Some(init.clone());
+            existing.spec.init = self.config.spec.init.clone();
+            existing.init_provenance = self.config.init_provenance.clone();
+            existing.environment_provenance = self.config.environment_provenance.clone();
+            existing.init_provenance_unknown = Some(false);
         }
-        self.config.spec.init = Some(init);
         self
     }
 
@@ -884,12 +1012,31 @@ impl SandboxBuilder {
                 return self;
             }
         };
-        match f(NetworkBuilder::from_config(network)).build() {
+        let network = f(NetworkBuilder::from_inherited_config(network));
+        let http_override = network.has_http_override();
+        let secret_policy_override = network.has_secret_policy_override();
+        let policy_fields = network.explicit_policy_fields().clone();
+        match network.build() {
             Ok(net) => {
                 if let Err(err) = self.set_local_network_config(net)
                     && self.build_error.is_none()
                 {
                     self.build_error = Some(err);
+                }
+                if http_override {
+                    self.config.http_defaults_implicit = Some(false);
+                }
+                if !policy_fields.is_empty() {
+                    self.config
+                        .field_presence
+                        .get_or_insert_with(Default::default)
+                        .declare_network_policy_fields(&policy_fields);
+                }
+                if secret_policy_override {
+                    self.config
+                        .field_presence
+                        .get_or_insert_with(Default::default)
+                        .declare_secret_policy();
                 }
             }
             Err(err) => {
@@ -1121,6 +1268,10 @@ impl SandboxBuilder {
         mut self,
         action: microsandbox_types::SecretViolationAction,
     ) -> Self {
+        self.config
+            .field_presence
+            .get_or_insert_with(Default::default)
+            .declare_secret_policy();
         match self.local_network_config() {
             Ok(mut network) => {
                 network.secrets.violation_action = action;
@@ -1181,6 +1332,11 @@ impl SandboxBuilder {
             }
             return self;
         }
+        let value = value.into();
+        self.config
+            .environment_provenance
+            .get_or_insert_with(Default::default)
+            .declare_env(&key, &value, EnvironmentOrigin::Literal);
 
         let value = EnvVar::new(key, value);
         if let ConfigSource::ExistingConfig(existing) = &mut self.config_source {
@@ -1189,6 +1345,19 @@ impl SandboxBuilder {
 
         self.config.spec.get_env_mut().push(value);
         self
+    }
+
+    /// CLI bridge for an already-resolved host value. Does not perform a second host lookup.
+    /// Existing launch values are unchanged; capture must require a binding or exclusion.
+    #[doc(hidden)]
+    pub fn host_env(self, key: String, value: String) -> Self {
+        let mut builder = self.env(&key, &value);
+        builder
+            .config
+            .environment_provenance
+            .get_or_insert_with(Default::default)
+            .declare_env(&key, &value, EnvironmentOrigin::Host);
+        builder
     }
 
     /// Set multiple environment variables at once. See [`env`](Self::env).
@@ -1344,6 +1513,10 @@ impl SandboxBuilder {
         }
         match f(MountBuilder::new(guest_path)).build() {
             Ok(mount) => {
+                self.config
+                    .field_presence
+                    .get_or_insert_with(Default::default)
+                    .declare_mount(&mount);
                 self.list_for_append(|config| &mut config.spec.mounts)
                     .push(mount);
             }
@@ -1385,6 +1558,10 @@ impl SandboxBuilder {
     /// Add one already-materialized volume mount.
     #[doc(hidden)]
     pub fn add_volume_mount(mut self, mount: VolumeMount) -> Self {
+        self.config
+            .field_presence
+            .get_or_insert_with(Default::default)
+            .declare_mount(&mount);
         self.list_for_append(|config| &mut config.spec.mounts)
             .push(mount);
         self
@@ -1646,8 +1823,10 @@ impl SandboxBuilder {
         &mut self,
         network: microsandbox_network::config::NetworkConfig,
     ) -> MicrosandboxResult<()> {
+        let http_defaults_implicit = self.config.http_defaults_are_implicit();
         let network = super::config::network_spec_from_config(&network)?;
         self.config.spec.network = network.into();
+        self.config.http_defaults_implicit = Some(http_defaults_implicit);
         Ok(())
     }
 
@@ -2844,6 +3023,23 @@ fn wrap_config_script(shell: Option<&str>, body: &str) -> String {
 /// update the recorded overrides, which can take precedence over those edits.
 impl From<SandboxConfig> for SandboxBuilder {
     fn from(mut config: SandboxConfig) -> Self {
+        // Only explicit setters can establish new origins after historical reconstruction.
+        config.environment_provenance_unknown = true;
+        config.field_presence_unknown = true;
+        if let Some(presence) = &mut config.field_presence {
+            presence.retain_matching(&config.spec);
+        }
+        if let Some(origin) = &mut config.environment_provenance {
+            origin.retain_matching(&config.spec.env, config.spec.init.as_ref());
+        }
+        config.command_provenance_unknown = config
+            .command_provenance
+            .as_ref()
+            .is_none_or(|origin| !origin.matches(&config.spec.runtime.cmd));
+        config.init_provenance_unknown = config
+            .init_provenance
+            .as_ref()
+            .is_none_or(|origin| !origin.matches(config.spec.init.as_ref()));
         let saved_overrides = config.caller_config_overrides.take();
         let workdir = config.spec.runtime.workdir.clone();
         let env = std::mem::take(&mut config.spec.env);
@@ -3555,9 +3751,38 @@ mod tests {
                         Some(SandboxConfigPatch::from_image(&image)),
                     )
                     .unwrap();
-                let actual_settings = serde_json::to_value(&actual).unwrap();
-                let expected_settings = serde_json::to_value(&expected).unwrap();
-                assert_eq!(actual_settings, expected_settings);
+                let mut actual_launch = serde_json::to_value(&actual).unwrap();
+                let mut expected_launch = serde_json::to_value(&expected).unwrap();
+                // Reconstruction must not invent private init intent, while the concrete
+                // launch still matches fresh image resolution. Other private evidence has
+                // separate tests and is not part of the guest launch contract.
+                assert!(actual.init_provenance.is_none());
+                assert!(expected.init_provenance.is_some());
+                actual_launch
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("init_provenance");
+                expected_launch
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("init_provenance");
+                actual_launch
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("environment_provenance");
+                expected_launch
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("environment_provenance");
+                actual_launch
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("field_presence");
+                expected_launch
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("field_presence");
+                assert_eq!(actual_launch, expected_launch);
                 assert_eq!(
                     actual.init_owns_boot_workload(),
                     expected.init_owns_boot_workload()
@@ -4229,6 +4454,42 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["/second", "/third"]
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn http_default_intent_survives_layering_persistence_and_ffi_without_weakening_requests() {
+        let make = || SandboxBuilder::new("http-intent").image("alpine");
+        let finish = |builder: SandboxBuilder| builder.finish(None, None).unwrap();
+        let implicit = finish(make().network(|network| network.max_tcp_connections(8)));
+        assert!(implicit.has_implicit_http_defaults());
+        assert!(
+            finish(make().network(|network| network.http(|http| http)))
+                .has_implicit_http_defaults()
+        );
+        let restored: SandboxConfig =
+            serde_json::from_value(serde_json::to_value(&implicit).unwrap()).unwrap();
+        assert!(restored.has_implicit_http_defaults());
+
+        let explicit = finish(make().network(|network| {
+            network.http(|http| {
+                http.deny_response_format(microsandbox_types::HttpDenyResponseFormat::Json)
+            })
+        }));
+        assert!(!explicit.has_implicit_http_defaults());
+        let restored: SandboxConfig =
+            serde_json::from_value(serde_json::to_value(&explicit).unwrap()).unwrap();
+        assert!(!restored.has_implicit_http_defaults());
+
+        // Rebuilding a known config preserves its omission evidence; FFI can observe raw presence.
+        assert!(finish(SandboxBuilder::from(implicit.clone())).has_implicit_http_defaults());
+        let mut json = serde_json::to_value(&implicit).unwrap();
+        json["network"].as_object_mut().unwrap().remove("http");
+        let ffi = finish(SandboxBuilder::from_spec_json(&json.to_string()).unwrap());
+        assert!(ffi.has_implicit_http_defaults());
+        json["network"]["http"] = serde_json::json!({"deny_response_format": "json"});
+        let ffi = finish(SandboxBuilder::from_spec_json(&json.to_string()).unwrap());
+        assert!(!ffi.has_implicit_http_defaults());
     }
 
     #[cfg(feature = "net")]

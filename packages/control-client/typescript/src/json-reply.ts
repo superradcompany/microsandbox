@@ -63,6 +63,9 @@ export function jsonRuntimeCapabilities(value: JsonValue | undefined): RuntimeCa
   };
   const optional = (name: string): boolean => fields.has(name) ? boolean(name) : false;
   return {
+    configuration_capture: optional("configuration_capture"),
+    configuration_exec_limits: optional("configuration_exec_limits"),
+    configuration_storage: optional("configuration_storage"),
     root_disk_grow: optional("root_disk_grow"), guest_flush_policy: optional("guest_flush_policy"),
     optional_disk_integrity: optional("optional_disk_integrity"), branch_create: optional("branch_create"),
     branch_memfd: optional("branch_memfd"), pause_resume: optional("pause_resume"),
@@ -84,6 +87,7 @@ export function jsonCpu(value: JsonValue | undefined): CpuState {
 export function jsonCheckpoint(value: JsonValue | undefined): CheckpointState {
   const fields = jsonObject(value), uint = (name: string) => jsonUint(fields.get(name), 64);
   return {
+    ...(fields.has("configuration") ? { configuration: { sha256: jsonText(jsonObject(fields.get("configuration")).get("sha256")) } } : {}),
     checkpoint_id: jsonText(fields.get("checkpoint_id")), checkpoint_root: jsonText(fields.get("checkpoint_root")),
     path: jsonText(fields.get("path")), memory_mode: jsonText(fields.get("memory_mode")),
     memory_logical_bytes: uint("memory_logical_bytes"), memory_emitted_bytes: uint("memory_emitted_bytes"),
@@ -96,6 +100,7 @@ export function jsonDiskCheckpoint(value: JsonValue | undefined): DiskCheckpoint
   if (owned !== undefined && !Array.isArray(owned)) throw new ClientError("invalid_data");
   if (!fields.has("disk")) throw new ClientError("invalid_data");
   return {
+    ...(fields.has("configuration") ? { configuration: { sha256: jsonText(jsonObject(fields.get("configuration")).get("sha256")) } } : {}),
     checkpoint_id: jsonText(fields.get("checkpoint_id")), path: jsonText(fields.get("path")),
     disk: fields.get("disk"), owned_volumes: owned ?? [],
   };

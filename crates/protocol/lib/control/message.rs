@@ -192,7 +192,12 @@ impl ControlOperation {
 pub fn control_message_min_generation(name: &str) -> Option<u8> {
     if matches!(
         name,
-        "control.jobs" | "control.jobs.result" | "control.resize" | "control.resize.result"
+        "control.jobs"
+            | "control.jobs.result"
+            | "control.resize"
+            | "control.resize.result"
+            | "control.labels"
+            | "control.labels.result"
     ) {
         return Some(2);
     }

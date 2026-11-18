@@ -50,6 +50,7 @@ use microsandbox_protocol::exec_control::{
     EXEC_CONTROL_VERSION, ExecControlAdvertisement, ExecControlReady,
 };
 use microsandbox_protocol::fs::{FsRequest, FsResponse};
+use microsandbox_protocol::init_observation::ObservedReady;
 use microsandbox_protocol::message::{
     FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message,
     MessageType,
@@ -1507,13 +1508,12 @@ impl AgentRelay {
                         self.dual_port_active,
                     );
                     let mut client_ready =
-                        Message::with_payload(MessageType::Ready, msg.id, &ready.public).map_err(
-                            |error| {
+                        Message::with_payload(MessageType::Ready, msg.id, &ready.client_ready())
+                            .map_err(|error| {
                                 RuntimeError::Custom(format!(
                                     "encode SDK-facing core.ready payload: {error}"
                                 ))
-                            },
-                        )?;
+                            })?;
                     client_ready.v = msg.v;
                     let mut client_ready_frame = Vec::new();
                     codec::encode_to_buf(&client_ready, &mut client_ready_frame).map_err(
@@ -1967,8 +1967,9 @@ impl AgentRelay {
             restored.ready.clone(),
             self.dual_port_active,
         );
-        let mut ready = Message::with_payload(MessageType::Ready, 0, &restored.ready.public)
-            .map_err(|error| RuntimeError::Custom(format!("encode restored ready: {error}")))?;
+        let mut ready =
+            Message::with_payload(MessageType::Ready, 0, &restored.ready.client_ready())
+                .map_err(|error| RuntimeError::Custom(format!("encode restored ready: {error}")))?;
         ready.v = restored.protocol_generation;
         let mut frame = Vec::new();
         codec::encode_to_buf(&ready, &mut frame).map_err(|error| {
@@ -1999,12 +2000,12 @@ impl AgentRelay {
         })?;
         let ready_message = codec::decode_message_frame(&ready_frame)
             .map_err(|error| RuntimeError::Custom(format!("decode relay Ready: {error}")))?;
-        let ready_payload = ready_message.payload::<Ready>().map_err(|error| {
+        let ready_payload = ready_message.payload::<ObservedReady>().map_err(|error| {
             RuntimeError::Custom(format!("decode relay Ready payload: {error}"))
         })?;
         // Only bundled peers with bounded, nonblocking guest input and range retirement can
         // advertise the stronger delivery contract. Older agents retain their existing path.
-        let exec_control_supported = ready_payload.workload_transport_barrier_version
+        let exec_control_supported = ready_payload.ready.workload_transport_barrier_version
             == Some(microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION)
             && self.range_lease_active;
 
@@ -2021,7 +2022,7 @@ impl AgentRelay {
         let (agent_tx, agent_rx) = ControlWriter::new();
         agent_tx
             .execution_tracker
-            .install(ready_payload.exec_limits)
+            .install(ready_payload.ready.exec_limits)
             .map_err(RuntimeError::Custom)?;
         agent_tx
             .exec_controls
@@ -8988,14 +8989,20 @@ mod tests {
             relay = relay.with_bind_identity_map(None, 0);
         }
 
+        let observation = microsandbox_protocol::init_observation::InitObservation::Handoff {
+            path: "/sbin/init".into(),
+        };
         let ready = encoded_message(
             MessageType::Ready,
-            &Ready {
-                boot_time_ns: 0,
-                init_time_ns: 0,
-                ready_time_ns: 0,
-                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
-                ..Default::default()
+            &ObservedReady {
+                ready: Ready {
+                    boot_time_ns: 0,
+                    init_time_ns: 0,
+                    ready_time_ns: 0,
+                    workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+                    ..Default::default()
+                },
+                init_observation: Some(observation.clone()),
             },
         );
         shared.tx_ring.push(ready.clone()).unwrap();
@@ -9005,6 +9012,7 @@ mod tests {
 
         let _private = shared.workload_control.start();
         let (_, captured_ready) = shared.workload_control.ready().unwrap();
+        assert_eq!(captured_ready.init_observation, Some(observation.clone()));
         #[cfg(unix)]
         assert_eq!(
             captured_ready.public.local_transport,
@@ -9014,7 +9022,9 @@ mod tests {
         assert!(captured_ready.public.local_transport.is_none());
 
         let cached = relay.ready_frame.as_ref().expect("SDK-facing ready frame");
-        let cached_ready: Ready = decode_frame(cached).unwrap().payload().unwrap();
+        let cached_observed: ObservedReady = decode_frame(cached).unwrap().payload().unwrap();
+        assert_eq!(cached_observed.init_observation, Some(observation));
+        let cached_ready = cached_observed.ready;
         #[cfg(unix)]
         assert_eq!(
             cached_ready.local_transport,
@@ -9205,6 +9215,7 @@ mod tests {
             external_mount_reports: Vec::new(),
             protocol_generation: microsandbox_protocol::message::PROTOCOL_VERSION,
             ready: GuestReady {
+                init_observation: None,
                 restore_tcp_reset_version: Some(1),
                 public: Ready {
                     boot_time_ns: 11,

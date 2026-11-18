@@ -1128,7 +1128,7 @@ impl LocalBackend {
         )
         .await
         {
-            sandbox.terminate_creation_owner().await;
+            let err = sandbox.creation_failure(err).await;
             return Err(creation_cleanup.finish_failure(err).await);
         }
 
@@ -1158,7 +1158,7 @@ impl LocalBackend {
         }
         .await;
         if let Err(error) = validated {
-            sandbox.terminate_creation_owner().await;
+            let error = sandbox.creation_failure(error).await;
             // A bounded termination attempt can expire before runtime ownership ends.
             // Keep the original failure, but never remove storage without the lifecycle lock.
             self.rollback_failed_startup(
@@ -1183,7 +1183,7 @@ impl LocalBackend {
             )
             .await
             {
-                sandbox.terminate_creation_owner().await;
+                let error = sandbox.creation_failure(error).await;
                 return Err(creation_cleanup.finish_failure(error).await);
             }
             if let Err(error) = remove_dir_if_exists(&closure) {

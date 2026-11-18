@@ -13,7 +13,7 @@ use crate::runner::workload_control::WorkloadControl;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn executor(root: &Path, socket: &Path) -> Arc<RuntimeControlExecutor> {
+async fn executor(root: &Path, socket: &Path) -> Arc<RuntimeControlExecutor> {
     // Construction only: no firmware, hypervisor or guest process is entered by this fixture.
     let vm = msb_krun::VmBuilder::new().build().unwrap();
     let config = VmConfig {
@@ -61,6 +61,22 @@ fn executor(root: &Path, socket: &Path) -> Arc<RuntimeControlExecutor> {
         checkpoint_restore: None,
     };
 
+    let db = microsandbox_db::DbWriteConnection::open(
+        &root.join("catalog.db"),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let owner = crate::retention::RetentionOwner {
+        catalog_file: [0, 0],
+        sandbox_id: 1,
+        sandbox_created_at: None,
+        run_id: 1,
+        run_started_at: "fixture".into(),
+        runtime_boot_id: new_runtime_boot_id(),
+    };
+    let retention = crate::retention::RetentionJournal::begin_start(root, owner).unwrap();
     Arc::new(
         RuntimeControlExecutor::new(
             vm.control_handle(),
@@ -75,8 +91,12 @@ fn executor(root: &Path, socket: &Path) -> Arc<RuntimeControlExecutor> {
             WorkloadControl::new(),
             Arc::new(AtomicBool::new(false)),
             None,
-            BTreeMap::new(),
+            Default::default(),
             ConfirmedMemoryLimit::boot(256 << 20, vm.metrics_handle()),
+            None,
+            Default::default(),
+            retention,
+            db,
         )
         .unwrap(),
     )
@@ -112,7 +132,7 @@ async fn pending_reads_return_without_connecting_to_the_guest() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("agent.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    let executor = executor(root.path(), &socket);
+    let executor = executor(root.path(), &socket).await;
     let request = pending(&executor);
     let read = Arc::clone(&executor);
     let response = timeout(
@@ -149,7 +169,7 @@ async fn pending_reads_and_host_observation_continue_while_background_guest_io_s
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("agent.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    let executor = executor(root.path(), &socket);
+    let executor = executor(root.path(), &socket).await;
     let request = pending(&executor);
     executor.start_resize_observer();
     // The real observer connects to a peer that deliberately never answers its handshake.
@@ -195,7 +215,7 @@ async fn pending_reads_and_host_observation_continue_while_background_guest_io_s
 #[tokio::test]
 async fn retained_reads_report_paused_without_fabricating_completion() {
     let root = tempfile::tempdir().unwrap();
-    let executor = executor(root.path(), &root.path().join("missing.sock"));
+    let executor = executor(root.path(), &root.path().join("missing.sock")).await;
     let request = pending(&executor);
     executor.state.lock().unwrap().lifecycle = RuntimeLifecycle::Quiescing;
     let read = Arc::clone(&executor);

@@ -11,6 +11,10 @@ mod error;
 
 /// Runtime-owned execution jobs on the host-control extension.
 pub mod jobs;
+/// Capability-probed runtime-owned label updates.
+pub mod labels;
+/// Compact private configuration deltas for negotiated metadata updates.
+pub mod labels_delta;
 /// Operation-bound CPU and memory resize tracking over host control.
 pub mod resize;
 
@@ -452,6 +456,7 @@ pub mod exec;
 pub mod exec_control;
 pub mod fs;
 pub mod heartbeat;
+pub mod init_observation;
 pub mod message;
 pub mod resources;
 #[doc(hidden)]

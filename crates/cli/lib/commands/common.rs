@@ -1436,7 +1436,11 @@ fn apply_sandbox_opts_inner(
     // --- Environment ---
     for env_str in &opts.env {
         let (k, v) = ui::parse_env(env_str).map_err(anyhow::Error::msg)?;
-        builder = builder.env(k, v);
+        builder = if env_str.contains('=') {
+            builder.env(k, v)
+        } else {
+            builder.host_env(k, v)
+        };
     }
 
     // --- Labels ---
@@ -1538,10 +1542,20 @@ fn apply_sandbox_opts_inner(
             let mut init_envs = Vec::with_capacity(opts.init_env.len());
             for entry in &opts.init_env {
                 let (k, v) = ui::parse_env(entry).map_err(anyhow::Error::msg)?;
-                init_envs.push((k, v));
+                init_envs.push((k, v, !entry.contains('=')));
             }
             let init_args = opts.init_arg.clone();
-            builder = builder.init_with(init_path, |i| i.args(init_args).envs(init_envs));
+            builder = builder.init_with(init_path, |i| {
+                init_envs
+                    .into_iter()
+                    .fold(i.args(init_args), |i, (key, value, host)| {
+                        if host {
+                            i.host_env(key, value)
+                        } else {
+                            i.env(key, value)
+                        }
+                    })
+            });
         }
     }
 

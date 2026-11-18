@@ -424,6 +424,19 @@ pub(super) async fn apply(
         ports::preflight(&config, active.as_ref(), &builder.patch, status)?;
     }
     let restart_required = plan_requires_restart(&plan) && running_status(status);
+    // Resolve ownership before the first mutation. A failed dispatched label update
+    // may already have applied and must never be retried through the catalog path.
+    let label_owner = if !restart_required && has_live_label_change(&plan) {
+        match &session {
+            Some(session) => session
+                .label_update_owner()
+                .await
+                .map_err(MicrosandboxError::ControlClient)?,
+            None => None,
+        }
+    } else {
+        None
+    };
     if running_status(status)
         && !restart_required
         && builder.policy == ModificationPolicy::NoRestart
@@ -644,19 +657,37 @@ pub(super) async fn apply(
     if !plan.changes.is_empty() {
         config.apply_modification(&builder.patch);
         config.update_secrets(&builder.patch)?;
+        let labels_persisted_by_runtime = label_owner.is_some();
         let active_labels = if !restart_required && has_live_label_change(&plan) {
             let (Some(active), Some(expected_json)) = (active.as_mut(), active_json.clone()) else {
                 return Err(MicrosandboxError::ControlStateChanged);
             };
             active.update_labels(&builder.patch);
-            Some(ActiveLabelsUpdate {
-                expected_json,
-                active_config_json: serde_json::to_string(active)?,
-            })
+            if let Some(owner) = label_owner {
+                control_session(&session)?
+                    .update_labels(
+                        owner,
+                        &expected_json,
+                        handle.config_json(),
+                        serde_json::to_string(&config)?,
+                        builder.patch.labels.iter().cloned().collect(),
+                        builder.patch.labels_remove.clone(),
+                    )
+                    .await
+                    .map_err(MicrosandboxError::ControlClient)?;
+                None
+            } else {
+                Some(ActiveLabelsUpdate {
+                    expected_json,
+                    active_config_json: serde_json::to_string(active)?,
+                })
+            }
         } else {
             None
         };
-        persist_config(&builder.backend, &handle, &config, active_labels).await?;
+        if !labels_persisted_by_runtime {
+            persist_config(&builder.backend, &handle, &config, active_labels).await?;
+        }
     }
     if restart_required {
         start_after_modify(&handle).await?;
@@ -941,7 +972,9 @@ async fn live_control(
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
 ) -> MicrosandboxResult<(LiveControl, Option<ControlSession>)> {
-    let needs_control = patch.root_disk_size_mib.is_some()
+    let needs_control = !patch.labels.is_empty()
+        || !patch.labels_remove.is_empty()
+        || patch.root_disk_size_mib.is_some()
         || patch.cpus.is_some()
         || patch.memory_mib.is_some()
         || !patch.secrets.is_empty()
@@ -2238,6 +2271,11 @@ mod tests {
             .unwrap()
             .set_len(1024 * 1024)
             .unwrap();
+        // A real modify request receives the decoded catalog config, including historical
+        // omission evidence. Use that same baseline when checking for a concurrent edit.
+        let config =
+            SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())
+                .unwrap();
         (home, local, config, model.id)
     }
 
@@ -2320,7 +2358,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
             let backend: Arc<dyn Backend> = local.clone();
-            let pending = tokio::spawn(async move {
+            let mut pending = tokio::spawn(async move {
                 grow_root_disk_now(&backend, "growth", id, &config, 1).await
             });
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2357,10 +2395,12 @@ mod tests {
                             break;
                         }
                     }
-                    assert!(
-                        !pending.is_finished(),
-                        "growth ended before reserving storage"
-                    );
+                    if pending.is_finished() {
+                        panic!(
+                            "growth ended before reserving storage: {:?}",
+                            (&mut pending).await
+                        );
+                    }
                     tokio::task::yield_now().await;
                 }
             })
@@ -2794,6 +2834,7 @@ mod tests {
                 "first-checkpoint".into(),
                 false,
                 microsandbox_types::GuestFlush::Auto,
+                false,
             )
             .await
             .unwrap();
@@ -2805,6 +2846,7 @@ mod tests {
                 "second-checkpoint".into(),
                 true,
                 microsandbox_types::GuestFlush::Auto,
+                false,
             )
             .await
             .unwrap();

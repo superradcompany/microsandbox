@@ -1242,7 +1242,7 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&paths.runtime.agent).unwrap();
         std::fs::set_permissions(
             &paths.runtime.canonical_dir,
-            std::fs::Permissions::from_mode(0),
+            std::fs::Permissions::from_mode(0o000),
         )
         .unwrap();
         let result = paths.may_be_live().await;

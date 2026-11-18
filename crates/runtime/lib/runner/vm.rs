@@ -124,6 +124,9 @@ struct AgentConsoleBackends {
 /// agent relay, lifecycle policies). Passed to [`enter()`].
 #[derive(Debug)]
 pub struct Config {
+    /// Optional private source from a capable launcher; never trusted as guest resource completion.
+    pub retention_source: Option<crate::retention::RetentionSource>,
+
     /// Internal per-boot agent transport policy.
     #[doc(hidden)]
     pub agent_transport: AgentTransportProfile,
@@ -476,6 +479,8 @@ type VmBuildOutput = (
     BindIdentityMapRegistration,
     Option<crate::checkpoint::RestoredAgentState>,
     crate::checkpoint::CheckpointDeviceBindings,
+    Option<std::fs::File>,
+    super::storage_observation::MountedFilesystemInventory,
 );
 
 /// Public runtime endpoints held back until a restored guest is activated.
@@ -774,18 +779,6 @@ fn run(
     crate::checkpoint::layout::require_ready(&config.runtime_dir).map_err(RuntimeError::Custom)?;
     let guest_dir =
         crate::checkpoint::layout::guest_root(&config.runtime_dir).map_err(RuntimeError::Custom)?;
-    crate::checkpoint::layout::real_directory(&guest_dir.join("scripts"), true)
-        .map_err(RuntimeError::Custom)?;
-    crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm).map_err(
-        |error| RuntimeError::Custom(format!("recover runtime-owned root disk: {error}")),
-    )?;
-    recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks)?;
-    // Heartbeats are per boot, while the runtime directory persists across starts.
-    heartbeat::clear_stale(&guest_dir)?;
-    if config.vm.checkpoint_restore.is_some() {
-        prepare_runtime_restore_namespace(&guest_dir, config.vm.rootfs_vmdk.is_some())?;
-    }
-
     let socket_paths = RuntimeSocketPaths::new(&config.run_dir, &config.sandbox_name);
     #[cfg(unix)]
     socket_paths.prepare_canonical_directory(&config.agent_sock_path)?;
@@ -816,6 +809,54 @@ fn run(
         let run_db_id = insert_run(&db, config.sandbox_id, pid).await?;
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
+
+    // This fence is durable before VM construction/activation or recovery can change guest
+    // backing state. It does not change the shared catalog schema or active_config cleanup.
+    let retention = (|| -> RuntimeResult<crate::retention::RetentionJournal> {
+        let owner = tokio_rt.block_on(crate::retention::RetentionOwner::for_run(
+            &db,
+            &config.sandbox_db_path,
+            config.sandbox_id,
+            run_db_id,
+            super::control::RuntimeControlExecutor::new_boot_identity(),
+        ))?;
+        crate::retention::RetentionJournal::begin_start(
+            config.runtime_dir.parent().ok_or_else(|| {
+                RuntimeError::Custom("runtime directory has no sandbox parent".into())
+            })?,
+            owner,
+        )
+        .map_err(RuntimeError::Io)
+    })();
+    let retention = match retention {
+        Ok(retention) => retention,
+        Err(error) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(RuntimeError::Custom(format!(
+                "start refused before guest activation: cannot record configuration transition: {error}"
+            )));
+        }
+    };
+    let recovery = (|| -> RuntimeResult<()> {
+        crate::checkpoint::layout::real_directory(&guest_dir.join("scripts"), true)
+            .map_err(RuntimeError::Custom)?;
+        // Heartbeats are per boot, while the runtime directory persists across starts.
+        heartbeat::clear_stale(&guest_dir)?;
+        if config.vm.checkpoint_restore.is_some() {
+            prepare_runtime_restore_namespace(&guest_dir, config.vm.rootfs_vmdk.is_some())?;
+        }
+        crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm)
+            .map_err(|error| {
+                RuntimeError::Custom(format!("recover runtime-owned root disk: {error}"))
+            })?;
+        recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks)
+    })();
+    if let Err(error) = recovery {
+        // Recovery now follows the durable start fence and run insertion. Preserve its
+        // uncertain evidence, but do not leave this failed attempt recorded as a live run.
+        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+        return Err(error);
+    }
 
     let relay_idle = relay.idle_state();
     relay = relay.with_boot_error_log_dir(config.log_dir.clone());
@@ -951,6 +992,12 @@ fn run(
     let exit_socket_paths = socket_paths.clone();
     let exit_sandbox_name = config.sandbox_name.clone();
     let exit_sandboxes_dir = config.sandboxes_dir.clone();
+    let exit_retention_directory = config
+        .runtime_dir
+        .parent()
+        .expect("retention preparation validated the runtime parent")
+        .to_path_buf();
+    let exit_retention_boot = retention.record().owner.runtime_boot_id.clone();
     let exit_log_writer = exec_log_writer.clone();
     // Capture the activated writer so the exit observer can release the slot
     // without re-opening the registry (saving two mmap syscalls and a
@@ -1012,6 +1059,22 @@ fn run(
 
             rt_handle.block_on(async {
                 let now = chrono::Utc::now().naive_utc();
+
+                // Preserve catalog provenance before terminal_sandbox_update clears it. This
+                // reads the durable generation, so exit never waits for the control mutex of
+                // an operation that may itself be waiting for the VM to finish exiting.
+                if let Err(error) = crate::retention::seal_terminal(
+                    &exit_db,
+                    &exit_retention_directory,
+                    exit_sandbox_id,
+                    exit_run_id,
+                    Some(&exit_retention_boot),
+                    crate::retention::RetentionTerminalOrigin::RuntimeExit,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "terminal configuration evidence unavailable");
+                }
 
                 if let Err(error) = exit_writeback_guard.release(&exit_db).await {
                     tracing::warn!(%error, "release writeback pressure membership at VM exit");
@@ -1146,6 +1209,8 @@ fn run(
         bind_identity_map,
         mut restored_agent,
         device_bindings,
+        runtime_script_root,
+        mounted_filesystems,
     ) = match build_result {
         Ok(vm) => vm,
         Err(e) => {
@@ -1208,7 +1273,7 @@ fn run(
         u64::from(config.vm.memory_mib) << 20,
         krun_metrics_handle.clone(),
     );
-    let (restore_endpoint_publication, managed_jobs) = {
+    let (restore_endpoint_publication, activation_control, managed_jobs) = {
         let control = vm.control_handle();
         #[cfg(feature = "net")]
         let secrets = _network_secrets_handle.clone();
@@ -1232,6 +1297,10 @@ fn run(
                 .and_then(|agent| agent.inherited_memory.take()),
             device_bindings,
             confirmed_memory_limit.clone(),
+            runtime_script_root,
+            mounted_filesystems,
+            retention,
+            db.clone(),
         );
         let context = super::control::ControlContext {
             executor: match executor {
@@ -1247,6 +1316,7 @@ fn run(
         // Fresh evidence also confirms restored hotplug capacity without inventing a resize
         // operation in the new runtime. Sleeping observers cannot retain a finished runtime.
         context.executor.start_resize_observer();
+        let activation_control = Arc::clone(&context.executor);
         let managed_jobs = context.executor.jobs();
         if restored_agent.is_some() {
             (
@@ -1256,6 +1326,7 @@ fn run(
                     sandbox_name: config.sandbox_name.clone(),
                     control: context,
                 }),
+                activation_control,
                 managed_jobs,
             )
         } else {
@@ -1271,7 +1342,7 @@ fn run(
                 let _ = socket_paths.remove_canonical_artifacts();
                 return Err(error);
             }
-            (None, managed_jobs)
+            (None, activation_control, managed_jobs)
         }
     };
 
@@ -1384,6 +1455,7 @@ fn run(
     let restore_runtime_dir = config.runtime_dir.clone();
     let relay_boot_log_dir = config.log_dir.clone();
     let restore_startup_progress = startup_progress.clone();
+    let retention_source = config.retention_source.take();
     tokio_rt.spawn(async move {
         let ready_result = tokio::task::spawn_blocking(move || {
             if let (Some(restored), Some(control)) =
@@ -1398,6 +1470,11 @@ fn run(
             } else {
                 relay.wait_ready()?;
             }
+            // No public Ready is released until confirmation is durable. Failure follows the
+            // existing readiness-failure termination path, including for legacy SDK callers.
+            activation_control
+                .confirm_activation(retention_source)
+                .map_err(RuntimeError::Custom)?;
             Ok::<_, RuntimeError>(relay)
         })
         .await;
@@ -1971,6 +2048,8 @@ fn build_vm(
     // never started, and the exit observer reclaims them at teardown.
     #[cfg(not(unix))]
     let _ = trampoline_rootfs_dirs;
+    let runtime_script_root;
+    let mut mounted_filesystems = super::storage_observation::MountedFilesystemInventory::default();
     // Decode once before constructing devices: unavailable disks need the exact
     // captured capacity/features, never guessed geometry or a temporary backing.
     let prepared_restore = vm
@@ -2194,6 +2273,16 @@ fn build_vm(
         };
         let backend = PassthroughFs::new(cfg)
             .map_err(|e| RuntimeError::Custom(format!("runtime mount: {e}")))?;
+        // Keep observation tied to the mounted inode even if a host renames its pathname.
+        // Failure only makes this optional evidence unknown; legacy launch remains supported.
+        #[cfg(unix)]
+        {
+            runtime_script_root = backend.pin_runtime_script_root().ok();
+        }
+        #[cfg(not(unix))]
+        {
+            runtime_script_root = None;
+        }
         builder = builder.fs(move |fs| fs.tag(&runtime_tag).custom(Box::new(backend)));
     }
 
@@ -2338,6 +2427,11 @@ fn build_vm(
                     host_path.display()
                 ))
             })?;
+        mounted_filesystems.record_available(
+            &tag,
+            super::storage_observation::MountedFilesystemKind::File,
+            parsed.quota_bytes,
+        );
         builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
     }
 
@@ -2512,6 +2606,11 @@ fn build_vm(
                 RuntimeError::Custom(format!("mount {tag}: {e}"))
             }
         })?;
+        mounted_filesystems.record_available(
+            &tag,
+            super::storage_observation::MountedFilesystemKind::Directory,
+            parsed.quota_bytes,
+        );
         builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
     }
 
@@ -2921,6 +3020,8 @@ fn build_vm(
         bind_identity_map,
         restored_agent,
         device_bindings,
+        runtime_script_root,
+        mounted_filesystems,
     ))
 }
 
@@ -4490,6 +4591,7 @@ mod tests {
         };
         shape_rootfs(&mut vm);
         super::Config {
+            retention_source: None,
             agent_transport: AgentTransportProfile::default(),
             sandbox_name: "trampoline-test".into(),
             sandbox_id: 1,

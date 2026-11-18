@@ -820,6 +820,28 @@ mod tests {
     }
 
     #[test]
+    fn restores_optional_init_selection_without_inventing_legacy_evidence() {
+        use microsandbox_protocol::init_observation::InitObservation;
+
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        let legacy = parse_restored_agent_resource(&resource, "checkpoint-attempt").unwrap();
+        assert!(legacy.ready.init_observation.is_none());
+        let mut ready = legacy.ready;
+        ready.init_observation = Some(InitObservation::Builtin);
+        resource
+            .binding
+            .insert("ready".into(), serde_json::to_string(&ready).unwrap());
+        let restored = parse_restored_agent_resource(&resource, "checkpoint-attempt").unwrap();
+        assert_eq!(
+            restored.ready.init_observation,
+            Some(InitObservation::Builtin)
+        );
+        // Older parsers consume exactly this same nested Ready document, not a new binding key.
+        let legacy: Ready = serde_json::from_str(&resource.binding["ready"]).unwrap();
+        assert_eq!(legacy.agent_version, "0.6.16-test");
+    }
+
+    #[test]
     fn mount_warnings_are_published_outside_the_guest_runtime_share() {
         let sandbox = tempfile::tempdir().unwrap();
         let runtime = sandbox.path().join("runtime");
@@ -868,8 +890,8 @@ mod tests {
     #[test]
     fn rejects_development_snapshot_with_stdin_charged_to_control() {
         let mut resource = agent_resource(PROTOCOL_VERSION);
-        let mut ready: Ready = serde_json::from_str(&resource.binding["ready"]).unwrap();
-        ready.workload_transport_barrier_version = Some(1);
+        let mut ready: GuestReady = serde_json::from_str(&resource.binding["ready"]).unwrap();
+        ready.public.workload_transport_barrier_version = Some(1);
         resource
             .binding
             .insert("ready".into(), serde_json::to_string(&ready).unwrap());

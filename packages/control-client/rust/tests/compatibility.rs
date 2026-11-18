@@ -884,3 +884,529 @@ async fn mismatched_connected_peer_is_runtime_changed_before_any_operation_bytes
     assert_eq!(connector.dials.load(Ordering::SeqCst), 2);
     peer.await.unwrap();
 }
+
+#[tokio::test]
+async fn retained_capture_requires_verified_json_ownership_and_fresh_capability() {
+    for verified in [false, true] {
+        let (connector, mut peers) = QueueConnector::new(if verified { 2 } else { 1 });
+        let discovery = peers.remove(0);
+        let probe = peers.pop();
+        let peer = tokio::spawn(async move {
+            // Advertise support once, then simulate its absence on the actual admission probe.
+            let caps = br#"{"ok":true,"capabilities":{"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true}}"#;
+            json_peer(discovery, "capabilities", caps).await;
+            if let Some(probe) = probe {
+                json_peer(probe, "capabilities", LEGACY_CAPS).await;
+            }
+        });
+        let connection = if verified {
+            ControlConnection::connect_verified_connector(connector.clone())
+                .await
+                .unwrap()
+        } else {
+            ControlConnection::connect_connector(connector.clone())
+                .await
+                .unwrap()
+        };
+        let request = CreateCheckpoint(CheckpointCreate {
+            retain_configuration: Some(true),
+            retain_configuration_exec_limits: None,
+            retain_configuration_storage: None,
+            guest_flush: None,
+            record_integrity: false,
+            checkpoint_id: "retained".into(),
+            intent: CheckpointCaptureIntent::FullSnapshot,
+        });
+        let error = connection.request_typed(&request).await.unwrap_err();
+        assert_eq!(error.delivery(), Delivery::NotSent);
+        assert!(matches!(
+            error,
+            ControlClientError::Client(ClientError {
+                kind: ErrorKind::UnsupportedOperation,
+                ..
+            })
+        ));
+        assert_eq!(
+            connector.dials.load(Ordering::SeqCst),
+            if verified { 2 } else { 1 }
+        );
+        // No mutation stream was supplied: a fallback or ignored capability would fail this count.
+        peer.await.unwrap();
+        connection.close().await;
+    }
+}
+
+#[tokio::test]
+async fn verified_json_retained_capture_preserves_receipt_and_sends_once() {
+    let (connector, mut peers) = QueueConnector::new(3);
+    let mutation = peers.pop().unwrap();
+    let probe = peers.pop().unwrap();
+    let discovery = peers.pop().unwrap();
+    let peer = tokio::spawn(async move {
+        let caps = br#"{"ok":true,"capabilities":{"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true}}"#;
+        json_peer(discovery, "capabilities", caps).await;
+        json_peer(probe, "capabilities", caps).await;
+        extended_json_peer(mutation, serde_json::json!({"op":"checkpoint_create", "retain_configuration":true,
+            "guest_flush":null,"record_integrity":false,"checkpoint_id":"retained","intent":"full_snapshot"}),
+            br#"{"ok":true,"checkpoint":{"checkpoint_id":"retained","checkpoint_root":"root","path":"/private/capture","memory_mode":"full","memory_logical_bytes":0,"memory_emitted_bytes":0,"configuration":{"sha256":"receipt-digest"}}}"#).await;
+    });
+    let connection = ControlConnection::connect_verified_connector(connector.clone())
+        .await
+        .unwrap();
+    let request = CreateCheckpoint(CheckpointCreate {
+        retain_configuration: Some(true),
+        retain_configuration_exec_limits: None,
+        retain_configuration_storage: None,
+        guest_flush: None,
+        record_integrity: false,
+        checkpoint_id: "retained".into(),
+        intent: CheckpointCaptureIntent::FullSnapshot,
+    });
+    let result = connection.request_typed(&request).await.unwrap();
+    assert_eq!(
+        result.checkpoint.unwrap().configuration.unwrap().sha256,
+        "receipt-digest"
+    );
+    assert_eq!(connector.dials.load(Ordering::SeqCst), 3);
+    peer.await.unwrap();
+    connection.close().await;
+}
+
+#[tokio::test]
+async fn retained_capture_probes_the_actual_framed_peer_before_mutation() {
+    for supported in [false, true] {
+        let (connector, mut peers) = QueueConnector::new(2);
+        let mut framed = peers.pop().unwrap();
+        let discovery = peers.pop().unwrap();
+        let peer = tokio::spawn(async move {
+            json_peer(discovery, "capabilities", FRAMED_CAPS).await;
+            welcome(&mut framed).await;
+            let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+            assert_eq!(
+                Envelope::decode(&raw.body).unwrap().t,
+                "control.capabilities"
+            );
+            let payload = serde_json::json!({"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":supported});
+            let response = Envelope::new(2, "control.capabilities.result", &payload)
+                .unwrap()
+                .frame(raw.id, 1)
+                .unwrap();
+            codec::write_raw_frame(&mut framed, &response)
+                .await
+                .unwrap();
+            if supported {
+                let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+                let envelope = Envelope::decode(&raw.body).unwrap();
+                assert_eq!(envelope.t, "control.checkpoint.create");
+                let request: CheckpointCreate = envelope.payload().unwrap();
+                assert_eq!(request.retain_configuration, Some(true));
+                let payload = serde_json::json!({"checkpoint":{"checkpoint_id":"retained","checkpoint_root":"root","path":"/private/capture","memory_mode":"full","memory_logical_bytes":0,"memory_emitted_bytes":0,"configuration":{"sha256":"receipt-digest"}}});
+                codec::write_raw_frame(
+                    &mut framed,
+                    &Envelope::new(2, "control.checkpoint.result", &payload)
+                        .unwrap()
+                        .frame(raw.id, 1)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            }
+            let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+            assert_eq!(
+                Envelope::decode(&raw.body).unwrap().t,
+                "control.memory.state"
+            );
+            codec::write_raw_frame(&mut framed, &Envelope::new(1, "control.memory.state", &serde_json::json!({"boot_mib":256,"target_mib":256,"current_mib":256,"max_mib":256})).unwrap().frame(raw.id, 1).unwrap()).await.unwrap();
+        });
+        let connection = ControlConnection::connect_connector(connector)
+            .await
+            .unwrap();
+        let request = CreateCheckpoint(CheckpointCreate {
+            retain_configuration: Some(true),
+            retain_configuration_exec_limits: None,
+            retain_configuration_storage: None,
+            guest_flush: None,
+            record_integrity: false,
+            checkpoint_id: "retained".into(),
+            intent: CheckpointCaptureIntent::FullSnapshot,
+        });
+        let result = connection.request_typed(&request).await;
+        if supported {
+            assert_eq!(
+                result
+                    .unwrap()
+                    .checkpoint
+                    .unwrap()
+                    .configuration
+                    .unwrap()
+                    .sha256,
+                "receipt-digest"
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.delivery(), Delivery::NotSent);
+        }
+        assert_eq!(
+            connection
+                .request_typed(&GetMemoryState)
+                .await
+                .unwrap()
+                .target_mib,
+            256
+        );
+        peer.await.unwrap();
+        connection.close().await;
+    }
+}
+
+#[tokio::test]
+async fn retained_capture_generation_one_uses_verified_json_before_any_framed_probe() {
+    let (connector, mut peers) = QueueConnector::new(4);
+    let mutation = peers.pop().unwrap();
+    let probe = peers.pop().unwrap();
+    let mut framed = peers.pop().unwrap();
+    let discovery = peers.pop().unwrap();
+    let peer = tokio::spawn(async move {
+        let caps = br#"{"ok":true,"control_protocols":["json","cbor"],"capabilities":{"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true}}"#;
+        json_peer(discovery, "capabilities", caps).await;
+        generation_one_welcome(&mut framed).await;
+        json_peer(probe, "capabilities", caps).await;
+        extended_json_peer(mutation, serde_json::json!({"op":"disk_checkpoint_create", "retain_configuration":true,
+            "guest_flush":null,"checkpoint_id":"retained"}),
+            br#"{"ok":true,"disk_checkpoint":{"checkpoint_id":"retained","path":"/capture","disk":{"schema":"msb.disk-generation.v1","volume_id":"volume","generation":0,"layers":[],"head":"head","pause_generation":1},"configuration":{"sha256":"receipt-digest"}}}"#).await;
+        let mut byte = [0];
+        assert_eq!(framed.read(&mut byte).await.unwrap(), 0);
+    });
+    let connection = ControlConnection::connect_verified_connector(connector.clone())
+        .await
+        .unwrap();
+    let request = CreateDiskCheckpoint(DiskCheckpointCreate {
+        retain_configuration: Some(true),
+        retain_configuration_exec_limits: None,
+        retain_configuration_storage: None,
+        guest_flush: None,
+        checkpoint_id: "retained".into(),
+    });
+    let result = connection.request_typed(&request).await.unwrap();
+    assert_eq!(result.configuration.unwrap().sha256, "receipt-digest");
+    assert_eq!(connector.dials.load(Ordering::SeqCst), 4);
+    connection.close().await;
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn retained_capture_probe_timeout_is_not_a_sent_mutation() {
+    let (connector, mut peers) = QueueConnector::new(2);
+    let mut framed = peers.pop().unwrap();
+    let discovery = peers.pop().unwrap();
+    let peer = tokio::spawn(async move {
+        json_peer(discovery, "capabilities", FRAMED_CAPS).await;
+        welcome(&mut framed).await;
+        let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+        assert_eq!(
+            Envelope::decode(&raw.body).unwrap().t,
+            "control.capabilities"
+        );
+        // Keep the peer open but never answer the read-only probe.
+        let mut byte = [0];
+        assert_eq!(framed.read(&mut byte).await.unwrap(), 0);
+    });
+    let connection = ControlConnection::connect_connector(connector)
+        .await
+        .unwrap();
+    let request = CreateDiskCheckpoint(DiskCheckpointCreate {
+        retain_configuration: Some(true),
+        retain_configuration_exec_limits: None,
+        retain_configuration_storage: None,
+        guest_flush: None,
+        checkpoint_id: "retained".into(),
+    });
+    let error = connection
+        .request_typed_with(&request, |mut options| {
+            options.request_timeout = Some(std::time::Duration::from_millis(30));
+            options
+        })
+        .await
+        .unwrap_err();
+    assert_local(error, ErrorKind::Timeout, Delivery::NotSent);
+    connection.close().await;
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn storage_capture_requires_its_own_fresh_capability_and_preserves_old_operations() {
+    for supported in [false, true] {
+        let (connector, mut peers) = QueueConnector::new(2);
+        let mut framed = peers.pop().unwrap();
+        let discovery = peers.pop().unwrap();
+        let peer = tokio::spawn(async move {
+            json_peer(discovery, "capabilities", FRAMED_CAPS).await;
+            welcome(&mut framed).await;
+            let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+            assert_eq!(
+                Envelope::decode(&raw.body).unwrap().t,
+                "control.capabilities"
+            );
+            let payload = serde_json::json!({"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true,"configuration_storage":supported});
+            let response = Envelope::new(2, "control.capabilities.result", &payload)
+                .unwrap()
+                .frame(raw.id, 1)
+                .unwrap();
+            codec::write_raw_frame(&mut framed, &response)
+                .await
+                .unwrap();
+            if supported {
+                let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+                let envelope = Envelope::decode(&raw.body).unwrap();
+                assert_eq!(envelope.t, "control.checkpoint.create");
+                let request: CheckpointCreate = envelope.payload().unwrap();
+                assert_eq!(request.retain_configuration, Some(true));
+                assert_eq!(request.retain_configuration_storage, Some(true));
+                let payload = serde_json::json!({"checkpoint":{"checkpoint_id":"retained","checkpoint_root":"root","path":"/private/capture","memory_mode":"full","memory_logical_bytes":0,"memory_emitted_bytes":0,"configuration":{"sha256":"receipt-digest"}}});
+                codec::write_raw_frame(
+                    &mut framed,
+                    &Envelope::new(2, "control.checkpoint.result", &payload)
+                        .unwrap()
+                        .frame(raw.id, 1)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            }
+            let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+            assert_eq!(
+                Envelope::decode(&raw.body).unwrap().t,
+                "control.memory.state"
+            );
+            codec::write_raw_frame(&mut framed, &Envelope::new(1, "control.memory.state", &serde_json::json!({"boot_mib":256,"target_mib":256,"current_mib":256,"max_mib":256})).unwrap().frame(raw.id, 1).unwrap()).await.unwrap();
+        });
+        let connection = ControlConnection::connect_connector(connector)
+            .await
+            .unwrap();
+        let request = CreateCheckpoint(CheckpointCreate {
+            retain_configuration: Some(true),
+            retain_configuration_exec_limits: None,
+            retain_configuration_storage: Some(true),
+            guest_flush: None,
+            record_integrity: false,
+            checkpoint_id: "retained".into(),
+            intent: CheckpointCaptureIntent::FullSnapshot,
+        });
+        let result = connection.request_typed(&request).await;
+        if supported {
+            assert_eq!(
+                result
+                    .unwrap()
+                    .checkpoint
+                    .unwrap()
+                    .configuration
+                    .unwrap()
+                    .sha256,
+                "receipt-digest"
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.delivery(), Delivery::NotSent);
+        }
+        assert_eq!(
+            connection
+                .request_typed(&GetMemoryState)
+                .await
+                .unwrap()
+                .target_mib,
+            256
+        );
+        peer.await.unwrap();
+        connection.close().await;
+    }
+}
+
+#[tokio::test]
+async fn storage_capture_refuses_old_json_receipts_before_dispatch() {
+    for verified in [false, true] {
+        let (connector, mut peers) = QueueConnector::new(if verified { 2 } else { 1 });
+        let discovery = peers.remove(0);
+        let probe = peers.pop();
+        let peer = tokio::spawn(async move {
+            // Advertise support once, then simulate its absence on the actual admission probe.
+            let caps = br#"{"ok":true,"capabilities":{"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true,"configuration_storage":true}}"#;
+            json_peer(discovery, "capabilities", caps).await;
+            if let Some(probe) = probe {
+                json_peer(probe, "capabilities", br#"{"ok":true,"capabilities":{"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true}}"#).await;
+            }
+        });
+        let connection = if verified {
+            ControlConnection::connect_verified_connector(connector.clone())
+                .await
+                .unwrap()
+        } else {
+            ControlConnection::connect_connector(connector.clone())
+                .await
+                .unwrap()
+        };
+        let request = CreateCheckpoint(CheckpointCreate {
+            retain_configuration: Some(true),
+            retain_configuration_exec_limits: None,
+            retain_configuration_storage: Some(true),
+            guest_flush: None,
+            record_integrity: false,
+            checkpoint_id: "retained".into(),
+            intent: CheckpointCaptureIntent::FullSnapshot,
+        });
+        let error = connection.request_typed(&request).await.unwrap_err();
+        assert_eq!(error.delivery(), Delivery::NotSent);
+        assert!(matches!(
+            error,
+            ControlClientError::Client(ClientError {
+                kind: ErrorKind::UnsupportedOperation,
+                ..
+            })
+        ));
+        assert_eq!(
+            connector.dials.load(Ordering::SeqCst),
+            if verified { 2 } else { 1 }
+        );
+        // No mutation stream was supplied: a fallback or ignored capability would fail this count.
+        peer.await.unwrap();
+        connection.close().await;
+    }
+}
+
+#[tokio::test]
+async fn exec_limit_capture_requires_its_own_fresh_capability_and_preserves_old_operations() {
+    for supported in [false, true] {
+        let (connector, mut peers) = QueueConnector::new(2);
+        let mut framed = peers.pop().unwrap();
+        let discovery = peers.pop().unwrap();
+        let peer = tokio::spawn(async move {
+            json_peer(discovery, "capabilities", FRAMED_CAPS).await;
+            welcome(&mut framed).await;
+            let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+            assert_eq!(
+                Envelope::decode(&raw.body).unwrap().t,
+                "control.capabilities"
+            );
+            let payload = serde_json::json!({"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true,"configuration_exec_limits":supported});
+            let response = Envelope::new(2, "control.capabilities.result", &payload)
+                .unwrap()
+                .frame(raw.id, 1)
+                .unwrap();
+            codec::write_raw_frame(&mut framed, &response)
+                .await
+                .unwrap();
+            if supported {
+                let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+                let envelope = Envelope::decode(&raw.body).unwrap();
+                assert_eq!(envelope.t, "control.checkpoint.create");
+                let request: CheckpointCreate = envelope.payload().unwrap();
+                assert_eq!(request.retain_configuration, Some(true));
+                assert_eq!(request.retain_configuration_exec_limits, Some(true));
+                let payload = serde_json::json!({"checkpoint":{"checkpoint_id":"retained","checkpoint_root":"root","path":"/private/capture","memory_mode":"full","memory_logical_bytes":0,"memory_emitted_bytes":0,"configuration":{"sha256":"receipt-digest"}}});
+                codec::write_raw_frame(
+                    &mut framed,
+                    &Envelope::new(2, "control.checkpoint.result", &payload)
+                        .unwrap()
+                        .frame(raw.id, 1)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            }
+            let raw = codec::read_raw_frame(&mut framed).await.unwrap();
+            assert_eq!(
+                Envelope::decode(&raw.body).unwrap().t,
+                "control.memory.state"
+            );
+            codec::write_raw_frame(&mut framed, &Envelope::new(1, "control.memory.state", &serde_json::json!({"boot_mib":256,"target_mib":256,"current_mib":256,"max_mib":256})).unwrap().frame(raw.id, 1).unwrap()).await.unwrap();
+        });
+        let connection = ControlConnection::connect_connector(connector)
+            .await
+            .unwrap();
+        let request = CreateCheckpoint(CheckpointCreate {
+            retain_configuration: Some(true),
+            retain_configuration_exec_limits: Some(true),
+            retain_configuration_storage: None,
+            guest_flush: None,
+            record_integrity: false,
+            checkpoint_id: "retained".into(),
+            intent: CheckpointCaptureIntent::FullSnapshot,
+        });
+        let result = connection.request_typed(&request).await;
+        if supported {
+            assert_eq!(
+                result
+                    .unwrap()
+                    .checkpoint
+                    .unwrap()
+                    .configuration
+                    .unwrap()
+                    .sha256,
+                "receipt-digest"
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.delivery(), Delivery::NotSent);
+        }
+        assert_eq!(
+            connection
+                .request_typed(&GetMemoryState)
+                .await
+                .unwrap()
+                .target_mib,
+            256
+        );
+        peer.await.unwrap();
+        connection.close().await;
+    }
+}
+
+#[tokio::test]
+async fn exec_limit_capture_refuses_old_json_receipts_before_dispatch() {
+    for verified in [false, true] {
+        let (connector, mut peers) = QueueConnector::new(if verified { 2 } else { 1 });
+        let discovery = peers.remove(0);
+        let probe = peers.pop();
+        let peer = tokio::spawn(async move {
+            // Advertise support once, then simulate its absence on the actual admission probe.
+            let caps = br#"{"ok":true,"capabilities":{"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true,"configuration_exec_limits":true}}"#;
+            json_peer(discovery, "capabilities", caps).await;
+            if let Some(probe) = probe {
+                json_peer(probe, "capabilities", br#"{"ok":true,"capabilities":{"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true}}"#).await;
+            }
+        });
+        let connection = if verified {
+            ControlConnection::connect_verified_connector(connector.clone())
+                .await
+                .unwrap()
+        } else {
+            ControlConnection::connect_connector(connector.clone())
+                .await
+                .unwrap()
+        };
+        let request = CreateCheckpoint(CheckpointCreate {
+            retain_configuration: Some(true),
+            retain_configuration_exec_limits: Some(true),
+            retain_configuration_storage: None,
+            guest_flush: None,
+            record_integrity: false,
+            checkpoint_id: "retained".into(),
+            intent: CheckpointCaptureIntent::FullSnapshot,
+        });
+        let error = connection.request_typed(&request).await.unwrap_err();
+        assert_eq!(error.delivery(), Delivery::NotSent);
+        assert!(matches!(
+            error,
+            ControlClientError::Client(ClientError {
+                kind: ErrorKind::UnsupportedOperation,
+                ..
+            })
+        ));
+        assert_eq!(
+            connector.dials.load(Ordering::SeqCst),
+            if verified { 2 } else { 1 }
+        );
+        // No mutation stream was supplied: a fallback or ignored capability would fail this count.
+        peer.await.unwrap();
+        connection.close().await;
+    }
+}

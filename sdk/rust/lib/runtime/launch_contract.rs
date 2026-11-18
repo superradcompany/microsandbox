@@ -751,20 +751,37 @@ pub(crate) async fn validate_http_deny_response(
     path: &Path,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<()> {
+    select_http_deny_response(path, config).await.map(|_| ())
+}
+
+/// Select once before dispatch. Only proven omission permits legacy response formatting;
+/// an explicit JSON choice or custom message must never be silently discarded.
+#[cfg(feature = "net")]
+pub(crate) async fn select_http_deny_response(
+    path: &Path,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<microsandbox_types::HttpConfig> {
+    let mut http = config.spec.network.http.clone();
     if !config.spec.network.enabled || !config.spec.network.http.deny_response {
-        return Ok(());
+        return Ok(http);
     }
-    let supported = bounded_probe(path, "__launch-protocol")
+    let capabilities = bounded_probe(path, "__launch-protocol")
         .await
         .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(
-            |capabilities| match config.spec.network.http.deny_response_format {
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok());
+    let supported =
+        capabilities
+            .as_ref()
+            .is_some_and(|capabilities| match http.deny_response_format {
                 HttpDenyResponseFormat::Text => capabilities.http_deny_message,
                 HttpDenyResponseFormat::Json => capabilities.http_deny_json,
-            },
-        );
+            });
     if !supported {
+        if config.has_implicit_http_defaults() {
+            http.deny_response_format = HttpDenyResponseFormat::Text;
+            http.deny_response = capabilities.is_some_and(|value| value.http_deny_message);
+            return Ok(http);
+        }
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
             crate::error::UnsupportedReason::NotAvailable(upgrade_required(
@@ -772,7 +789,7 @@ pub(crate) async fn validate_http_deny_response(
             )),
         ));
     }
-    Ok(())
+    Ok(http)
 }
 
 /// Refuse runtimes that would ignore the requested hardware virtualization policy.
@@ -904,6 +921,18 @@ pub(crate) async fn validate_fs_state_limit(
         ));
     }
     Ok(())
+}
+
+/// Optional evidence support never gates an otherwise-supported operation on an older runtime.
+/// Read the existing side-effect-free probe before dispatch; a failed/old probe means no handoff.
+pub(crate) async fn supports_configuration_retention(path: &Path) -> bool {
+    bounded_probe(path, "__launch-protocol")
+        .await
+        .ok()
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
+        .is_some_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.configuration_retention
+        })
 }
 
 /// Probe only the new combination. Ordinary starts/restores keep their cached,
@@ -1537,6 +1566,45 @@ mod tests {
         validate_http_deny_response(&path, &config).await.unwrap();
     }
 
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn implicit_http_defaults_select_legacy_before_dispatch_but_explicit_json_is_strict() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::test_support::fixtures::decode(include_str!(
+            "../db/fixtures/config-0.6.18.json"
+        ))
+        .unwrap();
+        config.spec.network.enabled = true;
+        assert!(config.has_implicit_http_defaults());
+        for (name, reply, enabled, format) in [
+            ("no-feature", "exit 1", false, HttpDenyResponseFormat::Text),
+            (
+                "text",
+                r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+                true,
+                HttpDenyResponseFormat::Text,
+            ),
+            (
+                "json",
+                r#"printf '%s' '{"protocols":[2,1],"http_deny_json":true}'"#,
+                true,
+                HttpDenyResponseFormat::Json,
+            ),
+        ] {
+            let path = script(dir.path(), name, reply);
+            let selected = select_http_deny_response(&path, &config).await.unwrap();
+            assert_eq!(selected.deny_response, enabled);
+            assert_eq!(selected.deny_response_format, format);
+        }
+        let old = script(dir.path(), "old", "exit 1");
+        config.http_defaults_implicit = Some(false);
+        assert!(select_http_deny_response(&old, &config).await.is_err());
+        config.http_defaults_implicit = Some(true);
+        config.spec.network.http.network_deny_message = Some("explicit message".into());
+        assert!(select_http_deny_response(&old, &config).await.is_err());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn nested_virt_requires_a_runtime_that_honors_the_setting() {
@@ -1833,6 +1901,36 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":true}'"#,
         );
         validate_fs_state_limit(&path, &global).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retention_handoff_is_optional_and_selected_before_launch() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!supports_configuration_retention(&dir.path().join("missing")).await);
+        for (index, response) in [
+            "exit 1",
+            r#"printf '%s' '{"protocols":[2,1]}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"configuration_retention":false}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"configuration_retention":"true"}'"#,
+            r#"printf '%s' '{"protocols":[1],"configuration_retention":true}'"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = script(dir.path(), &format!("old-retention-{index}"), response);
+            assert!(!supports_configuration_retention(&path).await);
+        }
+        let path = script(
+            dir.path(),
+            "supports-retention",
+            r#"test "$1" = __launch-protocol || exit 97; printf '%s' '{"protocols":[2,1],"configuration_retention":true}'"#,
+        );
+        assert!(supports_configuration_retention(&path).await);
+        // Existing strict readers receive no additional property on the unsupported path.
+        let value = serde_json::to_value(LaunchConfig::default()).unwrap();
+        assert!(value.get("retention_source").is_none());
     }
 
     #[cfg(unix)]

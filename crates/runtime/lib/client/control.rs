@@ -37,6 +37,15 @@ pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
 pub enum ControlRequest {
     /// Seal only the owned root disk; never capture guest RAM or execution state.
     DiskCheckpointCreate {
+        /// Retain host-private configuration evidence for this exact capture.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retain_configuration: Option<bool>,
+        /// Request execution-limit evidence only after capability negotiation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retain_configuration_exec_limits: Option<bool>,
+        /// Request storage evidence only after capability negotiation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retain_configuration_storage: Option<bool>,
         /// Optional writeback policy. Absent preserves released clients' behavior.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         guest_flush: Option<microsandbox_types::GuestFlush>,
@@ -138,6 +147,15 @@ pub enum ControlRequest {
     /// Produce one same-epoch full checkpoint and return the source to its prior running
     /// state after root-last publication.
     CheckpointCreate {
+        /// Retain host-private configuration evidence for this exact capture.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retain_configuration: Option<bool>,
+        /// Request execution-limit evidence only after capability negotiation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retain_configuration_exec_limits: Option<bool>,
+        /// Request storage evidence only after capability negotiation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retain_configuration_storage: Option<bool>,
         /// Optional writeback policy. Absent retains released capture semantics.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         guest_flush: Option<microsandbox_types::GuestFlush>,
@@ -246,6 +264,9 @@ pub struct ControlResponse {
 /// Published checkpoint information returned by the runtime control executor.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckpointControlState {
+    /// Optional private receipt; absence never establishes configuration evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<microsandbox_protocol::control::ConfigurationCaptureReceipt>,
     /// Stable checkpoint identity.
     pub checkpoint_id: String,
     /// Content-addressed composite checkpoint root.
@@ -263,6 +284,9 @@ pub struct CheckpointControlState {
 /// Immutable disk closure returned after a live root-head rollover.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiskCheckpointControlState {
+    /// Optional private receipt; absence never establishes configuration evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<microsandbox_protocol::control::ConfigurationCaptureReceipt>,
     /// Capture identity echoed from the request.
     pub checkpoint_id: String,
     /// Runtime-owned closure, independent of the source's new writable head.
@@ -298,6 +322,15 @@ pub struct ControlCapabilities {
     /// Operation-bound resize tracking over the framed host-control extension.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resize_operations: bool,
+    /// Captures can retain configuration under runtime mutation authority.
+    #[serde(default)]
+    pub configuration_capture: bool,
+    /// Optional private receipt evidence for effective guest execution limits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub configuration_exec_limits: bool,
+    /// Optional private receipt evidence for mounted filesystem kind and quota.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub configuration_storage: bool,
     /// Explicit guest writeback policy and same-pause filesystem coverage checks.
     #[serde(default)]
     pub guest_flush_policy: bool,
@@ -517,6 +550,9 @@ mod tests {
             ok: true,
             capabilities: Some(ControlCapabilities {
                 resize_operations: false,
+                configuration_capture: true,
+                configuration_exec_limits: true,
+                configuration_storage: true,
                 guest_flush_policy: true,
                 optional_disk_integrity: true,
                 root_disk_grow: true,

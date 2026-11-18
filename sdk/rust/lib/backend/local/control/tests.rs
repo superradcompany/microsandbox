@@ -91,6 +91,8 @@ mod unix {
         run_id: i32,
         probes: Arc<AtomicUsize>,
         frames: Arc<AtomicUsize>,
+        label_mode: Arc<AtomicUsize>,
+        label_updates: Arc<AtomicUsize>,
         disconnect: CancellationToken,
         listener: tokio::task::JoinHandle<()>,
     }
@@ -233,6 +235,10 @@ mod unix {
         let frames = Arc::new(AtomicUsize::new(0));
         let counted_probes = probes.clone();
         let counted_frames = frames.clone();
+        let label_mode = Arc::new(AtomicUsize::new(0));
+        let label_updates = Arc::new(AtomicUsize::new(0));
+        let peer_label_mode = label_mode.clone();
+        let peer_label_updates = label_updates.clone();
         let disconnect = CancellationToken::new();
         let peer_disconnect = disconnect.clone();
         let task = tokio::spawn(async move {
@@ -240,6 +246,8 @@ mod unix {
                 let (socket, _) = listener.accept().await.unwrap();
                 let probes = counted_probes.clone();
                 let frames = counted_frames.clone();
+                let label_mode = peer_label_mode.clone();
+                let label_updates = peer_label_updates.clone();
                 let disconnect = peer_disconnect.clone();
                 tokio::spawn(async move {
                     let mut socket = BufReader::new(socket);
@@ -250,6 +258,11 @@ mod unix {
                     if first != Some(0) {
                         let mut line = String::new();
                         socket.read_line(&mut line).await.unwrap();
+                        // Sandbox lookup inspects pause state before selecting a live mutation.
+                        if line == "{\"op\":\"pause_state\"}\n" {
+                            socket.get_mut().write_all(b"{\"ok\":true,\"pause\":{\"paused\":false,\"recovery_required\":false}}\n").await.unwrap();
+                            return;
+                        }
                         assert_eq!(line, "{\"op\":\"capabilities\"}\n");
                         probes.fetch_add(1, Ordering::SeqCst);
                         let protocols = if legacy {
@@ -284,6 +297,102 @@ mod unix {
                             };
                             frames.fetch_add(1, Ordering::SeqCst);
                             let request = Envelope::decode(&frame.body).unwrap();
+                            if request.t == microsandbox_protocol::labels::LABELS_REQUEST {
+                                use microsandbox_protocol::control::{ControlError, ErrorEffect};
+                                use microsandbox_protocol::labels::{
+                                    LABELS_RESPONSE, LabelsRequest, LabelsResponse,
+                                };
+                                let mode = label_mode.load(Ordering::SeqCst);
+                                let reply = match request.payload::<LabelsRequest>().unwrap() {
+                                    LabelsRequest::Hello if mode > 0 => Envelope::new(
+                                        2,
+                                        LABELS_RESPONSE,
+                                        &LabelsResponse::Supported {
+                                            runtime_boot_id: "labels-boot".into(),
+                                            config_delta: mode >= 5,
+                                        },
+                                    )
+                                    .unwrap(),
+                                    LabelsRequest::Update { .. }
+                                    | LabelsRequest::UpdateDelta { .. }
+                                        if mode > 0 =>
+                                    {
+                                        let decoded = request.payload::<LabelsRequest>().unwrap();
+                                        assert_eq!(
+                                            matches!(decoded, LabelsRequest::UpdateDelta { .. }),
+                                            mode >= 5
+                                        );
+                                        label_updates.fetch_add(1, Ordering::SeqCst);
+                                        // Losing the reply after dispatch must not replay through
+                                        // the catalog path or open a fresh mutation connection.
+                                        if mode == 4 || mode == 8 {
+                                            break;
+                                        }
+                                        if mode == 1 || mode == 5 {
+                                            Envelope::new(
+                                                2,
+                                                LABELS_RESPONSE,
+                                                &LabelsResponse::Updated {
+                                                    runtime_boot_id: "labels-boot".into(),
+                                                    generation: 2,
+                                                },
+                                            )
+                                            .unwrap()
+                                        } else {
+                                            Envelope::new(
+                                                2,
+                                                "control.error",
+                                                &ControlError {
+                                                    code: if mode == 3 || mode == 7 {
+                                                        "unsupported_operation"
+                                                    } else {
+                                                        "configuration_outcome_unknown"
+                                                    }
+                                                    .into(),
+                                                    message: "label update failure".into(),
+                                                    effect: ErrorEffect::Unknown,
+                                                },
+                                            )
+                                            .unwrap()
+                                        }
+                                    }
+                                    _ => Envelope::new(
+                                        2,
+                                        "control.error",
+                                        &ControlError::rejected(
+                                            "unsupported_operation",
+                                            "old peer",
+                                        ),
+                                    )
+                                    .unwrap(),
+                                };
+                                codec::write_raw_frame(
+                                    socket.get_mut(),
+                                    &reply.frame(frame.id, 1).unwrap(),
+                                )
+                                .await
+                                .unwrap();
+                                continue;
+                            }
+                            if request.t == "control.pause.state" {
+                                let reply = Envelope::new(
+                                    2,
+                                    "control.pause.state",
+                                    &microsandbox_protocol::control::PauseState {
+                                        paused: false,
+                                        recovery_required: false,
+                                        capture_unavailable: None,
+                                    },
+                                )
+                                .unwrap();
+                                codec::write_raw_frame(
+                                    socket.get_mut(),
+                                    &reply.frame(frame.id, 1).unwrap(),
+                                )
+                                .await
+                                .unwrap();
+                                continue;
+                            }
                             assert_eq!(request.t, "control.capabilities");
                             let caps = microsandbox_protocol::control::Capabilities {
                                 root_disk_grow: false,
@@ -311,6 +420,8 @@ mod unix {
             run_id: run.id,
             probes,
             frames,
+            label_mode,
+            label_updates,
             disconnect,
             listener: task,
         }
@@ -319,6 +430,72 @@ mod unix {
     //--------------------------------------------------------------------------------------------------
     // Tests
     //--------------------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn older_label_peers_keep_catalog_updates_and_remain_usable() {
+        for legacy in [true, false] {
+            let fixture = fixture(legacy, false).await;
+            let session = fixture
+                .backend
+                .control_session("control-fixture")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(session.label_update_owner().await.unwrap().is_none());
+            let plan = crate::sandbox::SandboxModificationBuilder::new(
+                fixture.backend.clone(),
+                "control-fixture",
+            )
+            .label("team", "compat")
+            .apply()
+            .await
+            .unwrap();
+            assert!(plan.applied);
+            assert_eq!(fixture.label_updates.load(Ordering::SeqCst), 0);
+            let row = sandbox::Entity::find_by_id(fixture.sandbox_id)
+                .one(fixture.backend.db().await.unwrap().read())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(row.active_config.as_ref().unwrap())
+                    .unwrap()["labels"]["team"],
+                "compat"
+            );
+            assert!(session.request(&GetCapabilities).await.unwrap().cpu_resize);
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatched_label_failures_never_fall_back_to_catalog_writes() {
+        for mode in [2, 3, 4, 6, 7, 8] {
+            let fixture = fixture(false, false).await;
+            fixture.label_mode.store(mode, Ordering::SeqCst);
+            let before = sandbox::Entity::find_by_id(fixture.sandbox_id)
+                .one(fixture.backend.db().await.unwrap().read())
+                .await
+                .unwrap()
+                .unwrap();
+            let error = crate::sandbox::SandboxModificationBuilder::new(
+                fixture.backend.clone(),
+                "control-fixture",
+            )
+            .label("team", "must-not-write")
+            .apply()
+            .await
+            .unwrap_err();
+            assert!(matches!(error, crate::MicrosandboxError::ControlClient(_)));
+            let after = sandbox::Entity::find_by_id(fixture.sandbox_id)
+                .one(fixture.backend.db().await.unwrap().read())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(before.config, after.config);
+            assert_eq!(before.active_config, after.active_config);
+            assert_eq!(fixture.label_updates.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.probes.load(Ordering::SeqCst), 1);
+        }
+    }
 
     #[tokio::test]
     async fn shared_setup_survives_one_cancelled_waiter() {

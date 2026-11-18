@@ -849,6 +849,22 @@ async fn reconcile_stale_active(
         return Ok(false);
     }
 
+    // A killed runtime cannot run its exit observer. Preserve matching active evidence before
+    // clearing the catalog, under both transition and lifecycle ownership. Missing journals
+    // on older runtimes remain unknown and do not change their cleanup behavior.
+    if let Err(error) = crate::retention::seal_terminal(
+        db,
+        &sandboxes_dir.join(&sandbox.name),
+        sandbox.id,
+        run.id,
+        None,
+        crate::retention::RetentionTerminalOrigin::ReconciledDeath,
+    )
+    .await
+    {
+        tracing::warn!(%error, "reconciled configuration evidence unavailable");
+    }
+
     // Runtime artifacts are part of reaping this specific dead process. Do
     // this before the terminal transition so a failure leaves the row in the
     // active maintenance query and therefore retryable.

@@ -298,11 +298,6 @@ impl LocalBackend {
         // Durable configuration stores only host-side source references. Resolve
         // them into the private runtime configuration before the sandbox process
         // is spawned.
-        #[cfg(feature = "net")]
-        let resolved_network = config
-            .local_network_config()?
-            .resolve(&EnvNetworkSecretResolver)
-            .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
 
         // Resolve the already-layered runtime paths as one compatible pair before launch.
         let global = self.config();
@@ -320,12 +315,22 @@ impl LocalBackend {
         ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
         launch_contract::require_protected_guest_state(&resolved_runtime.msb_path).await?;
         let launch_contract = launch_contract::resolve(&resolved_runtime.msb_path).await?;
+        let retention_supported = launch_contract.machine
+            && launch_contract::supports_configuration_retention(&resolved_runtime.msb_path).await;
         // A stopped sandbox may have been edited without a runtime installed, or
         // the selected executable may have changed since creation. Validate its
         // effective configuration here for both initial launch and later starts.
         launch_contract.validate_launch_intent(config)?;
         #[cfg(feature = "net")]
-        launch_contract::validate_http_deny_response(&resolved_runtime.msb_path, config).await?;
+        let resolved_network = {
+            let mut network = config.local_network_config()?;
+            network.http =
+                launch_contract::select_http_deny_response(&resolved_runtime.msb_path, config)
+                    .await?;
+            network
+                .resolve(&EnvNetworkSecretResolver)
+                .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
+        };
         launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
@@ -593,6 +598,12 @@ impl LocalBackend {
         }
         if !launch_contract.machine {
             visible[0] = OsString::from("sandbox");
+        }
+        // Only advertise private tracking to a runtime that passed protected-state admission.
+        if retention_supported {
+            launch.retention_source = Some(microsandbox_runtime::retention::RetentionSource {
+                configuration: serde_json::to_value(config.clone_for_persistence())?,
+            });
         }
         let launch_value = match launch_contract.encode_for_runtime(&msb_path, &launch).await {
             Ok(launch) => launch,

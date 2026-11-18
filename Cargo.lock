@@ -4283,6 +4283,8 @@ name = "microsandbox-filesystem"
 version = "0.7.16"
 dependencies = [
  "bincode",
+ "cap-primitives",
+ "cap-std",
  "crossbeam-channel",
  "hex",
  "libc",
@@ -4296,6 +4298,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

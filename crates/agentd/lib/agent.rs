@@ -38,6 +38,7 @@ use microsandbox_protocol::exec::{
 };
 use microsandbox_protocol::fs::{FS_CHUNK_SIZE, FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
+use microsandbox_protocol::init_observation::InitObservation;
 use microsandbox_protocol::message::{FRAME_HEADER_SIZE, Message, MessageType};
 use microsandbox_protocol::restore_transport::{
     GuestReady, GuestThaw as WorkloadThaw, GuestThawMode as WorkloadThawMode,
@@ -211,6 +212,7 @@ struct ActivityTracker {
 pub struct BootConsoleState {
     input: Vec<u8>,
     init_failure_ack: bool,
+    init_observation: Option<InitObservation>,
 }
 
 #[derive(Clone)]
@@ -302,6 +304,13 @@ impl Default for AgentState {
             pending_bulk_finishes: HashMap::new(),
             fs: FsState::default(),
         }
+    }
+}
+
+impl BootConsoleState {
+    /// Retain boot selection without adding init arguments or environment to Ready.
+    pub fn set_init_observation(&mut self, observation: Option<InitObservation>) {
+        self.init_observation = observation;
     }
 }
 
@@ -566,6 +575,7 @@ pub async fn run(
                 workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
                 exec_limits: config.exec_limits,
             },
+            init_observation: boot_console.init_observation,
             restore_tcp_reset_version: crate::network_reset::supported().then_some(1),
         },
     )

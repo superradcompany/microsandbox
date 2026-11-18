@@ -9,6 +9,8 @@ mod archive_compatibility;
 mod copy;
 mod group;
 mod import;
+#[doc(hidden)]
+pub mod saved_config;
 mod types;
 
 //--------------------------------------------------------------------------------------------------

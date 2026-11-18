@@ -2,6 +2,7 @@
 
 pub(super) mod archive;
 mod artifact;
+pub(crate) mod configuration_capture;
 mod copy;
 mod create;
 pub(crate) mod deletion;
@@ -9,6 +10,8 @@ mod dispatch;
 pub mod downgrade;
 mod file_identity;
 mod group;
+#[cfg(test)]
+mod historical_recovery_tests;
 mod lease;
 pub(crate) mod lineage;
 mod metadata;
@@ -16,6 +19,7 @@ pub(super) mod migration;
 pub(crate) mod publication;
 mod restore;
 mod source;
+mod stopped_script_backing;
 mod store;
 mod verify;
 mod writer;

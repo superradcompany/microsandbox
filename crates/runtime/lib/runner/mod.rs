@@ -22,6 +22,7 @@ pub mod policy;
 pub(crate) mod progress;
 pub mod relay;
 pub(crate) mod startup;
+pub(crate) mod storage_observation;
 pub mod vm;
 pub(crate) mod workload_control;
 pub(crate) mod writeback;

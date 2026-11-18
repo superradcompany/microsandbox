@@ -10,6 +10,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_SETUP_TIMEOUT_MS,
   type Capabilities, type RuntimeCapabilities,
 } from "./records.js";
+import { GetRuntimeCapabilities } from "./request.js";
 import { ControlProtocol } from "./protocol.js";
 
 export type ControlReply = { kind: "cbor"; frame: InboundFrame } | { kind: "json"; reply: JsonReply };
@@ -87,7 +88,30 @@ export class ControlConnection {
       const json = new JsonSession(this.session.dialer, this.session.options, "cbor");
       return request.decodeJson(await json.operation(request.jsonRequest(), options));
     }
-    return this.framedOperation(options, remaining => this.session.framed!.requestTyped(request, remaining));
+    const configurationExecLimits = "requiresConfigurationExecLimits" in request && request.requiresConfigurationExecLimits === true;
+    const configurationStorage = "requiresConfigurationStorage" in request && request.requiresConfigurationStorage === true;
+    const configurationCapture = configurationExecLimits || configurationStorage || "requiresConfigurationCapture" in request && request.requiresConfigurationCapture === true;
+    return this.framedOperation(options, async remaining => {
+      if (!configurationCapture) return this.session.framed!.requestTyped(request, remaining);
+      // Use the actual framed connection, not discovery from a potentially replaced socket.
+      // Both the read-only probe and the one mutation share the original operation deadline.
+      const attempt = new ControlAttempt(remaining.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, [remaining.signal]);
+      try {
+        let capabilities: RuntimeCapabilities;
+        try {
+          capabilities = await this.session.framed!.requestTyped(new GetRuntimeCapabilities(), { ...remaining, signal: attempt.signal, requestTimeoutMs: attempt.remaining() });
+          attempt.check();
+        } catch (error) {
+          // The generic client may label an aborted deadline signal as cancellation.
+          // Preserve this operation's timeout/cancellation cause before classifying delivery.
+          attempt.check();
+          const failure = controlError(error);
+          throw failure instanceof ClientError ? failure.withDelivery("not_sent") : new ClientError("invalid_data");
+        }
+        if (!capabilities.configuration_capture || (configurationStorage && !capabilities.configuration_storage) || (configurationExecLimits && !capabilities.configuration_exec_limits)) throw new ClientError("unsupported_operation");
+        return await this.session.framed!.requestTyped(request, { ...remaining, signal: attempt.signal, requestTimeoutMs: attempt.remaining() });
+      } finally { attempt.dispose(); }
+    });
   }
   private async framedOperation<T>(options: RequestOptions, operation: (options: RequestOptions) => Promise<T>): Promise<T> {
     if (this.isClosed()) throw new ClientError("closed");

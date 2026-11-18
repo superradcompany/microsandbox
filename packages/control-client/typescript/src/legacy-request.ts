@@ -31,6 +31,10 @@ export interface CheckedControlRequest<T> extends Request<T> {
 
 /** Generation-aware requests choose legacy JSON before sending when a peer negotiated generation one. */
 export interface CompatibleControlRequest<T> extends Request<T> {
+  /** New optional capture contract; older/custom requests keep their existing route. */
+  readonly requiresConfigurationCapture?: boolean;
+  readonly requiresConfigurationExecLimits?: boolean;
+  readonly requiresConfigurationStorage?: boolean;
   readonly minGeneration: number;
   jsonRequest(): ExtendedLegacyControlRequest;
   decodeJson(reply: JsonReply): T;

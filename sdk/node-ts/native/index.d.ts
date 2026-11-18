@@ -842,7 +842,6 @@ export declare class RestoreBuilder {
   maxCpus(count: number): this
   /** Set the memory ceiling in MiB; full resume requires the captured ceiling. */
   maxMemory(mib: number): this
-  /** Select a profile defined on the destination host. */
   /** Annotate the destination sandbox without changing its snapshot. */
   label(key: string, value: string): this
   /** Attach destination labels, replacing earlier values for matching keys. */
@@ -851,6 +850,7 @@ export declare class RestoreBuilder {
   init(cmd: string, args?: Array<string> | undefined | null): this
   /** Set guest PID 1, arguments and environment for disk boot only. */
   initWith(cmd: string, configure: (arg: InitOptionsBuilder) => InitOptionsBuilder): this
+  /** Set the guest hostname for disk boot; full-memory resume rejects replacement. */
   hostname(hostname: string): this
   /** Set only host-side network policy, without DNS, TLS, or guest bootstrap changes. */
   networkPolicyJson(json: string): this

@@ -606,7 +606,12 @@ mod tests {
             .cmd(["printf requested"])
             .env("KEY", "first")
             .envs([("KEY", "last"), ("EMPTY", "")]);
-        let config = config(&builder);
+        // The production layer resolver preserves appended environment entries. Direct
+        // sparse-patch application alone merges keyed entries and skips that resolution.
+        let mut config = crate::SandboxConfig::default();
+        config
+            .apply_layers(None, builder.inner.config.clone(), None)
+            .unwrap();
         assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/root"));
         assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/ash"));
         assert_eq!(
