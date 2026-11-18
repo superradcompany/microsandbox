@@ -489,16 +489,6 @@ impl GlobalConfig {
         Ok(())
     }
 
-    /// Validate host runtime settings this platform cannot honor.
-    pub(crate) fn validate_runtime(&self) -> MicrosandboxResult<()> {
-        if cfg!(not(unix)) && self.runtime.strict_host_files {
-            return Err(MicrosandboxError::InvalidConfig(
-                "runtime.strict_host_files is supported only on Unix hosts".into(),
-            ));
-        }
-        Ok(())
-    }
-
     /// Virtio-fs backend state budget per device, in bytes.
     pub(crate) fn fs_state_limit(&self) -> usize {
         self.snapshots.max_filesystem_state_mib as usize * 1024 * 1024

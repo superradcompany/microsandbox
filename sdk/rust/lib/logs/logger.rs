@@ -23,6 +23,25 @@ use crate::backend::LocalBackend;
 use crate::backend::sandbox::LogStream;
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Take the log directory and host file policy from one retained default backend.
+pub(super) fn default_logger(name: &str) -> SandboxLogger {
+    let backend = crate::backend::default_backend();
+    if let Some(local) = backend.as_local() {
+        return SandboxLogger::for_local(local, name);
+    }
+    SandboxLogger::new(
+        name.to_string(),
+        microsandbox_utils::resolve_home()
+            .join(microsandbox_utils::SANDBOXES_SUBDIR)
+            .join(name)
+            .join("logs"),
+    )
+}
+
+//--------------------------------------------------------------------------------------------------
 // SandboxLogger
 //--------------------------------------------------------------------------------------------------
 

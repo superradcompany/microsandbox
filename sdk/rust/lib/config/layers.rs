@@ -49,6 +49,18 @@ pub(crate) struct ConfigLayers<P> {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl GlobalConfig {
+    /// Validate host runtime settings this platform cannot honor.
+    pub(crate) fn validate_runtime(&self) -> MicrosandboxResult<()> {
+        if cfg!(not(unix)) && self.runtime.strict_host_files {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.strict_host_files is supported only on Unix hosts".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl BackendConfig {
     /// Borrow the settings captured by the sandbox's backend, independent of ambient routing.
     pub(crate) fn for_backend(backend: &dyn crate::backend::Backend) -> Option<&Self> {
