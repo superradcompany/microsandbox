@@ -11,9 +11,7 @@ use std::num::NonZero;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(unix)]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use microsandbox_db::DbWriteConnection;
@@ -936,6 +934,10 @@ fn run(
     // Build the VM with an exit observer for DB cleanup and socket removal.
     // The on_exit closure runs synchronously on the VMM thread before _exit().
     let rt_handle = tokio_rt.handle().clone();
+    // The builder installs the callback before it returns the VM's metrics handle.
+    // Populate this cell before entering the VM so a panic is visible even during shutdown.
+    let exit_observations = Arc::new(OnceLock::<msb_krun::MetricsHandle>::new());
+    let observed_exit = Arc::clone(&exit_observations);
     let exit_db = db.clone();
     let exit_sandbox_id = config.sandbox_id;
     let exit_run_id = run_db_id;
@@ -995,19 +997,14 @@ fn run(
             use sea_orm::QueryFilter;
             use sea_orm::sea_query::Expr;
 
-            // Map (exit_code, reason tag) → TerminationReason.
             let reason_tag = exit_reason_for_observer.load(std::sync::atomic::Ordering::SeqCst);
-            let reason = match reason_tag {
-                EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
-                EXIT_REASON_AGENT_UNRESPONSIVE => run_entity::TerminationReason::AgentUnresponsive,
-                EXIT_REASON_SHUTDOWN_REQUESTED => run_entity::TerminationReason::ShutdownRequested,
-                EXIT_REASON_STARTUP_COMMAND_FAILED => run_entity::TerminationReason::Failed,
-                EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
-                EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
-                EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
-                _ if exit_code == 0 => run_entity::TerminationReason::Completed,
-                _ => run_entity::TerminationReason::Failed,
-            };
+            let panicked = observed_exit
+                .get()
+                .is_some_and(msb_krun::MetricsHandle::guest_panicked);
+            if panicked {
+                tracing::error!(sandbox = %exit_sandbox_name, "guest kernel reported a panic");
+            }
+            let reason = termination_reason(reason_tag, exit_code, panicked);
 
             rt_handle.block_on(async {
                 let now = chrono::Utc::now().naive_utc();
@@ -1196,6 +1193,7 @@ fn run(
         let _ = bind_identity_map;
     }
     let krun_metrics_handle = vm.metrics_handle();
+    let _ = exit_observations.set(krun_metrics_handle.clone());
     let exit_handle = vm.exit_handle();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
@@ -3401,6 +3399,27 @@ async fn connect_db(
     .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))
 }
 
+fn termination_reason(
+    reason_tag: u8,
+    exit_code: i32,
+    guest_panicked: bool,
+) -> run_entity::TerminationReason {
+    if guest_panicked {
+        return run_entity::TerminationReason::Failed;
+    }
+    match reason_tag {
+        EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
+        EXIT_REASON_AGENT_UNRESPONSIVE => run_entity::TerminationReason::AgentUnresponsive,
+        EXIT_REASON_SHUTDOWN_REQUESTED => run_entity::TerminationReason::ShutdownRequested,
+        EXIT_REASON_STARTUP_COMMAND_FAILED => run_entity::TerminationReason::Failed,
+        EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
+        EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
+        EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
+        _ if exit_code == 0 => run_entity::TerminationReason::Completed,
+        _ => run_entity::TerminationReason::Failed,
+    }
+}
+
 /// Insert a run record into the database.
 async fn insert_run(db: &DbWriteConnection, sandbox_id: i32, pid: u32) -> RuntimeResult<i32> {
     let now = chrono::Utc::now().naive_utc();
@@ -3983,6 +4002,28 @@ mod tests {
     #[cfg(unix)]
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn confirmed_panic_takes_precedence_over_concurrent_shutdown() {
+        use super::{EXIT_REASON_COMPLETED, EXIT_REASON_SHUTDOWN_REQUESTED, termination_reason};
+        use microsandbox_db::entity::run::TerminationReason;
+        assert_eq!(
+            termination_reason(EXIT_REASON_COMPLETED, 0, false),
+            TerminationReason::Completed
+        );
+        assert_eq!(
+            termination_reason(EXIT_REASON_SHUTDOWN_REQUESTED, 0, false),
+            TerminationReason::ShutdownRequested
+        );
+        for tag in [EXIT_REASON_COMPLETED, EXIT_REASON_SHUTDOWN_REQUESTED] {
+            for code in [0, 1] {
+                assert_eq!(
+                    termination_reason(tag, code, true),
+                    TerminationReason::Failed
+                );
+            }
+        }
+    }
 
     fn fs_context() -> Context {
         Context {
