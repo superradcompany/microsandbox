@@ -67,7 +67,11 @@ async def probe():
         page = await retained.list()
         assert isinstance(page.sandboxes[0], core.Sandbox)
         assert await sb.wait_for_status('stopped') is None
-        os.environ.update(MSB_BACKEND="remote", MSB_API_URL=f"http://127.0.0.1:{server.server_port}", MSB_API_KEY="key")
+        os.environ.update(
+            MSB_BACKEND="remote",
+            MSB_API_URL=f"http://127.0.0.1:{server.server_port}",
+            MSB_API_KEY="key",
+        )
         assert (await core.Sandbox.get("task")).id == sb.id
         # The explicit local collection still uses its original provider.
         before = len(requests)
