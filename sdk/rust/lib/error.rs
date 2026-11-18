@@ -116,11 +116,11 @@ pub enum MicrosandboxError {
     /// A cloud control-plane request failed with an HTTP status.
     #[error("cloud HTTP {status}: {message}")]
     CloudHttp {
-        /// HTTP status code returned by msb-cloud.
+        /// HTTP status code returned by the cloud API.
         status: u16,
-        /// Machine-readable msb-cloud error code, when present.
+        /// Machine-readable cloud API error code, when present.
         code: Option<String>,
-        /// Human-readable msb-cloud error message.
+        /// Human-readable cloud API error message.
         message: String,
     },
 

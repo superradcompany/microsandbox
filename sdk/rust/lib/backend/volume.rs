@@ -38,7 +38,7 @@ use crate::volume::{
 pub enum VolumeInner {
     /// Local-disk-backed volume state.
     Local(VolumeLocalState),
-    /// Cloud msb-cloud-backed volume state.
+    /// Cloud API-backed volume state.
     Cloud(VolumeCloudState),
 }
 
@@ -56,7 +56,7 @@ pub struct VolumeLocalState {
     pub disk_fstype: Option<String>,
 }
 
-/// Cloud msb-cloud-backed volume state held inside [`VolumeInner::Cloud`].
+/// Cloud API-backed volume state held inside [`VolumeInner::Cloud`].
 pub struct VolumeCloudState {
     /// Server-side UUID.
     pub id: String,
@@ -102,7 +102,7 @@ pub enum CloudVolumeStatus {
 pub enum VolumeHandleInner {
     /// Local persisted volume handle.
     Local(VolumeHandleLocalState),
-    /// Cloud msb-cloud volume handle.
+    /// Cloud volume handle.
     Cloud(VolumeHandleCloudState),
 }
 
@@ -131,7 +131,7 @@ pub struct VolumeHandleLocalState {
     pub created_at: Option<DateTime<Utc>>,
 }
 
-/// Cloud handle state. Captures the snapshot msb-cloud returned at fetch time.
+/// Cloud handle state. Captures the snapshot the cloud API returned at fetch time.
 #[derive(Clone)]
 pub struct VolumeHandleCloudState {
     /// Server-side UUID.
@@ -159,7 +159,7 @@ pub struct VolumeHandleCloudState {
 /// resolve the backend via [`default_backend`](super::default_backend) and
 /// forward it through.
 ///
-/// Cloud-side `fs_*` operations route through msb-cloud HTTP while local
+/// Cloud-side `fs_*` operations route through the cloud HTTP API while local
 /// operations remain scoped to the configured local volume root.
 pub trait VolumeBackend: Send + Sync {
     /// Create a volume. The returned outer [`Volume`] carries the supplied

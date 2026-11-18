@@ -331,9 +331,18 @@ def audit_inputs_and_catalog(report, archive, original_hash, home):
 
 
 def sealed(group):
-    # Runtime lock files can change; immutable descriptors and payloads must not.
-    return {str(p.relative_to(group)): digest(p) for p in sorted(group.rglob("*"))
-            if p.is_file() and p.suffix in (".json", ".ext4", ".erofs")}
+    # Full state includes extensionless RAM/device objects and raw/qcow2 disks.
+    # A suffix allowlist would silently leave most of the captured payload unchecked.
+    result = {}
+    for path in sorted(group.rglob("*")):
+        relative = path.relative_to(group)
+        if relative.parts[0] == ".msb-leases" or relative == Path(".group.lock"):
+            continue
+        if path.is_symlink():
+            raise RuntimeError("unexpected symlink in captured group")
+        if path.is_file():
+            result[str(relative)] = digest(path)
+    return result
 
 
 class Runner:

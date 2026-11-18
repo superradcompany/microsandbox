@@ -121,6 +121,118 @@ async fn cloud_stop_accepts_only_confirmed_ephemeral_deletion() {
 }
 
 #[tokio::test]
+async fn cloud_stop_waits_through_saving_state() {
+    for handle_api in [false, true] {
+        let (backend, server) = serve(vec![
+            ("GET", 200, response(false, "running")),
+            ("POST", 200, response(false, "stopping")),
+            ("GET", 200, response(false, "saving_state")),
+            ("GET", 200, response(false, "stopped")),
+        ])
+        .await;
+        let cloud: CloudCreateSandboxResponse =
+            serde_json::from_value(response(false, "running")).unwrap();
+
+        let result = if handle_api {
+            SandboxHandle::from_cloud(backend, cloud)
+                .unwrap()
+                .stop_with_timeout(Duration::from_secs(3))
+                .await
+        } else {
+            Sandbox::from_cloud(backend, cloud, SandboxConfig::default())
+                .stop_with_timeout(Duration::from_secs(3))
+                .await
+        };
+
+        assert!(result.is_ok(), "{result:?}");
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cloud_stop_waits_without_stop_request_while_saving_state() {
+    let (backend, server) = serve(vec![
+        ("GET", 200, response(false, "saving_state")),
+        ("GET", 200, response(false, "stopped")),
+    ])
+    .await;
+    let cloud = serde_json::from_value(response(false, "running")).unwrap();
+
+    let result = Sandbox::from_cloud(backend, cloud, SandboxConfig::default())
+        .stop_with_timeout(Duration::from_secs(3))
+        .await;
+
+    assert!(result.is_ok(), "{result:?}");
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cloud_stop_reports_recovery_decision_required() {
+    let (backend, server) = serve(vec![
+        ("GET", 200, response(false, "running")),
+        ("POST", 200, response(false, "stopping")),
+        ("GET", 200, response(false, "recovery_decision_required")),
+    ])
+    .await;
+    let cloud = serde_json::from_value(response(false, "running")).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        Sandbox::from_cloud(backend, cloud, SandboxConfig::default())
+            .stop_with_timeout(Duration::from_secs(3)),
+    )
+    .await
+    .expect("stop should report the recovery decision promptly");
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("needs a recovery decision before it can stop")
+    );
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cloud_stop_reports_unrecognized_status() {
+    let (backend, server) = serve(vec![
+        ("GET", 200, response(false, "running")),
+        ("POST", 200, response(false, "stopping")),
+        ("GET", 200, response(false, "not_a_real_status")),
+    ])
+    .await;
+    let cloud = serde_json::from_value(response(false, "running")).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        Sandbox::from_cloud(backend, cloud, SandboxConfig::default())
+            .stop_with_timeout(Duration::from_secs(3)),
+    )
+    .await
+    .expect("stop should report the unrecognized status promptly");
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("status this SDK does not recognize; upgrade the SDK")
+    );
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn cloud_stop_does_not_hide_missing_targets_or_failed_requests() {
     for missing_before_stop in [false, true] {
         let mut script = vec![];

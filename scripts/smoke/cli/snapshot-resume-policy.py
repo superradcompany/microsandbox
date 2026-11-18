@@ -30,19 +30,7 @@ def events(server):
         return list(server.events)
 
 
-def sealed_full(group):
-    # Full state includes extensionless RAM/device objects and raw/qcow2 disks.
-    # A suffix allowlist would silently leave most of the captured payload unchecked.
-    result = {}
-    for path in sorted(group.rglob("*")):
-        relative = path.relative_to(group)
-        if relative.parts[0] == ".msb-leases" or relative == Path(".group.lock"):
-            continue
-        if path.is_symlink():
-            raise RuntimeError("unexpected symlink in captured group")
-        if path.is_file():
-            result[str(relative)] = proxy.digest(path)
-    return result
+sealed_full = proxy.sealed
 
 
 def wait_until(check, message, timeout=20):
