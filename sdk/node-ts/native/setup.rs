@@ -64,3 +64,37 @@ pub async fn ensure_runtime(config_json: String, options_json: String) -> Result
 fn serialize_runtime(runtime: microsandbox::setup::ResolvedRuntime) -> Result<String> {
     serde_json::to_string(&runtime).map_err(|error| Error::from_reason(error.to_string()))
 }
+
+/// Inspect explicitly selected storage without initializing the normal backend.
+#[napi]
+pub async fn diagnose_storage(config_json: String, selection_json: String) -> Result<String> {
+    let report = microsandbox::setup::binding_diagnose_storage(&config_json, &selection_json)
+        .await
+        .map_err(to_napi_error)?;
+    // JSON numbers otherwise round u64 counters before the TypeScript wrapper sees them.
+    // Only byte counters are decimal strings on this Node-specific wire boundary.
+    let mut report: serde_json::Value =
+        serde_json::from_str(&report).map_err(|error| Error::from_reason(error.to_string()))?;
+    if let Some(sandboxes) = report["sandboxes"].as_array_mut() {
+        for sandbox in sandboxes {
+            let inspection = &mut sandbox["inspection"];
+            stringify_counter(inspection, "estimated_bytes");
+            if let Some(candidates) = inspection
+                .get_mut("candidates")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for candidate in candidates {
+                    stringify_counter(candidate, "estimated_bytes");
+                    stringify_counter(candidate, "virtual_size");
+                }
+            }
+        }
+    }
+    serde_json::to_string(&report).map_err(|error| Error::from_reason(error.to_string()))
+}
+
+fn stringify_counter(object: &mut serde_json::Value, key: &str) {
+    if let Some(value) = object.get(key).and_then(serde_json::Value::as_u64) {
+        object[key] = serde_json::Value::String(value.to_string());
+    }
+}

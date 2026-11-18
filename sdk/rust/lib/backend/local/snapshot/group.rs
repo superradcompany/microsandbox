@@ -91,6 +91,8 @@ pub(super) struct ImportDestination {
 /// The caller can still report publication certainty if the blocking publisher fails.
 /// Only the transaction writer advances this state, after all validation has passed.
 pub(super) struct IndexedPublication {
+    /// Only IDs whose age credentials were authenticated and sealed in this batch.
+    pub(super) verified_signers: BTreeSet<String>,
     pub(super) operation: String,
     pub(super) outcome: Arc<AtomicU8>,
 }
@@ -713,13 +715,33 @@ async fn publish_batch_inner(
         }
         apply_aliases(&mut members, &aliases)?;
         validate_ancestry(&members)?;
-        let update = batch_head_update(
-            &group_dir,
-            state.head.as_deref(),
-            &candidates,
-            &members,
-            set_head,
-        )?;
+        // A signer repair of installed checkpoints also preserves an explicitly cleared head.
+        let signer_reimport = added.is_empty()
+            && !set_head
+            && index_operation
+                .as_ref()
+                .is_some_and(|op| !op.verified_signers.is_empty());
+        let update = if signer_reimport {
+            Some(HeadUpdate {
+                group: group_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                previous: state.head.clone(),
+                head: state.head.clone(),
+                reason: HeadUpdateReason::Unchanged,
+                changed: false,
+            })
+        } else {
+            batch_head_update(
+                &group_dir,
+                state.head.as_deref(),
+                &candidates,
+                &members,
+                set_head,
+            )?
+        };
 
         let next_head = update
             .as_ref()

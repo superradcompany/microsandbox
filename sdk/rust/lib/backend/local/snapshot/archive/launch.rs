@@ -8,6 +8,7 @@ use std::sync::Arc;
 use microsandbox_image::GlobalCache;
 use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
 use microsandbox_image::snapshot::{OwnedVolumeData, SnapshotId, SnapshotState, UpperIntegrity};
+use microsandbox_runtime::checkpoint::launch_staging::LaunchStaging;
 
 use super::super::{Snapshot, dispatch, migration, store};
 use super::batch::{StagedArchive, read_manifest, unpack};
@@ -29,6 +30,8 @@ pub(crate) struct PreparedLaunchSource {
     snapshot: Snapshot,
     _archives: Vec<StagedArchive>,
     _images: Vec<GlobalCache>,
+    // Drop archive handles before releasing their crash-recovery lease.
+    _staging: Option<LaunchStaging>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -96,8 +99,7 @@ async fn prepare_inner(
     paths: &[PathBuf],
     target: Option<&SnapshotId>,
 ) -> MicrosandboxResult<PreparedLaunchSource> {
-    let temporary = local.cache_dir().join("tmp");
-    tokio::fs::create_dir_all(&temporary).await?;
+    let mut staging: Option<LaunchStaging> = None;
     let mut archives = Vec::new();
     let mut directories = Vec::new();
     let mut seen_paths = BTreeSet::new();
@@ -119,7 +121,16 @@ async fn prepare_inner(
             })?;
             directories.push(store::open_snapshot_leased(local, selector).await?);
         } else if metadata.is_file() {
-            archives.push(unpack(path, &temporary, &temporary).await?);
+            if staging.is_none() {
+                let home = local.config().home();
+                staging = Some(
+                    tokio::task::spawn_blocking(move || LaunchStaging::reserve(&home))
+                        .await
+                        .map_err(|error| MicrosandboxError::Runtime(error.to_string()))??,
+                );
+            }
+            let root = staging.as_ref().expect("archive staging reserved").path();
+            archives.push(unpack(path, root, root, None).await?);
         } else {
             return Err(MicrosandboxError::InvalidConfig(format!(
                 "snapshot input {} is not a regular archive or artifact directory",
@@ -241,6 +252,7 @@ async fn prepare_inner(
         snapshot,
         _archives: archives,
         _images: images,
+        _staging: staging,
     })
 }
 

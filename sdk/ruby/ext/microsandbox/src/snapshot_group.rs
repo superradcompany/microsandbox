@@ -148,6 +148,11 @@ impl RubyGroup {
         })
     }
 
+    fn open(ruby: &Ruby, path: String) -> Result<Self, Error> {
+        let pending = Snapshot::open(path);
+        Ok(Self { inner: run(ruby, pending)? })
+    }
+
     fn get(ruby: &Ruby, name: String) -> Result<Self, Error> {
         Ok(Self {
             inner: run(ruby, async move { Snapshot::get(name).await })?,
@@ -455,6 +460,7 @@ pub(super) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     let group = module.define_class("Snapshot", ruby.class_object())?;
     group.define_method("remove", method!(RubyGroup::remove, 0))?;
     group.define_singleton_method("load", function!(RubyGroup::load, -1))?;
+    group.define_singleton_method("open", function!(RubyGroup::open, 1))?;
     group.define_singleton_method("get", function!(RubyGroup::get, 1))?;
     group.define_singleton_method("list", function!(RubyGroup::list, 0))?;
     group.define_method("name", method!(RubyGroup::name, 0))?;

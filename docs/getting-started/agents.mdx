@@ -82,7 +82,7 @@ claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
 }
 ```
 
-```json Open Code
+```json Open Code v1
 // .opencode.json
 {
   "mcpServers": {
@@ -90,6 +90,22 @@ claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json Open Code v2
+// ~/.config/opencode/opencode.json
+{
+  "mcp": {
+    "microsandbox": {
+      "type": "local",
+      "command": [ 
+        "npx",
+        "-y", 
+        "microsandbox-mcp"
+      ]
     }
   }
 }

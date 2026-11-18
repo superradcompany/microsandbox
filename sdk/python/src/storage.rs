@@ -21,7 +21,7 @@ use crate::error::to_py_err;
 pub struct PyStorage;
 
 /// Storage totals and accounting limitations for the selected backend.
-#[pyclass(name = "StorageUsage", get_all, frozen)]
+#[pyclass(from_py_object, name = "StorageUsage", get_all, frozen)]
 #[derive(Clone)]
 pub struct PyStorageUsage {
     images: PyStorageCategoryUsage,
@@ -34,7 +34,7 @@ pub struct PyStorageUsage {
 }
 
 /// Category observations; absent counts and byte values mean unknown, never zero.
-#[pyclass(name = "StorageCategoryUsage", get_all, frozen)]
+#[pyclass(from_py_object, name = "StorageCategoryUsage", get_all, frozen)]
 #[derive(Clone)]
 pub struct PyStorageCategoryUsage {
     count: Option<u64>,
@@ -47,7 +47,7 @@ pub struct PyStorageCategoryUsage {
 }
 
 /// One object's storage, retention reasons, and ownership observations.
-#[pyclass(name = "StorageItemUsage", get_all, frozen)]
+#[pyclass(from_py_object, name = "StorageItemUsage", get_all, frozen)]
 #[derive(Clone)]
 pub struct PyStorageItemUsage {
     name: String,
@@ -60,7 +60,7 @@ pub struct PyStorageItemUsage {
 }
 
 /// Per-file runtime-cache eligibility and any inspection error.
-#[pyclass(name = "MemoryCacheEntry", get_all, frozen)]
+#[pyclass(from_py_object, name = "MemoryCacheEntry", get_all, frozen)]
 #[derive(Clone)]
 pub struct PyMemoryCacheEntry {
     path: String,
@@ -72,7 +72,7 @@ pub struct PyMemoryCacheEntry {
 }
 
 /// Runtime-cache prune results; removed logical bytes are not physical space reclaimed.
-#[pyclass(name = "MemoryCacheReport", get_all, frozen)]
+#[pyclass(from_py_object, name = "MemoryCacheReport", get_all, frozen)]
 #[derive(Clone)]
 pub struct PyMemoryCacheReport {
     dry_run: bool,

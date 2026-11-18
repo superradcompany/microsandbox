@@ -10,11 +10,14 @@
 //! client without rewriting frame headers.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+#[cfg(unix)]
+use std::io;
 use std::io::IoSlice;
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -38,8 +41,7 @@ use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE, MAX_WIRE_FRAME};
 #[cfg(test)]
 use microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION;
 use microsandbox_protocol::core::{
-    CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThaw,
-    WorkloadThawMode, WorkloadThawed,
+    CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThawed,
 };
 use microsandbox_protocol::exec::{
     ExecFailed, ExecFailureKind, ExecOutputAck, ExecRequest, ExecSignal, ExecStderr, ExecStdout,
@@ -53,6 +55,9 @@ use microsandbox_protocol::message::{
     FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message,
     MessageType,
 };
+use microsandbox_protocol::restore_transport::{
+    GuestReady, GuestThaw as WorkloadThaw, GuestThawMode as WorkloadThawMode,
+};
 use microsandbox_protocol::tcp::{TcpConnect, TcpFailed};
 #[cfg(unix)]
 use microsandbox_protocol::transport::LocalTransportReady;
@@ -65,6 +70,8 @@ use microsandbox_protocol::transport::{
 use microsandbox_protocol::transport::{RelayClientConnected, RelayClientDisconnectedAck};
 #[cfg(test)]
 use microsandbox_types::ExecLimits;
+#[cfg(unix)]
+use microsandbox_utils::wake_pipe::WakePipe;
 #[cfg(unix)]
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -220,6 +227,19 @@ struct ClientState {
     /// Runtime-to-SDK arena producer after this client accepts local-shm-v1.
     #[cfg(unix)]
     local_outbound: Option<SharedArenaProducer>,
+}
+
+/// Host-side execution ownership used by the idle monitor.
+#[derive(Default)]
+pub(crate) struct RelayIdleState {
+    clients: Arc<Mutex<HashMap<u32, ClientState>>>,
+    managed_connections: StdMutex<HashSet<[u8; 16]>>,
+}
+
+/// Removes a managed connection's identity when its job stream ends.
+pub(crate) struct ManagedConnectionGuard {
+    idle_state: Arc<RelayIdleState>,
+    token: [u8; 16],
 }
 
 /// One primary-lane write, optionally acknowledged after physical ring admission.
@@ -477,6 +497,7 @@ struct GuestFrameMerger {
 /// for client connections on a Unix domain socket. Frames are routed between
 /// clients and the guest agent without decoding.
 pub struct AgentRelay {
+    idle_state: Arc<RelayIdleState>,
     restored_input: RestoreInput,
     /// Shared ring buffers + wake pipes for console backend communication.
     shared: Arc<ConsoleSharedState>,
@@ -548,6 +569,35 @@ struct RestoreActivationRecord<'a> {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl RelayIdleState {
+    /// Register a runtime-owned agent connection before it sends an exec request.
+    pub(crate) fn register_managed_connection(
+        self: &Arc<Self>,
+        token: [u8; 16],
+    ) -> ManagedConnectionGuard {
+        self.managed_connections.lock().unwrap().insert(token);
+
+        ManagedConnectionGuard {
+            idle_state: Arc::clone(self),
+            token,
+        }
+    }
+
+    /// Return whether a caller-owned exec is still connected to the relay.
+    pub(crate) async fn has_attached_exec_sessions(&self) -> bool {
+        let clients = self.clients.lock().await;
+        let managed = self.managed_connections.lock().unwrap();
+
+        clients.values().any(|client| {
+            !client.active_sessions.is_empty()
+                && client
+                    .exec_control
+                    .as_ref()
+                    .is_none_or(|connection| !managed.contains(&connection.token()))
+        })
+    }
+}
 
 impl ControlWrite {
     pub(crate) fn clock_sync() -> RuntimeResult<Self> {
@@ -1220,6 +1270,7 @@ impl AgentRelay {
         tracing::info!("agent relay listening on {}", agent_sock_path.display());
 
         Ok(Self {
+            idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
             restored_input: RestoreInput::default(),
@@ -1251,6 +1302,7 @@ impl AgentRelay {
         bulk_shared: Option<Arc<ConsoleSharedState>>,
     ) -> Self {
         Self {
+            idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
             restored_input: RestoreInput::default(),
@@ -1282,6 +1334,11 @@ impl AgentRelay {
             self.endpoint.display()
         );
         Ok(())
+    }
+
+    /// Share live client ownership with the host idle monitor and job manager.
+    pub(crate) fn idle_state(&self) -> Arc<RelayIdleState> {
+        Arc::clone(&self.idle_state)
     }
 
     /// Select how the relay manages the guest wall clock.
@@ -1413,10 +1470,10 @@ impl AgentRelay {
                                 .into(),
                         ));
                     }
-                    let ready: ObservedReady = msg.payload().map_err(|error| {
+                    let ready: GuestReady = msg.payload().map_err(|error| {
                         RuntimeError::Custom(format!("decode core.ready payload: {error}"))
                     })?;
-                    self.select_ready_transport(&ready.ready)?;
+                    self.select_ready_transport(&ready.public)?;
                     tracing::info!(
                         dual_port = self.dual_port_active,
                         "agent relay: received core.ready from agentd"
@@ -1427,7 +1484,7 @@ impl AgentRelay {
                         // This capability describes only the already authenticated local SDK
                         // hop. Agentd remains unaware of shared mappings and the guest generation
                         // stays unchanged.
-                        ready.ready.local_transport = Some(LocalTransportReady::shared_arena_v1());
+                        ready.public.local_transport = Some(LocalTransportReady::shared_arena_v1());
                         ready
                     };
                     // Capture the complete client-facing capability set, including the existing
@@ -1438,13 +1495,12 @@ impl AgentRelay {
                         self.dual_port_active,
                     );
                     let mut client_ready =
-                        Message::with_payload(MessageType::Ready, msg.id, &ready).map_err(
-                            |error| {
+                        Message::with_payload(MessageType::Ready, msg.id, &ready.client_ready())
+                            .map_err(|error| {
                                 RuntimeError::Custom(format!(
                                     "encode SDK-facing core.ready payload: {error}"
                                 ))
-                            },
-                        )?;
+                            })?;
                     client_ready.v = msg.v;
                     let mut client_ready_frame = Vec::new();
                     codec::encode_to_buf(&client_ready, &mut client_ready_frame).map_err(
@@ -1740,6 +1796,16 @@ impl AgentRelay {
     }
 
     fn thaw_restored_workload(&mut self, restored: &RestoredAgentState) -> RuntimeResult<()> {
+        let mode = if restored.ready.restore_tcp_reset_version == Some(1) {
+            WorkloadThawMode::RestoreResetTcp
+        } else {
+            let warning = "Restored guest cannot reset inherited TCP connections before thaw. Interrupted connections may wait for a timeout.";
+            tracing::warn!("{warning}");
+            if let Some(writer) = &self.log_writer {
+                writer.write_system(warning);
+            }
+            WorkloadThawMode::Restore
+        };
         if !self.restored_input.control.is_empty() || !self.restored_input.bulk.is_empty() {
             return Err(RuntimeError::Custom(
                 "restored transport did not start at a complete-frame boundary".into(),
@@ -1758,7 +1824,7 @@ impl AgentRelay {
             RESTORE_CONTROL_ID,
             &WorkloadThaw {
                 attempt_id: restored.attempt_id.clone(),
-                mode: WorkloadThawMode::Restore,
+                mode,
             },
         )
         .map_err(|error| RuntimeError::Custom(format!("encode restored workload thaw: {error}")))?;
@@ -1871,25 +1937,26 @@ impl AgentRelay {
 
     fn install_restored_ready(&mut self, restored: &RestoredAgentState) -> RuntimeResult<()> {
         // Guest RAM already contains the completed bulk binding: no new boot hello is sent.
-        if restored.ready.ready.bulk_transport.is_some() && self.bulk_shared.is_none() {
+        if restored.ready.public.bulk_transport.is_some() && self.bulk_shared.is_none() {
             return Err(RuntimeError::Custom(
                 "restored agent requires its captured bulk console lane".into(),
             ));
         }
         self.bulk_connection_id = restored
             .ready
-            .ready
+            .public
             .bulk_transport
             .as_ref()
             .map(|ready| ready.connection_id);
-        self.select_ready_transport(&restored.ready.ready)?;
+        self.select_ready_transport(&restored.ready.public)?;
         self.shared.workload_control.install_ready(
             restored.protocol_generation,
             restored.ready.clone(),
             self.dual_port_active,
         );
-        let mut ready = Message::with_payload(MessageType::Ready, 0, &restored.ready)
-            .map_err(|error| RuntimeError::Custom(format!("encode restored ready: {error}")))?;
+        let mut ready =
+            Message::with_payload(MessageType::Ready, 0, &restored.ready.client_ready())
+                .map_err(|error| RuntimeError::Custom(format!("encode restored ready: {error}")))?;
         ready.v = restored.protocol_generation;
         let mut frame = Vec::new();
         codec::encode_to_buf(&ready, &mut frame).map_err(|error| {
@@ -1935,7 +2002,7 @@ impl AgentRelay {
             .ok_or_else(|| RuntimeError::Custom("agent relay: endpoint not published".into()))?;
 
         // Shared state: map from client slot index to client state.
-        let clients: Arc<Mutex<HashMap<u32, ClientState>>> = Arc::new(Mutex::new(HashMap::new()));
+        let clients = Arc::clone(&self.idle_state.clients);
 
         // Bounded channel for client reader tasks to send frames to the ring writer.
         // Backpressure prevents unbounded memory growth from client floods.
@@ -2341,6 +2408,16 @@ impl AgentRelay {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Drop for ManagedConnectionGuard {
+    fn drop(&mut self) {
+        self.idle_state
+            .managed_connections
+            .lock()
+            .unwrap()
+            .remove(&self.token);
+    }
+}
+
 impl Drop for AgentRelay {
     fn drop(&mut self) {
         // The console write-capacity hook may be sleeping on a libkrun thread. Every relay exit,
@@ -2422,10 +2499,7 @@ fn persist_restore_activation(
 
     let target = runtime_dir.join("restore-activation.json");
     let temporary = runtime_dir.join(format!(".restore-activation.{}.tmp", rand::random::<u64>()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
     serde_json::to_writer(
         &mut file,
         &RestoreActivationRecord {
@@ -2994,6 +3068,14 @@ async fn wait_for_input_stall(shared: &ConsoleSharedState, bulk: Option<&Console
     }
 }
 
+#[cfg(unix)]
+fn register_wake_pipe(pipe: &WakePipe) -> io::Result<AsyncFd<OwnedFd>> {
+    let read_fd = pipe.try_clone_read_fd()?;
+
+    // SAFETY: The owned, non-blocking descriptor stays open and unchanged until AsyncFd drops it.
+    unsafe { AsyncFd::register(read_fd) }.map_err(Into::into)
+}
+
 /// Background task that pushes client frames into the rx_ring for the guest.
 /// Retries on full ring with backoff to avoid dropping frames.
 async fn ring_writer_task(
@@ -3004,7 +3086,7 @@ async fn ring_writer_task(
 ) -> RuntimeResult<()> {
     let _lifetime = WorkloadWriterGuard(Arc::clone(&shared.workload_control));
     #[cfg(unix)]
-    let capacity_fd = match AsyncFd::new(shared.rx_capacity_wake.as_raw_fd()) {
+    let capacity_fd = match register_wake_pipe(&shared.rx_capacity_wake) {
         Ok(fd) => fd,
         Err(error) => {
             return Err(RuntimeError::Custom(format!(
@@ -3233,7 +3315,7 @@ fn admit_control_write(
 
 async fn wait_console_capacity(
     shared: &Arc<ConsoleSharedState>,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
 ) -> bool {
     #[cfg(unix)]
     {
@@ -3267,7 +3349,7 @@ async fn bulk_ring_writer_task(
 ) -> RuntimeResult<()> {
     let _lifetime = WorkloadWriterGuard(Arc::clone(&workload));
     #[cfg(unix)]
-    let capacity_fd = match AsyncFd::new(shared.rx_capacity_wake.as_raw_fd()) {
+    let capacity_fd = match register_wake_pipe(&shared.rx_capacity_wake) {
         Ok(fd) => fd,
         Err(error) => {
             return Err(RuntimeError::Custom(format!(
@@ -3535,7 +3617,7 @@ fn bulk_wire_metadata(data: &Bytes) -> RuntimeResult<(BulkKind, BulkFlow, u64, u
 async fn push_bulk_write(
     shared: &Arc<ConsoleSharedState>,
     write: BulkWrite,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
 ) -> bool {
     // Keep the incarnation outside the unchanged generation-8 frame. Two queue fragments avoid
     // copying the potentially megabyte-sized opaque payload merely to prepend sixteen bytes.
@@ -3573,7 +3655,7 @@ async fn push_bulk_write(
 async fn push_bulk_fragment(
     shared: &Arc<ConsoleSharedState>,
     data: Bytes,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
 ) -> bool {
     push_bulk_fragment_with_timeout(
         shared,
@@ -3588,7 +3670,7 @@ async fn push_bulk_fragment(
 async fn push_bulk_fragment_with_timeout(
     shared: &Arc<ConsoleSharedState>,
     data: Bytes,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
     timeout: std::time::Duration,
 ) -> bool {
     let mut stall = None;
@@ -3607,7 +3689,7 @@ async fn push_bulk_fragment_with_timeout(
 async fn push_bulk_fragment_with_stall<'a>(
     shared: &'a Arc<ConsoleSharedState>,
     mut data: Bytes,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
     timeout: std::time::Duration,
     stall: &mut Option<InputStall<'a>>,
 ) -> bool {
@@ -4165,7 +4247,7 @@ async fn combined_ring_reader_task(
     pending_disconnects: Arc<Mutex<HashMap<ClientIncarnation, PendingClientDisconnect>>>,
 ) -> RuntimeResult<()> {
     #[cfg(unix)]
-    let async_fd = AsyncFd::new(shared.tx_wake.as_raw_fd()).map_err(RuntimeError::Io)?;
+    let async_fd = register_wake_pipe(&shared.tx_wake).map_err(RuntimeError::Io)?;
     let output_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
     if !buf.is_empty() {
         shared.tx_wake.wake();
@@ -4254,7 +4336,7 @@ async fn lane_reader_task(
     workload: Arc<WorkloadControl>,
 ) -> RuntimeResult<()> {
     #[cfg(unix)]
-    let async_fd = AsyncFd::new(shared.tx_wake.as_raw_fd()).map_err(RuntimeError::Io)?;
+    let async_fd = register_wake_pipe(&shared.tx_wake).map_err(RuntimeError::Io)?;
     if !buf.is_empty() {
         shared.tx_wake.wake();
     }
@@ -5630,6 +5712,49 @@ mod tests {
 
     use super::exec_admission::ExecutionTracker;
     use super::*;
+
+    #[tokio::test]
+    async fn idle_state_tracks_caller_connections_separately_from_managed_jobs() {
+        let idle = Arc::new(RelayIdleState::default());
+        let (agent_tx, _agent_rx) = ControlWriter::new();
+        let direct = agent_tx.exec_controls.connect(1, 100);
+        let managed = agent_tx.exec_controls.connect(101, 200);
+        let managed_token = managed.token();
+        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+        let (disconnect_tx, _disconnect_rx) = watch::channel(false);
+
+        let client = |connection: Option<ExecControlConnection>, id| ClientState {
+            exec_control: connection,
+            execution_tracker: Arc::new(ExecutionTracker::default()),
+            incarnation: None,
+            active_sessions: HashSet::from([id]),
+            active_bulk: Arc::new(StdMutex::new(HashMap::new())),
+            completed_bulk_ids: None,
+            write_tx: write_tx.clone(),
+            write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
+            disconnect_tx: disconnect_tx.clone(),
+            #[cfg(unix)]
+            local_outbound: None,
+        };
+
+        let managed_guard = idle.register_managed_connection(managed_token);
+        let mut clients = idle.clients.lock().await;
+        clients.insert(0, client(Some(direct), 1));
+        clients.insert(1, client(Some(managed), 101));
+        drop(clients);
+
+        assert!(idle.has_attached_exec_sessions().await);
+
+        idle.clients.lock().await.remove(&0);
+        assert!(!idle.has_attached_exec_sessions().await);
+
+        idle.clients.lock().await.insert(2, client(None, 201));
+        assert!(idle.has_attached_exec_sessions().await);
+
+        idle.clients.lock().await.remove(&2);
+        drop(managed_guard);
+        assert!(idle.has_attached_exec_sessions().await);
+    }
 
     /// Reports the relay reader's consumed byte count every time its read goes pending, so a test
     /// can interrupt a partly read frame at a known position without sleeping on a guess.
@@ -8796,11 +8921,11 @@ mod tests {
         assert_eq!(captured_ready.init_observation, Some(observation.clone()));
         #[cfg(unix)]
         assert_eq!(
-            captured_ready.ready.local_transport,
+            captured_ready.public.local_transport,
             Some(LocalTransportReady::shared_arena_v1())
         );
         #[cfg(not(unix))]
-        assert!(captured_ready.ready.local_transport.is_none());
+        assert!(captured_ready.public.local_transport.is_none());
 
         let cached = relay.ready_frame.as_ref().expect("SDK-facing ready frame");
         let cached_observed: ObservedReady = decode_frame(cached).unwrap().payload().unwrap();
@@ -8995,15 +9120,18 @@ mod tests {
             inherited_memory: None,
             external_mount_reports: Vec::new(),
             protocol_generation: microsandbox_protocol::message::PROTOCOL_VERSION,
-            ready: Ready {
-                boot_time_ns: 11,
-                init_time_ns: 22,
-                ready_time_ns: 33,
-                agent_version: "test-agent".into(),
-                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
-                ..Default::default()
-            }
-            .into(),
+            ready: GuestReady {
+                init_observation: None,
+                restore_tcp_reset_version: Some(1),
+                public: Ready {
+                    boot_time_ns: 11,
+                    init_time_ns: 22,
+                    ready_time_ns: 33,
+                    agent_version: "test-agent".into(),
+                    workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+                    ..Default::default()
+                },
+            },
             attempt_id: attempt_id.into(),
             host_input: Default::default(),
             input_credit: Default::default(),
@@ -9013,13 +9141,18 @@ mod tests {
 
     #[tokio::test]
     async fn restored_workload_thaw_uses_private_attempt_scoped_exchange() {
-        for policy in [
-            None,
-            Some(ExecLimits {
-                max_executions: 7,
-                input_limit: 32768,
-                ..Default::default()
-            }),
+        for (version, expected_mode, policy) in [
+            (None, WorkloadThawMode::Restore, None),
+            (Some(2), WorkloadThawMode::Restore, None),
+            (
+                Some(1),
+                WorkloadThawMode::RestoreResetTcp,
+                Some(ExecLimits {
+                    max_executions: 7,
+                    input_limit: 32768,
+                    ..Default::default()
+                }),
+            ),
         ] {
             // Console capacity is now a byte budget, not a count of queued frames.
             let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
@@ -9028,7 +9161,8 @@ mod tests {
                 .await
                 .unwrap();
             let mut restored = restored_agent("checkpoint-attempt");
-            restored.ready.ready.exec_limits = policy;
+            restored.ready.restore_tcp_reset_version = version;
+            restored.ready.public.exec_limits = policy;
             relay.install_restored_ready(&restored).unwrap();
 
             let guest_shared = Arc::clone(&shared);
@@ -9051,7 +9185,7 @@ mod tests {
                 assert_eq!(request.t, MessageType::WorkloadThaw);
                 assert_eq!(
                     request.payload::<WorkloadThaw>().unwrap().mode,
-                    WorkloadThawMode::Restore
+                    expected_mode
                 );
                 assert_eq!(
                     request.payload::<WorkloadThaw>().unwrap().attempt_id,
@@ -10966,7 +11100,7 @@ mod tests {
     fn blocked_write(shared: Arc<ConsoleSharedState>) -> tokio::task::JoinHandle<bool> {
         tokio::spawn(async move {
             #[cfg(unix)]
-            let capacity = AsyncFd::new(shared.rx_capacity_wake.as_raw_fd()).unwrap();
+            let capacity = register_wake_pipe(&shared.rx_capacity_wake).unwrap();
 
             push_bulk_fragment_with_timeout(
                 &shared,
@@ -11066,7 +11200,7 @@ mod tests {
             let writer_shared = Arc::clone(&shared);
             let writer = tokio::spawn(async move {
                 #[cfg(unix)]
-                let capacity = AsyncFd::new(writer_shared.rx_capacity_wake.as_raw_fd()).unwrap();
+                let capacity = register_wake_pipe(&writer_shared.rx_capacity_wake).unwrap();
 
                 push_bulk_fragment_with_timeout(
                     &writer_shared,

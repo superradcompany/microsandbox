@@ -567,7 +567,7 @@ Writer for sending data to a running process's stdin. Implements `AsyncDisposabl
 write(data)
 ```
 
-Write bytes to the process's stdin. Strings are UTF-8 encoded. The write completes once the guest accepts the data, so it waits while the command is slow to read. For a command that also produces output, read output concurrently to avoid blocking each other.
+Write bytes to the process's stdin. Strings are UTF-8 encoded. The write completes once the guest accepts the data, so it waits while the command is slow to read. For a command that also produces output, read output concurrently to avoid blocking each other. Writing empty data does nothing. Call [`close()`](#sink-close) when done writing; in pipe mode it sends EOF.
 
 <p className="msb-label">Returns</p>
 

@@ -116,8 +116,15 @@ pub(super) fn publish(
             .store(SnapshotImportOutcome::Unknown as u8, Ordering::Release);
     }
     #[cfg(windows)]
-    let result = if operation.is_some() {
-        install_windows(directory, incoming, members, &intent, |_| Ok(()))
+    let result = if let Some(operation) = operation {
+        install_windows(
+            directory,
+            incoming,
+            members,
+            &intent,
+            &operation.verified_signers,
+            |_| Ok(()),
+        )
     } else {
         install(directory, incoming, members, aliases, &intent, |_| Ok(()))
     };
@@ -391,6 +398,7 @@ fn install_windows(
     incoming: &BTreeMap<String, Member>,
     members: &BTreeMap<String, Member>,
     intent: &Intent,
+    verified_signers: &std::collections::BTreeSet<String>,
     mut after_move: impl FnMut(usize) -> MicrosandboxResult<()>,
 ) -> MicrosandboxResult<()> {
     let stage = tempfile::Builder::new()
@@ -416,6 +424,22 @@ fn install_windows(
         write_member_name(&alias_stage, change.next.as_deref())?;
     }
     let mut transaction = super::txf::Transaction::new()?;
+    #[cfg(not(feature = "net"))]
+    let _ = verified_signers;
+    #[cfg(feature = "net")]
+    for id in verified_signers {
+        if intent.added.contains_key(id) {
+            continue; // New members carry their sealed signer in the directory move below.
+        }
+        let name = microsandbox_runtime::checkpoint::tls_receipt::SIDECAR;
+        let destination = directory.join(id).join(name);
+        if !path_exists(&destination)? {
+            let member = incoming.get(id).ok_or_else(|| {
+                integrity(format!("verified signer has no incoming checkpoint {id}"))
+            })?;
+            transaction.rename(&member.path.join(name), &destination, false)?;
+        }
+    }
     for (index, id) in intent.added.keys().enumerate() {
         transaction.rename(&incoming[id].path, &directory.join(id), false)?;
         after_move(index + 1)?;
@@ -1000,10 +1024,17 @@ mod tests {
         wait(0);
         #[cfg(windows)]
         if std::env::var_os("MSB_TEST_GROUP_TXF").is_some() {
-            install_windows(&group, &incoming, &members, &intent, |moved| {
-                wait(if moved == usize::MAX { 3 } else { moved });
-                Ok(())
-            })
+            install_windows(
+                &group,
+                &incoming,
+                &members,
+                &intent,
+                &Default::default(),
+                |moved| {
+                    wait(if moved == usize::MAX { 3 } else { moved });
+                    Ok(())
+                },
+            )
             .unwrap();
             wait(4);
             panic!("unknown TxF test boundary");

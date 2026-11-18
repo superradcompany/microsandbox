@@ -443,13 +443,16 @@ fn load_or_generate_ca(config: &TlsConfig) -> Result<CertAuthority, TlsStateErro
                     path: key_path.clone(),
                     source,
                 })?;
-            let ca = CertAuthority::load(&cert_pem, &key_pem).map_err(|err| {
-                TlsStateError::InvalidInterceptCa {
+            let ca = CertAuthority::load(&cert_pem, &key_pem)
+                .and_then(|ca| {
+                    ca.verify_signing_key()?;
+                    Ok(ca)
+                })
+                .map_err(|err| TlsStateError::InvalidInterceptCa {
                     cert_path: cert_path.clone(),
                     key_path: key_path.clone(),
                     reason: err.to_string(),
-                }
-            })?;
+                })?;
             tracing::info!("loaded user-provided CA from {:?}", cert_path);
             return Ok(ca);
         }

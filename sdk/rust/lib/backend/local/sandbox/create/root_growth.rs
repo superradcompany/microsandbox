@@ -1,9 +1,13 @@
 //! Offline growth of an unpublished snapshot child, before replacement touches its destination.
 
+#[cfg(test)]
 use std::path::PathBuf;
+
+use crate::backend::local::creation::CreationStorage;
 
 use microsandbox_image::checkpoint::CompactLayer;
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
+#[cfg(test)]
 use tempfile::TempDir;
 
 use crate::sandbox::config::SnapshotRestoreMode;
@@ -16,8 +20,9 @@ use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 
 /// Own all staging in a detached worker, including across blocking filesystem work.
 /// Dropping the caller never deletes a directory while a materializer still writes it.
+#[cfg(test)]
 pub(super) async fn prepare(
-    mut config: SandboxConfig,
+    config: SandboxConfig,
     sources: Vec<RootfsUpperLayerConfig>,
     virtual_size: Option<u64>,
     checkpoint: Option<CheckpointRestoreConfig>,
@@ -25,6 +30,37 @@ pub(super) async fn prepare(
     directory: PathBuf,
     fs_state_limit: usize,
 ) -> MicrosandboxResult<(SandboxConfig, TempDir)> {
+    let stage = match stage {
+        Some(stage) => stage,
+        None => {
+            tokio::fs::create_dir_all(&directory).await?;
+            tempfile::Builder::new()
+                .prefix(".snapshot-grow-")
+                .tempdir_in(&directory)?
+        }
+    };
+    let storage = CreationStorage::for_test(stage.path());
+    prepare_owned(
+        config,
+        sources,
+        virtual_size,
+        checkpoint,
+        stage,
+        storage,
+        fs_state_limit,
+    )
+    .await
+}
+
+pub(super) async fn prepare_owned<T: AsRef<std::path::Path> + Send + 'static>(
+    mut config: SandboxConfig,
+    sources: Vec<RootfsUpperLayerConfig>,
+    virtual_size: Option<u64>,
+    checkpoint: Option<CheckpointRestoreConfig>,
+    stage: T,
+    storage: CreationStorage,
+    fs_state_limit: usize,
+) -> MicrosandboxResult<(SandboxConfig, T)> {
     tokio::spawn(async move {
         let size_mib = config.snapshot_root_growth_mib.take().ok_or_else(|| {
             MicrosandboxError::InvalidConfig("snapshot root capacity is missing".into())
@@ -38,15 +74,8 @@ pub(super) async fn prepare(
                 )
             })?;
         let layout = super::snapshot_root_layout_from_config(&config)?;
-        let stage = match stage {
-            Some(stage) => stage,
-            None => {
-                tokio::fs::create_dir_all(&directory).await?;
-                tempfile::Builder::new()
-                    .prefix(".snapshot-grow-")
-                    .tempdir_in(&directory)?
-            }
-        };
+        // A fresh catalog reservation owns its path before any filesystem worker starts.
+        tokio::fs::create_dir_all(stage.as_ref()).await?;
         if let Some(checkpoint) = checkpoint {
             if config.snapshot_restore_mode != SnapshotRestoreMode::DiskOnly {
                 return Err(MicrosandboxError::InvalidConfig(
@@ -54,8 +83,10 @@ pub(super) async fn prepare(
                 ));
             }
             let materialized = crate::snapshot::materialize_checkpoint_disk_for_child(
-                &checkpoint,
-                stage.path(),
+                &checkpoint.closure,
+                &checkpoint.checkpoint_root,
+                &checkpoint.checkpoint_id,
+                &storage,
                 &layout,
                 &config.restore_resources,
                 fs_state_limit,
@@ -70,7 +101,7 @@ pub(super) async fn prepare(
             let materialized = crate::snapshot::materialize_file_snapshot_for_child(
                 &sources,
                 virtual_size,
-                stage.path(),
+                &storage,
                 &layout,
             )
             .await?;
@@ -107,7 +138,7 @@ pub(super) async fn prepare(
         }
         if layers
             .iter()
-            .any(|layer| !layer.path.starts_with(stage.path()))
+            .any(|layer| !layer.path.starts_with(stage.as_ref()))
             || !layers.last().is_some_and(|layer| layer.qcow2)
         {
             return Err(MicrosandboxError::SnapshotIntegrity(
@@ -115,7 +146,7 @@ pub(super) async fn prepare(
             ));
         }
         #[cfg(test)]
-        tests::pause_staged_worker(&directory).await;
+        tests::pause_staged_worker(stage.as_ref().parent().expect("staging has a parent")).await;
         // Transfer staging into the blocking task too: even runtime shutdown must not
         // remove its head while ext4 metadata is being rewritten. No captured inode is writable.
         let stage = tokio::task::spawn_blocking(move || {

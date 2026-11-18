@@ -54,6 +54,15 @@ Artifact helpers formerly owned by `Snapshot` are now accessed through `Checkpoi
 
 ## Snapshot group methods
 
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Open()</span>
+
+```go
+func (snapshotFactory) Open(ctx context.Context, path string) (*SnapshotGroup, error)
+```
+
+Open an existing local history directory, including groups captured or imported outside the default snapshot store. Relative paths are anchored when the call is made, before deferred work; symlinks retain their filesystem meaning. The returned group retains its backend and path for later operations. Missing directories fail without creating a group or falling back to a same-name default-store group. Cloud backends do not support this local-directory operation. Use `get` (`Get` in Go) to select a bare group name from the default store.
+
+
 <span id="group-get" />
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Get()</span>

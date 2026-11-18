@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Sandbox } from "../dist/index.js";
 import { msbPath } from "../dist/internal/resolve-binary.js";
-import type { PullProgress } from "../dist/index.js";
+import type { PullProgress, SecretModifySpec } from "../dist/index.js";
 
 const SANDBOX_NAME = "sdk-smoke-test";
 
@@ -87,6 +87,25 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     expect(stdout).toBe("a\n");
     expect(stderr).toBe("b\n");
     expect(code).toBe(7);
+  });
+
+  it("keeps stdin open across an empty write", async () => {
+    const handle = await sb.execStreamWith("cat", (exec) => exec.stdinPipe());
+    const stdin = await handle.takeStdin();
+    expect(stdin).not.toBeNull();
+
+    await stdin!.write("aaaaa");
+    await stdin!.write("");
+    await stdin!.write(new Uint8Array());
+    await stdin!.write("bbbbb");
+    await stdin!.close();
+
+    await stdin!.write("");
+    await expect(stdin!.write("after EOF")).rejects.toThrow(/stdin closed/);
+
+    const out = await handle.collect();
+    expect(out.success).toBe(true);
+    expect(out.stdout()).toBe("aaaaabbbbb");
   });
 
   it("resizes a TTY while recv() is pending", async () => {
@@ -185,6 +204,60 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     });
     expect(handlePlan.sandbox).toBe(SANDBOX_NAME);
     expect(handlePlan.applied).toBe(false);
+  });
+
+  it("plans each secret policy field on the sandbox and on a handle", async () => {
+    const handle = await Sandbox.get(SANDBOX_NAME);
+    const specs: SecretModifySpec[] = [
+      { substitution: { headerFields: ["authorization"] } },
+      { violationAction: "block" },
+      { requireTlsIdentity: false },
+      { allowPlaceholderFor: ["logs.example.com"] },
+    ];
+    for (const [target, spec] of [sb, handle].flatMap((t) => specs.map((s) => [t, s] as const))) {
+      const plan = await target.modify({
+        secrets: { SDK_SECRET_TOKEN: spec },
+        policy: "restart",
+        dryRun: true,
+      });
+      expect(plan.applied).toBe(false);
+      expect(plan.changes).toContainEqual(
+        expect.objectContaining({
+          kind: "config",
+          field: "secret.SDK_SECRET_TOKEN.policy",
+          disposition: "requires restart",
+        }),
+      );
+    }
+  });
+
+  it("rejects an unknown secret violation action", async () => {
+    await expect(
+      sb.modify({
+        secrets: { SDK_SECRET_TOKEN: { violationAction: "explode" as never } },
+        policy: "restart",
+        dryRun: true,
+      }),
+    ).rejects.toThrow('secret "SDK_SECRET_TOKEN": invalid secret violation action: explode');
+  });
+
+  it("rejects a substitution rule with no location before persisting it", async () => {
+    await expect(
+      sb.modify({
+        secrets: { SDK_SECRET_TOKEN: { substitution: { headers: false } } },
+        policy: "next_start",
+      }),
+    ).rejects.toThrow("invalid secret configuration");
+
+    // `headerFields: []` is the stored all-header rule, so nothing to plan.
+    const plan = await sb.modify({
+      secrets: { SDK_SECRET_TOKEN: { substitution: { headerFields: [] } } },
+      policy: "restart",
+      dryRun: true,
+    });
+    expect(plan.changes.map((change) => change.field)).not.toContain(
+      "secret.SDK_SECRET_TOKEN.policy",
+    );
   });
 });
 

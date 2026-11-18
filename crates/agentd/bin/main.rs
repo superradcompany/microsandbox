@@ -25,6 +25,16 @@ fn main() {
 fn main() {
     // Capture CLOCK_BOOTTIME immediately — this represents kernel boot duration.
     let boot_time_ns = clock::boottime_ns();
+    // Only the injected binary runs this fixed, read-only guest helper. PID 1 always follows
+    // the regular authenticated bootstrap path and never interprets workload argv as a query.
+    if process::id() != 1
+        && std::env::args().nth(1).as_deref()
+            == Some(microsandbox_protocol::storage_preview::READER_ARG)
+    {
+        process::exit(microsandbox_agentd::storage_preview::query(
+            std::env::args().skip(2),
+        ));
+    }
 
     // Mount only what console discovery needs, then receive the typed
     // bootstrap frame that the host queued before entering the VM.
@@ -50,6 +60,7 @@ fn main() {
             );
         }
     };
+    let storage_preview_oci = bootstrap.storage_preview_oci;
     let (mut boot, config) = match BootParams::from_bootstrap(bootstrap) {
         Ok(result) => result,
         Err(e) => {
@@ -69,6 +80,15 @@ fn main() {
         agent::report_init_context(&port, &mut boot_console, config.user())
     }) {
         exit_startup_failure(&port, &mut boot_console, "init", &e);
+    }
+    if storage_preview_oci && let Err(error) = microsandbox_agentd::storage_preview::mount_merged()
+    {
+        exit_startup_failure(
+            &port,
+            &mut boot_console,
+            "recovery filesystem assembly",
+            &AgentdError::Init(error.to_string()),
+        );
     }
     let init_time_ns = clock::boottime_ns() - init_start;
 

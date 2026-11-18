@@ -72,7 +72,7 @@ impl PySnapshotGroup {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let info = group.inspect().await.map_err(to_py_err)?;
             let value = serde_json::to_value(info).map_err(|error| to_py_err(error.into()))?;
-            Python::with_gil(|py| crate::sandbox_handle::json_value_to_py(py, value))
+            Python::attach(|py| crate::sandbox_handle::json_value_to_py(py, value))
         })
     }
 
@@ -92,7 +92,7 @@ impl PySnapshotGroup {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let report = group.verify().await.map_err(to_py_err)?;
             let value = serde_json::to_value(report).map_err(|error| to_py_err(error.into()))?;
-            Python::with_gil(|py| crate::sandbox_handle::json_value_to_py(py, value))
+            Python::attach(|py| crate::sandbox_handle::json_value_to_py(py, value))
         })
     }
 
@@ -122,6 +122,16 @@ impl PySnapshotGroup {
                     .group(group)
                     .await
                     .map_err(to_py_err)?,
+            })
+        })
+    }
+
+    #[staticmethod]
+    fn open<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let pending = RustGroup::open(path);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(Self {
+                inner: pending.await.map_err(to_py_err)?,
             })
         })
     }
@@ -235,7 +245,7 @@ impl PySnapshotGroup {
         let group = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let update = group.set_head(member).await.map_err(to_py_err)?;
-            Python::with_gil(|py| head_update_to_py(py, &update))
+            Python::attach(|py| head_update_to_py(py, &update))
         })
     }
 
@@ -243,7 +253,7 @@ impl PySnapshotGroup {
         let group = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let update = group.clear_head().await.map_err(to_py_err)?;
-            Python::with_gil(|py| head_update_to_py(py, &update))
+            Python::attach(|py| head_update_to_py(py, &update))
         })
     }
 

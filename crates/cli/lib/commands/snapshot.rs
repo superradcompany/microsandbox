@@ -251,6 +251,10 @@ pub struct SnapshotReindexArgs {
 /// Arguments for `msb snapshot export` (also available as `save`).
 #[derive(Debug, Args)]
 pub struct SnapshotSaveArgs {
+    /// Encrypt for an age X25519 public key (repeat for additional recipients).
+    #[arg(long, value_name = "AGE_RECIPIENT")]
+    pub recipient: Vec<String>,
+
     /// Archive reader target: current or 0.7.8; unsupported required behavior is refused.
     #[arg(long, default_value = "current")]
     pub compatibility: microsandbox::ArchiveCompatibility,
@@ -300,6 +304,10 @@ pub struct SnapshotSaveArgs {
 pub struct SnapshotLoadArgs {
     /// Destination snapshot group, created only when the complete batch commits.
     pub group: String,
+
+    /// Unlock the encrypted archive set with this age X25519 identity file.
+    #[arg(long, value_name = "FILE")]
+    pub identity: Option<PathBuf>,
 
     /// Archives to import together; dependencies are resolved regardless of argument order.
     #[arg(long = "file", required = true, num_args = 1.., value_name = "ARCHIVE")]
@@ -411,7 +419,7 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
     } else {
         ui::Spinner::start("Checkpointing", selector)
     };
-    let config = microsandbox::SnapshotConfig {
+    let mut config = microsandbox::SnapshotConfig {
         name: args.name.unwrap_or_default(),
         group: args.group,
         source_sandbox: args.sandbox.unwrap_or_default(),
@@ -423,11 +431,40 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
         guest_flush: args.guest_flush,
     };
     let backend = microsandbox::backend::default_backend();
-    match backend
+    if backend.as_local().is_some()
+        && let Some(path) = config
+            .group
+            .as_deref()
+            .filter(|path| explicit_group_path(path))
+    {
+        anyhow::ensure!(
+            config.dest_dir.is_none(),
+            "an explicit group path already selects its destination directory"
+        );
+        let path = std::path::absolute(path)?;
+        let group = SnapshotGroup::open(&path).await?;
+        // Resolve the original, anchored spelling through the filesystem. Group
+        // inspection would enumerate every member just to find the store root.
+        let directory = tokio::fs::canonicalize(path).await?;
+        anyhow::ensure!(
+            directory.file_name() == Some(group.name().as_ref()),
+            "capture path no longer resolves to the opened group name"
+        );
+        config.dest_dir = Some(
+            directory
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("snapshot group has no parent directory"))?
+                .to_path_buf(),
+        );
+        config.group = Some(group.name().to_owned());
+    }
+    // Keep the optional sandbox selector through bound-source validation, just
+    // as for a named group. It must never silently select another source.
+    let outcome = backend
         .snapshots()
         .checkpoint(backend.clone(), config)
-        .await
-    {
+        .await;
+    match outcome {
         Ok(checkpoint) => {
             spinner.finish_success("Checkpointed");
             if !args.quiet {
@@ -576,7 +613,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         }
         return Ok(());
     };
-    let snapshots = SnapshotGroup::get(&group_name).await?.checkpoints().await?;
+    let snapshots = select_group(&group_name).await?.checkpoints().await?;
 
     if args.format == Some(OutputFormat::Json) {
         let entries: Vec<serde_json::Value> = snapshots
@@ -656,7 +693,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
 }
 
 async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
-    let group = SnapshotGroup::get(&args.snapshot).await?;
+    let group = select_group(&args.snapshot).await?;
     let Some(member) = args.checkpoint else {
         let info = group.inspect().await?;
         ui::detail_kv("Group", &info.name);
@@ -764,7 +801,7 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
 
 async fn verify(args: SnapshotVerifyArgs) -> anyhow::Result<()> {
     if args.all {
-        let group = SnapshotGroup::get(&args.snapshot).await?;
+        let group = select_group(&args.snapshot).await?;
         return match group.verify().await {
             Ok(report) => display_group_verification(&report),
             Err(microsandbox::MicrosandboxError::SnapshotVerification(report)) => {
@@ -860,7 +897,7 @@ async fn remove(args: SnapshotRemoveArgs) -> anyhow::Result<()> {
         ui::Spinner::start("Removing", &args.group)
     };
     let result = async {
-        let group = SnapshotGroup::get(&args.group).await?;
+        let group = select_group(&args.group).await?;
         if args.all {
             let report = group.remove().await?;
             Ok((Some(report.head_update), report.warnings))
@@ -917,9 +954,35 @@ async fn reindex(args: SnapshotReindexArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Canonical group selectors never guess whether a string is a path or cloud ID.
+/// Path syntax is explicit; bare names always select the default store.
+fn explicit_group_path(selector: &str) -> bool {
+    let path = std::path::Path::new(selector);
+    path.is_absolute()
+        || selector.contains('/')
+        || selector == "."
+        || selector == ".."
+        || (cfg!(windows) && (selector.contains('\\') || selector.as_bytes().get(1) == Some(&b':')))
+}
+
+fn select_group(
+    selector: &str,
+) -> impl std::future::Future<Output = microsandbox::MicrosandboxResult<SnapshotGroup>> + '_ {
+    // Cloud names are never interpreted as paths in the client's filesystem.
+    let local = microsandbox::backend::default_backend()
+        .as_local()
+        .is_some();
+    let pending = (local && explicit_group_path(selector)).then(|| SnapshotGroup::open(selector));
+    async move {
+        match pending {
+            Some(pending) => pending.await,
+            None => SnapshotGroup::get(selector).await,
+        }
+    }
+}
+
+/// Select an immutable member from an explicitly chosen group.
 async fn select_checkpoint(group: &str, member: Option<&str>) -> anyhow::Result<Snapshot> {
-    let group = SnapshotGroup::get(group).await?;
+    let group = select_group(group).await?;
     match member {
         Some(member) => Ok(group.get_checkpoint(member).await?),
         None => group.head().await?.ok_or_else(|| {
@@ -944,19 +1007,30 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
     // Pin the immutable member before export; a concurrent head change must not
     // change the artifact or dependencies selected by this operation.
     let checkpoint = select_checkpoint(&args.snapshot, args.checkpoint.as_deref()).await?;
-    checkpoint.save_to(&out, opts).await?;
+    if args.recipient.is_empty() {
+        checkpoint.save_to(&out, opts).await?;
+    } else {
+        checkpoint
+            .save_encrypted(&out, opts, &args.recipient)
+            .await?;
+    }
     println!("{}", out.display());
     Ok(())
 }
 
 async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
-    let result = SnapshotGroup::load_with(&args.group, &args.archives, |mut options| {
+    let configure = |mut options: microsandbox::SnapshotImportOptions| {
         options.dest = args.dest;
         options.base = args.base;
         options.set_head = args.set_head;
         options
-    })
-    .await?;
+    };
+    let result = match args.identity {
+        Some(identity) => {
+            SnapshotGroup::load_encrypted(&args.group, &args.archives, &identity, configure).await?
+        }
+        None => SnapshotGroup::load_with(&args.group, &args.archives, configure).await?,
+    };
     report_head_update(&result.head_update);
     for warning in &result.warnings {
         ui::warn(warning);
@@ -976,7 +1050,7 @@ async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
 }
 
 async fn head(args: SnapshotHeadArgs) -> anyhow::Result<()> {
-    let group = SnapshotGroup::get(&args.selector).await?;
+    let group = select_group(&args.selector).await?;
     let head = group.head().await?;
     if args.format == Some(OutputFormat::Json) {
         println!(
@@ -998,7 +1072,7 @@ async fn head(args: SnapshotHeadArgs) -> anyhow::Result<()> {
 }
 
 async fn modify(args: SnapshotModifyArgs) -> anyhow::Result<()> {
-    let group = SnapshotGroup::get(&args.group).await?;
+    let group = select_group(&args.group).await?;
     let update = match args.set_head {
         Some(member) => group.set_head(member).await?,
         None => group.clear_head().await?,
@@ -1660,5 +1734,30 @@ mod tests {
             ])
             .is_err()
         );
+    }
+    #[test]
+    fn explicit_group_paths_do_not_guess_bare_names() {
+        for name in ["history", "nightly-1", "missing"] {
+            assert!(!explicit_group_path(name));
+        }
+        for path in [
+            "./history",
+            "../history",
+            "exports/history",
+            "/history",
+            ".",
+            "..",
+        ] {
+            assert!(explicit_group_path(path));
+        }
+        #[cfg(windows)]
+        for path in [
+            r"C:\history",
+            r"C:history",
+            r"exports\history",
+            r"\\server\share\history",
+        ] {
+            assert!(explicit_group_path(path));
+        }
     }
 }

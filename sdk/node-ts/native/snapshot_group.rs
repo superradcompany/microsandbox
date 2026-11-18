@@ -180,6 +180,17 @@ impl JsSnapshotGroup {
         })
     }
 
+    /// Open a local directory, anchoring it before scheduling native work.
+    #[napi]
+    pub fn open<'env>(env: &'env Env, path: String) -> Result<PromiseRaw<'env, Self>> {
+        let pending = RustGroup::open(path);
+        env.spawn_future(async move {
+            Ok(Self {
+                inner: pending.await.map_err(to_napi_error)?,
+            })
+        })
+    }
+
     #[napi(factory)]
     pub async fn get(name: String) -> Result<Self> {
         Ok(Self {

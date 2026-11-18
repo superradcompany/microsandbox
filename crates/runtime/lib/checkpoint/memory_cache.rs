@@ -73,13 +73,13 @@ impl MemoryCache {
             if page_size <= 0 {
                 return Err(io::Error::last_os_error());
             }
-            std::fs::create_dir_all(&root)?;
+            microsandbox_utils::private_file::create_private_dir_all(&root)?;
             // Cache contents are guest RAM, not public image data. Restrict traversal even
             // when the caller's umask permits other local users to read ordinary cache files.
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
             let root = root.join(namespace);
-            std::fs::create_dir_all(&root)?;
+            microsandbox_utils::private_file::create_private_dir_all(&root)?;
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
             Ok(Self {
                 root,
@@ -94,10 +94,10 @@ impl MemoryCache {
             unsafe {
                 GetSystemInfo(&mut info);
             }
-            std::fs::create_dir_all(&root)?;
+            microsandbox_utils::private_file::create_private_dir_all(&root)?;
             restrict_cache_directory(&root)?;
             let root = root.join(namespace);
-            std::fs::create_dir_all(&root)?;
+            microsandbox_utils::private_file::create_private_dir_all(&root)?;
             restrict_cache_directory(&root)?;
             Ok(Self {
                 root,
@@ -268,6 +268,8 @@ impl MemoryCache {
         let staging_dir = tempfile::Builder::new()
             .prefix(".memory-")
             .tempdir_in(&self.root)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_directory(staging_dir.path())?;
         let staging_path = staging_dir.path().join("memory");
         let baseline = baseline.filter(|(_, cached)| cached.regions == regions);
         if let Some((previous, cached)) = baseline {
@@ -285,6 +287,7 @@ impl MemoryCache {
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o600))?;
+                microsandbox_utils::private_file::harden_existing_file(&staging_path)?;
             }
         }
         let mut staging = OpenOptions::new()
@@ -292,6 +295,8 @@ impl MemoryCache {
             .create(true)
             .truncate(false)
             .open(&staging_path)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden(&staging, false)?;
         // A fresh sparse file supplies all zero extents without allocating or writing RAM-sized
         // buffers. Only immutable nonzero object slices are copied into it.
         staging.set_len(length)?;

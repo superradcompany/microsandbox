@@ -1,7 +1,7 @@
 //! Group-oriented history and capture APIs. Immutable artifacts are `Checkpoint` values.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::backend::Backend;
@@ -104,6 +104,31 @@ impl Snapshot {
         self.backend.snapshots().verify_group(&self.reference).await
     }
 
+    /// Open a local history directory, including one outside the default store.
+    ///
+    /// Relative paths are anchored when this method is called, before its future is
+    /// polled. Symlinks and parent components keep their filesystem meaning. This
+    /// never falls back to a same-named group in the default store.
+    pub fn open(
+        path: impl AsRef<Path>,
+    ) -> impl std::future::Future<Output = MicrosandboxResult<Self>> + Send {
+        // Resolve before suspension: bindings may queue this future on another thread.
+        let directory = if path.as_ref().as_os_str().is_empty() {
+            Err(MicrosandboxError::InvalidConfig(
+                "snapshot group path cannot be empty".into(),
+            ))
+        } else {
+            std::path::absolute(path).map_err(MicrosandboxError::from)
+        };
+        let backend = crate::backend::default_backend();
+        async move {
+            backend
+                .snapshots()
+                .open_group(backend.clone(), &directory?)
+                .await
+        }
+    }
+
     /// Reopen a named history through the active backend, including a headless history.
     pub async fn get(name: impl AsRef<str>) -> MicrosandboxResult<Self> {
         let backend = crate::backend::default_backend();
@@ -141,6 +166,29 @@ impl Snapshot {
                 group.as_ref(),
                 files,
                 configure(SnapshotImportOptions::default()).into_load_opts(),
+            )
+            .await
+    }
+
+    /// Authenticate an encrypted archive set before publishing it to a local history.
+    #[cfg(feature = "local")]
+    pub async fn load_encrypted(
+        group: &str,
+        files: &[PathBuf],
+        identity: &Path,
+        configure: impl FnOnce(SnapshotImportOptions) -> SnapshotImportOptions,
+    ) -> MicrosandboxResult<SnapshotImportResult> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(|| {
+            MicrosandboxError::InvalidConfig("encrypted archives require the local backend".into())
+        })?;
+        local
+            .import_encrypted(
+                backend.clone(),
+                group,
+                files,
+                configure(SnapshotImportOptions::default()).into_load_opts(),
+                identity,
             )
             .await
     }
@@ -203,7 +251,25 @@ impl Snapshot {
         let options = configure(SnapshotCaptureOptions::default());
         // Keep a non-default store attached to the receiver across later cwd changes.
         let destination = match &self.reference {
-            SnapshotReference::Path(path) => std::path::Path::new(path).parent().map(PathBuf::from),
+            SnapshotReference::Path(path) => {
+                let directory = Path::new(path);
+                // Capture takes (store root, group name). A path ending in ".."
+                // has no lexical filename; its lexical parent is inside the group.
+                // Resolve that spelling through the filesystem before splitting it.
+                let resolved;
+                let directory = if directory.file_name().is_none() {
+                    resolved = tokio::fs::canonicalize(directory).await?;
+                    resolved.as_path()
+                } else {
+                    directory
+                };
+                if directory.file_name() != Some(self.name.as_ref()) {
+                    return Err(MicrosandboxError::InvalidConfig(
+                        "capture path no longer resolves to the opened group name".into(),
+                    ));
+                }
+                directory.parent().map(PathBuf::from)
+            }
             _ => None,
         };
         if options.destination.is_some() {

@@ -16,6 +16,7 @@ use microsandbox_types::{VolumeMount, canonicalize_volume_mounts};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::backend::LocalBackend;
+use crate::backend::local::creation;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
 use crate::{
@@ -23,7 +24,9 @@ use crate::{
     SnapshotArtifactKind, SnapshotSourceRecoveryError, UnsupportedReason,
 };
 
-use super::configuration_capture::{CapturedSandboxConfiguration, StoppedConfigurationCapture};
+use super::configuration_capture::{
+    CapturedSandboxConfiguration, ExpectedConfigurationCapture, StoppedConfigurationCapture,
+};
 use super::{Snapshot, SnapshotArchive, SnapshotConfig};
 
 //--------------------------------------------------------------------------------------------------
@@ -37,6 +40,8 @@ pub(crate) const CHECKPOINT_DIRECTORY: &str = "checkpoint";
 //--------------------------------------------------------------------------------------------------
 
 struct CapturedFullSnapshot {
+    #[cfg(feature = "net")]
+    sealed_ca: Option<Vec<u8>>,
     checkpoint_path: PathBuf,
     checkpoint_root: ObjectId,
     manifest: Manifest,
@@ -474,6 +479,7 @@ async fn capture_installed(
     }
 
     let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
+    creation::require_complete(db, current.id, &source_sandbox).await?;
     LocalBackend::validate_completed_restore(&sandbox_config)?;
 
     // Only OCI-rooted sandboxes can be snapshotted today; non-OCI
@@ -687,6 +693,11 @@ async fn stage_full_snapshot(
             .manifest
             .digest()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        #[cfg(feature = "net")]
+        if let Some(sealed) = &captured.sealed_ca {
+            microsandbox_runtime::checkpoint::tls_receipt::write_staged(&staging_dir, sealed)
+                .map_err(MicrosandboxError::Runtime)?;
+        }
         if let Err(error) = write_descriptor(&staging_dir, &descriptor).await {
             let _ = tokio::fs::remove_dir_all(&staging_dir).await;
             return Err(error);
@@ -829,8 +840,11 @@ pub(super) async fn create_snapshot_archive(
     {
         return Err(MicrosandboxError::SnapshotSandboxRunning(source_sandbox));
     }
+
     let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
+    creation::require_complete(db, current.id, &source_sandbox).await?;
     LocalBackend::validate_completed_restore(&sandbox_config)?;
+
     let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(
             "only OCI-rooted sandboxes with a pinned image can be snapshotted".into(),
@@ -1050,6 +1064,7 @@ async fn capture_full_snapshot(
             UnsupportedReason::NotAvailable("full snapshots require a running sandbox".into()),
         ));
     }
+    crate::runtime::protected_state::require_running(local, source_sandbox)?;
     let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
     LocalBackend::validate_completed_restore(&sandbox_config)?;
     let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
@@ -1061,14 +1076,17 @@ async fn capture_full_snapshot(
     let root_disk = snapshot_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
 
     let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
-    let outcome = crate::sandbox::control_checkpoint_create(
-        local,
-        source_sandbox,
-        checkpoint_id.clone(),
-        record_integrity,
-        guest_flush,
-    )
-    .await?;
+    let session = local.require_control_session(source_sandbox).await?;
+    let configuration =
+        ExpectedConfigurationCapture::prepare(local, source_sandbox, &session).await?;
+    let outcome = session
+        .create_checkpoint(
+            checkpoint_id.clone(),
+            record_integrity,
+            guest_flush,
+            configuration.is_some(),
+        )
+        .await?;
     let checkpoint = outcome.checkpoint;
     let fs_state_limit = local.config().fs_state_limit();
     let validated = (|| {
@@ -1087,8 +1105,7 @@ async fn capture_full_snapshot(
                 "runtime checkpoint closure has another capture identity".into(),
             ));
         }
-        let captured_configuration = outcome
-            .configuration
+        let captured_configuration = configuration
             .map(|expected| {
                 expected.read(
                     &checkpoint_id,
@@ -1186,7 +1203,21 @@ async fn capture_full_snapshot(
         manifest
             .validate()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        #[cfg(feature = "net")]
+        let sealed_ca = match &sandbox_config.spec.network.tls {
+            Some(tls) if tls.enabled => microsandbox_runtime::checkpoint::tls_receipt::capture(
+                &local.config().home(),
+                model.id,
+                &tls.intercept_ca,
+                &closure.checkpoint().resources,
+                &checkpoint.checkpoint_root,
+            )
+            .map_err(MicrosandboxError::Runtime)?,
+            _ => None,
+        };
         Ok(CapturedFullSnapshot {
+            #[cfg(feature = "net")]
+            sealed_ca,
             source_recovery: outcome.recovery_error.as_ref().map(|detail| {
                 SnapshotSourceRecoveryError {
                     source_sandbox: source_sandbox.into(),
@@ -1582,6 +1613,14 @@ async fn capture_disk_source(
         let lifecycle_guard = lifecycle_guard.ok_or_else(|| {
             MicrosandboxError::Runtime("stopped disk capture requires lifecycle ownership".into())
         })?;
+        let model = sandbox_entity::Entity::find_by_id(source_id)
+            .one(local.db().await?.read())
+            .await?
+            .ok_or_else(|| MicrosandboxError::SandboxNotFound(source.into()))?;
+        let config =
+            SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())?;
+        let storage = crate::backend::local::creation::CreationStorage::acquire(local, source)?;
+        crate::runtime::protected_state::prepare(local, &config, &storage).await?;
         let db = local.db().await?.write().clone();
         let sandbox_dir = sandbox_dir.to_path_buf();
         let root_disk = root_disk.clone();
@@ -1590,6 +1629,7 @@ async fn capture_disk_source(
             // These synchronous helpers own a current-thread runtime. Run the whole cut away
             // from Tokio's async executor, and retain ownership even if its await is canceled.
             let _lifecycle_guard = lifecycle_guard;
+            let _storage = storage;
             let observer = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
@@ -1626,11 +1666,14 @@ async fn capture_disk_source(
             MicrosandboxError::Runtime(format!("stopped disk capture task: {error}"))
         })?;
     }
+    crate::runtime::protected_state::require_running(local, source)?;
     let id = format!("disk_{:032x}", rand::random::<u128>());
-    let captured =
-        crate::sandbox::control_disk_checkpoint_create(local, source, id.clone(), guest_flush)
-            .await?;
-    let expected_path = sandbox_dir.join("runtime").join("checkpoints").join(&id);
+    let session = local.require_control_session(source).await?;
+    let configuration = ExpectedConfigurationCapture::prepare(local, source, &session).await?;
+    let captured = session
+        .create_disk_checkpoint(id.clone(), guest_flush, configuration.is_some())
+        .await?;
+    let expected_path = sandbox_dir.join("checkpoints").join(&id);
     let expected_device = match root_disk {
         SnapshotRootDisk::Flat => "vda",
         SnapshotRootDisk::Managed => "vdb",
@@ -1641,17 +1684,11 @@ async fn capture_disk_source(
         }
     };
     let configuration_root =
-        microsandbox_runtime::retention::disk_configuration_root(&captured.checkpoint.disk)?;
-    let receipt = captured.checkpoint.configuration.clone();
-    let mut disk = validate_live_disk_capture(
-        captured.checkpoint,
-        &id,
-        expected_path,
-        expected_device,
-        mounts,
-    )?;
-    disk.configuration = captured
-        .configuration
+        microsandbox_runtime::retention::disk_configuration_root(&captured.disk)?;
+    let receipt = captured.configuration.clone();
+    let mut disk =
+        validate_live_disk_capture(captured, &id, expected_path, expected_device, mounts)?;
+    disk.configuration = configuration
         .map(|expected| expected.read(&id, &configuration_root, receipt.as_ref()))
         .transpose()?
         .flatten();
@@ -2378,12 +2415,71 @@ mod tests {
     use std::path::PathBuf;
 
     use microsandbox_types::DiskImageFormat;
-    use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+    use sea_orm::{
+        ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseBackend, Statement,
+    };
 
     use super::*;
-    use crate::sandbox::SandboxBuilder;
+    use crate::{
+        backend::local::creation::CreationStorage,
+        sandbox::{RootfsSource, SandboxBuilder},
+    };
 
     const CAPTURE_BASE_ID: &str = "layer_00000000000000000000000000000001";
+
+    #[tokio::test]
+    async fn incomplete_creation_cannot_publish_disk_snapshots() {
+        for archive in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let local = crate::test_support::local_backend_builder(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap();
+            let mut config = SandboxConfig::default();
+            config.spec.name = "unfinished".into();
+            config.spec.image = RootfsSource::oci("alpine:3.21");
+            config.manifest_digest = Some(format!("sha256:{}", "1".repeat(64)));
+            let db = local.db().await.unwrap();
+            db.write().execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO sandbox (name, config, status, ephemeral, creation_state) VALUES ('unfinished', ?, 'Starting', 0, 'preparing')",
+                [serde_json::to_string(&config).unwrap().into()],
+            )).await.unwrap();
+            let source = local.sandboxes_dir().join("unfinished");
+            std::fs::create_dir_all(&source).unwrap();
+            std::fs::write(source.join("upper.ext4"), b"partially copied disk").unwrap();
+            let request = SnapshotConfig {
+                name: "captured".into(),
+                source_sandbox: "unfinished".into(),
+                group: None,
+                dest_dir: None,
+                labels: Vec::new(),
+                force: false,
+                record_integrity: false,
+                full: false,
+                guest_flush: Default::default(),
+            };
+            let out = temp.path().join("captured.msnap");
+
+            let result = if archive {
+                create_snapshot_archive(&local, request, &out, false)
+                    .await
+                    .map(|_| ())
+            } else {
+                create_snapshot(&local, request).await.map(|_| ())
+            };
+
+            let error = result.expect_err("an incomplete disk must never become a snapshot");
+            assert!(error.to_string().contains("incomplete creation"), "{error}");
+            assert!(!out.exists());
+            assert!(
+                super::super::store::list_indexed(&local)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 
     #[test]
     fn batch_staging_retains_owned_payloads_after_the_first_child_is_removed() {
@@ -2654,6 +2750,8 @@ mod tests {
         };
         manifest.validate().unwrap();
         CapturedFullSnapshot {
+            #[cfg(feature = "net")]
+            sealed_ca: None,
             checkpoint_path: root.to_path_buf(),
             source_recovery: detail.map(|detail| SnapshotSourceRecoveryError {
                 source_sandbox: "box".into(),
@@ -3157,6 +3255,9 @@ mod tests {
     fn stopped_async_capture_fixture(sandbox: &Path) -> Vec<microsandbox_types::VolumeMount> {
         use microsandbox_types::{OwnedVolumeStorage, VolumeMount};
 
+        // These capture tests model already protected storage; migration has its own tests.
+        std::fs::create_dir_all(sandbox.join("runtime")).unwrap();
+        microsandbox_runtime::checkpoint::layout::initialize_new(&sandbox.join("runtime")).unwrap();
         let owned = sandbox.join("owned-volumes");
         let data = owned.join(microsandbox_types::owned_volume_mount_id("/data"));
         let cache = owned
@@ -3182,6 +3283,23 @@ mod tests {
         .collect()
     }
 
+    async fn register_stopped_capture(local: &LocalBackend, mounts: &[VolumeMount]) {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "box".into();
+        config.spec.image = RootfsSource::oci("alpine:3.21");
+        config.spec.mounts = mounts.to_vec();
+        sandbox_entity::ActiveModel {
+            name: Set(config.spec.name.clone()),
+            config: Set(serde_json::to_string(&config).unwrap()),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn stopped_capture_dispatches_owned_chains_off_the_async_executor() {
         let temp = tempfile::tempdir().unwrap();
@@ -3189,8 +3307,9 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let sandbox = temp.path().join("sandbox");
+        let sandbox = local.sandboxes_dir().join("box");
         let mounts = stopped_async_capture_fixture(&sandbox);
+        register_stopped_capture(&local, &mounts).await;
         let run = temp.path().join("run");
         let guard = Arc::new(
             microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
@@ -3281,8 +3400,9 @@ mod tests {
                 // Finish lazy catalog setup before occupying the only blocking worker.
                 // The cancellation below must target a queued disk cut, not catalog opening.
                 local.db().await.unwrap();
-                let sandbox = temp.path().join("sandbox");
+                let sandbox = local.sandboxes_dir().join("box");
                 let mounts = stopped_async_capture_fixture(&sandbox);
+                register_stopped_capture(&local, &mounts).await;
                 let run = temp.path().join("run");
                 let guard = Arc::new(
                     microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
@@ -3309,7 +3429,19 @@ mod tests {
                     Some(Arc::clone(&guard)),
                     microsandbox_types::GuestFlush::Auto,
                 ));
-                assert!(futures::poll!(capture.as_mut()).is_pending());
+                // Ready storage already has a layout marker. Observe the actual storage
+                // reservation to ensure cancellation targets the queued capture worker.
+                loop {
+                    assert!(futures::poll!(capture.as_mut()).is_pending());
+                    match crate::backend::local::creation::CreationStorage::acquire(&local, "box") {
+                        Ok(storage) => drop(storage),
+                        Err(error) => {
+                            assert!(error.to_string().contains("retry"), "{error}");
+                            break;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
                 drop(capture);
                 drop(guard);
                 assert!(
@@ -3689,7 +3821,9 @@ mod tests {
                     let child = super::super::restore::materialize_file_snapshot_for_child(
                         &sources,
                         file.virtual_size,
-                        &temp.path().join(format!("child-{}", loaded.id())),
+                        &CreationStorage::for_test(
+                            temp.path().join(format!("child-{}", loaded.id())),
+                        ),
                         &root_disk,
                     )
                     .await

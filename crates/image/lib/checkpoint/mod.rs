@@ -37,4 +37,5 @@ pub use resolver::{
 pub use store::{
     AdmittedObject, CaptureObjectBatch, CaptureObjectBatchStats, LocalObjectStore, ObjectId,
     SparseFileIntegrity, sparse_file_integrity, sparse_file_integrity_from_file,
+    sparse_file_integrity_handle,
 };

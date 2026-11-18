@@ -372,6 +372,10 @@ msb volume rm old-cache
 ```
 </CodeGroup>
 
+<Note>
+If local volume creation is interrupted, remove it with `msb volume rm <name>` or the volume removal API, then retry. If the error names an incomplete sandbox, remove or replace that sandbox instead.
+</Note>
+
 ## Disk-image volumes
 
 <Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>

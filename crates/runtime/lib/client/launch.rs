@@ -46,13 +46,23 @@ pub const LIFECYCLE_LOCK_FD: i32 = 99;
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
 
+/// Host-only bootstrap rootfs directory beneath a sandbox's persisted directory.
+pub const BOOTSTRAP_ROOTFS_DIR: &str = ".bootstrap-rootfs";
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Side-effect-free response to `msb __launch-protocol`.
+/// Capability response to `msb __launch-protocol`, including host nesting support.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LaunchCapabilities {
+    /// The runtime can validate its selected agent before opening recovery preview disks.
+    #[serde(default)]
+    pub storage_reader: bool,
+    /// Host journals and checkpoint storage are excluded from the guest runtime share.
+    /// Absence is unsafe for every launch, including restarts of legacy sandboxes.
+    #[serde(default)]
+    pub protected_guest_state: bool,
     /// Supported wire generations: 1 is the v0.6.17 boot contract; 2 adds explicit intent.
     pub protocols: Vec<u32>,
 
@@ -83,6 +93,11 @@ pub struct LaunchCapabilities {
     #[serde(default)]
     pub http_connect_proxy: bool,
 
+    /// HTTP CONNECT outbound proxy credentials are supported. Older runtimes omit
+    /// this capability and would silently connect without authentication.
+    #[serde(default)]
+    pub http_connect_proxy_auth: bool,
+
     /// The launch field `guest_clock` is honored by the runtime.
     /// Older runtimes omit this capability.
     #[serde(default)]
@@ -96,6 +111,10 @@ pub struct LaunchCapabilities {
     /// Runtime-owned durable last-active evidence and the optional source handoff.
     #[serde(default)]
     pub configuration_retention: bool,
+    /// Host nesting support. Presence means the runtime enforces nesting policy;
+    /// omission identifies runtimes that predate this capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_virt: Option<bool>,
     /// Sandbox-owned execution policy is installed and enforced by the runtime.
     #[serde(default)]
     pub exec_limits: bool,
@@ -139,6 +158,9 @@ pub struct LaunchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_source: Option<crate::retention::RetentionSource>,
 
+    /// The launcher has admitted the protected storage layout before preparing disks.
+    #[serde(default)]
+    pub protected_guest_state: bool,
     /// Required execution intent. Restore intent must never be inferred from optional hints.
     pub execution: ExecutionIntent,
 
@@ -187,6 +209,10 @@ pub struct LaunchConfig {
     /// Guest transparent huge-page policy selected at boot.
     #[serde(default)]
     pub thp: TransparentHugePagePolicy,
+
+    /// Nested virtualization policy; omitted by older launchers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_virt: Option<bool>,
 
     /// Host control over the guest wall clock. Omitted when it is the default host sync, so
     /// runtimes that predate the field keep accepting ordinary launches.
@@ -438,6 +464,12 @@ pub struct FileMountConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl LaunchConfig {
+    /// Resolve the effective policy. Only an explicit setting can enable nesting.
+    /// The legacy automatic hint is accepted but cannot opt a sandbox in.
+    pub fn resolve_nested_virt(&self) -> bool {
+        self.nested_virt.unwrap_or(false)
+    }
+
     /// Decode and validate execution intent before allocating or starting a VM.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let config: Self = serde_json::from_slice(bytes)
@@ -659,6 +691,21 @@ mod tests {
         without_files.as_object_mut().unwrap().remove("file_mounts");
         let decoded: LaunchConfig = serde_json::from_value(without_files).unwrap();
         assert!(decoded.file_mounts.is_empty());
+    }
+
+    #[test]
+    fn nested_virt_handoff_preserves_omission_and_explicit_false() {
+        for enabled in [None, Some(false), Some(true)] {
+            let config = LaunchConfig {
+                nested_virt: enabled,
+                ..Default::default()
+            };
+            let encoded = serde_json::to_value(config).unwrap();
+            assert_eq!(encoded.get("nested_virt").is_some(), enabled.is_some());
+            let decoded = decode(encoded).unwrap();
+            assert_eq!(decoded.nested_virt, enabled);
+            assert_eq!(decoded.resolve_nested_virt(), enabled.unwrap_or(false));
+        }
     }
 
     #[test]

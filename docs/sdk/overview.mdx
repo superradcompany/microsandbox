@@ -40,18 +40,23 @@ All five SDKs can use a separately provisioned runtime. See [Runtime setup](/sdk
 
 ## Small example
 
-Create a sandbox from a container image, run a command, print the output, and stop it.
+Create a sandbox from a container image, run a command, print the output, and remove it.
 
 <CodeGroup>
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("hello")
+const sb = await Sandbox.builder("hello")
     .image("python")
     .create();
 
-const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
-console.log("Output:", output.stdout());
+try {
+    const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
+    console.log("Output:", output.stdout());
+} finally {
+    await sb.stop();
+    await Sandbox.remove("hello");
+}
 ```
 
 ```rust Rust
@@ -70,6 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("{}", output.stdout()?);
 
     sb.stop().await?;
+    Sandbox::remove("hello").await?;
     Ok(())
 }
 ```
@@ -88,6 +94,7 @@ async def main():
     print("Output:", output.stdout_text)
 
     await sb.stop()
+    await Sandbox.remove("hello")
 
 asyncio.run(main())
 ```
@@ -104,26 +111,34 @@ import (
 )
 
 func main() {
+    if err := run(); err != nil {
+        log.Fatal(err)
+    }
+}
+
+func run() error {
     ctx := context.Background()
 
     if _, err := m.EnsureRuntime(ctx, m.RuntimeConfig{}, m.InstallOptions{}); err != nil {
-        log.Fatal(err)
+        return err
     }
 
     sb, err := m.CreateSandbox(ctx, "hello", m.WithImage("python"))
     if err != nil {
-        log.Fatal(err)
+        return err
     }
     defer func() {
         _ = sb.Stop(context.Background())
         _ = sb.Close()
+        _ = m.RemoveSandbox(context.Background(), "hello")
     }()
 
     out, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello, World!')"})
     if err != nil {
-        log.Fatal(err)
+        return err
     }
     fmt.Println("Output:", out.Stdout())
+    return nil
 }
 ```
 
@@ -136,6 +151,7 @@ Microsandbox::Sandbox.with("hello", image: "python") do |sandbox|
   output = sandbox.exec("python", ["-c", "print('Hello, World!')"])
   puts "Output: #{output.stdout}"
 end
+Microsandbox::Sandbox.remove("hello")
 ```
 
 </CodeGroup>

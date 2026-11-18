@@ -3,7 +3,9 @@
 //! The persisted `upper_size_mib` is only the desired size; the real state is the `upper.ext4` file attached as the overlay upper device. Callers rely on the success ordering
 //! this module enables: the new desired size is persisted (or booted against) only after the file itself has grown.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use crate::backend::local::creation::CreationStorage;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -37,7 +39,10 @@ pub(crate) enum UpperGrowError {
 /// Grow the `upper.ext4` at `path` to `target_mib`, off the async runtime.
 ///
 /// A file that is already at or beyond the target is left untouched (shrink is never attempted here), so the call is idempotent across repeated starts.
-pub(crate) async fn grow_upper_to_mib(path: PathBuf, target_mib: u32) -> MicrosandboxResult<()> {
+pub(crate) async fn grow_upper_to_mib(
+    path: &CreationStorage,
+    target_mib: u32,
+) -> MicrosandboxResult<()> {
     let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
         MicrosandboxError::Custom(format!("cannot grow upper.ext4 at {}: {e}", path.display()))
     })?;
@@ -45,7 +50,7 @@ pub(crate) async fn grow_upper_to_mib(path: PathBuf, target_mib: u32) -> Microsa
     if metadata.len() >= target_bytes {
         return Ok(());
     }
-
+    let path = path.clone();
     tokio::task::spawn_blocking(move || grow_upper_ext4(&path, target_bytes))
         .await
         .map_err(|e| MicrosandboxError::Runtime(format!("upper grow task failed: {e}")))?
@@ -96,8 +101,12 @@ mod tests {
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(2 * BYTES_PER_MIB).unwrap();
 
-        grow_upper_to_mib(path.clone(), 2).await.unwrap();
-        grow_upper_to_mib(path, 1).await.unwrap();
+        grow_upper_to_mib(&CreationStorage::for_test(&path), 2)
+            .await
+            .unwrap();
+        grow_upper_to_mib(&CreationStorage::for_test(&path), 1)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -105,7 +114,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.ext4");
 
-        let err = grow_upper_to_mib(path, 8).await.unwrap_err();
+        let err = grow_upper_to_mib(&CreationStorage::for_test(&path), 8)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("cannot grow upper.ext4"));
     }
 }

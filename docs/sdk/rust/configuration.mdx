@@ -119,4 +119,6 @@ Override the user-configured SSH inactivity timeout. Zero disables it; managed s
 
 ## Sandbox configuration patches
 
-Use [`SandboxBuilder::overlay()`](/sdk/rust/sandbox#sandbox-overlay) to add sparse per-sandbox values. A concrete `SandboxConfig` with `workdir: None` is treated as omitted. To explicitly clear an inherited working directory, use a patch. See [configuration layering](/configuration#sandbox_defaults) for precedence and backend differences.
+Use [`SandboxBuilder::overlay()`](/sdk/rust/sandbox#sandbox-overlay) to override individual settings or explicitly clear an inherited working directory. These choices survive `SandboxBuilder::from(config)` and local database reloads. Without saved caller overrides, `workdir: None` still means omitted.
+
+Edit settings through builder setters, `overlay()`, or sandbox modification APIs; saved overrides can overwrite direct edits to a resolved `SandboxConfig`. See [configuration layering](/configuration#sandbox_defaults) for precedence and backend differences.

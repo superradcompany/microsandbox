@@ -15,7 +15,7 @@ See [Snapshots](/sdk/typescript/snapshots#forking) for live fork methods.
 
 #### <span className="msb-hn">allSandboxMetrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
@@ -93,6 +93,43 @@ Get a live handle to an existing sandbox (running or stopped). The handle provid
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">Promise&lt;SandboxHandle&gt;</a></div>
     <div className="msb-param-desc">Live handle with status and lifecycle control.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">recoverStorage()</span>
+
+```typescript
+static recoverStorage(
+  name: string,
+  options?: StorageRecoveryOptions,
+): Promise<StorageRecovery>
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage repair](/repairs/sandbox-storage) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Options</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>selections</code><span className="msb-type">readonly StorageRecoverySelection[]</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with <code>diskId</code> and <code>candidateId</code> strings. Omit or leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>acceptSelectedView</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>legacyWritersStopped</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originalsRetained</code> (boolean) confirms the original disks were retained.</div>
   </div>
 </div>
 
@@ -261,7 +298,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 
 <p className="msb-member-group" id="instance-methods">Instance methods</p>
 
-A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle; local detached handles and all cloud handles do not, because the cloud worker owns the sandbox process.
+A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle. Cloud sandboxes created with `Sandbox.builder(...).create()` or its progress variants also own scope cleanup unless `.detached(true)` is set. Connected cloud handles and detached handles do not acquire cleanup ownership. Calling `detach()` releases scope cleanup.
 
 Command execution (`exec`, `execWith`, `execStream`, `execStreamWith`, `shell`, `shellStream`) and foreground attachment (`attach`, `attachWith`, `attachShell`) live on the [Execution](/sdk/typescript/execution) page.
 
@@ -377,7 +414,7 @@ Force-terminate the sandbox and wait up to `timeoutMs` for stopped-state observa
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeoutMs</code><span className="msb-type">number</span></div>
-    <div className="msb-param-desc">Milliseconds to wait for the stopped state to be observed.</div>
+    <div className="msb-param-desc">Milliseconds to wait for the stopped state to be observed. Must be an integer from 0 to 4294967295, inclusive; other values reject with <code>RangeError</code> before calling native.</div>
   </div>
 </div>
 
@@ -540,7 +577,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 modify(opts?: ModifyOptions): Promise<SandboxModificationPlan>
@@ -588,7 +625,9 @@ Plan or apply a configuration change. The returned plan labels each change `"liv
 
 Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder`, `allowedHosts`, and the settings listed under [`SecretModifySpec`](#secretmodifyspec); omitting a source updates only the other supplied fields. Unknown keys are rejected. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
+
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `policy: "restart"` to apply now, or `policy: "next_start"` to save for the next start.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -612,7 +651,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metrics(): Promise<SandboxMetrics>
@@ -640,7 +679,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metricsStream()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsStream(intervalMs: number): Promise<MetricsStream>
@@ -1045,7 +1084,7 @@ Create in detached/background mode when `true`. A detached sandbox survives afte
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">disableMetricsSample()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud, where SDK and CLI resource metrics are unavailable."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 disableMetricsSample(): this
@@ -1441,7 +1480,7 @@ Select the guest transparent huge-page policy applied through the kernel command
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">metricsSampleIntervalMs()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud, where SDK and CLI resource metrics are unavailable."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsSampleIntervalMs(ms: number): this
@@ -2442,7 +2481,7 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 modify(opts?)
@@ -2456,7 +2495,7 @@ Plan or apply a configuration change; same options as [`modify()`](#sandbox-modi
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metrics()
@@ -2536,7 +2575,7 @@ Connect to a running sandbox without taking ownership. Returns an error if it do
 connectWithTimeout(timeoutMs)
 ```
 
-Same as `connect()` with an explicit timeout in milliseconds
+Same as `connect()` with an explicit timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
 
 <p className="msb-label">Returns</p>
 
@@ -2636,7 +2675,7 @@ Force terminate and wait until stopped state is observed
 killWithTimeout(timeoutMs)
 ```
 
-Same as `kill()` with an explicit observation timeout
+Same as `kill()` with an explicit observation timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
 
 <p className="msb-label">Returns</p>
 
@@ -2946,15 +2985,48 @@ Compute the plan without applying anything. Defaults to `false`
 
 <p className="msb-backref">Used by <a href="#sandbox-modify">modify()</a></p>
 
-Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the placeholder or allowed hosts.
+Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the other supplied fields.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| env | `string` | Host environment variable to resolve when applying the modification |
-| value | `string` | Raw secret value. Stored in the durable sandbox config until replaced by a source reference |
-| store | `string` | Reserved for a host-side secret store reference; currently unsupported |
-| placeholder | `string` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
-| allowedHosts | `string[]` | Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged |
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Host environment variable to resolve when applying the modification.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Raw secret value. Stored in the durable sandbox config until replaced by a source reference.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>store</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Reserved for a host-side secret store reference; currently unsupported.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>placeholder</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Explicit guest-visible placeholder. New secrets default to <code>$MSB_&lt;NAME&gt;</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>allowedHosts</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>substitution</code><a className="msb-type" href="/sdk/typescript/secrets#secretsubstitution">SecretSubstitution</a></div>
+    <div className="msb-param-desc">Desired substitution locations. A supplied value replaces the stored rule; omitted keys take the defaults (headers on, every header, no query or body), so repeat <code>headerFields</code> to keep a narrowed list. Omission keeps the stored rule; new secrets default to headers only.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>violationAction</code><a className="msb-type" href="/sdk/typescript/secrets#violationaction">ViolationAction</a></div>
+    <div className="msb-param-desc">Per-secret blocking action. Omission keeps the existing override.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>requireTlsIdentity</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Whether substitution requires verified TLS identity. Omission keeps the existing setting; new secrets default to <code>true</code>. Explicit <code>false</code> disables this requirement.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>allowPlaceholderFor</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Hosts permitted to receive the unchanged placeholder. A non-empty list replaces the existing hosts; an empty list leaves them unchanged.</div>
+  </div>
+</div>
 
 ### PullPolicy
 
@@ -3210,3 +3282,11 @@ Current lifecycle state of a sandbox. String literal type.
 | `"paused"` | VM is paused |
 | `"stopped"` | VM shut down; configuration persisted; can be restarted |
 | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+
+## Nested virtualization
+
+`nestedVirt(enabled: boolean)` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```typescript
+const sandbox = await Sandbox.builder("nested").image("alpine").nestedVirt(true).create();
+```

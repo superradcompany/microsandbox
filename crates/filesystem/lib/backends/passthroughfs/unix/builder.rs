@@ -237,7 +237,7 @@ impl PassthroughFsBuilder {
             root_fd,
             inodes: RwLock::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(3), // 1=root, 2=init
-            handles: RwLock::new(BTreeMap::new()),
+            handles: RwLock::new(Default::default()),
             dir_handles: RwLock::new(BTreeMap::new()),
             next_handle: AtomicU64::new(1), // 0=init handle
             writeback: AtomicBool::new(false),

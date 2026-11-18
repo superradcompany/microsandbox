@@ -6,10 +6,16 @@ mod cache_storage;
 #[cfg(feature = "runner")]
 mod capture_pipeline;
 mod compaction;
+mod compat;
 #[cfg(feature = "runner")]
 mod coordinator;
 mod disk;
+mod execution;
 mod external_mounts;
+#[cfg(feature = "client")]
+#[doc(hidden)]
+pub mod launch_staging;
+pub mod layout;
 mod local;
 #[cfg(feature = "runner")]
 mod local_disk;
@@ -17,15 +23,25 @@ mod local_memory;
 #[cfg(target_os = "linux")]
 mod local_memory_budget;
 mod memory_cache;
+pub mod migration;
 mod network;
 mod object_pipeline;
 mod owned_disk;
 #[cfg(feature = "runner")]
 mod restore;
+#[cfg(feature = "net")]
+#[doc(hidden)]
+pub mod tls_identity;
+#[cfg(feature = "net")]
+pub mod tls_receipt;
+mod tls_storage;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
+
+#[doc(hidden)]
+pub use tls_storage::remove_sandbox_identity;
 
 pub use cache_storage::{
     MemoryCacheEntry, MemoryCacheKind, MemoryCacheReport, MemoryCacheState, MemoryPruneOptions,
@@ -33,13 +49,16 @@ pub use cache_storage::{
 };
 pub use compaction::compact_stopped_disks;
 #[cfg(feature = "runner")]
-pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult, UserPause};
+pub(crate) use coordinator::{
+    CheckpointCoordinator, CheckpointDeviceBindings, CheckpointResult, UserPause,
+};
 #[cfg(feature = "runner")]
 pub(crate) use disk::recover_runtime_owned_root;
 pub use disk::{
     DiskCompactionResult, RuntimeOwnedRootChain, RuntimeOwnedRootLayer, compact_stopped_root,
     grow_stopped_root, load_runtime_owned_root_chain, recover_stopped_root_growth,
 };
+pub use execution::captured_nested_virt;
 pub use external_mounts::ExternalMountAuthorization;
 pub use local::LocalBranchState;
 pub use local_memory::{LocalMemory, LocalMemoryPin, LocalMemoryReservation};

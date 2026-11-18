@@ -47,6 +47,21 @@ pub trait NetworkMetrics: Send + Sync {
 
     /// Bytes received by the guest from the runtime.
     fn rx_bytes(&self) -> u64;
+
+    /// Published TCP admission rejections, when this backend reports them.
+    fn inbound_tcp_rejected(&self) -> Option<u64> {
+        None
+    }
+
+    /// Outbound TCP cap rejections, when this backend reports them.
+    fn outbound_tcp_rejected(&self) -> Option<u64> {
+        None
+    }
+
+    /// Outbound UDP cap evictions, when this backend reports them.
+    fn outbound_udp_evicted(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl NetworkMetrics for () {
@@ -67,6 +82,18 @@ impl NetworkMetrics for microsandbox_network::network::MetricsHandle {
 
     fn rx_bytes(&self) -> u64 {
         microsandbox_network::network::MetricsHandle::rx_bytes(self)
+    }
+
+    fn inbound_tcp_rejected(&self) -> Option<u64> {
+        Some(microsandbox_network::network::MetricsHandle::inbound_tcp_rejected(self))
+    }
+
+    fn outbound_tcp_rejected(&self) -> Option<u64> {
+        Some(microsandbox_network::network::MetricsHandle::outbound_tcp_rejected(self))
+    }
+
+    fn outbound_udp_evicted(&self) -> Option<u64> {
+        Some(microsandbox_network::network::MetricsHandle::outbound_udp_evicted(self))
     }
 }
 
@@ -298,6 +325,9 @@ fn write_sample(
         disk_write_bytes: krun.block.write_bytes,
         net_rx_bytes: rx,
         net_tx_bytes: tx,
+        net_inbound_tcp_rejected: network_metrics.and_then(NetworkMetrics::inbound_tcp_rejected),
+        net_outbound_tcp_rejected: network_metrics.and_then(NetworkMetrics::outbound_tcp_rejected),
+        net_outbound_udp_evicted: network_metrics.and_then(NetworkMetrics::outbound_udp_evicted),
         upper_used_bytes,
         upper_free_bytes,
         upper_host_allocated_bytes: upper_host_allocated_bytes(upper_host_path),
@@ -569,6 +599,81 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].upper_used_bytes, None);
         assert_eq!(snapshot[0].upper_free_bytes, None);
+        cleanup_shm(&name);
+    }
+
+    #[test]
+    fn write_sample_reports_network_rejections_only_when_available() {
+        struct Counters(Option<u64>, Option<u64>, Option<u64>);
+
+        impl NetworkMetrics for Counters {
+            fn rx_bytes(&self) -> u64 {
+                0
+            }
+            fn tx_bytes(&self) -> u64 {
+                0
+            }
+            fn inbound_tcp_rejected(&self) -> Option<u64> {
+                self.0
+            }
+            fn outbound_tcp_rejected(&self) -> Option<u64> {
+                self.1
+            }
+            fn outbound_udp_evicted(&self) -> Option<u64> {
+                self.2
+            }
+        }
+
+        let name = unique_shm_name("in-rej");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reserved = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "inbound-rejected",
+                memory_limit_bytes: 512 * 1024 * 1024,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reserved.slot,
+                generation: reserved.generation,
+                run_id: 9,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        for (rejected, tcp_rejected, udp_evicted) in [
+            (Some(37), Some(41), Some(43)),
+            (None, None, None),
+            (Some(0), Some(0), Some(0)),
+            (Some(37), None, Some(43)),
+        ] {
+            assert!(
+                write_sample(
+                    &writer,
+                    None,
+                    &msb_krun::VmMetrics::default(),
+                    None,
+                    Some(&Counters(rejected, tcp_rejected, udp_evicted)),
+                    None,
+                    Duration::from_secs(3),
+                )
+                .is_ok()
+            );
+            assert_eq!(
+                registry.snapshot().unwrap()[0].net_inbound_tcp_rejected,
+                rejected
+            );
+            assert_eq!(
+                registry.snapshot().unwrap()[0].net_outbound_tcp_rejected,
+                tcp_rejected
+            );
+            assert_eq!(
+                registry.snapshot().unwrap()[0].net_outbound_udp_evicted,
+                udp_evicted
+            );
+        }
         cleanup_shm(&name);
     }
 

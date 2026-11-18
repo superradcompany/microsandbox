@@ -179,6 +179,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		CPUPlacement:      string(o.CPUPlacement),
 		PlacementProfile:  o.PlacementProfile,
 		THP:               string(o.THP),
+		NestedVirt:        o.NestedVirt,
 		Workdir:           o.Workdir,
 		Shell:             o.Shell,
 		SecurityProfile:   string(o.SecurityProfile),
@@ -234,7 +235,9 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		}
 		ffiOpts.Init = init
 	}
-	if o.RegistryAuth != nil {
+	if o.registryAnonymous {
+		ffiOpts.RegistryAnonymous = true
+	} else if o.RegistryAuth != nil {
 		ffiOpts.RegistryAuth = &ffi.RegistryAuthOptions{
 			Username: o.RegistryAuth.Username,
 			Password: o.RegistryAuth.Password,
