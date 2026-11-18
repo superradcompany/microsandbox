@@ -131,26 +131,46 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
             _capacity: None,
         });
     }
-    let mut patches = patches.to_vec();
-    for patch in &mut patches {
-        if let Patch::CopyFile { src, .. } | Patch::CopyDir { src, .. } = patch {
-            *src = std::path::absolute(&*src)?;
-        }
+    let mut budget = Budget {
+        bytes: 0,
+        entries: 0,
+    };
+    let mut sources = Vec::with_capacity(patches.len().min(MAX_ENTRIES));
+    for patch in patches {
+        budget.entry(0)?;
+        let source = match patch {
+            Patch::CopyFile { src, .. } | Patch::CopyDir { src, .. } => {
+                Some(std::path::absolute(src)?)
+            }
+            Patch::Text { content, .. } | Patch::Append { content, .. } => {
+                budget.add(content.len() as u64)?;
+                None
+            }
+            Patch::File { content, .. } => {
+                budget.add(content.len() as u64)?;
+                None
+            }
+            _ => None,
+        };
+        sources.push(source);
     }
     let permit = CAPACITY
         .clone()
         .acquire_owned()
         .await
         .map_err(|error| MicrosandboxError::PatchFailed(error.to_string()))?;
+    // Bound inline payloads and acquire capacity before cloning their bytes.
+    // Resolve host paths before the wait without canonicalizing away symlinks.
+    let mut patches = patches.to_vec();
+    for (patch, source) in patches.iter_mut().zip(sources) {
+        if let Patch::CopyFile { src, .. } | Patch::CopyDir { src, .. } = patch {
+            *src = source.expect("copy source was resolved");
+        }
+    }
     tokio::task::spawn_blocking(move || {
         let stage = tempfile::Builder::new().prefix("msb-copy-").tempdir()?;
-        let mut budget = Budget {
-            bytes: 0,
-            entries: 0,
-        };
         let mut prepared = Vec::new();
         for (index, mut patch) in patches.into_iter().enumerate() {
-            budget.entry(0)?;
             match &mut patch {
                 Patch::CopyFile { src, .. } => {
                     let output = stage.path().join(index.to_string());
@@ -162,10 +182,6 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
                     budget.directory(files::open_directory(src)?, &output, 0)?;
                     *src = output;
                 }
-                Patch::Text { content, .. } | Patch::Append { content, .. } => {
-                    budget.add(content.len() as u64)?
-                }
-                Patch::File { content, .. } => budget.add(content.len() as u64)?,
                 _ => {}
             }
             prepared.push(patch);
