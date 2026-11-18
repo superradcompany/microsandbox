@@ -699,6 +699,7 @@ module.exports.imageRemove = nativeBinding.imageRemove
 module.exports.imageSave = nativeBinding.imageSave
 module.exports.installRuntime = nativeBinding.installRuntime
 module.exports.isRuntimeInstalled = nativeBinding.isRuntimeInstalled
+module.exports.configuredProviderKind = nativeBinding.configuredProviderKind
 module.exports.providerInfo = nativeBinding.providerInfo
 module.exports.resolveRuntime = nativeBinding.resolveRuntime
 module.exports.resolveRuntimeVersion = nativeBinding.resolveRuntimeVersion

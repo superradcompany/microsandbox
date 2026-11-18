@@ -70,7 +70,7 @@ go run github.com/superradcompany/microsandbox/sdk/go/core/cmd/ffi-setup@VERSION
 
 Replace the placeholders with the exact release version, native artifact URL and digest from trusted release metadata. Offline provisioning uses a local file for `--source`. Setup copies only that FFI artifact; it never installs `msb` or firmware. Import and first use never download missing libraries.
 
-Use `remote.NewContextWithURL(path, url, apiKey)` or `local.NewContext(path, core.LocalOptions{...})`. An empty path selects the verified install cache; an explicit path selects a trusted preinstalled library. A local provider makes the ordinary core `CreateSandbox` and other default-local factories available; remote contexts never redirect those factories. Resources, streams, cancellation and cleanup retain the library that created them.
+Use `remote.NewContextWithURL(path, url, apiKey)` or `local.NewContext(path, core.LocalOptions{...})`. An empty path selects the verified install cache; an explicit path selects a trusted preinstalled library. Package functions such as `CreateSandbox` require the provider for the configured backend. With no selection, they use local. Resources, streams, cancellation and cleanup retain the library that created them.
 
 ## Quick Start
 

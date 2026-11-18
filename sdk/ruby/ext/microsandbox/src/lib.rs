@@ -2081,7 +2081,7 @@ impl RubyOutboundProxy {
 
 fn sandbox_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     sandbox_create_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2106,7 +2106,7 @@ fn sandbox_create_in(
 
 fn sandbox_connect_or_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     sandbox_connect_or_create_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2131,7 +2131,7 @@ fn sandbox_connect_or_create_in(
 
 fn sandbox_start(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     sandbox_start_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2160,7 +2160,7 @@ fn sandbox_start_in(
 
 fn sandbox_get(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     sandbox_get_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2184,7 +2184,7 @@ fn sandbox_get_in(
 
 fn sandbox_get_running(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     sandbox_get_running_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2207,7 +2207,7 @@ fn sandbox_get_running_in(
 
 fn sandbox_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
     sandbox_remove_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2228,7 +2228,7 @@ fn sandbox_remove_in(
 
 fn sandbox_list(ruby: &Ruby, args: &[Value]) -> Result<RHash, Error> {
     sandbox_list_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2272,7 +2272,7 @@ fn sandbox_list_in(
 
 fn volume_get(ruby: &Ruby, args: &[Value]) -> Result<RubyVolume, Error> {
     volume_get_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2294,7 +2294,7 @@ fn volume_get_in(
 
 fn volume_list(ruby: &Ruby, args: &[Value]) -> Result<RArray, Error> {
     volume_list_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2319,7 +2319,7 @@ fn volume_list_in(
 
 fn volume_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
     volume_remove_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2348,7 +2348,7 @@ fn volume_builder(name: String) -> RubyVolumeBuilder {
 
 fn snapshot_open(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshot, Error> {
     snapshot_open_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2373,7 +2373,7 @@ fn snapshot_open_in(
 
 fn snapshot_get(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshot, Error> {
     snapshot_get_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2395,7 +2395,7 @@ fn snapshot_get_in(
 
 fn snapshot_list(ruby: &Ruby, args: &[Value]) -> Result<RArray, Error> {
     snapshot_list_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )
@@ -2420,7 +2420,7 @@ fn snapshot_list_in(
 
 fn snapshot_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
     snapshot_remove_in(
-        microsandbox_core::context::default_local_context(),
+        microsandbox_core::context::configured_context(),
         ruby,
         args,
     )

@@ -129,6 +129,14 @@ func TestExplicitContextsNative(t *testing.T) {
 		t.Fatal("snapshot remote selector", err)
 	}
 	t.Setenv("MSB_BACKEND", "remote")
+	routed, err := GetSandbox(context.Background(), "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer routed.Close()
+	if routed.ID() != "cloud:a" {
+		t.Fatalf("configured lookup reached %q", routed.ID())
+	}
 	sl, err := SandboxLocal()
 	if err != nil || sl.Context().Kind() != ContextLocal {
 		t.Fatal("sandbox local selector", err)

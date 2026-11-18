@@ -170,7 +170,7 @@ export class Snapshot {
   get context(): Context { return Context.fromNative(this.inner.context()); }
 
   /**
-   * Begin building a snapshot using the default-local destination; local names may be generated.
+   * Begin building a snapshot on the configured backend; local names may be generated.
    *
    * The source sandbox is required:
    * `Snapshot.builder("clean").fromSandbox("box").create()`.

@@ -1,7 +1,7 @@
 package microsandbox
 
 // Resource selectors capture a destination before any operation. They do not
-// change default-local factories or the context held by existing resources.
+// change the configured default or the context held by existing resources.
 
 // SandboxLocal captures local configuration, ignoring ambient remote selection.
 func SandboxLocal() (*Sandboxes, error) {

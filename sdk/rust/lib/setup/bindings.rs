@@ -80,7 +80,7 @@ pub async fn binding_diagnose_storage(
     selection_json: &str,
 ) -> MicrosandboxResult<String> {
     binding_diagnose_storage_in(
-        crate::context::default_local_context().as_ref(),
+        crate::context::configured_context().as_ref(),
         config_json,
         selection_json,
     )

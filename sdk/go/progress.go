@@ -91,11 +91,11 @@ func CreateSandboxWithProgress(ctx context.Context, name string, opts ...Sandbox
 	if err := prepareSandboxCreateConfig(&config); err != nil {
 		return failedCreationProgress(err)
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return failedCreationProgress(err)
 	}
-	return local.Sandboxes().createWithProgress(ctx, name, config)
+	return selected.Sandboxes().createWithProgress(ctx, name, config)
 }
 
 // RestoreSandboxWithProgress restores a detached sandbox with bounded progress events.
@@ -110,11 +110,11 @@ func RestoreSandboxWithProgress[T SnapshotSeed](ctx context.Context, snapshot T,
 	if err := validateRestoreConfig(config); err != nil {
 		return failedCreationProgress(err)
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return failedCreationProgress(err)
 	}
-	destination := local.inner
+	destination := selected.nativeContext()
 	return sandboxWithProgress(ctx, destination.Library(), func(id uint64) (*ffi.Sandbox, error) {
 		options := buildFFIRestoreOptions(snapshot, config)
 		options.CreationProgress = id

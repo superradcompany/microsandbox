@@ -98,7 +98,7 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
     )?;
     let context = match opts.context_handle {
         Some(handle) => super::context::get(handle)?,
-        None => microsandbox::context::default_local_context(),
+        None => microsandbox::context::configured_context(),
     };
     let mut builder = Sandbox::ctx(context.as_ref())
         .restore_ref(reference)

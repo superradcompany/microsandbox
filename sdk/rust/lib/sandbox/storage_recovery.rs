@@ -71,7 +71,7 @@ impl Sandbox {
         name: &str,
         options: StorageRecoveryOptions,
     ) -> MicrosandboxResult<StorageRecovery> {
-        crate::context::default_local_context()
+        crate::context::configured_context()
             .sandboxes()
             .recover_storage(name, options)
             .await

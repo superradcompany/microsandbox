@@ -268,7 +268,7 @@ impl Image {
 
     /// Get an image handle by reference from the active local backend.
     pub async fn get(reference: &str) -> MicrosandboxResult<ImageHandle> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageGet))?;
@@ -277,7 +277,7 @@ impl Image {
 
     /// List all cached images from the active local backend, ordered by creation time.
     pub async fn list() -> MicrosandboxResult<Vec<ImageHandle>> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageList))?;
@@ -286,7 +286,7 @@ impl Image {
 
     /// Get full detail for an image from the active local backend.
     pub async fn inspect(reference: &str) -> MicrosandboxResult<ImageDetail> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageInspect))?;
@@ -299,7 +299,7 @@ impl Image {
     /// sandboxes and snapshots. Active storage operations always return
     /// [`MicrosandboxError::ImageInUse`], including with `force`.
     pub async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageRemove))?;
@@ -311,7 +311,7 @@ impl Image {
     /// If a later cleanup batch fails, the error message includes removal counts from
     /// completed batches. The failing batch may have made additional progress.
     pub async fn prune() -> MicrosandboxResult<ImagePruneReport> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImagePrune))?;
@@ -324,7 +324,7 @@ impl Image {
     /// applies extra references to the first image in the archive. Returns a
     /// handle for every image reference imported.
     pub async fn load(input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageLoad))?;
@@ -340,7 +340,7 @@ impl Image {
         output: &Path,
         format: ImageArchiveFormat,
     ) -> MicrosandboxResult<()> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageSave))?;

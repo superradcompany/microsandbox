@@ -130,7 +130,7 @@ impl Snapshot {
     /// and cloud snapshots use managed storage. A destination selects a local
     /// parent directory or a directory on the cloud host volume.
     pub fn builder(name: impl Into<String>) -> SnapshotBuilder {
-        SnapshotBuilder::for_context(crate::context::default_local_context(), name)
+        SnapshotBuilder::for_context(crate::context::configured_context(), name)
     }
 
     /// Capture a snapshot using the active backend.
@@ -140,7 +140,7 @@ impl Snapshot {
     /// Cloud creation waits for the asynchronous control-plane operation and
     /// returns the completed resource.
     pub async fn create(config: SnapshotConfig) -> MicrosandboxResult<Self> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.snapshot_ops().create(backend.clone(), config).await
     }
 
@@ -155,7 +155,7 @@ impl Snapshot {
 
     /// Open a snapshot through its backend-neutral reference.
     pub async fn open_ref(reference: impl Into<SnapshotReference>) -> MicrosandboxResult<Self> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let reference = reference.into();
         backend
             .snapshot_ops()
@@ -258,7 +258,7 @@ impl Snapshot {
 
     /// Get a handle by the active backend's public snapshot identifier.
     pub async fn get(name_or_digest: &str) -> MicrosandboxResult<Snapshot> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
             .get(backend.clone(), name_or_digest)
@@ -267,7 +267,7 @@ impl Snapshot {
 
     /// List snapshots visible through the active backend.
     pub async fn list() -> MicrosandboxResult<Vec<Snapshot>> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.snapshot_ops().list(backend.clone()).await
     }
 
@@ -282,7 +282,7 @@ impl Snapshot {
         reference: impl Into<SnapshotReference>,
         force: bool,
     ) -> MicrosandboxResult<()> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let reference = reference.into();
         backend
             .snapshot_ops()
@@ -339,7 +339,7 @@ impl Snapshot {
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
     pub async fn list_dir(dir: impl AsRef<Path>) -> MicrosandboxResult<Vec<Snapshot>> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
             .list_dir(backend.clone(), dir.as_ref().to_path_buf())
@@ -351,7 +351,7 @@ impl Snapshot {
     /// This maintenance operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
     pub async fn reindex(dir: impl AsRef<Path>) -> MicrosandboxResult<usize> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
             .reindex(Some(dir.as_ref().to_path_buf()))
@@ -365,7 +365,7 @@ impl Snapshot {
     /// [`crate::MicrosandboxError::Unsupported`].
     #[doc(hidden)]
     pub async fn reindex_default() -> MicrosandboxResult<usize> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.snapshot_ops().reindex(None).await
     }
 
@@ -374,7 +374,7 @@ impl Snapshot {
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
     pub async fn save(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         let reference = SnapshotReference::Auto(name_or_path.to_string());
         backend.snapshot_ops().save(reference, out, opts).await
     }
@@ -384,7 +384,7 @@ impl Snapshot {
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
     pub async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Snapshot> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
             .load(backend.clone(), archive_path, dest)
@@ -629,7 +629,7 @@ impl Snapshot {
         out: impl AsRef<Path>,
         plain_tar: bool,
     ) -> MicrosandboxResult<SnapshotArchive> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
             .create_archive(config, out.as_ref(), plain_tar)
@@ -658,7 +658,7 @@ impl Snapshot {
     }
     /// Validate all inputs before publication and return their heads in input order.
     pub async fn load_many(paths: &[PathBuf], opts: LoadOpts) -> MicrosandboxResult<Vec<Snapshot>> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
             .load_many(backend.clone(), paths, opts)
@@ -666,7 +666,7 @@ impl Snapshot {
     }
     /// Read the selected snapshot ID. An existing headless group returns None.
     pub async fn group_head(group: &str) -> MicrosandboxResult<Option<SnapshotId>> {
-        crate::context::default_local_context()
+        crate::context::configured_context()
             .snapshots()
             .group_head(group)
             .await
@@ -674,7 +674,7 @@ impl Snapshot {
 
     /// Select a member of the group by its stable ID.
     pub async fn set_group_head(group: &str, id: &SnapshotId) -> MicrosandboxResult<HeadUpdate> {
-        crate::context::default_local_context()
+        crate::context::configured_context()
             .snapshots()
             .set_group_head(group, id)
             .await

@@ -30,6 +30,7 @@ use pyo3::prelude::*;
 
 /// The `_microsandbox` native extension module.
 pub(crate) fn register_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(provider::configured_provider_kind, m)?)?;
     m.add_function(wrap_pyfunction!(provider::provider_info, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(setup::resolve_runtime, m)?)?;
@@ -137,7 +138,7 @@ fn resolved_msb_path() -> PyResult<String> {
     }
     #[cfg(feature = "local")]
     {
-        let backend = microsandbox::context::default_local_context();
+        let backend = microsandbox::context::configured_context();
         let local = backend
             .as_local()
             .ok_or_else(|| error::local_only("resolved_msb_path"))?;

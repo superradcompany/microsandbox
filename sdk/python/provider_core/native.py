@@ -80,6 +80,9 @@ def binding(kind):
 def default_binding():
     global _default_local
     with _lock:
+        kind = _mount_binding().configured_provider_kind()
+        if kind == "remote":
+            return binding(kind)
         if _default_local is None:
             _default_local = binding("local")
         return _default_local

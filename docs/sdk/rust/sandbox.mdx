@@ -189,7 +189,7 @@ Sandbox::remove("api").await?;
 
 </Accordion>
 
-Delete a stopped sandbox by name. Locally, this removes the same state as [`sb.remove_persisted()`](#sb-remove_persisted); see [Destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for the exact deletion scope. This associated function uses the default local context. Use `remote.sandboxes().remove(name)` for a remote destination. Fails if the sandbox is still running. Stop it first.
+Delete a stopped sandbox by name. Locally, this removes the same state as [`sb.remove_persisted()`](#sb-remove_persisted); see [Destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for the exact deletion scope. This associated function uses the configured destination. Use `Sandbox::local().remove(name)` to select local explicitly. Fails if the sandbox is still running. Stop it first.
 
 <p className="msb-label">Parameters</p>
 

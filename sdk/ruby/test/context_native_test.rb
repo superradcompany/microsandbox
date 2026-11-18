@@ -109,6 +109,7 @@ class ContextNativeTest < Test::Unit::TestCase
             raise "remote selector ignored" unless resource.remote.context.kind == :remote
           end
           ENV["MSB_BACKEND"] = "remote"
+          raise "configured lookup missed remote" unless Microsandbox::Sandbox.get("task").id == collection.get("task").id
           [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Snapshot].each do |resource|
             raise "local selector ignored" unless resource.local.context.kind == :local
           end

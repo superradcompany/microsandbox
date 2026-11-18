@@ -243,7 +243,7 @@ pub(crate) fn local_metrics_stream(
 /// Get the latest metrics snapshot for every running sandbox from the active local backend.
 #[cfg(feature = "local")]
 pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
-    let backend = crate::context::default_local_context();
+    let backend = crate::context::configured_context();
     let local = backend
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(Operation::AllSandboxMetrics))?;

@@ -30,7 +30,7 @@ class LocalContext(Context):
 
 
 class RemoteContext(Context):
-    """A remote destination; constructing it never changes default-local routing."""
+    """A remote destination; constructing it preserves the configured default."""
 
     def __new__(
         cls,

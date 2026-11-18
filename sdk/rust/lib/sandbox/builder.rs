@@ -40,7 +40,7 @@ use crate::UnsupportedReason;
 use crate::config::layers::BackendConfig;
 #[cfg(feature = "local")]
 use crate::config::{GlobalConfig, GlobalConfigPatch};
-use crate::context::default_local_context;
+use crate::context::configured_context;
 #[cfg(feature = "local")]
 use crate::runtime::SpawnMode;
 use crate::snapshot::SnapshotReference;
@@ -142,9 +142,9 @@ impl SandboxBuilder {
     ///
     /// The name must be unique among existing sandboxes (unless
     /// [`replace`](Self::replace) is set) and no longer than 128 UTF-8 bytes.
-    /// Defaults and managed overrides come from the backend active when [`build`](Self::build) runs.
+    /// The builder captures the configured destination before deferred work begins.
     pub fn new(name: impl Into<String>) -> Self {
-        Self::for_context(default_local_context(), name)
+        Self::for_context(configured_context(), name)
     }
 
     /// Retain the destination before any deferred preparation or spawned work.
@@ -2630,7 +2630,7 @@ impl From<SandboxConfig> for SandboxBuilder {
         caller_overrides.caller_config_overrides = None;
 
         Self {
-            context: default_local_context(),
+            context: configured_context(),
             config: caller_overrides,
             detached: false,
             build_error: None,

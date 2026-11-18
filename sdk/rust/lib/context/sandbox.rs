@@ -169,7 +169,7 @@ pub struct SandboxRecordCloudState {
 /// Trait methods take the [`Arc<dyn Context>`] that they should wrap any
 /// returned [`Sandbox`] / [`SandboxRecord`] with. Callers (e.g.
 /// `Sandbox::create`) resolve the backend via
-/// [`default_local_context`](super::default_local_context) and forward it through.
+/// [`configured_context`](super::configured_context) and forward it through.
 pub trait SandboxOps: Send + Sync {
     /// Suggested budget for callers choosing a bounded graceful-stop observation.
     ///

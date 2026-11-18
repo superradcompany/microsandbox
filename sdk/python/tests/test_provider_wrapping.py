@@ -29,6 +29,7 @@ def wrappers(monkeypatch):
 
     def register(kind, version="test"):
         native = ModuleType(f"_provider_test_{kind}")
+        native.configured_provider_kind = lambda: "local"
         native.provider_info = lambda: json.dumps({"abi": 1, "version": version, kind: True})
 
         class Output:

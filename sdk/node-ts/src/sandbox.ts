@@ -349,7 +349,7 @@ export class Sandbox implements AsyncDisposable {
 
   get context(): Context { return Context.fromNative(this.inner.context()); }
 
-  /** Begin building a default-local sandbox. Names are limited to 128 UTF-8 bytes. */
+  /** Begin building a sandbox on the configured backend. Names are limited to 128 UTF-8 bytes. */
   static builder(name: string): SandboxBuilder {
     return Sandbox.fromNativeBuilder(name, new napi.SandboxBuilder(name));
   }

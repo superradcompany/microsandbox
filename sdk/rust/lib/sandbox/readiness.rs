@@ -182,7 +182,7 @@ impl Sandbox {
     /// Connecting to an existing run acquires no lifecycle ownership; remote
     /// runtimes are independent of this object's lifetime.
     pub async fn get_running(name: &str) -> MicrosandboxResult<Self> {
-        let context = crate::context::default_local_context();
+        let context = crate::context::configured_context();
         Self::ctx(context.as_ref()).get_running(name).await
     }
 }

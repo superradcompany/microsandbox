@@ -45,7 +45,10 @@ pub use microsandbox_types::{
     CloudUpdateServiceRequest,
 };
 
-pub use profile::{Profile, ProfileKind, resolve_cli_context, resolve_default_backend};
+pub use profile::{
+    Profile, ProfileKind, configured_context, configured_provider_kind, resolve_cli_context,
+    resolve_default_backend,
+};
 pub use sandbox::{
     SandboxIdentity, SandboxInner, SandboxOps, SandboxRecordCloudState, SandboxRecordInner,
     SandboxRemoteState,

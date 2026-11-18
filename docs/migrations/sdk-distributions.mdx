@@ -53,7 +53,7 @@ go run github.com/superradcompany/microsandbox/sdk/go/core/cmd/ffi-setup@VERSION
 
 Setup accepts `--target` for cross-target provisioning and `--cache` for a custom cache. It verifies and copies the selected FFI only, and never installs the host runtime. Module installation, import and first use do not download native files.
 
-Load the verified provider once before ordinary default-local calls. An empty path selects the verified default cache; a nonempty path selects an explicitly trusted preinstalled library:
+Load the verified local provider before using the following example with a local destination. An empty path selects the verified default cache; a nonempty path selects an explicitly trusted preinstalled library:
 
 ```go
 import (

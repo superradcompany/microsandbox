@@ -39,7 +39,7 @@ impl Sandbox {
     /// `get`/`list`: that observation is already stale by the time the mutation executes.
     #[doc(hidden)]
     pub async fn get_for_control(name: &str) -> MicrosandboxResult<SandboxRecord> {
-        return crate::context::default_local_context()
+        return crate::context::configured_context()
             .sandboxes()
             .get_for_control(name)
             .await;

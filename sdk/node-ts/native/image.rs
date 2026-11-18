@@ -137,7 +137,7 @@ impl JsImageHandle {
 
 #[cfg(feature = "local")]
 fn resolve_local() -> Result<std::sync::Arc<dyn microsandbox::Context>> {
-    let backend = microsandbox::context::default_local_context();
+    let backend = microsandbox::context::configured_context();
     if backend.as_local().is_none() {
         return Err(napi::Error::from_reason(
             "image ops require a local backend".to_string(),

@@ -2,7 +2,6 @@ package microsandbox
 
 import (
 	"context"
-	"sync"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -181,27 +180,14 @@ func (s *Sandbox) Context() Context {
 	return &LocalContext{inner: destination}
 }
 
-// Default-local conveniences capture configuration once and never consult remote selectors.
-var defaultLocalState struct {
-	sync.Mutex
-	context *LocalContext
-}
-
-func defaultLocalContext() (*LocalContext, error) {
-	defaultLocalState.Lock()
-	defer defaultLocalState.Unlock()
-	if defaultLocalState.context != nil {
-		return defaultLocalState.context, nil
-	}
-	inner, err := ffi.DefaultLibrary().NewContext(struct {
-		Kind string `json:"kind"`
-	}{"local"})
+// Resolve once per package operation and pass the retained native context through
+// retries, progress streams and returned resources.
+func configuredContext() (Context, error) {
+	inner, err := ffi.ConfiguredContext()
 	if err != nil {
-		return nil, err
+		return nil, wrapFFI(err)
 	}
-	selected := &LocalContext{inner: inner}
-	defaultLocalState.context = selected
-	return selected, nil
+	return contextFromNative(inner), nil
 }
 
 func (c *LocalContext) Volumes() *Volumes  { return VolumeCtx(c) }

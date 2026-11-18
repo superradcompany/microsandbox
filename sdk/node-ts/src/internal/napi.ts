@@ -19,7 +19,7 @@ registerFallback(() => {
   return native;
 }, configureNative);
 
-// Default-local factories resolve lazily. Importing shared resource classes
+// Factories resolve the configured destination lazily. Importing shared resource classes
 // never loads a native library or changes the selected destination.
 export const napi = new Proxy({} as NativeBindings, {
   get: (_target, property) => Reflect.get(defaultBinding(), property),
@@ -31,6 +31,7 @@ export const napi = new Proxy({} as NativeBindings, {
 // dependency on the generated d.ts.
 
 export interface NativeBindings {
+  readonly configuredProviderKind: () => "local" | "remote";
   readonly providerInfo: () => string;
   readonly Context: new (optionsJson: string) => NapiContext;
   readonly supportsPortModification?: () => boolean;

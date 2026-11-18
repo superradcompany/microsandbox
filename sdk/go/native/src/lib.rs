@@ -68,7 +68,7 @@ use base64::Engine;
 use microsandbox::sandbox::all_sandbox_metrics_local;
 use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, SnapshotReference,
-    UnsupportedReason, UpperVerifyStatus, default_local_context,
+    UnsupportedReason, UpperVerifyStatus, configured_context,
     logs::{LogOptions, LogSource},
     sandbox::{
         DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile,
@@ -2548,7 +2548,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
 
         let context = match opts.context_handle {
             Some(handle) => context::get(handle)?,
-            None => microsandbox::context::default_local_context(),
+            None => microsandbox::context::configured_context(),
         };
 
         // Pre-parse pull policy / log level / violation action so any error
@@ -3034,7 +3034,7 @@ struct SandboxHandleLifecycleOpts {
 async fn sandbox_record(
     name: &str,
 ) -> microsandbox::MicrosandboxResult<microsandbox::sandbox::SandboxRecord> {
-    let context = microsandbox::context::default_local_context();
+    let context = microsandbox::context::configured_context();
     context.sandbox_ops().get(context.clone(), name).await
 }
 
@@ -3122,7 +3122,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
             })?;
 
         let running_lookup = matches!(operation.as_str(), "get" | "get_running").then(|| {
-            let context = microsandbox::context::default_local_context();
+            let context = microsandbox::context::configured_context();
             Sandbox::ctx(context.as_ref())
         });
         Ok(Box::pin(async move {
@@ -4099,7 +4099,7 @@ pub unsafe extern "C" fn msb_sandbox_list(
             .map_err(|e| FfiError::invalid_argument(format!("invalid list filter JSON: {e}")))?;
 
         Ok(Box::pin(async move {
-            let context = microsandbox::context::default_local_context();
+            let context = microsandbox::context::configured_context();
             let query = resource::list_query(opts)?;
             let page = context.sandbox_ops().list(context.clone(), query).await?;
             let mut out = String::from("{\"sandboxes\":[");
@@ -6205,7 +6205,7 @@ pub unsafe extern "C" fn msb_all_sandbox_metrics(
     {
         run_c(cancel_id, buf, buf_len, || {
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend
                     .as_local()
                     .ok_or_else(|| FfiError::invalid_argument("metrics require a local backend"))?;
@@ -6359,7 +6359,7 @@ pub unsafe extern "C" fn msb_default_backend_info(
     buf_len: usize,
 ) -> *mut c_char {
     run(buf, buf_len, || {
-        serde_json::to_string(&microsandbox::default_local_context().info()?)
+        serde_json::to_string(&microsandbox::configured_context().info()?)
             .map_err(|error| FfiError::internal(format!("serialize backend info: {error}")))
     })
 }
@@ -6403,7 +6403,7 @@ pub unsafe extern "C" fn msb_image_get(
         run_c(cancel_id, buf, buf_len, || {
             let reference = unsafe { cstr(reference) }?;
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6434,7 +6434,7 @@ pub unsafe extern "C" fn msb_image_list(
     {
         run_c(cancel_id, buf, buf_len, || {
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6468,7 +6468,7 @@ pub unsafe extern "C" fn msb_image_inspect(
         run_c(cancel_id, buf, buf_len, || {
             let reference = unsafe { cstr(reference) }?;
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6536,7 +6536,7 @@ pub unsafe extern "C" fn msb_image_remove(
         run_c(cancel_id, buf, buf_len, || {
             let reference = unsafe { cstr(reference) }?;
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6567,7 +6567,7 @@ pub unsafe extern "C" fn msb_image_prune(
     {
         run_c(cancel_id, buf, buf_len, || {
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6617,7 +6617,7 @@ pub unsafe extern "C" fn msb_image_load(
             let tags: Vec<String> = serde_json::from_str(&raw_tags)
                 .map_err(|e| FfiError::invalid_argument(format!("invalid tags payload: {e}")))?;
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6678,7 +6678,7 @@ pub unsafe extern "C" fn msb_image_save(
                 }
             };
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6861,7 +6861,7 @@ fn snapshot_builder_from_opts(
     opts: SnapshotCreateOpts,
 ) -> Result<microsandbox::SnapshotBuilder, FfiError> {
     snapshot_builder_in(
-        microsandbox::context::default_local_context(),
+        microsandbox::context::configured_context(),
         source_sandbox,
         opts,
     )
@@ -7132,7 +7132,7 @@ pub unsafe extern "C" fn msb_snapshot_export(
         let opts: SnapshotSaveOptsJson = serde_json::from_str(&opts_raw)
             .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
         Ok(Box::pin(async move {
-            let backend = default_local_context();
+            let backend = configured_context();
             backend
                 .snapshot_ops()
                 .save(
@@ -7316,7 +7316,7 @@ pub unsafe extern "C" fn msb_snapshot_group_head(
     run_c(cancel_id, buf, buf_len, || {
         let selector = unsafe { cstr(selector) }?;
         Ok(Box::pin(async move {
-            let update = microsandbox::context::default_local_context()
+            let update = microsandbox::context::configured_context()
                 .snapshot_ops()
                 .group_head_selector(&selector)
                 .await

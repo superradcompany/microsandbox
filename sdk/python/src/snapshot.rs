@@ -119,7 +119,7 @@ impl PySnapshot {
         guest_flush: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         create_in(
-            microsandbox::context::default_local_context(),
+            microsandbox::context::configured_context(),
             py,
             name,
             from_sandbox,
@@ -348,17 +348,12 @@ impl PySnapshot {
 
     #[staticmethod]
     fn group_head(py: Python<'_>, group: String) -> PyResult<Bound<'_, PyAny>> {
-        group_head_in(microsandbox::context::default_local_context(), py, group)
+        group_head_in(microsandbox::context::configured_context(), py, group)
     }
 
     #[staticmethod]
     fn set_group_head(py: Python<'_>, group: String, id: String) -> PyResult<Bound<'_, PyAny>> {
-        set_group_head_in(
-            microsandbox::context::default_local_context(),
-            py,
-            group,
-            id,
-        )
+        set_group_head_in(microsandbox::context::configured_context(), py, group, id)
     }
 
     /// Deprecated: use `reference`. Raises UnsupportedError for remote snapshots.

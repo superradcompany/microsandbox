@@ -66,7 +66,7 @@ impl PyVolume {
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         create_in(
-            microsandbox::context::default_local_context(),
+            microsandbox::context::configured_context(),
             py,
             name,
             kind,

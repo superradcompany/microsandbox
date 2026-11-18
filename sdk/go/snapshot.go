@@ -372,110 +372,110 @@ func CreateSnapshot(ctx context.Context, opts SnapshotCreateOptions) (*Snapshot,
 	if opts.FromSandbox == "" {
 		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot create requires a source sandbox (FromSandbox)"}
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().Create(ctx, opts)
+	return selected.Snapshots().Create(ctx, opts)
 }
 func CreateSnapshotArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().CreateArchive(ctx, opts)
+	return selected.Snapshots().CreateArchive(ctx, opts)
 }
 func GetSnapshot(ctx context.Context, name string) (*Snapshot, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().Get(ctx, name)
+	return selected.Snapshots().Get(ctx, name)
 }
 func OpenSnapshot(ctx context.Context, reference string) (*Snapshot, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().Open(ctx, reference)
+	return selected.Snapshots().Open(ctx, reference)
 }
 func ListSnapshots(ctx context.Context) ([]*Snapshot, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().List(ctx)
+	return selected.Snapshots().List(ctx)
 }
 func ListSnapshotsDir(ctx context.Context, dir string) ([]*Snapshot, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().ListDir(ctx, dir)
+	return selected.Snapshots().ListDir(ctx, dir)
 }
 func RemoveSnapshot(ctx context.Context, reference string, force bool) error {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return err
 	}
-	return local.Snapshots().Remove(ctx, reference, force)
+	return selected.Snapshots().Remove(ctx, reference, force)
 }
 func ReindexSnapshots(ctx context.Context, dir string) (uint32, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return 0, err
 	}
-	return local.Snapshots().Reindex(ctx, dir)
+	return selected.Snapshots().Reindex(ctx, dir)
 }
 func SaveSnapshot(ctx context.Context, reference, path string, opts SnapshotSaveOptions) error {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return err
 	}
-	return local.Snapshots().Save(ctx, reference, path, opts)
+	return selected.Snapshots().Save(ctx, reference, path, opts)
 }
 func LoadSnapshot(ctx context.Context, archive, dest string) (*Snapshot, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().Load(ctx, archive, dest)
+	return selected.Snapshots().Load(ctx, archive, dest)
 }
 func LoadSnapshotWithBase(ctx context.Context, archive, dest, base string) (*Snapshot, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().LoadWithBase(ctx, archive, dest, base)
+	return selected.Snapshots().LoadWithBase(ctx, archive, dest, base)
 }
 func LoadSnapshotWithOptions(ctx context.Context, archive string, opts SnapshotLoadOptions) (*Snapshot, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().LoadWithOptions(ctx, archive, opts)
+	return selected.Snapshots().LoadWithOptions(ctx, archive, opts)
 }
 func LoadSnapshots(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*Snapshot, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().LoadMany(ctx, archives, opts)
+	return selected.Snapshots().LoadMany(ctx, archives, opts)
 }
 func SnapshotGroupHead(ctx context.Context, group string) (*string, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().GroupHead(ctx, group)
+	return selected.Snapshots().GroupHead(ctx, group)
 }
 
 func SetSnapshotGroupHead(ctx context.Context, group, id string) (*SnapshotHeadUpdate, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().SetGroupHead(ctx, group, id)
+	return selected.Snapshots().SetGroupHead(ctx, group, id)
 }
 
 func snapshotHeadUpdateFromInfo(update *ffi.SnapshotHeadUpdate) *SnapshotHeadUpdate {

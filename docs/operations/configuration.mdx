@@ -119,7 +119,7 @@ Some settings resolve outside the sandbox precedence rules above.
 
 The CLI chooses a local or remote connection from environment variables,
 profiles, and the local default. See [selection precedence](/cloud/connect#precedence).
-SDK code chooses its context explicitly; CLI settings do not redirect default-local SDK calls.
+Unqualified SDK calls follow the same backend and profile settings as the CLI, with local as the fallback. Explicit resource selectors override that choice and respect managed restrictions.
 
 Registry authentication resolves across explicit secret names, environment
 variables, and the operating-system keyring. See the

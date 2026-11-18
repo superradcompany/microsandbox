@@ -2404,6 +2404,9 @@ export interface PatchReplaceOnly {
   replace?: boolean
 }
 
+/** Read selection before choosing a provider-specific native library. */
+export declare function configuredProviderKind(): string
+
 /** Package loaders validate this before accepting any native objects. */
 export declare function providerInfo(): string
 

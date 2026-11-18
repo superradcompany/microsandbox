@@ -110,7 +110,7 @@ end
 
 ## Destinations
 
-Resource class methods use the default local context. Select a destination explicitly for remote operations:
+Resource class methods use the configured backend and default to local. To select remote explicitly:
 
 ```ruby
 sandbox = Microsandbox::Sandbox.remote.get("worker") # Uses MSB_API_KEY and MSB_API_URL

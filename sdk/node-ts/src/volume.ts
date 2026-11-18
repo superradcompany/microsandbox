@@ -57,7 +57,7 @@ export class Volume {
 
   get context(): Context { return Context.fromNative(this.inner.context()); }
 
-  /** Begin building a new volume using the default-local destination. */
+  /** Begin building a new volume on the configured backend. */
   static builder(name: string): VolumeBuilder {
     return Volume.fromNativeBuilder(new napi.VolumeBuilder(name));
   }

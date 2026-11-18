@@ -5,9 +5,9 @@ description: "Migrate destination selection, resource access, inspection and own
 
 The redesigned SDK uses one `Sandbox`, `Volume`, and `Snapshot` type each. Lookups and lists return operational resources; there is no separate resource Handle type or conversion step. This is a breaking application API migration. It does not change the runtime protocol or persisted resource format.
 
-## Keep default-local workflows simple
+## Keep unqualified resource calls
 
-Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSandbox` for ordinary local work. The matching get/list and Volume/Snapshot factories remain available. SDK shortcuts always select local execution; environment profiles no longer redirect them.
+Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSandbox` for ordinary resource operations. The matching get/list and Volume/Snapshot factories remain available. These calls honor the configured backend and use local when unset. An API key alone supplies credentials.
 
 Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. See [context selection](/operations/backends#sdk-contexts) for complete language examples. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. `Sandbox.ctx(context)` and the corresponding Volume/Snapshot entry points remain available.
 
@@ -94,7 +94,7 @@ Key-only constructors now honor `MSB_API_URL`. To pin an endpoint, pass its URL 
 
 TypeScript keeps `new RemoteContext({ apiKey })` and adds `RemoteContext.withUrl(url, apiKey, options?)`. Python keeps `RemoteContext(api_key=...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Ruby keeps `RemoteContext.new(api_key: ...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Existing URL options/keywords remain supported. Builders, explicit environment loading and named profiles retain their roles. See [remote endpoints](/cloud/connect#another-endpoint).
 
-This is a public source API change. Runtime protocols, stored configuration, resource identity and default-local routing are unchanged.
+This is a public source API change. Runtime protocols, stored configuration, resource identity and the local fallback are unchanged.
 
 ## Remote context derivation and authentication
 
@@ -104,7 +104,7 @@ Rust custom HTTP clients now use the context's API key for Authorization, consis
 
 ## Resource selectors and state accessors
 
-Explicit resource-type `local()` / `remote()` selectors return the existing plural collections before builder/create/get/list. Go uses `SandboxLocal()` / `SandboxRemote()` and corresponding Volume/Snapshot functions. Remote selection reads environment credentials; direct resource entry points remain default-local. See [usage and feature availability](/cloud/connect#resource-selectors).
+Explicit resource-type `local()` / `remote()` selectors return the existing plural collections before builder/create/get/list. Go uses `SandboxLocal()` / `SandboxRemote()` and corresponding Volume/Snapshot functions. Remote selection reads environment credentials; unqualified calls use the configured destination. See [usage and feature availability](/cloud/connect#resource-selectors).
 
 Rust's previous instance `.local()` and `.cloud()` state accessors are now `.local_state()` and `.remote_state()`. Public `SandboxCloudState` and `VolumeCloudState` become `SandboxRemoteState` and `VolumeRemoteState`. This source-breaking rename frees the resource-type selector names. State access remains synchronous and does not replace live inspection. Runtime protocols and persisted field spellings are unchanged.
 

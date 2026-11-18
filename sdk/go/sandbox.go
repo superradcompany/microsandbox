@@ -131,11 +131,11 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 	if err := prepareSandboxCreateConfig(&config); err != nil {
 		return nil, err
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	inner, err := local.inner.CreateSandbox(ctx, name, buildFFICreateOptions(config), connectOrCreate)
+	inner, err := selected.nativeContext().CreateSandbox(ctx, name, buildFFICreateOptions(config), connectOrCreate)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -636,11 +636,11 @@ func GetSandbox(ctx context.Context, name string) (*Sandbox, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().Get(ctx, name)
+	return selected.Sandboxes().Get(ctx, name)
 }
 
 // GetRunningSandbox looks up an existing sandbox and connects or starts it.
@@ -650,32 +650,32 @@ func GetRunningSandbox(ctx context.Context, name string) (*Sandbox, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().GetRunning(ctx, name)
+	return selected.Sandboxes().GetRunning(ctx, name)
 }
 
 // StartSandbox boots a stopped sandbox by name and returns a live Sandbox.
 // Sandbox names are limited to 128 UTF-8 bytes.
 func StartSandbox(ctx context.Context, name string) (*Sandbox, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().Start(ctx, name)
+	return selected.Sandboxes().Start(ctx, name)
 }
 
 // StartSandboxDetached boots a stopped sandbox in detached mode. The VM keeps
 // running after the returned handle is released. Sandbox names are limited to
 // 128 UTF-8 bytes.
 func StartSandboxDetached(ctx context.Context, name string) (*Sandbox, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().StartDetached(ctx, name)
+	return selected.Sandboxes().StartDetached(ctx, name)
 }
 
 // AllSandboxMetrics returns a point-in-time metrics snapshot for every running
@@ -846,21 +846,21 @@ func ListSandboxesWith(ctx context.Context, configure ...SandboxListOption) (*Sa
 }
 
 func listSandboxes(ctx context.Context, configure ...SandboxListOption) (*SandboxPage, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().List(ctx, configure...)
+	return selected.Sandboxes().List(ctx, configure...)
 }
 
 // RemoveSandbox removes a stopped sandbox's persisted state by name.
 // Sandbox names are limited to 128 UTF-8 bytes.
 func RemoveSandbox(ctx context.Context, name string) error {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return err
 	}
-	return local.Sandboxes().Remove(ctx, name)
+	return selected.Sandboxes().Remove(ctx, name)
 }
 
 // ---------------------------------------------------------------------------

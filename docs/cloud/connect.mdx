@@ -5,7 +5,7 @@ description: "Switch from local sandboxes to our managed cloud in one command"
 icon: "cloud-arrow-up"
 ---
 
-Run agents and workloads on your machine by default. Need more compute? Switch to [our managed cloud](/cloud/overview) with one command in the CLI or one line to choose a remote context in your SDK. Keep the same sandbox code, and switch back just as easily.
+Run agents and workloads on your machine by default. Need more compute? Switch to [our managed cloud](/cloud/overview) by setting the backend for the CLI and SDKs. Keep the same sandbox code, and switch back just as easily.
 
 ## Start locally
 
@@ -15,7 +15,7 @@ Microsandbox runs locally by default, without a cloud account or daemon:
 msb run python -- python -V
 ```
 
-The default SDK helpers run locally too. You do not need a remote connection or an API key.
+With no backend configured, SDK calls also run locally without an API key.
 
 <span id="connect-remotely" />
 
@@ -29,47 +29,40 @@ Get an API key from the [dashboard](https://dashboard.microsandbox.dev/access/ap
 export MSB_API_KEY="msb_..."
 ```
 
-Then switch the CLI with one command:
+Select cloud for CLI commands and SDK calls:
 
 ```bash
 export MSB_BACKEND=remote
 ```
 
-Your next `msb` command runs remotely. In an application that uses a context, change the line that creates it to a remote context. The code that creates and uses your sandboxes stays the same:
+Run the same code with either destination:
 
 <CodeGroup>
 ```typescript TypeScript
-import { RemoteContext } from "microsandbox";
+import { Sandbox } from "microsandbox";
 
-const remote = RemoteContext.fromEnv();
-const sb = await remote.sandboxes.builder("task")
+const sb = await Sandbox.builder("task")
   .image("python")
   .create();
 ```
 
 ```rust Rust
-use microsandbox::{Context, RemoteContext};
+use microsandbox::Sandbox;
 
-let remote = RemoteContext::from_env()?;
-let sb = remote.sandboxes().builder("task")
+let sb = Sandbox::builder("task")
     .image("python")
     .create()
     .await?;
 ```
 
 ```python Python
-from microsandbox import RemoteContext
+from microsandbox import Sandbox
 
-remote = RemoteContext.from_env()
-sb = await remote.sandboxes.create("task", image="python")
+sb = await Sandbox.create("task", image="python")
 ```
 
 ```go Go
-remote, err := microsandbox.RemoteContextFromEnv()
-if err != nil {
-    return err
-}
-sb, err := remote.Sandboxes().Create(ctx, "task", microsandbox.WithImage("python"))
+sb, err := microsandbox.CreateSandbox(ctx, "task", microsandbox.WithImage("python"))
 if err != nil {
     return err
 }
@@ -78,8 +71,7 @@ if err != nil {
 ```ruby Ruby
 require "microsandbox"
 
-remote = Microsandbox::RemoteContext.from_env
-sb = remote.sandboxes.builder("task").image("python").create
+sb = Microsandbox::Sandbox.create("task", image: "python")
 ```
 
 ```bash CLI
@@ -87,135 +79,20 @@ msb create python --name task
 ```
 </CodeGroup>
 
-A context is the connection your sandbox code uses. Default SDK helpers always run locally; use the remote context for cloud work.
-
-Switching connections does not move existing sandboxes or data. Objects you already opened keep their original connection.
-
 <span id="choose-at-startup" />
 
-<Accordion title="Choose the connection at startup">
-Choose the context once when your application starts. This example reads `MSB_BACKEND` itself; CLI profiles do not change it.
-
-<CodeGroup>
-```typescript TypeScript
-import { LocalContext, RemoteContext } from "microsandbox";
-
-const context = process.env.MSB_BACKEND === "remote"
-  ? RemoteContext.fromEnv()
-  : new LocalContext();
-
-const sb = await context.sandboxes.builder("hello").image("python").create();
-try {
-  const output = await sb.shell("echo hello");
-  console.log(output.stdout());
-} finally {
-  await sb.destroy();
-}
-```
-
-```rust Rust
-use microsandbox::{Context, LocalContext, RemoteContext};
-
-let context = if std::env::var("MSB_BACKEND").as_deref() == Ok("remote") {
-    RemoteContext::from_env()?.clone_shared()
-} else {
-    LocalContext::lazy()?.clone_shared()
-};
-
-let sb = context.sandboxes().builder("hello").image("python").create().await?;
-let output = sb.shell("echo hello").await?;
-println!("{}", output.stdout()?);
-sb.destroy().await?;
-```
-
-```python Python
-import os
-from microsandbox import LocalContext, RemoteContext
-
-context = (
-    RemoteContext.from_env()
-    if os.environ.get("MSB_BACKEND") == "remote"
-    else LocalContext()
-)
-
-sb = await context.sandboxes.create("hello", image="python")
-try:
-    output = await sb.shell("echo hello")
-    print(output.stdout_text)
-finally:
-    await sb.destroy()
-```
-
-```go Go
-import (
-    "fmt"
-    "os"
-
-    m "github.com/superradcompany/microsandbox/sdk/go"
-)
-
-var connection m.Context
-if os.Getenv("MSB_BACKEND") == "remote" {
-    remote, err := m.RemoteContextFromEnv()
-    if err != nil {
-        return err
-    }
-    connection = remote
-} else {
-    local, err := m.NewLocalContext(m.LocalOptions{})
-    if err != nil {
-        return err
-    }
-    connection = local
-}
-
-sb, err := connection.Sandboxes().Create(ctx, "hello", m.WithImage("python"))
-if err != nil {
-    return err
-}
-defer sb.Close()
-defer sb.Destroy(ctx)
-
-output, err := sb.Shell(ctx, "echo hello")
-if err != nil {
-    return err
-}
-fmt.Println(output.Stdout())
-```
-
-```ruby Ruby
-require "microsandbox"
-
-context = if ENV["MSB_BACKEND"] == "remote"
-  Microsandbox::RemoteContext.from_env
-else
-  Microsandbox::LocalContext.new
-end
-
-sb = context.sandboxes.builder("hello").image("python").create
-begin
-  puts sb.shell("echo hello").stdout
-ensure
-  sb.destroy
-end
-```
-</CodeGroup>
-
-Set `MSB_BACKEND=remote` and `MSB_API_KEY` before starting the application to run remotely. Set `MSB_BACKEND=local` and restart it to run locally again.
-</Accordion>
+New builders and lookups use the configured destination. Use an explicit [resource selector](#resource-selectors) to override it for one workflow. Existing builders and resources keep their original connection.
 
 ## Switch back
 
-Point the CLI back at your machine:
+Select local execution again:
 
 ```bash
 export MSB_BACKEND=local
 ```
 
-In your application, choose a local context again. Your sandbox workflow stays the same. See [Choose the connection at startup](#choose-at-startup) for an example.
-
-<Accordion title="CLI connection settings">
-`MSB_BACKEND=remote` switches CLI commands to remote. `MSB_API_KEY` supplies credentials; setting it alone does not switch where commands run. `cloud` remains an alias for `remote`. Set `MSB_API_URL` to use another API, or save a [profile](#profiles) for later commands.
+<Accordion title="Connection settings">
+`MSB_BACKEND=remote` switches unqualified SDK calls and CLI commands to remote. `MSB_API_KEY` supplies credentials; setting it alone does not switch where commands run. `cloud` remains an alias for `remote`. Set `MSB_API_URL` to use another API, or save a [profile](#profiles) for later commands.
 </Accordion>
 
 <span id="connect-from-an-sdk" />
@@ -263,7 +140,7 @@ MSB_PROFILE=work msb ls
 
 ### Load a profile in code
 
-SDKs load saved profiles explicitly. Switching the CLI profile does not change connections in your application.
+New SDK calls honor the active profile. To use a different named profile explicitly:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -447,7 +324,7 @@ See [configuration](/operations/configuration) for defaults and [cloud limitatio
 
 ## Resource selectors
 
-For explicit selection before creation, lookup or listing, use the resource's `local()` or `remote()` selector. Sandbox, Volume and Snapshot return their existing plural collection types. Ordinary direct entry points remain default-local; selectors do not install a global default or retarget existing resources.
+For explicit selection before creation, lookup or listing, use the resource's `local()` or `remote()` selector. Sandbox, Volume and Snapshot return their existing plural collection types. Unqualified calls follow configuration and fall back to local. Explicit selectors override the configured destination and respect managed backend restrictions.
 
 <CodeGroup>
 ```typescript TypeScript

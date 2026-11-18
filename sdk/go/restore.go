@@ -66,11 +66,11 @@ func RestoreSandbox[T SnapshotSeed](ctx context.Context, snapshot T, name string
 	if err := validateRestoreConfig(config); err != nil {
 		return nil, err
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	inner, err := local.inner.RestoreSandbox(ctx, name, buildFFIRestoreOptions(snapshot, config))
+	inner, err := selected.nativeContext().RestoreSandbox(ctx, name, buildFFIRestoreOptions(snapshot, config))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}

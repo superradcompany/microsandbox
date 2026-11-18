@@ -73,7 +73,7 @@ impl Sandbox {
 
 impl RestoreBuilder {
     fn new(reference: SnapshotReference) -> Self {
-        Self::for_context(crate::context::default_local_context(), reference)
+        Self::for_context(crate::context::configured_context(), reference)
     }
 
     pub(crate) fn for_context(

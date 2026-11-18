@@ -262,6 +262,7 @@ async def check():
     for resource in (Sandbox, Volume, Snapshot):
         assert resource.remote().context.kind == "remote"
     os.environ["MSB_BACKEND"] = "remote"
+    assert (await Sandbox.get("task")).id == "cloud:a"
     for resource in (Sandbox, Volume, Snapshot):
         assert resource.local().context.kind == "local"
     os.environ.update(MSB_API_URL=f"http://127.0.0.1:{servers[1].server_port}", MSB_API_KEY="key-b")

@@ -154,7 +154,7 @@ Microsandbox::RemoteContext.from_env # => RemoteContext
 Microsandbox::RemoteContext.from_profile(name) # => RemoteContext
 ```
 
-`from_env` reads `MSB_API_KEY` and optional `MSB_API_URL`. Neither constructor changes default-local shortcuts.
+`from_env` reads `MSB_API_KEY` and optional `MSB_API_URL`. Existing contexts and resources keep their destination.
 
 ## Context
 

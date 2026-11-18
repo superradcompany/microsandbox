@@ -69,7 +69,13 @@ pub unsafe extern "C" fn msb_context_create(
         let json = unsafe { cstr(options) }?;
         let value: serde_json::Value =
             serde_json::from_str(&json).map_err(|e| FfiError::invalid_argument(e.to_string()))?;
-        let context = if value.get("baseHandle").is_some() {
+        if value == serde_json::json!({"selection": "kind"}) {
+            let kind = microsandbox::context::configured_provider_kind()?;
+            return Ok(Box::pin(async move { Ok(kind.as_str().to_owned()) }));
+        }
+        let context = if value == serde_json::json!({"selection": "configured"}) {
+            microsandbox::context::resolve_default_backend()?
+        } else if value.get("baseHandle").is_some() {
             let request: Derivation = serde_json::from_value(value)
                 .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
             let base = get(request.base_handle)?;

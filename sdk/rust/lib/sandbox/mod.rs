@@ -354,7 +354,7 @@ impl Sandbox {
 
     /// Create a sandbox from a config.
     ///
-    /// Uses the default local context. For remote creation, use
+    /// Uses the configured context. To override the destination, use
     /// `Sandbox::remote()?.builder(name)` or `Sandbox::ctx(&context).builder(name)`.
     pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
         #[cfg(feature = "local")]
@@ -364,7 +364,7 @@ impl Sandbox {
             // so an exiting CLI/SDK process cannot reap the successfully restored VM.
             return Self::create_detached(config).await;
         }
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .sandbox_ops()
             .create(backend.clone(), config, true)
@@ -375,9 +375,9 @@ impl Sandbox {
     ///
     /// This is intended for detached CLI workflows such as `msb create` and
     /// `msb run --detach`, where the sandbox should keep running in the
-    /// background after the command returns. Uses the default local context.
+    /// background after the command returns. Uses the configured context.
     pub async fn create_detached(config: SandboxConfig) -> MicrosandboxResult<Self> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .sandbox_ops()
             .create_detached(backend.clone(), config)
@@ -389,7 +389,7 @@ impl Sandbox {
     /// Returns a progress handle for per-layer pull events and a task handle
     /// for the sandbox creation result. The caller should consume progress
     /// events until the channel closes, then await the task. This entry point uses
-    /// the default local context.
+    /// the configured context.
     #[cfg(feature = "local")]
     pub fn create_with_pull_progress(
         config: SandboxConfig,
@@ -422,7 +422,7 @@ impl Sandbox {
         PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         // Resolve before spawning: the task may first run after the caller changes cwd.
         let paths = if backend.as_local().is_some() {
             crate::context::local::host_paths::resolve_host_paths(&mut config)
@@ -459,7 +459,7 @@ impl Sandbox {
     /// Start an existing stopped sandbox from persisted state.
     ///
     /// Reuses the serialized sandbox config and pinned rootfs state without
-    /// re-resolving the original OCI reference. Uses the default local context.
+    /// re-resolving the original OCI reference. Uses the configured context.
     ///
     /// For an explicitly remote start via `Sandbox::remote()?.start(name)`, the provider returns
     /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
@@ -467,11 +467,11 @@ impl Sandbox {
     /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
     /// this usually clears within seconds. Start again after a short wait.
     pub async fn start(name: &str) -> MicrosandboxResult<Self> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.sandbox_ops().start(backend.clone(), name).await
     }
 
-    /// Start an existing sandbox in detached/background mode in the default local context.
+    /// Start an existing sandbox in detached/background mode in the configured context.
     ///
     /// For an explicitly remote start via `Sandbox::remote()?.start_detached(name)`, the provider returns
     /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
@@ -479,7 +479,7 @@ impl Sandbox {
     /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
     /// this usually clears within seconds. Start again after a short wait.
     pub async fn start_detached(name: &str) -> MicrosandboxResult<Self> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .sandbox_ops()
             .start_detached(backend.clone(), name)
@@ -493,7 +493,7 @@ impl Sandbox {
     }
 
     pub(crate) async fn get_record(name: &str) -> MicrosandboxResult<SandboxRecord> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.sandbox_ops().get(backend.clone(), name).await
     }
 
@@ -515,7 +515,7 @@ impl Sandbox {
             )));
         }
 
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .sandbox_ops()
             .list(backend.clone(), query)
@@ -523,9 +523,9 @@ impl Sandbox {
             .map(SandboxPage::from_records)
     }
 
-    /// Remove a stopped sandbox by name in the default local context.
+    /// Remove a stopped sandbox by name in the configured context.
     pub async fn remove(name: &str) -> MicrosandboxResult<()> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.sandbox_ops().remove(backend.clone(), name).await
     }
 }

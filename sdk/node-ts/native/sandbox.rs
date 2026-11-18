@@ -229,7 +229,7 @@ impl Sandbox {
     #[napi(ts_return_type = "Promise<Sandbox>")]
     pub fn get_running<'env>(env: &'env Env, name: String) -> Result<PromiseRaw<'env, Sandbox>> {
         // Select the destination before scheduling work on the native runtime.
-        let context = microsandbox::context::default_local_context();
+        let context = microsandbox::context::configured_context();
         let sandboxes = microsandbox::Sandbox::ctx(context.as_ref());
         env.spawn_future(async move {
             let sandbox = sandboxes.get_running(&name).await.map_err(to_napi_error)?;

@@ -8,7 +8,7 @@ icon: "play"
 
 Run microsandbox from your application. Locally, each sandbox runs as a child VM process; there is no daemon to install.
 
-Run workloads on your machine with a local context, or use a remote context to run on [our managed cloud](/cloud/overview). Your sandbox workflow stays the same, and you can switch back to local execution whenever you need to. Default SDK helpers always run locally. A remote context does not move local sandboxes or data. See [remote connections](/cloud/connect) for connection settings.
+The SDK uses your configured backend and defaults to local. Set `MSB_BACKEND=remote` and supply your API key to run the same code on [our managed cloud](/cloud/overview). Existing sandboxes keep their original destination. See [remote connections](/cloud/connect).
 
 ## Installation
 
@@ -206,7 +206,7 @@ puts sb.status
 </CodeGroup>
 
 <Tip>
-Choose the context at application startup to [switch between local and cloud](/cloud/connect#choose-at-startup). CLI settings do not redirect SDK calls.
+Use `MSB_BACKEND` or an active profile to [switch between local and cloud](/cloud/connect#choose-at-startup) across SDKs and the CLI.
 </Tip>
 
 ## Select a smaller distribution

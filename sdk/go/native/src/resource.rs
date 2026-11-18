@@ -166,7 +166,7 @@ pub unsafe extern "C" fn msb_sandbox_resource_list(
             .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
         let query = list_query(opts)?;
         // Capture destination before handing work to the native runtime.
-        let context = microsandbox::context::default_local_context();
+        let context = microsandbox::context::configured_context();
         let sandboxes = Sandbox::ctx(context.as_ref());
         Ok(Box::pin(async move {
             let page = sandboxes.list_with(|_| query).await?;

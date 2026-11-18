@@ -40,7 +40,7 @@ impl Sandbox {
     pub async fn stop_storage_repair_blocker(
         blocker: &StorageRepairBlocker,
     ) -> MicrosandboxResult<()> {
-        crate::context::default_local_context()
+        crate::context::configured_context()
             .sandboxes()
             .stop_storage_repair_blocker(blocker)
             .await
@@ -188,12 +188,7 @@ pub async fn storage_repair_blockers(
     options: GlobalConfigPatch,
     name: &str,
 ) -> MicrosandboxResult<Vec<StorageRepairBlocker>> {
-    storage_repair_blockers_in(
-        crate::context::default_local_context().as_ref(),
-        options,
-        name,
-    )
-    .await
+    storage_repair_blockers_in(crate::context::configured_context().as_ref(), options, name).await
 }
 
 /// Revalidate repair blockers in the captured destination without changing its catalog.

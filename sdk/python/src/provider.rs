@@ -23,6 +23,13 @@ pub(crate) fn public_module(suffix: &str) -> String {
 }
 
 #[pyfunction]
+pub(crate) fn configured_provider_kind() -> PyResult<&'static str> {
+    microsandbox::context::configured_provider_kind()
+        .map(|kind| kind.as_str())
+        .map_err(crate::error::to_py_err)
+}
+
+#[pyfunction]
 pub(crate) fn provider_info() -> String {
     serde_json::json!({
         "abi": 1,

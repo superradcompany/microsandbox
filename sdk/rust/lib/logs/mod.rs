@@ -178,7 +178,7 @@ pub(crate) fn log_dir_for_local(local: &LocalContext, name: &str) -> PathBuf {
 /// stream's per-source ordering doesn't match snapshot's "filter after sort"
 /// contract.
 pub async fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>> {
-    let backend = crate::context::default_local_context();
+    let backend = crate::context::configured_context();
     backend
         .sandbox_ops()
         .logs(backend.clone(), name, opts)
@@ -191,7 +191,7 @@ pub async fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<
 /// satisfy a requested filter return a typed [`MicrosandboxError::Unsupported`]
 /// error.
 pub async fn follow_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogStream> {
-    let backend = crate::context::default_local_context();
+    let backend = crate::context::configured_context();
     backend
         .sandbox_ops()
         .follow_logs(backend.clone(), name, opts)
@@ -204,7 +204,7 @@ pub async fn follow_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Lo
 /// [`MicrosandboxError::BootStart`] during create/start. The cloud backend
 /// currently returns `None` because its API has no boot-error concept yet.
 pub async fn boot_error(name: &str) -> MicrosandboxResult<Option<BootError>> {
-    let backend = crate::context::default_local_context();
+    let backend = crate::context::configured_context();
     backend
         .sandbox_ops()
         .boot_error(backend.clone(), name)

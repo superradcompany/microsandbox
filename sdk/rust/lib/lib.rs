@@ -47,7 +47,7 @@ pub use context::{
     CloudUpdateServiceRequest, CloudVolumeKind, CloudVolumeStatus, ComputeType, Context,
     ContextInfo, ContextKind, ContextSelectionSource, Profile, ProfileKind, SandboxInner,
     SandboxOps, SandboxRecordCloudState, SandboxRecordInner, SandboxRemoteState, Sandboxes,
-    ServiceOps, Snapshots, VolumeInner, VolumeOps, VolumeRemoteState, Volumes,
+    ServiceOps, Snapshots, VolumeInner, VolumeOps, VolumeRemoteState, Volumes, configured_context,
     default_local_context, resolve_default_backend,
 };
 /// Previous name for [`ComputeType`].

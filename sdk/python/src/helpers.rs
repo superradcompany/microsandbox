@@ -182,7 +182,7 @@ pub(crate) fn restore_builder_from_args(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<microsandbox::sandbox::RestoreBuilder> {
     restore_builder_with_context(
-        microsandbox::context::default_local_context(),
+        microsandbox::context::configured_context(),
         snapshot,
         name,
         kwargs,
@@ -461,7 +461,7 @@ pub fn sandbox_builder_from_args(
     name: String,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<SandboxBuilder> {
-    sandbox_builder_with_context(microsandbox::context::default_local_context(), name, kwargs)
+    sandbox_builder_with_context(microsandbox::context::configured_context(), name, kwargs)
 }
 
 pub(crate) fn sandbox_builder_with_context(

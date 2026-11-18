@@ -108,7 +108,7 @@ pub struct VolumeRemoteState {
 ///
 /// Trait methods take the [`Arc<dyn Context>`] that they should wrap any
 /// returned [`Volume`] with. Callers (e.g. `Volume::create`)
-/// resolve the backend via [`default_local_context`](super::default_local_context) and
+/// resolve the backend via [`configured_context`](super::configured_context) and
 /// forward it through.
 ///
 /// Cloud-side `fs_*` operations route through the cloud HTTP API while local
@@ -439,7 +439,7 @@ mod tests {
 
     /// Regression test for the asymmetric-signature P1: `LocalContext::remove`
     /// must operate on the passed-in `backend` Arc, not on the process-wide
-    /// `default_local_context()`. Two `LocalContext` instances live in separate
+    /// `configured_context()`. Two `LocalContext` instances live in separate
     /// home dirs (so separate SQLite DBs). The default is installed on
     /// backend A; backend B's trait impl is invoked directly. The remove
     /// must hit B's DB (and fail because the volume doesn't exist there),
@@ -483,7 +483,7 @@ mod tests {
             .unwrap();
 
         // Install A as the process default. If the trait impl re-resolved
-        // `default_local_context()` (the bug we just fixed) it would find A and
+        // `configured_context()` (the bug we just fixed) it would find A and
         // successfully delete A's volume — even though we asked B.
         // Both destinations remain alive; explicit operations must retain B.
         let _other_destination = backend_a.clone();

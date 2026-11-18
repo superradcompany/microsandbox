@@ -242,7 +242,7 @@ impl PyMemoryCacheReport {
 
 #[cfg(feature = "local")]
 fn resolve_local(op: microsandbox::Operation) -> PyResult<Arc<dyn microsandbox::Context>> {
-    let backend = microsandbox::context::default_local_context();
+    let backend = microsandbox::context::configured_context();
     if backend.as_local().is_none() {
         return Err(to_py_err(microsandbox::MicrosandboxError::local_only(op)));
     }

@@ -443,7 +443,7 @@ mod tests {
 
     #[cfg(all(feature = "local", feature = "cloud"))]
     #[test]
-    fn selectors_capture_remote_and_preserve_default_local() {
+    fn selectors_override_the_configured_destination_and_builders_retain_it() {
         let _guard = crate::test_support::lock_env();
         let home = tempfile::tempdir().unwrap();
         let names = [
@@ -470,6 +470,7 @@ mod tests {
         unsafe {
             std::env::set_var("MSB_API_KEY", "fixture-key");
         }
+        let local_builder = Sandbox::builder("captured-local");
         let selected = Sandbox::remote().unwrap();
         let builder = selected.builder("retained");
         assert_eq!(
@@ -510,8 +511,17 @@ mod tests {
         );
         assert_eq!(
             Sandbox::builder("default").context().kind(),
-            crate::ContextKind::Local
+            crate::ContextKind::Remote
         );
+        assert_eq!(
+            Volume::builder("vol").context().kind(),
+            crate::ContextKind::Remote
+        );
+        assert_eq!(
+            Snapshot::builder("snap").context().kind(),
+            crate::ContextKind::Remote
+        );
+        assert_eq!(local_builder.context().kind(), crate::ContextKind::Local);
         for (name, value) in previous {
             unsafe {
                 match value {

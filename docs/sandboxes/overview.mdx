@@ -11,7 +11,7 @@ The security boundary is hardware virtualization, not Linux namespaces. That mak
 
 ## Create a sandbox
 
-The SDK examples use the default local helpers. To run remotely, [use a remote context](/cloud/connect); the CLI follows its connection settings. Existing sandboxes and data stay where you created them.
+The SDK examples use the configured backend and run locally when unset. To run the same examples on cloud, [select the remote backend](/cloud/connect). Existing sandboxes and data stay where you created them.
 
 At minimum, a sandbox needs a name and an image. Everything else has defaults: 1 vCPU, 512 MiB memory, public-only networking, and `/bin/sh` as the default shell.
 

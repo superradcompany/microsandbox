@@ -517,7 +517,7 @@ impl PySandbox {
     #[staticmethod]
     fn get_running<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         // Retain the selected context before the future reaches the runtime.
-        let context = microsandbox::context::default_local_context();
+        let context = microsandbox::context::configured_context();
         let sandboxes = microsandbox::Sandbox::ctx(context.as_ref());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = sandboxes.get_running(&name).await.map_err(to_py_err)?;
