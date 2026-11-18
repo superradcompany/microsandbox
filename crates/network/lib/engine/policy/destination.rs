@@ -49,7 +49,7 @@ fn addr_classify(addr: IpAddr, shared: &SharedState) -> Option<DestinationGroup>
         Some(DestinationGroup::Metadata)
     } else if is_loopback(addr) {
         Some(DestinationGroup::Loopback)
-    } else if is_private(addr) {
+    } else if is_private(addr, shared) {
         Some(DestinationGroup::Private)
     } else if is_link_local(addr) {
         Some(DestinationGroup::LinkLocal)
@@ -65,8 +65,12 @@ fn addr_classify(addr: IpAddr, shared: &SharedState) -> Option<DestinationGroup>
 /// unit tests that don't exercise Host rules).
 fn matches_host(addr: IpAddr, shared: &SharedState) -> bool {
     match addr {
-        IpAddr::V4(v4) => shared.gateway_ipv4().is_some_and(|gw| gw == v4),
-        IpAddr::V6(v6) => shared.gateway_ipv6().is_some_and(|gw| gw == v6),
+        IpAddr::V4(v4) => {
+            shared.gateway_ipv4().is_some_and(|gw| gw == v4) || shared.host_ipv4().contains(&v4)
+        }
+        IpAddr::V6(v6) => {
+            shared.gateway_ipv6().is_some_and(|gw| gw == v6) || shared.host_ipv6().contains(&v6)
+        }
     }
 }
 
@@ -77,7 +81,7 @@ fn is_loopback(addr: IpAddr) -> bool {
     }
 }
 
-fn is_private(addr: IpAddr) -> bool {
+fn is_private(addr: IpAddr, shared: &SharedState) -> bool {
     match addr {
         IpAddr::V4(v4) => {
             let octets = v4.octets();
@@ -89,11 +93,21 @@ fn is_private(addr: IpAddr) -> bool {
             || (octets[0] == 192 && octets[1] == 168)
             // 100.64.0.0/10 (Carrier-grade NAT / shared address space)
             || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+                || shared
+                    .host_ipv4_networks()
+                    .iter()
+                    .any(|network| network.contains(v4))
         }
         IpAddr::V6(v6) => {
             let segments = v6.segments();
             // fc00::/7 (ULA — Unique Local Address)
             (segments[0] & 0xfe00) == 0xfc00
+                // Global addresses on the host's on-link prefixes are local
+                // network destinations, even though they are not ULA.
+                || shared
+                    .host_ipv6_networks()
+                    .iter()
+                    .any(|network| network.contains(v6))
         }
     }
 }
@@ -174,6 +188,17 @@ mod tests {
         s
     }
 
+    fn with_host_addresses() -> SharedState {
+        let s = SharedState::new(4);
+        s.set_host_networks(
+            vec![Ipv4Addr::new(192, 0, 2, 10)],
+            vec!["192.0.2.0/24".parse().unwrap()],
+            vec!["2001:db8:1:2::10".parse().unwrap()],
+            vec!["2001:db8:1:2::/64".parse().unwrap()],
+        );
+        s
+    }
+
     #[test]
     fn loopback_v4() {
         let s = no_host();
@@ -238,6 +263,56 @@ mod tests {
         assert!(!matches_group(
             DestinationGroup::Private,
             IpAddr::V6("2001:db8::1".parse().unwrap()),
+            &s,
+        ));
+    }
+
+    #[test]
+    fn host_interface_addresses_are_host_group() {
+        let s = with_host_addresses();
+        assert!(matches_group(
+            DestinationGroup::Host,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            &s,
+        ));
+        assert!(matches_group(
+            DestinationGroup::Host,
+            IpAddr::V6("2001:db8:1:2::10".parse().unwrap()),
+            &s,
+        ));
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("2001:db8:1:2::10".parse().unwrap()),
+            &s,
+        ));
+    }
+
+    #[test]
+    fn global_ipv6_on_host_link_is_private() {
+        let s = with_host_addresses();
+        assert!(matches_group(
+            DestinationGroup::Private,
+            IpAddr::V6("2001:db8:1:2::1".parse().unwrap()),
+            &s,
+        ));
+        assert!(matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("2001:db8:1:3::1".parse().unwrap()),
+            &s,
+        ));
+    }
+
+    #[test]
+    fn ipv4_on_host_link_is_private() {
+        let s = with_host_addresses();
+        assert!(matches_group(
+            DestinationGroup::Private,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+            &s,
+        ));
+        assert!(matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 11)),
             &s,
         ));
     }

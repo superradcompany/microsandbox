@@ -6,12 +6,14 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use futures::stream;
+use microsandbox_types::{CloudCreateServiceRequest, CloudUpdateServiceRequest};
 
 use super::sandbox::{LogStream, MetricsStream};
-use super::{Backend, BackendKind, SandboxBackend, SnapshotBackend, VolumeBackend};
+use super::{Backend, BackendKind, SandboxBackend, ServiceBackend, SnapshotBackend, VolumeBackend};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage};
+use crate::service::{Service, ServiceListBuilder, ServicePage};
 use crate::snapshot::{
     Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle, SnapshotReference,
     SnapshotVerifyReport,
@@ -83,6 +85,10 @@ impl Backend for ConfigurationErrorBackend {
     }
 
     fn snapshots(&self) -> &dyn SnapshotBackend {
+        self
+    }
+
+    fn services(&self) -> &dyn ServiceBackend {
         self
     }
 
@@ -471,6 +477,65 @@ impl VolumeBackend for ConfigurationErrorBackend {
         _name: &'a str,
         _path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<VolumeFsWriteSink>> {
+        self.fail()
+    }
+}
+
+impl ServiceBackend for ConfigurationErrorBackend {
+    fn create<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _request: CloudCreateServiceRequest,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn get<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _slug: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn list<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _query: ServiceListBuilder,
+    ) -> BoxFuture<'a, MicrosandboxResult<ServicePage>> {
+        self.fail()
+    }
+
+    fn update<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _slug: &'a str,
+        _request: CloudUpdateServiceRequest,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn enable<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _slug: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn disable<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _slug: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn remove<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _slug: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         self.fail()
     }
 }

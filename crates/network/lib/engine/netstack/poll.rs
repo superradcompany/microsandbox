@@ -611,6 +611,7 @@ pub fn smoltcp_poll_loop(
                     strict,
                     conn.proxy_connect,
                     connection_outbound_proxy,
+                    dns_forwarder_handle.clone(),
                 );
                 tokio_handle.spawn(proxy.run());
                 continue;
@@ -687,6 +688,7 @@ pub fn smoltcp_poll_loop(
                 strict,
                 conn.proxy_connect,
                 connection_outbound_proxy,
+                dns_forwarder_handle.clone(),
             );
             tokio_handle.spawn(proxy.run());
         }
