@@ -757,7 +757,7 @@ child = await Sandbox.restore("api:baseline", name="api-restored", cow_memory=Tr
 | `disk_only=True` | Boot only the saved disk. |
 | `snapshot_base` | Supply an archive dependency. |
 | `Sandbox.restore()` | Return the restored sandbox. |
-| `Sandbox.restore_with_progress()` | Return a `PullSession`; await its result. |
+| `Sandbox.restore_with_progress()` | Claim the restored sandbox inside or after the [progress scope](/sdk/python/sandbox#pullsession). |
 
 Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 

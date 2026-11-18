@@ -6,7 +6,7 @@ from contextlib import suppress
 
 import pytest
 
-from integration.helpers import IMAGE, remove_sandbox
+from integration.helpers import IMAGE, remove_sandbox, remove_snapshot
 from microsandbox import MicrosandboxError, PullEventType, PullPolicy, Sandbox
 
 
@@ -71,11 +71,14 @@ async def test_create_with_progress_result_rejects_on_second_call(sandbox_name):
     sandbox = None
     try:
         async with session:
-            async for _event in session.progress:
-                pass
-            sandbox = await session.result()
-            with pytest.raises(RuntimeError, match="already consumed"):
-                await session.result()
+            pass
+
+        sandbox = await session.result()
+        assert sandbox.name == name
+        assert await sandbox.owns_lifecycle
+        assert (await sandbox.shell("printf ready")).stdout_text == "ready"
+        with pytest.raises(RuntimeError, match="already consumed"):
+            await session.result()
     finally:
         if sandbox is not None:
             with suppress(Exception):
@@ -158,3 +161,25 @@ async def test_create_with_progress_failure_surfaces_from_result(sandbox_name):
             pass
         with pytest.raises(MicrosandboxError):
             await session.result()
+
+
+@pytest.mark.asyncio
+async def test_restore_with_progress_returns_usable_sandbox_after_exit(sandbox_factory, sandbox_name):
+    base = await sandbox_factory("py-sdk-progress-base")
+    restored_name = sandbox_name("py-sdk-progress-restored")
+    await base.stop()
+    snapshot = await base.snapshot("saved")
+    restored = None
+    try:
+        session = Sandbox.restore_with_progress(snapshot, name=restored_name)
+        async with session:
+            pass
+        restored = await session.result()
+        assert restored.name == restored_name
+        assert (await restored.shell("printf restored")).stdout_text == "restored"
+    finally:
+        if restored is not None:
+            with suppress(Exception):
+                await restored.stop()
+        await remove_sandbox(restored_name)
+        await remove_snapshot(f"{base.name}:saved")

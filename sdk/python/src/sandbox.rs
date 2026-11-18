@@ -2550,15 +2550,15 @@ fn apply_attach_options(
 pub struct PyPullSession {
     abort: tokio::task::AbortHandle,
     progress: Arc<Mutex<Option<microsandbox::CreationProgressHandle>>>,
-    task: Arc<
-        Mutex<
-            Option<
-                tokio::task::JoinHandle<
-                    microsandbox::MicrosandboxResult<microsandbox::sandbox::Sandbox>,
-                >,
-            >,
-        >,
-    >,
+    state: Arc<Mutex<PullSessionState>>,
+}
+
+enum PullSessionState {
+    Creating(
+        tokio::task::JoinHandle<microsandbox::MicrosandboxResult<microsandbox::sandbox::Sandbox>>,
+    ),
+    Ready(PySandbox),
+    Consumed,
 }
 
 /// Async iterator over image and startup progress events.
@@ -2602,6 +2602,21 @@ pub struct PyPullEvent {
 // Methods: PullSession
 //--------------------------------------------------------------------------------------------------
 
+impl PullSessionState {
+    async fn finish(&mut self) -> PyResult<()> {
+        if let Self::Creating(task) = self {
+            // Borrow the join handle so cancelling a pending observer leaves it in the session.
+            let outcome = task.await;
+            *self = Self::Consumed;
+            let sandbox = outcome
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+                .map_err(to_py_err)?;
+            *self = Self::Ready(PySandbox::from_rust(sandbox));
+        }
+        Ok(())
+    }
+}
+
 impl PyPullSession {
     pub fn new(
         progress: microsandbox::CreationProgressHandle,
@@ -2612,7 +2627,7 @@ impl PyPullSession {
         Self {
             abort: task.abort_handle(),
             progress: Arc::new(Mutex::new(Some(progress))),
-            task: Arc::new(Mutex::new(Some(task))),
+            state: Arc::new(Mutex::new(PullSessionState::Creating(task))),
         }
     }
 }
@@ -2645,36 +2660,35 @@ impl PyPullSession {
         _exc_val: &Bound<'py, PyAny>,
         _exc_tb: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if !_exc_type.is_none() {
+        let body_failed = !_exc_type.is_none();
+        if body_failed {
             self.abort.abort();
         }
-        let task = self.task.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Ensure task is awaited/aborted.
-            let mut guard = task.lock().await;
-            if let Some(join_handle) = guard.take() {
-                // Wait for it to finish. Ignore errors — __aexit__ should be safe.
-                let _ = join_handle.await;
+            let mut state = state.lock().await;
+            if body_failed {
+                // Join cancelled work and release any unclaimed sandbox. The body error takes precedence.
+                if let PullSessionState::Creating(task) = &mut *state {
+                    let _ = task.await;
+                }
+                *state = PullSessionState::Consumed;
+            } else {
+                state.finish().await?;
             }
             Ok(false)
         })
     }
 
-    /// Await the task and return the Sandbox.
+    /// Claim the sandbox once, inside or after a successful progress scope.
     fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let task = self.task.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = task.lock().await;
-            if let Some(join_handle) = guard.take() {
-                let result = join_handle.await.map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("create task panicked: {e}"))
-                })?;
-                let sb = result.map_err(to_py_err)?;
-                Ok(PySandbox::from_rust(sb))
-            } else {
-                Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "result() already consumed",
-                ))
+            let mut state = state.lock().await;
+            state.finish().await?;
+            match std::mem::replace(&mut *state, PullSessionState::Consumed) {
+                PullSessionState::Ready(sandbox) => Ok(sandbox),
+                _ => Err(PyRuntimeError::new_err("result() already consumed")),
             }
         })
     }

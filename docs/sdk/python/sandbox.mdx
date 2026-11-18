@@ -1511,7 +1511,7 @@ Async iterator of pull progress events
 result()
 ```
 
-Await once to get the final running sandbox. A second call raises `RuntimeError`
+Claim the sandbox once, inside the block or after it exits successfully. Normal exit waits for creation and raises any creation failure you haven’t already observed. If the block raises, the session requests cancellation and propagates the block’s exception. A second `result()` call raises `RuntimeError`.
 
 <p className="msb-label">Returns</p>
 
@@ -1522,7 +1522,7 @@ session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
 async with session:
     async for event in session.progress:
         print(event)
-    sb = await session.result()
+sb = await session.result()
 ```
 
 ## Types
