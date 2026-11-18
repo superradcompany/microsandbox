@@ -393,6 +393,10 @@ pub struct OciSandboxDefaults {
 #[derive(ConfigPatch)]
 #[config_patch(serde)]
 pub struct RuntimeConfig {
+    /// Stage patch payloads with at most 64 MiB, 4096 entries, and 32 directory levels.
+    /// Reject symlinks and special copy sources. Defaults to false. Unix only.
+    pub bounded_patch_sources: bool,
+
     /// Buffered host writeback containment and pressure-sharing policy.
     pub block_writeback: BlockWritebackConfig,
 
@@ -883,6 +887,7 @@ mod tests {
                 "disable_metrics_sample": true
             },
             "runtime": {
+                "bounded_patch_sources": true,
                 "block_writeback": {"mode": "fixed", "per_disk_mib": 1280, "pool_mib": 5120},
                 "placement_profiles": {"latency": {
                     "numa": {"mode": "prefer_single"},

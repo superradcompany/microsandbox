@@ -664,6 +664,7 @@ impl LocalBackend {
                                 &config.spec.patches,
                                 &layer_erofs_paths,
                                 &preparation.at(&flat_patch_spool),
+                                self.config().runtime.bounded_patch_sources,
                             ),
                         )
                         .await
@@ -690,7 +691,11 @@ impl LocalBackend {
                             timing::measure(
                                 &timing_name,
                                 "patch_tree",
-                                build_upper_tree(&config.spec.patches, &layer_erofs_paths),
+                                build_upper_tree(
+                                    &config.spec.patches,
+                                    &layer_erofs_paths,
+                                    self.config().runtime.bounded_patch_sources,
+                                ),
                             )
                             .await?,
                         )
@@ -847,7 +852,12 @@ impl LocalBackend {
                 if !config.spec.patches.is_empty()
                     && !matches!(config.spec.image, RootfsSource::Oci(_))
                 {
-                    apply_patches(&config.spec.image, &config.spec.patches).await?;
+                    apply_patches(
+                        &config.spec.image,
+                        &config.spec.patches,
+                        self.config().runtime.bounded_patch_sources,
+                    )
+                    .await?;
                 }
 
                 crate::runtime::owned_volumes::prepare(

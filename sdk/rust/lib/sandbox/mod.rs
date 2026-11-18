@@ -34,6 +34,8 @@ mod modify;
 #[cfg(feature = "local")]
 mod patch;
 #[cfg(feature = "local")]
+mod patch_sources;
+#[cfg(feature = "local")]
 pub(crate) mod storage_preview;
 mod storage_recovery;
 #[cfg(all(feature = "local", windows))]
