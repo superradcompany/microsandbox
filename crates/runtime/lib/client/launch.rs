@@ -8,6 +8,8 @@
 //! network config and secret-bearing env out of `ps` and `/proc/<pid>/cmdline`
 //! — see issue #997.
 
+#[cfg(feature = "net")]
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use super::compat;
@@ -115,6 +117,11 @@ pub struct LaunchCapabilities {
     /// Sandbox-owned execution policy is installed and enforced by the runtime.
     #[serde(default)]
     pub exec_limits: bool,
+
+    /// The launch field `multi_tenant_nameservers` is honored by the runtime.
+    /// Older runtimes omit this capability.
+    #[serde(default)]
+    pub multi_tenant_nameservers: bool,
 }
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this sandbox.
@@ -276,6 +283,13 @@ pub struct LaunchConfig {
     #[cfg(feature = "net")]
     #[serde(default)]
     pub deployment_profile: DeploymentProfile,
+
+    /// Operator-selected upstream DNS resolvers for multi-tenant deployments.
+    /// Omitted for the built-in public resolvers, so runtimes that predate the
+    /// field keep accepting ordinary launches.
+    #[cfg(feature = "net")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_tenant_nameservers: Option<Vec<IpAddr>>,
 
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
@@ -485,6 +499,14 @@ impl LaunchConfig {
                 .secrets
                 .validate()
                 .map_err(|error| format!("invalid secret configuration: {error}"))?;
+        }
+        #[cfg(feature = "net")]
+        if config
+            .multi_tenant_nameservers
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            return Err("multi-tenant nameserver list must not be empty".into());
         }
         match (config.execution, config.checkpoint_restore.as_ref()) {
             (ExecutionIntent::Boot, None) => {}
@@ -733,6 +755,36 @@ mod tests {
             decode(encoded).unwrap().fs_state_limit_bytes,
             Some(64 * 1024 * 1024)
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn multi_tenant_nameservers_are_omitted_by_default_and_survive_the_handoff() {
+        let default = serde_json::to_value(LaunchConfig::default()).unwrap();
+        assert!(default.get("multi_tenant_nameservers").is_none());
+        assert_eq!(decode(default).unwrap().multi_tenant_nameservers, None);
+
+        let nameservers = vec!["9.9.9.9".parse().unwrap(), "2620:fe::fe".parse().unwrap()];
+        let config = LaunchConfig {
+            multi_tenant_nameservers: Some(nameservers.clone()),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            encoded["multi_tenant_nameservers"],
+            serde_json::json!(["9.9.9.9", "2620:fe::fe"])
+        );
+        assert_eq!(
+            decode(encoded).unwrap().multi_tenant_nameservers,
+            Some(nameservers)
+        );
+
+        let empty = LaunchConfig {
+            multi_tenant_nameservers: Some(Vec::new()),
+            ..Default::default()
+        };
+        let error = decode(serde_json::to_value(empty).unwrap()).unwrap_err();
+        assert!(error.contains("must not be empty"), "{error}");
     }
 
     #[test]

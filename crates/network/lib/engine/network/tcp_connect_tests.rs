@@ -125,6 +125,7 @@ async fn check_connect(ipv6: bool, listening: bool) {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         2,
         Default::default(),
+        None,
         HostRoutes {
             ipv4: true,
             ipv6: true,
@@ -255,6 +256,7 @@ async fn check_stalled_ipv6_fallback() {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         2,
         Default::default(),
+        None,
         HostRoutes {
             ipv4: true,
             ipv6: true,

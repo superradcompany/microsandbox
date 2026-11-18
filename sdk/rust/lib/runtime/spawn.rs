@@ -329,6 +329,13 @@ impl LocalBackend {
         launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
+        #[cfg(feature = "net")]
+        launch_contract::validate_multi_tenant_nameservers(
+            &resolved_runtime.msb_path,
+            config,
+            global,
+        )
+        .await?;
         launch_contract::validate_nested_virt(&resolved_runtime.msb_path, config, launch_contract)
             .await?;
         if config.checkpoint_restore.as_ref().is_some_and(|restore| {
@@ -2323,6 +2330,10 @@ fn machine_cli_args(
         }),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
+        #[cfg(feature = "net")]
+        multi_tenant_nameservers: local
+            .config()
+            .multi_tenant_nameservers(config.spec.deployment_profile),
         bootstrap: guest_bootstrap(config),
         ..Default::default()
     };

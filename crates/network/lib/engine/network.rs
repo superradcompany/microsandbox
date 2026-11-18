@@ -5,8 +5,7 @@
 //! type the runtime creates from config, wires into the VM builder, and starts
 //! the networking stack.
 
-use std::env::{self, VarError};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -44,18 +43,16 @@ const DEFAULT_MULTI_TENANT_MAX_TCP_CONNECTIONS: NonZeroUsize = NonZeroUsize::new
 /// Default UDP cap for multi-tenant deployments; explicit settings override it.
 const DEFAULT_MULTI_TENANT_MAX_UDP_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
-/// Host environment variable that lets the operator choose the upstream DNS
-/// resolvers for multi-tenant deployments, as a comma-separated list of
-/// `IP` or `IP:PORT` entries. Sandbox configuration cannot change it.
-pub const MULTI_TENANT_NAMESERVERS_ENV: &str = "MSB_MULTI_TENANT_NAMESERVERS";
-
 /// Public resolvers used by multi-tenant deployments unless the operator
 /// overrides them. Multi-tenant sandboxes never use the host's own resolvers,
 /// which may answer for private infrastructure names.
-const DEFAULT_MULTI_TENANT_NAMESERVERS: [SocketAddr; 2] = [
-    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 53)),
-    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 0, 0, 1), 53)),
+const DEFAULT_MULTI_TENANT_NAMESERVERS: [IpAddr; 2] = [
+    IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+    IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
 ];
+
+/// Port used for multi-tenant upstream resolvers.
+const MULTI_TENANT_DNS_PORT: u16 = 53;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -154,14 +151,9 @@ pub enum NetworkInitError {
     #[error("invalid network rate limiter: at least one of egress or ingress is required")]
     EmptyNetworkRateLimiter,
 
-    /// The operator's multi-tenant DNS resolver setting is invalid.
-    #[error(
-        "invalid {MULTI_TENANT_NAMESERVERS_ENV} value {value:?}: expected a comma-separated list of IP or IP:PORT entries"
-    )]
-    InvalidMultiTenantNameservers {
-        /// Raw value of the setting.
-        value: String,
-    },
+    /// The operator supplied an empty multi-tenant DNS resolver list.
+    #[error("multi-tenant nameserver list must not be empty")]
+    EmptyMultiTenantNameservers,
 }
 
 /// Handle for installing host-side termination behavior into the network stack.
@@ -286,6 +278,10 @@ impl SmoltcpNetwork {
     /// remains separate and is intersected with the platform's public-network
     /// policy by the poll loop.
     ///
+    /// `multi_tenant_nameservers` is the operator's upstream DNS resolver list
+    /// for `MultiTenant`; `None` selects the built-in public resolvers. It is
+    /// ignored for `SingleTenant`.
+    ///
     /// # Errors
     ///
     /// Returns an error when the effective network configuration would allocate
@@ -294,26 +290,25 @@ impl SmoltcpNetwork {
         config: ResolvedNetworkConfig,
         slot: u16,
         deployment_profile: DeploymentProfile,
+        multi_tenant_nameservers: Option<&[IpAddr]>,
     ) -> Result<Self, NetworkInitError> {
-        Self::build(config, slot, deployment_profile, HostRoutes::detect())
+        Self::build(
+            config,
+            slot,
+            deployment_profile,
+            multi_tenant_nameservers,
+            HostRoutes::detect(),
+        )
     }
 
     fn build(
         mut config: ResolvedNetworkConfig,
         slot: u16,
         deployment_profile: DeploymentProfile,
+        multi_tenant_nameservers: Option<&[IpAddr]>,
         host_routes: HostRoutes,
     ) -> Result<Self, NetworkInitError> {
-        let operator_nameservers = if deployment_profile == DeploymentProfile::MultiTenant {
-            operator_multi_tenant_nameservers()?
-        } else {
-            None
-        };
-        enforce_deployment_profile(
-            &mut config,
-            deployment_profile,
-            operator_nameservers.as_deref(),
-        )?;
+        enforce_deployment_profile(&mut config, deployment_profile, multi_tenant_nameservers)?;
         let platform_policy = Self::platform_policy(deployment_profile);
         let resolved_config = config;
         let config = resolved_config.config();
@@ -764,11 +759,11 @@ impl MetricsHandle {
 /// broad tenant allow can never outrank the platform floor, while a tenant deny
 /// still remains effective.
 ///
-/// `operator_nameservers` is the operator's raw resolver setting, if any.
+/// `operator_nameservers` is the operator's resolver list, if any.
 fn enforce_deployment_profile(
     config: &mut ResolvedNetworkConfig,
     profile: DeploymentProfile,
-    operator_nameservers: Option<&str>,
+    operator_nameservers: Option<&[IpAddr]>,
 ) -> Result<(), NetworkInitError> {
     if profile == DeploymentProfile::SingleTenant {
         return Ok(());
@@ -826,47 +821,22 @@ fn enforce_deployment_profile(
     Ok(())
 }
 
-/// Read the operator's multi-tenant resolver setting from the environment.
-///
-/// A value that is not valid Unicode is an error rather than "unset", so a
-/// mistyped setting never silently selects the defaults.
-fn operator_multi_tenant_nameservers() -> Result<Option<String>, NetworkInitError> {
-    match env::var(MULTI_TENANT_NAMESERVERS_ENV) {
-        Ok(value) => Ok(Some(value)),
-        Err(VarError::NotPresent) => Ok(None),
-        Err(VarError::NotUnicode(value)) => Err(NetworkInitError::InvalidMultiTenantNameservers {
-            value: value.to_string_lossy().into_owned(),
-        }),
-    }
-}
-
 /// Resolve the upstream DNS resolvers for a multi-tenant deployment.
 ///
-/// `operator_value` is the raw operator setting, if any. Only literal IP
+/// `operator_nameservers` is the operator's resolver list, if any. Only IP
 /// addresses are accepted so resolver selection never depends on host DNS.
 fn multi_tenant_nameservers(
-    operator_value: Option<&str>,
+    operator_nameservers: Option<&[IpAddr]>,
 ) -> Result<Vec<Nameserver>, NetworkInitError> {
-    let Some(value) = operator_value else {
-        return Ok(DEFAULT_MULTI_TENANT_NAMESERVERS
-            .into_iter()
-            .map(Nameserver::Addr)
-            .collect());
-    };
-
-    let invalid = || NetworkInitError::InvalidMultiTenantNameservers {
-        value: value.to_owned(),
-    };
-
-    let mut nameservers = Vec::new();
-    for entry in value.split(',') {
-        match entry.parse::<Nameserver>() {
-            Ok(nameserver @ Nameserver::Addr(_)) => nameservers.push(nameserver),
-            _ => return Err(invalid()),
-        }
+    let addresses = operator_nameservers.unwrap_or(&DEFAULT_MULTI_TENANT_NAMESERVERS);
+    if addresses.is_empty() {
+        return Err(NetworkInitError::EmptyMultiTenantNameservers);
     }
 
-    Ok(nameservers)
+    Ok(addresses
+        .iter()
+        .map(|ip| Nameserver::Addr(SocketAddr::new(*ip, MULTI_TENANT_DNS_PORT)))
+        .collect())
 }
 
 /// Derive a guest MAC address from the sandbox slot.
@@ -1012,6 +982,7 @@ mod tests {
             resolved(source_config),
             7,
             DeploymentProfile::SingleTenant,
+            None,
             routes(true, true),
         )
         .unwrap();
@@ -1024,6 +995,7 @@ mod tests {
                 resolved(config.clone()),
                 slot,
                 DeploymentProfile::SingleTenant,
+                None,
                 routes(true, true),
             )
             .unwrap()
@@ -1045,6 +1017,7 @@ mod tests {
                 resolved(NetworkConfig::default()),
                 8,
                 DeploymentProfile::SingleTenant,
+                None,
                 routes(true, true),
             )
             .unwrap();
@@ -1061,6 +1034,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            None,
             routes(true, false),
         )
         .unwrap();
@@ -1144,17 +1118,18 @@ mod tests {
 
     #[test]
     fn multi_tenant_profile_uses_operator_nameservers() {
-        let mut overridden = resolved(NetworkConfig::default());
-        enforce_deployment_profile(
-            &mut overridden,
-            DeploymentProfile::MultiTenant,
-            Some("9.9.9.9"),
-        )
-        .unwrap();
+        let operator = ["9.9.9.9".parse().unwrap(), "2620:fe::fe".parse().unwrap()];
+        let mut config = resolved(NetworkConfig::default());
+
+        enforce_deployment_profile(&mut config, DeploymentProfile::MultiTenant, Some(&operator))
+            .unwrap();
 
         assert_eq!(
-            overridden.config().dns.nameservers,
-            vec!["9.9.9.9:53".parse::<Nameserver>().unwrap()]
+            config.config().dns.nameservers,
+            vec![
+                "9.9.9.9:53".parse::<Nameserver>().unwrap(),
+                "[2620:fe::fe]:53".parse::<Nameserver>().unwrap(),
+            ]
         );
     }
 
@@ -1172,34 +1147,13 @@ mod tests {
     }
 
     #[test]
-    fn multi_tenant_nameservers_accept_operator_ip_literals() {
-        let nameservers =
-            multi_tenant_nameservers(Some("9.9.9.9, 149.112.112.112:5353,[2620:fe::fe]:53"))
-                .unwrap();
+    fn multi_tenant_nameservers_reject_an_empty_operator_list() {
+        let result = multi_tenant_nameservers(Some(&[]));
 
-        assert_eq!(
-            nameservers,
-            vec![
-                "9.9.9.9:53".parse::<Nameserver>().unwrap(),
-                "149.112.112.112:5353".parse::<Nameserver>().unwrap(),
-                "[2620:fe::fe]:53".parse::<Nameserver>().unwrap(),
-            ]
-        );
-    }
-
-    #[test]
-    fn multi_tenant_nameservers_reject_invalid_operator_values() {
-        for value in ["", " ", "1.1.1.1,", "dns.google", "1.1.1.1,dns.google:53"] {
-            let result = multi_tenant_nameservers(Some(value));
-
-            assert!(
-                matches!(
-                    result,
-                    Err(NetworkInitError::InvalidMultiTenantNameservers { .. })
-                ),
-                "{value:?} should be rejected"
-            );
-        }
+        assert!(matches!(
+            result,
+            Err(NetworkInitError::EmptyMultiTenantNameservers)
+        ));
     }
 
     #[test]
@@ -1399,6 +1353,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            None,
             routes(true, false),
         )
         .unwrap();
@@ -1419,6 +1374,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            None,
             routes(true, true),
         )
         .unwrap();
@@ -1438,6 +1394,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            None,
             routes(true, false),
         )
         .unwrap();
@@ -1452,6 +1409,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            None,
             routes(false, true),
         )
         .unwrap();
@@ -1471,6 +1429,7 @@ mod tests {
             resolved(config),
             0,
             DeploymentProfile::SingleTenant,
+            None,
             routes(true, false),
         )
         .unwrap();
@@ -1557,7 +1516,8 @@ mod tests {
                     host_bind,
                 });
             }
-            let network = SmoltcpNetwork::build(resolved(config), 7, profile, host_routes).unwrap();
+            let network =
+                SmoltcpNetwork::build(resolved(config), 7, profile, None, host_routes).unwrap();
             let bootstrap = network.guest_bootstrap_network();
 
             assert_eq!(bootstrap.ipv4.is_some(), expected_ipv4);
@@ -1580,6 +1540,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            None,
             routes(false, false),
         )
         .unwrap();
@@ -1596,6 +1557,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             7,
             DeploymentProfile::SingleTenant,
+            None,
             routes(true, true),
         )
         .unwrap();
@@ -1616,6 +1578,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            None,
             routes(false, false),
         )
         .unwrap();
@@ -1636,6 +1599,7 @@ mod tests {
                 resolved(config),
                 0,
                 DeploymentProfile::MultiTenant,
+                None,
                 routes(true, false),
             );
             assert!(net.is_ok(), "large explicit cap should allow startup");
@@ -1662,6 +1626,7 @@ mod tests {
             resolved(config),
             0,
             DeploymentProfile::SingleTenant,
+            None,
             routes(true, false),
         ) {
             Ok(_) => panic!("empty rate limiter should fail"),

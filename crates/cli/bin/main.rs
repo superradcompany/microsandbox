@@ -321,6 +321,7 @@ fn main() {
                         microsandbox_runtime::nested_virt_supported().unwrap_or(false)
                     ),
                     exec_limits: true,
+                    multi_tenant_nameservers: cfg!(feature = "net"),
                 })
                 .expect("serialize capabilities")
             );

@@ -117,6 +117,9 @@ Use an absolute path to keep a location elsewhere. Programmatic SDK paths and en
   "snapshots": {
     "max_filesystem_state_mib": 4
   },
+  "network": {
+    "multi_tenant_nameservers": ["9.9.9.9", "149.112.112.112"]
+  },
   "active_profile": "prod",
   "profiles": {
     "prod": {
@@ -474,6 +477,16 @@ After changing it, restart running sandboxes to update their capture limit. Host
 When reading snapshots, allow enough space for each device's saved state. The reader does not need to match the capture host's maximum. A smaller limit rejects oversized state before making changes.
 
 Before raising it, consider memory use, especially when restoring imported snapshots. Raise it only for snapshots you trust.
+
+## `network`
+
+<Tooltip tip="Local runtime placement only; microsandbox cloud applies its own network settings."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `multi_tenant_nameservers` | `null` | Upstream DNS resolvers for [`multi-tenant`](#deployment_profile) sandboxes, as a list of IP addresses queried on port 53. `null` uses `1.1.1.1` and `1.0.0.1`. An empty list is invalid. Ignored for `single-tenant` sandboxes. |
+
+`multi-tenant` sandboxes never use the host's own resolvers, which may answer for private names. Choose resolvers that only answer public names. Sandboxes cannot override this setting. Restart running sandboxes to apply a change. An older runtime that cannot apply this setting refuses to start the sandbox.
 
 ## `profiles`
 

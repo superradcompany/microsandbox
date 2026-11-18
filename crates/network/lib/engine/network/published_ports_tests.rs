@@ -76,6 +76,7 @@ async fn start_fails_when_a_published_port_is_taken() {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         7,
         microsandbox_types::DeploymentProfile::SingleTenant,
+        None,
         HostRoutes {
             ipv4: false,
             ipv6: false,
@@ -123,6 +124,7 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         7,
         microsandbox_types::DeploymentProfile::SingleTenant,
+        None,
         HostRoutes {
             ipv4: false,
             ipv6: false,
