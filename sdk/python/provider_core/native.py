@@ -85,6 +85,14 @@ def default_binding():
         return _default_local
 
 
+def _mount_binding():
+    # Mount factories construct shared MountConfig values without opening a resource.
+    with _lock:
+        if "remote" in _loaders and "local" not in _loaders and _full_loader is None:
+            return binding("remote")
+        return binding("local")
+
+
 def _unwrap(value, owner):
     if isinstance(value, NativeObject):
         if value._provider is not owner:
@@ -149,6 +157,10 @@ class NativeType(type):
                 and cls._native_name in ("Sandbox", "Volume", "Snapshot")
             ):
                 owner = binding(name)
+            elif cls._native_name == "Volume" and name in (
+                "bind", "named", "owned", "tmpfs", "disk",
+            ):
+                owner = _mount_binding()
             else:
                 owner = default_binding()
             function = getattr(getattr(owner, cls._native_name), name)

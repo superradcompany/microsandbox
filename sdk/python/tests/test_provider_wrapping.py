@@ -16,7 +16,7 @@ def wrappers(monkeypatch):
     package.__path__ = []
     schema = ModuleType("_provider_test_core._schema")
     schema.VERSION = "test"
-    schema.CLASSES = {"Sandbox": ["__aenter__", "__aexit__"], "ForkOutcome": [],
+    schema.CLASSES = {"Sandbox": ["__aenter__", "__aexit__"], "ForkOutcome": [], "Volume": [],
                       "ExecHandle": ["__aiter__", "__anext__"], "ExecOutput": [], "Context": []}
     schema.FUNCTIONS = ["version"]
     monkeypatch.setitem(sys.modules, package.__name__, package)
@@ -147,3 +147,17 @@ def test_context_derivation_keeps_its_original_provider(wrappers, monkeypatch):
     assert derived._provider is native
     assert derived._inner.base is base._inner
     assert derived._inner.options == {"url": "https://derived.example"}
+
+
+def test_remote_only_volume_mount_factories_do_not_select_local_resources(wrappers):
+    core, register = wrappers
+    remote = register("remote")
+    factories = {"bind": ("/src",), "named": ("data",), "owned": (), "tmpfs": (), "disk": ("/img",)}
+    remote.Volume = type("Volume", (), {
+        name: staticmethod(lambda *args, **kwargs: (args, kwargs)) for name in factories
+    })
+    for name, args in factories.items():
+        assert getattr(core.Volume, name)(*args, readonly=True) == (args, {"readonly": True})
+
+    with pytest.raises(ImportError, match="microsandbox-local"):
+        core.Volume.get("data")
