@@ -327,6 +327,7 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 | Field | Default | Description |
 |-------|---------|-------------|
+| `strict_host_files` | `false` | Reject symlinks in SDK log-reader and disk-lock paths, including parent directories. Unix only. Strict paths cannot contain `..`. Existing symlinked paths keep working when disabled. |
 | `block_writeback` | `{ "mode": "auto" }` | Buffered host writeback containment and live pressure sharing on Linux. Pool pressure never rejects sandbox creation; unconfigured `auto` is a no-op on other hosts. |
 | `placement_profiles` | `{}` | Host-owned named CPU and NUMA placement profiles selectable by sandboxes |
 

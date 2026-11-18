@@ -32,12 +32,22 @@ use crate::backend::sandbox::LogStream;
 pub struct SandboxLogger {
     name: String,
     log_dir: PathBuf,
+    strict_host_files: bool,
 }
 
 impl SandboxLogger {
     /// Construct a logger for a named sandbox rooted at `log_dir`.
     pub(crate) fn new(name: String, log_dir: PathBuf) -> Self {
-        Self { name, log_dir }
+        Self {
+            name,
+            log_dir,
+            strict_host_files: false,
+        }
+    }
+
+    pub(crate) fn with_strict_host_files(mut self, strict: bool) -> Self {
+        self.strict_host_files = strict;
+        self
     }
 
     /// The sandbox name this logger reads.
@@ -57,13 +67,25 @@ impl SandboxLogger {
 
     /// Read a chronologically sorted log snapshot plus its end cursor.
     pub async fn read_snapshot(&self, opts: &LogOptions) -> MicrosandboxResult<LogSnapshot> {
-        super::read_logs_snapshot_from_dir(&self.name, self.log_dir.clone(), opts).await
+        super::read_logs_snapshot_from_dir(
+            &self.name,
+            self.log_dir.clone(),
+            opts,
+            self.strict_host_files,
+        )
+        .await
     }
 
     /// Stream log entries. When `opts.follow` is set, each stream owns a
     /// private filesystem watcher (the standalone behavior).
     pub async fn stream(&self, opts: &LogStreamOptions) -> MicrosandboxResult<LogStream> {
-        let stream = super::log_stream_from_dir(&self.name, self.log_dir.clone(), opts).await?;
+        let stream = super::log_stream_from_dir(
+            &self.name,
+            self.log_dir.clone(),
+            opts,
+            self.strict_host_files,
+        )
+        .await?;
         Ok(Box::pin(stream) as LogStream)
     }
 }
@@ -125,6 +147,7 @@ impl RegisteredSandboxLogger {
             self.logger.log_dir.clone(),
             opts,
             subscription,
+            self.logger.strict_host_files,
         )
         .await?;
         Ok(Box::pin(stream) as LogStream)

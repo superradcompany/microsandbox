@@ -222,7 +222,13 @@ pub(crate) async fn read_logs_snapshot_local(
     name: &str,
     opts: &LogOptions,
 ) -> MicrosandboxResult<LogSnapshot> {
-    read_logs_snapshot_from_dir(name, log_dir_for_local(local, name), opts).await
+    read_logs_snapshot_from_dir(
+        name,
+        log_dir_for_local(local, name),
+        opts,
+        local.config().runtime.strict_host_files,
+    )
+    .await
 }
 
 /// Read all matching local log entries and return the snapshot end cursor.
@@ -232,7 +238,7 @@ pub(crate) async fn read_logs_snapshot_local(
 /// lines written between the snapshot drain and follow startup.
 #[cfg(feature = "local")]
 pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogSnapshot> {
-    read_logs_snapshot_from_dir(name, log_dir_for(name), opts).await
+    read_logs_snapshot_from_dir(name, log_dir_for(name), opts, default_strict_host_files()).await
 }
 
 #[cfg(feature = "local")]
@@ -240,6 +246,7 @@ async fn read_logs_snapshot_from_dir(
     name: &str,
     log_dir: PathBuf,
     opts: &LogOptions,
+    strict_host_files: bool,
 ) -> MicrosandboxResult<LogSnapshot> {
     crate::sandbox::validate_sandbox_name(name)?;
     let stream_opts = LogStreamOptions {
@@ -261,6 +268,7 @@ async fn read_logs_snapshot_from_dir(
         &stream_opts.start,
         stream_opts.until,
         stream_opts.follow,
+        strict_host_files,
     )
     .await?;
     let (mut entries, cursor) = engine.drain_sorted_snapshot().await?;
@@ -280,7 +288,7 @@ pub async fn log_stream(
     name: &str,
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
-    log_stream_from_dir(name, log_dir_for(name), opts).await
+    log_stream_from_dir(name, log_dir_for(name), opts, default_strict_host_files()).await
 }
 
 /// Stream log entries through an explicit local backend.
@@ -290,7 +298,13 @@ pub(crate) async fn log_stream_local(
     name: &str,
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
-    log_stream_from_dir(name, log_dir_for_local(local, name), opts).await
+    log_stream_from_dir(
+        name,
+        log_dir_for_local(local, name),
+        opts,
+        local.config().runtime.strict_host_files,
+    )
+    .await
 }
 
 #[cfg(feature = "local")]
@@ -298,6 +312,7 @@ async fn log_stream_from_dir(
     name: &str,
     log_dir: PathBuf,
     opts: &LogStreamOptions,
+    strict_host_files: bool,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     crate::sandbox::validate_sandbox_name(name)?;
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
@@ -311,6 +326,7 @@ async fn log_stream_from_dir(
         &opts.start,
         opts.until,
         opts.follow,
+        strict_host_files,
     )
     .await?;
     Ok(engine.into_stream())
@@ -326,6 +342,7 @@ pub(crate) async fn log_stream_from_dir_registry(
     log_dir: PathBuf,
     opts: &LogStreamOptions,
     subscription: watch::LogSubscription,
+    strict_host_files: bool,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     crate::sandbox::validate_sandbox_name(name)?;
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
@@ -339,7 +356,15 @@ pub(crate) async fn log_stream_from_dir_registry(
         &opts.start,
         opts.until,
         subscription,
+        strict_host_files,
     )
     .await?;
     Ok(engine.into_stream())
+}
+
+#[cfg(feature = "local")]
+fn default_strict_host_files() -> bool {
+    crate::backend::default_backend()
+        .as_local()
+        .is_some_and(|local| local.config().runtime.strict_host_files)
 }
