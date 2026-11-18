@@ -58,7 +58,7 @@ async fn named_volume_mounts_reuse_or_create_once_before_sandbox_create() {
         )];
         if !existing {
             replies.push(if race {
-                reply(409, json!({"error": {"message": "volume already exists"}}))
+                reply(409, json!({"error": {"code": "name_already_exists", "message": "volume already exists"}}))
             } else {
                 reply(201, volume())
             });
