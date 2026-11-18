@@ -7,6 +7,8 @@ icon: "triangle-exclamation"
 
 Use typed errors to handle specific failures without parsing messages. The examples show each SDK’s matching and cleanup conventions.
 
+TypeScript exposes native failures such as `SnapshotNotFoundError`, `ExecFailedError` and `InvalidCursorError` as subclasses of `MicrosandboxError`. Each retains its code and original cause.
+
 ## Matching errors
 
 <CodeGroup>

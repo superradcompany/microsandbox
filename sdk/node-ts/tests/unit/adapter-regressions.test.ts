@@ -1,10 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { AttachOptionsBuilder, ExecOptionsBuilder, NetworkBuilder, NetworkPolicy, Sandbox, SecretBuilder, TlsBuilder, RootDiskBuilder } from "../../dist/index.js";
+import { AttachOptionsBuilder, ExecOptionsBuilder, NetworkBuilder, NetworkBuilderError, NetworkPolicy, Sandbox, SecretBuilder, TlsBuilder, RootDiskBuilder } from "../../dist/index.js";
 import { remapKeysToCamel } from "../../dist/internal/config.js";
 
 const invalidNumbers = [-1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1];
 
 describe("adapter security regressions", () => {
+  it.each(["exec", "execStream", "execDetached", "attach"] as const)(
+    "%s rejects a bare argv string before native dispatch",
+    async method => {
+      for (const args of ["", "hello"]) {
+        await expect(Sandbox.prototype[method].call({}, "echo", args)).rejects.toThrow(/arguments as a list/);
+      }
+    },
+  );
+
+  it("rejects malformed secrets through the public builder error type", () => {
+    const secret = new SecretBuilder().env("TOKEN").value("private").allow("*");
+    expect(() => secret.build()).toThrow(NetworkBuilderError);
+    expect(() => secret.env("OTHER")).toThrow(/consumed/);
+    expect(() => new NetworkBuilder().secret(s => s.env("TOKEN"))).toThrow(NetworkBuilderError);
+  });
+
   it("preserves accumulated network restrictions across callbacks", async () => {
     const config = await Sandbox.builder("adapter-network").image("alpine")
       .network(n => n.policy(NetworkPolicy.none()).maxTcpConnections(12)

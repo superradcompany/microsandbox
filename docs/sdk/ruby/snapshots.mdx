@@ -7,6 +7,15 @@ description: Capture and manage snapshots with the Ruby SDK.
 
 See [Snapshots](/sandboxes/snapshots) for capture behavior and compatibility. Ruby does not expose sandbox restore or full-capture options. See [forking availability](#forking).
 
+## Local group heads
+
+```ruby
+head = Microsandbox::Snapshot.group_head("work") # String or nil
+update = Microsandbox::Snapshot.set_group_head("work", checkpoint.id)
+```
+
+An existing group with no selected member returns `nil`. A missing group raises an error. The write returns a hash with the previous and selected IDs, reason and change flag. A context’s `snapshots` collection exposes both methods.
+
 ## Sandbox
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>

@@ -7280,7 +7280,9 @@ pub unsafe extern "C" fn msb_snapshot_group_head(
     run_c(cancel_id, buf, buf_len, || {
         let selector = unsafe { cstr(selector) }?;
         Ok(Box::pin(async move {
-            let update = Snapshot::group_head(&selector)
+            let update = microsandbox::context::default_local_context()
+                .snapshot_ops()
+                .group_head_selector(&selector)
                 .await
                 .map_err(FfiError::from)?;
             serde_json::to_string(&update)

@@ -9,7 +9,7 @@ use crate::{
     error::to_napi_error,
     sandbox::{JsSandboxPage, Sandbox, sandbox_page_to_js},
     sandbox_builder::JsSandboxBuilder,
-    snapshot::JsSnapshot,
+    snapshot::{JsHeadUpdate, JsSnapshot, head_update_to_js, parse_snapshot_id},
     snapshot_builder::JsSnapshotBuilder,
     types::SandboxListOptions,
     volume::JsVolume,
@@ -201,6 +201,28 @@ impl JsContext {
     pub fn snapshot_builder(&self, name: String) -> JsSnapshotBuilder {
         let builder = self.inner.snapshots().builder(&name);
         JsSnapshotBuilder::from_builder(name, builder)
+    }
+
+    #[napi]
+    pub async fn snapshot_group_head(&self, group: String) -> Result<Option<String>> {
+        self.inner
+            .snapshots()
+            .group_head(&group)
+            .await
+            .map(|head| head.map(|id| id.to_string()))
+            .map_err(to_napi_error)
+    }
+
+    #[napi]
+    pub async fn snapshot_set_group_head(&self, group: String, id: String) -> Result<JsHeadUpdate> {
+        let id = parse_snapshot_id(id)?;
+        let update = self
+            .inner
+            .snapshots()
+            .set_group_head(&group, &id)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(head_update_to_js(&update))
     }
 
     #[napi]

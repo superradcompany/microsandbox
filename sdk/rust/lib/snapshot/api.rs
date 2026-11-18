@@ -664,13 +664,22 @@ impl Snapshot {
             .load_many(backend.clone(), paths, opts)
             .await
     }
-    /// Read a group head, or explicitly select a qualified member.
-    pub async fn group_head(selector: &str) -> MicrosandboxResult<HeadUpdate> {
+    /// Read the selected snapshot ID. An existing headless group returns None.
+    pub async fn group_head(group: &str) -> MicrosandboxResult<Option<SnapshotId>> {
         crate::context::default_local_context()
-            .snapshot_ops()
-            .group_head(selector)
+            .snapshots()
+            .group_head(group)
             .await
     }
+
+    /// Select a member of the group by its stable ID.
+    pub async fn set_group_head(group: &str, id: &SnapshotId) -> MicrosandboxResult<HeadUpdate> {
+        crate::context::default_local_context()
+            .snapshots()
+            .set_group_head(group, id)
+            .await
+    }
+
     #[cfg(feature = "local")]
     /// Resolve a local physical layer, including the released flat-artifact binding.
     pub async fn layer_path(&self, layer: &DiskLayer) -> MicrosandboxResult<PathBuf> {

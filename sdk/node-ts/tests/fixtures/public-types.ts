@@ -15,6 +15,10 @@ export async function publicTypes(filters: JobOutputSource[]) {
   // @ts-expect-error The callback receives a network builder.
   builder.network(network => network.nonexistentMethod());
   const sandbox = await builder.create();
+  await sandbox.exec("echo", new Set(["hello"]));
+  await sandbox.attach("echo", ["hello"] as const);
+  // @ts-expect-error A string is a single argument, not an argv list.
+  await sandbox.execStream("echo", "hello");
   const config = await sandbox.config();
   const level: LogLevel | null = config.spec.runtime.logLevel;
   if (level) builder.logLevel(level);

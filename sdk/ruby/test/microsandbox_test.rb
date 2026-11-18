@@ -189,6 +189,21 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_equal "unsupported", error.code
   end
 
+  def test_secret_hash_rejects_unknown_keys_before_creation
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("invalid-secret", secrets: [
+        { env: "TOKEN", value: "private-value", allowed_host: "api.example", allow_host: "typo" }
+      ])
+    end
+    assert_match(/unknown keyword: :allow_host/, error.message)
+    assert_not_match(/private-value/, error.message)
+  end
+
+  def test_snapshot_head_read_rejects_member_selectors
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Snapshot.group_head("app:previous") }
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Snapshot.local.group_head("app:previous") }
+  end
+
   def test_snapshot_source_recovery_error_attributes_default_to_nil
     error = Microsandbox::SnapshotSourceRecoveryError.new("boom")
 

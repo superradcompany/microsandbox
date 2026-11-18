@@ -115,6 +115,8 @@ export declare class Context {
   volumeRemove(name: string): Promise<void>
   snapshotBuilder(name: string): JsSnapshotBuilder
   snapshotGet(reference: string): Promise<JsSnapshot>
+  snapshotGroupHead(group: string): Promise<string | null>
+  snapshotSetGroupHead(group: string, id: string): Promise<HeadUpdate>
   snapshotList(): Promise<Array<JsSnapshot>>
   snapshotRemove(reference: string, force: boolean): Promise<void>
 }
@@ -1636,11 +1638,7 @@ export declare class SecretBuilder {
   substituteInBody(enabled: boolean): this
   /** Configure the blocking action for this secret. */
   violationAction(action: string): this
-  /**
-   * Materialize into a `SecretEntry`. Panics if required fields are not
-   * set (matches the underlying Rust builder's contract; surface as a
-   * typed error here).
-   */
+  /** Validate the declaration and materialize a secret entry. */
   build(): SecretEntry
 }
 export type JsSecretBuilder = SecretBuilder
@@ -1682,8 +1680,8 @@ export declare class Snapshot {
   static loadWithOptions(archive: string, opts?: LoadOpts | undefined | null): Promise<Snapshot>
   /** Import archives together, resolving dependencies within the batch and destination group. */
   static loadMany(archives: Array<string>, opts?: LoadOpts | undefined | null): Promise<Array<Snapshot>>
-  /** Read a group's head, or select `group:member` as its head. */
-  static groupHead(selector: string): Promise<HeadUpdate>
+  static readGroupHead(group: string): Promise<string | null>
+  static setGroupHead(group: string, id: string): Promise<HeadUpdate>
   /** Deprecated: use `reference`. Throws when no local filesystem path exists. */
   get path(): string
   get reference(): string

@@ -3,6 +3,7 @@
 use std::{cell::RefCell, sync::Arc};
 
 use magnus::{Error, RModule, Ruby, Value, function, method, prelude::*, typed_data};
+use microsandbox_core::snapshot::HeadUpdateReason;
 use microsandbox_core::{Context, SnapshotBuilder};
 
 use crate::{RubySandbox, RubySandboxBuilder, RubySnapshot, RubyVolume, RubyVolumeBuilder};
@@ -170,6 +171,45 @@ impl RubyVolumes {
 }
 
 impl RubySnapshots {
+    fn group_head(ruby: &Ruby, this: &Self, group: String) -> Result<Option<String>, Error> {
+        let collection = this.inner.snapshots();
+        Ok(
+            crate::run(ruby, async move { collection.group_head(&group).await })?
+                .map(|id| id.to_string()),
+        )
+    }
+
+    fn set_group_head(
+        ruby: &Ruby,
+        this: &Self,
+        group: String,
+        id: String,
+    ) -> Result<magnus::RHash, Error> {
+        let collection = this.inner.snapshots();
+        let id = microsandbox_core::snapshot::SnapshotId::new(id)
+            .map_err(|e| crate::argument_error(ruby, e.to_string()))?;
+        let update = crate::run(
+            ruby,
+            async move { collection.set_group_head(&group, &id).await },
+        )?;
+        let result = ruby.hash_new();
+        result.aset("group", update.group)?;
+        result.aset("previous", update.previous)?;
+        result.aset("head", update.head)?;
+        let reason = match update.reason {
+            HeadUpdateReason::Initialized => "initialized",
+            HeadUpdateReason::FastForwarded => "fast_forwarded",
+            HeadUpdateReason::Selected => "selected",
+            HeadUpdateReason::Unchanged => "unchanged",
+            HeadUpdateReason::Diverged => "diverged",
+            HeadUpdateReason::UnknownAncestry => "unknown_ancestry",
+            HeadUpdateReason::AmbiguousCandidates => "ambiguous_candidates",
+        };
+        result.aset("reason", ruby.to_symbol(reason))?;
+        result.aset("changed", update.changed)?;
+        Ok(result)
+    }
+
     fn context(&self) -> RubyContext {
         RubyContext {
             inner: self.inner.clone(),
@@ -335,6 +375,8 @@ pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     collection.define_method("context", method!(RubySnapshots::context, 0))?;
     collection.define_method("builder", method!(RubySnapshots::builder, 1))?;
     collection.define_method("open", method!(RubySnapshots::open, -1))?;
+    collection.define_method("group_head", method!(RubySnapshots::group_head, 1))?;
+    collection.define_method("set_group_head", method!(RubySnapshots::set_group_head, 2))?;
     collection.define_method("get", method!(RubySnapshots::get, -1))?;
     collection.define_method("list", method!(RubySnapshots::list, -1))?;
     collection.define_method("remove", method!(RubySnapshots::remove, -1))?;

@@ -50,6 +50,8 @@ wrapMethodWithErrorMap(napi.SandboxBuilder, "create");
 wrapMethodWithErrorMap(napi.PatchBuilder, "build");
 wrapMethodWithErrorMap(napi.DnsBuilder, "build");
 wrapMethodWithErrorMap(napi.SecretBuilder, "build");
+wrapMethodWithErrorMap(napi.NetworkBuilder, "secret");
+wrapMethodWithErrorMap(napi.SandboxBuilder, "secret");
 wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
 
 // `SandboxBuilder.build()` natively returns the JSON-serialized config

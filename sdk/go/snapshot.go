@@ -352,9 +352,17 @@ func (s *Snapshots) LoadWithOptions(ctx context.Context, archive string, opts Sn
 func (s *Snapshots) LoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*Snapshot, error) {
 	return s.operation(ctx, "snapshot_load", "", map[string]any{"archives": archives, "options": ffi.SnapshotLoadOptions{Dest: opts.Dest, Base: opts.Base, Group: opts.Group, SetHead: opts.SetHead}})
 }
-func (s *Snapshots) GroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
+func (s *Snapshots) GroupHead(ctx context.Context, group string) (*string, error) {
+	var id *string
+	if err := s.request(ctx, "snapshot_read_group_head", group, nil, &id); err != nil {
+		return nil, err
+	}
+	return id, nil
+}
+
+func (s *Snapshots) SetGroupHead(ctx context.Context, group, id string) (*SnapshotHeadUpdate, error) {
 	var result ffi.SnapshotHeadUpdate
-	if err := s.request(ctx, "snapshot_group_head", selector, nil, &result); err != nil {
+	if err := s.request(ctx, "snapshot_set_group_head", group, map[string]string{"id": id}, &result); err != nil {
 		return nil, err
 	}
 	return snapshotHeadUpdateFromInfo(&result), nil
@@ -454,12 +462,20 @@ func LoadSnapshots(ctx context.Context, archives []string, opts SnapshotLoadOpti
 	}
 	return local.Snapshots().LoadMany(ctx, archives, opts)
 }
-func SnapshotGroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
+func SnapshotGroupHead(ctx context.Context, group string) (*string, error) {
 	local, err := defaultLocalContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Snapshots().GroupHead(ctx, selector)
+	return local.Snapshots().GroupHead(ctx, group)
+}
+
+func SetSnapshotGroupHead(ctx context.Context, group, id string) (*SnapshotHeadUpdate, error) {
+	local, err := defaultLocalContext()
+	if err != nil {
+		return nil, err
+	}
+	return local.Snapshots().SetGroupHead(ctx, group, id)
 }
 
 func snapshotHeadUpdateFromInfo(update *ffi.SnapshotHeadUpdate) *SnapshotHeadUpdate {

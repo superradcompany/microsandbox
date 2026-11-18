@@ -192,8 +192,12 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 		t.Fatalf("Snapshot.Create missing group head outcome: %#v", update)
 	}
 	head, err := microsandbox.SnapshotGroupHead(ctx, baseName)
-	if err != nil || head.Head != artifact.ID() {
+	if err != nil || head == nil || *head != artifact.ID() {
 		t.Fatalf("Snapshot.GroupHead = %#v, err = %v", head, err)
+	}
+	update, err = microsandbox.SetSnapshotGroupHead(ctx, baseName, artifact.ID())
+	if err != nil || update == nil || update.Head != artifact.ID() || update.Changed {
+		t.Fatalf("SetSnapshotGroupHead on current head = %#v, err = %v", update, err)
 	}
 	t.Cleanup(func() { removeSnapshotBestEffort(snapshotDir) })
 

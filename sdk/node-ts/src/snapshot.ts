@@ -261,9 +261,12 @@ export class Snapshot {
     return raw.map((handle) => new Snapshot(handle));
   }
 
-  /** Read a group's head, or select `group:member` as its head. */
-  static async groupHead(selector: string): Promise<HeadUpdate> {
-    const update = await withMappedErrors(() => napi.Snapshot.groupHead(selector));
+  static async groupHead(group: string): Promise<string | null> {
+    return (await withMappedErrors(() => napi.Snapshot.readGroupHead(group))) ?? null;
+  }
+
+  static async setGroupHead(group: string, id: string): Promise<HeadUpdate> {
+    const update = await withMappedErrors(() => napi.Snapshot.setGroupHead(group, id));
     return { ...update, previous: update.previous ?? null };
   }
 

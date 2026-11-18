@@ -480,10 +480,11 @@ Import archives as one batch. Returns handles in input order. Dependencies resol
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">group_head()</span>
 
 ```python
-async def group_head(selector: str) -> dict[str, str | bool | None]
+async def group_head(group: str) -> str | None
+async def set_group_head(group: str, id: str) -> dict[str, str | bool | None]
 ```
 
-Read a group’s head, or select an exact member with `group:member`. Returns the group, previous and current snapshot IDs, reason, and whether the head changed. See [group selection](/sandboxes/snapshots#snapshot-groups).
+Read the selected ID from a local group, or explicitly set it to an installed member’s stable ID. A headless group returns an absent ID. A missing group or qualified group name raises an error. The write returns the previous and current IDs, reason and change flag. See [group selection](/sandboxes/snapshots#snapshot-groups).
 
 <span id="snapshot-groups" />
 

@@ -292,9 +292,31 @@ async fn persistent_operation(
                     .to_string(),
             );
         }
+        "snapshot_read_group_head" => {
+            let head = context.snapshots().group_head(&request.name).await?;
+            return Ok(serde_json::json!(head.map(|id| id.to_string())).to_string());
+        }
+        "snapshot_set_group_head" => {
+            let id = request.args["id"]
+                .as_str()
+                .ok_or_else(|| FfiError::invalid_argument("missing snapshot ID"))?;
+            let id = microsandbox::snapshot::SnapshotId::new(id)
+                .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
+            let update = context
+                .snapshots()
+                .set_group_head(&request.name, &id)
+                .await?;
+            return serde_json::to_string(&update).map_err(|e| FfiError::internal(e.to_string()));
+        }
+        // Previous Go SDKs use this operation for both selector forms.
         "snapshot_group_head" => {
-            return serde_json::to_string(&context.snapshot_ops().group_head(&request.name).await?)
-                .map_err(|e| FfiError::internal(e.to_string()));
+            return serde_json::to_string(
+                &context
+                    .snapshot_ops()
+                    .group_head_selector(&request.name)
+                    .await?,
+            )
+            .map_err(|e| FfiError::internal(e.to_string()));
         }
         "snapshot_create_archive" => {
             let opts: super::SnapshotCreateOpts =

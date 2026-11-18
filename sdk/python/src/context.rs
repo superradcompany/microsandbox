@@ -354,6 +354,18 @@ impl PyVolumes {
 
 #[pymethods]
 impl PySnapshots {
+    fn group_head<'py>(&self, py: Python<'py>, group: String) -> PyResult<Bound<'py, PyAny>> {
+        crate::snapshot::group_head_in(self.inner.clone(), py, group)
+    }
+    fn set_group_head<'py>(
+        &self,
+        py: Python<'py>,
+        group: String,
+        id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        crate::snapshot::set_group_head_in(self.inner.clone(), py, group, id)
+    }
+
     #[getter]
     fn context(&self) -> PyContext {
         PyContext {

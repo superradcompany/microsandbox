@@ -967,8 +967,14 @@ impl SandboxBuilder {
     ///
     /// Automatically enables TLS interception if not already enabled.
     #[cfg(feature = "net")]
-    pub fn secret(self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
-        self.secret_entry(f(SecretBuilder::new()).build())
+    pub fn secret(mut self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
+        match f(SecretBuilder::new()).build() {
+            Ok(entry) => self.secret_entry(entry),
+            Err(error) => {
+                self.build_error.get_or_insert_with(|| error.into());
+                self
+            }
+        }
     }
 
     /// Add a materialized secret entry.
@@ -5831,6 +5837,14 @@ mod tests {
     #[cfg(feature = "net")]
     #[tokio::test]
     async fn test_builder_rejects_invalid_secret_config() {
+        let error = SandboxBuilder::new("test")
+            .image("alpine")
+            .secret(|secret| secret.env("TOKEN").value("redacted"))
+            .build()
+            .await
+            .unwrap_err();
+        assert!(matches!(error, crate::MicrosandboxError::NetworkBuilder(_)));
+
         let err = SandboxBuilder::new("test")
             .image("alpine")
             .secret_entry(SecretEntry {

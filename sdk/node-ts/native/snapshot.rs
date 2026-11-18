@@ -209,10 +209,18 @@ impl JsSnapshot {
         Ok(handles.into_iter().map(JsSnapshot::from_rust).collect())
     }
 
-    /// Read a group's head, or select `group:member` as its head.
-    #[napi(js_name = "groupHead")]
-    pub async fn group_head(selector: String) -> Result<JsHeadUpdate> {
-        let update = RustSnapshot::group_head(&selector)
+    #[napi(js_name = "readGroupHead")]
+    pub async fn read_group_head(group: String) -> Result<Option<String>> {
+        RustSnapshot::group_head(&group)
+            .await
+            .map(|head| head.map(|id| id.to_string()))
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "setGroupHead")]
+    pub async fn set_group_head(group: String, id: String) -> Result<JsHeadUpdate> {
+        let id = parse_snapshot_id(id)?;
+        let update = RustSnapshot::set_group_head(&group, &id)
             .await
             .map_err(to_napi_error)?;
         Ok(head_update_to_js(&update))
@@ -485,7 +493,15 @@ fn format_scope(scope: RustSnapshotScope) -> &'static str {
     }
 }
 
-fn head_update_to_js(update: &microsandbox::snapshot::HeadUpdate) -> JsHeadUpdate {
+pub(crate) fn parse_snapshot_id(id: String) -> Result<microsandbox::snapshot::SnapshotId> {
+    microsandbox::snapshot::SnapshotId::new(id).map_err(|e| {
+        to_napi_error(microsandbox::MicrosandboxError::InvalidConfig(
+            e.to_string(),
+        ))
+    })
+}
+
+pub(crate) fn head_update_to_js(update: &microsandbox::snapshot::HeadUpdate) -> JsHeadUpdate {
     // Match the stable serde spelling without losing the closed reason variants.
     let reason = match update.reason {
         HeadUpdateReason::Initialized => "initialized",

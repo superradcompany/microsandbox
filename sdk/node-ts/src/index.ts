@@ -17,7 +17,7 @@ export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox, SandboxListBuilder } from "./sandbox.js";
-export type { RestoreBuilder } from "./sandbox.js";
+export type { CommandArgs, RestoreBuilder } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
 /**
  * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is
@@ -233,6 +233,19 @@ export function setRuntimeLibkrunfwPath(path: string): void {
 
 // Errors
 export {
+  AgentClientError,
+  BootStartError,
+  ExecFailedError,
+  InvalidCursorError,
+  MissedRotationError,
+  NetworkBuilderError,
+  SnapshotAlreadyExistsError,
+  SnapshotImageMissingError,
+  SnapshotIntegrityError,
+  SnapshotMigrationError,
+  SnapshotNotFoundError,
+  SnapshotSandboxRunningError,
+  WindowsHostSetupError,
   CustomError,
   CloudHttpError,
   DatabaseError,

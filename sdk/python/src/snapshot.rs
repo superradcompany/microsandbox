@@ -346,15 +346,19 @@ impl PySnapshot {
         })
     }
 
-    /// Read a group's head, or select `group:member` as its head.
     #[staticmethod]
-    fn group_head<'py>(py: Python<'py>, selector: String) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let update = RustSnapshot::group_head(&selector)
-                .await
-                .map_err(to_py_err)?;
-            Python::attach(|py| head_update_to_py(py, &update))
-        })
+    fn group_head(py: Python<'_>, group: String) -> PyResult<Bound<'_, PyAny>> {
+        group_head_in(microsandbox::context::default_local_context(), py, group)
+    }
+
+    #[staticmethod]
+    fn set_group_head(py: Python<'_>, group: String, id: String) -> PyResult<Bound<'_, PyAny>> {
+        set_group_head_in(
+            microsandbox::context::default_local_context(),
+            py,
+            group,
+            id,
+        )
     }
 
     /// Deprecated: use `reference`. Raises UnsupportedError for remote snapshots.
@@ -750,6 +754,42 @@ impl PySnapshot {
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+pub(crate) fn group_head_in(
+    context: std::sync::Arc<dyn microsandbox::Context>,
+    py: Python<'_>,
+    group: String,
+) -> PyResult<Bound<'_, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let head = context
+            .snapshots()
+            .group_head(&group)
+            .await
+            .map_err(to_py_err)?;
+        Ok(head.map(|id| id.to_string()))
+    })
+}
+
+pub(crate) fn set_group_head_in(
+    context: std::sync::Arc<dyn microsandbox::Context>,
+    py: Python<'_>,
+    group: String,
+    id: String,
+) -> PyResult<Bound<'_, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let id = microsandbox::snapshot::SnapshotId::new(id).map_err(|e| {
+            to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                e.to_string(),
+            ))
+        })?;
+        let update = context
+            .snapshots()
+            .set_group_head(&group, &id)
+            .await
+            .map_err(to_py_err)?;
+        Python::attach(|py| head_update_to_py(py, &update))
+    })
+}
 
 fn head_update_to_py(
     py: Python<'_>,

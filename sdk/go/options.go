@@ -9,9 +9,8 @@ import (
 
 // SandboxConfig holds configuration for creating a sandbox.
 //
-// Most callers construct a sandbox via CreateSandbox with functional options;
-// SandboxConfig is exported for callers that prefer to build a config value
-// directly and pass it via WithConfig.
+// Pass functional options such as WithImage to CreateSandbox. The SDK applies
+// them in order to the SandboxConfig before creating the sandbox.
 type SandboxConfig struct {
 	Name        string
 	Image       string

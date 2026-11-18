@@ -252,6 +252,16 @@ export class CreationProgressCreate {
   awaitSandbox(): Promise<Sandbox> { return this.creation.awaitSandbox(); }
 }
 
+/** An argument list may be an array, set or generator. A string is one argument. */
+export type CommandArgs = Iterable<string> & object;
+
+function commandArgs(args?: CommandArgs): string[] | undefined {
+  if (typeof args === "string") {
+    throw new TypeError("Pass command arguments as a list, for example ['argument'].");
+  }
+  return args === undefined ? undefined : Array.from(args);
+}
+
 export class Sandbox implements AsyncDisposable {
 
   /** Recover stopped storage after diagnosis. Never boots or stops a VM; originals are retained. */
@@ -265,8 +275,9 @@ export class Sandbox implements AsyncDisposable {
     return jobPageFromJson(await jobCall(() => this.inner.listJobs(b.includeAll, b.pageSize, b.after)));
   }
 
-  async execDetached(cmd: string, args: Iterable<string> = []): Promise<Job> {
-    return new Job(await jobCall(() => this.inner.execDetached(cmd, Array.from(args))));
+  async execDetached(cmd: string, args?: CommandArgs): Promise<Job> {
+    const argv = commandArgs(args) ?? [];
+    return new Job(await jobCall(() => this.inner.execDetached(cmd, argv)));
   }
   async execDetachedWith(cmd: string, configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder): Promise<Job> {
     const builder = configure(new (bindingFor(this.inner, napi).ExecOptionsBuilder)().stdinPipe());
@@ -467,8 +478,8 @@ export class Sandbox implements AsyncDisposable {
     return new ExecHandle(raw);
   }
 
-  async exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput> {
-    const argv = args ? Array.from(args) : undefined;
+  async exec(cmd: string, args?: CommandArgs): Promise<ExecOutput> {
+    const argv = commandArgs(args);
     const raw = await withMappedErrors(() => this.inner.exec(cmd, argv));
     return new ExecOutput(raw);
   }
@@ -484,8 +495,8 @@ export class Sandbox implements AsyncDisposable {
     return new ExecOutput(raw);
   }
 
-  async execStream(cmd: string, args?: Iterable<string>): Promise<ExecHandle> {
-    const argv = args ? Array.from(args) : undefined;
+  async execStream(cmd: string, args?: CommandArgs): Promise<ExecHandle> {
+    const argv = commandArgs(args);
     const raw = await withMappedErrors(() =>
       this.inner.execStream(cmd, argv),
     );
@@ -528,8 +539,8 @@ export class Sandbox implements AsyncDisposable {
     );
   }
 
-  async attach(cmd: string, args?: Iterable<string>): Promise<number> {
-    const argv = args ? Array.from(args) : undefined;
+  async attach(cmd: string, args?: CommandArgs): Promise<number> {
+    const argv = commandArgs(args);
     return await withMappedErrors(() => this.inner.attach(cmd, argv));
   }
 

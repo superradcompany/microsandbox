@@ -679,7 +679,7 @@ async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
 async fn head(args: SnapshotHeadArgs) -> anyhow::Result<()> {
     let update = crate::commands::common::selected_context()?
         .snapshot_ops()
-        .group_head(&args.selector)
+        .group_head_selector(&args.selector)
         .await?;
     if args.format == Some(OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&update)?);

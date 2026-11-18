@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::Context;
 use crate::sandbox::SandboxBuilder;
+use crate::snapshot::{HeadUpdate, SnapshotId};
 use crate::volume::VolumeBuilder;
 use crate::{
     MicrosandboxError, MicrosandboxResult, Sandbox, SandboxListBuilder, SandboxPage, Snapshot,
@@ -205,6 +206,20 @@ impl Volumes {
 }
 
 impl Snapshots {
+    /// Read the selected snapshot ID. An existing headless group returns None.
+    pub async fn group_head(&self, group: &str) -> MicrosandboxResult<Option<SnapshotId>> {
+        self.context.snapshot_ops().group_head(group).await
+    }
+
+    /// Select a member of this group by its stable ID.
+    pub async fn set_group_head(
+        &self,
+        group: &str,
+        id: &SnapshotId,
+    ) -> MicrosandboxResult<HeadUpdate> {
+        self.context.snapshot_ops().set_group_head(group, id).await
+    }
+
     /// Inspect artifacts in a provider-supported directory.
     pub async fn list_dir(
         &self,
@@ -563,6 +578,9 @@ mod tests {
         assert_destination(a.list().await, "destination-a");
         assert_destination(bv.list().await, "destination-b");
         assert_destination(ass.open("same-name").await, "destination-a");
+        assert_destination(ass.group_head("same-group").await, "destination-a");
+        let id = SnapshotId::new(format!("snap_{:032x}", 1)).unwrap();
+        assert_destination(bs.set_group_head("same-group", &id).await, "destination-b");
     }
 
     #[tokio::test]

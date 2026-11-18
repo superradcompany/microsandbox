@@ -70,13 +70,7 @@ pub(super) async fn resolve(root: &Path, selector: &str) -> MicrosandboxResult<P
     blocking(move || {
         let (name, member) = parse_selector(&selector)?;
         let directory = root.join(name);
-        let _lock = lock_group(&directory).map_err(|error| match error {
-            // A selector lookup has the same not-found contract as an explicit snapshot path.
-            MicrosandboxError::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound => {
-                MicrosandboxError::SnapshotNotFound(selector.clone())
-            }
-            other => other,
-        })?;
+        let _lock = lock_existing_group(&directory)?;
         let state = read_group(&directory)?;
         let (id, _) = resolve_selected(&directory, &state, member)?;
         Ok(directory.join(id))
@@ -289,6 +283,35 @@ pub(super) async fn dependency_members(
     .await
 }
 
+pub(super) async fn read_head(root: &Path, name: &str) -> MicrosandboxResult<Option<SnapshotId>> {
+    validate_group_name(name)?;
+    let directory = root.join(name);
+    blocking(move || {
+        let _lock = lock_existing_group(&directory)?;
+        let state = read_group(&directory)?;
+        if state.head.is_none() {
+            return Ok(None);
+        }
+        // Verify the selected descriptor under the same lock as the group state.
+        let (id, _) = resolve_selected(&directory, &state, None)?;
+        Ok(Some(SnapshotId::new(id)?))
+    })
+    .await
+}
+
+pub(super) async fn set_head(
+    root: &Path,
+    name: &str,
+    id: &SnapshotId,
+) -> MicrosandboxResult<HeadUpdate> {
+    validate_group_name(name)?;
+    // SnapshotId also supports transparent deserialization. Revalidate at the mutation
+    // boundary so a deserialized alias cannot be resolved as a different member.
+    let id = SnapshotId::new(id.as_str())
+        .map_err(|e| MicrosandboxError::InvalidConfig(e.to_string()))?;
+    select(root, &format!("{name}:{id}")).await
+}
+
 /// Read a bare group's head, or explicitly select a qualified member as its head.
 pub(super) async fn select(root: &Path, selector: &str) -> MicrosandboxResult<HeadUpdate> {
     let root = root.to_path_buf();
@@ -296,7 +319,7 @@ pub(super) async fn select(root: &Path, selector: &str) -> MicrosandboxResult<He
     blocking(move || {
         let (name, selected) = parse_selector(&selector)?;
         let directory = root.join(name);
-        let _lock = lock_group(&directory)?;
+        let _lock = lock_existing_group(&directory)?;
         let state = read_group(&directory)?;
         let (candidate, member) = resolve_selected(&directory, &state, selected)?;
         let members = BTreeMap::from([(candidate.clone(), member)]);
@@ -461,6 +484,15 @@ fn validate_group_name(name: &str) -> MicrosandboxResult<()> {
         )));
     }
     Ok(())
+}
+
+fn lock_existing_group(directory: &Path) -> MicrosandboxResult<File> {
+    lock_group(directory).map_err(|error| match error {
+        MicrosandboxError::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound => {
+            MicrosandboxError::SnapshotNotFound(directory.display().to_string())
+        }
+        other => other,
+    })
 }
 
 fn lock_group(directory: &Path) -> MicrosandboxResult<File> {

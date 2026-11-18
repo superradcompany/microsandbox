@@ -132,7 +132,8 @@ describe("native snapshot contract", () => {
   it("exports group creation, import, and head selection", () => {
     expect(typeof napi.Snapshot.loadWithOptions).toBe("function");
     expect(typeof napi.Snapshot.loadMany).toBe("function");
-    expect(typeof napi.Snapshot.groupHead).toBe("function");
+    expect(typeof napi.Snapshot.readGroupHead).toBe("function");
+    expect(typeof napi.Snapshot.setGroupHead).toBe("function");
     expect(typeof napi.SnapshotBuilder.prototype.group).toBe("function");
     const builder = new napi.SnapshotBuilder("").fromSandbox("source").group("work");
     const config = (builder as unknown as { build(): { name: string; group: string } }).build();

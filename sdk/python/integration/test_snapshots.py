@@ -60,9 +60,8 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         assert handle.group == base_name
         assert snapshot.head_update["reason"] == "initialized"
         head = await Snapshot.group_head(base_name)
-        assert head["head"] == snapshot.id
-        assert head["changed"] is False
-        selected = await Snapshot.group_head(snapshot_selector)
+        assert head == snapshot.id
+        selected = await Snapshot.set_group_head(base_name, snapshot.id)
         assert selected["head"] == snapshot.id
         opened = handle
         assert opened.digest == snapshot.digest

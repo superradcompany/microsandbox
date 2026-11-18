@@ -3,7 +3,7 @@ import { type NapiSnapshotSeed, type NapiContext } from "./internal/napi.js";
 import { withMappedErrors } from "./internal/error-mapping.js";
 import { Sandbox, SandboxListBuilder, sandboxPageFromNapi, type RestoreBuilder, type SandboxBuilder, type SandboxPage } from "./sandbox.js";
 import { Volume, type VolumeBuilder } from "./volume.js";
-import { Snapshot, wrapBuilder, type SnapshotBuilder } from "./snapshot.js";
+import { Snapshot, wrapBuilder, type SnapshotBuilder, type HeadUpdate } from "./snapshot.js";
 
 export interface LocalContextOptions {
   readonly home?: string;
@@ -162,6 +162,13 @@ export class Volumes {
 }
 
 export class Snapshots {
+  async groupHead(group: string): Promise<string | null> {
+    return (await withMappedErrors(() => this.context.native.snapshotGroupHead(group))) ?? null;
+  }
+  async setGroupHead(group: string, id: string): Promise<HeadUpdate> {
+    const update = await withMappedErrors(() => this.context.native.snapshotSetGroupHead(group, id));
+    return { ...update, previous: update.previous ?? null };
+  }
   constructor(readonly context: Context) {}
   builder(name = ""): SnapshotBuilder { return wrapBuilder(this.context.native.snapshotBuilder(name)); }
   async get(reference: string): Promise<Snapshot> {

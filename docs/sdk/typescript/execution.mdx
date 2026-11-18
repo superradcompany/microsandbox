@@ -12,8 +12,10 @@ See [Commands](/sandboxes/commands) for usage examples.
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
 
 ```typescript
-exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput>
+exec(cmd: string, args?: CommandArgs): Promise<ExecOutput>
 ```
+
+Pass an array, set or generator of strings. For a single argument, pass `["hello"]`. A bare string raises `TypeError`.
 
 <Accordion title="Example">
 
@@ -160,7 +162,7 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execStream()</span>
 
 ```typescript
-execStream(cmd: string, args?: Iterable<string>): Promise<ExecHandle>
+execStream(cmd: string, args?: CommandArgs): Promise<ExecHandle>
 ```
 
 <Accordion title="Example">
@@ -284,7 +286,7 @@ Run a shell command with streaming output.
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach()</span>
 
 ```typescript
-attach(cmd: string, args?: Iterable<string>): Promise<number>
+attach(cmd: string, args?: CommandArgs): Promise<number>
 ```
 
 <Accordion title="Example">
@@ -1004,7 +1006,7 @@ type RlimitResource =
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execDetached()</span>
 
 ```typescript
-execDetached(cmd: string, args?: Iterable<string>): Promise<Job>
+execDetached(cmd: string, args?: CommandArgs): Promise<Job>
 ```
 
 Start a runtime-owned command and return after guest startup. Defaults to pipes with stdin retained. Requires a supporting local runtime. Dropping the handle does not stop the job; stopping the sandbox does. See [background jobs](/sandboxes/commands#managed-jobs) for lifecycle and limits.

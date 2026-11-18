@@ -1,4 +1,17 @@
 export type MicrosandboxErrorCode =
+  | "agentClient"
+  | "bootStart"
+  | "execFailed"
+  | "invalidCursor"
+  | "missedRotation"
+  | "networkBuilder"
+  | "snapshotAlreadyExists"
+  | "snapshotImageMissing"
+  | "snapshotIntegrity"
+  | "snapshotMigration"
+  | "snapshotNotFound"
+  | "snapshotSandboxRunning"
+  | "windowsHostSetup"
   | "io"
   | "http"
   | "cloudHttp"
@@ -43,6 +56,84 @@ export class MicrosandboxError extends Error {
     super(message, options);
     this.code = code;
     this.name = new.target.name;
+  }
+}
+
+export class AgentClientError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("agentClient", message, options);
+  }
+}
+
+export class BootStartError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("bootStart", message, options);
+  }
+}
+
+export class ExecFailedError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("execFailed", message, options);
+  }
+}
+
+export class InvalidCursorError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("invalidCursor", message, options);
+  }
+}
+
+export class MissedRotationError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("missedRotation", message, options);
+  }
+}
+
+export class NetworkBuilderError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("networkBuilder", message, options);
+  }
+}
+
+export class SnapshotAlreadyExistsError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotAlreadyExists", message, options);
+  }
+}
+
+export class SnapshotImageMissingError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotImageMissing", message, options);
+  }
+}
+
+export class SnapshotIntegrityError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotIntegrity", message, options);
+  }
+}
+
+export class SnapshotMigrationError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotMigration", message, options);
+  }
+}
+
+export class SnapshotNotFoundError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotNotFound", message, options);
+  }
+}
+
+export class SnapshotSandboxRunningError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotSandboxRunning", message, options);
+  }
+}
+
+export class WindowsHostSetupError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("windowsHostSetup", message, options);
   }
 }
 

@@ -601,7 +601,8 @@ export interface NapiSnapshotStatic {
   load(archive: string, dest?: string, base?: string): Promise<NapiSnapshot>;
   loadWithOptions(archive: string, opts?: NapiLoadOpts): Promise<NapiSnapshot>;
   loadMany(archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshot[]>;
-  groupHead(selector: string): Promise<NapiHeadUpdate>;
+  readGroupHead(group: string): Promise<string | null>;
+  setGroupHead(group: string, id: string): Promise<NapiHeadUpdate>;
 }
 
 export interface NapiLoadOpts {
@@ -1426,6 +1427,8 @@ export interface NapiContext {
   volumeRemove(name: string): Promise<void>;
   snapshotBuilder(name: string): NapiSnapshotBuilder;
   snapshotGet(reference: string): Promise<NapiSnapshot>;
+  snapshotGroupHead(group: string): Promise<string | null>;
+  snapshotSetGroupHead(group: string, id: string): Promise<NapiHeadUpdate>;
   snapshotList(): Promise<NapiSnapshot[]>;
   snapshotRemove(reference: string, force: boolean): Promise<void>;
 }

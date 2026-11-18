@@ -15,7 +15,7 @@ func timeoutSecsCeil(d time.Duration) uint64 {
 	if d <= 0 {
 		return 0
 	}
-	return uint64((d + time.Second - 1) / time.Second)
+	return uint64((d-1)/time.Second) + 1
 }
 
 // ExecOutput is the collected result of a command execution.
@@ -48,16 +48,25 @@ func (e *ExecOutput) ExitCode() int { return e.exitCode }
 // Success reports whether the command exited with code 0.
 func (e *ExecOutput) Success() bool { return e.exitCode == 0 }
 
+// Validate collected options before shell lookup or guest execution. Only
+// streaming sessions expose a handle from which the caller can take stdin.
+func collectedExecOptions(opts []ExecOption) (ffi.ExecOptions, error) {
+	var config ExecConfig
+	for _, opt := range opts {
+		opt(&config)
+	}
+	if config.StdinPipe {
+		return ffi.ExecOptions{}, &Error{Kind: ErrInvalidConfig, Message: "collected execution cannot expose a stdin pipe; use a streaming execution method"}
+	}
+	return ffi.ExecOptions{Cwd: config.Cwd, TTY: config.TTY, User: config.User, Env: config.Env, TimeoutSecs: timeoutSecsCeil(config.Timeout)}, nil
+}
+
 // ExecDefault runs the sandbox's effective OCI entrypoint and CMD.
 // A missing executable default is returned as ErrNoDefaultCommand.
 func (s *Sandbox) ExecDefault(ctx context.Context, opts ...ExecOption) (*ExecOutput, error) {
-	o := ExecConfig{}
-	for _, opt := range opts {
-		opt(&o)
-	}
-	ffiOpts := ffi.ExecOptions{Cwd: o.Cwd, TTY: o.TTY, User: o.User, Env: o.Env}
-	if o.Timeout > 0 {
-		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
+	ffiOpts, err := collectedExecOptions(opts)
+	if err != nil {
+		return nil, err
 	}
 	res, err := s.inner.ExecDefault(ctx, ffiOpts)
 	if err != nil {
@@ -71,20 +80,19 @@ func (s *Sandbox) ExecDefault(ctx context.Context, opts ...ExecOption) (*ExecOut
 }
 
 // Exec runs a command in the sandbox and returns its collected output.
-// The returned error is non-nil only on transport/runtime failures; a
-// non-zero exit code is reported via ExecOutput.ExitCode, not as an error.
+// Invalid options and transport/runtime failures return an error. A non-zero
+// command exit is reported through ExecOutput.ExitCode.
 // This call blocks until the command exits.
 func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecOutput, error) {
-	o := ExecConfig{}
-	for _, opt := range opts {
-		opt(&o)
+	ffiOpts, err := collectedExecOptions(opts)
+	if err != nil {
+		return nil, err
 	}
+	return s.execCollected(ctx, cmd, args, ffiOpts)
+}
 
-	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, TTY: o.TTY, User: o.User, Env: o.Env}
-	if o.Timeout > 0 {
-		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
-	}
-
+func (s *Sandbox) execCollected(ctx context.Context, cmd string, args []string, ffiOpts ffi.ExecOptions) (*ExecOutput, error) {
+	ffiOpts.Args = args
 	res, err := s.inner.Exec(ctx, cmd, ffiOpts)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -98,11 +106,15 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...E
 
 // Shell runs command with the configured shell (default /bin/sh) and waits for exit.
 func (s *Sandbox) Shell(ctx context.Context, command string, opts ...ExecOption) (*ExecOutput, error) {
+	ffiOpts, err := collectedExecOptions(opts)
+	if err != nil {
+		return nil, err
+	}
 	shell, err := s.inner.ShellPath(ctx)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	return s.Exec(ctx, shell, []string{"-c", command}, opts...)
+	return s.execCollected(ctx, shell, []string{"-c", command}, ffiOpts)
 }
 
 // ExecEventKind identifies what an ExecEvent carries.

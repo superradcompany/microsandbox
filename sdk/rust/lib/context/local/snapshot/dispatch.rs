@@ -12,7 +12,7 @@ use crate::context::{Context, LocalContext, SnapshotOps};
 use crate::sandbox::SandboxConfig;
 use crate::snapshot::{
     HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
-    SnapshotReference, SnapshotVerifyReport,
+    SnapshotId, SnapshotReference, SnapshotVerifyReport,
 };
 use crate::{MicrosandboxError, MicrosandboxResult, Operation};
 
@@ -381,6 +381,21 @@ impl SnapshotOps for LocalContext {
     }
 
     fn group_head<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<SnapshotId>>> {
+        Box::pin(async move { group::read_head(&self.snapshots_dir(), name).await })
+    }
+
+    fn set_group_head<'a>(
+        &'a self,
+        name: &'a str,
+        id: &'a SnapshotId,
+    ) -> BoxFuture<'a, MicrosandboxResult<HeadUpdate>> {
+        Box::pin(async move { group::set_head(&self.snapshots_dir(), name, id).await })
+    }
+
+    fn group_head_selector<'a>(
         &'a self,
         selector: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<HeadUpdate>> {

@@ -3,7 +3,7 @@ import { Snapshot } from "../../dist/snapshot.js";
 import { napi } from "../../dist/internal/napi.js";
 
 vi.mock("../../dist/internal/napi.js", () => ({
-  napi: { Snapshot: { loadWithOptions: vi.fn(), loadMany: vi.fn(), groupHead: vi.fn() } },
+  napi: { Snapshot: { loadWithOptions: vi.fn(), loadMany: vi.fn(), readGroupHead: vi.fn(), setGroupHead: vi.fn() } },
 }));
 
 function projectedSnapshot(
@@ -73,12 +73,15 @@ describe("Snapshot native projections", () => {
     expect(handle.headUpdate).toEqual(headUpdate);
   });
 
-  it("forwards a member selector for explicit head selection", async () => {
-    vi.mocked(napi.Snapshot.groupHead).mockResolvedValue({
+  it("uses distinct native operations for reading and setting the head", async () => {
+    vi.mocked(napi.Snapshot.readGroupHead).mockResolvedValue(null);
+    expect(await Snapshot.groupHead("work")).toBeNull();
+    expect(napi.Snapshot.setGroupHead).not.toHaveBeenCalled();
+    vi.mocked(napi.Snapshot.setGroupHead).mockResolvedValue({
       group: "work", previous: "snapshot-2", head: "snapshot-1", reason: "selected", changed: true,
     });
-    expect(await Snapshot.groupHead("work:baseline")).toMatchObject({ reason: "selected", changed: true });
-    expect(napi.Snapshot.groupHead).toHaveBeenCalledWith("work:baseline");
+    expect(await Snapshot.setGroupHead("work", "snapshot-1")).toMatchObject({ reason: "selected", changed: true });
+    expect(napi.Snapshot.setGroupHead).toHaveBeenCalledWith("work", "snapshot-1");
   });
 
   it("loads a batch once and preserves input-order handles and headless outcomes", async () => {

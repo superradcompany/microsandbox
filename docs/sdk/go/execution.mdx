@@ -752,6 +752,8 @@ Set a per-command timeout. When exceeded, the guest terminates the process and t
 func WithExecStdinPipe() ExecOption
 ```
 
+Collected `Exec`, `ExecDefault` and `Shell` reject this option with `ErrInvalidConfig`. Use a streaming method to obtain the stdin sink.
+
 Enable a stdin pipe for the exec session, allowing data to be written via [`ExecHandle.TakeStdin`](#h-takestdin).
 
 #### <span className="msb-hn">WithExecTTY()</span>

@@ -11,7 +11,7 @@ use crate::MicrosandboxResult;
 use crate::sandbox::SandboxConfig;
 use crate::snapshot::{
     HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
-    SnapshotReference, SnapshotVerifyReport,
+    SnapshotId, SnapshotReference, SnapshotVerifyReport,
 };
 
 /// Context implementation for snapshot lifecycle operations.
@@ -44,8 +44,34 @@ pub trait SnapshotOps: Send + Sync {
         })
     }
 
-    /// Read or select a local group head.
+    /// Read the selected member of a group.
     fn group_head<'a>(
+        &'a self,
+        _group: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<SnapshotId>>> {
+        Box::pin(async {
+            Err(crate::MicrosandboxError::local_only(
+                crate::Operation::SnapshotOps,
+            ))
+        })
+    }
+
+    /// Select an installed member by stable identity.
+    fn set_group_head<'a>(
+        &'a self,
+        _group: &'a str,
+        _id: &'a SnapshotId,
+    ) -> BoxFuture<'a, MicrosandboxResult<HeadUpdate>> {
+        Box::pin(async {
+            Err(crate::MicrosandboxError::local_only(
+                crate::Operation::SnapshotOps,
+            ))
+        })
+    }
+
+    /// Legacy selector protocol used by the CLI and previously shipped native ABI.
+    #[doc(hidden)]
+    fn group_head_selector<'a>(
         &'a self,
         _selector: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<HeadUpdate>> {

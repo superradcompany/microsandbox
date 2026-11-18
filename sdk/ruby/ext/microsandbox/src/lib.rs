@@ -552,6 +552,7 @@ fn apply_secret_options(
         .map_err(|_| argument_error(ruby, "secrets must be an Array of Hashes"))?;
     for i in 0..secrets.len() {
         let spec: RHash = secrets.entry(i as isize)?;
+        reject_unknown_keywords(ruby, spec, &["env", "value", "allowed_host"])?;
         let env = required_keyword::<String>(spec, "env", ruby)?;
         let secret = required_keyword::<String>(spec, "value", ruby)?;
         let host = required_keyword::<String>(spec, "allowed_host", ruby)?;

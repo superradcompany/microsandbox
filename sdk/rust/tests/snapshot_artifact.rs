@@ -1472,11 +1472,12 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
         assert_eq!(renamed.id(), snapshot_id);
         assert_eq!(
             destination
-                .snapshot_ops()
+                .snapshots()
                 .group_head("renamed")
                 .await
                 .unwrap()
-                .head,
+                .unwrap()
+                .as_str(),
             snapshot_id
         );
 
@@ -1564,11 +1565,12 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
         );
         assert_eq!(
             destination
-                .snapshot_ops()
+                .snapshots()
                 .group_head("work")
                 .await
                 .unwrap()
-                .head,
+                .unwrap()
+                .as_str(),
             original_id
         );
         assert_eq!(
@@ -1608,11 +1610,12 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
         assert_eq!(listed[0].name(), Some("clean"));
         assert_eq!(
             destination
-                .snapshot_ops()
+                .snapshots()
                 .group_head("work")
                 .await
                 .unwrap()
-                .head,
+                .unwrap()
+                .as_str(),
             original_id
         );
         assert_eq!(
@@ -1656,11 +1659,12 @@ async fn load_many_selects_lineage_tip_independently_of_input_order() {
             }
             assert_eq!(
                 destination
-                    .snapshot_ops()
+                    .snapshots()
                     .group_head(group)
                     .await
                     .unwrap()
-                    .head,
+                    .unwrap()
+                    .as_str(),
                 third_id
             );
             assert_eq!(
@@ -1757,11 +1761,12 @@ async fn load_many_sibling_batch_preserves_existing_head_and_leaves_new_group_he
             .unwrap();
         assert_eq!(
             destination
-                .snapshot_ops()
+                .snapshots()
                 .group_head("existing")
                 .await
                 .unwrap()
-                .head,
+                .unwrap()
+                .as_str(),
             base_id
         );
         let handles = destination
@@ -1781,14 +1786,33 @@ async fn load_many_sibling_batch_preserves_existing_head_and_leaves_new_group_he
                 .id(),
             left_id
         );
+        let fresh = destination.snapshots();
+        assert!(matches!(
+            fresh.group_head("missing").await,
+            Err(microsandbox::MicrosandboxError::SnapshotNotFound(_))
+        ));
+        assert_eq!(fresh.group_head("fresh").await.unwrap(), None);
+        assert!(fresh.group_head("fresh:left").await.is_err());
+        let selected = SnapshotId::new(&left_id).unwrap();
+        let alias: SnapshotId = serde_json::from_value(serde_json::json!("left")).unwrap();
+        assert!(fresh.set_group_head("fresh", &alias).await.is_err());
+        let absent = SnapshotId::new(format!("snap_{:032x}", 0)).unwrap();
+        assert!(fresh.set_group_head("fresh", &absent).await.is_err());
+        assert_eq!(fresh.group_head("fresh").await.unwrap(), None);
         assert_eq!(
-            destination
-                .snapshot_ops()
-                .group_head("fresh:left")
+            fresh.set_group_head("fresh", &selected).await.unwrap().head,
+            left_id
+        );
+        assert!(
+            !fresh
+                .set_group_head("fresh", &selected)
                 .await
                 .unwrap()
-                .head,
-            left_id
+                .changed
+        );
+        assert_eq!(
+            fresh.group_head("fresh").await.unwrap().as_ref(),
+            Some(&selected)
         );
         assert_eq!(
             destination.snapshots().open("fresh").await.unwrap().id(),
@@ -1845,11 +1869,12 @@ async fn load_many_accepts_complete_payload_with_missing_historical_parent() {
         assert_eq!(handles[0].id(), id);
         assert_eq!(
             destination
-                .snapshot_ops()
+                .snapshots()
                 .group_head("work")
                 .await
                 .unwrap()
-                .head,
+                .unwrap()
+                .as_str(),
             id
         );
         assert_eq!(
