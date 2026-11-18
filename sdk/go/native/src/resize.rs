@@ -231,7 +231,7 @@ mod tests {
             .expect("exact wait lookup exceeded its budget")
             .unwrap_err();
             assert_eq!(error.kind, "resize_timeout");
-            assert!(error.resize_status.as_ref().is_some_and(Vec::is_empty));
+            assert!(error.resize_status.as_deref().is_some_and(Vec::is_empty));
         }
     }
 

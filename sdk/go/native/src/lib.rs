@@ -510,9 +510,13 @@ struct FfiError {
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
     import: Option<Box<microsandbox::SnapshotImportError>>,
     verification: Option<Box<microsandbox::snapshot::SnapshotGroupVerifyReport>>,
-    removal: Option<(Box<microsandbox::CheckpointRemoveResult>, String)>,
+    removal: Option<Box<(microsandbox::CheckpointRemoveResult, String)>>,
     group_removal: Option<Box<(microsandbox::SnapshotRemoveResult, String)>>,
-    resize_status: Option<Vec<microsandbox::sandbox::ResourceResizeStatus>>,
+    #[expect(
+        clippy::box_collection,
+        reason = "a single pointer keeps the common FFI error small; only resize timeouts allocate"
+    )]
+    resize_status: Option<Box<Vec<microsandbox::sandbox::ResourceResizeStatus>>>,
     resize_wait: Option<Box<microsandbox::ResizeWaitError>>,
     service: Option<Box<service::ServiceErrorDetails>>,
     os_error: Option<i32>,

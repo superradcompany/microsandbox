@@ -73,7 +73,7 @@ impl FfiError {
         if let Some(report) = &self.verification {
             payload["report"] = serde_json::json!(report);
         }
-        if let Some((result, detail)) = &self.removal {
+        if let Some((result, detail)) = self.removal.as_deref() {
             payload["removal"] = serde_json::json!(result);
             payload["detail"] = serde_json::json!(detail);
         }
@@ -161,12 +161,14 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotImport(details) => error.import = Some(details),
             MicrosandboxError::SnapshotVerification(details) => error.verification = Some(details),
             MicrosandboxError::SnapshotRemovalRecovery { result, source } => {
-                error.removal = Some((result, source.to_string()));
+                error.removal = Some(Box::new((*result, source.to_string())));
             }
             MicrosandboxError::SnapshotGroupRemovalRecovery { result, source } => {
                 error.group_removal = Some(Box::new((*result, source.to_string())));
             }
-            MicrosandboxError::ResizeTimeout { status, .. } => error.resize_status = Some(status),
+            MicrosandboxError::ResizeTimeout { status, .. } => {
+                error.resize_status = Some(Box::new(status))
+            }
             MicrosandboxError::ResizeWait(details) => error.resize_wait = Some(details),
             _ => {}
         }
@@ -181,6 +183,31 @@ impl From<MicrosandboxError> for FfiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_removal_error_preserves_committed_result_and_detail() {
+        let id = format!("snap_{:032x}", 1);
+        let error = MicrosandboxError::SnapshotRemovalRecovery {
+            result: Box::new(microsandbox::CheckpointRemoveResult {
+                id: microsandbox::snapshot::SnapshotId::new(id.clone()).unwrap(),
+                head_update: None,
+                warnings: vec!["cleanup pending".into()],
+            }),
+            source: Box::new(MicrosandboxError::Runtime("catalog offline".into())),
+        };
+        let message = error.to_string();
+        let payload: serde_json::Value =
+            serde_json::from_str(&FfiError::from(error).to_json()).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "kind": "snapshot_removal_recovery",
+                "message": message,
+                "detail": "runtime error: catalog offline",
+                "removal": {"id": id, "head_update": null, "warnings": ["cleanup pending"]},
+            })
+        );
+    }
 
     #[test]
     fn resize_wait_payload_keeps_reason_and_omits_internal_cause() {
