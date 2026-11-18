@@ -144,7 +144,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::ControlSecretBatch { .. } => "Runtime",
         #[cfg(all(unix, feature = "local"))]
         MicrosandboxError::Nix(_) => "Nix",
-        #[cfg(windows)]
+        #[cfg(all(windows, feature = "local"))]
         MicrosandboxError::WindowsHostSetup(_) => "WindowsHostSetup",
         MicrosandboxError::ExecTimeout(_) => "ExecTimeout",
         MicrosandboxError::StopTimeout { .. } => "StopTimeout",
