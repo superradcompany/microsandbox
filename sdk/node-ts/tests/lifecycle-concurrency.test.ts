@@ -10,6 +10,7 @@ import { Sandbox, SandboxNotFoundError } from "../dist/index.js";
 
 const native: typeof import("../native/index.js") = createRequire(import.meta.url)("../native/index.cjs");
 const consumed = /Sandbox handle has been consumed/;
+const released = /sandbox receiver .* has been released/;
 
 async function bounded<T>(promise: Promise<T>, label: string, timeoutMs = 2_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -40,7 +41,7 @@ async function fixture(label: string, run: (source: Sandbox, observer: Sandbox) 
       throw error;
     });
     if (handle) {
-      if (handle.status === "paused") await handle.resume();
+      if (await handle.status() === "paused") await handle.resume();
       await handle.stop();
       await Sandbox.remove(name);
     }
@@ -70,7 +71,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
         let started = performance.now();
         await bounded(source.pause(), "pause during exec");
         pauses.push(performance.now() - started);
-        expect((await Sandbox.get(source.name)).status).toBe("paused");
+        expect(await observer.status()).toBe("paused");
         started = performance.now();
         await bounded(source.resume(), "resume during exec");
         resumes.push(performance.now() - started);
@@ -132,7 +133,9 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
       const writer = await open(fifo, "w");
       let closed = false;
       try {
-        await writer.writeFile("initial ");
+        // Pass the inline probe and deliver a full bulk record while keeping EOF pending.
+        const prefix = "x".repeat(4 * 1024 * 1024);
+        await writer.writeFile(prefix);
         await bounded((async () => {
           while (true) {
             try {
@@ -151,7 +154,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
         await writer.close();
         closed = true;
         await bounded(upload, "admitted upload after detach");
-        expect(await observer.fs().readToString("/dev/shm/uploaded")).toBe("initial private upload payload");
+        expect(await observer.fs().readToString("/dev/shm/uploaded")).toBe(prefix + "private upload payload");
       } finally {
         if (!closed) await writer.close();
         await unlink(fifo);
@@ -172,7 +175,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
       const removal = raw.removePersisted().then(() => ({ removed: true }), error => ({ error }));
       await delay(50);
       await expect(bounded(raw.pause(), "consumed pause")).rejects.toThrow(consumed);
-      await expect(bounded(fs.exists("/dev/shm/started"), "consumed filesystem")).rejects.toThrow(consumed);
+      expect(() => raw.fs()).toThrow(consumed);
       await expect(raw.removePersisted()).rejects.toThrow(consumed);
       await observer.fs().write("/dev/shm/release", "go");
       expect((await bounded(pending, "exec after failed removal")).success).toBe(true);
@@ -187,6 +190,8 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
         expect("removed" in result).toBe(true);
       }
       if ("error" in result) expect(String(result.error)).toMatch(/running|stopped|lock|timed out/i);
+      // Existing helpers use the receiver group until its final admitted operation releases it.
+      await expect(fs.exists("/dev/shm/started")).rejects.toThrow(released);
     });
   });
 
@@ -202,7 +207,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
       await bounded(waiter, "terminal-state observation");
       await raw.removePersisted();
       await expect(raw.resume()).rejects.toThrow(consumed);
-      await expect(fs.exists("/tmp")).rejects.toThrow(consumed);
+      await expect(fs.exists("/tmp")).rejects.toThrow(released);
       await expect(native.Sandbox.get(name)).rejects.toThrow();
     } finally {
       // Successful removal already deleted the record; only recover a fixture
