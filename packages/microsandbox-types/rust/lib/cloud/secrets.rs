@@ -31,7 +31,7 @@ pub struct CloudSecretsConfig {
 }
 
 /// A single cloud secret entry. Twin of domain [`SecretEntry`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudSecretEntry {
@@ -120,6 +120,23 @@ pub enum CloudViolationAction {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+// The secret value must never reach a log line or an error message.
+impl std::fmt::Debug for CloudSecretEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloudSecretEntry")
+            .field("env_var", &self.env_var)
+            .field("value", &"[REDACTED]")
+            .field("source", &self.source)
+            .field("placeholder", &self.placeholder)
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("substitution", &self.substitution)
+            .field("passthrough_hosts", &self.passthrough_hosts)
+            .field("violation_action", &self.violation_action)
+            .field("require_tls_identity", &self.require_tls_identity)
+            .finish()
+    }
+}
 
 impl<'de> Deserialize<'de> for CloudSecretsConfig {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
