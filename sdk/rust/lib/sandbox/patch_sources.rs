@@ -1,7 +1,6 @@
 //! Stage bounded host-copy inputs before patch application.
 //! Retain the staging owner until every consumer has stopped using the files.
 
-mod files;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::fs::Permissions;
@@ -25,6 +24,8 @@ use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
+
+mod files;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
