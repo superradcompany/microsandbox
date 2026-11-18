@@ -128,6 +128,7 @@ pub(crate) fn capabilities(value: &JsonValue) -> Option<RuntimeCapabilities> {
             .unwrap_or(Some(false))
     };
     Some(RuntimeCapabilities {
+        resize_operations: optional("resize_operations")?,
         root_disk_grow: optional("root_disk_grow")?,
         guest_flush_policy: optional("guest_flush_policy")?,
         optional_disk_integrity: optional("optional_disk_integrity")?,

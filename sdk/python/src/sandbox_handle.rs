@@ -285,6 +285,138 @@ impl PySandboxHandle {
         })
     }
 
+    /// Apply a modification and return the exact operations accepted by that call.
+    /// Missing tracking on older runtimes is None; no mutation is retried.
+    #[pyo3(signature = (
+        *,
+        cpus = None,
+        max_cpus = None,
+        memory = None,
+        max_memory = None,
+        root_disk_size = None,
+        env = None,
+        env_rm = None,
+        labels = None,
+        labels_rm = None,
+        workdir = None,
+        secrets = None,
+        secrets_rm = None,
+        ports = None,
+        ports_rm = None,
+        policy = None,
+        dry_run = false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn modify_with_resize_tracking<'py>(
+        &self,
+        py: Python<'py>,
+        cpus: Option<u8>,
+        max_cpus: Option<u8>,
+        memory: Option<u32>,
+        max_memory: Option<u32>,
+        root_disk_size: Option<u32>,
+        env: Option<std::collections::HashMap<String, String>>,
+        env_rm: Option<Vec<String>>,
+        labels: Option<std::collections::HashMap<String, String>>,
+        labels_rm: Option<Vec<String>>,
+        workdir: Option<String>,
+        secrets: Option<
+            std::collections::HashMap<String, std::collections::HashMap<String, Py<PyAny>>>,
+        >,
+        secrets_rm: Option<Vec<String>>,
+        ports: Option<Py<PyAny>>,
+        ports_rm: Option<Py<PyAny>>,
+        policy: Option<Py<PyAny>>,
+        dry_run: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let secrets = crate::sandbox::build_secret_patches(py, secrets)?;
+        let mut patch = crate::sandbox::build_modify_patch(
+            cpus,
+            max_cpus,
+            memory,
+            max_memory,
+            root_disk_size,
+            env,
+            env_rm,
+            labels,
+            labels_rm,
+            workdir,
+            secrets,
+            secrets_rm,
+        );
+        patch.ports = crate::helpers::modify_ports(ports.as_ref().map(|value| value.bind(py)))?;
+        patch.ports_remove =
+            crate::helpers::modify_ports_remove(ports_rm.as_ref().map(|value| value.bind(py)))?;
+        let policy = policy
+            .as_ref()
+            .map(|value| extract_str_enum(value.bind(py), "ModificationPolicy"))
+            .transpose()?;
+        let policy = crate::sandbox::parse_modify_policy(policy.as_deref())?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.clone();
+            let builder =
+                crate::sandbox::apply_modify_policy(guard.modify().with_patch(patch), policy);
+            drop(guard);
+            crate::resize::run_modify_tracked(builder, dry_run).await
+        })
+    }
+
+    /// Read the current live CPU and memory resize status.
+    fn resize_status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::sandbox::resize_status_result_to_py(inner.resize_status().await)
+        })
+    }
+
+    /// Read current per-resource operation identities and evidence.
+    fn resize_operations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::resize::operations_result_to_py(inner.resize_operations().await)
+        })
+    }
+
+    /// Wait for these exact operations; a later same-target request cannot replace them.
+    #[pyo3(signature = (operations, *, timeout = None))]
+    fn wait_for_resize_operations<'py>(
+        &self,
+        py: Python<'py>,
+        operations: &Bound<'_, PyAny>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let operations = crate::resize::parse_operations(py, operations)?;
+        let timeout = crate::sandbox::optional_duration(timeout)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::sandbox::resize_status_result_to_py(
+                inner.wait_for_resize_operations(&operations, timeout).await,
+            )
+        })
+    }
+
+    /// Wait for the operations selected at the first read to be guest-confirmed.
+    ///
+    /// Raises an error when the sandbox is not running. Without a timeout
+    /// it keeps polling while a guest never converges. Expiry raises
+    /// `ResizeTimeoutError` whose `status` is empty if no read completed.
+    #[pyo3(signature = (*, timeout = None))]
+    fn wait_until_resized<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let timeout = crate::sandbox::optional_duration(timeout)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::sandbox::resize_status_result_to_py(match timeout {
+                Some(timeout) => inner.wait_until_resized_with_timeout(timeout).await,
+                None => inner.wait_until_resized().await,
+            })
+        })
+    }
+
     /// Read captured output from `exec.log`.
     ///
     /// Works without starting the sandbox. Defaults to `stdout +

@@ -5,6 +5,8 @@ vi.mock("../../dist/internal/napi.js", () => ({ napi: native }));
 import {
   modificationPlanFromJson,
   modifyOptionsToNapi,
+  resizeStatusFromJson,
+  validateResizeTimeout,
   type ModifyOptions,
 } from "../../dist/modify.js";
 import { Sandbox } from "../../dist/sandbox.js";
@@ -238,5 +240,30 @@ describe("modificationPlanFromJson", () => {
     expect(plan.warnings).toEqual([{ field: "cpus", message: "warning" }]);
     // `resize_status` is omitted from the wire format when empty.
     expect(plan.resizeStatus).toEqual([]);
+  });
+});
+
+describe("resizeStatusFromJson", () => {
+  it("parses the native resize status array", () => {
+    const status = resizeStatusFromJson(
+      JSON.stringify([
+        { resource: "cpus", requested: "4", actual: "2", enforced: "4", state: "converging" },
+        { resource: "memory", requested: "8 GiB", actual: "8 GiB", enforced: "8 GiB", state: "applied" },
+      ]),
+    );
+    expect(status.map((entry) => [entry.resource, entry.state])).toEqual([
+      ["cpus", "converging"],
+      ["memory", "applied"],
+    ]);
+    expect(resizeStatusFromJson("[]")).toEqual([]);
+  });
+
+  it("rejects timeouts N-API cannot represent", () => {
+    expect(() => validateResizeTimeout(undefined)).not.toThrow();
+    expect(() => validateResizeTimeout(0)).not.toThrow();
+    expect(() => validateResizeTimeout(1500)).not.toThrow();
+    for (const value of [-1, NaN, Infinity]) {
+      expect(() => validateResizeTimeout(value)).toThrow(RangeError);
+    }
   });
 });

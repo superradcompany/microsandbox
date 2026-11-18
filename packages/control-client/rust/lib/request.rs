@@ -81,6 +81,10 @@ pub struct CompactDisks(pub DiskCompact);
 #[derive(Debug, Clone)]
 pub struct ManageJob(pub microsandbox_protocol::jobs::JobRequest);
 
+/// Capability-gated resize tracking; select support before sending this request.
+#[derive(Debug, Clone)]
+pub struct ManageResize(pub microsandbox_protocol::resize::ResizeRequest);
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -115,6 +119,29 @@ impl UpdateSecrets {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl Request<ControlProtocol> for ManageResize {
+    type Response = microsandbox_protocol::resize::ResizeResponse;
+    type Error = ControlClientError;
+    fn message(&self) -> ControlClientResult<EncodedMessage> {
+        prepared(microsandbox_protocol::resize::RESIZE_REQUEST, &self.0)
+    }
+    fn decode(&self, response: Message) -> ControlClientResult<Self::Response> {
+        checked(response, 2, microsandbox_protocol::resize::RESIZE_RESPONSE)
+    }
+}
+
+impl CompatibleControlRequest for ManageResize {
+    fn min_generation(&self) -> u8 {
+        2
+    }
+    fn compatibility_json_bytes(&self) -> ControlClientResult<Zeroizing<Vec<u8>>> {
+        Err(ControlClientError::UnsupportedMode)
+    }
+    fn decode_compatibility_json(&self, _reply: JsonReply) -> ControlClientResult<Self::Response> {
+        Err(ControlClientError::UnsupportedMode)
+    }
+}
 
 impl Request<ControlProtocol> for ManageJob {
     type Response = microsandbox_protocol::jobs::JobResponse;

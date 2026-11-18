@@ -28,6 +28,7 @@ mod patch_builder;
 mod pull_progress;
 mod rate_limiter_builder;
 mod registry_builder;
+mod resize;
 mod restore_builder;
 mod root_disk_builder;
 mod runtime_config;

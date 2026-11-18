@@ -29,6 +29,16 @@ pub(crate) trait Handler: Send + Sync + 'static {
         )
     }
 
+    fn handle_resize(
+        &self,
+        _request: microsandbox_protocol::resize::ResizeRequest,
+    ) -> Result<microsandbox_protocol::resize::ResizeResponse, ControlError> {
+        Err(ControlError::rejected(
+            "unsupported_operation",
+            "resize tracking is unavailable",
+        ))
+    }
+
     fn handle_job(
         &self,
         _request: microsandbox_protocol::jobs::JobRequest,
@@ -76,6 +86,7 @@ pub(crate) struct Response {
 pub(crate) enum Reply {
     ExecSignal(microsandbox_protocol::exec_control::ExecControlResponse),
     Job(microsandbox_protocol::jobs::JobResponse),
+    Resize(microsandbox_protocol::resize::ResizeResponse),
     Capabilities(Capabilities),
     RuntimeCapabilities(RuntimeCapabilities),
     Memory(MemoryState),
@@ -115,6 +126,11 @@ impl Reply {
                 microsandbox_protocol::exec_control::EXEC_CONTROL_RESPONSE,
                 value,
             ),
+            Self::Resize(value) => Envelope::new(
+                generation,
+                microsandbox_protocol::resize::RESIZE_RESPONSE,
+                value,
+            ),
             Self::Job(value) => {
                 Envelope::new(generation, microsandbox_protocol::jobs::JOB_RESPONSE, value)
             }
@@ -149,6 +165,13 @@ impl Reply {
 //--------------------------------------------------------------------------------------------------
 
 impl Handler for ControlContext {
+    fn handle_resize(
+        &self,
+        request: microsandbox_protocol::resize::ResizeRequest,
+    ) -> Result<microsandbox_protocol::resize::ResizeResponse, ControlError> {
+        self.executor.resize_request(request)
+    }
+
     fn handle_exec_signal(
         &self,
         request: microsandbox_protocol::exec_control::ExecControlRequest,
@@ -223,6 +246,7 @@ impl Handler for ControlContext {
             Reply::Error(error())
         } else if let Some(caps) = result.capabilities {
             let capabilities = RuntimeCapabilities {
+                resize_operations: caps.resize_operations,
                 root_disk_grow: caps.root_disk_grow,
                 guest_flush_policy: caps.guest_flush_policy,
                 optional_disk_integrity: caps.optional_disk_integrity,

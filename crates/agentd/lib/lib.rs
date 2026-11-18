@@ -11,6 +11,7 @@ mod error;
 mod exec_output;
 mod mount_checkpoint;
 mod network_reset;
+mod resources;
 mod rlimit;
 mod root_disk;
 mod workload;

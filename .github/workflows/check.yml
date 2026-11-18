@@ -1664,6 +1664,7 @@ jobs:
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_compatibility.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_checkpoint_integration.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_catalog_history.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_lifecycle_evidence.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_managed_job_integration.py
 
       - name: Snapshot and branch live smoke
@@ -1841,6 +1842,7 @@ jobs:
       # This fixture needs a released runtime, not the candidate installed above.
       # Keep its signal even when an unrelated test in the generic batch fails.
       - name: Historical catalog compatibility (v0.6.18)
+        # A failed test may be followed by independent fixtures; failed setup may not.
         if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
@@ -1878,6 +1880,7 @@ jobs:
       # These tests require a captured guest and scoped fault injection; run every case
       # explicitly, including all three eager modes, even if the general batch failed.
       - name: Checkpoint lifecycle integration fixtures
+        # A failed test may be followed by independent fixtures; failed setup may not.
         if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         run: |
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"

@@ -225,3 +225,10 @@ parking_lot = "0.13"
 rpassword = "7"
 russh = "0.65.0"
 russh-sftp = "2.3.0"
+
+# Temporary native APIs from libkrun PR #173, pinned for reproducible builds.
+# Replace these patches with the maintainer's published native version before
+# publishing dependent crates: workspace patches do not propagate to consumers.
+[patch.crates-io]
+msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "46209182d92f43b71d4599a8319d8975e1d2fda7" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "46209182d92f43b71d4599a8319d8975e1d2fda7" }

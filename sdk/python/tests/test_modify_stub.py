@@ -75,6 +75,26 @@ def test_sandbox_modify_stub_signature() -> None:
         assert method.returns.id == "SandboxModificationPlan"
 
 
+def test_resize_status_stubs() -> None:
+    tree = _stub_tree()
+    for class_name in ("Sandbox", "SandboxHandle"):
+        status = _class_method(tree, class_name, "resize_status")
+        assert [arg.arg for arg in status.args.args] == ["self"]
+        wait = _class_method(tree, class_name, "wait_until_resized")
+        assert [arg.arg for arg in wait.args.kwonlyargs] == ["timeout"]
+        assert isinstance(wait.args.kw_defaults[0], ast.Constant)
+        assert wait.args.kw_defaults[0].value is None
+
+
+def test_resize_timeout_error_is_timeout() -> None:
+    from microsandbox import MicrosandboxError, ResizeTimeoutError
+
+    error = ResizeTimeoutError("resize did not converge")
+    assert isinstance(error, MicrosandboxError)
+    assert isinstance(error, TimeoutError)
+    assert error.code == "resize-timeout"
+
+
 def test_modification_not_confirmed_error_preserves_message() -> None:
     message = (
         "the change did not complete as asked: "

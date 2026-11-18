@@ -129,6 +129,7 @@ fn capabilities_response_serializes_flags() {
     let response = ControlResponse {
         ok: true,
         capabilities: Some(ControlCapabilities {
+            resize_operations: false,
             guest_flush_policy: true,
             optional_disk_integrity: true,
             branch_memfd: false,
