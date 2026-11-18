@@ -43,6 +43,11 @@ fn lifecycle_signal_child() {
     if std::env::var_os("MSB_LIFECYCLE_SIGNAL_CHILD").is_none() {
         return;
     }
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("MSB_TEST_PRIVATE_CHILD").is_some() {
+        // Model a process whose descriptors an unprivileged SDK cannot inspect.
+        assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) }, 0);
+    }
     // A stray SIGUSR1 must terminate this child.
     unsafe {
         libc::signal(libc::SIGUSR1, libc::SIG_DFL);
@@ -355,4 +360,62 @@ async fn ambiguous_runtime_ownership_preserves_active_state() {
         recorded_sandbox_status(&backend, id).await,
         SandboxStatus::Running
     );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn stop_reconciles_a_released_generation_with_a_private_pid() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let home = test_home();
+    let mut child = scopeguard::guard(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "context::local::sandbox::signal_tests::lifecycle_signal_child",
+                "--nocapture",
+            ])
+            .env("MSB_LIFECYCLE_SIGNAL_CHILD", "1")
+            .env("MSB_TEST_PRIVATE_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+        |mut child| {
+            drop(child.stdin.take());
+            let _ = child.wait();
+        },
+    );
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    while line.trim() != "ready" {
+        line.clear();
+        assert_ne!(stdout.read_line(&mut line).unwrap(), 0);
+    }
+    let pid = child.id() as i32;
+    let (backend, id) = backend_with_stale_running_pid(home.path(), "private", pid).await;
+    // A privileged CI runner can inspect private children. Record which kernel
+    // path ran while requiring generation reconciliation in either environment.
+    let lock =
+        microsandbox_runtime::ipc::lifecycle_lock_path(&backend.config().run_dir(), "private");
+    match super::process_exit::RuntimeExit::capture(Some(pid), &lock) {
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            println!("verified denied descriptor access");
+        }
+        Ok(result) => assert!(result.is_none()),
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        backend.stop_complete("private", id, false),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        recorded_sandbox_status(&backend, id).await,
+        SandboxStatus::Crashed
+    );
+    assert!(child.try_wait().unwrap().is_none());
 }
