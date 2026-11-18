@@ -27,6 +27,7 @@ pub mod progress;
 #[cfg(feature = "local")]
 pub mod runtime;
 pub mod sandbox;
+pub mod service;
 #[cfg(feature = "local")]
 pub mod setup;
 pub mod snapshot;
@@ -40,13 +41,14 @@ pub use agent::{
 #[cfg(feature = "local")]
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use context::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
-    CloudVolumeKind, CloudVolumeStatus, ComputeType, Context, ContextInfo, ContextKind,
-    ContextSelectionSource, Profile, ProfileKind, SandboxInner, SandboxOps,
-    SandboxRecordCloudState, SandboxRecordInner, SandboxRemoteState, Sandboxes, Snapshots,
-    VolumeInner, VolumeOps, VolumeRemoteState, Volumes, default_local_context,
-    resolve_default_backend,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
+    CloudErrorBody, CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudSandboxStatusReason, CloudService, CloudServiceStatus, CloudServiceTarget,
+    CloudUpdateServiceRequest, CloudVolumeKind, CloudVolumeStatus, ComputeType, Context,
+    ContextInfo, ContextKind, ContextSelectionSource, Profile, ProfileKind, SandboxInner,
+    SandboxOps, SandboxRecordCloudState, SandboxRecordInner, SandboxRemoteState, Sandboxes,
+    ServiceOps, Snapshots, VolumeInner, VolumeOps, VolumeRemoteState, Volumes,
+    default_local_context, resolve_default_backend,
 };
 /// Previous name for [`ComputeType`].
 #[deprecated(note = "use ComputeType instead")]
@@ -107,6 +109,10 @@ pub use sandbox::{
 pub use sandbox::{
     SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics, all_sandbox_metrics_local,
     all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+};
+pub use service::{
+    Service, ServiceBuilder, ServiceListBuilder, ServicePage, ServiceStatus, ServiceTarget,
+    ServiceUpdate,
 };
 pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts,

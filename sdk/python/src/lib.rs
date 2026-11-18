@@ -11,6 +11,7 @@ mod logs;
 mod metrics;
 mod provider;
 mod sandbox;
+mod service;
 mod setup;
 mod snapshot;
 mod ssh;
@@ -80,6 +81,8 @@ pub(crate) fn register_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<storage::PyMemoryCacheReport>()?;
     m.add_class::<volume::PyVolume>()?;
     m.add_class::<volume::PyVolumeFs>()?;
+    m.add_class::<service::PyService>()?;
+    m.add_class::<service::PyServicePage>()?;
     m.add_class::<snapshot::PySnapshot>()?;
     m.add_class::<snapshot::PySnapshotArchive>()?;
     m.add_class::<snapshot::PySnapshotCopyBuilder>()?;

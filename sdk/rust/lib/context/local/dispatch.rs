@@ -32,6 +32,10 @@ impl Context for LocalContext {
         self
     }
 
+    fn service_ops(&self) -> &dyn crate::context::ServiceOps {
+        self
+    }
+
     fn snapshot_ops(&self) -> &dyn SnapshotOps {
         self
     }

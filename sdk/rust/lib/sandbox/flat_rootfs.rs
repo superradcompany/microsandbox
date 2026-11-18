@@ -103,6 +103,9 @@ pub(crate) async fn create_patched_flat_rootfs(
         }
         let temporary = destination.with_extension("raw.part");
         let result = (|| {
+            // This candidate belongs to the sandbox, not the shared image cache.
+            #[cfg(unix)]
+            microsandbox_utils::private_file::create_new(&temporary)?;
             let artifact = microsandbox_image::ext4::materialize_ext4_rootfs(
                 &temporary,
                 tree,
@@ -200,6 +203,10 @@ fn create_private_flat_rootfs_sync(
                 FlatClone::Reflink
             }
         };
+        // Reflinks can copy the source's mode and ACL. Restrict only our unpublished
+        // private copy; the cached base retains its sharing policy.
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_file(&temp)?;
         let clone_us = clone_started_at.elapsed().as_micros();
         let base_apparent_bytes = std::fs::metadata(base)?.len();
         let grow_started_at = Instant::now();
@@ -279,8 +286,11 @@ mod tests {
         .await
         .unwrap();
 
+        #[cfg(unix)]
+        microsandbox_utils::private_file::verify(&std::fs::File::open(&destination).unwrap())
+            .unwrap();
         assert_eq!(
-            std::fs::metadata(destination).unwrap().len(),
+            std::fs::metadata(&destination).unwrap().len(),
             u64::from(target_mib) * BYTES_PER_MIB
         );
         assert_eq!(
@@ -346,8 +356,11 @@ mod tests {
         .unwrap();
 
         assert!(destination.is_file());
+        #[cfg(unix)]
+        microsandbox_utils::private_file::verify(&std::fs::File::open(&destination).unwrap())
+            .unwrap();
         assert_eq!(
-            std::fs::metadata(destination).unwrap().len(),
+            std::fs::metadata(&destination).unwrap().len(),
             u64::from(target_mib) * BYTES_PER_MIB
         );
     }

@@ -15,7 +15,7 @@ use tokio_tungstenite::{
 };
 
 use super::{RemoteContext, cloud_agent_tls_connector, default_user_agent};
-use crate::context::{Context, ContextInfo, ContextKind, SandboxOps, VolumeOps};
+use crate::context::{Context, ContextInfo, ContextKind, SandboxOps, ServiceOps, VolumeOps};
 use crate::{MicrosandboxError, MicrosandboxResult, timing};
 
 //--------------------------------------------------------------------------------------------------
@@ -53,6 +53,10 @@ impl Context for RemoteContext {
     }
 
     fn snapshot_ops(&self) -> &dyn crate::context::SnapshotOps {
+        self
+    }
+
+    fn service_ops(&self) -> &dyn ServiceOps {
         self
     }
 

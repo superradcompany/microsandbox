@@ -245,7 +245,7 @@ impl SandboxRecord {
     }
 
     /// The serialized sandbox configuration as stored in the database (local)
-    /// or returned by msb-cloud (cloud). Use [`config()`](Self::config) for a
+    /// or returned by the cloud API (cloud). Use [`config()`](Self::config) for a
     /// deserialized [`SandboxConfig`].
     pub fn config_json(&self) -> &str {
         match &self.inner {
@@ -365,8 +365,7 @@ impl SandboxRecord {
     /// - Local: the database row's `updated_at` (modification time of the
     ///   persisted record).
     /// - Cloud: the most recent of `stopped_at` / `started_at` / `created_at`
-    ///   from the msb-cloud response. msb-cloud has no dedicated
-    ///   `updated_at` column, so this is synthesised on the client.
+    ///   from the API response. This timestamp is computed on the client.
     pub fn updated_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         match &self.inner {
             SandboxRecordInner::Local(s) => s.updated_at,

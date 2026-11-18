@@ -304,6 +304,8 @@ Sources: [`crates/utils/lib/lib.rs`](crates/utils/lib/lib.rs) and [`crates/runti
 
 Renaming a directory or file requires migration or old-location probing. Preserve atomic publication and cleanup ordering, and never infer that an unrecognized old path is safe to delete.
 
+Unix FUSE initialization preserves the runtime process umask. Guest creation modes still use the guest request and mask; new host-managed files and directories request `0600` and `0700` and clear inherited ACLs. Explicit repair of stopped, protected sandboxes tightens recognized host state and clears its ACLs, including intentional sharing on that state; guest-state and directory-volume contents, external mounts, shared caches, and unknown paths remain excluded. Repair leaves already-private snapshot hardlinks unchanged and refuses non-private links outside the recognized set or objects replaced since inspection. No catalog, journal, launch, or guest-protocol format changes; Windows ready-storage repair remains a no-op.
+
 ## 8. Disk and Filesystem Image Formats
 
 Disk-image bytes outlive the binary that produced them. ext4 compatibility includes superblock feature flags, group descriptors, checksums, inode size and reserved inodes, 64-bit layouts, JBD2 journal state, resize-inode behavior, clean/dirty state, and replay requirements. EROFS and VMDK constants, descriptors, block sizes, extents, device tables, adapters, and alignment rules are likewise durable formats.
@@ -404,6 +406,8 @@ Bind mounts and volumes persist virtual Linux stat information outside the guest
 
 Compatibility-sensitive elements include xattr, ADS, and sidecar names; payload version, width, and byte order; uid, gid, mode, and rdev interpretation; symlink representation; path encoding; hidden-metadata filtering; reserved inode/handle values; and whiteout immunity.
 
+Guest xattr access on Unix passthrough host mounts is limited to user.* attributes outside Microsandbox's reserved user.msb and OverlayFS's user.overlay namespaces. New runtimes hide other host xattr namespaces and reject guest reads, writes, and removals; older runtimes retain their previous behavior. Existing host xattrs are not rewritten or removed.
+
 Sources: [`crates/filesystem/lib/backends/shared/stat_override.rs`](crates/filesystem/lib/backends/shared/stat_override.rs), [`crates/filesystem/lib/backends/passthroughfs/windows`](crates/filesystem/lib/backends/passthroughfs/windows), and [`crates/filesystem/lib/backends/shared/init_binary.rs`](crates/filesystem/lib/backends/shared/init_binary.rs).
 
 New metadata layouts require a new decoder version and, when old writers must consume the state, a migration or clean refusal before mutation.
@@ -416,13 +420,19 @@ Sources: [`Cargo.toml`](Cargo.toml), [`crates/filesystem/build.rs`](crates/files
 
 Do not independently substitute or upgrade one component because its upstream ABI appears compatible. Verify the release bundle as a unit on every supported OS and architecture, including the embedded matching agentd, firmware/kernel, library soname, device behavior, and package-version checks.
 
+The bundled Linux 6.12.118 kernel requires the virtio-fs completion-length fix in `msb_krun` 0.1.46. Ship the runtime and firmware together: older hosts report zero used-ring lengths and fail the kernel's response validation before guest initialization. The updated host also supports the previous 6.12.117 kernel. Full memory snapshots retain their captured kernel; installing new firmware does not add multigrain timestamps to those snapshots or already-running guests. A fresh guest boot uses the updated kernel. The backport improves observed nanosecond mtime/ctime updates on guest tmpfs, ext4, XFS and Btrfs without changing the timer frequency; it does not guarantee unique millisecond-rounded timestamps or change host-shared virtio-fs timestamp behavior.
+
 Normal x86 boot now declares `krun.poweroff=i8042` in libkrun's default kernel command line. Matching libkrunfw registers a low-priority final poweroff handler that sends the existing i8042 exit byte after orderly Linux shutdown. Generic KVM identity is not enough to enable it. Without both the host declaration and the new kernel, Linux may halt without releasing VMM ownership; StopWithTimeout reports expiry without killing. Existing running guests and full snapshots retain their captured kernel and require a fresh boot/recapture to acquire the handler. ARM platform poweroff, explicit custom command-line replacement and SEV/TDX built-in overrides are unchanged; they are not implicitly qualified by the normal Linux x86 test.
 
 ## 13. Networking, DNS, Published Ports, and Secret Substitution
 
+Gateway DNS rebinding protection also gates local-network discovery. `.local` requires broad native `Private` access; reverse zones containing restricted addresses require authorization of the whole zone, including ordered denies and the platform floor. A single allowed private subnet no longer enables all `.local` discovery. Response owners, embedded names and addresses are checked before caching, including configured NAT64 translations. Restricted ancillary RRsets may be removed from independently complete successful answers; incomplete replies are refused. Removing restricted records clears AD and whole-message signatures and removes signatures covering discarded RRsets. Clients depending on that metadata may fail validation. Explicit guest-selected resolvers retain their answer-address filtering and routing contract, and rebind-off remains an opt-out. No launch, agent, SDK, or persisted schema changes are introduced; older running runtimes retain their previous DNS behavior until restarted with the patched runtime.
+
 Strict hostname policy is enabled by default. The v0.6.0–v0.6.17 launch gate rejects strict policies containing outbound hostname allow rules, including domain suffixes and rules applying in both directions. Policies without those rules retain their existing behavior on older runtimes because strict enforcement is unused. Explicit `strict: false` remains supported.
 
 Observable network behavior is an effective compatibility contract. It includes default MTU, sandbox-slot address derivation, IPv4 subnet sizing, guest and gateway offsets, IPv6 prefixes, deterministic MAC addresses, interface name `eth0`, `host.microsandbox.internal`, DNS UDP and TCP behavior, DNS-over-TLS, TLS interception and trust paths, published-port binding, TCP half-close, UDP peer lifetime, destination policy, and host-side secret placeholder substitution.
+
+TLS reconnects may use SNI to revalidate an expired DNS binding. A fresh policy-filtered answer must contain the chosen IP before connection policy is rechecked; no prior guest lookup is required. Deferring SYN admission never dials upstream. Non-SNI connections, UDP, ICMP, and ingress still require live bindings. No launch fields, persisted formats, protocols, SDK contracts, or agent/kernel requirements change. Older runtimes retain their previous TTL-expiry behavior.
 
 Omitted HTTP denial settings now default to enabled + JSON, including in older payloads and saved configs. Denied requests may return `403` instead of a connection error; callers must check status. Set `deny_response: false` for silent closure or `deny_response_format: text` for legacy bodies and `{host}` substitution. JSON requires the `http_deny_json` runtime capability. Cloud behavior is unchanged. See [denial responses](docs/networking/overview.mdx#what-a-denied-http-request-sees) for message settings and protocol limits.
 

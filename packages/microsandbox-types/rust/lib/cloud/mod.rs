@@ -29,6 +29,7 @@ use crate::{TypesError, TypesResult};
 mod modify;
 mod modify_plan;
 mod secrets;
+mod services;
 mod snapshots;
 mod specs;
 
@@ -46,6 +47,10 @@ pub use modify_plan::{
 };
 pub use secrets::{
     CloudHostPattern, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
+};
+pub use services::{
+    CloudCreateServiceRequest, CloudService, CloudServiceStatus, CloudServiceTarget,
+    CloudUpdateServiceRequest,
 };
 pub use snapshots::{
     CloudCreateSnapshotRequest, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,
@@ -248,13 +253,14 @@ pub struct CloudCreateSandboxResponse {
     pub name: String,
     /// Canonical, resolved SSH username token.
     pub slug: String,
-    /// Current lifecycle status.
+    /// Current lifecycle status. A status this SDK does not recognize arrives as its own string.
+    #[cfg_attr(feature = "ts", ts(type = "CloudSandboxStatus | (string & {})"))]
     pub status: CloudSandboxStatus,
     /// Why the sandbox is not running yet, when known. Only present while
     /// `status` is `starting`.
     #[serde(default)]
     pub status_reason: Option<CloudSandboxStatusReason>,
-    /// Curated resolved-spec projection returned by the control plane, when
+    /// Curated resolved-spec projection returned by the cloud API, when
     /// available. Lifecycle and agent operations intentionally do not depend
     /// on reconstructing the create request from this server-owned view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -278,11 +284,12 @@ pub struct CloudCreateSandboxResponse {
     pub last_failure_message: Option<String>,
 }
 
-/// Sandbox lifecycle status returned by the cloud control plane.
+/// Sandbox lifecycle status returned by the cloud API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CloudSandboxStatus {
     /// Created in the database but not yet started.
     Created,
@@ -292,12 +299,19 @@ pub enum CloudSandboxStatus {
     Running,
     /// Stop request has been submitted.
     Stopping,
-    /// The VM has exited but its checkpoint is not yet durably saved.
+    /// The sandbox has stopped; its state is still being saved and it cannot start yet.
     SavingState,
-    /// Sandbox is stopped and any required state save is complete.
+    /// The sandbox is unreachable for now and may come back on its own.
+    TemporarilyUnavailable,
+    /// The sandbox cannot run again until a recovery decision is made.
+    RecoveryDecisionRequired,
+    /// Sandbox is stopped.
     Stopped,
     /// Sandbox failed.
     Failed,
+    /// The cloud API returned a status this SDK does not recognize.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Reason a sandbox start is still in progress. Only meaningful while

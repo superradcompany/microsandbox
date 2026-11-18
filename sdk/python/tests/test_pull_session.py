@@ -47,10 +47,13 @@ async def test_unclaimed_create_error_surfaces_at_scope_exit(read_progress):
 async def test_scope_exit_preserves_body_exception():
     session = Sandbox.create_with_progress("progress-body", image="/__microsandbox_missing_rootfs__")
     failure = ValueError("body failed")
-    with pytest.raises(ValueError) as caught:
+    try:
         async with session:
             raise failure
-    assert caught.value is failure
+    except ValueError as caught:
+        assert caught is failure
+    else:
+        pytest.fail("progress scope suppressed the body exception")
 
 
 @pytest.mark.asyncio
@@ -96,7 +99,7 @@ async def test_cancellation_while_remote_creation_is_pending(cancel_creation):
             else:
                 observer.cancel()
                 with pytest.raises(asyncio.CancelledError):
-                    await observer
+                    _ = await observer
                 release.set()
                 with pytest.raises(CloudHttpError, match="403"):
                     await asyncio.wait_for(session.result(), timeout=5)

@@ -44,6 +44,7 @@ local = [
     "dep:tar",
 ]
 cloud = [
+    "dep:httpdate",
     "dep:reqwest",
     "dep:rustls",
     "dep:rustls-platform-verifier",
@@ -76,6 +77,7 @@ docker_credential = { version = "1.4.0", optional = true }
 flate2 = { workspace = true, optional = true }
 futures.workspace = true
 hex = { workspace = true, optional = true }
+httpdate = { workspace = true, optional = true }
 libc.workspace = true
 microsandbox-db = { workspace = true, optional = true }
 microsandbox-agent-client = { workspace = true, features = ["named-pipe", "uds"] }

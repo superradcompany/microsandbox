@@ -239,6 +239,15 @@ typedef char *(*msb_image_prune_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf
 typedef char *(*msb_storage_usage_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_storage_usage_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_storage_prune_fn)(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_create_fn)(uint64_t cancel_id, const char *request_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_get_fn)(uint64_t cancel_id, const char *slug, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_list_fn)(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_update_fn)(uint64_t cancel_id, uint64_t handle, const char *request_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_enable_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_disable_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_remove_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_refresh_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_load_fn)(uint64_t cancel_id, const char *input_path, const char *tags_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_save_fn)(uint64_t cancel_id, const char *references_json, const char *output_path, const char *format, uint8_t *buf, size_t buf_len);
 
@@ -440,6 +449,15 @@ struct msb_library {
     msb_image_inspect_fn ptr_msb_image_inspect;
     msb_image_remove_fn ptr_msb_image_remove;
     msb_image_prune_fn ptr_msb_image_prune;
+    msb_service_create_fn ptr_msb_service_create;
+    msb_service_get_fn ptr_msb_service_get;
+    msb_service_list_fn ptr_msb_service_list;
+    msb_service_update_fn ptr_msb_service_update;
+    msb_service_enable_fn ptr_msb_service_enable;
+    msb_service_disable_fn ptr_msb_service_disable;
+    msb_service_remove_fn ptr_msb_service_remove;
+    msb_service_refresh_fn ptr_msb_service_refresh;
+    msb_service_close_fn ptr_msb_service_close;
     msb_storage_usage_fn ptr_msb_storage_usage;
     msb_sandbox_storage_usage_fn ptr_msb_sandbox_storage_usage;
     msb_storage_prune_fn ptr_msb_storage_prune;
@@ -663,6 +681,15 @@ const char * provider_load_microsandbox(msb_library *library, const char *path) 
 	RESOLVE_OPTIONAL(msb_storage_usage);
 	RESOLVE_OPTIONAL(msb_sandbox_storage_usage);
 	RESOLVE_OPTIONAL(msb_storage_prune);
+	RESOLVE_OPTIONAL(msb_service_create);
+	RESOLVE_OPTIONAL(msb_service_get);
+	RESOLVE_OPTIONAL(msb_service_list);
+	RESOLVE_OPTIONAL(msb_service_update);
+	RESOLVE_OPTIONAL(msb_service_enable);
+	RESOLVE_OPTIONAL(msb_service_disable);
+	RESOLVE_OPTIONAL(msb_service_remove);
+	RESOLVE_OPTIONAL(msb_service_refresh);
+	RESOLVE_OPTIONAL(msb_service_close);
 	RESOLVE(msb_image_load);
 	RESOLVE(msb_image_save);
 	RESOLVE(msb_sandbox_handle_snapshot);
@@ -1313,6 +1340,40 @@ char * provider_call_msb_image_prune(msb_library *library, uint64_t cancel_id, u
 	return library->ptr_msb_image_prune ? library->ptr_msb_image_prune(cancel_id, buf, buf_len) : NULL;
 }
 char * call_msb_image_prune(uint64_t cancel_id, uint8_t *buf, size_t buf_len) { return provider_call_msb_image_prune(&default_library, cancel_id, buf, buf_len); }
+bool has_msb_service(void) {
+	return default_library.ptr_msb_service_create != NULL && default_library.ptr_msb_service_get != NULL && default_library.ptr_msb_service_list != NULL &&
+		default_library.ptr_msb_service_update != NULL && default_library.ptr_msb_service_enable != NULL &&
+		default_library.ptr_msb_service_disable != NULL && default_library.ptr_msb_service_remove != NULL &&
+		default_library.ptr_msb_service_refresh != NULL && default_library.ptr_msb_service_close != NULL;
+}
+char *call_msb_service_create(uint64_t cancel_id, const char *request_json, uint8_t *buf, size_t buf_len) {
+	return default_library.ptr_msb_service_create ? default_library.ptr_msb_service_create(cancel_id, request_json, buf, buf_len) : NULL;
+}
+char *call_msb_service_get(uint64_t cancel_id, const char *slug, uint8_t *buf, size_t buf_len) {
+	return default_library.ptr_msb_service_get ? default_library.ptr_msb_service_get(cancel_id, slug, buf, buf_len) : NULL;
+}
+char *call_msb_service_list(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len) {
+	return default_library.ptr_msb_service_list ? default_library.ptr_msb_service_list(cancel_id, options_json, buf, buf_len) : NULL;
+}
+char *call_msb_service_update(uint64_t cancel_id, uint64_t handle, const char *request_json, uint8_t *buf, size_t buf_len) {
+	return default_library.ptr_msb_service_update ? default_library.ptr_msb_service_update(cancel_id, handle, request_json, buf, buf_len) : NULL;
+}
+char *call_msb_service_enable(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return default_library.ptr_msb_service_enable ? default_library.ptr_msb_service_enable(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_disable(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return default_library.ptr_msb_service_disable ? default_library.ptr_msb_service_disable(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_remove(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return default_library.ptr_msb_service_remove ? default_library.ptr_msb_service_remove(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_refresh(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return default_library.ptr_msb_service_refresh ? default_library.ptr_msb_service_refresh(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return default_library.ptr_msb_service_close ? default_library.ptr_msb_service_close(cancel_id, handle, buf, buf_len) : NULL;
+}
+
 bool provider_has_msb_storage_usage(msb_library *library) { return library->ptr_msb_storage_usage != NULL; }
 bool has_msb_storage_usage(void) { return provider_has_msb_storage_usage(&default_library); }
 bool provider_has_msb_sandbox_storage_usage(msb_library *library) { return library->ptr_msb_sandbox_storage_usage != NULL; }
@@ -1459,6 +1520,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1571,11 +1633,32 @@ const logsBufSize = 48 << 20
 // serialises {kind, message} JSON with optional recovery metadata; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
 type Error struct {
-	Kind     string                         `json:"kind"`
-	Message  string                         `json:"message"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+	// Changed reports whether a failed Service change may have been applied.
+	Changed  string                         `json:"changed,omitempty"`
 	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+	Service  *ServiceErrorDetails           `json:"service,omitempty"`
 	// Local volume errors retain host errno/Win32 identity. Older libraries omit it.
 	OSError *int32 `json:"os_error,omitempty"`
+}
+
+// UndispatchedServiceChangeError records a Service change failure that happened
+// before the native request was called.
+type UndispatchedServiceChangeError struct {
+	err error
+}
+
+func (e *UndispatchedServiceChangeError) Error() string { return e.err.Error() }
+
+// Unwrap preserves the original pre-dispatch failure.
+func (e *UndispatchedServiceChangeError) Unwrap() error { return e.err }
+
+func undispatchedServiceChange(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &UndispatchedServiceChangeError{err: err}
 }
 
 // SnapshotSourceRecoveryDetails preserves native recovery metadata across the FFI.
@@ -1631,7 +1714,11 @@ const (
 	KindMetricsDisabled          = "metrics_disabled"
 	KindMetricsUnavailable       = "metrics_unavailable"
 	KindUnsupportedOperation     = "unsupported_operation"
+	KindCloudOnly                = "cloud_only"
 	KindModificationNotConfirmed = "modification_not_confirmed"
+	KindServiceNotFound          = "service_not_found"
+	KindServiceAlreadyExists     = "service_already_exists"
+	KindService                  = "service"
 	KindIO                       = "io"
 )
 
@@ -4704,6 +4791,145 @@ func StorageUsage(ctx context.Context) (*StorageUsageReport, error) {
 // PruneStorage revalidates runtime cache ownership before removal and never prompts.
 func PruneStorage(ctx context.Context, options StoragePruneOptions) (*StoragePruneReport, error) {
 	return defaultLibrary().PruneStorage(ctx, options)
+}
+
+// CreateService creates a Service and returns it once the change is committed.
+func CreateService(ctx context.Context, request ServiceCreateRequest) (*ServiceInfo, error) {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, undispatchedServiceChange(err)
+	}
+	cRequest := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cRequest))
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_create(cancelID, cRequest, buf, bufLen)
+	})
+}
+
+// GetService returns a Service by slug.
+func GetService(ctx context.Context, slug string) (*ServiceInfo, error) {
+	// The slug is passed as a C string, which ends at the first NUL, so a slug with one
+	// would fetch a different Service.
+	if strings.IndexByte(slug, 0) >= 0 {
+		return nil, &Error{Kind: KindInvalidConfig, Message: fmt.Sprintf("invalid config: service slug %q is not valid", slug)}
+	}
+	cSlug := C.CString(slug)
+	defer C.free(unsafe.Pointer(cSlug))
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_get(cancelID, cSlug, buf, bufLen)
+	})
+}
+
+// UpdateService sends one change and returns the Service once it is committed.
+func UpdateService(ctx context.Context, handle uint64, request ServiceUpdateRequest) (*ServiceInfo, error) {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, undispatchedServiceChange(err)
+	}
+	cRequest := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cRequest))
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_update(cancelID, C.uint64_t(handle), cRequest, buf, bufLen)
+	})
+}
+
+// EnableService enables a Service and returns it once committed.
+func EnableService(ctx context.Context, handle uint64) (*ServiceInfo, error) {
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_enable(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// DisableService disables a Service and returns it once committed.
+func DisableService(ctx context.Context, handle uint64) (*ServiceInfo, error) {
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_disable(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// ListServices returns one page of Services.
+func ListServices(ctx context.Context, options ServiceListOptions) (*ServicePage, error) {
+	if err := ensureService(ctx); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+	cOptions := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOptions))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_list(cancelID, cOptions, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var page *ServicePage
+	if err := json.Unmarshal([]byte(out), &page); err != nil {
+		return nil, fmt.Errorf("parse service page: %w", err)
+	}
+	if page == nil {
+		return nil, fmt.Errorf("native SDK returned no service page")
+	}
+	return page, nil
+}
+
+// RemoveService removes a Service.
+func RemoveService(ctx context.Context, handle uint64) error {
+	if err := ensureService(ctx); err != nil {
+		return undispatchedServiceChange(err)
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_remove(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+	return err
+}
+
+// RefreshService gets a Service through the backend retained by its handle.
+func RefreshService(ctx context.Context, handle uint64) (*ServiceInfo, error) {
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_refresh(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// CloseService releases a Service handle. It runs with context.Background so a finalizer can always complete it.
+func CloseService(handle uint64) error {
+	_, err := call(context.Background(), func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_close(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+	return err
+}
+
+// ensureService loads the library and refuses before dispatch when it predates Services.
+func ensureService(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if !bool(C.has_msb_service()) {
+		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support services; update the native SDK"}
+	}
+	return nil
+}
+
+func callService(ctx context.Context, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char) (*ServiceInfo, error) {
+	if err := ensureService(ctx); err != nil {
+		return nil, undispatchedServiceChange(err)
+	}
+	out, err := call(ctx, fn)
+	if err != nil {
+		return nil, err
+	}
+	var info *ServiceInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse service: %w", err)
+	}
+	if info == nil {
+		return nil, fmt.Errorf("native SDK returned no service")
+	}
+	return info, nil
 }
 
 // ImageLoad imports images from a local archive into the cache and returns

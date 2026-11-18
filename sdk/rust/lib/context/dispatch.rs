@@ -6,7 +6,10 @@ use futures::future::BoxFuture;
 
 #[cfg(feature = "local")]
 use super::LocalContext;
-use super::{ContextInfo, ContextKind, ContextSelectionSource, SandboxOps, SnapshotOps, VolumeOps};
+use super::{
+    ContextInfo, ContextKind, ContextSelectionSource, SandboxOps, ServiceOps, SnapshotOps,
+    VolumeOps,
+};
 use crate::{
     MicrosandboxResult,
     error::{Operation, UnsupportedReason},
@@ -17,8 +20,8 @@ use crate::{
 //--------------------------------------------------------------------------------------------------
 
 /// Top-level routing trait for SDK dispatch. Implementations route to
-/// resource-specific sub-traits (sandboxes, volumes, snapshots) via accessor
-/// methods.
+/// resource-specific sub-traits (sandboxes, volumes, snapshots, services) via
+/// accessor methods.
 ///
 /// Object-safe — handles hold an `Arc<dyn Context>`. Every implementation must
 /// explicitly provide each resource-specific backend so that missing
@@ -71,6 +74,9 @@ pub trait Context: Send + Sync + 'static {
 
     /// Return the snapshot lifecycle backend.
     fn snapshot_ops(&self) -> &dyn SnapshotOps;
+
+    /// Operations for Services in this destination.
+    fn service_ops(&self) -> &dyn ServiceOps;
 
     /// Try downcast to a concrete `&LocalContext` when in a local context.
     ///

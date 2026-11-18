@@ -612,10 +612,14 @@ await using sb = await Sandbox.builder("worker")
 ```
 
 ```rust Rust
+use std::time::Duration;
+
+use microsandbox::Sandbox;
+
 let sb = Sandbox::builder("worker")
     .image("python")
-    .max_duration(std::time::Duration::from_secs(3600))
-    .idle_timeout(std::time::Duration::from_secs(300))
+    .max_duration(Duration::from_secs(3600))
+    .idle_timeout(Duration::from_secs(300))
     .create()
     .await?;
 ```

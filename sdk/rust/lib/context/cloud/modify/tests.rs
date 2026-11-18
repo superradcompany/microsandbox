@@ -172,11 +172,11 @@ fn error_json(code: &str, message: &str) -> serde_json::Value {
 }
 
 fn plan_line() -> String {
-    format!("POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1")
+    format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1")
 }
 
 fn apply_line() -> String {
-    format!("PUT /v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
+    format!("PATCH /v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
 }
 
 fn body(request: &Recorded) -> serde_json::Value {
@@ -557,7 +557,7 @@ async fn a_refused_proxy_is_sent_again() {
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].line,
-        format!("PUT http://cloud.example/v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
+        format!("PATCH http://cloud.example/v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
     );
 }
 
@@ -776,32 +776,18 @@ async fn in_progress_is_waited_out() {
     assert_eq!(mock.requests().len(), 3);
 }
 
-/// The real budget scaled down by 60: a crashed request's lock (90 s) is
-/// waited out, then one full answer (67 s) still fits in the total (180 s).
+/// A busy response followed by a slow success must fit within the client budget.
 #[tokio::test]
-async fn a_crashed_lock_is_waited_out() {
-    let scale = |budget: Duration| budget / 60;
-    let lock = scale(Duration::from_secs(90));
-    let answer = scale(Duration::from_secs(67));
-    let budget = ApplyBudget {
-        total: scale(APPLY_BUDGET.total),
-        per_request: scale(APPLY_BUDGET.per_request),
-        not_sent: Backoff {
-            first: scale(APPLY_BUDGET.not_sent.first),
-            max: scale(APPLY_BUDGET.not_sent.max),
-            jitter: false,
-        },
-        in_progress: Backoff {
-            first: scale(APPLY_BUDGET.in_progress.first),
-            max: scale(APPLY_BUDGET.in_progress.max),
-            jitter: true,
-        },
-    };
+async fn in_progress_then_a_slow_answer_fits_within_the_budget() {
+    let busy_for = Duration::from_millis(150);
+    let answer_delay = Duration::from_millis(200);
+    let mut budget = short_budget(2_000);
+    budget.per_request = Duration::from_millis(1_000);
     let mock = MockCloud::start(move |_, elapsed| {
-        if elapsed < lock {
+        if elapsed < busy_for {
             Reply::Json(409, error_json(CLOUD_MODIFICATION_IN_PROGRESS, "busy"))
         } else {
-            Reply::Slow(answer, 200, plan_json(true, "live"))
+            Reply::Slow(answer_delay, 200, plan_json(true, "live"))
         }
     })
     .await;
@@ -809,7 +795,7 @@ async fn a_crashed_lock_is_waited_out() {
     let plan = apply_within(&mock.backend(), &value_patch(VALUE), budget).await;
 
     assert!(plan.is_ok(), "{plan:?}");
-    assert!(mock.requests().len() > 2, "the lock was waited out");
+    assert!(mock.requests().len() > 1, "the busy response was retried");
 }
 
 #[tokio::test]

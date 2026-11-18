@@ -83,7 +83,7 @@ pub struct VolumeLocalState {
     pub created_at: Option<DateTime<Utc>>,
 }
 
-/// Cloud handle state. Captures the snapshot msb-cloud returned at fetch time.
+/// Cloud handle state. Captures the snapshot the cloud API returned at fetch time.
 #[derive(Clone)]
 pub struct VolumeRemoteState {
     /// Server-side UUID.
@@ -111,7 +111,7 @@ pub struct VolumeRemoteState {
 /// resolve the backend via [`default_local_context`](super::default_local_context) and
 /// forward it through.
 ///
-/// Cloud-side `fs_*` operations route through msb-cloud HTTP while local
+/// Cloud-side `fs_*` operations route through the cloud HTTP API while local
 /// operations remain scoped to the configured local volume root.
 pub trait VolumeOps: Send + Sync {
     /// Create a volume. The returned outer [`Volume`] carries the supplied

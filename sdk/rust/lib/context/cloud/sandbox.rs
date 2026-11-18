@@ -94,36 +94,52 @@ impl RemoteContext {
     /// Stop the captured cloud identity and observe completion, including ephemeral deletion.
     pub(crate) async fn stop_complete(&self, id: &str) -> MicrosandboxResult<()> {
         let current = self.get_sandbox_by_id(id).await?;
-        if matches!(
-            current.status,
-            CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed
-        ) {
-            return Ok(());
-        }
-        // A previous caller may have already submitted stop. The provider
-        // rejects a duplicate while stopping or persisting the checkpoint.
-        if !matches!(
-            current.status,
-            CloudSandboxStatus::Stopping | CloudSandboxStatus::SavingState
-        ) {
-            self.stop_sandbox_by_id(id).await?;
+        let unrecognized_status = || {
+            MicrosandboxError::Runtime(format!(
+                "cloud sandbox {:?} reported a status this SDK does not recognize; upgrade the SDK",
+                current.name
+            ))
+        };
+        match current.status {
+            CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed => return Ok(()),
+            // A stop is already in flight. Poll it without submitting a duplicate.
+            CloudSandboxStatus::Stopping | CloudSandboxStatus::SavingState => {}
+            CloudSandboxStatus::Created
+            | CloudSandboxStatus::Starting
+            | CloudSandboxStatus::Running
+            | CloudSandboxStatus::TemporarilyUnavailable
+            | CloudSandboxStatus::RecoveryDecisionRequired => {
+                self.stop_sandbox_by_id(id).await?;
+            }
+            CloudSandboxStatus::Unknown => return Err(unrecognized_status()),
+            _ => return Err(unrecognized_status()),
         }
         loop {
             match self.get_sandbox_by_id(id).await {
-                Ok(observed)
-                    if matches!(
-                        observed.status,
-                        CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed
-                    ) =>
-                {
-                    return Ok(());
-                }
+                Ok(observed) => match observed.status {
+                    CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed => return Ok(()),
+                    CloudSandboxStatus::RecoveryDecisionRequired => {
+                        return Err(MicrosandboxError::Runtime(format!(
+                            "cloud sandbox {:?} needs a recovery decision before it can stop",
+                            current.name
+                        )));
+                    }
+                    CloudSandboxStatus::Unknown => return Err(unrecognized_status()),
+                    CloudSandboxStatus::Created
+                    | CloudSandboxStatus::Starting
+                    | CloudSandboxStatus::Running
+                    | CloudSandboxStatus::Stopping
+                    | CloudSandboxStatus::SavingState
+                    | CloudSandboxStatus::TemporarilyUnavailable => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    _ => return Err(unrecognized_status()),
+                },
                 // Only disappearance after a successful stop of a confirmed ephemeral
                 // sandbox is completion. Missing persistent sandboxes and failed stop
                 // requests still surface their errors, and a reused name is never followed.
                 Err(MicrosandboxError::SandboxNotFound(_)) if current.ephemeral => return Ok(()),
                 Err(error) => return Err(error),
-                Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
     }
@@ -198,7 +214,7 @@ impl SandboxOps for RemoteContext {
         config: SandboxConfig,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         // Cloud has no notion of "detached" — the sandbox lifecycle is owned
-        // by msb-cloud, not by this process. Reuse the eager-start path.
+        // by the cloud API, not by this process. Reuse the eager-start path.
         self.create(backend, config, true)
     }
 
@@ -777,17 +793,22 @@ fn cloud_tls_config_is_harmless(
 
 /// Map [`CloudSandboxStatus`] to the SDK's [`SandboxStatus`] enum.
 ///
-/// `Stopping` and `SavingState` collapse to `Draining` (microsandbox uses `Draining` for
-/// the graceful-stop state); `Failed` collapses to `Crashed`. All other
-/// variants map 1:1.
+/// `Stopping` and `SavingState` collapse to `Draining`; `Failed` collapses to
+/// `Crashed`; `TemporarilyUnavailable`, `RecoveryDecisionRequired`, `Unknown`,
+/// and any unrecognized status collapse to `Paused`. All other variants map 1:1.
 pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxStatus {
     match s {
         CloudSandboxStatus::Created => SandboxStatus::Created,
         CloudSandboxStatus::Starting => SandboxStatus::Starting,
         CloudSandboxStatus::Running => SandboxStatus::Running,
-        CloudSandboxStatus::Stopping | CloudSandboxStatus::SavingState => SandboxStatus::Draining,
+        CloudSandboxStatus::Stopping => SandboxStatus::Draining,
+        CloudSandboxStatus::SavingState => SandboxStatus::Draining,
+        CloudSandboxStatus::TemporarilyUnavailable => SandboxStatus::Paused,
+        CloudSandboxStatus::RecoveryDecisionRequired => SandboxStatus::Paused,
         CloudSandboxStatus::Stopped => SandboxStatus::Stopped,
         CloudSandboxStatus::Failed => SandboxStatus::Crashed,
+        CloudSandboxStatus::Unknown => SandboxStatus::Paused,
+        _ => SandboxStatus::Paused,
     }
 }
 
@@ -802,7 +823,7 @@ fn ensure_cloud_sandbox_ready(cloud: &CloudCreateSandboxResponse) -> Microsandbo
             cloud
                 .last_failure_message
                 .as_deref()
-                .unwrap_or("the cloud control plane reported no failure reason")
+                .unwrap_or("the cloud API reported no failure reason")
         ))),
         CloudSandboxStatus::Starting => Err(MicrosandboxError::Runtime(format!(
             "cloud sandbox {:?} did not reach running before the readiness wait expired",
@@ -2122,19 +2143,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_status_maps_created_and_starting_one_to_one() {
-        assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Created),
-            SandboxStatus::Created,
-        );
-        assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Starting),
-            SandboxStatus::Starting,
-        );
-        assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Running),
-            SandboxStatus::Running,
-        );
+    fn cloud_status_maps_to_existing_sandbox_states() {
         assert_eq!(
             cloud_status_to_sandbox_status(CloudSandboxStatus::Stopping),
             SandboxStatus::Draining,
@@ -2144,12 +2153,20 @@ mod tests {
             SandboxStatus::Draining,
         );
         assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Stopped),
-            SandboxStatus::Stopped,
+            cloud_status_to_sandbox_status(CloudSandboxStatus::TemporarilyUnavailable),
+            SandboxStatus::Paused,
+        );
+        assert_eq!(
+            cloud_status_to_sandbox_status(CloudSandboxStatus::RecoveryDecisionRequired),
+            SandboxStatus::Paused,
         );
         assert_eq!(
             cloud_status_to_sandbox_status(CloudSandboxStatus::Failed),
             SandboxStatus::Crashed,
+        );
+        assert_eq!(
+            cloud_status_to_sandbox_status(CloudSandboxStatus::Unknown),
+            SandboxStatus::Paused,
         );
     }
 
@@ -2162,8 +2179,11 @@ mod tests {
             CloudSandboxStatus::Starting,
             CloudSandboxStatus::Stopping,
             CloudSandboxStatus::SavingState,
+            CloudSandboxStatus::TemporarilyUnavailable,
+            CloudSandboxStatus::RecoveryDecisionRequired,
             CloudSandboxStatus::Stopped,
             CloudSandboxStatus::Failed,
+            CloudSandboxStatus::Unknown,
         ] {
             assert!(ensure_cloud_sandbox_ready(&cloud_response(status)).is_err());
         }

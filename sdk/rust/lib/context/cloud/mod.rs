@@ -1,4 +1,4 @@
-//! Cloud backend implementation — talks to an msb-cloud control plane over HTTP.
+//! Cloud backend implementation — talks to the cloud API over HTTP.
 //!
 //! Holds the (url, api_key) tuple and a `reqwest::Client`. Lifecycle ops are
 //! plain HTTP; logs stream over SSE; exec, attach, and guest-fs ride the agent
@@ -7,14 +7,15 @@
 //! Construction requires an API key. Hosted-cloud callers use the default
 //! endpoint; `with_url`, environment configuration, and profiles can override it
 //! for development, self-hosted, and on-prem deployments.
-//! Auth is API-key-only — the same `msb_live_*` / `msb_test_*` tokens msb-cloud
-//! issues today. No OAuth or session credentials are honored here.
+//! Auth is API-key-only, using `msb_live_*` / `msb_test_*` tokens.
+//! No OAuth or session credentials are honored here.
 
 mod agent;
 mod constructors;
 mod http;
 mod modify;
 pub(in crate::context) mod sandbox;
+mod service;
 mod sharing;
 mod snapshot;
 #[cfg(test)]
@@ -59,11 +60,11 @@ fn default_user_agent() -> String {
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Cloud-runtime backend: talks to an msb-cloud control plane over HTTP.
+/// Cloud-runtime backend: talks to the cloud API over HTTP.
 ///
 /// Holds the deployment URL, API key, and captured user and managed settings.
 /// The `(url, api_key)` pair determines
-/// which org's view the backend sees: msb-cloud derives the org from the API
+/// which org's view the backend sees: the cloud API derives the org from the API
 /// key, so there is no per-call org argument.
 ///
 /// Constructors:
@@ -85,6 +86,7 @@ struct RemoteContextInner {
     url: String,
     api_key: String,
     http: reqwest::Client,
+    service_http: reqwest::Client,
     authorization: HeaderValue,
     user_agent_header: Option<HeaderValue>,
     request_timeout: Duration,
@@ -133,7 +135,7 @@ impl RemoteContext {
     /// Construct from a named SDK profile in `~/.microsandbox/config.json`.
     ///
     /// Profiles are local SDK sugar over the primary `(url, api_key)` constructor;
-    /// msb-cloud does not receive or interpret profile names.
+    /// the cloud API does not receive or interpret profile names.
     pub fn from_profile(name: &str) -> MicrosandboxResult<Self> {
         super::profile::cloud_backend_from_profile(name)
     }
@@ -143,7 +145,7 @@ impl RemoteContext {
         RemoteContextBuilder::default()
     }
 
-    /// Configured msb-cloud endpoint URL (no trailing slash).
+    /// Configured cloud API endpoint URL (no trailing slash).
     pub fn url(&self) -> &str {
         &self.inner.url
     }
@@ -254,7 +256,7 @@ impl RemoteContextBuilder {
         self
     }
 
-    /// Set the msb-cloud endpoint URL.
+    /// Set the cloud API endpoint URL.
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
@@ -287,6 +289,12 @@ impl RemoteContextBuilder {
     /// Provide a fully custom `reqwest::Client`. When set, `request_timeout`
     /// and `user_agent` builder options are ignored — the supplied client owns
     /// its own transport configuration. The context API key always supplies Authorization.
+    ///
+    /// Service create, update, enable, disable and remove also use this client,
+    /// so its retry and redirect policies decide whether a change request can be
+    /// resent or redirected. Build it with `.retry(reqwest::retry::never())` and
+    /// `.redirect(reqwest::redirect::Policy::none())` to keep each change to the
+    /// requested endpoint at most once.
     pub fn client(mut self, client: reqwest::Client) -> Self {
         self.custom_client = Some(client);
         self
@@ -352,11 +360,22 @@ impl RemoteContextBuilder {
             })?,
         };
 
+        let service_http = match self.custom_client.as_ref() {
+            Some(client) => client.clone(),
+            None => service::service_change_client_builder()
+                .build()
+                .map_err(|error| {
+                    MicrosandboxError::InvalidConfig(format!(
+                        "failed to build Service client: {error}"
+                    ))
+                })?,
+        };
         Ok(RemoteContext {
             inner: Arc::new(RemoteContextInner {
                 url,
                 api_key,
                 http,
+                service_http,
                 authorization,
                 user_agent_header,
                 request_timeout: self.request_timeout,

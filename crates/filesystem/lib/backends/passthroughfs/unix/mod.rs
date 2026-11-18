@@ -647,9 +647,6 @@ impl DynFileSystem for PassthroughFs {
             self.writeback.store(true, Ordering::Relaxed);
         }
 
-        // Clear umask so the client can set all mode bits.
-        unsafe { libc::umask(0o000) };
-
         Ok(opts)
     }
 

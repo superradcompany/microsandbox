@@ -43,6 +43,7 @@ export interface NativeBindings {
   readonly RestoreBuilder: new (snapshot: string, referenceKind?: "auto" | "id" | "path") => NapiRestoreBuilder;
   readonly Volume: NapiVolumeStatic;
   readonly VolumeBuilder: NapiVolumeBuilderCtor;
+  readonly Service: NapiServiceStatic;
   readonly Snapshot: NapiSnapshotStatic;
   readonly SnapshotBuilder: NapiSnapshotBuilderCtor;
   readonly ExecOptionsBuilder: NapiExecOptionsBuilderCtor;
@@ -584,6 +585,51 @@ export interface NapiVolumeFsReadStream extends AsyncIterable<Buffer> {
 export interface NapiVolumeFsWriteSink {
   write(data: Buffer): Promise<void>;
   close(): Promise<void>;
+}
+
+//-----------------------------------------------------------------------------
+// Service
+//-----------------------------------------------------------------------------
+
+export interface NapiServiceTarget {
+  sandbox: string;
+  port: number;
+}
+
+export interface NapiServiceUpdateOptions {
+  target: NapiServiceTarget;
+}
+
+export interface NapiServiceListOptions {
+  sandbox?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface NapiServicePage {
+  services: NapiService[];
+  nextCursor?: string;
+}
+
+export interface NapiServiceStatic {
+  create(slug: string, target?: NapiServiceTarget): Promise<NapiService>;
+  get(slug: string): Promise<NapiService>;
+  list(): Promise<NapiServicePage>;
+  listWith(options: NapiServiceListOptions): Promise<NapiServicePage>;
+}
+
+export interface NapiService {
+  readonly slug: string;
+  readonly url: string;
+  readonly status: string;
+  readonly target: NapiServiceTarget | null | undefined;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  update(options: NapiServiceUpdateOptions): Promise<NapiService>;
+  enable(): Promise<NapiService>;
+  disable(): Promise<NapiService>;
+  remove(): Promise<void>;
+  refresh(): Promise<NapiService>;
 }
 
 //-----------------------------------------------------------------------------
