@@ -11,6 +11,8 @@ A Service gives a sandbox port a public HTTPS URL. Requests to the URL go to the
 
 ## Create a Service
 
+Select a remote destination with `MSB_BACKEND=remote` or a remote profile. With the local destination selected, Service lookup, list, and creation return an unsupported error before sending a provider request, even when `MSB_API_KEY` is set.
+
 Start the target sandbox, then create the Service:
 
 <CodeGroup>
