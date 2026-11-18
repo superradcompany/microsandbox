@@ -73,8 +73,11 @@ impl Default for ExecLimits {
     fn default() -> Self {
         Self {
             max_executions: 128,
-            input_limit: 64 * 1024,
-            output_limit: 1024 * 1024,
+            // Keep enough credit in flight over remote links without removing
+            // backpressure. At 128 executions these allowances total 640 MiB
+            // before transport/allocator overhead; they are not preallocated.
+            input_limit: 1024 * 1024,
+            output_limit: 4 * 1024 * 1024,
             stdin_chunk_size: 16 * 1024,
             output_chunk_size: 16 * 1024,
         }
