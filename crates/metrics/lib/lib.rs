@@ -20,10 +20,8 @@ mod snapshot;
 pub use compatibility::MetricsRegistryReader;
 pub use error::{MetricsError, MetricsResult};
 /// Maximum bytes reserved for a sandbox name inside a fixed metrics slot.
-pub use layout::{
-    NAME_BYTES as SLOT_NAME_BYTES, READABLE_REGISTRY_ABI_VERSIONS, REGISTRY_ABI_VERSION,
-    registry_size,
-};
+pub use layout::NAME_BYTES as SLOT_NAME_BYTES;
+pub use layout::{READABLE_REGISTRY_ABI_VERSIONS, REGISTRY_ABI_VERSION, registry_size};
 pub use registry::{
     ActivateSlot, IdentifiedMetric, MetricsRegistry, MetricsSlotWriter, ReleaseMode, ReserveSlot,
     SampleWrite, SlotReservation, default_capacity,
