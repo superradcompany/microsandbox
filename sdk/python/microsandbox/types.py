@@ -98,7 +98,6 @@ class ComputeType(StrEnum):
     SHARED = "shared"
 
 
-class ContextKind(StrEnum):
 class ServiceStatus(StrEnum):
     ENABLED = "enabled"
     DISABLED = "disabled"
@@ -114,7 +113,7 @@ class ServiceTarget:
     port: int
 
 
-class BackendKind(StrEnum):
+class ContextKind(StrEnum):
     LOCAL = "local"
     REMOTE = "remote"
 
