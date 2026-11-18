@@ -665,20 +665,21 @@ impl SecretBuilder {
 
     /// Set the secret value inline (mutually exclusive with [`source`](Self::source)).
     ///
-    /// Prefer [`source`](Self::source) for durable configs: an inline value is
-    /// persisted verbatim in the sandbox spec, whereas a source reference is
-    /// resolved host-side at spawn time and never stored at rest.
+    /// Prefer [`source`](Self::source) for durable local configs: an inline
+    /// value is persisted verbatim in the sandbox spec, whereas a local sandbox
+    /// keeps only the source reference.
     pub fn value(mut self, value: impl Into<String>) -> Self {
         self.value = Some(value.into());
         self
     }
 
-    /// Resolve the value from a host-side source reference at spawn time
+    /// Resolve the value from a host-side source reference
     /// (mutually exclusive with [`value`](Self::value)).
     ///
-    /// The durable config records only the reference; the plaintext is read
-    /// from the host environment when the sandbox starts, so it never lands
-    /// in the database.
+    /// A local sandbox config records only the reference, and the value is
+    /// read from the host environment when the sandbox starts. On microsandbox
+    /// cloud, the value is read from the caller's environment when the sandbox
+    /// is created and sent like a value set with [`value`](Self::value).
     pub fn source(mut self, source: SecretSource) -> Self {
         self.source = Some(source);
         self

@@ -296,7 +296,7 @@ fn result_unknown(cause: impl std::fmt::Display) -> MicrosandboxError {
 
 /// A missing or non-UTF-8 variable resolves to `None`, which the request
 /// builder refuses as an unresolved source.
-fn resolve_env(var: &str) -> Option<CloudSecretValue> {
+pub(super) fn resolve_env(var: &str) -> Option<CloudSecretValue> {
     std::env::var(var).ok().map(CloudSecretValue::new)
 }
 
