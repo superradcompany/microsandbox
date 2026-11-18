@@ -2388,6 +2388,7 @@ mod tests {
         let error = apply_patches(&image, &patches, true).await.unwrap_err();
         assert!(error.to_string().contains("byte budget"), "{error}");
         assert!(!root.join("first").exists());
+        std::fs::write(&file, b"payload").unwrap();
         symlink(&source, fixture.join("alias-dir")).unwrap();
         for patch in [
             Patch::CopyFile {
@@ -2723,8 +2724,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
-        let source = temp.path().join("source");
+        let fixture = temp.path().canonicalize().unwrap();
+        let root = fixture.join("root");
+        let source = fixture.join("source");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(source.join("private")).unwrap();
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o710)).unwrap();
@@ -2737,7 +2739,7 @@ mod tests {
         apply_patches(
             &bind_root(root.clone(), true),
             &[Patch::CopyDir {
-                src: source,
+                src: source.clone(),
                 dst: "/copied".into(),
                 replace: false,
             }],
@@ -2745,6 +2747,34 @@ mod tests {
         )
         .await
         .unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::CopyDir {
+                src: source,
+                dst: "/staged".into(),
+                replace: false,
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(root.join("staged"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o710
+        );
+        assert_eq!(
+            std::fs::metadata(root.join("staged/private"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
 
         assert_eq!(
             std::fs::metadata(root.join("copied"))
