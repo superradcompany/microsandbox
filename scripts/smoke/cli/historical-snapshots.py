@@ -108,7 +108,7 @@ def produce(args):
     binary = args.release_dir / "msb"
     firmware = args.release_dir / releases.firmware_name()
     # Preserve the isolated home for diagnosis; only its own source sandbox is removed.
-    home = Path(tempfile.mkdtemp(prefix="msb-hp-", dir="/tmp"))
+    home = Path(tempfile.mkdtemp(prefix="msb-hp-", dir=args.temp_root))
     runner = Runner(binary, environment(binary, firmware, home), args.output / "producer")
     originals = args.output / "originals"
     originals.mkdir()
@@ -167,7 +167,7 @@ def qualify(args):
     before = inventory(originals)
     if fixture.get("status") != "produced" or before != fixture["originals"]:
         raise RuntimeError("producer fixture is incomplete or its original bytes changed")
-    home = Path(tempfile.mkdtemp(prefix="msb-hc-", dir="/tmp"))
+    home = Path(tempfile.mkdtemp(prefix="msb-hc-", dir=args.temp_root))
     env = environment(args.candidate, args.firmware, home, args.agent)
     runner = Runner(args.candidate, env, args.output / "candidate")
     report = {"producer_version": fixture["producer_version"], "home": str(home),
@@ -232,6 +232,8 @@ def main():
     candidate.add_argument("--agent", type=Path)
     for command in (producer, candidate):
         command.add_argument("--output", type=Path, required=True)
+    for command in (producer, candidate):
+        command.add_argument("--temp-root", type=Path, default=Path("/tmp"), help="Parent directory for isolated sandbox homes")
     args = parser.parse_args()
     for key, value in vars(args).items():
         if isinstance(value, Path):

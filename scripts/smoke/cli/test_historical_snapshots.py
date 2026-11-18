@@ -98,7 +98,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
         release.mkdir()
         for name in ("msb", "firmware", "bundle", "checksums.sha256"):
             (release / name).write_bytes(b"fixture")
-        args = SimpleNamespace(output=self.root / "produced", release_dir=release,
+        args = SimpleNamespace(temp_root=self.root, output=self.root / "produced", release_dir=release,
                                version="0.7.8", image="unused")
         runner = Mock(output=args.output / "producer")
 
@@ -136,7 +136,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
         binary = self.root / "binary"
         binary.write_bytes(b"selected bytes")
         for agent in (None, binary):
-            args = SimpleNamespace(fixture=fixture, candidate=binary, firmware=binary,
+            args = SimpleNamespace(temp_root=self.root, fixture=fixture, candidate=binary, firmware=binary,
                                    agent=agent, output=self.root / ("embedded" if agent is None else "explicit"))
             with patch.object(smoke, "Runner", return_value=Mock(run=Mock(return_value=0))):
                 smoke.qualify(args)
@@ -171,7 +171,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
             "originals": smoke.inventory(originals)}))
         binary = self.root / "binary"
         binary.write_bytes(b"selected bytes")
-        args = SimpleNamespace(fixture=originals.parent, candidate=binary, firmware=binary,
+        args = SimpleNamespace(temp_root=self.root, fixture=originals.parent, candidate=binary, firmware=binary,
                                agent=None, output=self.root / "out")
         runner = Mock()
 
