@@ -494,13 +494,13 @@ msb restart -t 30 devbox
 ```
 </CodeGroup>
 
-`msb restart --force` kills immediately. Otherwise `--timeout` bounds graceful completion; expiry fails without killing or starting a replacement. Unlike standalone Stop, Restart retains its explicit default budget of ten seconds.
+`msb restart --force` kills immediately. Otherwise `--timeout` bounds graceful completion; expiry fails without killing or starting a replacement. Unlike standalone Stop, Restart always bounds the stop phase: without `--timeout` it waits up to ten seconds locally and six minutes on cloud.
 
 | Flag | Description |
 |------|-------------|
 | `--label` | Restart every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-f`, `--force` | Force terminate immediately before starting again. Pending writes may be lost |
-| `-t`, `--timeout` | Total graceful-completion budget in seconds; expiry fails without killing. Defaults to 10 |
+| `-t`, `--timeout` | Total graceful-completion budget in seconds; expiry fails without killing. Defaults to 10 locally, 360 on cloud |
 | `-q`, `--quiet` | Suppress progress output |
 
 <span id="msb-sandbox-wait" />
