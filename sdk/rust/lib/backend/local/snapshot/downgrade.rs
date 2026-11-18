@@ -87,6 +87,7 @@ impl TranslationSource {
 }
 
 struct Candidate {
+    previous: Option<ReverseJournal>,
     path: PathBuf,
     indexed_digest: Option<String>,
     source_digest: String,
@@ -132,6 +133,9 @@ struct ForwardJournal {
 
 #[derive(Debug)]
 struct ReverseJournal {
+    indexed_digest: Option<String>,
+    source_parent_digest: Option<String>,
+    recovery_member: Option<String>,
     source_digest: Option<String>,
     target_digest: Option<String>,
     target_parent_digest: Option<String>,
@@ -142,7 +146,7 @@ struct ReverseJournal {
 #[derive(Serialize)]
 struct RecoveryIndexEntry<'a> {
     artifact_path: String,
-    indexed_digest: &'a Option<String>,
+    indexed_digest: Option<&'a str>,
     source_digest: &'a str,
     source_parent_digest: &'a Option<String>,
     target_digest: &'a Option<String>,
@@ -231,8 +235,15 @@ pub async fn preflight_managed_v066(
     }
 
     plan_graph(&mut candidates)?;
+    for candidate in &candidates {
+        validate_reverse_identity(candidate)?;
+    }
     preflight_index(db, &candidates).await?;
     journal_plans(db, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(&candidate.path, "downgrade", "planned");
+    }
 
     Ok(DowngradePlan { candidates })
 }
@@ -246,9 +257,41 @@ pub async fn execute_managed_v066(
 ) -> MicrosandboxResult<DowngradeReport> {
     let candidates = plan.candidates;
     backup_canonical_descriptors(db, recovery_dir, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(
+            &candidate.path,
+            "downgrade",
+            "canonical_backed_up",
+        );
+    }
     publish_legacy_descriptors(db, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(
+            &candidate.path,
+            "downgrade",
+            "legacy_descriptor_published",
+        );
+    }
     publish_legacy_index(db, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(
+            &candidate.path,
+            "downgrade",
+            "legacy_index_published",
+        );
+    }
     retire_canonical_descriptors(db, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(
+            &candidate.path,
+            "downgrade",
+            "canonical_retired",
+        );
+    }
 
     Ok(DowngradeReport {
         artifacts: candidates.len(),
@@ -611,6 +654,7 @@ async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxR
                 .unwrap_or(&source_digest)
         ));
         return Ok(Candidate {
+            previous: reverse,
             path,
             indexed_digest,
             source_digest,
@@ -660,7 +704,9 @@ async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxR
             .as_ref()
             .and_then(|row| row.source_digest.clone())
             .unwrap_or_else(|| info.source_digest.clone());
-        let source_parent_digest = None;
+        let source_parent_digest = reverse
+            .as_ref()
+            .and_then(|row| row.source_parent_digest.clone());
         let translation_source = match reverse
             .as_ref()
             .and_then(|row| row.translation_source.as_deref())
@@ -669,7 +715,16 @@ async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxR
             Some("native_final") => TranslationSource::Native,
             _ => TranslationSource::AlreadyLegacy,
         };
+        let recovery_member = (translation_source != TranslationSource::AlreadyLegacy).then(|| {
+            format!(
+                "{}.snapshot.json",
+                source_digest
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&source_digest)
+            )
+        });
         return Ok(Candidate {
+            previous: reverse,
             path,
             indexed_digest,
             source_digest,
@@ -681,7 +736,7 @@ async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxR
             target_parent_digest: info.parent_digest,
             target_integrity: None,
             translation_source,
-            recovery_member: None,
+            recovery_member,
             _lock: lock,
         });
     }
@@ -814,6 +869,12 @@ fn visit_candidate(
                 candidates[index].target_bytes = Some(translated.target_bytes);
                 candidates[index].target_digest = Some(translated.target_digest);
                 candidates[index].target_parent_digest = mapped_parent;
+            } else if candidates[index].target_parent_digest != mapped_parent {
+                return downgrade_error(
+                    &candidates[index].path,
+                    "preflight",
+                    "published legacy parent differs from the verified graph",
+                );
             }
         }
         TranslationSource::ExactBackup => {
@@ -847,23 +908,37 @@ async fn preflight_index(
     db: &DatabaseConnection,
     candidates: &[Candidate],
 ) -> MicrosandboxResult<()> {
-    let known_paths: HashSet<String> = candidates
+    let by_path: HashMap<_, _> = candidates
         .iter()
-        .map(|candidate| candidate.path.display().to_string())
+        .map(|candidate| (candidate.path.as_path(), candidate))
         .collect();
     let rows = db
         .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT digest, artifact_path, state_kind, scope, format, fstype FROM snapshot_index",
+            "SELECT digest, artifact_path, state_kind, scope, format, fstype, parent_digest FROM snapshot_index",
         ))
         .await?;
     for row in rows {
         let path = row.try_get_by_index::<String>(1)?;
-        if !known_paths.contains(&path) {
+        let Some(candidate) = by_path.get(Path::new(&path)) else {
             return downgrade_error(
                 Path::new(&path),
                 "preflight",
                 "indexed artifact was omitted from the complete managed graph",
+            );
+        };
+        let digest = row.try_get_by_index::<String>(0)?;
+        let parent = row.try_get_by_index::<Option<String>>(6)?;
+        let expected_parent = if Some(&digest) == candidate.target_digest.as_ref() {
+            &candidate.target_parent_digest
+        } else {
+            &candidate.source_parent_digest
+        };
+        if Some(&digest) != candidate.indexed_digest.as_ref() || &parent != expected_parent {
+            return downgrade_error(
+                Path::new(&path),
+                "preflight",
+                "catalog identity or parent differs from the verified descriptor",
             );
         }
         let state_kind = row.try_get_by_index::<String>(2)?;
@@ -885,6 +960,68 @@ async fn preflight_index(
     Ok(())
 }
 
+/// Older retries could overwrite the journal's indexed digest with the legacy digest.
+/// Accept that history only when it agrees with the live catalog and the original
+/// canonical backup identity. All other planned identities stay immutable.
+fn validate_reverse_identity(candidate: &Candidate) -> MicrosandboxResult<()> {
+    let current = candidate.indexed_digest.as_deref();
+    let source = Some(candidate.source_digest.as_str());
+    let target = candidate.target_digest.as_deref();
+    if current.is_some() && current != source && current != target {
+        return downgrade_error(&candidate.path, "preflight", "unexpected catalog digest");
+    }
+    // A journal digest may supply a backup filename after canonical retirement.
+    if !candidate
+        .source_digest
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return downgrade_error(
+            &candidate.path,
+            "preflight",
+            "invalid canonical recovery digest",
+        );
+    }
+    if let Some(row) = &candidate.previous {
+        let indexed = row.indexed_digest.as_deref();
+        if !matches!(
+            row.phase.as_str(),
+            "reverse_planned"
+                | "canonical_backed_up"
+                | "legacy_descriptor_published"
+                | "legacy_index_published"
+                | "reverse_complete"
+        ) || row.source_digest.as_deref() != source
+            || row.source_parent_digest != candidate.source_parent_digest
+            || row.target_digest != candidate.target_digest
+            || row.target_parent_digest != candidate.target_parent_digest
+            || row.translation_source.as_deref() != Some(candidate.translation_source.as_str())
+            || row.recovery_member != candidate.recovery_member
+            || indexed.is_some() != current.is_some()
+            || (indexed.is_some() && indexed != source && !(indexed == target && current == target))
+            || (current.is_some() && current != source && row.phase == "reverse_planned")
+        {
+            return downgrade_error(
+                &candidate.path,
+                "preflight",
+                "recovery identities disagree with the planned graph",
+            );
+        }
+    } else if current.is_some() && current != source {
+        return downgrade_error(
+            &candidate.path,
+            "preflight",
+            "catalog transition lacks its reverse journal",
+        );
+    }
+    Ok(())
+}
+
 async fn journal_plans(
     db: &DatabaseConnection,
     candidates: &[Candidate],
@@ -893,7 +1030,7 @@ async fn journal_plans(
     for candidate in candidates {
         db.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
-            "INSERT INTO snapshot_artifact_migration (kind, artifact_path, indexed_digest, source_digest, target_digest, source_parent_digest, target_parent_digest, phase, attempts, discovered_at, updated_at, recovery_member, translation_source) VALUES (?, ?, ?, ?, ?, ?, ?, 'reverse_planned', 1, ?, ?, ?, ?) ON CONFLICT(kind, artifact_path) DO UPDATE SET indexed_digest = excluded.indexed_digest, source_digest = COALESCE(snapshot_artifact_migration.source_digest, excluded.source_digest), target_digest = excluded.target_digest, source_parent_digest = COALESCE(snapshot_artifact_migration.source_parent_digest, excluded.source_parent_digest), target_parent_digest = excluded.target_parent_digest, attempts = snapshot_artifact_migration.attempts + 1, updated_at = excluded.updated_at, recovery_member = COALESCE(snapshot_artifact_migration.recovery_member, excluded.recovery_member), translation_source = COALESCE(snapshot_artifact_migration.translation_source, excluded.translation_source), error_code = NULL, error_detail = NULL",
+            "INSERT INTO snapshot_artifact_migration (kind, artifact_path, indexed_digest, source_digest, target_digest, source_parent_digest, target_parent_digest, phase, attempts, discovered_at, updated_at, recovery_member, translation_source) VALUES (?, ?, ?, ?, ?, ?, ?, 'reverse_planned', 1, ?, ?, ?, ?) ON CONFLICT(kind, artifact_path) DO UPDATE SET attempts = snapshot_artifact_migration.attempts + 1, updated_at = excluded.updated_at, error_code = NULL, error_detail = NULL",
             [
                 REVERSE_KIND.into(),
                 candidate.path.display().to_string().into(),
@@ -929,7 +1066,11 @@ async fn backup_canonical_descriptors(
         .iter()
         .map(|candidate| RecoveryIndexEntry {
             artifact_path: candidate.path.display().to_string(),
-            indexed_digest: &candidate.indexed_digest,
+            // The recovery file describes the catalog before the graph switch.
+            indexed_digest: candidate
+                .indexed_digest
+                .as_ref()
+                .map(|_| candidate.source_digest.as_str()),
             source_digest: &candidate.source_digest,
             source_parent_digest: &candidate.source_parent_digest,
             target_digest: &candidate.target_digest,
@@ -940,18 +1081,48 @@ async fn backup_canonical_descriptors(
     let index_bytes = serde_json::to_vec_pretty(&index_entries).map_err(|error| {
         MicrosandboxError::Custom(format!("serialize snapshot recovery index: {error}"))
     })?;
-    write_create_new_or_validate(&recovery_dir.join("snapshot-index.json"), &index_bytes)?;
-
+    // Once backup was acknowledged, a missing file is lost recovery evidence.
+    // Verify the entire retained set before re-entering legacy publication.
+    let backed_up = |c: &Candidate| {
+        c.previous
+            .as_ref()
+            .is_some_and(|row| row.phase != "reverse_planned")
+    };
+    let index_path = recovery_dir.join("snapshot-index.json");
+    if candidates.iter().any(backed_up) {
+        verify_recovery_bytes(&index_path, &index_bytes)?;
+    } else {
+        publish_recovery_file(&index_path, &index_bytes)?;
+    }
     for candidate in candidates {
-        let (Some(member), Some(bytes)) = (
-            candidate.recovery_member.as_deref(),
-            candidate.source_bytes.as_deref(),
-        ) else {
+        let Some(member) = &candidate.recovery_member else {
             continue;
         };
         let path = recovery_dir.join(member);
-        write_create_new_or_validate(&path, bytes)?;
-        journal_phase(db, &candidate.path, "canonical_backed_up").await?;
+        if let Some(bytes) = &candidate.source_bytes {
+            if backed_up(candidate) {
+                verify_recovery_bytes(&path, bytes)?;
+            } else {
+                publish_recovery_file(&path, bytes)?;
+            }
+        } else {
+            let bytes = read_regular_bounded(&path, "canonical recovery descriptor")?;
+            let manifest = Manifest::from_bytes(&bytes)?;
+            if manifest.digest()? != candidate.source_digest
+                || manifest.parent.as_ref().map(ToString::to_string)
+                    != candidate.source_parent_digest
+            {
+                return downgrade_error(
+                    &path,
+                    "canonical_backed_up",
+                    "canonical recovery descriptor or parent changed",
+                );
+            }
+        }
+        if !backed_up(candidate) {
+            sync_directory(recovery_dir)?;
+            journal_phase(db, &candidate.path, "canonical_backed_up").await?;
+        }
     }
     sync_directory(recovery_dir)?;
     Ok(())
@@ -998,7 +1169,14 @@ async fn publish_legacy_descriptors(
             std::fs::rename(temp, &legacy)?;
         }
         sync_directory(&candidate.path)?;
-        journal_phase(db, &candidate.path, "legacy_descriptor_published").await?;
+        if !candidate.previous.as_ref().is_some_and(|row| {
+            matches!(
+                row.phase.as_str(),
+                "legacy_index_published" | "reverse_complete"
+            )
+        }) {
+            journal_phase(db, &candidate.path, "legacy_descriptor_published").await?;
+        }
     }
     Ok(())
 }
@@ -1048,7 +1226,7 @@ async fn publish_legacy_index(
         transaction
             .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
-                "UPDATE snapshot_artifact_migration SET phase = 'legacy_index_published', updated_at = ? WHERE kind = ? AND artifact_path = ?",
+                "UPDATE snapshot_artifact_migration SET phase = 'legacy_index_published', updated_at = ? WHERE kind = ? AND artifact_path = ? AND phase != 'reverse_complete'",
                 [
                     Utc::now().naive_utc().into(),
                     REVERSE_KIND.into(),
@@ -1131,7 +1309,7 @@ async fn reverse_journal(
     let row = db
         .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
-            "SELECT source_digest, target_digest, target_parent_digest, phase, translation_source FROM snapshot_artifact_migration WHERE kind = ? AND artifact_path = ?",
+            "SELECT source_digest, target_digest, target_parent_digest, phase, translation_source, indexed_digest, source_parent_digest, recovery_member FROM snapshot_artifact_migration WHERE kind = ? AND artifact_path = ?",
             [REVERSE_KIND.into(), path.display().to_string().into()],
         ))
         .await?;
@@ -1142,6 +1320,9 @@ async fn reverse_journal(
             target_parent_digest: row.try_get_by_index::<Option<String>>(2)?,
             phase: row.try_get_by_index::<String>(3)?,
             translation_source: row.try_get_by_index::<Option<String>>(4)?,
+            indexed_digest: row.try_get_by_index(5)?,
+            source_parent_digest: row.try_get_by_index(6)?,
+            recovery_member: row.try_get_by_index(7)?,
         })
     })
     .transpose()
@@ -1547,6 +1728,38 @@ fn replace_file(source: &Path, destination: &Path) -> MicrosandboxResult<()> {
     Ok(())
 }
 
+fn verify_recovery_bytes(path: &Path, expected: &[u8]) -> MicrosandboxResult<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_file() || meta.len() != expected.len() as u64 || std::fs::read(path)? != expected {
+        return downgrade_error(
+            path,
+            "canonical_backed_up",
+            "recovery file differs from the verified graph",
+        );
+    }
+    Ok(())
+}
+
+/// A crash before publication can leave a temporary file, but never a partial
+/// backup at its authoritative path. An existing backup is always verified.
+fn publish_recovery_file(path: &Path, bytes: &[u8]) -> MicrosandboxResult<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return verify_recovery_bytes(path, bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let mut staged = tempfile::NamedTempFile::new_in(path.parent().expect("recovery directory"))?;
+    staged.write_all(bytes)?;
+    staged.as_file().sync_all()?;
+    match staged.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            verify_recovery_bytes(path, bytes)
+        }
+        Err(error) => Err(error.error.into()),
+    }
+}
+
 fn write_create_new_or_validate(path: &Path, bytes: &[u8]) -> MicrosandboxResult<()> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
@@ -1696,6 +1909,9 @@ mod tests {
         let plan = preflight_managed_v066(pools.write().inner(), &snapshots)
             .await
             .unwrap();
+        backup_canonical_descriptors(pools.write().inner(), &recovery, &plan.candidates)
+            .await
+            .unwrap();
         drop(plan);
         std::fs::rename(
             artifact.join(V066_BACKUP_FILENAME),
@@ -1752,6 +1968,52 @@ mod tests {
             row.try_get_by_index::<String>(1).unwrap(),
             "reverse_complete"
         );
+
+        // Re-entry must validate the original recovery set even after canonical retirement.
+        let index = recovery.join("snapshot-index.json");
+        let original = std::fs::read(&index).unwrap();
+        reverse_managed_v066(pools.write().inner(), &snapshots, &recovery)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&index).unwrap(), original);
+        std::fs::write(&index, b"[]").unwrap();
+        assert!(
+            reverse_managed_v066(pools.write().inner(), &snapshots, &recovery)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&index).unwrap(), b"[]");
+        std::fs::write(&index, original).unwrap();
+        let member = recovery.join(format!(
+            "{}.snapshot.json",
+            canonical_digest.strip_prefix("sha256:").unwrap()
+        ));
+        let db = pools.write().inner();
+        db.execute_unprepared("UPDATE snapshot_index SET parent_digest = 'unexpected-parent'")
+            .await
+            .unwrap();
+        assert!(
+            reverse_managed_v066(db, &snapshots, &recovery)
+                .await
+                .is_err()
+        );
+        db.execute_unprepared("UPDATE snapshot_index SET parent_digest = NULL")
+            .await
+            .unwrap();
+        std::fs::write(&member, b"{}").unwrap();
+        assert!(
+            reverse_managed_v066(db, &snapshots, &recovery)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&member).unwrap(), b"{}");
+        std::fs::remove_file(&member).unwrap();
+        assert!(
+            reverse_managed_v066(pools.write().inner(), &snapshots, &recovery)
+                .await
+                .is_err()
+        );
+        assert!(!member.exists());
 
         // Reverse both the empty group projection and stable-identity projection.
         Migrator::down(pools.write().inner(), Some(2))
