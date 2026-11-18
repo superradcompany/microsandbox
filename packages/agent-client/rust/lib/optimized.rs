@@ -323,6 +323,23 @@ impl AgentClient {
         }
     }
 
+    /// Connect to a local relay without negotiating shared-memory buffers.
+    ///
+    /// All frames, including bulk payloads, remain on the socket or named pipe,
+    /// even when the peer advertises a shared-arena transport. The deadline
+    /// bounds dialing and both handshake reads. Existing connect methods keep
+    /// their automatic transport selection.
+    #[cfg(any(all(feature = "named-pipe", windows), all(feature = "uds", unix)))]
+    pub async fn connect_in_band_with_deadline(
+        sock_path: impl AsRef<Path>,
+        deadline: Instant,
+    ) -> AgentClientResult<Self> {
+        let stream = connect_local_stream(sock_path.as_ref(), deadline).await?;
+        let mut client = Self::connect_stream_with_deadline(stream, deadline).await?;
+        client.exec_controller = crate::ExecController::from_ready_body(&client.ready_body)?;
+        Ok(client)
+    }
+
     /// Connect over an arbitrary byte-stream transport using the default 10s
     /// handshake timeout.
     ///
@@ -1629,6 +1646,56 @@ mod tests {
             .await
             .unwrap();
         server.await.unwrap();
+    }
+
+    #[cfg(all(feature = "uds", unix))]
+    #[tokio::test]
+    async fn in_band_connection_ignores_shared_arena_offer() {
+        let temp = tempfile::tempdir().unwrap();
+        let sock_path = temp.path().join("agent.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Ready {
+            local_transport: Some(
+                microsandbox_protocol::transport::LocalTransportReady::shared_arena_v1(),
+            ),
+            ..Default::default()
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+        let expected = Bytes::from_static(b"socket payload");
+        let expected_server = expected.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&1u32.to_be_bytes()).await.unwrap();
+            socket.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut socket, &ready_msg).await.unwrap();
+
+            // An upgrade request here would violate the caller's transport choice.
+            let frame = codec::read_raw_frame(&mut socket).await.unwrap();
+            assert_eq!(frame.id, 1);
+            assert_eq!(frame.flags, FLAG_BULK);
+            assert_eq!(&frame.body[12..], expected_server.as_ref());
+        });
+
+        let client = AgentClient::connect_in_band_with_deadline(
+            &sock_path,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        client
+            .send_bulk(BulkRecord {
+                id: 1,
+                kind: microsandbox_protocol::bulk::BulkKind::Filesystem,
+                flow: microsandbox_protocol::bulk::BulkFlow::HostToGuest,
+                offset: 0,
+                payload: expected,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[cfg(all(feature = "named-pipe", windows))]
