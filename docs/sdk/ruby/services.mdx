@@ -248,7 +248,7 @@ Set the running sandbox and port that receive requests.
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>port</code><span className="msb-type">Integer</span></div>
-    <div className="msb-param-desc">Sandbox port from 1 through 65,535.</div>
+    <div className="msb-param-desc">Sandbox port from 1 through 65,535. A negative number or one above 65,535 raises <code>RangeError</code> before any request.</div>
   </div>
 </div>
 
