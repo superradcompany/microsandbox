@@ -226,7 +226,32 @@ pub(super) fn decrypt(
                 archive.display()
             ))
         })?;
+    #[cfg(not(windows))]
     let mut plain = tempfile::tempfile_in(staging)?;
+    #[cfg(windows)]
+    let mut plain = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_DELETE_ON_CLOSE, WRITE_DAC,
+        };
+
+        // The default anonymous tempfile handle lacks WRITE_DAC. SetSecurityInfo needs
+        // that access on the original handle before writing any decrypted archive bytes.
+        // Exclusive sharing and delete-on-close also cover interruption during decryption.
+        tempfile::Builder::new()
+            .make_in(staging, |path| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE | WRITE_DAC)
+                    .share_mode(0)
+                    .custom_flags(FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE)
+                    .open(path)
+            })?
+            .into_file()
+    };
     microsandbox_utils::private_file::harden(&plain, false)?;
     // Preserve storage write errors independently of authenticated-stream
     // failures and identify the failing input in a multi-archive import.
