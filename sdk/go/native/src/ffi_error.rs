@@ -68,8 +68,10 @@ impl FfiError {
         {
             payload["resize_status"] = status;
         }
-        if let Some(details) = &self.resize_wait {
-            payload["resize_wait"] = details.clone();
+        if let Some(details) = &self.resize_wait
+            && let Ok(details) = serde_json::to_value(details)
+        {
+            payload["resize_wait"] = details;
         }
         payload.to_string()
     }
@@ -128,14 +130,11 @@ impl From<MicrosandboxError> for FfiError {
         };
         let service = service::error_details(&e);
         let message = e.to_string();
-        let resize_wait = match &e {
-            MicrosandboxError::ResizeWait(details) => serde_json::to_value(details).ok(),
-            _ => None,
-        };
-        let (recovery, resize_status) = match e {
-            MicrosandboxError::SnapshotSourceRecovery(recovery) => (Some(recovery), None),
-            MicrosandboxError::ResizeTimeout { status, .. } => (None, Some(status)),
-            _ => (None, None),
+        let (recovery, resize_status, resize_wait) = match e {
+            MicrosandboxError::SnapshotSourceRecovery(recovery) => (Some(recovery), None, None),
+            MicrosandboxError::ResizeTimeout { status, .. } => (None, Some(status), None),
+            MicrosandboxError::ResizeWait(details) => (None, None, Some(details)),
+            _ => (None, None, None),
         };
         Self {
             kind,

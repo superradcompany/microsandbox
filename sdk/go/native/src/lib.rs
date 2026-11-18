@@ -504,7 +504,7 @@ struct FfiError {
     changed: Option<microsandbox::ChangeState>,
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
     resize_status: Option<Vec<microsandbox::sandbox::ResourceResizeStatus>>,
-    resize_wait: Option<serde_json::Value>,
+    resize_wait: Option<Box<microsandbox::ResizeWaitError>>,
     service: Option<Box<service::ServiceErrorDetails>>,
     os_error: Option<i32>,
 }

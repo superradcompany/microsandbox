@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn malformed_operations_are_rejected_before_dispatch() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         Python::attach(|py| {
             let json = py.import("json").unwrap();
             for raw in ["[]", "[{}, {}, {}]", "[{}]", "null", "{}"] {
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn operation_input_preserves_exact_u64_identity_and_closed_discriminators() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         Python::attach(|py| {
             let json = py.import("json").unwrap();
             let raw = serde_json::json!([{
