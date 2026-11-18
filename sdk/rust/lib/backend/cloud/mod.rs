@@ -82,7 +82,7 @@ pub struct CloudBackend {
     url: String,
     api_key: String,
     http: reqwest::Client,
-    /// Client for log follows and volume file transfers, with no total timeout.
+    /// Client for log follows and volume file transfers.
     stream_http: reqwest::Client,
     /// Client for Service changes, which must never resend a request.
     service_http: reqwest::Client,
@@ -274,13 +274,11 @@ impl CloudBackendBuilder {
         self
     }
 
-    /// Set the timeout for each ordinary HTTP request.
+    /// Set the timeout for each HTTP request.
     ///
-    /// Log follows and volume file transfers are not bounded by this duration
-    /// as a total. It bounds connecting, the wait for a log follow or file read
-    /// to start, each wait for more file read data, each wait for a file write
-    /// to send data it already has, the wait for a file write's reply after all
-    /// data is sent, and reading an error reply.
+    /// Log follows and volume file transfers are not limited as a whole; for
+    /// them it bounds connecting, each wait for a reply, and each wait for data
+    /// to move.
     pub fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
         self
@@ -294,9 +292,9 @@ impl CloudBackendBuilder {
 
     /// Provide a fully custom `reqwest::Client`. When set, `user_agent` is
     /// ignored and the supplied client's own settings apply. `request_timeout`
-    /// still bounds the log follow and file transfer waits listed on
-    /// [`Self::request_timeout`]. A total timeout on the supplied client also
-    /// ends log follows and file transfers.
+    /// still bounds the waits of log follows and file transfers, except
+    /// connecting, which the supplied client controls. A total timeout on the
+    /// supplied client also ends log follows and file transfers.
     ///
     /// Service create, update, enable, disable and remove also use this client,
     /// so its retry and redirect policies decide whether a change request can be

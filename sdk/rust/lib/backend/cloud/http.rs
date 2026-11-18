@@ -72,8 +72,9 @@ pub(in crate::backend) enum FileTransfer {
     /// File read: the request timeout bounds the wait for the response and
     /// each wait for more data, not the whole transfer.
     Download,
-    /// File write with this body stream: the caller paces it, so no total or
-    /// idle limit applies while producing the body.
+    /// File write with this body stream. Waits for the caller's next chunk are
+    /// not timed; the request timeout bounds each wait for the client to take
+    /// a piece and the wait for the reply.
     Upload(BoxStream<'static, Result<Bytes, std::io::Error>>),
 }
 
@@ -387,7 +388,7 @@ impl CloudBackend {
             .await
             .map_err(|_| {
                 MicrosandboxError::Custom(format!(
-                    "GET /v1/sandboxes/:id/logs: no response within {:?}",
+                    "log stream: no response within {:?}",
                     self.request_timeout
                 ))
             })?
@@ -542,9 +543,9 @@ impl CloudBackend {
             FileTransfer::Upload(mut body_stream) => {
                 // The caller's stream is read by a task this request owns, so it
                 // is released, and further writes fail, once the request ends
-                // even if the HTTP client still holds the body. Pieces keep the
-                // stall limit about network progress when a caller hands over
-                // one large buffer.
+                // even if the HTTP client still holds the body. Splitting chunks
+                // into pieces keeps the stall limit working when the caller hands
+                // over one large buffer.
                 let (piece_tx, piece_rx) = tokio::sync::mpsc::channel(1);
                 let _pump = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
                     while let Some(item) = body_stream.next().await {
@@ -623,8 +624,8 @@ impl CloudBackend {
 // Functions: HTTP helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Resolve once a piece has been held unsent for `timeout`. Never resolves after
-/// the body is gone; the reply timeout covers that part.
+/// Resolve once the HTTP client has held a body piece for `timeout`. Never
+/// resolves after the body is gone; the reply timeout covers that part.
 async fn upload_stall(
     mut sending: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
     timeout: Duration,
