@@ -150,7 +150,9 @@ impl RubyGroup {
 
     fn open(ruby: &Ruby, path: String) -> Result<Self, Error> {
         let pending = Snapshot::open(path);
-        Ok(Self { inner: run(ruby, pending)? })
+        Ok(Self {
+            inner: run(ruby, pending)?,
+        })
     }
 
     fn get(ruby: &Ruby, name: String) -> Result<Self, Error> {

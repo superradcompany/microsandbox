@@ -20,7 +20,7 @@ async fn cli_output(home: &Path, args: &[&str]) -> Output {
             command.env_remove(key);
         }
     }
-    let output = timeout(
+    timeout(
         Duration::from_secs(30),
         command
             .env("MSB_HOME", home)
@@ -32,8 +32,7 @@ async fn cli_output(home: &Path, args: &[&str]) -> Output {
     )
     .await
     .expect("snapshot command must finish without a VM")
-    .expect("spawn built CLI");
-    output
+    .expect("spawn built CLI")
 }
 
 async fn cli(home: &Path, args: &[&str]) -> Output {

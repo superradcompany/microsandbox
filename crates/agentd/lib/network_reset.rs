@@ -126,7 +126,7 @@ impl Diagnostic {
             .sequence
             .checked_add(1)
             .ok_or_else(|| invalid("diagnostic sequence exhausted"))?;
-        let mut bytes = vec![0; HEADER + REQUEST];
+        let mut bytes = [0; HEADER + REQUEST];
         bytes[0..4].copy_from_slice(&((HEADER + REQUEST) as u32).to_ne_bytes());
         bytes[4..6].copy_from_slice(&kind.to_ne_bytes());
         bytes[6..8].copy_from_slice(&flags.to_ne_bytes());

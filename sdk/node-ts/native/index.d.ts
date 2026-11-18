@@ -1794,8 +1794,8 @@ export declare class Snapshot {
   static remove(pathOrName: string, opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
   static load(archive: string, dest?: string | undefined | null, base?: string | undefined | null): Promise<SnapshotHandle>
   static loadWithOptions(archive: string, opts?: LoadOpts | undefined | null): Promise<SnapshotHandle>
-  /** Import archives together, resolving dependencies within the batch and destination group. */
-  static loadMany(archives: Array<string>, opts?: LoadOpts | undefined | null): Promise<Array<SnapshotHandle>>
+  /** Import archives together, retaining their call-time path interpretation. */
+  static loadMany(archives: Array<string>, opts?: LoadOpts | undefined | null): Promise<SnapshotHandle[]>
   /** Read a group's head, or select `group:member` as its head. */
   static groupHead(selector: string): Promise<HeadUpdate>
   /** Deprecated: use `reference`. Throws when no local filesystem path exists. */
