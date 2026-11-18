@@ -662,6 +662,8 @@ mod tests {
             "base.yaml",
             "--resource-conf",
             "second.yaml",
+            "--file",
+            "Sandboxfile",
             "--net-conf",
             "network.yaml",
         ]);
@@ -676,6 +678,7 @@ mod tests {
                 (SandboxConfigKind::Resources, PathBuf::from("first.yaml")),
                 (SandboxConfigKind::Root, PathBuf::from("base.yaml")),
                 (SandboxConfigKind::Resources, PathBuf::from("second.yaml")),
+                (SandboxConfigKind::Root, PathBuf::from("Sandboxfile")),
                 (SandboxConfigKind::Network, PathBuf::from("network.yaml")),
             ]
         );
