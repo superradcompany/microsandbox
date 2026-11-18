@@ -4118,12 +4118,12 @@ esac
             .await
             .unwrap();
 
-        let (child, _bin) = super::super::runtime_identity::test_support::spawn_msb_child();
+        let (mut child, _bin) = super::super::runtime_identity::test_support::spawn_msb_child();
         let live_pid = child.id() as i32;
-        let waiter = std::thread::spawn(move || {
-            let mut child = child;
-            child.wait().unwrap()
-        });
+        // Child::wait closes stdin before reaping. Keep the writer here so the
+        // fixture can only exit through replacement while its PID is inspected.
+        let fixture_stdin = child.stdin.take().unwrap();
+        let waiter = std::thread::spawn(move || child.wait().unwrap());
         let run = run_entity::ActiveModel {
             sandbox_id: Set(sandbox_id),
             pid: Set(Some(live_pid)),
@@ -4145,7 +4145,12 @@ esac
             .await
             .unwrap();
 
-        waiter.join().unwrap();
+        drop(fixture_stdin);
+        let status = waiter.join().unwrap();
+        assert!(matches!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(libc::SIGTERM | libc::SIGKILL)
+        ));
 
         assert!(!LocalContext::pid_is_alive(live_pid));
         assert!(!sandbox_dir.exists());
