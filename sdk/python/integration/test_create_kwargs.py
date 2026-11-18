@@ -50,7 +50,9 @@ async def test_create_kwargs_affect_guest_defaults(sandbox_name):
         script = await sandbox.exec("create-kwarg-script", timeout=timedelta(seconds=5))
         assert script.success is True
         assert script.stdout_text == "script:nobody:guest-visible\n"
-        output = await sandbox.exec("printf", {"args": ["ready"], "timeout": timedelta(milliseconds=1500)})
+        output = await sandbox.exec(
+            "printf", {"args": ["ready"], "timeout": timedelta(milliseconds=1500)}
+        )
         assert output.stdout_text == "ready"
     finally:
         await stop_and_remove_sandbox(name, sandbox)

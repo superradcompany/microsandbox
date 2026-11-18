@@ -655,7 +655,7 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           foreach ($filter in @(
             'image::cleanup::tests',
-            'backend::local::snapshot::store::tests',
+            'context::local::snapshot::store::tests',
             'external_import_alias_has_one_row_and_preserves_distinct_copies',
             'import_requires_durable_ownership_and_recovers_failed_completion',
             'storage::usage::local_usage::tests',
@@ -1804,7 +1804,7 @@ jobs:
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
+            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^context::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^context::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
             --test-threads 2
 
       - name: Managed-job integration fixtures

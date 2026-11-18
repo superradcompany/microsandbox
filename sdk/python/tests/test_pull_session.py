@@ -34,7 +34,9 @@ async def test_create_with_progress_returns_session_outside_tokio_reactor() -> N
 @pytest.mark.asyncio
 @pytest.mark.parametrize("read_progress", [False, True])
 async def test_unclaimed_create_error_surfaces_at_scope_exit(read_progress):
-    session = Sandbox.create_with_progress("progress-error", image="/__microsandbox_missing_rootfs__")
+    session = Sandbox.create_with_progress(
+        "progress-error", image="/__microsandbox_missing_rootfs__",
+    )
     with pytest.raises(InvalidConfigError, match="rootfs bind path does not exist"):
         async with session:
             if read_progress:
@@ -45,7 +47,9 @@ async def test_unclaimed_create_error_surfaces_at_scope_exit(read_progress):
 
 @pytest.mark.asyncio
 async def test_scope_exit_preserves_body_exception():
-    session = Sandbox.create_with_progress("progress-body", image="/__microsandbox_missing_rootfs__")
+    session = Sandbox.create_with_progress(
+        "progress-body", image="/__microsandbox_missing_rootfs__",
+    )
     failure = ValueError("body failed")
     try:
         async with session:
@@ -79,7 +83,9 @@ async def test_cancellation_while_remote_creation_is_pending(cancel_creation):
             await reader.readuntil(b"\r\n\r\n")
             requested.set()
             await release.wait()
-            writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
             await writer.drain()
         finally:
             writer.close()

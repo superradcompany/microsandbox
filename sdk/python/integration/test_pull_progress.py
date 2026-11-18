@@ -164,7 +164,9 @@ async def test_create_with_progress_failure_surfaces_from_result(sandbox_name):
 
 
 @pytest.mark.asyncio
-async def test_restore_with_progress_returns_usable_sandbox_after_exit(sandbox_factory, sandbox_name):
+async def test_restore_with_progress_returns_usable_sandbox_after_exit(
+    sandbox_factory, sandbox_name,
+):
     base = await sandbox_factory("py-sdk-progress-base")
     restored_name = sandbox_name("py-sdk-progress-restored")
     await base.stop()

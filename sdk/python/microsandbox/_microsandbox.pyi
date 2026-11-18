@@ -48,9 +48,9 @@ from microsandbox.types import (
     SecretEntry,
     SecretModifySpec,
     SecurityProfile,
-    Size,
     ServiceStatus,
     ServiceTarget,
+    Size,
     SnapshotFormat,
     SnapshotScope,
     SnapshotStateKind,
@@ -579,7 +579,9 @@ class Sandbox:
         timeout: float | timedelta | None = None,
         detached: bool = False,
     ) -> Sandbox: ...
-    async def destroy(self, *, force: bool = False, timeout: float | timedelta | None = None) -> None: ...
+    async def destroy(
+        self, *, force: bool = False, timeout: float | timedelta | None = None
+    ) -> None: ...
     async def wait_until_stopped(self) -> SandboxStopResult: ...
     async def detach(self) -> None: ...
     async def __aenter__(self) -> Sandbox: ...

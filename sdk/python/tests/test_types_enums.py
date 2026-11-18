@@ -352,7 +352,11 @@ def test_wrong_enum_classes_do_not_cross_matching_wire_values() -> None:
 
 @pytest.mark.parametrize(
     ("wire", "member"),
-    [("IfMissing", PullPolicy.IF_MISSING), ("Always", PullPolicy.ALWAYS), ("Never", PullPolicy.NEVER)],
+    [
+        ("IfMissing", PullPolicy.IF_MISSING),
+        ("Always", PullPolicy.ALWAYS),
+        ("Never", PullPolicy.NEVER),
+    ],
 )
 def test_inspection_decodes_local_policy_and_level(wire, member):
     from microsandbox.inspection import _decode_config

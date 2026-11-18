@@ -74,7 +74,8 @@ async def test_restore_accepts_explicit_destination_controls(tmp_path):
             tmp_path / "missing", name="restore-controls", disk_only=True,
             cpus=2, memory=512, network_policy=NetworkPolicy.none(),
             max_tcp_connections=0, max_udp_connections=7,
-            disable_network=True, security=SecurityProfile.DEFAULT, max_duration=timedelta(0), idle_timeout=timedelta(minutes=1),
+            disable_network=True, security=SecurityProfile.DEFAULT,
+            max_duration=timedelta(0), idle_timeout=timedelta(minutes=1),
         )
 
 

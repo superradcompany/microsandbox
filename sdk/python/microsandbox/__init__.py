@@ -149,8 +149,8 @@ from microsandbox.storage_diagnosis import (
 from microsandbox.types import (
     Action,
     ChangeKind,
-    ComputeType,
     ChangeState,
+    ComputeType,
     ConfigPlannedChange,
     ContextKind,
     CpuPlacement,
