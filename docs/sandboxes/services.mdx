@@ -128,7 +128,7 @@ If the target sandbox stops, the Service keeps its target and requests return `5
 
 ## Handle requests
 
-In the sandbox, your application must listen on the target port at `0.0.0.0` or `127.0.0.1`. Services support HTTP, WebSocket, and server-sent events (SSE). Microsandbox does not time out slow responses, so set your own timeouts where you need them. Your application receives the original method, path, query, and body, plus these headers:
+In the sandbox, your application must listen on the target port at `0.0.0.0` or `127.0.0.1`. Services support HTTP, WebSocket, and server-sent events (SSE). Set your own timeouts for slow responses, and keep long-lived connections active. Your application receives the original method, path, query, and body, plus these headers:
 
 - `Host`: the Service hostname
 - `X-Forwarded-Host`: the Service hostname
@@ -137,7 +137,7 @@ In the sandbox, your application must listen on the target port at `0.0.0.0` or 
 
 Microsandbox sets these headers itself and replaces any copies the client sent, so your application can trust them. Header names starting with `msb-` or `x-msb-`, and cookies named `msb_*` or `__Host-msb_*`, are reserved for Microsandbox: they never reach your application, and your responses cannot set those cookies.
 
-On the Free plan, a browser's first visit shows a one-time notice page before your application. Automated browsers, such as end-to-end tests, can skip it by sending an `msb-skip-browser-warning` header with any value.
+On the Free plan, a browser's first visit shows a notice page before your application. Automated browsers, such as end-to-end tests, can skip it by sending an `msb-skip-browser-warning` header with any value.
 
 ## Error responses
 
@@ -370,4 +370,15 @@ Events contain sandbox IDs, not sandbox names. Deleting a target sandbox automat
 
 ## Limits
 
-Organization and per-sandbox Service limits apply; going over them fails with `service_quota_exceeded` or `sandbox_service_limit_exceeded` (see [Service changes](/sdk/errors#service-changes)). Disabled Services count toward both limits, and detached Services count toward the organization limit. Too many concurrent requests to one sandbox return `429 service_busy_inflight`.
+<Accordion title="Service limits">
+
+| Limit | Free plan | Paid plans |
+| --- | --- | --- |
+| Services per organization | 100 | 1,000 |
+| Services per sandbox | 20 | 20 |
+
+You can request a higher limit for your organization. If a limit drops below your current usage, existing Services keep working; creating a Service, or moving one to a sandbox at its limit, is refused until you are under it.
+
+Going over these limits fails with `service_quota_exceeded` or `sandbox_service_limit_exceeded` (see [Service changes](/sdk/errors#service-changes)). Disabled Services count toward both limits, and detached Services count toward the organization limit. Too many concurrent requests to one sandbox return `429 service_busy_inflight`.
+
+</Accordion>
