@@ -1,4 +1,4 @@
-//! Pin regular files and directories without following links or waiting on FIFOs.
+//! Pin regular files and directories without following links or opening special files.
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -29,17 +29,24 @@ pub(crate) fn open_directory(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Pin one directory child without crossing a mount, including same-device binds.
+///
+/// `directory` is the type the parent listed. A child swapped for any other
+/// type after the listing is refused without being opened.
+#[cfg(target_os = "linux")]
+pub(crate) fn open_child(root: &File, name: &Path, directory: bool) -> io::Result<File> {
+    let pinned = open_beneath(root, name, libc::O_PATH, true)?;
+    reopen(&pinned, false, directory)
+}
+
+/// Open a host source after checking its type, so a device or FIFO is never opened.
 fn open_path(path: &Path, writable: bool, directory: bool) -> io::Result<File> {
     #[cfg(target_os = "linux")]
     let file = {
         let root = File::open(if path.is_absolute() { "/" } else { "." })?;
-        open_beneath(
-            &root,
-            path.strip_prefix("/").unwrap_or(path),
-            writable,
-            directory,
-            false,
-        )?
+        let relative = path.strip_prefix("/").unwrap_or(path);
+        let pinned = open_beneath(&root, relative, libc::O_PATH, false)?;
+        reopen(&pinned, writable, directory)?
     };
     #[cfg(all(unix, not(target_os = "linux")))]
     let file = open_without_links(path, writable, directory)?;
@@ -55,6 +62,27 @@ fn open_path(path: &Path, writable: bool, directory: bool) -> io::Result<File> {
             "bounded patch source staging requires Unix",
         ))
     }
+}
+
+/// Refuse a source whose `st_mode` is not the expected regular file or directory.
+#[cfg(unix)]
+fn check_type(mode: libc::mode_t, directory: bool) -> io::Result<()> {
+    let expected = if directory {
+        libc::S_IFDIR
+    } else {
+        libc::S_IFREG
+    };
+    if mode & libc::S_IFMT == expected {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        if directory {
+            "host source is not a directory"
+        } else {
+            "host source is not a regular file"
+        },
+    ))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -87,6 +115,23 @@ fn open_without_links(path: &Path, writable: bool, directory: bool) -> io::Resul
         };
         let name = CString::new(name.as_bytes())?;
         let final_component = components.peek().is_none();
+        if final_component {
+            // No O_PATH here: a swap after this check can still reach the
+            // open, but the check after opening still refuses it.
+            let mut status = unsafe { std::mem::zeroed::<libc::stat>() };
+            let result = unsafe {
+                libc::fstatat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    &mut status,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if result < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            check_type(status.st_mode, directory)?;
+        }
         let flags = libc::O_NOFOLLOW
             | libc::O_NONBLOCK
             | libc::O_CLOEXEC
@@ -120,20 +165,26 @@ fn open_without_links(path: &Path, writable: bool, directory: bool) -> io::Resul
     ))
 }
 
-/// Pin one directory child without crossing a mount, including same-device binds.
+/// Open an `O_PATH` pin once its type is checked.
+///
+/// Reopening through procfs reaches the pinned inode, never a swapped entry.
 #[cfg(target_os = "linux")]
-pub(crate) fn open_child(root: &File, name: &Path) -> io::Result<File> {
-    open_beneath(root, name, false, false, true)
+fn reopen(pinned: &File, writable: bool, directory: bool) -> io::Result<File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    check_type(pinned.metadata()?.mode(), directory)?;
+    File::options()
+        .read(true)
+        .write(writable)
+        .custom_flags(
+            libc::O_NONBLOCK | libc::O_CLOEXEC | if directory { libc::O_DIRECTORY } else { 0 },
+        )
+        .open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
 }
 
 #[cfg(target_os = "linux")]
-fn open_beneath(
-    root: &File,
-    name: &Path,
-    writable: bool,
-    directory: bool,
-    no_mounts: bool,
-) -> io::Result<File> {
+fn open_beneath(root: &File, name: &Path, flags: libc::c_int, no_mounts: bool) -> io::Result<File> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -145,14 +196,7 @@ fn open_beneath(
     }
     let name = CString::new(name.as_os_str().as_bytes())?;
     let how = OpenHow {
-        flags: (if writable {
-            libc::O_RDWR
-        } else {
-            libc::O_RDONLY
-        } | libc::O_NONBLOCK
-            | libc::O_CLOEXEC
-            | libc::O_NOFOLLOW
-            | if directory { libc::O_DIRECTORY } else { 0 }) as u64,
+        flags: (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64,
         mode: 0,
         // BENEATH, NO_SYMLINKS, NO_MAGICLINKS, and optionally NO_XDEV.
         resolve: 0x08 | 0x04 | 0x02 | u64::from(no_mounts),

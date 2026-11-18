@@ -903,8 +903,9 @@ async fn apply_one_to_tree(
             }
             let (data, source_mode) = read_regular_source(src).await?;
             let file_mode = mode
-                .or(sources.mode(src))
-                .map_or(source_mode, |mode| mode as u16);
+                .map(|mode| mode as u16)
+                .or(sources.mode(src).map(|mode| staged_image_mode(mode, false)))
+                .unwrap_or(source_mode);
             insert_tree_node(
                 tree,
                 &rel,
@@ -1278,18 +1279,17 @@ async fn copy_dir_into_tree(
     sources: &Prepared,
 ) -> MicrosandboxResult<()> {
     ensure_tree_parents(tree, lowers, dst_relative)?;
+    let mode = match sources.mode(src) {
+        Some(mode) => staged_image_mode(mode, true),
+        None => source_mode(src, true).await?,
+    };
     insert_tree_node(
         tree,
         dst_relative,
         TreeNode::Directory(new_upper_directory(
             lowers,
             dst_relative,
-            metadata_with_mode(
-                sources
-                    .mode(src)
-                    .map(|mode| mode as u16)
-                    .unwrap_or(source_mode(src, true).await?),
-            ),
+            metadata_with_mode(mode),
         )),
     )?;
 
@@ -1326,7 +1326,9 @@ async fn copy_dir_into_tree(
             )?;
         } else if file_type.is_file() {
             let (data, mode) = read_regular_source(&child_path).await?;
-            let mode = sources.mode(&child_path).map_or(mode, |mode| mode as u16);
+            let mode = sources
+                .mode(&child_path)
+                .map_or(mode, |mode| staged_image_mode(mode, false));
             insert_tree_node(
                 tree,
                 &child_relative,
@@ -1364,6 +1366,15 @@ async fn source_mode(_path: &Path, is_dir: bool) -> MicrosandboxResult<u16> {
     #[cfg(not(unix))]
     {
         Ok(if is_dir { 0o755 } else { 0o644 })
+    }
+}
+
+/// Image mode for a staged source mode, defaulting zero like `source_mode`.
+fn staged_image_mode(mode: u32, is_dir: bool) -> u16 {
+    match mode as u16 {
+        0 if is_dir => 0o755,
+        0 => 0o644,
+        mode => mode,
     }
 }
 
@@ -2407,6 +2418,13 @@ mod tests {
         }
         assert!(!root.join("file").exists());
         assert!(!root.join("dir").exists());
+    }
+
+    #[test]
+    fn staged_zero_modes_use_image_defaults() {
+        assert_eq!(staged_image_mode(0, false), 0o644);
+        assert_eq!(staged_image_mode(0, true), 0o755);
+        assert_eq!(staged_image_mode(0o4750, false), 0o4750);
     }
 
     #[cfg(unix)]
