@@ -108,16 +108,15 @@ Microsandbox::Sandbox.with(
 end
 ```
 
-## Backends
+## Destinations
 
-The local backend is the default. Select a backend explicitly when needed:
+Resource class methods use the default local context. Select a destination explicitly for remote operations:
 
 ```ruby
-Microsandbox.use_local_backend! # Default
-# Or:
-Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
-# Or:
-Microsandbox.use_cloud_profile!("production")
+sandbox = Microsandbox::Sandbox.remote.get("worker") # Uses MSB_API_KEY and MSB_API_URL
+
+production = Microsandbox::RemoteContext.from_profile("production")
+volumes = production.volumes.list
 ```
 
 ## Lifecycle
@@ -267,9 +266,8 @@ operation. Its message names the Ruby API and the remedy, both also available
 as attributes:
 
 ```ruby
-Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
 begin
-  Microsandbox::Sandbox.create("my-sandbox", image: "python", replace: true)
+  Microsandbox::Sandbox.remote.create("my-sandbox", image: "python", replace: true)
 rescue Microsandbox::UnsupportedError => error
   error.message   # => "sandbox.create is not supported by this backend: the replace option is not accepted here"
   error.operation # => "sandbox.create"
