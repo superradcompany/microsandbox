@@ -166,6 +166,14 @@ mod tests {
     // Functions
     //--------------------------------------------------------------------------------------------------
 
+    fn private_test_root() -> tempfile::TempDir {
+        // Each root is a catalog ancestor and must remain private under a shared developer umask.
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
     async fn archive(root: &Path, flat: bool, plain: bool) -> PathBuf {
         let source = root.join("source.raw");
         std::fs::write(&source, vec![0u8; 4096]).unwrap();
@@ -373,6 +381,10 @@ mod tests {
         let executable = root.join("fixture-msb");
         std::fs::write(&executable, probe).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        backend_with_executable(root, &executable).await
+    }
+
+    async fn backend_with_executable(root: &Path, executable: &Path) -> Arc<LocalBackend> {
         let firmware = root.join("firmware");
         std::fs::write(&firmware, b"not launched").unwrap();
         let backend = LocalBackend::from_backend_config(
@@ -535,24 +547,39 @@ mod tests {
     //--------------------------------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn uncached_snapshot_image_preserves_replacement_target() {
+    async fn rejected_snapshot_restores_preserve_the_replacement_target() {
+        check_rejected_snapshot_replacement(None).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "set MSB_TEST_RESTORE_ADMISSION_RUNTIME to the compiled current msb executable"]
+    async fn native_runtime_reaches_image_admission_before_replacement() {
+        let runtime = std::env::var_os("MSB_TEST_RESTORE_ADMISSION_RUNTIME").unwrap();
+        check_rejected_snapshot_replacement(Some(Path::new(&runtime))).await;
+    }
+
+    async fn check_rejected_snapshot_replacement(runtime: Option<&Path>) {
         for running in [false, true] {
-            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let root = private_test_root();
             let source = root.path().join("snapshot-upper.ext4");
             std::fs::write(&source, b"snapshot disk must remain unchanged").unwrap();
             // Pass the prerequisite capability checks so the test actually reaches image
             // admission. A launch attempt is always a fixture error.
-            let backend = backend_with_probe(
-                root.path(),
-                r#"#!/bin/sh
+            let backend = if let Some(runtime) = runtime {
+                backend_with_executable(root.path(), runtime).await
+            } else {
+                backend_with_probe(
+                    root.path(),
+                    r#"#!/bin/sh
 case "$1" in
 --version) echo 'msb 0.6.18';;
 __launch-protocol) echo '{"protocols":[2,1],"protected_guest_state":true,"nested_virt":true}';;
 *) exit 99;;
 esac
 "#,
-            )
-            .await;
+                )
+                .await
+            };
             let mut request = replaceable_config();
             request.snapshot_upper_source = Some(source.clone());
             request.manifest_digest = Some(format!("sha256:{}", "1".repeat(64)));
@@ -561,7 +588,11 @@ esac
             assert_request_preserves_target_with_owner(
                 backend,
                 request,
-                "is not cached locally and pull policy is `never`",
+                if runtime.is_none() && cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+                    "nested virtualization policy through a legacy runtime or wrapper"
+                } else {
+                    "is not cached locally and pull policy is `never`"
+                },
                 running,
             )
             .await;
@@ -574,7 +605,7 @@ esac
 
     #[tokio::test]
     async fn cached_snapshot_always_revalidates_the_recorded_digest() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let backend = backend(root.path(), 18).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let reference = format!("{}/fixture:mutable-tag", listener.local_addr().unwrap());
@@ -674,7 +705,7 @@ esac
 
     #[tokio::test]
     async fn restore_staging_does_not_match_destination_labels() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_test_root();
         let local = Arc::new(local_backend_builder(temp.path()).build().await.unwrap());
         let mut config = replaceable_config();
         config.spec.labels.insert("tier".into(), "web".into());
@@ -705,7 +736,7 @@ esac
     async fn archive_flat_layout_is_admitted_before_replacement() {
         for patch in [0, 8] {
             for plain in [false, true] {
-                let root = tempfile::tempdir_in("/tmp").unwrap();
+                let root = private_test_root();
                 let archive = archive(root.path(), true, plain).await;
 
                 assert_rejection_preserves_target(
@@ -720,7 +751,7 @@ esac
 
     #[tokio::test]
     async fn archive_disk_chain_is_admitted_before_replacement() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = archive(root.path(), false, false).await;
         assert_rejection_preserves_target(
             backend(root.path(), 18).await,
@@ -735,7 +766,7 @@ esac
         use crate::config::{GlobalConfigPatch, layers::BackendConfig};
 
         for flat in [false, true] {
-            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let root = private_test_root();
             let archive = archive(root.path(), flat, false).await;
             let mut backend = backend_without_runtime(root.path());
             let user = GlobalConfigPatch::from_present_fields(backend.config().clone());
@@ -752,7 +783,7 @@ esac
 
     #[tokio::test]
     async fn corrupt_archive_does_not_replace_target() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = root.path().join("broken.msnap");
         std::fs::write(&archive, b"not a tar archive").unwrap();
         let backend = backend_without_runtime(root.path());
@@ -776,7 +807,7 @@ esac
 
     #[tokio::test]
     async fn copy_on_write_disk_archive_preserves_replacement_target() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = archive(root.path(), false, false).await;
         // Without an installed runtime, launch-contract checks are skipped, so only
         // the copy-on-write checks can reject this request.
@@ -801,7 +832,7 @@ esac
 
     #[tokio::test]
     async fn historical_runtime_rejects_disk_only_restore_before_launch() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = checkpoint_archive(root.path()).await;
         // Linux x86 rejects the old runtime at nesting preflight. Other hosts
         // admit disk-only restore, then reject the materialized disk chain.
@@ -882,7 +913,7 @@ esac
 
     #[tokio::test]
     async fn current_catalog_persistence_is_separate_from_create_admission() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let backend = backend(root.path(), 8).await;
         let pools = backend.db().await.unwrap();
         assert!(database::is_current(pools.read()).await.unwrap());
@@ -917,7 +948,7 @@ esac
 
     #[tokio::test]
     async fn archive_publication_preserves_relative_disk_chain() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = archive(root.path(), false, false).await;
         let backend = backend(root.path(), 18).await;
         let stage = tempfile::tempdir_in(root.path()).unwrap();
@@ -952,7 +983,7 @@ esac
     #[tokio::test]
     async fn archive_settings_resolve_without_extracting_payloads() {
         use crate::config::{GlobalConfigPatch, layers::BackendConfig};
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let source = checkpoint_archive(root.path()).await;
         let mut local = backend(root.path(), 18).await;
         let mut defaults = GlobalConfigPatch::from_present_fields(local.config().clone());
@@ -988,7 +1019,7 @@ esac
 
     #[tokio::test]
     async fn replacing_prepared_full_archive_discards_its_checkpoint() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let full = checkpoint_archive(root.path()).await;
         let disk = archive(root.path(), false, true).await;
         let local = backend(root.path(), 18).await;
@@ -1017,7 +1048,7 @@ esac
     async fn archive_changes_after_build_preserve_replacement_target() {
         for plain in [false, true] {
             for missing in [false, true] {
-                let root = tempfile::tempdir_in("/tmp").unwrap();
+                let root = private_test_root();
                 let source = archive(root.path(), false, plain).await;
                 let local = backend(root.path(), 18).await;
                 let mut builder = SandboxBuilder::new("replaceable")
@@ -1044,7 +1075,7 @@ esac
     async fn corrupt_payload_is_deferred_to_create_without_replacing_target() {
         use std::io::{Seek, SeekFrom, Write};
 
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let source = archive(root.path(), false, true).await;
         let mut tar = tar::Archive::new(std::fs::File::open(&source).unwrap());
         let payload_offset = tar
