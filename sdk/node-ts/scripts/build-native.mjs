@@ -8,9 +8,10 @@ import { spawnSync } from "node:child_process";
 // diagnostics) while refreshing N-API's exported names and declaration file.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const loader = resolve(root, "native/index.cjs");
-const boundary = "module.exports = nativeBinding\n";
+// Windows checkouts may use CRLF; locate the export line without changing either loader's bytes.
+const boundary = /^module\.exports = nativeBinding\r?$/m;
 const before = await readFile(loader, "utf8");
-const split = before.indexOf(boundary);
+const split = before.search(boundary);
 if (split < 0) throw new Error("Native loader export boundary is missing");
 const require = createRequire(import.meta.url);
 const manifestPath = require.resolve("@napi-rs/cli/package.json");
@@ -22,6 +23,6 @@ const result = spawnSync(process.execPath, [cli, "build", ...process.argv.slice(
 if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 const generated = await readFile(loader, "utf8");
-const exports = generated.indexOf(boundary);
+const exports = generated.search(boundary);
 if (exports < 0) throw new Error("Generated native exports are missing");
 await writeFile(loader, before.slice(0, split) + generated.slice(exports));
