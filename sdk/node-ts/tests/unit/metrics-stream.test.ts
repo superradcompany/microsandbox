@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { FsReadStream } from "../../src/fs.js";
-import { VolumeFsReadStream } from "../../src/volume-fs.js";
-import { LogStream } from "../../src/logs.js";
-import { MetricsStream } from "../../src/metrics-stream.js";
+import { FsReadStream } from "../../dist/fs.js";
+import { VolumeFsReadStream } from "../../dist/volume-fs.js";
+import { LogStream } from "../../dist/logs.js";
+import { MetricsStream } from "../../dist/metrics-stream.js";
 
 const sample = {
   cpuPercent: 1, vcpuTimeNs: 2, memoryBytes: 3, memoryLimitBytes: 4,
