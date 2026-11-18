@@ -1703,7 +1703,7 @@ Control when the OCI image is pulled from the registry. See [`PullPolicy`](#pull
 func WithMaxDuration(d time.Duration) SandboxOption
 ```
 
-Cap the sandbox's total runtime. When exceeded, the sandbox is drained and stopped. Zero means unlimited. Sub-second precision is rounded up to whole seconds. Enforced on the host side.
+Cap the sandbox's total runtime. When exceeded, the sandbox is drained and stopped. Zero means unlimited. The duration must be a non-negative whole number of seconds. Enforced on the host side.
 
 <p className="msb-label">Parameters</p>
 
@@ -1720,7 +1720,7 @@ Cap the sandbox's total runtime. When exceeded, the sandbox is drained and stopp
 func WithIdleTimeout(d time.Duration) SandboxOption
 ```
 
-Stop the sandbox after this much wall-clock time without exec activity. Zero means unlimited. Sub-second precision is rounded up to whole seconds.
+Stop the sandbox after this much wall-clock time without exec activity. Zero means unlimited. The duration must be a non-negative whole number of seconds.
 
 <p className="msb-label">Parameters</p>
 

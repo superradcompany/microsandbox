@@ -228,21 +228,50 @@ func TestWithMaxDurationAndIdleTimeoutCreates(t *testing.T) {
 		defer cancel()
 		_ = sb.Stop(stopCtx)
 		_ = sb.Close()
+		_ = microsandbox.RemoveSandbox(stopCtx, name)
 	})
 
 	h, err := microsandbox.GetSandbox(ctx, name)
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	cfg := liveConfigJSON(t, ctx, h)
-	// Sub-second durations are rounded up to whole seconds; here they're
-	// already whole, so the seconds count must appear.
-	if !strings.Contains(cfg, "max_duration") || !strings.Contains(cfg, "7200") {
-		t.Errorf("MaxDuration not in ConfigJSON: %s", cfg)
+	defer h.Close()
+	cfg, err := h.Config(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(cfg, "idle_timeout") || !strings.Contains(cfg, "1800") {
-		t.Errorf("IdleTimeout not in ConfigJSON: %s", cfg)
+	for field, want := range map[string]float64{"max_duration_secs": 7200, "idle_timeout_secs": 1800} {
+		if got := cfg.Spec.Lifecycle[field]; got != want {
+			t.Errorf("%s = %v, want %v", field, got, want)
+		}
 	}
+}
+
+func TestContextRejectsFractionalLifecycleLimits(t *testing.T) {
+	sandboxes, err := microsandbox.SandboxLocal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := integrationCtx(t)
+	check := func(method string, err error) {
+		t.Helper()
+		if !microsandbox.IsKind(err, microsandbox.ErrInvalidConfig) || !strings.Contains(err.Error(), "whole number of seconds") {
+			t.Errorf("%s returned %v, want a whole-second validation error", method, err)
+		}
+	}
+
+	create := microsandbox.WithIdleTimeout(1500 * time.Millisecond)
+	restore := microsandbox.WithRestoreMaxDuration(time.Nanosecond)
+	_, err = sandboxes.Create(ctx, "invalid-duration", create)
+	check("create", err)
+	_, err = sandboxes.ConnectOrCreate(ctx, "invalid-duration", create)
+	check("connect or create", err)
+	_, created := sandboxes.CreateWithProgress(ctx, "invalid-duration", create)
+	check("create with progress", (<-created).Err)
+	_, err = sandboxes.Restore(ctx, "missing-snapshot", "invalid-duration", restore)
+	check("restore", err)
+	_, restored := sandboxes.RestoreWithProgress(ctx, "missing-snapshot", "invalid-duration", restore)
+	check("restore with progress", (<-restored).Err)
 }
 
 // TestWithScriptsRoundTrip verifies scripts pass through to the runtime.

@@ -136,12 +136,12 @@ func WithRestoreSecurityProfile(profile SecurityProfile) RestoreOption {
 	return func(o *RestoreConfig) { o.SecurityProfile = profile }
 }
 
-// WithRestoreMaxDuration sets the destination runtime limit. Zero requests immediate expiry.
+// WithRestoreMaxDuration sets the destination runtime limit in whole seconds. Zero requests immediate expiry.
 func WithRestoreMaxDuration(duration time.Duration) RestoreOption {
 	return func(o *RestoreConfig) { o.MaxDuration = &duration }
 }
 
-// WithRestoreIdleTimeout sets the destination idle limit. Zero requests immediate expiry.
+// WithRestoreIdleTimeout sets the destination idle limit in whole seconds. Zero requests immediate expiry.
 func WithRestoreIdleTimeout(duration time.Duration) RestoreOption {
 	return func(o *RestoreConfig) { o.IdleTimeout = &duration }
 }
@@ -150,12 +150,8 @@ func validateRestoreConfig(config RestoreConfig) error {
 	if config.MaxConnections != nil && config.MaxTCPConnections != nil {
 		return fmt.Errorf("microsandbox: restore MaxConnections and MaxTCPConnections cannot both be specified")
 	}
-	for name, duration := range map[string]*time.Duration{
-		"max duration": config.MaxDuration, "idle timeout": config.IdleTimeout,
-	} {
-		if duration != nil && *duration < 0 {
-			return fmt.Errorf("microsandbox: restore %s must be non-negative", name)
-		}
+	if err := validateLifecycleLimits(config.MaxDuration, config.IdleTimeout); err != nil {
+		return err
 	}
 	if config.NetworkPolicy != nil {
 		remaining := *config.NetworkPolicy
@@ -204,7 +200,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		if duration == nil {
 			return nil
 		}
-		value := durationSecsCeil(*duration)
+		value := uint64(*duration / time.Second)
 		return &value
 	}
 	return ffi.RestoreOptions{

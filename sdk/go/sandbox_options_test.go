@@ -4,12 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// The largest whole-second duration fits on the wire even though adding a second would overflow.
+func TestLifecycleLimitWirePrecision(t *testing.T) {
+	limit := time.Duration(math.MaxInt64).Truncate(time.Second)
+	want := uint64(limit / time.Second)
+	create := SandboxConfig{MaxDuration: limit}
+	if err := prepareSandboxCreateConfig(&create); err != nil {
+		t.Fatal(err)
+	}
+	if got := buildFFICreateOptions(create).MaxDurationSecs; got != want {
+		t.Fatalf("create max duration = %d, want %d", got, want)
+	}
+	restore := RestoreConfig{IdleTimeout: &limit}
+	if err := validateRestoreConfig(restore); err != nil {
+		t.Fatal(err)
+	}
+	if got := buildFFIRestoreOptions("snapshot", restore).IdleTimeoutSecs; got == nil || *got != want {
+		t.Fatalf("restore idle timeout %v did not encode %d seconds", got, want)
+	}
+}
 
 func TestLifecycleConvergenceOptions(t *testing.T) {
 	restart := restartOptions{}

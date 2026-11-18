@@ -150,5 +150,6 @@ Job log filters accept `stdout`, `stderr`, `output` and `stdin_error`. An unreco
 | Rust | Pass `Duration::from_secs(60)` to `max_duration` or `idle_timeout` on create and restore builders. |
 | TypeScript | Rename `maxDuration` to `maxDurationSeconds`, `idleTimeout` to `idleTimeoutSeconds`, and exec builder `timeout` to `timeoutMilliseconds`. |
 | Python | Pass numeric seconds or `datetime.timedelta`. For example, `timeout=timedelta(milliseconds=500)` and `timeout=0.5` set the same command deadline. |
+| Go | Keep using `time.Duration`. For a two-second limit, pass `2 * time.Second` to the create or restore option. Passing `1500 * time.Millisecond` now fails with error kind `ErrInvalidConfig`. |
 
 For these SDKs, maximum lifetime and idle limits must be non-negative whole seconds. Choose the intended whole-second limit explicitly when migrating fractional values. Omission and explicit zero retain their operation-specific meanings.

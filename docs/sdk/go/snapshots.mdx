@@ -833,7 +833,7 @@ Restore rejects missing external filesystems (and, for full restore, additional 
 | `WithDangerouslyInheritResources` | Explicitly inherit host resources. Disabled by default. |
 | `WithExternalMountPolicy` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
-Omitted controls retain destination defaults. Durations use `time.Duration`, rounded up to seconds. Binding fields belong in `WithRestoreConfig(RestoreConfig{...})`; nil pointers mean omitted. Network policy accepts factory results or `NetworkConfig` with only `Rules`, `DefaultEgress`, and `DefaultIngress`.
+Omitted controls retain destination defaults. Lifetime limits use `time.Duration` and require non-negative whole seconds. Binding fields belong in `WithRestoreConfig(RestoreConfig{...})`; nil pointers mean omitted. Network policy accepts factory results or `NetworkConfig` with only `Rules`, `DefaultEgress`, and `DefaultIngress`.
 
 </Accordion>
 

@@ -908,13 +908,13 @@ func WithPullPolicy(p PullPolicy) SandboxOption {
 }
 
 // WithMaxDuration caps the sandbox's total runtime. Zero means unlimited.
-// Sub-second precision is rounded up to whole seconds.
+// The duration must be a non-negative whole number of seconds.
 func WithMaxDuration(d time.Duration) SandboxOption {
 	return func(o *SandboxConfig) { o.MaxDuration = d }
 }
 
 // WithIdleTimeout stops the sandbox after a period without exec activity.
-// Zero means unlimited. Sub-second precision is rounded up to whole seconds.
+// Zero means unlimited. The duration must be a non-negative whole number of seconds.
 func WithIdleTimeout(d time.Duration) SandboxOption {
 	return func(o *SandboxConfig) { o.IdleTimeout = d }
 }

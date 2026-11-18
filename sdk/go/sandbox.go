@@ -145,6 +145,9 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 
 // prepareSandboxCreateConfig resolves host inputs and validates options before native creation.
 func prepareSandboxCreateConfig(config *SandboxConfig) error {
+	if err := validateLifecycleLimits(&config.MaxDuration, &config.IdleTimeout); err != nil {
+		return err
+	}
 	if err := resolveRegistryCACertPaths(config); err != nil {
 		return err
 	}
@@ -198,8 +201,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		QuietLogs:         o.QuietLogs,
 		Scripts:           o.Scripts,
 		PullPolicy:        string(o.PullPolicy),
-		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
+		MaxDurationSecs:   uint64(o.MaxDuration / time.Second),
+		IdleTimeoutSecs:   uint64(o.IdleTimeout / time.Second),
 		Ports:             o.Ports,
 		PortsUDP:          o.PortsUDP,
 		PortBindings:      buildFFIPortBindings(o.PortBindings),
@@ -347,6 +350,22 @@ func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
 		spec.SizeMiB = &size
 	}
 	return spec
+}
+
+// The create and restore wire formats persist lifecycle limits in whole seconds.
+func validateLifecycleLimits(maxDuration, idleTimeout *time.Duration) error {
+	for _, limit := range []struct {
+		name  string
+		value *time.Duration
+	}{
+		{"max duration", maxDuration},
+		{"idle timeout", idleTimeout},
+	} {
+		if limit.value != nil && (*limit.value < 0 || *limit.value%time.Second != 0) {
+			return &Error{Kind: ErrInvalidConfig, Message: limit.name + " must be a non-negative whole number of seconds"}
+		}
+	}
+	return nil
 }
 
 // durationSecsCeil rounds a Duration up to whole seconds. Sub-second values
