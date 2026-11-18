@@ -13,6 +13,8 @@
 mod agent;
 mod http;
 mod modify;
+#[cfg(test)]
+mod named_volume_tests;
 pub(in crate::backend) mod sandbox;
 mod service;
 mod snapshot;
