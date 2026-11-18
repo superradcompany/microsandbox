@@ -286,3 +286,26 @@ async fn cloud_stop_preserves_zero_budget_and_bounded_waiting() {
         Err(MicrosandboxError::StopTimeout { .. })
     ));
 }
+
+#[tokio::test]
+async fn detached_job_on_stopped_remote_sandbox_makes_no_preparation_request() {
+    use crate::test_support::fake_server::{FakeServer, respond};
+
+    let server = FakeServer::scripted(vec![respond(
+        200,
+        None,
+        &response(false, "stopped").to_string(),
+    )])
+    .await;
+    let sandbox = Sandbox::ctx(server.backend().as_ref())
+        .get("agent")
+        .await
+        .unwrap();
+    let error = sandbox
+        .exec_detached("true", std::iter::empty::<String>())
+        .await
+        .err()
+        .expect("managed jobs require a local runtime");
+    assert_eq!(error.code(), "unsupported_feature");
+    assert_eq!(server.only_request().method, "GET");
+}

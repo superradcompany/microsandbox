@@ -354,10 +354,8 @@ impl Sandbox {
 
     /// Create a sandbox from a config.
     ///
-    /// Routes through the ambient [`default_local_context`](crate::context::default_local_context)
-    /// so a cloud profile will dispatch to `RemoteContext` instead of the local
-    /// libkrun runtime. The returned [`Sandbox`] always carries the backend it
-    /// was created on; subsequent method calls keep using that backend.
+    /// Uses the default local context. For remote creation, use
+    /// `Sandbox::remote()?.builder(name)` or `Sandbox::ctx(&context).builder(name)`.
     pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
         #[cfg(feature = "local")]
         if create_spawn_mode(&config, SpawnMode::Attached) == SpawnMode::Detached {
@@ -377,8 +375,7 @@ impl Sandbox {
     ///
     /// This is intended for detached CLI workflows such as `msb create` and
     /// `msb run --detach`, where the sandbox should keep running in the
-    /// background after the command returns. Routes through the ambient
-    /// [`default_local_context`](crate::context::default_local_context).
+    /// background after the command returns. Uses the default local context.
     pub async fn create_detached(config: SandboxConfig) -> MicrosandboxResult<Self> {
         let backend = crate::context::default_local_context();
         backend
@@ -391,10 +388,8 @@ impl Sandbox {
     ///
     /// Returns a progress handle for per-layer pull events and a task handle
     /// for the sandbox creation result. The caller should consume progress
-    /// events until the channel closes, then await the task. **Local backend
-    /// only** — pull progress is a local concept (cloud workers handle image
-    /// pulls server-side); on a cloud backend this falls back to a no-progress
-    /// create with an immediately-closed channel.
+    /// events until the channel closes, then await the task. This entry point uses
+    /// the default local context.
     #[cfg(feature = "local")]
     pub fn create_with_pull_progress(
         config: SandboxConfig,
@@ -464,10 +459,9 @@ impl Sandbox {
     /// Start an existing stopped sandbox from persisted state.
     ///
     /// Reuses the serialized sandbox config and pinned rootfs state without
-    /// re-resolving the original OCI reference. Routes through the ambient
-    /// [`default_local_context`](crate::context::default_local_context).
+    /// re-resolving the original OCI reference. Uses the default local context.
     ///
-    /// On a Cloud sandbox, a start is refused with
+    /// For an explicitly remote start via `Sandbox::remote()?.start(name)`, the provider returns
     /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
     /// secret change to it is being saved, or while its result is not yet known after
     /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
@@ -477,9 +471,9 @@ impl Sandbox {
         backend.sandbox_ops().start(backend.clone(), name).await
     }
 
-    /// Start an existing sandbox in detached/background mode.
+    /// Start an existing sandbox in detached/background mode in the default local context.
     ///
-    /// On a Cloud sandbox, a start is refused with
+    /// For an explicitly remote start via `Sandbox::remote()?.start_detached(name)`, the provider returns
     /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
     /// secret change to it is being saved, or while its result is not yet known after
     /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
@@ -529,8 +523,7 @@ impl Sandbox {
             .map(SandboxPage::from_records)
     }
 
-    /// Remove a stopped sandbox by name via the ambient
-    /// [`default_local_context`](crate::context::default_local_context).
+    /// Remove a stopped sandbox by name in the default local context.
     pub async fn remove(name: &str) -> MicrosandboxResult<()> {
         let backend = crate::context::default_local_context();
         backend.sandbox_ops().remove(backend.clone(), name).await
