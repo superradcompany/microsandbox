@@ -363,6 +363,64 @@ async fn unrelated_tips_require_an_exact_target_and_conflicts_never_pick_input_o
 }
 
 #[tokio::test]
+async fn shared_file_layer_allows_independent_integrity_recording() {
+    let temp = tempfile::tempdir().unwrap();
+    let local = crate::test_support::local_backend_builder(temp.path().join("home"))
+        .build()
+        .await
+        .unwrap();
+    let plain = temp.path().join("plain");
+    let checked = temp.path().join("checked");
+    let original = raw_source(&plain, 10, 3);
+    let mut copy = raw_source(&checked, 10, 3);
+    copy.snapshot_id = SnapshotId::new(format!("snap_{:032x}", 11)).unwrap();
+    let SnapshotState::File(file) = &mut copy.state else {
+        unreachable!()
+    };
+    let layer = &mut file.layers[0];
+    let relative = microsandbox_image::snapshot::layer_path(&layer.layer_id, layer.format);
+    layer.payload.integrity = Some(
+        crate::backend::local::snapshot::verify::compute_merkle_integrity(&checked.join(&relative))
+            .await
+            .unwrap(),
+    );
+    write_manifest(&checked, &copy);
+    let backend: Arc<dyn Backend> = Arc::new(local);
+    crate::with_backend(backend, async {
+        for paths in [
+            vec![plain.clone(), checked.clone()],
+            vec![checked.clone(), plain.clone()],
+        ] {
+            Sandbox::builder("child")
+                .override_snapshot_paths(paths, Some(original.snapshot_id.clone()))
+                .build()
+                .await
+                .unwrap();
+        }
+        // The unchecked descriptor gives no checksum guarantee of its own.
+        // Divergence must still be caught even with the checksummed input first.
+        std::fs::write(plain.join(relative), vec![4u8; 65536]).unwrap();
+        for paths in [
+            vec![plain.clone(), checked.clone()],
+            vec![checked.clone(), plain.clone()],
+        ] {
+            let error = Sandbox::builder("child")
+                .override_snapshot_paths(paths, Some(original.snapshot_id.clone()))
+                .build()
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("conflicting disk layer payloads"),
+                "{error}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn supplied_parent_cycle_is_refused_even_with_an_explicit_target() {
     let temp = tempfile::tempdir().unwrap();
     let local = Arc::new(

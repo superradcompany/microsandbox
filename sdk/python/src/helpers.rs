@@ -251,9 +251,21 @@ fn apply_outbound_proxy<B: ProxyDestination>(
     let proxy = config_dict(proxy, "OutboundProxy")?;
     let protocol = extract_required::<String>(&proxy, "protocol")?;
     let address = extract_required::<String>(&proxy, "address")?;
+    let credentials = parse_proxy_credentials(&proxy)?;
     builder = match protocol.as_str() {
-        "http_connect" => builder.proxy(move |p| p.http_connect(address)),
+        "http_connect" => builder.proxy(move |p| {
+            let proxy = p.http_connect(address);
+            match credentials {
+                Some((username, password)) => proxy.credentials(username, password),
+                None => proxy,
+            }
+        }),
         "socks4" => {
+            if credentials.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "credentials are only supported for SOCKS5 and HTTP CONNECT proxies",
+                ));
+            }
             let user_id = extract_opt::<String>(&proxy, "user_id")?;
             builder.proxy(move |p| {
                 let proxy = p.socks4(address);
@@ -263,55 +275,13 @@ fn apply_outbound_proxy<B: ProxyDestination>(
                 }
             })
         }
-        "socks5" => {
-            // The validated public OutboundProxy has already serialized these nested
-            // values. They are dictionaries, not separate public configuration classes.
-            let credentials = proxy
-                .get_item("credentials")?
-                .filter(|value| !value.is_none())
-                .map(|value| {
-                    value.downcast::<PyDict>().cloned().map_err(|_| {
-                        pyo3::exceptions::PyTypeError::new_err(
-                            "serialized SOCKS5 credentials must be a dict",
-                        )
-                    })
-                })
-                .transpose()?;
-            let username = credentials
-                .as_ref()
-                .map(|value| extract_required::<String>(value, "username"))
-                .transpose()?;
-            let password = credentials
-                .as_ref()
-                .map(|value| {
-                    let password = value.get_item("password")?.ok_or_else(|| {
-                        pyo3::exceptions::PyValueError::new_err(
-                            "SOCKS5 credentials requires password",
-                        )
-                    })?;
-                    let source = password.downcast::<PyDict>().map_err(|_| {
-                        pyo3::exceptions::PyTypeError::new_err(
-                            "serialized SOCKS5 password source must be a dict",
-                        )
-                    })?;
-                    let kind = extract_required::<String>(source, "kind")?;
-                    if kind != "env" {
-                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                            "unsupported SOCKS5 password source {kind:?}; only env is supported"
-                        )));
-                    }
-                    let var = extract_required::<String>(source, "var")?;
-                    Ok(SecretSource::env(var))
-                })
-                .transpose()?;
-            builder.proxy(move |p| {
-                let proxy = p.socks5(address);
-                match (username, password) {
-                    (Some(username), Some(password)) => proxy.credentials(username, password),
-                    _ => proxy,
-                }
-            })
-        }
+        "socks5" => builder.proxy(move |p| {
+            let proxy = p.socks5(address);
+            match credentials {
+                Some((username, password)) => proxy.credentials(username, password),
+                None => proxy,
+            }
+        }),
         _ => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unsupported outbound proxy protocol {protocol:?}"

@@ -84,7 +84,7 @@ pub(super) struct Sources {
     owned: BTreeMap<String, PathBuf>,
     // Canonical launch sets reject ambiguous shared identities. Legacy import
     // callers keep their existing admission path through `add`.
-    strict_disk_identities: BTreeMap<String, LayerIdentity>,
+    strict_disk_identities: BTreeMap<String, (LayerIdentity, PathBuf)>,
     strict_disk_hashes: BTreeMap<String, UpperIntegrity>,
 }
 
@@ -147,9 +147,13 @@ impl Sources {
             MicrosandboxError::Runtime(format!("snapshot source inspection: {error}"))
         })??;
         for (key, path) in disks {
-            let identity: LayerIdentity = serde_json::from_str(&key)?;
-            let (id, has_backing) = match &identity {
+            let mut identity: LayerIdentity = serde_json::from_str(&key)?;
+            let (id, has_backing) = match &mut identity {
                 LayerIdentity::File(layer) => {
+                    // A file snapshot copy can opt into recording integrity independently.
+                    // Admission verifies each descriptor's own recorded checksum. Compare
+                    // shared layers by their topology and actual bytes across providers.
+                    layer.payload.integrity = None;
                     (format!("file:{}", layer.layer_id), layer.backing.is_some())
                 }
                 LayerIdentity::Checkpoint(layer) => (
@@ -157,20 +161,17 @@ impl Sources {
                     layer.predecessor.is_some(),
                 ),
             };
-            if let Some(previous) = self.strict_disk_identities.get(&id)
-                && previous != &identity
-            {
-                return Err(source_error(format!(
-                    "conflicting disk layer metadata for {id}"
-                )));
-            }
-            self.strict_disk_identities.insert(id.clone(), identity);
-            if let Some(previous) = self.disks.get(&key) {
-                let previous_hash = match self.strict_disk_hashes.get(&key) {
+            if let Some((previous, previous_path)) = self.strict_disk_identities.get(&id) {
+                if previous != &identity {
+                    return Err(source_error(format!(
+                        "conflicting disk layer metadata for {id}"
+                    )));
+                }
+                let previous_hash = match self.strict_disk_hashes.get(&id) {
                     Some(hash) => hash.clone(),
                     None => {
-                        let hash = launch_disk_hash(previous, has_backing).await?;
-                        self.strict_disk_hashes.insert(key.clone(), hash.clone());
+                        let hash = launch_disk_hash(previous_path, has_backing).await?;
+                        self.strict_disk_hashes.insert(id.clone(), hash.clone());
                         hash
                     }
                 };
@@ -180,8 +181,11 @@ impl Sources {
                     )));
                 }
             } else {
-                self.disks.insert(key, path);
+                self.strict_disk_identities
+                    .insert(id, (identity, path.clone()));
             }
+            // Dependency reconstruction still selects the exact descriptor requested.
+            self.disks.entry(key).or_insert(path);
         }
         // RAM and borrowed owned payload identities include content hashes and
         // are verified when reconstructed; disk IDs alone may have no checksum.
