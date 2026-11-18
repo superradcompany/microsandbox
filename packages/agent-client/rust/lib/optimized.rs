@@ -335,6 +335,9 @@ impl AgentClient {
         deadline: Instant,
     ) -> AgentClientResult<Self> {
         let stream = connect_local_stream(sock_path.as_ref(), deadline).await?;
+        #[cfg(all(feature = "uds", unix))]
+        let mut client = Self::connect_uds_stream_with_deadline(stream, deadline, false).await?;
+        #[cfg(all(feature = "named-pipe", windows))]
         let mut client = Self::connect_stream_with_deadline(stream, deadline).await?;
         client.exec_controller = crate::ExecController::from_ready_body(&client.ready_body)?;
         Ok(client)
