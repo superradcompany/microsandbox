@@ -292,7 +292,7 @@ Service create, update, enable, disable, and remove each send one request and ne
 
 A missing Service, an unavailable slug, and a missing target sandbox have their own errors. Other refusals, and changes whose outcome is unknown, raise a Service error with one of these reasons: `service_quota_exceeded`, `sandbox_service_limit_exceeded`, `service_conflict`, `service_detached`, `target_unreachable`, `sandbox_not_running`, `service_changes_paused`, or `outcome_unknown`. `target_unreachable` and `service_changes_paused` carry a retry delay when the response sets `Retry-After`. Any other refusal uses the `other` reason and keeps the raw error code, HTTP status, and message. The [TypeScript](/sdk/typescript/services#serviceerror), [Rust](/sdk/rust/services#serviceerror), [Python](/sdk/python/services#serviceerror), [Go](/sdk/go/services#serviceerror), and [Ruby](/sdk/ruby/services#serviceerror) references give each reason's name and what to do.
 
-Every error from a Service change carries a change state. Errors where nothing could have changed, such as invalid values, refusals, missing resources, and unavailable slugs, report `unchanged`; other failures report `unknown`.
+Every Microsandbox error from a Service change carries a change state. Errors where nothing could have changed, such as invalid values, refusals, missing resources, and unavailable slugs, report `unchanged`; other failures report `unknown`.
 
 If the change state is unknown, the change may have been applied. Get the Service and check it before trying again:
 
