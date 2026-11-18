@@ -51,13 +51,12 @@ async def test_scope_exit_preserves_body_exception():
         "progress-body", image="/__microsandbox_missing_rootfs__",
     )
     failure = ValueError("body failed")
-    try:
+    body_result = asyncio.get_running_loop().create_future()
+    body_result.set_exception(failure)
+    with pytest.raises(ValueError) as caught:
         async with session:
-            raise failure
-    except ValueError as caught:
-        assert caught is failure
-    else:
-        pytest.fail("progress scope suppressed the body exception")
+            await body_result
+    assert caught.value is failure
 
 
 @pytest.mark.asyncio
