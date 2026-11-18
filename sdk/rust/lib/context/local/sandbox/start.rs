@@ -93,6 +93,19 @@ mod tests {
                 .build()
                 .unwrap(),
         );
+        // Hosted CI supplies the candidate runtime separately from this private catalog.
+        // Direct runs can also provide the two individual runtime path overrides.
+        if let Some(directory) = std::env::var_os("MSB_TEST_RUNTIME_DIR") {
+            crate::setup::install_runtime(
+                backend.config(),
+                crate::setup::InstallOptions {
+                    source: crate::setup::InstallSource::Directory(directory.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
         let name = "pid-reuse";
         let builder = || {
             SandboxBuilder::new(name)

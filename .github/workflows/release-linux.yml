@@ -373,7 +373,9 @@ jobs:
 
       - name: Stage runtime bundle
         run: |
-          mkdir -p sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
+          # Create dist as the runner before the manylinux container writes wheels as root.
+          # The subsequent metadata rewrite atomically replaces a wheel in this directory.
+          mkdir -p sdk/python/dist sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
           # GitHub artifact archives normalize every file to 0644. Restore the
           # runtime mode explicitly before maturin records it in the wheel.
           install -m 755 build/msb sdk/python/microsandbox/_bundled/bin/msb
