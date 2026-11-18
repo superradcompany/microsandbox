@@ -966,7 +966,7 @@ pub(crate) fn sandbox_config_from_cloud_spec(
     }
 }
 
-/// Copy caller-visible settings from the API projection into an SDK spec.
+/// Copy the settings SDK operations use from the API spec into an SDK spec.
 fn sandbox_spec_from_cloud_projection(projection: CloudSpecProjection) -> SandboxSpec {
     let mut spec = SandboxSpec::default();
 
