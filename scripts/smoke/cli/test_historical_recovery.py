@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import sys
 import tempfile
 import time
@@ -164,10 +165,22 @@ class QualificationTests(unittest.TestCase):
     def runner(self, binary, env, output):
         def run(label, *args, required=True):
             self.commands.append(label)
+            home = Path(env["MSB_HOME"])
+            if label == "seed-image":
+                (home / "cache").mkdir()
+                (home / "cache/image").write_bytes(b"cached image")
+            if label == "seed-image" or label.endswith("-create"):
+                (home / "db").mkdir()
+                with sqlite3.connect(home / "db/msb.db") as catalog:
+                    catalog.execute("CREATE TABLE sandbox (id INTEGER)")
+                if label.endswith("-create"):
+                    self.assertEqual((home / "cache/image").read_bytes(), b"cached image")
             if label.endswith("-create") and self.failure == "create":
                 raise RuntimeError("failed create")
             if label.endswith("-guest") and self.failure == "guest":
                 raise RuntimeError("guest checksum mismatch")
+            if label.endswith("-cleanup-rm") and self.failure == "catalog":
+                (home / "db/msb.db").unlink()
             if label.endswith("-cleanup-rm") and self.failure == "cleanup":
                 return 1
             if label.endswith("-persistent") and self.failure == "original":
@@ -189,7 +202,6 @@ class QualificationTests(unittest.TestCase):
                 patch.object(smoke.history, "Runner", side_effect=self.runner), \
                 patch.object(smoke, "run_worker", side_effect=self.worker), \
                 patch.object(smoke, "migration_state", return_value={}), \
-                patch.object(smoke, "catalog_empty", return_value=True), \
                 patch.object(smoke.subprocess, "check_output", return_value=smoke.WORKER + ": test\n"):
             smoke.qualify(self.args)
 
@@ -209,6 +221,8 @@ class QualificationTests(unittest.TestCase):
         row = self.report()["cases"][0]
         self.assertEqual(row["error"], "recovery failed")
         self.assertEqual(row["cleanup"], {})
+        self.assertIsNone(row["catalog_empty"])
+        self.assertTrue(self.report()["catalog_empty"])
         self.assertFalse(any("-create" in label for label in self.commands))
 
     def test_failed_create_still_attempts_stop_and_removal(self):
@@ -218,6 +232,14 @@ class QualificationTests(unittest.TestCase):
         row = self.report()["cases"][0]
         self.assertEqual(row["error"], "failed create")
         self.assertEqual(row["cleanup"], {"stop": 0, "rm": 0})
+
+    def test_missing_catalog_after_creation_fails_audit(self):
+        self.failure = "catalog"
+        with self.assertRaises(RuntimeError):
+            self.qualify()
+        report = self.report()
+        self.assertFalse(report["catalog_empty"])
+        self.assertIn("catalog_error", report["cases"][0])
 
     def test_guest_failure_cannot_pass(self):
         self.failure = "guest"

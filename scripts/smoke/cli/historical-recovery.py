@@ -145,7 +145,6 @@ def qualify(args):
               "agent_sha256": history.digest(args.agent),
               "harness_sha256": history.digest(Path(__file__)), "cases": [],
               "originals_unchanged": False}
-    case_homes = []
     try:
         # Seed only the image cache through a genuine historical archive. Recovered directory
         # launches use their own private copies and never this seed group's descriptor.
@@ -162,7 +161,6 @@ def qualify(args):
                 # Each trial recovers the same historical ID at a different path. Keep
                 # its live catalog independent from the seed and every other trial.
                 case_home = Path(tempfile.mkdtemp(prefix="hc-", dir=args.temp_root)).resolve()
-                case_homes.append(case_home)
                 history.copy_artifact(home / "cache", case_home / "cache")
                 runner = history.Runner(args.candidate, history.environment(
                     args.candidate, args.firmware, case_home, args.agent), case / "candidate")
@@ -213,7 +211,18 @@ def qualify(args):
                 finally:
                     history.finish_case(runner, label, sandbox, row, report,
                                         args.output, attempted=create_attempted)
-        report["catalog_empty"] = catalog_empty(home) and all(catalog_empty(path) for path in case_homes)
+                    # A worker may fail before the first CLI dispatch creates a catalog.
+                    # Once creation is attempted, a missing or unreadable catalog is an audit failure.
+                    try:
+                        untouched = not create_attempted and not (case_home / "db/msb.db").exists()
+                        row["catalog_empty"] = None if untouched else catalog_empty(case_home)
+                    except sqlite3.Error as error:
+                        row["catalog_error"] = str(error)
+                        row["catalog_empty"] = False
+                    if row["catalog_empty"] is False:
+                        row["status"] = "failed"
+        report["catalog_empty"] = catalog_empty(home) and all(
+            row["catalog_empty"] is not False for row in report["cases"])
         if any(row["status"] != "passed" for row in report["cases"]) or not report["catalog_empty"]:
             raise RuntimeError("one or more recovery cases or final cleanup failed")
         report["status"] = "passed"

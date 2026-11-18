@@ -27,6 +27,8 @@ class HistoricalTerminationTests(unittest.TestCase):
                     f"#!{sys.executable}\n"
                     "import os, pathlib, sys, time\n"
                     f"with pathlib.Path({str(calls)!r}).open('a') as f: f.write(sys.argv[1]+'\\n')\n"
+                    "if sys.argv[1:3] == ['snapshot', 'load']:\n"
+                    "    (pathlib.Path(os.environ['MSB_HOME']) / 'cache').mkdir(parents=True)\n"
                     "if sys.argv[1] in ('stop', 'rm', '--version', 'snapshot', 'create'):\n"
                     "    raise SystemExit(0)\n"
                     f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
