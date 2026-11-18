@@ -291,7 +291,13 @@ mod tests {
             result = ready => result.unwrap(),
         }
         let error = dial.await.err().expect("silent agent must time out");
-        assert!(error.to_string().contains("stage: handshake"), "{error}");
+        // Both the connection budget and the agent's handshake read can expire
+        // on the same poll. Either diagnostic must identify the timed-out phase.
+        let message = error.to_string();
+        assert!(
+            message.contains("handshake") && message.contains("timed out"),
+            "{error}"
+        );
         tokio::time::timeout(Duration::from_secs(2), server)
             .await
             .unwrap()
