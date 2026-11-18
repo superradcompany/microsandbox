@@ -595,6 +595,9 @@ pub(super) fn cloud_http_error(
         Some("name_already_exists") if op == "POST /v1/snapshots" => {
             return MicrosandboxError::SnapshotAlreadyExists(message);
         }
+        Some("name_already_exists") if op == "POST /v1/volumes" => {
+            return MicrosandboxError::VolumeAlreadyExists(message);
+        }
         Some("name_already_exists") => return MicrosandboxError::SandboxAlreadyExists(message),
         Some("invalid_request") | Some("invalid_sandbox_config") | Some("invalid_volume_path") => {
             return MicrosandboxError::InvalidConfig(message);
@@ -869,6 +872,12 @@ mod tests {
         assert!(
             matches!(err, MicrosandboxError::SandboxAlreadyExists(msg) if msg.contains("name taken"))
         );
+
+        let err = cloud_http_error(409, Some(&body), "", "POST /v1/volumes");
+        assert!(matches!(
+            err,
+            MicrosandboxError::VolumeAlreadyExists(msg) if msg.contains("name taken")
+        ));
     }
 
     #[test]
