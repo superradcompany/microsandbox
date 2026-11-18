@@ -122,7 +122,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
         let (cls_name, msg) = match &err {
             RuntimeNotInstalled(_) => ("RuntimeNotInstalledError", err.to_string()),
             RuntimeIncomplete(_) => ("RuntimeIncompleteError", err.to_string()),
-            InvalidConfig(_) | MissingRestoreBindings { .. } => {
+            InvalidConfig(_) | InvalidWorkdir { .. } | MissingRestoreBindings { .. } => {
                 ("InvalidConfigError", err.to_string())
             }
             NoDefaultCommand => ("NoDefaultCommandError", err.to_string()),

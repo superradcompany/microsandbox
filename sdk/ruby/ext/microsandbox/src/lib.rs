@@ -247,9 +247,9 @@ fn core_error_class_name(error: &MicrosandboxError) -> &'static str {
     match error {
         MicrosandboxError::RuntimeNotInstalled(_) => "RuntimeNotInstalledError",
         MicrosandboxError::RuntimeIncomplete(_) => "RuntimeIncompleteError",
-        MicrosandboxError::InvalidConfig(_) | MicrosandboxError::MissingRestoreBindings { .. } => {
-            "InvalidConfigError"
-        }
+        MicrosandboxError::InvalidConfig(_)
+        | MicrosandboxError::InvalidWorkdir { .. }
+        | MicrosandboxError::MissingRestoreBindings { .. } => "InvalidConfigError",
         MicrosandboxError::NoDefaultCommand => "NoDefaultCommandError",
         MicrosandboxError::CloudHttp { .. } => "CloudHttpError",
         MicrosandboxError::SandboxNotFound(_) => "SandboxNotFoundError",

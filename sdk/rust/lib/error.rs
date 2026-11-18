@@ -66,6 +66,19 @@ pub struct SnapshotSourceRecoveryError {
     pub publication_error: Option<String>,
 }
 
+/// Why the guest rejected a configured working directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WorkdirProblem {
+    /// The path exists but is not a directory.
+    NotADirectory,
+    /// The guest could not stat the path, for example because it does not exist.
+    StatFailed {
+        /// Error message returned by the guest.
+        message: String,
+    },
+}
+
 /// Errors that can occur in microsandbox operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -110,6 +123,15 @@ pub enum MicrosandboxError {
     /// Invalid configuration.
     #[error("invalid config: {0}")]
     InvalidConfig(String),
+
+    /// The guest rejected the configured working directory.
+    #[error("invalid config: {}", .problem.message(.path))]
+    InvalidWorkdir {
+        /// Configured guest path.
+        path: String,
+        /// Why the guest rejected the path.
+        problem: WorkdirProblem,
+    },
 
     /// A restore was refused because guest paths lack destination bindings.
     ///
@@ -679,6 +701,19 @@ pub enum UnsupportedReason {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl WorkdirProblem {
+    fn message(&self, path: &str) -> String {
+        match self {
+            Self::NotADirectory => {
+                format!("workdir is not a directory in guest: {path}")
+            }
+            Self::StatFailed { message } => {
+                format!("could not validate workdir in guest {path:?}: sandbox fs error: {message}")
+            }
+        }
+    }
+}
 
 impl Operation {
     /// The user-facing API path for this operation, e.g. `"Sandbox::kill"`.
