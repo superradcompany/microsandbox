@@ -85,7 +85,17 @@ async fn larger_exec_windows_still_backpressure_and_release_on_cancel() {
         .exec_stream_with("sleep", |e| e.args(["120"]).stdin_pipe())
         .await
         .unwrap();
+    assert!(matches!(
+        timeout(DEADLINE, blocked.recv()).await.unwrap(),
+        Some(ExecEvent::Started { .. })
+    ));
     let input = blocked.take_stdin().unwrap();
+    // Send one full window after startup before timing the blocked remainder.
+    // A slow spawn must not satisfy the backpressure assertion on its own.
+    timeout(DEADLINE, input.write(vec![0; MIB]))
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         timeout(Duration::from_millis(500), input.write(vec![0; 8 * MIB]))
             .await
