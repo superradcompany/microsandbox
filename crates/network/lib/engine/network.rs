@@ -5,6 +5,7 @@
 //! type the runtime creates from config, wires into the VM builder, and starts
 //! the networking stack.
 
+use std::env::{self, VarError};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
@@ -303,7 +304,16 @@ impl SmoltcpNetwork {
         deployment_profile: DeploymentProfile,
         host_routes: HostRoutes,
     ) -> Result<Self, NetworkInitError> {
-        enforce_deployment_profile(&mut config, deployment_profile)?;
+        let operator_nameservers = if deployment_profile == DeploymentProfile::MultiTenant {
+            operator_multi_tenant_nameservers()?
+        } else {
+            None
+        };
+        enforce_deployment_profile(
+            &mut config,
+            deployment_profile,
+            operator_nameservers.as_deref(),
+        )?;
         let platform_policy = Self::platform_policy(deployment_profile);
         let resolved_config = config;
         let config = resolved_config.config();
@@ -753,16 +763,18 @@ impl MetricsHandle {
 /// the platform public-network policy and the tenant policy independently so a
 /// broad tenant allow can never outrank the platform floor, while a tenant deny
 /// still remains effective.
+///
+/// `operator_nameservers` is the operator's raw resolver setting, if any.
 fn enforce_deployment_profile(
     config: &mut ResolvedNetworkConfig,
     profile: DeploymentProfile,
+    operator_nameservers: Option<&str>,
 ) -> Result<(), NetworkInitError> {
     if profile == DeploymentProfile::SingleTenant {
         return Ok(());
     }
 
-    let operator_nameservers = std::env::var(MULTI_TENANT_NAMESERVERS_ENV).ok();
-    let nameservers = multi_tenant_nameservers(operator_nameservers.as_deref())?;
+    let nameservers = multi_tenant_nameservers(operator_nameservers)?;
 
     config.clear_outbound_proxy();
 
@@ -812,6 +824,20 @@ fn enforce_deployment_profile(
     }
 
     Ok(())
+}
+
+/// Read the operator's multi-tenant resolver setting from the environment.
+///
+/// A value that is not valid Unicode is an error rather than "unset", so a
+/// mistyped setting never silently selects the defaults.
+fn operator_multi_tenant_nameservers() -> Result<Option<String>, NetworkInitError> {
+    match env::var(MULTI_TENANT_NAMESERVERS_ENV) {
+        Ok(value) => Ok(Some(value)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(value)) => Err(NetworkInitError::InvalidMultiTenantNameservers {
+            value: value.to_string_lossy().into_owned(),
+        }),
+    }
 }
 
 /// Resolve the upstream DNS resolvers for a multi-tenant deployment.
@@ -1095,7 +1121,7 @@ mod tests {
         config.policy = NetworkPolicy::allow_all();
         let mut resolved = resolved(config);
 
-        enforce_deployment_profile(&mut resolved, DeploymentProfile::MultiTenant).unwrap();
+        enforce_deployment_profile(&mut resolved, DeploymentProfile::MultiTenant, None).unwrap();
         let config = resolved.config();
 
         assert!(config.interface.mac.is_none());
@@ -1114,6 +1140,22 @@ mod tests {
         // Tenant policy stays intact and is intersected with the platform
         // policy at evaluation time instead of being reordered or flattened.
         assert!(config.policy.default_egress.is_allow());
+    }
+
+    #[test]
+    fn multi_tenant_profile_uses_operator_nameservers() {
+        let mut overridden = resolved(NetworkConfig::default());
+        enforce_deployment_profile(
+            &mut overridden,
+            DeploymentProfile::MultiTenant,
+            Some("9.9.9.9"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            overridden.config().dns.nameservers,
+            vec!["9.9.9.9:53".parse::<Nameserver>().unwrap()]
+        );
     }
 
     #[test]
@@ -1173,7 +1215,7 @@ mod tests {
                 let mut config = resolved(config);
                 // Exercise the serialized runtime launch boundary as well.
                 config = serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
-                enforce_deployment_profile(&mut config, profile).unwrap();
+                enforce_deployment_profile(&mut config, profile, None).unwrap();
                 let expected = requested
                     .or(match profile {
                         DeploymentProfile::SingleTenant => None,
@@ -1188,7 +1230,7 @@ mod tests {
                     expected
                 );
                 // Applying the profile again must preserve the resolved value.
-                enforce_deployment_profile(&mut config, profile).unwrap();
+                enforce_deployment_profile(&mut config, profile, None).unwrap();
                 assert_eq!(
                     config
                         .config()
@@ -1218,9 +1260,9 @@ mod tests {
                         DeploymentProfile::MultiTenant => Some(1024),
                     })
                     .map(ConnectionLimit::from);
-                enforce_deployment_profile(&mut config, profile).unwrap();
+                enforce_deployment_profile(&mut config, profile, None).unwrap();
                 assert_eq!(config.config().max_udp_connections, expected);
-                enforce_deployment_profile(&mut config, profile).unwrap();
+                enforce_deployment_profile(&mut config, profile, None).unwrap();
                 assert_eq!(config.config().max_udp_connections, expected);
             }
         }
@@ -1238,7 +1280,7 @@ mod tests {
         });
 
         let mut resolved = resolved(config);
-        enforce_deployment_profile(&mut resolved, DeploymentProfile::SingleTenant).unwrap();
+        enforce_deployment_profile(&mut resolved, DeploymentProfile::SingleTenant, None).unwrap();
         let config = resolved.config();
 
         assert_eq!(config.interface.mtu, Some(9000));
