@@ -97,10 +97,11 @@ export type JsAttachOptionsBuilder = AttachOptionsBuilder
 
 /** An explicit shared destination. Construction never changes global selection. */
 export declare class Context {
-  deriveRemote(optionsJson: string): Context
   /** Snapshot destination selection is captured before the restore builder escapes. */
   sandboxRestore(snapshot: string, kind?: string | undefined | null): JsRestoreBuilder
   constructor(optionsJson: string)
+  /** Derive inside the retained provider; credentials never cross back into JavaScript. */
+  deriveRemote(optionsJson: string): Context
   get kind(): string
   sandboxBuilder(name: string): JsSandboxBuilder
   sandboxGet(name: string): Promise<Sandbox>
@@ -114,9 +115,9 @@ export declare class Context {
   volumeList(): Promise<Array<JsVolume>>
   volumeRemove(name: string): Promise<void>
   snapshotBuilder(name: string): JsSnapshotBuilder
-  snapshotGet(reference: string): Promise<JsSnapshot>
   snapshotGroupHead(group: string): Promise<string | null>
   snapshotSetGroupHead(group: string, id: string): Promise<HeadUpdate>
+  snapshotGet(reference: string): Promise<JsSnapshot>
   snapshotList(): Promise<Array<JsSnapshot>>
   snapshotRemove(reference: string, force: boolean): Promise<void>
 }
@@ -1920,7 +1921,7 @@ export declare class Volume {
   get diskFormat(): string | null
   get diskFstype(): string | null
   get createdAt(): number | null
-  /** One fresh backend observation. */
+  /** Return one fresh provider observation without cached fallback. */
   info(): Promise<string>
   destroy(): Promise<void>
   get name(): string
@@ -2696,14 +2697,6 @@ export interface ServiceTarget {
 export interface ServiceUpdateOptions {
   target: ServiceTarget
 }
-
-/**
- * Set the process-wide default backend.
- *
- * `kind="local"` selects the local backend. `kind="cloud"` requires either an
- * API key (with an optional URL override), or a profile.
- */
-export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
 
 /** Register the platform package executable as a fallback after the runtime home. */
 export declare function setPackagedMsbPath(path: string): void

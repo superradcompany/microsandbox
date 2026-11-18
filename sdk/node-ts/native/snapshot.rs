@@ -69,8 +69,8 @@ pub struct JsLoadOpts {
 }
 
 /// Outcome of reading or selecting a snapshot group's head.
-#[napi(object, js_name = "HeadUpdate")]
-pub struct JsHeadUpdate {
+#[napi(object)]
+pub struct HeadUpdate {
     pub group: String,
     pub previous: Option<String>,
     pub head: String,
@@ -218,7 +218,7 @@ impl JsSnapshot {
     }
 
     #[napi(js_name = "setGroupHead")]
-    pub async fn set_group_head(group: String, id: String) -> Result<JsHeadUpdate> {
+    pub async fn set_group_head(group: String, id: String) -> Result<HeadUpdate> {
         let id = parse_snapshot_id(id)?;
         let update = RustSnapshot::set_group_head(&group, &id)
             .await
@@ -246,7 +246,7 @@ impl JsSnapshot {
     }
 
     #[napi(getter)]
-    pub fn head_update(&self) -> Option<JsHeadUpdate> {
+    pub fn head_update(&self) -> Option<HeadUpdate> {
         self.inner.head_update().map(head_update_to_js)
     }
     #[napi(getter)]
@@ -501,7 +501,7 @@ pub(crate) fn parse_snapshot_id(id: String) -> Result<microsandbox::snapshot::Sn
     })
 }
 
-pub(crate) fn head_update_to_js(update: &microsandbox::snapshot::HeadUpdate) -> JsHeadUpdate {
+pub(crate) fn head_update_to_js(update: &microsandbox::snapshot::HeadUpdate) -> HeadUpdate {
     // Match the stable serde spelling without losing the closed reason variants.
     let reason = match update.reason {
         HeadUpdateReason::Initialized => "initialized",
@@ -512,7 +512,7 @@ pub(crate) fn head_update_to_js(update: &microsandbox::snapshot::HeadUpdate) -> 
         HeadUpdateReason::UnknownAncestry => "unknown_ancestry",
         HeadUpdateReason::AmbiguousCandidates => "ambiguous_candidates",
     };
-    JsHeadUpdate {
+    HeadUpdate {
         group: update.group.clone(),
         previous: update.previous.clone(),
         head: update.head.clone(),

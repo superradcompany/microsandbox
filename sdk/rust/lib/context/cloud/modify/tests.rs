@@ -7,7 +7,7 @@ use serde_json::json;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
 use super::*;
 use crate::sandbox::SecretModificationPatch;
@@ -405,21 +405,20 @@ fn backend_with(url: &str, client: reqwest::Client) -> crate::RemoteContext {
     backend
 }
 
-/// Serve the mock on `addr` once 300 ms have passed; until then it refuses connections.
-fn serve_later(addr: SocketAddr) -> tokio::task::JoinHandle<MockCloud> {
-    tokio::spawn(async move {
+/// Reserve a port before delaying listen. Other parallel fixtures cannot take
+/// the address while the client is exercising the connection-refused path.
+fn serve_later() -> (SocketAddr, tokio::task::JoinHandle<MockCloud>) {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    let server = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let listener = TcpListener::bind(addr).await.unwrap();
         MockCloud::serve(
-            listener,
+            socket.listen(32).unwrap(),
             Arc::new(|_, _| Reply::Json(200, plan_json(true, "live"))),
         )
-    })
-}
-
-async fn closed_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap()
+    });
+    (addr, server)
 }
 
 /// Fails the first lookup, then resolves every name to `addr`.
@@ -444,9 +443,8 @@ impl reqwest::dns::Resolve for FlakyResolver {
 
 #[tokio::test]
 async fn a_refused_connection_is_sent_again() {
-    let addr = closed_addr().await;
+    let (addr, late) = serve_later();
     let backend = crate::test_support::cloud_backend(format!("http://{addr}"), "test-key").unwrap();
-    let late = serve_later(addr);
 
     let plan = apply_within(&backend, &value_patch(VALUE), short_budget(5_000))
         .await
@@ -539,14 +537,13 @@ async fn a_failed_tls_handshake_is_sent_again() {
 
 #[tokio::test]
 async fn a_refused_proxy_is_sent_again() {
-    let proxy = closed_addr().await;
+    // The proxy answers the forwarded request itself.
+    let (proxy, late) = serve_later();
     let client = reqwest::Client::builder()
         .proxy(reqwest::Proxy::all(format!("http://{proxy}")).unwrap())
         .build()
         .unwrap();
     let backend = backend_with("http://cloud.example", client);
-    // The proxy answers the forwarded request itself.
-    let late = serve_later(proxy);
 
     let plan = apply_within(&backend, &value_patch(VALUE), short_budget(5_000))
         .await
