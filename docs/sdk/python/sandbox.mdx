@@ -87,6 +87,8 @@ Create and boot a sandbox. Keyword arguments provide individual config fields; s
 
 The returned `Sandbox` is an async context manager. On scope exit, `async with` awaits graceful shutdown only for the local run this object owns; persisted state is retained except for configured ephemeral cleanup. Detached, independently connected, and cloud resources are not stopped. Cleanup checks the captured run and cannot stop a replacement run. A cleanup failure is raised, with any body exception retained as its cause.
 
+Creation also accepts `cpu_placement`, `placement_profile`, `thp`, `deployment_profile` and `proxy` through the default and context-bound factories.
+
 Pass `intercept_tls=True` to enable [TLS interception](/networking/tls) while preserving supplied network settings. `False` leaves them unchanged.
 
 <p className="msb-label">Parameters</p>

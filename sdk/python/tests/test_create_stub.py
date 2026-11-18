@@ -13,10 +13,14 @@ EXPECTED_KWARGS = [
     "cpus",
     "max_memory",
     "max_cpus",
+    "cpu_placement",
+    "placement_profile",
+    "thp",
     "nested_virt",
     "workdir",
     "shell",
     "security",
+    "deployment_profile",
     "hostname",
     "user",
     "entrypoint",
@@ -41,28 +45,33 @@ EXPECTED_KWARGS = [
     "vsock",
     "network",
     "intercept_tls",
+    "proxy",
     "secrets",
     "secret_violation_action",
     "detached",
 ]
 
 
-def _sandbox_class() -> ast.ClassDef:
+def _sandbox_class(owner: str = "Sandbox") -> ast.ClassDef:
     tree = ast.parse(STUB_PATH.read_text())
     for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == "Sandbox":
+        if isinstance(node, ast.ClassDef) and node.name == owner:
             return node
     raise AssertionError("Sandbox missing from stub")
 
 
-def _method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
-    for node in _sandbox_class().body:
+def _method(name: str, owner: str = "Sandbox") -> ast.FunctionDef | ast.AsyncFunctionDef:
+    for node in _sandbox_class(owner).body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
     raise AssertionError(f"Sandbox.{name} missing from stub")
 
 
 def test_create_methods_have_explicit_keyword_only_contracts() -> None:
+    for name in ("create", "connect_or_create", "create_with_progress"):
+        assert [ast.dump(arg) for arg in _method(name, "Sandboxes").args.kwonlyargs] == [
+            ast.dump(arg) for arg in _method(name).args.kwonlyargs
+        ]
     create = _method("create")
     connect_or_create = _method("connect_or_create")
     create_with_progress = _method("create_with_progress")
