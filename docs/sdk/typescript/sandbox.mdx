@@ -2258,7 +2258,7 @@ Use with `for await...of`
 [Symbol.asyncDispose]()
 ```
 
-Stop iterating; safe to use with `await using`
+Stop subsequent receives and iteration; safe to use with `await using`. After disposal, `recv()` returns `null` and `for await...of` ends without reading another entry. A receive that was already pending may still complete.
 
 <p className="msb-label">Returns</p>
 
@@ -2301,7 +2301,7 @@ Use with `for await...of`
 [Symbol.asyncDispose]()
 ```
 
-Stop iterating; safe to use with `await using`
+Stop subsequent receives and iteration; safe to use with `await using`. After disposal, `recv()` returns `null` and `for await...of` ends without reading another snapshot. A receive that was already pending may still complete.
 
 <p className="msb-label">Returns</p>
 
