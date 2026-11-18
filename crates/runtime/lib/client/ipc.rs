@@ -1049,6 +1049,27 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn endpoint_probe_covers_current_and_legacy_paths() {
+        // Concurrent fork-based tests can inherit the listening descriptor, so
+        // closing our copy alone cannot establish the closed-listener precondition.
+        const ISOLATED: &str = "MSB_TEST_ISOLATED_ENDPOINT_PROBE";
+        if std::env::var_os(ISOLATED).is_none() {
+            let name = std::thread::current()
+                .name()
+                .expect("named test thread")
+                .to_owned();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let run_dir = home.path().join("run");
         let sandbox_dir = home.path().join("sandbox");
