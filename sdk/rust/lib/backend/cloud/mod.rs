@@ -292,8 +292,8 @@ impl CloudBackendBuilder {
 
     /// Provide a fully custom `reqwest::Client`. When set, `user_agent` is
     /// ignored and the supplied client's own settings apply. `request_timeout`
-    /// still bounds the waits of log follows and file transfers, except
-    /// connecting, which the supplied client controls. A total timeout on the
+    /// still bounds the waits of log follows and file transfers; for uploads,
+    /// connecting is left to the supplied client. A total timeout on the
     /// supplied client also ends log follows and file transfers.
     ///
     /// Service create, update, enable, disable and remove also use this client,
