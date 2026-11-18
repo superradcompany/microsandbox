@@ -552,12 +552,11 @@ impl CloudBackend {
                         }
                     },
                 );
+                // The body is done once it ends or the client drops it unread,
+                // as it does for an empty body.
                 let response_timeout = async {
-                    if body_done_rx.await.is_ok() {
-                        tokio::time::sleep(self.request_timeout).await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
+                    let _ = body_done_rx.await;
+                    tokio::time::sleep(self.request_timeout).await;
                 };
                 tokio::select! {
                     response = request.body(reqwest::Body::wrap_stream(wrapped)).send() => {

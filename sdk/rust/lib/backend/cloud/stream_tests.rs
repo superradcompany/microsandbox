@@ -398,6 +398,28 @@ async fn volume_write_fails_when_reply_never_comes() {
 }
 
 #[tokio::test]
+async fn empty_volume_write_fails_when_reply_never_comes() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = backend(format!("http://{}", listener.local_addr().unwrap()));
+        let fs = VolumeFs::with_backend(Arc::new(backend), "stream-test");
+        let server = tokio::spawn(async move {
+            serve_volume_lookup(&listener).await;
+            let (target, _reader) = accept_request(&listener).await;
+            assert_eq!(target, format!("/v1/volumes/{VOLUME_ID}/files/content"));
+            std::future::pending::<()>().await;
+        });
+
+        let error = fs.write("/file", b"").await.unwrap_err().to_string();
+
+        assert!(error.contains("no response within"), "{error}");
+        server.abort();
+    })
+    .await
+    .expect("empty volume write reply timeout test timed out");
+}
+
+#[tokio::test]
 async fn volume_read_error_body_is_bounded() {
     tokio::time::timeout(TEST_TIMEOUT, async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
