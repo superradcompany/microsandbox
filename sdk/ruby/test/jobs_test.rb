@@ -44,7 +44,8 @@ class ManagedJobsTest < Test::Unit::TestCase
       found.eof
       assert_true found.wait.success
       second.detach
-      assert_equal "\xFF\x00\nreattached\n".b, found.logs.map(&:data).join
+      assert_equal "\xFF\x00\nreattached\n".b, found.logs(sources: [:stdout]).map(&:data).join
+      assert_empty found.logs(sources: ["stderr"])
       cursor = nil
       loop do
         page = sandbox.list_jobs(all: true, cursor: cursor)

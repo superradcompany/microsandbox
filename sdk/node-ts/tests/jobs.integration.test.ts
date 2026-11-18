@@ -23,6 +23,10 @@ describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("man
       expect((await found.wait()).success).toBe(true);
       await second.detach();
       expect(Buffer.concat((await found.logs()).map(x => x.data))).toEqual(Buffer.concat([Buffer.from([255, 0, 10]), Buffer.from("reattached\n")]));
+      const stdout = await found.logs({ sources: ["stdout"] });
+      expect(stdout.length).toBeGreaterThan(0);
+      expect(stdout.every(entry => entry.source === "stdout")).toBe(true);
+      expect(await found.logs({ sources: ["stderr"] })).toEqual([]);
       let cursor: string | null = null;
       for (;;) {
         const page = await sb.listJobsWith(b => cursor ? b.all().cursor(cursor) : b.all());

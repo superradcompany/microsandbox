@@ -77,12 +77,15 @@ func TestManagedJobIntegration(t *testing.T) {
 	if err != nil || !status.Success {
 		t.Fatalf("wait: %#v %v", status, err)
 	}
-	logs, err := found.Logs(ctx, JobLogOptions{})
+	logs, err := found.Logs(ctx, JobLogOptions{Sources: []JobOutputSource{JobOutputStdout}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var bytes []byte
 	for _, entry := range logs {
+		if entry.Source != JobOutputStdout {
+			t.Fatalf("unexpected job log source %q", entry.Source)
+		}
 		bytes = append(bytes, entry.Data...)
 	}
 	if string(bytes) != string(append([]byte{255, 0, 10}, []byte("reattached\n")...)) {

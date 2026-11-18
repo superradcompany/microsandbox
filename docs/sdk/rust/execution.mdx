@@ -1543,10 +1543,25 @@ pub struct JobLogOptions {
     pub tail: Option<usize>,
     pub since: Option<i64>,
     pub until: Option<i64>,
-    pub sources: Vec<String>,
+    pub sources: Vec<JobOutputSource>,
     pub from_cursor: Option<String>,
     pub follow: bool,
 }
 ```
+
+`JobLogEntry.source` uses the same `JobOutputSource` enum. Its variants are `Stdout`, `Stderr`, `Output` (merged PTY), and `StdinError` (a failed stdin write).
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::jobs::{JobLogOptions, JobOutputSource};
+
+let errors = job.logs(&JobLogOptions {
+    sources: vec![JobOutputSource::Stderr],
+    ..Default::default()
+}).await?;
+```
+
+</Accordion>
 
 `tail` selects the last N filtered records. `since` is inclusive and `until` exclusive, both in Unix milliseconds. Empty `sources` selects program output. `from_cursor` resumes after a job cursor and cannot be combined with `since`. `follow` continues after retained output.

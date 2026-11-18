@@ -133,7 +133,9 @@ Do not feed the result back into a creation builder. Keep creation input separat
 
 ## Typed resource and job values
 
-- **Rust** — Match `snapshot.state_kind()` against `SnapshotStateKind::File` or `Checkpoint`. Use `.as_str()` when forwarding the tag, including an unknown indexed value.
+Job log filters accept `stdout`, `stderr`, `output` and `stdin_error`. An unrecognized source now raises a validation error.
+
+- **Rust** — Match `snapshot.state_kind()` against `SnapshotStateKind::File` or `Checkpoint`. Use `.as_str()` when forwarding the tag, including an unknown indexed value. For job logs, replace `vec!["stderr".into()]` with `vec![JobOutputSource::Stderr]` and compare `entry.source` with the same enum. Dynamic inputs can use `name.parse::<JobOutputSource>()?`. [Job log options](/sdk/rust/execution#joblogoptions)
 - **TypeScript** — `volume.kind` and `(await volume.info()).kind` both return `"dir" | "disk"`. Narrow dynamic pull policies, log levels and job output filters before passing them to the SDK. Fluent configuration callbacks return the configured builder.
 - **Python** — `(await sb.info())["status"]` returns a `SandboxStatus`, `context.kind` a `ContextKind`, and `(await volume.info())["kind"]` a `VolumeKind`. Job event tags narrow the payload to output, a replay gap or completed job information. Use `JobState.RUNNING` to compare job state.
 - **Go** — Use `JobStateRunning` for job state and `[]JobOutputSource{JobOutputStdout, JobOutputStderr}` for log filters. Progress phases, modification dispositions and live resize outcomes also have named string types. Use `string(value)` when passing one to a function requiring a string.
