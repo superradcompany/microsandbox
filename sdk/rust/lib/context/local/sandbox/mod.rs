@@ -11,8 +11,11 @@ mod process_exit;
 #[cfg(target_os = "macos")]
 #[path = "process_exit_macos.rs"]
 mod process_exit;
+mod runtime_identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
+#[cfg(target_os = "linux")]
+mod start;
 mod stop;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -58,6 +61,7 @@ use crate::sandbox::{
     RootfsSource, Sandbox, SandboxConfig, SandboxListBuilder, SandboxRecord, SandboxStatus,
     load_sandbox_record, validate_env, validate_hostname, validate_labels, validate_volume_mounts,
 };
+use runtime_identity::{RecordedRuntime, RuntimeProcess, RuntimeSignal};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -94,6 +98,8 @@ impl LocalContext {
         let write_db = pools.write();
         let model = self.load_sandbox_record_reconciled(pools, name).await?;
         ensure_local_identity(name, expected_id, model.id)?;
+        #[cfg(target_os = "linux")]
+        let model = self.recover_recycled_start(pools, model).await?;
         tracing::debug!(sandbox = name, status = ?model.status, "start_local: current status");
 
         if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
@@ -174,8 +180,8 @@ impl LocalContext {
             })
             .transpose()?
             .flatten();
-        if let Some(pid) = previous_run.and_then(|run| run.pid) {
-            let alive = || -> MicrosandboxResult<bool> {
+        if let Some(pid) = previous_run.as_ref().and_then(|run| run.pid) {
+            let alive = async || -> MicrosandboxResult<bool> {
                 #[cfg(windows)]
                 if let Some(owner) = &previous_owner {
                     return Ok(owner
@@ -185,13 +191,26 @@ impl LocalContext {
                         .transpose()?
                         .unwrap_or(false));
                 }
+                #[cfg(target_os = "linux")]
+                if matches!(
+                    Self::recorded_runtime(
+                        previous_run.as_ref(),
+                        &microsandbox_runtime::ipc::lifecycle_lock_path(
+                            &self.config().run_dir(),
+                            name
+                        )
+                    ),
+                    RecordedRuntime::Recycled
+                ) {
+                    return self.start_endpoint_is_live(name).await;
+                }
                 Ok(!Self::pid_has_exited(pid))
             };
             let start = std::time::Instant::now();
-            while start.elapsed() < Duration::from_secs(5) && alive()? {
+            while start.elapsed() < Duration::from_secs(5) && alive().await? {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            if alive()? {
+            if alive().await? {
                 return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
                     "cannot start sandbox {name:?}: previous runtime pid {pid} is still alive"
                 )));
@@ -995,6 +1014,31 @@ impl LocalContext {
             .filter(|pid| Self::pid_is_alive(*pid))
     }
 
+    fn recorded_runtime(run: Option<&run_entity::Model>, lifecycle: &Path) -> RecordedRuntime {
+        RecordedRuntime::inspect(
+            run.and_then(|run| run.pid),
+            run.and_then(|run| run.started_at),
+            lifecycle,
+        )
+    }
+
+    /// Poll a signalled runtime process until it exits or `timeout` elapses.
+    async fn wait_for_runtime_exit(process: &RuntimeProcess, timeout: Duration) {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(50);
+        while !process.has_exited() && start.elapsed() < timeout {
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    /// Whether no process currently owns `name`'s lifecycle lock in this run directory.
+    ///
+    /// The probe acquires and immediately releases the lock, so it must only run while the
+    /// caller holds the name's transition guard.
+    fn lifecycle_is_unowned(run_dir: &Path, name: &str) -> MicrosandboxResult<bool> {
+        Ok(microsandbox_runtime::ipc::try_acquire_lifecycle_guard(run_dir, name)?.is_some())
+    }
+
     /// Terminal status + termination reason for a stale Running/Draining row.
     fn stale_runtime_terminal_state(
         status: SandboxStatus,
@@ -1175,24 +1219,8 @@ impl LocalContext {
         !Self::pid_is_alive(pid)
     }
 
-    /// Request graceful termination (SIGTERM).
-    #[cfg(unix)]
-    fn terminate_pid_gracefully(pid: i32) -> MicrosandboxResult<()> {
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid),
-            nix::sys::signal::Signal::SIGTERM,
-        )?;
-        Ok(())
-    }
-
-    /// Request termination (Windows has no graceful signal equivalent).
-    #[cfg(windows)]
-    fn terminate_pid_gracefully(pid: i32) -> MicrosandboxResult<()> {
-        Self::terminate_pid(pid)
-    }
-
     /// Force-kill a process (SIGKILL).
-    #[cfg(unix)]
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     fn kill_pid(pid: i32) -> MicrosandboxResult<()> {
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(pid),
