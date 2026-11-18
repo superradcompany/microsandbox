@@ -1,7 +1,7 @@
 ---
-title: "Sandbox storage migration"
-sidebarTitle: "v0.7.12 storage changes"
-description: "Migrate existing sandbox storage and repair sandboxes refused by the v0.7.12 storage change."
+title: "Repair sandbox storage"
+sidebarTitle: "Sandbox storage"
+description: "Recover older local sandboxes blocked by storage migration checks."
 ---
 
 v0.7.12 moved host-managed disk records and checkpoints out of guest-accessible directories to prevent guest code from rewriting them. Its strict migration checks can block startup for older local sandboxes using snapshots, forks, owned disks, or completed disk growth or compaction.
@@ -9,10 +9,10 @@ v0.7.12 moved host-managed disk records and checkpoints out of guest-accessible 
 A refusal does not itself delete disk data. Preserve the affected sandbox: restoring an earlier snapshot omits writes made after that snapshot.
 
 <Note>
-The diagnosis and repair commands below are not included in v0.7.12 or v0.7.13. They require a build containing the storage migration fixes.
+Storage migration repair is available from v0.7.14.
 </Note>
 
-Use an SDK/CLI and runtime that include those fixes, including any pinned runtime. Updating binaries does not itself migrate sandbox data. Restart older VMs with the updated runtime before snapshots, forks, disk growth, or compaction; exec and stop remain available. See [runtime setup](/sdk/setup).
+Use an SDK/CLI and runtime that include this fix, including any pinned runtime. Updating binaries does not itself migrate sandbox data. Restart older VMs with the updated runtime before snapshots, forks, disk growth, or compaction; exec and stop remain available. See [runtime setup](/sdk/setup).
 
 ## Migrate or repair
 

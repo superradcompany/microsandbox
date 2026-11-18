@@ -18,6 +18,17 @@ const (
 	SandboxStatusCrashed  SandboxStatus = "crashed"
 )
 
+// ServiceStatus reports whether a Service routes requests, is disabled, or has
+// no target.
+type ServiceStatus string
+
+const (
+	ServiceStatusEnabled  ServiceStatus = "enabled"
+	ServiceStatusDisabled ServiceStatus = "disabled"
+	ServiceStatusDetached ServiceStatus = "detached"
+	ServiceStatusUnknown  ServiceStatus = "unknown"
+)
+
 // FsEntryKind classifies a directory listing entry.
 type FsEntryKind string
 

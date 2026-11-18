@@ -21,6 +21,7 @@ engine = [
     "dep:hickory-net",
     "dep:httlib-hpack",
     "dep:httparse",
+    "dep:if-addrs",
     "dep:libc",
     "dep:lru",
     "dep:msb_krun",
@@ -54,6 +55,7 @@ futures = { workspace = true, optional = true }
 # crypto provider, so no new dependency is introduced.
 hickory-net = { workspace = true, features = ["tls-ring"], optional = true }
 hickory-proto = { workspace = true }
+if-addrs = { workspace = true, optional = true }
 httlib-hpack = { workspace = true, optional = true }
 httparse = { version = "1", optional = true }
 ipnetwork = { workspace = true }

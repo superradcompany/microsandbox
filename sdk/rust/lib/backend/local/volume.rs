@@ -709,6 +709,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_named_volume_creates_once_and_reuses_local_data() {
+        for existing in [false, true] {
+            let home = tempdir().unwrap();
+            let local = Arc::new(
+                crate::test_support::local_backend_builder(home.path())
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+            let backend: Arc<dyn Backend> = local.clone();
+            let config = crate::backend::with_backend(
+                backend.clone(),
+                SandboxBuilder::new("test")
+                    .image("/tmp/rootfs")
+                    .volume("/data", |m| m.named_with("cache", |v| v.ensure_exists()))
+                    .volume("/shared", |m| m.named_with("cache", |v| v.ensure_exists()))
+                    .build(),
+            )
+            .await
+            .unwrap();
+            let pools = local.db().await.unwrap();
+            pools.write().execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO sandbox (id, name, config, status, ephemeral, creation_state) VALUES (1, 'test', ?, 'Starting', 0, 'preparing')",
+                [serde_json::to_string(&config).unwrap().into()],
+            )).await.unwrap();
+            if existing {
+                crate::backend::with_backend(backend, Volume::builder("cache").create())
+                    .await
+                    .unwrap();
+            }
+            let storage = CreationStorage::for_test(local.sandboxes_dir().join("test"));
+
+            let first = local.ensure_named_volumes(&storage, &config).await.unwrap();
+
+            assert_eq!(first.created.len(), usize::from(!existing));
+            drop(first);
+            let marker = local.volume_path("cache").join("retained.txt");
+            tokio::fs::write(&marker, "keep this data").await.unwrap();
+
+            let second = local.ensure_named_volumes(&storage, &config).await.unwrap();
+            let resolved = local.resolve_named_volumes(&config).await.unwrap();
+
+            assert!(second.is_empty());
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved["cache"].path, local.volume_path("cache"));
+            assert_eq!(
+                tokio::fs::read_to_string(marker).await.unwrap(),
+                "keep this data"
+            );
+            assert!(
+                config
+                    .spec
+                    .mounts
+                    .iter()
+                    .all(|m| m.named_create().is_some())
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_failed_named_volume_formatting_retains_owner_until_recovery() {
         let temp = tempdir().unwrap();
         let home = temp.path().join("home");

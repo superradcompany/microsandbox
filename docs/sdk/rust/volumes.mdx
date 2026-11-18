@@ -1334,7 +1334,9 @@ Mount a named volume with explicit sandbox-time existence behavior, configured v
 
 `existing` (the default) behaves like [`.named()`](#mount-named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume.
 
-The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
+With the cloud backend, `ensure_exists` supports default directory volumes without quota, capacity, or labels. The client looks up or creates the volume before creating the sandbox. Other inline creation settings are rejected.
+
+Locally, the ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
 
 <p className="msb-label">Parameters</p>
 

@@ -15,7 +15,9 @@ class MicrosandboxTest < Test::Unit::TestCase
     SandboxStillRunningError SandboxStopTimedOutError StopTimeoutError
     ExecTimeoutError ExecFailedError
     FilesystemError PathNotFoundError
-    VolumeNotFoundError VolumeAlreadyExistsError ImageNotFoundError ImageInUseError ImagePullFailedError
+    VolumeNotFoundError VolumeAlreadyExistsError
+    ServiceNotFoundError ServiceAlreadyExistsError ServiceError
+    ImageNotFoundError ImageInUseError ImagePullFailedError
     SnapshotNotFoundError SnapshotAlreadyExistsError SnapshotSandboxRunningError
     SnapshotImageMissingError SnapshotIntegrityError SnapshotSourceRecoveryError SnapshotMigrationError
     NetworkPolicyError SecretViolationError TlsError

@@ -190,7 +190,7 @@ Owned-directory snapshots retain platform-specific filesystem metadata and canno
 
 ## Named volumes
 
-<Tooltip tip="On microsandbox cloud, create named volumes before mounting them; create-on-mount, disk-kind volumes, and size are not available, and quota must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="The cloud backend supports default ensure-exists mounts. Inline creation settings and disk-kind volumes are not available; quota on a separate volume-create call must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 microsandbox manages named volumes and stores them by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox, so you can create a volume, populate it, and mount it into different sandboxes over time.
 

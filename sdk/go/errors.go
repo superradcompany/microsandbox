@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -123,8 +125,8 @@ const (
 	// the FFI boundary (typically an SDK bug or a caller passing bad JSON).
 	ErrInvalidArgument
 
-	// ErrInvalidHandle indicates the sandbox handle is stale, closed, or
-	// was never valid.
+	// ErrInvalidHandle indicates a handle (a sandbox, Service, job or other
+	// native object) is stale, closed, or was never valid.
 	ErrInvalidHandle
 
 	// ErrBufferTooSmall indicates the FFI response exceeded the fixed
@@ -177,6 +179,15 @@ const (
 	// its result is unknown. The message says whether sending the same change
 	// again retries it.
 	ErrModificationNotConfirmed
+	// ErrServiceNotFound indicates no visible Service has the slug.
+	ErrServiceNotFound
+	// ErrServiceAlreadyExists indicates the slug is unavailable.
+	ErrServiceAlreadyExists
+	// ErrService indicates a Service change was refused or its outcome is
+	// unknown. Use errors.As with *ServiceError for the reason.
+	ErrService
+	// ErrCloudOnly indicates a Service call on the local backend; Services need a cloud backend.
+	ErrCloudOnly
 )
 
 func (k ErrorKind) String() string {
@@ -259,12 +270,20 @@ func (k ErrorKind) String() string {
 		return "MetricsUnavailable"
 	case ErrUnsupportedOperation:
 		return "UnsupportedOperation"
+	case ErrCloudOnly:
+		return "CloudOnly"
 	case ErrModificationNotConfirmed:
 		return "ModificationNotConfirmed"
 	case ErrInternal:
 		return "Internal"
 	case ErrNoDefaultCommand:
 		return "NoDefaultCommand"
+	case ErrServiceNotFound:
+		return "ServiceNotFound"
+	case ErrServiceAlreadyExists:
+		return "ServiceAlreadyExists"
+	case ErrService:
+		return "Service"
 	default:
 		return "Unknown"
 	}
@@ -276,6 +295,9 @@ type Error struct {
 	Kind    ErrorKind
 	Message string
 	Cause   error
+	// Changed says whether a failed Service create, update, enable, disable or remove may have
+	// been applied. It is empty for errors from other operations.
+	Changed ChangeState
 }
 
 // PublishedSnapshotArtifact names an artifact published despite source recovery failure.
@@ -309,6 +331,65 @@ func (e *SnapshotSourceRecoveryError) Error() string { return e.err.Error() }
 
 // Unwrap preserves access to the standard SDK error kind.
 func (e *SnapshotSourceRecoveryError) Unwrap() error { return e.err }
+
+// ServiceErrorReason says why a Service change did not complete.
+type ServiceErrorReason string
+
+const (
+	// ServiceReasonQuotaExceeded means the organization Service limit was reached.
+	ServiceReasonQuotaExceeded ServiceErrorReason = "service_quota_exceeded"
+	// ServiceReasonSandboxLimitExceeded means the target sandbox's Service limit was reached.
+	ServiceReasonSandboxLimitExceeded ServiceErrorReason = "sandbox_service_limit_exceeded"
+	// ServiceReasonConflict means the Service changed; get it before retrying.
+	ServiceReasonConflict ServiceErrorReason = "service_conflict"
+	// ServiceReasonDetached means the Service is detached; set a target.
+	ServiceReasonDetached ServiceErrorReason = "service_detached"
+	// ServiceReasonTargetUnreachable means the target cannot be reached; retry later.
+	ServiceReasonTargetUnreachable ServiceErrorReason = "target_unreachable"
+	// ServiceReasonTargetNotRunning means the target sandbox is not running; start it, then retry.
+	ServiceReasonTargetNotRunning ServiceErrorReason = "sandbox_not_running"
+	// ServiceReasonChangesPaused means Service changes are paused; retry later.
+	ServiceReasonChangesPaused ServiceErrorReason = "service_changes_paused"
+	// ServiceReasonOutcomeUnknown means the change may have been applied; get and check the Service.
+	ServiceReasonOutcomeUnknown ServiceErrorReason = "outcome_unknown"
+	// ServiceReasonOther is an unrecognized reason; the ServiceError raw fields preserve the refusal.
+	ServiceReasonOther ServiceErrorReason = "other"
+)
+
+// ChangeState says whether a failed Service change may have been applied.
+type ChangeState string
+
+const (
+	// ChangeUnchanged means nothing changed.
+	ChangeUnchanged ChangeState = "unchanged"
+	// ChangeUnknown means the change may have been applied; get and check the Service.
+	ChangeUnknown ChangeState = "unknown"
+)
+
+// ServiceError reports a refused Service change or one whose outcome is unknown.
+// Use errors.As to obtain this type; IsKind also recognizes ErrService.
+type ServiceError struct {
+	// Slug of the Service the change addressed.
+	Slug string
+	// Reason says why the change did not complete.
+	Reason ServiceErrorReason
+	// RetryAfter is the retry delay returned with the refusal, or zero when none was returned.
+	RetryAfter time.Duration
+	// Changed says whether the change may have been applied.
+	Changed ChangeState
+	// RawCode is the raw error code returned with a ServiceReasonOther refusal, or empty otherwise.
+	RawCode string
+	// RawStatus is the HTTP status returned with a ServiceReasonOther refusal, or zero otherwise.
+	RawStatus int
+	// RawMessage is the raw message returned with a ServiceReasonOther refusal, or empty otherwise.
+	RawMessage string
+	err        *Error
+}
+
+func (e *ServiceError) Error() string { return e.err.Error() }
+
+// Unwrap preserves access to the standard SDK error kind.
+func (e *ServiceError) Unwrap() error { return e.err }
 
 // Error implements the error interface.
 //
@@ -354,6 +435,13 @@ func wrapFFI(err error) error {
 	}
 	var fe *ffi.Error
 	if errors.As(err, &fe) {
+		baseError := func(kind ErrorKind) *Error {
+			base := &Error{Kind: kind, Message: fe.Message}
+			if fe.Changed != "" {
+				base.Changed = changeStateFromFFI(fe.Changed)
+			}
+			return base
+		}
 		if fe.Kind == ffi.KindSnapshotSourceRecovery && fe.Recovery != nil {
 			r := fe.Recovery
 			recovery := SnapshotSourceRecoveryDetails{
@@ -367,15 +455,86 @@ func wrapFFI(err error) error {
 				}
 			}
 			return &SnapshotSourceRecoveryError{
-				Recovery: recovery, err: &Error{Kind: ErrSnapshotSourceRecovery, Message: fe.Message},
+				Recovery: recovery, err: baseError(ErrSnapshotSourceRecovery),
 			}
 		}
-		return &Error{Kind: kindFromFFI(fe.Kind), Message: fe.Message}
+		if fe.Kind == ffi.KindService && fe.Service != nil {
+			details := fe.Service
+			retryAfter := retryAfterFromMillis(details.RetryAfterMs)
+			base := baseError(ErrService)
+			if base.Changed == "" {
+				base.Changed = ChangeUnknown
+			}
+			return &ServiceError{
+				Slug: details.Slug, Reason: serviceReasonFromFFI(details.Reason),
+				RetryAfter: retryAfter, Changed: base.Changed,
+				RawCode: details.RawCode, RawStatus: details.RawStatus, RawMessage: details.RawMessage,
+				err: base,
+			}
+		}
+		return baseError(kindFromFFI(fe.Kind))
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return &Error{Kind: ErrCancelled, Message: err.Error(), Cause: err}
 	}
 	return &Error{Kind: ErrInternal, Message: err.Error(), Cause: err}
+}
+
+func retryAfterFromMillis(ms *uint64) time.Duration {
+	if ms == nil {
+		return 0
+	}
+	const maxDurationMillis = uint64(math.MaxInt64) / uint64(time.Millisecond)
+	if *ms > maxDurationMillis {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(*ms) * time.Millisecond
+}
+
+// wrapServiceChange ensures every failed Service change reports whether it may have been applied.
+func wrapServiceChange(err error) error {
+	var undispatched *ffi.UndispatchedServiceChangeError
+	requestNotSent := errors.As(err, &undispatched)
+	err = wrapFFI(err)
+	if err == nil {
+		return nil
+	}
+
+	var base *Error
+	if !errors.As(err, &base) || base.Changed != "" {
+		return err
+	}
+
+	if requestNotSent {
+		base.Changed = ChangeUnchanged
+	} else {
+		base.Changed = ChangeUnknown
+	}
+	var serviceErr *ServiceError
+	if errors.As(err, &serviceErr) {
+		serviceErr.Changed = base.Changed
+	}
+	return err
+}
+
+// serviceReasonFromFFI maps a reason this SDK version does not list to ServiceReasonOther.
+func serviceReasonFromFFI(reason string) ServiceErrorReason {
+	switch known := ServiceErrorReason(reason); known {
+	case ServiceReasonQuotaExceeded, ServiceReasonSandboxLimitExceeded,
+		ServiceReasonConflict, ServiceReasonDetached, ServiceReasonTargetUnreachable,
+		ServiceReasonTargetNotRunning, ServiceReasonChangesPaused, ServiceReasonOutcomeUnknown:
+		return known
+	default:
+		return ServiceReasonOther
+	}
+}
+
+// changeStateFromFFI fails closed: anything but "unchanged" means the change may have applied.
+func changeStateFromFFI(changed string) ChangeState {
+	if ChangeState(changed) == ChangeUnchanged {
+		return ChangeUnchanged
+	}
+	return ChangeUnknown
 }
 
 func kindFromFFI(kind string) ErrorKind {
@@ -446,8 +605,16 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrMetricsUnavailable
 	case ffi.KindUnsupportedOperation:
 		return ErrUnsupportedOperation
+	case ffi.KindCloudOnly:
+		return ErrCloudOnly
 	case ffi.KindModificationNotConfirmed:
 		return ErrModificationNotConfirmed
+	case ffi.KindServiceNotFound:
+		return ErrServiceNotFound
+	case ffi.KindServiceAlreadyExists:
+		return ErrServiceAlreadyExists
+	case ffi.KindService:
+		return ErrService
 	default:
 		return ErrInternal
 	}

@@ -3,7 +3,7 @@
 //! Unlike [`SandboxFsOps`](crate::sandbox::fs::SandboxFsOps) which goes through the
 //! agent protocol, [`VolumeFs`] reads + writes a volume's bytes directly. For
 //! the local backend that is capability-scoped access to `volumes_dir/<name>/`; for
-//! cloud it routes through msb-cloud HTTP.
+//! cloud it routes through the cloud HTTP API.
 //!
 //! `VolumeFs` is a single type per D6.4 — no public variants. It borrows the
 //! parent volume's `Arc<dyn Backend>` + name and dispatches through the

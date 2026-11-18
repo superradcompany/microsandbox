@@ -2485,10 +2485,7 @@ fn persist_restore_activation(
 
     let target = runtime_dir.join("restore-activation.json");
     let temporary = runtime_dir.join(format!(".restore-activation.{}.tmp", rand::random::<u64>()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
     serde_json::to_writer(
         &mut file,
         &RestoreActivationRecord {
