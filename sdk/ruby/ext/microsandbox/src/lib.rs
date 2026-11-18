@@ -22,7 +22,7 @@ use magnus::{
 };
 use microsandbox_core::{
     AgentClientError, ChangeState, ContextKind, MicrosandboxError, MicrosandboxResult, Operation,
-    ServiceError, PublishedSnapshotArtifact, SnapshotArtifactKind, SnapshotSourceRecoveryError,
+    PublishedSnapshotArtifact, ServiceError, SnapshotArtifactKind, SnapshotSourceRecoveryError,
     UnsupportedReason,
     image::{Image, ImageHandle},
     logs::{LogEntry, LogOptions, LogSource},
@@ -1458,7 +1458,10 @@ impl RubySandbox {
         let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
         let opts = apply_exec_options(ruby, ExecOptionsBuilder::default(), parsed.keywords)?;
         let sb = this.inner_clone()?;
-        let output = run(ruby, async move { sb.exec_default_with(move |_| opts).await })?;
+        let output = run(
+            ruby,
+            async move { sb.exec_default_with(move |_| opts).await },
+        )?;
         Ok(RubyExecOutput { inner: output })
     }
 
