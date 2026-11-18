@@ -79,5 +79,5 @@ async def test_ip_destination_allows_specific_egress(label, destination, sandbox
 
     handle = await Sandbox.get(sandbox.name)
     config = await handle.config()
-    destinations = [rule["destination"] for rule in config["network"]["policy"]["rules"]]
+    destinations = [rule["destination"] for rule in config["spec"]["network"]["policy"]["rules"]]
     assert {"group": "link_local"} in destinations

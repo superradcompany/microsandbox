@@ -51,8 +51,8 @@ async def test_live_config_observes_another_client(sandbox_factory):
     observer = await Sandbox.get(sandbox.name)
     captured = await observer.config()
     await sandbox.modify(labels={"revision": "second"})
-    assert captured["labels"]["revision"] == "first"
-    assert (await observer.config())["labels"]["revision"] == "second"
+    assert captured["spec"]["labels"]["revision"] == "first"
+    assert (await observer.config())["spec"]["labels"]["revision"] == "second"
 
 
 @pytest.mark.asyncio
