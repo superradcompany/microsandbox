@@ -684,7 +684,8 @@ export type CloudSecretEntry = {
    */
   value: string;
   /**
-   * Host-side source resolved into `value` at spawn time.
+   * Host-side source, read into `value` when a local sandbox starts or a
+   * cloud sandbox is created.
    */
   source?: CloudSecretSource | null;
   /**

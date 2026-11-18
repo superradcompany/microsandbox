@@ -40,7 +40,8 @@ pub struct CloudSecretEntry {
     /// The secret value (empty when `source` carries a reference instead).
     #[serde(default)]
     pub value: String,
-    /// Host-side source resolved into `value` at spawn time.
+    /// Host-side source, read into `value` when a local sandbox starts or a
+    /// cloud sandbox is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<CloudSecretSource>,
     /// Placeholder the sandbox sees instead of the real value.
@@ -121,7 +122,7 @@ pub enum CloudViolationAction {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-// The secret value must never reach a log line or an error message.
+// Debug output must not show the secret value.
 impl std::fmt::Debug for CloudSecretEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CloudSecretEntry")

@@ -795,8 +795,8 @@ impl SecretBuilder {
     /// Consume the builder and return a [`SecretEntry`].
     ///
     /// Exactly one of [`value`](Self::value) or [`source`](Self::source) must
-    /// be set. A source-backed entry carries an empty durable value; it is
-    /// resolved host-side at spawn time.
+    /// be set. A source-backed entry carries an empty durable value; see
+    /// [`source`](Self::source) for when the value is read.
     ///
     /// # Panics
     /// Panics if `env` or at least one allowed host was not set, or if neither

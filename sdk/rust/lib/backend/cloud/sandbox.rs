@@ -653,7 +653,7 @@ fn resolve_secret_sources(
             }
             CloudSecretSource::Store { .. } => {
                 return Err(MicrosandboxError::Custom(format!(
-                    "secret {}: store-backed secret sources are not supported yet",
+                    "invalid secret configuration: secret {}: store-backed secret sources are not supported yet",
                     entry.env_var
                 )));
             }
