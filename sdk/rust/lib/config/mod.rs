@@ -234,6 +234,9 @@ pub struct SshConfig {
 pub struct SnapshotsConfig {
     /// Virtio-fs backend state budget per device, in MiB. Valid values are 1 through 4095.
     pub max_filesystem_state_mib: u32,
+    /// Materialize capture and restore files with independent inodes instead of hard links.
+    /// Defaults to false. Copies may use reflinks or sparse extents, but never share inodes.
+    pub copy_files: bool,
 }
 
 /// Live metrics registry configuration.
@@ -670,6 +673,7 @@ impl Default for SnapshotsConfig {
     fn default() -> Self {
         Self {
             max_filesystem_state_mib: FS_STATE_LIMIT_DEFAULT_MIB,
+            copy_files: false,
         }
     }
 }
@@ -903,7 +907,7 @@ mod tests {
             },
             "ssh": {"inactivity_timeout_secs": 45},
             "metrics": {"capacity": 128},
-            "snapshots": {"max_filesystem_state_mib": 64}
+            "snapshots": {"max_filesystem_state_mib": 64, "copy_files": true}
         });
         let config: GlobalConfig = serde_json::from_value(expected.clone()).unwrap();
         let patch: GlobalConfigPatch = saved_patch(&config);

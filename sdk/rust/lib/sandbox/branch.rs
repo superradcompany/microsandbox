@@ -482,9 +482,19 @@ pub(crate) async fn capture_child(
     crate::runtime::protected_state::require_running(local, &source.name)?;
     if let Some(capture) = source.batch.as_ref().and_then(|batch| batch.get()) {
         let closure = child.join(".branch-restore");
-        // Only local hardlinks and small directory metadata; no background copier may
-        // outlive cancellation and race the create path's staging cleanup.
-        crate::snapshot::stage_local_branch_closure(capture.staging.path(), &closure)?;
+        let source_pin = capture.staging.clone();
+        let worker_storage = child.clone();
+        let destination = closure.clone();
+        tokio::task::spawn_blocking(move || {
+            let storage = worker_storage;
+            crate::snapshot::stage_local_branch_closure(
+                source_pin.path(),
+                &destination,
+                storage.copy_snapshot_files,
+            )
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Runtime(format!("branch copy worker: {error}")))??;
         config.snapshot_parent = capture.snapshot_parent.clone();
         capture.state.validate_files(&closure)?;
         return adopt_capture(config, child, closure, &capture.state, capture.pin.clone()).await;
@@ -579,10 +589,22 @@ pub(crate) async fn capture_child(
         let staging = tempfile::Builder::new()
             .prefix(".branch-batch-")
             .tempdir_in(local.sandboxes_dir())?;
-        crate::snapshot::stage_local_branch_closure(&closure, staging.path())?;
+        let worker_storage = child.clone();
+        let source = closure.clone();
+        let staging = tokio::task::spawn_blocking(move || {
+            let storage = worker_storage;
+            crate::snapshot::stage_local_branch_closure(
+                &source,
+                staging.path(),
+                storage.copy_snapshot_files,
+            )?;
+            Ok::<_, std::io::Error>(staging)
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Runtime(format!("batch copy worker: {error}")))??;
         batch
             .publish(super::branch_batch::BatchCapture {
-                staging,
+                staging: Arc::new(staging),
                 pin: pin.clone(),
                 state: state.clone(),
                 snapshot_parent: config.snapshot_parent.clone(),

@@ -294,6 +294,8 @@ Renaming a directory or file requires migration or old-location probing. Preserv
 
 Unix FUSE initialization preserves the runtime process umask. Guest creation modes still use the guest request and mask; new host-managed files and directories request `0600` and `0700` and clear inherited ACLs. Explicit repair of stopped, protected sandboxes tightens recognized host state and clears its ACLs, including intentional sharing on that state; guest-state and directory-volume contents, external mounts, shared caches, and unknown paths remain excluded. Repair leaves already-private snapshot hardlinks unchanged and refuses non-private links outside the recognized set or objects replaced since inspection. No catalog, journal, launch, or guest-protocol format changes; Windows ready-storage repair remains a no-op.
 
+The optional SDK setting `snapshots.copy_files` changes host materialization only: newly copied capture, restore, and local-branch files receive independent inodes. The default keeps hardlinks. Reflinks may still share copy-on-write extents. Descriptors, payload bytes, launch requests, and runtime/guest protocols are unchanged; existing stored artifacts are not rewritten. Downgrade aliases within one artifact retain their existing behavior.
+
 ## 8. Disk and Filesystem Image Formats
 
 Disk-image bytes outlive the binary that produced them. ext4 compatibility includes superblock feature flags, group descriptors, checksums, inode size and reserved inodes, 64-bit layouts, JBD2 journal state, resize-inode behavior, clean/dirty state, and replay requirements. EROFS and VMDK constants, descriptors, block sizes, extents, device tables, adapters, and alignment rules are likewise durable formats.

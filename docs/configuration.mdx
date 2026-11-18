@@ -466,6 +466,9 @@ For local pulls without managed `auth`, microsandbox resolves credentials in thi
 | Field | Default | Description |
 |-------|---------|-------------|
 | `max_filesystem_state_mib` | `4` | Largest virtio-fs backend state, in MiB, that one filesystem device can carry through a full snapshot. Valid values are `1` through `4095`. |
+| `copy_files` | `false` | Use independent inodes when materializing snapshot captures, restores, and local branch files. Copies preserve sparse extents and may use reflinks. |
+
+With `copy_files` enabled, files copied into a new artifact or sandbox do not share inodes with the source. This can increase storage use and copy time. The default keeps hardlink optimizations. It does not change snapshot formats or eager memory restore, and it does not remove hardlinks already present in existing artifacts.
 
 This limit applies per filesystem device during capture, verification, export, import, restore, and live forks.
 

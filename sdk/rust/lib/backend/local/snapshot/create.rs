@@ -37,6 +37,7 @@ pub(crate) const CHECKPOINT_DIRECTORY: &str = "checkpoint";
 //--------------------------------------------------------------------------------------------------
 
 struct CapturedFullSnapshot {
+    copy_files: bool,
     checkpoint_path: PathBuf,
     checkpoint_root: ObjectId,
     manifest: Manifest,
@@ -81,6 +82,7 @@ struct SnapshotDiskSource {
 }
 
 struct SnapshotDiskClosure {
+    copy_files: bool,
     sources: Vec<SnapshotDiskSource>,
     virtual_size: u64,
     /// A live capture owns immutable runtime staging until artifact publication completes.
@@ -505,20 +507,29 @@ async fn stage_full_snapshot(
         force,
     } = destination;
     let source_recovery = captured.source_recovery.take();
+    let copy_files = captured.copy_files;
     // Recovery belongs to the source, not to the immutable artifact. Carry it through staging
     // until the outer publisher owns the final group member and its ancestry cursor.
     let published = async {
-        let staging = tempfile::Builder::new()
-            .prefix(&format!(".{name}."))
-            .suffix(".staging")
-            .tempdir_in(&parent_dir)?;
+        let staging = Arc::new(
+            tempfile::Builder::new()
+                .prefix(&format!(".{name}."))
+                .suffix(".staging")
+                .tempdir_in(&parent_dir)?,
+        );
         let staging_dir = staging.path().to_path_buf();
         let checkpoint_source = captured.checkpoint_path.clone();
         let checkpoint_destination = staging_dir.join(CHECKPOINT_DIRECTORY);
         let checkpoint_destination_for_copy = checkpoint_destination.clone();
         let materialize_started = Instant::now();
+        let worker_staging = staging.clone();
         let materialized = tokio::task::spawn_blocking(move || {
-            materialize_checkpoint_closure(&checkpoint_source, &checkpoint_destination_for_copy)
+            let _staging = worker_staging;
+            materialize_checkpoint_closure(
+                &checkpoint_source,
+                &checkpoint_destination_for_copy,
+                copy_files,
+            )
         })
         .await
         .map_err(|error| MicrosandboxError::Custom(format!("checkpoint copy task: {error}")))?;
@@ -1003,6 +1014,7 @@ async fn capture_full_snapshot(
             .validate()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         Ok(CapturedFullSnapshot {
+            copy_files: local.config().snapshots.copy_files,
             source_recovery: outcome.recovery_error.as_ref().map(|detail| {
                 SnapshotSourceRecoveryError {
                     source_sandbox: source_sandbox.into(),
@@ -1120,7 +1132,7 @@ async fn build_artifact(
     }
     let copy_us = copy_started.elapsed().as_micros();
     if let Some(source) = &disk.capture_root {
-        copy_owned_payloads(source, dir, &disk.owned_volumes)?;
+        copy_owned_payloads(source, dir, &disk.owned_volumes, disk.copy_files)?;
     }
 
     let payload_sync_started = Instant::now();
@@ -1414,6 +1426,7 @@ async fn capture_disk_source(
             let _lifecycle_guard = lifecycle_guard;
             let _storage = storage;
             let mut disk = snapshot_disk_closure(&sandbox_dir, &root_disk)?;
+            disk.copy_files = _storage.copy_snapshot_files;
             if mounts
                 .iter()
                 .any(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }))
@@ -1451,7 +1464,9 @@ async fn capture_disk_source(
             ));
         }
     };
-    let disk = validate_live_disk_capture(captured, &id, expected_path, expected_device, mounts)?;
+    let mut disk =
+        validate_live_disk_capture(captured, &id, expected_path, expected_device, mounts)?;
+    disk.copy_files = local.config().snapshots.copy_files;
     // A live runtime owns the lifecycle lock, not this SDK call. If the source was replaced
     // between lookup and capture, never publish its disk under the original image/config.
     let current = sandbox_entity::Entity::find()
@@ -1486,6 +1501,7 @@ fn validate_live_disk_capture(
     // Once the runtime response identifies our sealed generation, every later failure must
     // reclaim it. Never adopt a returned locator that failed the operation identity checks.
     let mut capture = SnapshotDiskClosure {
+        copy_files: false,
         sources: Vec::new(),
         virtual_size: 0,
         capture_root: Some(expected_path),
@@ -1663,6 +1679,7 @@ fn copy_owned_payloads(
     source: &Path,
     destination: &Path,
     volumes: &[microsandbox_image::snapshot::OwnedVolumeCapture],
+    copy_files: bool,
 ) -> MicrosandboxResult<()> {
     use microsandbox_image::snapshot::OwnedVolumeData;
     for volume in volumes {
@@ -1687,7 +1704,7 @@ fn copy_owned_payloads(
         for path in paths {
             let target = destination.join(&path);
             std::fs::create_dir_all(target.parent().expect("owned payload has a parent"))?;
-            copy_checkpoint_file(&source.join(path), &target)?;
+            copy_checkpoint_file(&source.join(path), &target, copy_files)?;
         }
     }
     microsandbox_image::snapshot::verify_owned_directory_payloads(destination, volumes)?;
@@ -1810,6 +1827,7 @@ fn validate_snapshot_disk_sources(
         }
     }
     Ok(SnapshotDiskClosure {
+        copy_files: false,
         sources,
         virtual_size,
         capture_root: None,
@@ -1866,25 +1884,34 @@ fn validate_snapshot_name(name: &str) -> MicrosandboxResult<()> {
 /// Materialize only the members of a published checkpoint closure.
 ///
 /// The immutable root is copied last, so an interrupted copy never looks like a published
-/// checkpoint. Regular files are hard-linked when source and destination share a filesystem;
-/// cross-filesystem copies retain sparse/reflink optimizations through `fast_copy`.
+/// checkpoint. Unless copying is requested, regular files are hard-linked on the same
+/// filesystem. Copies retain sparse/reflink optimizations through `fast_copy`.
 pub(crate) fn materialize_checkpoint_closure(
     source: &Path,
     destination: &Path,
+    copy_files: bool,
 ) -> std::io::Result<()> {
-    materialize_checkpoint_tree(source, destination, true)
+    materialize_checkpoint_tree(source, destination, true, copy_files)
 }
 
 /// Construction-only closure: retain independent links, but do not make disposable staging
 /// durable. Persistent disk successors are published separately before guest activation.
-pub(crate) fn stage_checkpoint_closure(source: &Path, destination: &Path) -> std::io::Result<()> {
-    materialize_checkpoint_tree(source, destination, false)
+pub(crate) fn stage_checkpoint_closure(
+    source: &Path,
+    destination: &Path,
+    copy_files: bool,
+) -> std::io::Result<()> {
+    materialize_checkpoint_tree(source, destination, false, copy_files)
 }
 
 /// Retain immutable local capture files without copying RAM or publishing a snapshot.
-pub(crate) fn stage_local_branch_closure(source: &Path, destination: &Path) -> std::io::Result<()> {
-    // Batch staging and children are on the same sandbox filesystem. Require links rather
-    // than silently copying large disk layers; RAM is outside this tree and stays pinned.
+pub(crate) fn stage_local_branch_closure(
+    source: &Path,
+    destination: &Path,
+    copy_files: bool,
+) -> std::io::Result<()> {
+    // Prefer links on the same filesystem unless independent inodes are requested.
+    // RAM is outside this tree and stays pinned in either mode.
     std::fs::create_dir_all(destination)?;
     for member in [
         "objects",
@@ -1897,20 +1924,32 @@ pub(crate) fn stage_local_branch_closure(source: &Path, destination: &Path) -> s
         if member != "branch.json" && !path.try_exists()? {
             continue;
         }
-        link_local_branch_member(&path, &destination.join(member))?;
+        link_local_branch_member(&path, &destination.join(member), copy_files)?;
     }
     Ok(())
 }
 
-fn link_local_branch_member(source: &Path, destination: &Path) -> std::io::Result<()> {
+fn link_local_branch_member(
+    source: &Path,
+    destination: &Path,
+    copy_files: bool,
+) -> std::io::Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.is_file() {
-        std::fs::hard_link(source, destination)
+        if copy_files {
+            microsandbox_utils::copy::fast_copy(source, destination).map(|_| ())
+        } else {
+            std::fs::hard_link(source, destination)
+        }
     } else if metadata.is_dir() {
         std::fs::create_dir(destination)?;
         for entry in std::fs::read_dir(source)? {
             let entry = entry?;
-            link_local_branch_member(&entry.path(), &destination.join(entry.file_name()))?;
+            link_local_branch_member(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                copy_files,
+            )?;
         }
         Ok(())
     } else {
@@ -1925,6 +1964,7 @@ fn materialize_checkpoint_tree(
     source: &Path,
     destination: &Path,
     durable: bool,
+    copy_files: bool,
 ) -> std::io::Result<()> {
     let source_metadata = std::fs::symlink_metadata(source)?;
     if !source_metadata.file_type().is_dir() {
@@ -1939,7 +1979,12 @@ fn materialize_checkpoint_tree(
         let source_member = source.join(member);
         match std::fs::symlink_metadata(&source_member) {
             Ok(metadata) if metadata.file_type().is_dir() => {
-                copy_checkpoint_directory(&source_member, &destination.join(member), durable)?;
+                copy_checkpoint_directory(
+                    &source_member,
+                    &destination.join(member),
+                    durable,
+                    copy_files,
+                )?;
             }
             Ok(_) => {
                 return Err(std::io::Error::new(
@@ -1955,6 +2000,7 @@ fn materialize_checkpoint_tree(
     copy_checkpoint_file(
         &source.join("checkpoint.json"),
         &destination.join("checkpoint.json"),
+        copy_files,
     )?;
     if durable {
         sync_directory(destination)?;
@@ -1966,6 +2012,7 @@ fn copy_checkpoint_directory(
     source: &Path,
     destination: &Path,
     durable: bool,
+    copy_files: bool,
 ) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(source)? {
@@ -1974,9 +2021,9 @@ fn copy_checkpoint_directory(
         let destination_path = destination.join(entry.file_name());
         let metadata = std::fs::symlink_metadata(&source_path)?;
         if metadata.file_type().is_dir() {
-            copy_checkpoint_directory(&source_path, &destination_path, durable)?;
+            copy_checkpoint_directory(&source_path, &destination_path, durable, copy_files)?;
         } else if metadata.file_type().is_file() {
-            copy_checkpoint_file(&source_path, &destination_path)?;
+            copy_checkpoint_file(&source_path, &destination_path, copy_files)?;
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1993,7 +2040,11 @@ fn copy_checkpoint_directory(
     Ok(())
 }
 
-pub(crate) fn copy_checkpoint_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_checkpoint_file(
+    source: &Path,
+    destination: &Path,
+    copy_files: bool,
+) -> std::io::Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
     if !metadata.file_type().is_file() {
         return Err(std::io::Error::new(
@@ -2004,19 +2055,17 @@ pub(crate) fn copy_checkpoint_file(source: &Path, destination: &Path) -> std::io
             ),
         ));
     }
-    match std::fs::hard_link(source, destination) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            microsandbox_utils::copy::fast_copy(source, destination)?;
-            // FlushFileBuffers on Windows requires write access even though the bytes are now
-            // immutable. Open read/write consistently on every platform for the same contract.
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(destination)?
-                .sync_all()
-        }
+    if !copy_files && std::fs::hard_link(source, destination).is_ok() {
+        return Ok(());
     }
+    microsandbox_utils::copy::fast_copy(source, destination)?;
+    // FlushFileBuffers on Windows requires write access even though the bytes are now
+    // immutable. Open read/write consistently on every platform for the same contract.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(destination)?
+        .sync_all()
 }
 
 async fn write_descriptor(directory: &Path, canonical: &[u8]) -> MicrosandboxResult<()> {
@@ -2242,9 +2291,9 @@ mod tests {
         std::fs::create_dir_all(source.path().join("owned/mount-test/payloads")).unwrap();
         std::fs::write(source.path().join(payload), b"captured owned data").unwrap();
         std::fs::write(source.path().join("branch.json"), b"{}").unwrap();
-        stage_local_branch_closure(source.path(), batch.path()).unwrap();
+        stage_local_branch_closure(source.path(), batch.path(), false).unwrap();
         source.close().unwrap();
-        stage_local_branch_closure(batch.path(), sibling.path()).unwrap();
+        stage_local_branch_closure(batch.path(), sibling.path(), false).unwrap();
         batch.close().unwrap();
         assert_eq!(
             std::fs::read(sibling.path().join(payload)).unwrap(),
@@ -2501,6 +2550,7 @@ mod tests {
         };
         manifest.validate().unwrap();
         CapturedFullSnapshot {
+            copy_files: false,
             checkpoint_path: root.to_path_buf(),
             source_recovery: detail.map(|detail| SnapshotSourceRecoveryError {
                 source_sandbox: "box".into(),
@@ -2836,7 +2886,7 @@ mod tests {
             "the source must write to a new private head after sealing its raw base"
         );
         let artifact = temp.path().join("artifact");
-        copy_owned_payloads(&capture, &artifact, &volumes).unwrap();
+        copy_owned_payloads(&capture, &artifact, &volumes, false).unwrap();
         let directory = microsandbox_filesystem::OwnedDirectorySnapshot::open(
             &artifact.join(volumes[0].directory_path()),
         )
@@ -2962,7 +3012,7 @@ mod tests {
                 .unwrap();
             assert_eq!(generation.layers.len(), layers);
             let mut copy = temp.path().join(format!("copy-{layers}"));
-            copy_owned_payloads(&root, &copy, &capture.owned_volumes).unwrap();
+            copy_owned_payloads(&root, &copy, &capture.owned_volumes, false).unwrap();
             let directory = capture
                 .owned_volumes
                 .iter()
@@ -3165,6 +3215,7 @@ mod tests {
         let source = temp.path().join("source.ext4");
         std::fs::write(&source, b"snapshot payload").unwrap();
         let disk = SnapshotDiskClosure {
+            copy_files: false,
             capture_root: None,
             owned_volumes: Vec::new(),
             sources: vec![SnapshotDiskSource {
@@ -3442,6 +3493,7 @@ mod tests {
             .await
             .unwrap();
         let disk = SnapshotDiskClosure {
+            copy_files: false,
             capture_root: None,
             owned_volumes: Vec::new(),
             sources: vec![
@@ -3525,7 +3577,7 @@ mod tests {
         std::fs::write(source.join("checkpoint.json"), b"root").unwrap();
         std::fs::write(source.join("runtime-private.json"), b"ignored").unwrap();
 
-        materialize_checkpoint_closure(&source, &destination).unwrap();
+        materialize_checkpoint_closure(&source, &destination, false).unwrap();
 
         assert_eq!(
             std::fs::read(destination.join("objects/sha256/aa/object")).unwrap(),
@@ -3540,6 +3592,31 @@ mod tests {
             b"root"
         );
         assert!(!destination.join("runtime-private.json").exists());
+
+        let copied = temp.path().join("copied");
+        materialize_checkpoint_closure(&source, &copied, true).unwrap();
+        for member in [
+            "objects/sha256/aa/object",
+            "layers/layer.qcow2",
+            "checkpoint.json",
+        ] {
+            let original = source.join(member);
+            let saved = std::fs::read(&original).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(
+                    std::fs::metadata(&original).unwrap().ino(),
+                    std::fs::metadata(destination.join(member)).unwrap().ino()
+                );
+                assert_ne!(
+                    std::fs::metadata(&original).unwrap().ino(),
+                    std::fs::metadata(copied.join(member)).unwrap().ino()
+                );
+            }
+            std::fs::write(&original, b"changed").unwrap();
+            assert_eq!(std::fs::read(copied.join(member)).unwrap(), saved);
+        }
     }
 
     #[cfg(unix)]
@@ -3555,7 +3632,7 @@ mod tests {
         symlink(source.join("outside"), source.join("objects/member")).unwrap();
         std::fs::write(source.join("checkpoint.json"), b"root").unwrap();
 
-        let error = materialize_checkpoint_closure(&source, &destination).unwrap_err();
+        let error = materialize_checkpoint_closure(&source, &destination, false).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }

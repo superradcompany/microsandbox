@@ -23,6 +23,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 pub(crate) struct CreationStorage {
     path: PathBuf,
     owner: StorageOwner,
+    pub(crate) copy_snapshot_files: bool,
 }
 
 #[derive(Clone)]
@@ -72,6 +73,7 @@ impl CreationStorage {
         }
         Ok(Self {
             path: local.sandboxes_dir().join(name),
+            copy_snapshot_files: local.config().snapshots.copy_files,
             owner: StorageOwner::Reserved {
                 _lock: Arc::new(file),
             },
@@ -83,6 +85,7 @@ impl CreationStorage {
         Self {
             path: path.as_ref().to_path_buf(),
             owner: self.owner.clone(),
+            copy_snapshot_files: self.copy_snapshot_files,
         }
     }
 
@@ -94,6 +97,7 @@ impl CreationStorage {
     pub(crate) fn temporary(directory: Arc<tempfile::TempDir>) -> Self {
         Self {
             path: directory.path().to_path_buf(),
+            copy_snapshot_files: false,
             owner: StorageOwner::Temporary {
                 _directory: directory,
             },
@@ -105,6 +109,7 @@ impl CreationStorage {
         Self {
             path: path.as_ref().to_path_buf(),
             owner: StorageOwner::Fixture,
+            copy_snapshot_files: false,
         }
     }
 }

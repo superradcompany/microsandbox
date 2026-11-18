@@ -55,8 +55,14 @@ pub(crate) async fn materialize_owned_volumes(
 
                         let _lease = pin;
                         std::fs::create_dir_all(&parent)?;
-                        let stage =
-                            stage_owned_disk(&source, &parent, &mount_id, &generation, readonly)?;
+                        let stage = stage_owned_disk(
+                            &source,
+                            &parent,
+                            &mount_id,
+                            &generation,
+                            readonly,
+                            _storage.copy_snapshot_files,
+                        )?;
                         Ok::<_, MicrosandboxError>(stage)
                     })
                 }
@@ -133,6 +139,7 @@ fn stage_owned_disk(
     mount_id: &str,
     generation: &DiskGenerationManifest,
     readonly: bool,
+    copy_files: bool,
 ) -> MicrosandboxResult<tempfile::TempDir> {
     let stage = tempfile::Builder::new()
         .prefix(".owned-disk-restore-")
@@ -149,7 +156,7 @@ fn stage_owned_disk(
         // Successors need private inodes because relocating a qcow2 header writes to it.
         // No captured layer is ever opened as the child's writable head.
         if index == 0 {
-            super::copy_child_disk_layer(&source, &target, None)?;
+            super::copy_child_disk_layer(&source, &target, None, copy_files)?;
         } else {
             microsandbox_utils::copy::fast_copy(&source, &target)?;
         }
