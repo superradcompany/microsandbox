@@ -307,7 +307,7 @@ A frozen dataclass; targets compare by value.
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>port</code><span className="msb-type">int</span></div>
-    <div className="msb-param-desc">Sandbox port, 1 through 65535.</div>
+    <div className="msb-param-desc">Sandbox port, 1 through 65535. A negative number or one above 65535 raises <code>OverflowError</code> before any request.</div>
   </div>
 </div>
 
