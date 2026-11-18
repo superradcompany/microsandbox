@@ -138,10 +138,27 @@ impl LocalBackend {
         #[cfg(not(windows))]
         let legacy_alive = false;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let departing = super::process_exit::RuntimeExit::capture(
+        let departing = match super::process_exit::RuntimeExit::capture(
             run.as_ref().and_then(|run| run.pid),
             &microsandbox_runtime::ipc::lifecycle_lock_path(&run_dir, name),
-        )?;
+        ) {
+            // A foreign PID after reboot can deny descriptor inspection. With no
+            // runtime owner, stop still waits for the selected generation's disk locks.
+            Err(error) if !lock_owned && error.kind() == std::io::ErrorKind::PermissionDenied => {
+                if microsandbox_runtime::ipc::SandboxSocketPaths::in_sandboxes_dir(
+                    &run_dir,
+                    &self.sandboxes_dir(),
+                    name,
+                )
+                .may_be_live()
+                .await?
+                {
+                    return Err(error.into());
+                }
+                None
+            }
+            result => result?,
+        };
         // Ownership, not a potentially recycled PID, decides whether there is a
         // runtime to signal. A stale Running row must still converge successfully.
         if (lock_owned || legacy_alive)

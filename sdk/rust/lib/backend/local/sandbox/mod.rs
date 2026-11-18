@@ -11,6 +11,8 @@ mod process_exit;
 #[cfg(target_os = "macos")]
 #[path = "process_exit_macos.rs"]
 mod process_exit;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod signals;
 mod stop;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -360,7 +362,7 @@ impl LocalBackend {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let all_dead = {
             let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            if let Some(departing) = self.signal_runtime(name, pid, libc::SIGKILL)? {
+            if let Some(departing) = self.signal_runtime(&model, pid, libc::SIGKILL).await? {
                 tokio::time::timeout_at(exit_deadline, async {
                     while !departing.has_exited()? {
                         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -420,6 +422,7 @@ impl LocalBackend {
             return Ok(());
         }
 
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         if model.status == SandboxStatus::Running {
             Self::mark_sandbox_draining_if_running(self.db().await?.write(), model.id).await?;
         }
@@ -452,7 +455,13 @@ impl LocalBackend {
 
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            self.signal_runtime(name, pid, libc::SIGUSR1)?;
+            if self
+                .signal_runtime(&model, pid, libc::SIGUSR1)
+                .await?
+                .is_some()
+            {
+                Self::mark_sandbox_draining_if_running(self.db().await?.write(), model.id).await?;
+            }
             Ok(())
         }
     }

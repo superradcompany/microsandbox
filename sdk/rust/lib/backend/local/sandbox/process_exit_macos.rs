@@ -138,25 +138,25 @@ impl RuntimeExit {
         }))
     }
 
-    pub(super) fn send_signal(&self, signal: libc::c_int) -> io::Result<()> {
+    pub(super) fn send_signal(&self, signal: libc::c_int) -> io::Result<bool> {
         if !self.signal_proven
             || process_state(self.pid)?.is_none_or(|state| {
                 state.birth != self.identity.birth || state.status == libc::SZOMB as u8
             })
         {
-            return Ok(());
+            return Ok(false);
         }
         // Darwin signals by PID; this check narrows but cannot close the reuse race.
         let result = unsafe { libc::kill(self.pid, signal) };
         if result < 0 {
             let error = io::Error::last_os_error();
             return if error.raw_os_error() == Some(libc::ESRCH) {
-                Ok(())
+                Ok(false)
             } else {
                 Err(error)
             };
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -222,9 +222,7 @@ fn lifecycle_matches(pid: i32, lifecycle: &Path) -> io::Result<bool> {
     if result <= 0 {
         let error = io::Error::last_os_error();
         return match error.raw_os_error() {
-            Some(libc::ESRCH | libc::EBADF | libc::ENOENT | libc::EPERM | libc::EACCES) => {
-                Ok(false)
-            }
+            Some(libc::ESRCH | libc::EBADF | libc::ENOENT) => Ok(false),
             _ => Err(error),
         };
     }
@@ -236,12 +234,7 @@ fn lifecycle_matches(pid: i32, lifecycle: &Path) -> io::Result<bool> {
     let info = unsafe { info.assume_init() };
     let expected = match std::fs::metadata(lifecycle) {
         Ok(metadata) => metadata,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-            ) =>
-        {
+        Err(error) if matches!(error.kind(), io::ErrorKind::NotFound) => {
             return Ok(false);
         }
         Err(error) => return Err(error),

@@ -4,9 +4,6 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use super::LocalBackend;
-use crate::MicrosandboxResult;
-
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -42,12 +39,12 @@ impl RuntimeExit {
         );
         let actual = match std::fs::metadata(inherited) {
             Ok(metadata) => metadata,
-            Err(error) if lifecycle_fd_unreadable(&error) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
         let expected = match std::fs::metadata(lifecycle) {
             Ok(metadata) => metadata,
-            Err(error) if lifecycle_fd_unreadable(&error) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
         // A stale catalog PID can point to an unrelated process. Require the runtime's
@@ -80,7 +77,7 @@ impl RuntimeExit {
         Ok(poll.revents & (libc::POLLIN | libc::POLLHUP) != 0)
     }
 
-    pub(super) fn send_signal(&self, signal: libc::c_int) -> std::io::Result<()> {
+    pub(super) fn send_signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
@@ -93,46 +90,13 @@ impl RuntimeExit {
         if result < 0 {
             let error = std::io::Error::last_os_error();
             return if error.raw_os_error() == Some(libc::ESRCH) {
-                Ok(())
+                Ok(false)
             } else {
                 Err(error)
             };
         }
-        Ok(())
+        Ok(true)
     }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Local backend signal dispatch
-//--------------------------------------------------------------------------------------------------
-
-impl LocalBackend {
-    /// Captures the runtime exit barrier and signals it only when the catalog
-    /// PID is proven to still be that runtime.
-    pub(super) fn signal_runtime(
-        &self,
-        name: &str,
-        pid: Option<i32>,
-        signal: libc::c_int,
-    ) -> MicrosandboxResult<Option<RuntimeExit>> {
-        let departing = RuntimeExit::capture(
-            pid,
-            &microsandbox_runtime::ipc::lifecycle_lock_path(&self.config().run_dir(), name),
-        )?;
-        if let (Some(_), Some(proven)) =
-            (pid.filter(|p| Self::pid_is_alive(*p)), departing.as_ref())
-        {
-            proven.send_signal(signal)?;
-        }
-        Ok(departing)
-    }
-}
-
-fn lifecycle_fd_unreadable(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-    )
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -303,19 +267,6 @@ mod tests {
             .is_none()
         );
         assert!(RuntimeExit::capture(None, home.path()).unwrap().is_none());
-    }
-
-    #[test]
-    fn lifecycle_fd_unreadable_covers_not_found_and_permission_denied() {
-        assert!(lifecycle_fd_unreadable(&std::io::Error::from_raw_os_error(
-            libc::ENOENT
-        )));
-        assert!(lifecycle_fd_unreadable(&std::io::Error::from_raw_os_error(
-            libc::EACCES
-        )));
-        assert!(!lifecycle_fd_unreadable(
-            &std::io::Error::from_raw_os_error(libc::EIO)
-        ));
     }
 
     #[test]

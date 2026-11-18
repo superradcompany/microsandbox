@@ -167,7 +167,7 @@ async fn drain_sandbox_spares_unrelated_recycled_pid() {
     );
     assert_eq!(
         recorded_sandbox_status(&backend, id).await,
-        SandboxStatus::Draining
+        SandboxStatus::Crashed
     );
 }
 
@@ -239,6 +239,7 @@ async fn kill_sandbox_still_kills_a_proven_runtime() {
     .exec(pools.write())
     .await
     .unwrap();
+    drop(guard); // Only the runtime retains the lifecycle lock after startup.
     backend.kill_sandbox(name, None).await.unwrap();
     let status = child.wait().unwrap();
     assert_eq!(
@@ -320,6 +321,7 @@ async fn drain_sandbox_still_drains_a_proven_runtime() {
     .exec(pools.write())
     .await
     .unwrap();
+    drop(guard);
     backend.drain_sandbox(name, None).await.unwrap();
     let status = child.wait().unwrap();
     assert_eq!(
@@ -330,5 +332,21 @@ async fn drain_sandbox_still_drains_a_proven_runtime() {
     assert_eq!(
         recorded_sandbox_status(&backend, id).await,
         SandboxStatus::Draining
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_runtime_ownership_preserves_active_state() {
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let (backend, id) =
+        backend_with_stale_running_pid(home.path(), "busy", std::process::id() as i32).await;
+    let _guard =
+        microsandbox_runtime::ipc::acquire_lifecycle_guard(&backend.config().run_dir(), "busy")
+            .unwrap();
+    assert!(backend.drain_sandbox("busy", Some(id)).await.is_err());
+    assert!(backend.kill_sandbox("busy", Some(id)).await.is_err());
+    assert_eq!(
+        recorded_sandbox_status(&backend, id).await,
+        SandboxStatus::Running
     );
 }
