@@ -3,9 +3,12 @@
 use std::io::{IsTerminal, Read, Write};
 
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use microsandbox::Sandbox;
 use microsandbox::jobs::{Job, JobEvent, JobId};
+use microsandbox::sandbox::SandboxStatus;
 
+use crate::context::SandboxCompleter;
 use crate::ui::OutputFormat;
 
 //--------------------------------------------------------------------------------------------------
@@ -35,6 +38,11 @@ pub struct JobsArgs {
 #[derive(Debug, Args)]
 pub struct JobArgs {
     /// Owning sandbox.
+    #[arg(
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running, SandboxStatus::Paused]})
+    )]
     pub name: String,
     /// Managed job identity.
     #[arg(long)]

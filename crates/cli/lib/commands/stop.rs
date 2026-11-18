@@ -1,9 +1,10 @@
 //! `msb stop` command — stop a running sandbox.
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
+use clap_complete::ArgValueCompleter;
+use microsandbox::sandbox::{Sandbox, SandboxStatus};
 
-use crate::ui;
+use crate::{context::SandboxCompleter, ui};
 
 use super::common;
 
@@ -15,7 +16,12 @@ use super::common;
 #[derive(Debug, Args)]
 pub struct StopArgs {
     /// Sandbox(es) to stop. Required unless `--label` is given.
-    #[arg(required_unless_present = "label")]
+    #[arg(
+        required_unless_present = "label",
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running]})
+    )]
     pub names: Vec<String>,
 
     /// Stop every sandbox carrying this label (`KEY=VALUE`). Repeatable;

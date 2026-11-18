@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use microsandbox::sandbox::Sandbox;
 
-use crate::ui;
+use crate::{context::SandboxCompleter, ui};
 
 use super::common;
 
@@ -17,7 +18,12 @@ use super::common;
 #[derive(Debug, Args)]
 pub struct PingArgs {
     /// Sandbox(es) to ping. Required unless `--label` is given.
-    #[arg(required_unless_present = "label")]
+    #[arg(
+        required_unless_present = "label",
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[]})
+    )]
     pub names: Vec<String>,
 
     /// Ping every sandbox carrying this label (`KEY=VALUE`). Repeatable;

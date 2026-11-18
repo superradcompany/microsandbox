@@ -1,9 +1,10 @@
 //! Explicit resident pause and resume.
 
 use clap::Args;
-use microsandbox::Sandbox;
+use clap_complete::ArgValueCompleter;
+use microsandbox::{Sandbox, sandbox::SandboxStatus};
 
-use crate::ui;
+use crate::{context::SandboxCompleter, ui};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -16,6 +17,11 @@ pub struct PauseArgs {
     #[arg(long)]
     pub guest_flush: Option<microsandbox::snapshot::GuestFlush>,
     /// Sandbox name.
+    #[arg(
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running]})
+    )]
     pub name: String,
     /// Suppress progress output.
     #[arg(short, long)]
@@ -26,6 +32,11 @@ pub struct PauseArgs {
 #[derive(Debug, Args)]
 pub struct ResumeArgs {
     /// Sandbox name.
+    #[arg(
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Paused]})
+    )]
     pub name: String,
     /// Suppress progress output.
     #[arg(short, long)]

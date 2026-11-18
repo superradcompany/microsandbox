@@ -114,7 +114,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 ciborium-ll = "0.2"
 clap = { version = "4.6", features = ["color", "derive"] }
-clap_complete = "4.6"
+clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
 console = "0.16"
 crossbeam-queue = "0.3"
 crossterm = { version = "0.29.0", features = ["events"] }

@@ -9,6 +9,7 @@
 
 pub mod boot_error_render;
 pub mod commands;
+pub mod context;
 pub mod exec_error_render;
 pub mod launch_compat;
 pub mod log_args;

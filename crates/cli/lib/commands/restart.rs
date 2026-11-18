@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use microsandbox::sandbox::{DEFAULT_STOP_TIMEOUT, Sandbox, SandboxStatus};
 
-use crate::ui;
+use crate::{context::SandboxCompleter, ui};
 
 use super::common;
 
@@ -17,7 +18,14 @@ use super::common;
 #[derive(Debug, Args)]
 pub struct RestartArgs {
     /// Sandbox(es) to restart. Required unless `--label` is given.
-    #[arg(required_unless_present = "label")]
+    #[arg(
+        required_unless_present = "label",
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running,
+            SandboxStatus::Stopped, SandboxStatus::Created, SandboxStatus::Crashed,
+            SandboxStatus::Draining, SandboxStatus::Paused]})
+    )]
     pub names: Vec<String>,
 
     /// Restart every sandbox carrying this label (`KEY=VALUE`). Repeatable;
