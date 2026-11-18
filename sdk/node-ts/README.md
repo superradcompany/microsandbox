@@ -85,7 +85,7 @@ const output = await sandbox.shell("echo 'Hello from microsandbox!'");
 console.log(output.stdout().trim());
 ```
 
-`await using` awaits shutdown of its owned local run and exposes cleanup errors. Detached, independently connected, and remote runs are not stopped. If both the body and cleanup fail, `SuppressedError` retains both. Use `sandbox.detach()` to relinquish automatic cleanup while keeping the object usable.
+For an attached remote creation, `await using` awaits a best-effort stop on scope exit. Detached and fetched remote sandboxes keep running. Use `await sandbox.stop()` to observe a remote stop error. For an owned local run, disposal awaits shutdown and surfaces cleanup errors.
 
 ### Reusable Lifecycle Convergence
 

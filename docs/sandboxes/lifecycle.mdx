@@ -272,7 +272,7 @@ sb.ensure_running # Surface preparation failures now; submit work later.
 ```
 </CodeGroup>
 
-Preparation retains a newly started local run on the receiving object. Releasing the final owner stops that run; connecting to an already-running sandbox acquires no new cleanup ownership. `detach` explicitly releases cleanup ownership while leaving the object usable. Remote runs remain independent of client scope.
+Preparation retains a newly started local run on the receiving object. Releasing the final owner stops that run; connecting to an already-running sandbox acquires no new cleanup ownership. `detach` explicitly releases cleanup ownership while leaving the object usable. Remote runs survive client process exit. In TypeScript, `await using` on an attached remote creation explicitly requests a best-effort stop at scope exit.
 
 Use the running-sandbox lookup to combine lookup and startup without creating a missing sandbox. Explicit start operations fail if the sandbox is already running. See your [SDK reference](/sdk/overview#reference) for the matching method.
 

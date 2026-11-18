@@ -153,9 +153,12 @@ try {
   )
     throw Error("creation prerequisite failed");
   await check("sandbox_identity", async () => {
-    assert.equal((await sandboxes.get(prefix)).id, sb.id);
+    const fetched = await sandboxes.get(prefix);
+    assert.equal(fetched.id, sb.id);
+    assert.equal(fetched.ownsLifecycle, false);
+    await fetched[Symbol.asyncDispose]();
     assert.equal(sb.context.kind, "remote");
-    assert.equal(sb.ownsLifecycle, false);
+    assert.equal(sb.ownsLifecycle, true);
   });
   await check("sandbox_info", () => sb.info());
   await check("sandbox_status", async () =>

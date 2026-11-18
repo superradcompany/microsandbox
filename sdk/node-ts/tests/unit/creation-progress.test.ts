@@ -246,20 +246,24 @@ describe("cloud scope cleanup", () => {
   });
 
   for (const method of ["create", "createWithProgress", "createWithPullProgress"] as const) {
-    for (const detached of [false, true]) {
-      it(`${method} leaves cloud lifetime independent (detached=${detached})`, async () => {
-        const builder = Sandbox.builder("cloud-scope").detached(detached);
-        const sandbox = method === "create"
-          ? await builder.create()
-          : await (await builder[method]()).awaitSandbox();
-        expect(sandbox.ownsLifecycle).toBe(false);
-        await sandbox[Symbol.asyncDispose]();
-        expect(native.stop).not.toHaveBeenCalled();
+    for (const detached of [undefined, false, true]) {
+      it(`${method} scopes remote creation with detached=${detached}`, async () => {
+        const builder = Sandbox.builder("cloud-scope");
+        if (detached !== undefined) builder.detached(detached);
+        {
+          await using sandbox = method === "create"
+            ? await builder.create()
+            : await (await builder[method]()).awaitSandbox();
+          expect(sandbox.ownsLifecycle).toBe(!detached);
+          expect(native.stop).not.toHaveBeenCalled();
+        }
+        expect(native.stop).toHaveBeenCalledTimes(detached ? 0 : 1);
+        expect(native.shutdownOwned).not.toHaveBeenCalled();
       });
     }
   }
 
-  for (const method of ["start", "startDetached", "getRunning"] as const) {
+  for (const method of ["get", "start", "startDetached", "getRunning"] as const) {
     it(`${method} does not acquire remote scope ownership`, async () => {
       const sandbox = await Sandbox[method]("existing-cloud");
       expect(sandbox.ownsLifecycle).toBe(false);
@@ -274,12 +278,38 @@ describe("cloud scope cleanup", () => {
     expect(native.stop).toHaveBeenCalledTimes(1);
   });
 
-  it("does not stop remote runs on exceptional scope exit", async () => {
+  it("attempts remote stop on exceptional exit and preserves the body error", async () => {
+    native.stop.mockRejectedValueOnce(new Error("provider unavailable"));
     await expect((async () => {
       await using sandbox = await Sandbox.builder("cloud-error").create();
       throw new Error("guest failed");
     })()).rejects.toThrow("guest failed");
-    expect(native.stop).not.toHaveBeenCalled();
+    expect(native.stop).toHaveBeenCalledOnce();
+  });
+
+  it("awaits remote stop even when the provider eventually rejects it", async () => {
+    const stop = Promise.withResolvers<void>();
+    native.stop.mockReturnValueOnce(stop.promise);
+    let exited = false;
+    const scope = (async () => {
+      await using sandbox = await Sandbox.builder("cloud-stop").create();
+      expect(sandbox.ownsLifecycle).toBe(true);
+    })().then(() => { exited = true; });
+    await vi.waitFor(() => expect(native.stop).toHaveBeenCalledOnce());
+    expect(exited).toBe(false);
+    stop.reject(new Error("provider unavailable"));
+    await scope;
+    expect(exited).toBe(true);
+  });
+
+  it("keeps remote cleanup armed when detach fails", async () => {
+    native.detach.mockRejectedValueOnce(new Error("detach failed"));
+    {
+      await using sandbox = await Sandbox.builder("cloud-detach-failure").create();
+      await expect(sandbox.detach()).rejects.toThrow("detach failed");
+      expect(sandbox.ownsLifecycle).toBe(true);
+    }
+    expect(native.stop).toHaveBeenCalledOnce();
   });
 
   it("honors detaching a created handle", async () => {

@@ -206,7 +206,7 @@ export class PullProgressCreate {
   /** @internal */
   private readonly name: string;
   /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string) {
+  constructor(inner: NapiPullProgressCreate, name: string, private readonly attachedCreation = false) {
     this.inner = inner;
     this.name = name;
   }
@@ -230,8 +230,7 @@ export class PullProgressCreate {
   /** Await the sandbox. Resolves once pull + boot finishes. */
   async awaitSandbox(): Promise<Sandbox> {
     const inner = await withMappedErrors(() => this.inner.awaitSandbox());
-    // Native ownership accounts for local auto-detach; remote runs are independent.
-    return new Sandbox(inner, this.name);
+    return new Sandbox(inner, this.name, this.attachedCreation);
   }
 }
 
@@ -239,8 +238,8 @@ export class PullProgressCreate {
 export class CreationProgressCreate {
   private readonly creation: PullProgressCreate;
   /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string) {
-    this.creation = new PullProgressCreate(inner, name);
+  constructor(inner: NapiPullProgressCreate, name: string, attachedCreation = false) {
+    this.creation = new PullProgressCreate(inner, name, attachedCreation);
   }
   get progress(): import("./creation-progress.js").CreationProgressStream {
     return this.creation.progress as unknown as import("./creation-progress.js").CreationProgressStream;
@@ -318,22 +317,26 @@ export class Sandbox implements AsyncDisposable {
   readonly id: string;
   /** Whether this handle acquired cleanup ownership for its scope. */
   get ownsLifecycle(): boolean {
-    return this.inner.backendKind === "local" && this.inner.ownsLifecycle;
+    return this.contextKind === "local" ? this.inner.ownsLifecycle : this.stopRemoteOnDispose;
   }
   /** Backend retained by this sandbox. */
   readonly contextKind: "local" | "remote";
+
+  private stopRemoteOnDispose: boolean;
 
   /** @internal use `Sandbox.builder(name).create()` */
   constructor(
     inner: NapiSandbox,
     name: string,
+    attachedCreation = false,
   ) {
     this.inner = inner;
     this.name = name;
     this.id = inner.id;
-    // Client scopes never acquire remote runtime ownership. Local results carry
-    // the actual launch mode, which may differ from the requested builder mode.
     this.contextKind = inner.backendKind === "local" ? "local" : "remote";
+    // Only the creating wrapper owns the remote stop request. Local ownership
+    // stays native so detach and automatic local launch modes remain observable.
+    this.stopRemoteOnDispose = this.contextKind === "remote" && attachedCreation;
   }
 
   // -- statics ------------------------------------------------------------
@@ -357,10 +360,18 @@ export class Sandbox implements AsyncDisposable {
     const origConnectOrCreate = nb.connectOrCreate.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
     const origCreateWithProgress = nb.createWithProgress?.bind(nb);
-    // Override the terminals so they return a TS Sandbox.
+    const setDetached = nb.detached.bind(nb);
+    let detached = false;
+    nb.detached = (enabled: boolean) => {
+      const result = setDetached(enabled);
+      detached = enabled;
+      return result;
+    };
+    // Capture the mode when each creation starts, including progress sessions.
     (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
+      const attached = !detached;
       const inner = await withMappedErrors(() => origCreate());
-      return new Sandbox(inner, name);
+      return new Sandbox(inner, name, attached);
     };
     (
       nb as unknown as { connectOrCreate: () => Promise<Sandbox> }
@@ -375,13 +386,15 @@ export class Sandbox implements AsyncDisposable {
         createWithPullProgress: () => Promise<PullProgressCreate>;
       }
     ).createWithPullProgress = async () => {
+      const attached = !detached;
       const raw = await withMappedErrors(() => origCreateWithPP());
-      return new PullProgressCreate(raw, name);
+      return new PullProgressCreate(raw, name, attached);
     };
     (nb as unknown as { createWithProgress: () => Promise<CreationProgressCreate> }).createWithProgress = async () => {
       if (!origCreateWithProgress) throw new Error("Installed native SDK does not support creation progress");
+      const attached = !detached;
       const raw = await withMappedErrors(() => origCreateWithProgress());
-      return new CreationProgressCreate(raw, name);
+      return new CreationProgressCreate(raw, name, attached);
     };
     return nb as unknown as SandboxBuilder;
   }
@@ -822,10 +835,20 @@ export class Sandbox implements AsyncDisposable {
    */
   async detach(): Promise<void> {
     await withMappedErrors(() => this.inner.detach());
+    this.stopRemoteOnDispose = false;
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
     if (!this.ownsLifecycle) return;
+    if (this.stopRemoteOnDispose) {
+      this.stopRemoteOnDispose = false;
+      try {
+        await this.stop();
+      } catch {
+        // Remote scope exit has always been best-effort. Explicit stop reports errors.
+      }
+      return;
+    }
     // The native owner checks its captured run, so an old scope cannot stop a
     // restarted sandbox. Let await-using preserve body and cleanup errors.
     await withMappedErrors(() => this.inner.shutdownOwned());

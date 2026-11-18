@@ -283,7 +283,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 
 <p className="msb-member-group" id="instance-methods">Instance methods</p>
 
-A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle. Cloud sandboxes remain independent of client scope lifetime, including creation, start, restart and progress results. Connected handles and detached handles do not acquire cleanup ownership. Calling `detach()` releases scope cleanup.
+A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle. Attached remote creations, including creation with progress, own their TypeScript scope cleanup. Fetched, detached, and remotely started or restarted handles are non-owning. Calling `await sandbox.detach()` releases scope cleanup.
 
 Command execution (`exec`, `execWith`, `execStream`, `execStreamWith`, `shell`, `shellStream`) and foreground attachment (`attach`, `attachWith`, `attachShell`) live on the [Execution](/sdk/typescript/execution) page.
 
@@ -889,7 +889,9 @@ Block until the sandbox is observed in a terminal non-running state, without tri
 
 </Accordion>
 
-Implements `AsyncDisposable` for `await using`. Scope exit awaits graceful shutdown of the local run this object owns, preserving persisted state except for configured ephemeral cleanup. Detached, independently connected, and cloud resources are not stopped. Cleanup checks the captured run, so an old scope cannot stop a replacement run. Cleanup errors reject; when both the body and disposal fail, `await using` preserves both in its `SuppressedError`.
+For an attached remote creation, scope exit awaits a best-effort stop by sandbox ID, including when the block throws. Call `stop()` explicitly to observe remote stop errors. Detached and fetched remote sandboxes keep running.
+
+For an owned local run, disposal awaits graceful shutdown of the captured run. Local cleanup errors reject. If the block also throws, `SuppressedError` preserves both failures.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">restoreWarnings()</span>
 
@@ -1008,7 +1010,7 @@ await sandbox.detach();
 
 </Accordion>
 
-Build and boot the sandbox. By default, a local handle is attached and stops when its `await using` binding goes out of scope. A cloud handle does not own the service-managed VM, so stop or remove it explicitly. Call [`detached(true)`](#sandboxbuilder-detached) first for local background mode.
+Build and boot an attached sandbox. With `await using`, scope exit awaits local shutdown or a best-effort remote stop. Use [`detached(true)`](#sandboxbuilder-detached) to keep it running after scope exit.
 
 <p className="msb-label">Returns</p>
 
