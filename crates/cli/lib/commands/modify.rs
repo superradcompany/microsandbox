@@ -248,23 +248,21 @@ pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
             Err(MicrosandboxError::ResizeTimeout {
                 timeout, status, ..
             }) => {
-                applied.resize_status = timeout_resize_status(applied.resize_status, status);
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&applied)?);
-                } else {
-                    ui::success("Modified", &applied.sandbox);
-                    print_resize_status(&applied.resize_status);
-                }
+                applied.resize_status = merge_resize_status(applied.resize_status, status);
+                print_accepted_resize(&applied, json)?;
                 print_resize_timeout(&args.name, timeout);
                 return Err(ui::AlreadyRenderedError.into());
             }
+            Err(MicrosandboxError::ResizeWait(error)) => {
+                // Apply already succeeded. Only replace acknowledgements for resources
+                // the waiter actually observed, and keep the full error for stderr.
+                applied.resize_status =
+                    merge_resize_status(applied.resize_status, error.status.clone());
+                print_accepted_resize(&applied, json)?;
+                return Err(MicrosandboxError::ResizeWait(error).into());
+            }
             Err(MicrosandboxError::Unsupported { .. }) => {
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&applied)?);
-                } else {
-                    ui::success("Modified", &applied.sandbox);
-                    print_resize_status(&applied.resize_status);
-                }
+                print_accepted_resize(&applied, json)?;
                 print_resize_unsupported(&args.name);
                 return Err(ui::AlreadyRenderedError.into());
             }
@@ -325,8 +323,18 @@ async fn wait_for_resize(
     (handle.wait_until_resized_with_timeout(budget).await, false)
 }
 
+fn print_accepted_resize(plan: &SandboxModificationPlan, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(plan)?);
+    } else {
+        ui::success("Modified", &plan.sandbox);
+        print_resize_status(&plan.resize_status);
+    }
+    Ok(())
+}
+
 /// Prefer each observed resource, preserving apply acknowledgement for unread resources.
-fn timeout_resize_status(
+fn merge_resize_status(
     mut applied: Vec<ResourceResizeStatus>,
     observed: Vec<ResourceResizeStatus>,
 ) -> Vec<ResourceResizeStatus> {
@@ -1377,8 +1385,8 @@ mod tests {
             ResourceKind::Cpus,
             ResourceConvergenceState::Converging,
         )];
-        assert_eq!(timeout_resize_status(applied.clone(), Vec::new()), applied);
-        assert_eq!(timeout_resize_status(applied, observed.clone()), observed);
+        assert_eq!(merge_resize_status(applied.clone(), Vec::new()), applied);
+        assert_eq!(merge_resize_status(applied, observed.clone()), observed);
     }
 
     #[test]
@@ -1387,11 +1395,11 @@ mod tests {
         let memory = resize_entry(ResourceKind::Memory, ResourceConvergenceState::Accepted);
         let observed = resize_entry(ResourceKind::Cpus, ResourceConvergenceState::Applied);
         assert_eq!(
-            timeout_resize_status(vec![cpu, memory.clone()], vec![observed.clone()]),
+            merge_resize_status(vec![cpu, memory.clone()], vec![observed.clone()]),
             vec![observed.clone(), memory]
         );
         assert_eq!(
-            timeout_resize_status(Vec::new(), vec![observed.clone()]),
+            merge_resize_status(Vec::new(), vec![observed.clone()]),
             vec![observed]
         );
     }
