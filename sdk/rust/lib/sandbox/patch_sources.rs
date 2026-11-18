@@ -3,7 +3,9 @@
 
 mod files;
 use std::collections::HashMap;
-use std::fs::{self, File, Permissions};
+#[cfg(unix)]
+use std::fs::Permissions;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -111,6 +113,7 @@ impl Budget {
     }
     fn directory(&mut self, file: File, destination: &Path, depth: usize) -> io::Result<()> {
         let source_device = device(&file)?;
+        #[cfg(unix)]
         let permissions = file.metadata()?.permissions();
         let directory = Dir::from_std_file(file.try_clone()?);
         fs::create_dir(destination)?;
