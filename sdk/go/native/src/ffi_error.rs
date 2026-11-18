@@ -2,7 +2,7 @@
 
 use microsandbox::MicrosandboxError;
 
-use super::{FfiError, Handle, error_kind};
+use super::{FfiError, Handle, UnsupportedReason, error_kind, service};
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -13,6 +13,8 @@ impl FfiError {
         Self {
             kind,
             message: message.into(),
+            service: None,
+            changed: None,
             recovery: None,
             resize_status: None,
             resize_wait: None,
@@ -35,9 +37,24 @@ impl FfiError {
         Self::new(error_kind::INTERNAL, message)
     }
 
+    pub(super) fn with_change(mut self, changed: microsandbox::ChangeState) -> Self {
+        self.changed = Some(changed);
+        self
+    }
+
     /// Serialize to the JSON payload returned by the error C string.
     pub(super) fn to_json(&self) -> String {
         let mut payload = serde_json::json!({ "kind": self.kind, "message": self.message });
+        if let Some(changed) = self.changed {
+            payload["changed"] = match changed {
+                microsandbox::ChangeState::Unchanged => "unchanged",
+                microsandbox::ChangeState::Unknown => "unknown",
+            }
+            .into();
+        }
+        if let Some(service) = &self.service {
+            payload["service"] = serde_json::json!(service);
+        }
         if let Some(os_error) = self.os_error {
             payload["os_error"] = os_error.into();
         }
@@ -73,6 +90,9 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SandboxStopTimedOut { .. } => error_kind::SANDBOX_STOP_TIMED_OUT,
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
+            MicrosandboxError::ServiceNotFound(_) => error_kind::SERVICE_NOT_FOUND,
+            MicrosandboxError::ServiceAlreadyExists(_) => error_kind::SERVICE_ALREADY_EXISTS,
+            MicrosandboxError::Service { .. } => error_kind::SERVICE,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
             MicrosandboxError::StopTimeout { .. } => error_kind::STOP_TIMEOUT,
             MicrosandboxError::ResizeTimeout { .. } => error_kind::RESIZE_TIMEOUT,
@@ -93,12 +113,20 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
+            MicrosandboxError::Unsupported {
+                op,
+                reason: UnsupportedReason::CloudOnly,
+            } if service::is_service_operation(*op) => error_kind::CLOUD_ONLY,
             MicrosandboxError::Unsupported { .. } => error_kind::UNSUPPORTED_OPERATION,
+            MicrosandboxError::ModificationNotConfirmed { .. } => {
+                error_kind::MODIFICATION_NOT_CONFIRMED
+            }
             MicrosandboxError::RuntimeNotInstalled(_) => "runtime_not_installed",
             MicrosandboxError::RuntimeIncomplete(_) => "runtime_incomplete",
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
+        let service = service::error_details(&e);
         let message = e.to_string();
         let resize_wait = match &e {
             MicrosandboxError::ResizeWait(details) => serde_json::to_value(details).ok(),
@@ -112,6 +140,8 @@ impl From<MicrosandboxError> for FfiError {
         Self {
             kind,
             message,
+            changed: None,
+            service,
             recovery,
             resize_status,
             resize_wait,

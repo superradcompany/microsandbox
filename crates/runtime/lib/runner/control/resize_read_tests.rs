@@ -19,6 +19,7 @@ fn executor(root: &Path, socket: &Path) -> Arc<RuntimeControlExecutor> {
     let config = VmConfig {
         libkrunfw_path: Default::default(),
         thp: Default::default(),
+        nested_virt: Default::default(),
         guest_clock: Default::default(),
         memory_cache_dir: None,
         vcpus: 1,
@@ -70,6 +71,7 @@ fn executor(root: &Path, socket: &Path) -> Arc<RuntimeControlExecutor> {
             &GuestBootstrap::default(),
             tokio::runtime::Handle::current(),
             socket,
+            Arc::new(crate::runner::relay::RelayIdleState::default()),
             WorkloadControl::new(),
             Arc::new(AtomicBool::new(false)),
             None,

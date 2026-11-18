@@ -287,6 +287,27 @@ impl AgentBridge {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl std::fmt::Debug for AgentBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentBridge")
+            .field("next_handle", &self.next_handle.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+// Suppress unused import lints in builds where AgentClientError is only used
+// transitively through `?`.
+#[allow(dead_code)]
+fn _assert_send_sync() {
+    fn assert<T: Send + Sync>() {}
+    assert::<AgentBridge>();
+    assert::<AgentClientError>();
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -332,25 +353,4 @@ mod tests {
         assert!(matches!(result, Err(AgentClientError::Closed)));
         drop(tx);
     }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Trait Implementations
-//--------------------------------------------------------------------------------------------------
-
-impl std::fmt::Debug for AgentBridge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentBridge")
-            .field("next_handle", &self.next_handle.load(Ordering::Relaxed))
-            .finish_non_exhaustive()
-    }
-}
-
-// Suppress unused import lints in builds where AgentClientError is only used
-// transitively through `?`.
-#[allow(dead_code)]
-fn _assert_send_sync() {
-    fn assert<T: Send + Sync>() {}
-    assert::<AgentBridge>();
-    assert::<AgentClientError>();
 }

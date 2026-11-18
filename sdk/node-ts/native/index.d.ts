@@ -245,7 +245,8 @@ export type JsHttpBuilder = HttpBuilder
 
 /** Builds an HTTP CONNECT outbound proxy. */
 export declare class HttpConnectProxyBuilder {
-
+  /** Set username authentication and a host-side password source. */
+  credentials(username: string, password: SecretSourceInput): this
 }
 export type JsHttpConnectProxyBuilder = HttpConnectProxyBuilder
 
@@ -354,29 +355,50 @@ export declare class InterfaceOverridesBuilder {
 }
 export type JsInterfaceOverridesBuilder = InterfaceOverridesBuilder
 
+/** Sandbox-scoped job handle; dropping it does not terminate the guest process. */
 export declare class Job {
+  /** Return the opaque job identity, scoped to its sandbox. */
   get id(): string
+  /** Return current lifecycle metadata as JSON, including capture or runtime errors. */
   inspect(): Promise<string>
+  /** Wait for a terminal state and return its exit result as JSON. */
   wait(): Promise<string>
+  /** Request delivery of a signal to this job; use `wait` to confirm its exit. */
   signal(signal: number): Promise<void>
+  /** Request SIGKILL without waiting for confirmed process termination. */
   kill(): Promise<void>
+  /** Permanently close pipe stdin after previously admitted input; PTY jobs reject EOF. */
   eof(): Promise<void>
+  /** Return retained log entries as JSON using JSON-encoded log options. */
   logs(options: string): Promise<string>
+  /** Replay retained logs and optionally follow output using JSON-encoded log options. */
   logStream(options: string): Promise<JobLogStream>
+  /**
+   * Attach with optional recent-byte or cursor replay; the replay selectors are exclusive.
+   * A writable attachment acquires the job's stdin lease; read-only observers do not.
+   */
   attach(readOnly: boolean, replayBytes?: number | undefined | null, cursor?: string | undefined | null): Promise<JobAttachment>
 }
 export type JsJob = Job
 
+/** Renewable output attachment with optional exclusive stdin ownership. */
 export declare class JobAttachment {
+  /** Receive the next JSON-encoded event, or `None` when the attachment ends. */
   recv(): Promise<string | null>
+  /** Admit bytes to guest stdin through this attachment's writable lease. */
   writeStdin(data: Buffer): Promise<void>
+  /** Resize a PTY job's terminal through this attachment's writable lease. */
   resize(rows: number, cols: number): Promise<void>
+  /** Release the attachment without closing guest stdin or terminating the job. */
   detach(): Promise<void>
 }
 export type JsJobAttachment = JobAttachment
 
+/** Cancellable iterator over retained output and optional live updates. */
 export declare class JobLogStream {
+  /** Read the next JSON-encoded log entry, or `None` after completion or closure. */
   next(): Promise<string | null>
+  /** Idempotently close this iterator and wake a pending read without stopping the job. */
   close(): Promise<void>
 }
 export type JsJobLogStream = JobLogStream
@@ -565,13 +587,13 @@ export declare class NetworkBuilder {
   maxTcpConnections(max: number): this
   /** Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant. */
   maxUdpConnections(max: number): this
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this
   /**
    * Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
    * 1024; the host kernel clamps it to its own somaxconn.
    */
   tcpAcceptQueueSize(size: number): this
-  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
-  maxInboundTcpConnections(value: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -852,10 +874,10 @@ export declare class RestoreBuilder {
   portUdp(hostPort: number, guestPort: number): this
   /** Publish a UDP port from host -> guest on a specific host bind address. */
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
-  /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
-  tcpAcceptQueueSize(size: number): this
   /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
   maxInboundTcpConnections(value: number): this
+  /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
+  tcpAcceptQueueSize(size: number): this
   /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
   vsock(hostPath: string, port: number): this
   /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
@@ -1074,6 +1096,8 @@ export declare class Sandbox {
    * Sandbox names are limited to 128 UTF-8 bytes.
    */
   static get(name: string): Promise<JsSandboxHandle>
+  /** Import or recover stopped storage without starting a VM. */
+  static recoverStorage(name: string, optionsJson: string): Promise<string>
   /** List the first page of sandboxes. */
   static list(): Promise<JsSandboxPage>
   /** List a configured page of sandboxes. */
@@ -1293,6 +1317,8 @@ export declare class SandboxBuilder {
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
@@ -1716,6 +1742,32 @@ export declare class SecretBuilder {
 }
 export type JsSecretBuilder = SecretBuilder
 
+/** A public URL for one sandbox port. */
+export declare class Service {
+  /** Create a Service. Without a target, the SDK refuses before any request. */
+  static create(slug: string, target?: ServiceTarget | undefined | null): Promise<Service>
+  static get(slug: string): Promise<Service>
+  static list(): Promise<ServicePage>
+  static listWith(options: ServiceListOptions): Promise<ServicePage>
+  get slug(): string
+  get url(): string
+  get status(): string
+  /** The target, or `null` when the Service is detached. */
+  get target(): ServiceTarget | null
+  get createdAt(): number
+  get updatedAt(): number
+  /** Change the target. */
+  update(options: ServiceUpdateOptions): Promise<Service>
+  /** Enable the Service. */
+  enable(): Promise<Service>
+  /** Disable the Service while retaining its target. */
+  disable(): Promise<Service>
+  /** Remove the Service and release its slug. */
+  remove(): Promise<void>
+  refresh(): Promise<Service>
+}
+export type JsService = Service
+
 /** High-level SFTP client session. */
 export declare class SftpClient {
   /** Read a file into memory. */
@@ -2074,6 +2126,9 @@ export declare function defaultBackendInfo(): JsBackendInfo
 
 /** Return the active default backend kind (`"local"` or `"cloud"`). */
 export declare function defaultBackendKind(): string
+
+/** Inspect explicitly selected storage without initializing the normal backend. */
+export declare function diagnoseStorage(configJson: string, selectionJson: string): Promise<string>
 
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
 export interface DnsConfig {
@@ -2706,6 +2761,9 @@ export interface SecretEntry {
  * secret name. `env` / `value` / `store` are mutually exclusive ways to
  * provide the secret material; setting more than one is rejected at the
  * boundary. Only `value` may carry raw secret material.
+ *
+ * Omitted policy fields keep the stored setting; a supplied `substitution`
+ * replaces the whole rule.
  */
 export interface SecretModifySpec {
   env?: string
@@ -2713,6 +2771,21 @@ export interface SecretModifySpec {
   store?: string
   placeholder?: string
   allowedHosts?: Array<string>
+  substitution?: SecretModifySubstitution
+  violationAction?: string
+  requireTlsIdentity?: boolean
+  allowPlaceholderFor?: Array<string>
+}
+
+/**
+ * Substitution locations in `SecretModifySpec.substitution`. Omitted fields
+ * take the create defaults.
+ */
+export interface SecretModifySubstitution {
+  headers?: boolean
+  headerFields?: Array<string>
+  query?: boolean
+  body?: boolean
 }
 
 /** Host-side source for secret material. */
@@ -2730,6 +2803,30 @@ export interface SecretSubstitution {
   headerFields: Array<string>
   query: boolean
   body: boolean
+}
+
+/** Options for one `Service.listWith()` page. */
+export interface ServiceListOptions {
+  sandbox?: string
+  cursor?: string
+  limit?: number
+}
+
+/** One page returned by `Service.list` / `Service.listWith`. */
+export interface ServicePage {
+  services: Array<Service>
+  nextCursor?: string
+}
+
+/** The sandbox and port a Service routes to. */
+export interface ServiceTarget {
+  sandbox: string
+  port: number
+}
+
+/** Fields for one `Service.update()` call. */
+export interface ServiceUpdateOptions {
+  target: ServiceTarget
 }
 
 /**
@@ -2921,6 +3018,9 @@ export interface StreamOpenResult {
 
 /** Whether this native library understands published-port modification. */
 export declare function supportsPortModification(): boolean
+
+/** Whether this native library applies secret policy fields in modify specs. */
+export declare function supportsSecretPolicyModification(): boolean
 
 /** TLS interception configuration produced by `TlsBuilder.build()`. */
 export interface TlsConfig {

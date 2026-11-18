@@ -1,0 +1,103 @@
+name: Release selection
+
+on:
+  pull_request:
+    paths:
+      - scripts/install.sh
+      - scripts/install.ps1
+      - scripts/ci/*release*
+      - scripts/ci/test_install.py
+      - scripts/ci/test_installer_selection.py
+      - scripts/ci/test-install-selection.ps1
+      - .github/workflows/release*.yml
+      - docs/getting-started/versions.mdx
+  push:
+    branches: [main]
+    paths:
+      - scripts/install.sh
+      - scripts/install.ps1
+      - scripts/ci/*release*
+      - scripts/ci/test_install.py
+      - scripts/ci/test_installer_selection.py
+      - scripts/ci/test-install-selection.ps1
+      - .github/workflows/release*.yml
+      - docs/getting-started/versions.mdx
+
+permissions:
+  contents: read
+
+jobs:
+  selection:
+    name: Installer selection (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test PowerShell release selection
+        shell: pwsh
+        run: ./scripts/ci/test-install-selection.ps1
+      - name: Test Windows PowerShell 5.1 compatibility
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/ci/test-install-selection.ps1
+      - name: Test Unix installer and release selection
+        if: runner.os != 'Windows'
+        run: |
+          sh -n scripts/install.sh
+          python3 -m unittest discover -s scripts/ci -p 'test_install*.py'
+      - name: Test npm publication routing
+        run: node --test scripts/ci/test-release-channel.mjs
+
+  live-install:
+    name: Real release installs (${{ matrix.os }}, ${{ matrix.shell }})
+    timeout-minutes: 25
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            shell: sh
+            packages: --packages
+          - os: macos-15
+            shell: sh
+            packages: --packages
+          - os: windows-latest
+            shell: pwsh
+            packages: --packages
+          - os: windows-latest
+            shell: powershell
+            packages: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Run documented commands with PR installers and real artifacts
+        shell: bash
+        run: >-
+          python scripts/ci/test-live-release-install.py
+          --shell ${{ matrix.shell }} ${{ matrix.packages }}
+          --report "$RUNNER_TEMP/live-install/pr.json"
+      # This audit intentionally does not gate PR code: deployment can lag it.
+      # Keep failures visible in the step and report instead of treating the
+      # public endpoint as equivalent to the installer under review.
+      - name: Audit deployed installer URLs
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: >-
+          python scripts/ci/test-live-release-install.py
+          --shell ${{ matrix.shell }} --source deployed
+          --report "$RUNNER_TEMP/live-install/deployed.json"
+      - name: Upload real-install reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: live-install-${{ matrix.os }}-${{ matrix.shell }}
+          path: ${{ runner.temp }}/live-install/*.json

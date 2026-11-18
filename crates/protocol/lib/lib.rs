@@ -454,6 +454,7 @@ pub mod fs;
 pub mod heartbeat;
 pub mod message;
 pub mod resources;
+pub mod storage_preview;
 pub mod tcp;
 #[doc(hidden)]
 pub mod transport;

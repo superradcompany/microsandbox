@@ -76,7 +76,7 @@ fn statfs_reports_baseline_plus_quota() {
         .unwrap();
 
     let st = sb.fs.statfs(sb.ctx(), ROOT_INODE).unwrap();
-    let frsize = st.f_frsize as u64;
+    let frsize = st.f_frsize;
     let total = st.f_blocks as u64 * frsize;
     let avail = st.f_bavail as u64 * frsize;
     // df total = baseline + quota; available = quota - used.

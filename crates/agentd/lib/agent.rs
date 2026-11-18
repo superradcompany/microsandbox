@@ -369,7 +369,8 @@ impl ActivityTracker {
 impl BulkInputState {
     fn new(file: File) -> AgentdResult<Self> {
         Ok(Self {
-            port: AsyncFd::new(file)?,
+            // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+            port: unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?,
             read_buf: vec![0u8; BULK_SERIAL_READ_BUF_SIZE],
             input: BytesMut::new(),
         })
@@ -491,7 +492,8 @@ pub async fn run(
     set_nonblocking(port_fd)?;
 
     // A single AsyncFd tracks both readable and writable readiness.
-    let async_port = AsyncFd::new(port_file)?;
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(port_file) }.map_err(std::io::Error::from)?;
 
     // A combined port carries full raw records; a dual-port control stream does not. Size the
     // allocation from the selected topology so combined throughput does not pay four reads per
@@ -1260,7 +1262,8 @@ async fn bulk_writer_task(
     mut command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
     activity_tx: tokio::sync::mpsc::Sender<RawActivity>,
 ) -> AgentdResult<()> {
-    let async_port = AsyncFd::new(file)?;
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?;
     let mut generation = 0;
     let mut flows = HashMap::<(ClientIncarnation, u32), BulkWriteFlow>::new();
     let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
@@ -3930,8 +3933,8 @@ fn errno_name(code: i32) -> Option<String> {
 }
 
 fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
-    // Check if the request already specifies PATH.
-    if let Some(entry) = req.env.iter_mut().find(|e| e.starts_with("PATH=")) {
+    // Entries apply in order, so the child sees the request's last PATH.
+    if let Some(entry) = req.env.iter_mut().rfind(|e| e.starts_with("PATH=")) {
         let existing = &entry["PATH=".len()..];
         *entry = format!("PATH={}", scripts_path(Some(existing)));
     } else {
@@ -4287,7 +4290,7 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 
     // Foreign init owns both shutdown duration and filesystem teardown. No timer or
     // fallback signal may convert this graceful request into forced termination.
-    crate::handoff::signal_init_shutdown()
+    crate::handoff::request_init_shutdown()
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -5286,9 +5289,11 @@ mod tests {
 
         let (mut control_source, control) = UnixStream::pair().unwrap();
         control.set_nonblocking(true).unwrap();
-        let control = AsyncFd::new(control).unwrap();
+        // SAFETY: UnixStream owns a stable descriptor for the lifetime of AsyncFd.
+        let control = unsafe { AsyncFd::register(control) }.unwrap();
         let (pipe_reader, pipe_writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_NONBLOCK).unwrap();
-        let pipe_writer = AsyncFd::new(pipe_writer).unwrap();
+        // SAFETY: OwnedFd keeps the descriptor open and unchanged until AsyncFd drops it.
+        let pipe_writer = unsafe { AsyncFd::register(pipe_writer) }.unwrap();
         // Prime the reactor, then clear the pipe's cached writable event with a real EAGAIN.
         let mut writable = pipe_writer.writable().await.unwrap();
         loop {
@@ -6564,5 +6569,28 @@ mod tests {
         publish_bulk_activity(&sender, &mut pending).unwrap();
         assert_eq!(receiver.try_recv().unwrap().fs_bytes, 17);
         assert_eq!(pending.fs_bytes, 0);
+    }
+
+    #[test]
+    fn scripts_dir_goes_on_the_last_path_entry() {
+        let mut req = ExecRequest {
+            cmd: "/bin/true".into(),
+            args: vec![],
+            env: vec!["PATH=/first".into(), "PATH=/last".into()],
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: vec![],
+        };
+        prepend_scripts_to_path(&mut req);
+        assert_eq!(
+            req.env,
+            vec![
+                "PATH=/first".to_string(),
+                format!("PATH={}:/last", microsandbox_protocol::SCRIPTS_PATH),
+            ]
+        );
     }
 }

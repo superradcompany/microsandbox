@@ -15,7 +15,7 @@ from microsandbox import Sandbox
 
 async def main():
     name = os.environ.get("QUAL_SOURCE", "compact-managed")
-    journal = Path(os.environ["MSB_HOME"]) / "sandboxes" / name / "runtime" / "root-disk.json"
+    journal = Path(os.environ["MSB_HOME"]) / "sandboxes" / name / "root-disk.json"
     before = json.loads(journal.read_text())
     assert len(before["layers"]) == 3
     handle = await Sandbox.get(name)

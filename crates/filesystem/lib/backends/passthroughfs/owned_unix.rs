@@ -374,7 +374,8 @@ pub(super) fn clear_payload_metadata(path: &Path) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    // macOS extended ACLs are separate from ordinary xattrs and survive a reflink.
+    microsandbox_utils::private_file::harden(&file, false)
 }
 
 fn read_xattrs(fd: i32, path: Option<&CString>) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {

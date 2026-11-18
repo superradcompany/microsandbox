@@ -12,6 +12,8 @@ name = "microsandbox_db"
 path = "lib/lib.rs"
 
 [dependencies]
+libc.workspace = true
+tempfile.workspace = true
 semver.workspace = true
 microsandbox-types.workspace = true
 serde_json.workspace = true
@@ -21,5 +23,5 @@ sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true
+[target.'cfg(windows)'.dependencies]
+microsandbox-utils.workspace = true

@@ -190,14 +190,6 @@ pub enum SecretLiveChange {
     },
 }
 
-/// Raw secret material in transit over the control socket. Wrapped so any
-/// `Debug`-formatted request or error path shows `[redacted]` instead of the
-/// value, and zeroized on drop so the plaintext does not linger in freed
-/// memory after the rotation batch is applied.
-#[derive(Clone, Serialize, Deserialize, zeroize::ZeroizeOnDrop)]
-#[serde(transparent)]
-pub struct SecretValue(pub String);
-
 /// The reply to any control request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlResponse {
@@ -448,16 +440,6 @@ pub struct ControlEnvelopeResponse {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Trait Implementations
-//--------------------------------------------------------------------------------------------------
-
-impl std::fmt::Debug for SecretValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[redacted]")
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -465,6 +447,15 @@ impl std::fmt::Debug for SecretValue {
 pub fn control_socket_path_for(agent_sock: &std::path::Path) -> PathBuf {
     crate::ipc::control_socket_path_for(agent_sock)
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::SecretValue;
+
+#[cfg(feature = "runner")]
+pub use crate::runner::control::{ControlContext, spawn_control_listener};
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -632,10 +623,3 @@ mod tests {
         assert!(!old.disk_compact_owned);
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-#[cfg(feature = "runner")]
-pub use crate::runner::control::{ControlContext, spawn_control_listener};

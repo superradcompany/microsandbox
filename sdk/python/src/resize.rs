@@ -20,7 +20,7 @@ pub(crate) fn parse_operations(
     py: Python<'_>,
     operations: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<ResizeOperation>> {
-    let list = operations.downcast::<PyList>()?;
+    let list = operations.cast::<PyList>()?;
     if list.is_empty() || list.len() > 2 {
         return Err(PyValueError::new_err(
             "expected one or two resize operations",
@@ -37,7 +37,7 @@ pub(crate) fn parse_operations(
 pub(crate) async fn run_modify_tracked(
     builder: SandboxModificationBuilder,
     dry_run: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let result = if dry_run {
         SandboxModificationResult {
             plan: builder.dry_run().await.map_err(to_py_err)?,
@@ -49,7 +49,7 @@ pub(crate) async fn run_modify_tracked(
             .await
             .map_err(to_py_err)?
     };
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let dict = PyDict::new(py);
         let plan = serde_json::to_value(result.plan).map_err(invalid_serialization)?;
         dict.set_item("plan", crate::sandbox::modification_plan_to_py(py, plan)?)?;
@@ -64,12 +64,12 @@ pub(crate) async fn run_modify_tracked(
 
 pub(crate) fn operations_result_to_py(
     result: microsandbox::MicrosandboxResult<Vec<ResizeOperation>>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let operations = result.map_err(to_py_err)?;
-    Python::with_gil(|py| operations_to_py(py, operations))
+    Python::attach(|py| operations_to_py(py, operations))
 }
 
-fn operations_to_py(py: Python<'_>, operations: Vec<ResizeOperation>) -> PyResult<PyObject> {
+fn operations_to_py(py: Python<'_>, operations: Vec<ResizeOperation>) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for operation in operations {
         let value = serde_json::to_value(operation).map_err(invalid_serialization)?;
@@ -106,7 +106,7 @@ fn operations_to_py(py: Python<'_>, operations: Vec<ResizeOperation>) -> PyResul
     Ok(list.unbind().into())
 }
 
-fn enum_to_py(py: Python<'_>, value: &serde_json::Value, name: &str) -> PyResult<PyObject> {
+fn enum_to_py(py: Python<'_>, value: &serde_json::Value, name: &str) -> PyResult<Py<PyAny>> {
     str_enum_member(
         py,
         name,
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn malformed_operations_are_rejected_before_dispatch() {
         pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let json = py.import("json").unwrap();
             for raw in ["[]", "[{}, {}, {}]", "[{}]", "null", "{}"] {
                 let value = json.call_method1("loads", (raw,)).unwrap();
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn operation_input_preserves_exact_u64_identity_and_closed_discriminators() {
         pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let json = py.import("json").unwrap();
             let raw = serde_json::json!([{
                 "id": "operation-a", "runtime_boot_id": "run-a", "generation": u64::MAX,

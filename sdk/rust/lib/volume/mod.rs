@@ -27,10 +27,13 @@ use std::sync::Arc;
 #[cfg(feature = "local")]
 use microsandbox_image::ext4::{self, Ext4FormatOptions};
 #[cfg(feature = "local")]
-use sea_orm::ConnectionTrait;
-#[cfg(feature = "local")]
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, QueryOrder, Set,
+    Statement,
+};
 
+#[cfg(feature = "local")]
+use crate::backend::local::creation::CreationStorage;
 use crate::backend::{
     Backend, BackendKind, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
     VolumeHandleLocalState, VolumeInner, VolumeLocalState,
@@ -461,8 +464,8 @@ impl VolumeHandle {
 
     /// Remove this volume.
     ///
-    /// Locally deletes the DB record first, then the directory. An orphaned
-    /// directory is easier to detect and clean up than an orphaned DB record.
+    /// Locally deletes the files before the database record, so interrupted
+    /// removal can be retried.
     /// Cloud handles route through the backend's remove endpoint.
     pub async fn remove(&self) -> MicrosandboxResult<()> {
         if self.is_default() {
@@ -573,9 +576,7 @@ impl std::fmt::Debug for VolumeHandle {
 // Functions: Local lifecycle (called from the LocalBackend VolumeBackend impl)
 //--------------------------------------------------------------------------------------------------
 
-/// Local create path. Inserts a DB record, creates the host directory, and
-/// returns a wrapped [`Volume`]. On directory-create failure rolls back the
-/// DB insert so we don't leak phantom rows.
+/// Reserve a volume before writing its files. Interrupted creation remains removable.
 #[cfg(feature = "local")]
 pub(crate) async fn create_local(
     backend: Arc<dyn Backend>,
@@ -589,18 +590,26 @@ pub(crate) async fn create_local(
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(Operation::VolumeCreate))?;
     let pools = local_backend.db().await?;
-    let _name_lock = lock_volume_name(local_backend, &config.name).await?;
+    let name_lock = lock_volume_name(local_backend, &config.name).await?;
 
     // Check for existing volume.
     let existing = volume_entity::Entity::find()
         .filter(volume_entity::Column::Name.eq(&config.name))
         .one(pools.read())
         .await?;
-    if existing.is_some() {
+
+    if let Some(existing) = existing {
+        local_backend
+            .ensure_volume_available(existing.id, None)
+            .await?;
+
         return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
     }
+
     let path = local_backend.volume_path(&config.name);
-    materialize_volume_path(&config, &path).await?;
+    if tokio::fs::try_exists(&path).await? {
+        return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
+    }
 
     // Serialize labels.
     let labels_json = if config.labels.is_empty() {
@@ -609,8 +618,7 @@ pub(crate) async fn create_local(
         Some(serde_json::to_string(&config.labels)?)
     };
 
-    // The filesystem artifact is already materialized. If the DB insert
-    // loses a race, remove it so no orphaned final path remains.
+    // Reserve the row and recovery marker atomically before any filesystem work.
     let now = chrono::Utc::now().naive_utc();
     let model = volume_entity::ActiveModel {
         name: Set(config.name.clone()),
@@ -626,12 +634,44 @@ pub(crate) async fn create_local(
         ..Default::default()
     };
 
-    if let Err(e) = volume_entity::Entity::insert(model)
-        .exec(pools.write())
+    let volume_id = pools
+        .write()
+        .transaction(|txn| {
+            let model = model.clone();
+
+            async move {
+                let id = volume_entity::Entity::insert(model)
+                    .exec(&txn)
+                    .await?
+                    .last_insert_id;
+
+                txn.execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "UPDATE volume SET creation_state = 'creating' WHERE id = ?",
+                    [id.into()],
+                ))
+                .await?;
+
+                Ok::<_, MicrosandboxError>((txn, id))
+            }
+        })
+        .await?;
+
+    if let Err(error) = local_backend
+        .materialize_volume(&config, volume_id, name_lock.clone())
         .await
     {
-        let _ = tokio::fs::remove_dir_all(&path).await;
-        return Err(e.into());
+        return Err(
+            match local_backend
+                .remove_volume_storage(volume_id, path, name_lock, None)
+                .await
+            {
+                Ok(()) => error,
+                Err(cleanup) => MicrosandboxError::Runtime(format!(
+                    "{error}; volume cleanup remains pending: {cleanup}"
+                )),
+            },
+        );
     }
 
     Ok(Volume::from_local(
@@ -664,6 +704,10 @@ pub(crate) async fn get_local(
         .one(db)
         .await?
         .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
+
+    local_backend
+        .ensure_volume_available(model.id, None)
+        .await?;
 
     let handle = VolumeHandle::from_local_model(backend.clone(), model);
     Ok(handle)
@@ -700,95 +744,77 @@ pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> Micro
         return Err(MicrosandboxError::VolumeNotFound(name.into()));
     }
     let pools = local_backend.db().await?;
-    let _name_lock = lock_volume_name(local_backend, name).await?;
+    let name_lock = lock_volume_name(local_backend, name).await?;
 
     let model = volume_entity::Entity::find()
         .filter(volume_entity::Column::Name.eq(name))
         .one(pools.read())
         .await?
         .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
-    let handle = VolumeHandle::from_local_model(backend.clone(), model);
-    let _disk_lock = lock_disk_volume_for_remove(&handle)?;
-    ensure_volume_not_referenced_by_active_sandbox(pools.read(), name).await?;
-
-    let path = local_backend.volume_path(name);
-    if path.exists() {
-        tokio::fs::remove_dir_all(&path).await?;
+    if !local_backend.volume_creation_pending(model.id).await? {
+        local_backend
+            .ensure_volume_available(model.id, None)
+            .await?;
     }
 
-    volume_entity::Entity::delete_by_id(handle.local().expect("local handle").db_id)
-        .exec(pools.write())
-        .await?;
+    let handle = VolumeHandle::from_local_model(backend.clone(), model);
+    let disk_lock = lock_disk_volume_for_remove(&handle)?;
+    ensure_volume_not_referenced_by_active_sandbox(pools.read(), name).await?;
 
-    Ok(())
+    local_backend
+        .remove_volume_storage(
+            handle.local().expect("local handle").db_id,
+            local_backend.volume_path(name),
+            name_lock,
+            disk_lock,
+        )
+        .await
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Materialize a volume under a temporary sibling directory, then atomically
-/// rename it into place. This keeps failed disk formatting from exposing a
-/// half-populated final volume path.
 #[cfg(feature = "local")]
-pub(crate) async fn materialize_volume_path(
+pub(crate) async fn provision_volume_path(
+    config: &VolumeConfig,
+    path: &CreationStorage,
+) -> MicrosandboxResult<()> {
+    let path = path.clone();
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || provision_volume_path_sync(&config, &path))
+        .await
+        .map_err(|error| MicrosandboxError::Runtime(format!("volume path: {error}")))?
+}
+
+#[cfg(feature = "local")]
+pub(crate) fn provision_volume_path_sync(
     config: &VolumeConfig,
     path: &Path,
 ) -> MicrosandboxResult<()> {
-    let parent = path.parent().ok_or_else(|| {
-        MicrosandboxError::InvalidConfig(format!(
-            "volume path has no parent directory: {}",
-            path.display()
-        ))
-    })?;
-
-    tokio::fs::create_dir_all(parent).await?;
-    if path.exists() {
-        return Err(MicrosandboxError::VolumeAlreadyExists(config.name.clone()));
+    std::fs::create_dir_all(path)?;
+    if config.kind == VolumeKind::Disk {
+        let capacity_mib = config.capacity_mib.ok_or_else(|| {
+            MicrosandboxError::InvalidConfig(
+                "disk named volumes require .size(...) / --size".into(),
+            )
+        })?;
+        let options = Ext4FormatOptions {
+            size_bytes: u64::from(capacity_mib) * 1024 * 1024,
+            ..Default::default()
+        };
+        ext4::format_ext4(&path.join("disk.raw"), &options).map_err(|error| {
+            MicrosandboxError::Custom(format!("failed to create disk.raw: {error}"))
+        })?;
     }
-
-    let temp = tempfile::Builder::new()
-        .prefix(&format!(".{}.", config.name))
-        .tempdir_in(parent)?;
-    provision_volume_path(config, temp.path()).await?;
-    tokio::fs::rename(temp.path(), path).await?;
-    let _ = temp.keep();
     Ok(())
 }
 
 #[cfg(feature = "local")]
-pub(crate) async fn provision_volume_path(
-    config: &VolumeConfig,
-    path: &Path,
-) -> MicrosandboxResult<()> {
-    tokio::fs::create_dir_all(path).await?;
-
-    match config.kind {
-        VolumeKind::Directory => Ok(()),
-        VolumeKind::Disk => {
-            let capacity_mib = config.capacity_mib.ok_or_else(|| {
-                MicrosandboxError::InvalidConfig(
-                    "disk named volumes require .size(...) / --size".into(),
-                )
-            })?;
-            let disk_path = path.join("disk.raw");
-            let options = Ext4FormatOptions {
-                size_bytes: u64::from(capacity_mib) * 1024 * 1024,
-                ..Default::default()
-            };
-            tokio::task::spawn_blocking(move || ext4::format_ext4(&disk_path, &options))
-                .await
-                .map_err(|e| MicrosandboxError::Custom(format!("ext4 format task failed: {e}")))?
-                .map_err(|e| {
-                    MicrosandboxError::Custom(format!("failed to create disk.raw: {e}"))
-                })?;
-            Ok(())
-        }
-    }
-}
-
-#[cfg(feature = "local")]
-pub(crate) async fn lock_volume_name(local: &LocalBackend, name: &str) -> MicrosandboxResult<File> {
+pub(crate) async fn lock_volume_name(
+    local: &LocalBackend,
+    name: &str,
+) -> MicrosandboxResult<Arc<File>> {
     let volumes_dir = local.volumes_dir();
     std::fs::create_dir_all(&volumes_dir)?;
     let locks_dir = volumes_dir.join(".locks");
@@ -810,7 +836,7 @@ pub(crate) async fn lock_volume_name(local: &LocalBackend, name: &str) -> Micros
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    Ok(file)
+    Ok(Arc::new(file))
 }
 
 #[cfg(feature = "local")]

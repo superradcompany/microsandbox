@@ -193,7 +193,8 @@ impl JobAttachment {
             let input = open_nonblocking_terminal_input(&terminal_path_for_fd(
                 std::io::stdin().as_raw_fd(),
             )?)?;
-            let input = AsyncFd::new(input)?;
+            // SAFETY: The owned terminal file keeps its non-blocking descriptor open and unchanged.
+            let input = unsafe { AsyncFd::register(input) }.map_err(std::io::Error::from)?;
             crossterm::terminal::enable_raw_mode()?;
             let _raw_guard = scopeguard::guard((), |_| {
                 let _ = crossterm::terminal::disable_raw_mode();

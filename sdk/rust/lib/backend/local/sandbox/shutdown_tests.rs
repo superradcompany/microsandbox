@@ -29,7 +29,7 @@ async fn graceful_shutdown_reaches_current_and_legacy_agent_without_an_owned_id(
             .await
             .unwrap();
         let name = "shutdown";
-        let socket = crate::runtime::sandbox_agent_socket_path_candidates_for(&backend, name)
+        let socket = backend.agent_socket_paths(name)
             .into_iter()
             .next()
             .unwrap();

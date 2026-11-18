@@ -11,12 +11,15 @@
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod backup;
 pub mod catalog;
 pub mod compat;
 pub mod connection;
 #[allow(missing_docs)]
 pub mod entity;
 pub mod pool;
+pub mod private_storage;
+pub mod protected_state;
 pub mod retry;
 
 pub use connection::{DbReadConnection, DbWriteConnection};

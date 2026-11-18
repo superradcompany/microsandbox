@@ -36,6 +36,11 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 use super::install::is_generated_alias;
 use crate::ui;
 
+mod repair;
+mod storage_doctor;
+pub use repair::RepairArgs;
+pub use storage_doctor::{StorageDoctorExit, run_doctor_command};
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -65,9 +70,12 @@ pub struct SelfArgs {
 /// `msb self` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
-    /// Check local runtime and host virtualization prerequisites.
+    /// Check host setup, or inspect a named sandbox.
     #[command(visible_alias = "check")]
     Doctor(DoctorArgs),
+
+    /// Repair local sandboxes without starting them.
+    Repair(RepairArgs),
 
     /// Update msb and libkrunfw to the latest release.
     #[command(visible_alias = "upgrade")]
@@ -129,15 +137,31 @@ pub struct WindowsSelfSwapArgs {
 }
 
 /// Arguments for `msb doctor` and `msb self doctor`.
-#[derive(Debug, Args, Clone, Copy)]
+#[derive(Debug, Args, Clone)]
 pub struct DoctorArgs {
+    /// Inspect this sandbox's storage. Omit to check the host.
+    #[arg(long = "sandbox", value_name = "SANDBOX", group = "storage_scope", conflicts_with_all = ["sandbox", "fix", "yes"])]
+    pub sandbox_flag: Option<String>,
+
+    /// Positional sandbox name retained for existing scripts.
+    #[arg(value_name = "SANDBOX", hide = true, group = "storage_scope", conflicts_with_all = ["sandbox_flag", "fix", "yes"])]
+    pub sandbox: Option<String>,
+
     /// Attempt supported host virtualization setup fixes.
     #[arg(long)]
     pub fix: bool,
 
-    /// Apply fixes without prompting for confirmation.
+    /// Apply host fixes without prompting for confirmation.
     #[arg(long, short = 'y')]
     pub yes: bool,
+
+    /// Inspect every sandbox in the configured local home.
+    #[arg(short = 'a', long, group = "storage_scope", conflicts_with_all = ["sandbox", "sandbox_flag", "fix", "yes"])]
+    pub all: bool,
+
+    /// Structured sandbox diagnosis (exit 0: ready or eligible, 2: action needed, 3: incomplete).
+    #[arg(long, requires = "storage_scope", value_enum)]
+    pub format: Option<crate::ui::OutputFormat>,
 }
 
 /// Arguments for `msb self uninstall`.
@@ -448,7 +472,8 @@ fn parse_version(input: &str) -> anyhow::Result<Version> {
 /// Run a `msb self` subcommand.
 pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     match args.command {
-        SelfCommand::Doctor(args) => run_doctor(args),
+        SelfCommand::Doctor(args) => run_doctor_command(args).await,
+        SelfCommand::Repair(args) => repair::run(args).await,
         SelfCommand::Update(args) => run_update(args).await,
         SelfCommand::Downgrade(args) => run_downgrade(args).await,
         SelfCommand::Uninstall(args) => run_uninstall(args).await,
@@ -2297,8 +2322,9 @@ async fn prepare_downgrade_operation(
     target: &Version,
     _force: bool,
 ) -> anyhow::Result<(DowngradeOperation, SchemaBaseline)> {
+    microsandbox_db::pool::ensure_private_database_directory(db_dir)?;
     let operations_dir = db_dir.join("self-downgrade");
-    fs::create_dir_all(&operations_dir)?;
+    microsandbox_db::pool::ensure_private_database_directory(&operations_dir)?;
 
     if let Some(operation) = find_active_downgrade_operation(&operations_dir)? {
         if operation.journal.source_version != source.to_string()
@@ -2491,7 +2517,7 @@ async fn open_downgrade_db(
     db_path: &Path,
 ) -> anyhow::Result<microsandbox_db::connection::DbWriteConnection> {
     if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent)?;
+        microsandbox_db::pool::ensure_private_database_directory(parent)?;
     }
 
     let config = load_persisted_config_or_default()?;
@@ -2807,16 +2833,7 @@ async fn refuse_if_active_sandboxes(db: &DatabaseConnection) -> anyhow::Result<(
 }
 
 async fn vacuum_into(db: &DatabaseConnection, backup_path: &Path) -> anyhow::Result<()> {
-    if let Some(parent) = backup_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    db.execute_raw(Statement::from_sql_and_values(
-        DatabaseBackend::Sqlite,
-        "VACUUM INTO ?",
-        [backup_path.display().to_string().into()],
-    ))
-    .await?;
+    microsandbox_db::backup::create_private_backup(db, backup_path).await?;
     Ok(())
 }
 
@@ -2827,7 +2844,7 @@ async fn preflight_schema_rollback(
     target_version: &Version,
 ) -> anyhow::Result<()> {
     if let Some(parent) = preflight_path.parent() {
-        fs::create_dir_all(parent)?;
+        microsandbox_db::pool::ensure_private_database_directory(parent)?;
     }
     match fs::remove_file(preflight_path) {
         Ok(()) => {}
@@ -2855,18 +2872,7 @@ async fn preflight_schema_rollback(
 }
 
 async fn verify_sqlite_backup(path: &Path) -> anyhow::Result<()> {
-    let backup = open_downgrade_db(path).await?;
-    let row = backup
-        .query_one_raw(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            "PRAGMA quick_check",
-        ))
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("SQLite backup quick_check returned no row"))?;
-    let result = row.try_get_by_index::<String>(0)?;
-    if result != "ok" {
-        anyhow::bail!("SQLite backup failed quick_check: {result}");
-    }
+    microsandbox_db::backup::validate_backup(path).await?;
     Ok(())
 }
 
@@ -3179,8 +3185,9 @@ fn acquire_migration_lock(db_dir: &Path) -> anyhow::Result<MigrationLock> {
 }
 
 fn acquire_downgrade_operation_lock(db_dir: &Path) -> anyhow::Result<MigrationLock> {
+    microsandbox_db::pool::ensure_private_database_directory(db_dir)?;
     let operations_dir = db_dir.join("self-downgrade");
-    fs::create_dir_all(&operations_dir)?;
+    microsandbox_db::pool::ensure_private_database_directory(&operations_dir)?;
     // Keep the existing filename and OS lock protocol so a holder using the
     // previous implementation is still excluded. File existence is not ownership.
     let path = operations_dir.join(format!(

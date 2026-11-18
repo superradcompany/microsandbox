@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from microsandbox import ModificationNotConfirmedError
+
 STUB_PATH = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
 TYPES_PATH = Path(__file__).parent.parent / "microsandbox" / "types.py"
 
@@ -91,3 +93,14 @@ def test_resize_timeout_error_is_timeout() -> None:
     assert isinstance(error, MicrosandboxError)
     assert isinstance(error, TimeoutError)
     assert error.code == "resize-timeout"
+
+
+def test_modification_not_confirmed_error_preserves_message() -> None:
+    message = (
+        "the change did not complete as asked: "
+        "the running sandbox does not hold the secret"
+    )
+    error = ModificationNotConfirmedError(message)
+
+    assert str(error) == message
+    assert error.code == "modification-not-confirmed"

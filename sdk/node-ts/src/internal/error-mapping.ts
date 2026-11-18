@@ -18,6 +18,7 @@ import {
   MetricsDisabledError,
   MetricsUnavailableError,
   MicrosandboxError,
+  ModificationNotConfirmedError,
   NixError,
   PatchFailedError,
   ProtocolError,
@@ -31,15 +32,20 @@ import {
   SandboxStopTimedOutError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  ServiceAlreadyExistsError,
+  ServiceError,
+  ServiceNotFoundError,
   SnapshotSourceRecoveryError,
   TerminalError,
   UnsupportedOperationError,
   UnsupportedError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
+  type ChangeState,
+  type ServiceErrorReason,
 } from "../errors.js";
 
-// Recovery and resize timeout variants carry a JSON envelope after the usual tag; all others carry text.
+  // Recovery, resize, and Service errors may carry a JSON envelope with structured details.
 const PATTERN = /^\[(\w+)\] ([\s\S]*)$/;
 
 const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
@@ -72,12 +78,15 @@ const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
   ["ImageInUse", (m, c) => new ImageInUseError(m, { cause: c })],
   ["VolumeNotFound", (m, c) => new VolumeNotFoundError(m, { cause: c })],
   ["VolumeAlreadyExists", (m, c) => new VolumeAlreadyExistsError(m, { cause: c })],
+  ["ServiceNotFound", (m, c) => new ServiceNotFoundError(m, { cause: c })],
+  ["ServiceAlreadyExists", (m, c) => new ServiceAlreadyExistsError(m, { cause: c })],
   ["Image", (m, c) => new ImageError(m, { cause: c })],
   ["PatchFailed", (m, c) => new PatchFailedError(m, { cause: c })],
   ["MetricsDisabled", (m, c) => new MetricsDisabledError(m, { cause: c })],
   ["MetricsUnavailable", (m, c) => new MetricsUnavailableError(m, { cause: c })],
   ["UnsupportedOperation", (m, c) => new UnsupportedOperationError(m, { cause: c })],
   ["Unsupported", (m, c) => new UnsupportedError(m, { cause: c })],
+  ["ModificationNotConfirmed", (m, c) => new ModificationNotConfirmedError(m, { cause: c })],
   ["Custom", (m, c) => new CustomError(m, { cause: c })],
 ]);
 
@@ -102,9 +111,33 @@ export function mapNapiError(err: unknown): unknown {
   if (m[1] === "SnapshotSourceRecovery") {
     return mapRecoveryError(m[2]!, err);
   }
+  if (m[1] === "Service") {
+    return mapServiceError(m[2]!, err);
+  }
   const ctor = CTORS.get(m[1]!);
   if (!ctor) return err;
+  const changeError = mapChangeError(m[2]!, err, ctor);
+  if (changeError) return changeError;
   return ctor(m[2]!, err);
+}
+
+function mapChangeError(
+  payload: string,
+  raw: Error,
+  ctor: (message: string, raw: Error) => MicrosandboxError,
+): MicrosandboxError | null {
+  try {
+    const envelope = JSON.parse(payload);
+    if (!envelope || typeof envelope.message !== "string" || !("changed" in envelope)) {
+      return null;
+    }
+    const changed: ChangeState = envelope.changed === "unchanged" ? "unchanged" : "unknown";
+    const mapped = ctor(envelope.message, raw);
+    Object.defineProperty(mapped, "changed", { value: changed, enumerable: true });
+    return mapped;
+  } catch {
+    return null;
+  }
 }
 
 function mapRecoveryError(payload: string, raw: Error): unknown {
@@ -162,6 +195,44 @@ function mapResizeTimeoutError(payload: string, raw: Error): ResizeTimeoutError 
     // Older native bindings send only the message.
   }
   return new ResizeTimeoutError(payload, [], { cause: raw });
+}
+
+const SERVICE_REASONS: ReadonlySet<string> = new Set<ServiceErrorReason>([
+  "serviceQuotaExceeded", "sandboxServiceLimitExceeded", "serviceConflict", "serviceDetached",
+  "targetUnreachable", "sandboxNotRunning", "serviceChangesPaused", "outcomeUnknown", "other",
+]);
+
+function mapServiceError(payload: string, raw: Error): unknown {
+  try {
+    const envelope = JSON.parse(payload);
+    if (typeof envelope.message !== "string" || typeof envelope.slug !== "string") return raw;
+    // A reason or change state this version does not list keeps the details: an unlisted reason
+    // is "other", and anything but "unchanged" fails closed to "unknown".
+    const reason: ServiceErrorReason = SERVICE_REASONS.has(envelope.reason)
+      ? envelope.reason
+      : "other";
+    const changed: ChangeState = envelope.changed === "unchanged" ? "unchanged" : "unknown";
+    const retryAfterMs = typeof envelope.retryAfterMs === "number" ? envelope.retryAfterMs : null;
+    const rawCode = typeof envelope.rawCode === "string" ? envelope.rawCode : null;
+    const rawStatus = typeof envelope.rawStatus === "number" ? envelope.rawStatus : null;
+    const rawMessage = typeof envelope.rawMessage === "string" ? envelope.rawMessage : null;
+    return new ServiceError(
+      envelope.message,
+      {
+        slug: envelope.slug,
+        reason,
+        retryAfterMs,
+        changed,
+        rawCode,
+        rawStatus,
+        rawMessage,
+      },
+      { cause: raw },
+    );
+  } catch {
+    // Preserve the original error if a mismatched native binary sends an unknown envelope.
+    return raw;
+  }
 }
 
 export async function withMappedErrors<T>(fn: () => Promise<T>): Promise<T> {

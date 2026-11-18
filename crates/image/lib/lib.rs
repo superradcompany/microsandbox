@@ -17,6 +17,7 @@
 )]
 
 mod archive;
+mod async_gate;
 mod cache;
 pub mod checkpoint;
 mod config;
@@ -58,3 +59,4 @@ pub use platform::{Arch, Os, Platform};
 pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};
 pub use pull::{PullOptions, PullPolicy, PullResult, RootfsMaterialization};
 pub use registry::{Registry, RegistryBuilder};
+pub use stitch::vmdk::write_vmdk_descriptor;
