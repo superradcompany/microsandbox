@@ -22,10 +22,10 @@ CREATE TRIGGER IF NOT EXISTS replacement_guard_delete BEFORE DELETE ON sandbox
 WHEN EXISTS (SELECT 1 FROM sandbox_replacement WHERE original = OLD.id)
 BEGIN SELECT RAISE(ABORT, 'sandbox is retained for replacement recovery'); END;
 CREATE TRIGGER IF NOT EXISTS replacement_guard_insert BEFORE INSERT ON sandbox
-WHEN EXISTS (SELECT 1 FROM sandbox_replacement WHERE name = NEW.name AND admitting = 0)
+WHEN EXISTS (SELECT 1 FROM sandbox_replacement WHERE name = NEW.name AND published = 0 AND admitting = 0)
 BEGIN SELECT RAISE(ABORT, 'sandbox name is reserved for replacement recovery'); END;
 CREATE TRIGGER IF NOT EXISTS replacement_guard_rename BEFORE UPDATE OF name ON sandbox
-WHEN EXISTS (SELECT 1 FROM sandbox_replacement WHERE name = NEW.name AND original != NEW.id)
+WHEN EXISTS (SELECT 1 FROM sandbox_replacement WHERE name = NEW.name AND published = 0 AND original != NEW.id)
 AND OLD.name != NEW.name
 BEGIN SELECT RAISE(ABORT, 'sandbox name is reserved for replacement recovery'); END;
 CREATE TRIGGER IF NOT EXISTS replacement_record_candidate AFTER INSERT ON sandbox

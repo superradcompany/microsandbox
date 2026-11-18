@@ -526,6 +526,13 @@ mod tests {
                     .await
                     .unwrap();
             }
+            if published {
+                // Legacy writers may reuse a published ephemeral name immediately.
+                // Retiring the original must never touch that later generation.
+                LocalBackend::insert_sandbox_record(db, &config)
+                    .await
+                    .unwrap();
+            }
             drop(backend);
             let reopened = crate::test_support::local_backend_builder(temp.path())
                 .build()
