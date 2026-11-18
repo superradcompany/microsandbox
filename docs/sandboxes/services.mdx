@@ -370,6 +370,7 @@ Events contain sandbox IDs, not sandbox names. Deleting a target sandbox automat
 
 ## Limits
 
+<Accordion title="Service limits">
 | Limit | Free plan | Paid plans |
 | --- | --- | --- |
 | Services per organization | 100 | 1,000 |
@@ -378,3 +379,4 @@ Events contain sandbox IDs, not sandbox names. Deleting a target sandbox automat
 You can request a higher limit for your organization. If a limit drops below your current usage, existing Services keep working; creating a Service, or moving one to a sandbox at its limit, is refused until you are under it.
 
 Going over these limits fails with `service_quota_exceeded` or `sandbox_service_limit_exceeded` (see [Service changes](/sdk/errors#service-changes)). Disabled Services count toward both limits, and detached Services count toward the organization limit. Too many concurrent requests to one sandbox return `429 service_busy_inflight`.
+</Accordion>
