@@ -108,7 +108,7 @@ Common flags:
 | `--secret-violation-action` | Set `block`, `block-and-log`, or `block-and-terminate` for blocked placeholders |
 | `--tmpfs` | Mount an in-memory filesystem |
 | `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, `--rm` | Patch the rootfs before boot |
-| `--conf` | Load a sparse [sandbox configuration](/cli/configuration). Repeatable |
+| `--file`, `--conf` | Load a [Sandboxfile](/cli/configuration). Repeat to layer configuration files in order |
 | `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, `--script-conf` | Load an unwrapped, concern-specific [scoped config](/cli/configuration#scoped-config-files). Repeatable |
 
 Use `msb run --help` for the full flag list.
@@ -996,7 +996,7 @@ Run `project-shell` from any folder to open it at `/workspace` inside the sandbo
 | `--no-pull` | Don't pull the image before installing |
 | `--tmp` | Create a fresh sandbox on every invocation and remove it on exit; host-mounted files persist |
 | `-l`, `--list` | List all installed sandbox commands |
-| `--conf` | Load an explicit sparse [sandbox configuration](/cli/configuration). Repeatable |
+| `--file`, `--conf` | Load a [Sandboxfile](/cli/configuration). Repeat to layer configuration files in order |
 | `--net-conf`<br />`--resource-conf`<br />`--runtime-conf`<br />`--fs-conf`<br />`--secret-conf`<br />`--script-conf` | Load an explicit [scoped config](/cli/configuration#scoped-config-files). Repeatable |
 
 ## msb uninstall
