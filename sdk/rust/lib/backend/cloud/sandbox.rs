@@ -2,6 +2,7 @@
 //! plus the conversions between the SDK's [`SandboxConfig`] and the cloud's
 //! create wire shape.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +23,8 @@ use crate::sandbox::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, CloudSecretSource,
-    CloudSecretValue, CloudSecretsConfig, NetworkSpec, RootDisk, SandboxRuntimeOptions, TlsConfig,
+    CloudSecretValue, CloudSecretsConfig, NamedVolumeMode, NetworkSpec, RootDisk,
+    SandboxRuntimeOptions, TlsConfig, VolumeKind, VolumeMount,
 };
 use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
@@ -153,8 +155,56 @@ impl CloudBackend {
         &self,
         builder: SandboxBuilder,
     ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
-        let config = self.build_sandbox_config(builder).await?;
-        cloud_create_body_and_config(config, super::modify::resolve_env)
+        let mut config = self.build_sandbox_config(builder).await?;
+        let mut names = BTreeSet::new();
+        for mount in &mut config.spec.mounts {
+            let VolumeMount::Named { name, create, .. } = mount else {
+                continue;
+            };
+            let Some(requested) = create.take() else {
+                continue;
+            };
+            if requested.name != *name {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "named volume {name:?} has a different creation name"
+                )));
+            }
+            if requested.mode != NamedVolumeMode::EnsureExists
+                || requested.kind != VolumeKind::Directory
+                || requested.quota_mib.is_some()
+                || requested.capacity_mib.is_some()
+                || !requested.labels.is_empty()
+            {
+                return Err(MicrosandboxError::unsupported(
+                    Operation::SandboxCreate,
+                    UnsupportedReason::ConfigField("named volume inline create"),
+                ));
+            }
+            names.insert(name.clone());
+        }
+
+        // Validate the whole request before provisioning anything. Only the default
+        // ensure-exists behavior is resolved here; the wire and retained config use
+        // plain named mounts, while the local backend keeps its inline-create path.
+        let (request, config) = cloud_create_body_and_config(config, super::modify::resolve_env)?;
+        for name in names {
+            match self.find_volume(&name).await {
+                Ok(_) => {}
+                Err(MicrosandboxError::VolumeNotFound(_)) => {
+                    match self.create_volume(&name, None, &[]).await {
+                        Ok(_) => {}
+                        // Another client may have created the same volume since lookup.
+                        Err(MicrosandboxError::VolumeAlreadyExists(_)) => {
+                            self.find_volume(&name).await?;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok((request, config))
     }
 
     /// Resolve cloud request settings for both explicit build and immediate creation.
