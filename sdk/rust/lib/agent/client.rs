@@ -4,6 +4,7 @@ use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
 
+use microsandbox_agent_client::OptimizedAgentClient;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     time::Instant,
@@ -18,7 +19,7 @@ use super::AgentClientResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Client for communicating with `agentd` through a running sandbox's relay.
-pub struct AgentClient(microsandbox_agent_client::OptimizedAgentClient);
+pub struct AgentClient(OptimizedAgentClient);
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -27,9 +28,7 @@ pub struct AgentClient(microsandbox_agent_client::OptimizedAgentClient);
 impl AgentClient {
     /// Connect to an arbitrary agent relay socket path.
     pub async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<Self> {
-        microsandbox_agent_client::OptimizedAgentClient::connect(sock_path)
-            .await
-            .map(Self)
+        OptimizedAgentClient::connect(sock_path).await.map(Self)
     }
 
     /// Connect over an arbitrary byte-stream transport with an explicit
@@ -44,11 +43,9 @@ impl AgentClient {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        microsandbox_agent_client::OptimizedAgentClient::connect_stream_with_timeout(
-            stream, timeout,
-        )
-        .await
-        .map(Self)
+        OptimizedAgentClient::connect_stream_with_timeout(stream, timeout)
+            .await
+            .map(Self)
     }
 
     /// Connect to an arbitrary agent relay socket path with an explicit
@@ -57,7 +54,7 @@ impl AgentClient {
         sock_path: impl AsRef<Path>,
         timeout: Duration,
     ) -> AgentClientResult<Self> {
-        microsandbox_agent_client::OptimizedAgentClient::connect_with_timeout(sock_path, timeout)
+        OptimizedAgentClient::connect_with_timeout(sock_path, timeout)
             .await
             .map(Self)
     }
@@ -68,7 +65,7 @@ impl AgentClient {
         sock_path: impl AsRef<Path>,
         deadline: Instant,
     ) -> AgentClientResult<Self> {
-        microsandbox_agent_client::OptimizedAgentClient::connect_with_deadline(sock_path, deadline)
+        OptimizedAgentClient::connect_with_deadline(sock_path, deadline)
             .await
             .map(Self)
     }
@@ -81,11 +78,9 @@ impl AgentClient {
         sock_path: impl AsRef<Path>,
         deadline: Instant,
     ) -> AgentClientResult<Self> {
-        microsandbox_agent_client::OptimizedAgentClient::connect_in_band_with_deadline(
-            sock_path, deadline,
-        )
-        .await
-        .map(Self)
+        OptimizedAgentClient::connect_in_band_with_deadline(sock_path, deadline)
+            .await
+            .map(Self)
     }
 
     /// Resolve a sandbox name to its agent socket path and connect.
@@ -123,7 +118,7 @@ impl AgentClient {
         t: microsandbox_protocol::message::MessageType,
         negotiated: u8,
     ) -> AgentClientResult<()> {
-        microsandbox_agent_client::OptimizedAgentClient::ensure_version_compat_for(t, negotiated)
+        OptimizedAgentClient::ensure_version_compat_for(t, negotiated)
     }
 
     /// Close the connection.
@@ -137,7 +132,7 @@ impl AgentClient {
 //--------------------------------------------------------------------------------------------------
 
 impl Deref for AgentClient {
-    type Target = microsandbox_agent_client::OptimizedAgentClient;
+    type Target = OptimizedAgentClient;
 
     fn deref(&self) -> &Self::Target {
         &self.0
