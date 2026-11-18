@@ -16,10 +16,15 @@ import tempfile
 import traceback
 
 
+RUNTIMES = ("current", "v0.6.0", "v0.6.6", "v0.6.7", "v0.6.18", "v0.7.8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("binary", "releases", "agent", "firmware", "image", "support", "output", "temp-root"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--runtime", action="append", choices=RUNTIMES, help="Run only the selected runtime cells")
+    parser.add_argument("--previous-writer", type=Path, help="Released CLI that can open the candidate catalog but predates presence evidence")
     parser.add_argument("--with-mount", action="store_true", help="Also verify omitted mount ownership defaults")
     parser.add_argument("--with-network-defaults", action="store_true", help="Verify private evidence for omitted HTTP defaults")
     parser.add_argument("--with-unrecorded-secret-policy", action="store_true",
@@ -36,8 +41,8 @@ def main():
     report = {"host": platform.platform(), "cases": [], "status": "running",
               "artifacts": {str(p): history.digest(p) for p in (args.binary, args.agent, args.firmware, args.image)}}
     report["harness_sha256"] = history.digest(Path(__file__))
-    versions = ["current", "v0.6.0", "v0.6.6", "v0.6.7", "v0.6.18", "v0.7.8"]
-    for version in versions:
+    previous_writer = args.previous_writer or args.releases / "v0.7.8/msb"
+    for version in args.runtime or RUNTIMES:
         runtime = args.binary if version == "current" else args.releases / version / "msb"
         report["artifacts"][str(runtime)] = history.digest(runtime)
         home = Path(tempfile.mkdtemp(prefix="presence-", dir=args.temp_root))
@@ -152,7 +157,7 @@ def main():
                 first = journal()
                 check_presence(first["confirmed"]["source"])
                 save_source("current-source", first["confirmed"]["source"])
-                old = history.Runner(args.releases / "v0.7.8/msb", env, args.output / "old-writer")
+                old = history.Runner(previous_writer, env, args.output / "old-writer")
                 old.run("inspect", "inspect", "presence", "--format", "json")
                 old.run("modify", "modify", "presence", "--cpus", "2", "--format", "json")
                 # A new runtime owns this mutation even when the requester is old. It

@@ -679,7 +679,16 @@ fn fluent_scalar_and_list_replacements_establish_only_selected_policy() {
 #[ignore = "requires real runtime records from saved-presence-evidence.py"]
 fn live_missing_policy_remains_unknown_when_projected_and_rewritten() {
     let root = std::path::PathBuf::from(std::env::var_os("MSB_POLICY_PRESENCE_FIXTURES").unwrap());
-    for version in ["current", "v0.6.0", "v0.6.6", "v0.6.7", "v0.6.18", "v0.7.8"] {
+    // CI provisions a current runtime with a released writer. The full historical
+    // collector also provides a rewritten record for each old runtime.
+    let versions: &[&str] = match std::env::var("MSB_POLICY_PRESENCE_CURRENT_ONLY").as_deref() {
+        Ok("1") => &["current"],
+        Err(std::env::VarError::NotPresent) => {
+            &["current", "v0.6.0", "v0.6.6", "v0.6.7", "v0.6.18", "v0.7.8"]
+        }
+        value => panic!("unexpected current-only fixture selection: {value:?}"),
+    };
+    for &version in versions {
         let mut files = vec!["historical-network-rewritten-config.json"];
         if version == "current" {
             files.extend(["current-source.json", "runtime-modified-source.json"]);
