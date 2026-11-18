@@ -14,6 +14,15 @@ use crate::sandbox::{SandboxConfig, SandboxStatus};
 // Helpers
 //--------------------------------------------------------------------------------------------------
 
+fn test_home() -> tempfile::TempDir {
+    // Darwin's default temp directory can exceed the Unix socket path limit.
+    #[cfg(target_os = "macos")]
+    let directory = tempfile::tempdir_in("/tmp");
+    #[cfg(target_os = "linux")]
+    let directory = tempfile::tempdir();
+    directory.unwrap()
+}
+
 fn test_config(name: impl Into<String>) -> SandboxConfig {
     SandboxConfig {
         spec: microsandbox_types::SandboxSpec {
@@ -89,7 +98,7 @@ async fn recorded_sandbox_status(backend: &LocalContext, id: i32) -> SandboxStat
 
 #[tokio::test]
 async fn kill_sandbox_spares_unrelated_recycled_pid() {
-    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let home = test_home();
     let mut innocent_command = Command::new(std::env::current_exe().unwrap());
     innocent_command
         .args([
@@ -131,7 +140,7 @@ async fn kill_sandbox_spares_unrelated_recycled_pid() {
 
 #[tokio::test]
 async fn drain_sandbox_spares_unrelated_recycled_pid() {
-    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let home = test_home();
     let mut innocent_command = Command::new(std::env::current_exe().unwrap());
     innocent_command
         .args([
@@ -177,7 +186,7 @@ async fn kill_sandbox_still_kills_a_proven_runtime() {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::process::Stdio;
 
-    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let home = test_home();
     let backend = Arc::new(
         crate::test_support::local_backend_builder(home.path())
             .build()
@@ -259,7 +268,7 @@ async fn drain_sandbox_still_drains_a_proven_runtime() {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::process::Stdio;
 
-    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let home = test_home();
     let backend = Arc::new(
         crate::test_support::local_backend_builder(home.path())
             .build()
@@ -337,7 +346,7 @@ async fn drain_sandbox_still_drains_a_proven_runtime() {
 
 #[tokio::test]
 async fn ambiguous_runtime_ownership_preserves_active_state() {
-    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let home = test_home();
     let (backend, id) =
         backend_with_stale_running_pid(home.path(), "busy", std::process::id() as i32).await;
     let _guard =
