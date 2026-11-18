@@ -661,8 +661,7 @@ fn send_parent_watchdog_detach(fd: &OwnedFd) -> std::io::Result<()> {
 
 /// Wait for a released child in the background so its exit is always collected.
 ///
-/// On Linux `Child::wait` observes exit through a pidfd, so this waiter does not depend on
-/// SIGCHLD delivery. Without a runtime the child falls back to Tokio's orphan queue.
+/// Without a Tokio runtime the child falls back to the normal orphan queue.
 #[cfg(target_os = "linux")]
 fn reap_in_background(mut child: Child, runtime: Option<Handle>) {
     if !matches!(child.try_wait(), Ok(None)) {
@@ -679,9 +678,21 @@ fn reap_in_background(mut child: Child, runtime: Option<Handle>) {
 
     runtime.spawn(async move {
         let pid = child.id();
-        match child.wait().await {
-            Ok(status) => tracing::debug!(?pid, ?status, "reaped released sandbox process"),
-            Err(error) => tracing::debug!(?pid, %error, "failed to reap released sandbox process"),
+        let Some(mut exit) = super::child_exit::ChildExit::observe(&child) else {
+            return;
+        };
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    tracing::debug!(?pid, ?status, "reaped released sandbox process");
+                    return;
+                }
+                Ok(None) => exit.wait().await,
+                Err(error) => {
+                    tracing::warn!(?pid, %error, "failed to reap released sandbox process");
+                    return;
+                }
+            }
         }
     });
 }
@@ -978,28 +989,9 @@ mod reap_tests {
             "case {case} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
         assert!(
-            stdout.contains(&format!("reap case {case} passed"))
-                || stdout.contains(&format!("reap case {case} skipped")),
+            stdout.contains(&format!("reap case {case} passed")),
             "case {case} did not run\nstdout:\n{stdout}"
         );
-    }
-
-    /// Report why pidfds are unavailable. Without them Tokio waits through SIGCHLD,
-    /// which these scenarios deliberately disable.
-    fn pidfd_unavailable() -> Option<std::io::Error> {
-        let fd = unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_open,
-                std::process::id() as libc::pid_t,
-                libc::PIDFD_NONBLOCK,
-            )
-        };
-        if fd < 0 {
-            return Some(std::io::Error::last_os_error());
-        }
-
-        unsafe { libc::close(fd as libc::c_int) };
-        None
     }
 
     /// Spawn a child that exits only on stdin EOF or a signal, after a host runtime reset
@@ -1097,11 +1089,6 @@ mod reap_tests {
         let Ok(case) = std::env::var(CASE_ENV) else {
             return;
         };
-        if let Some(error) = pidfd_unavailable() {
-            println!("reap case {case} skipped: pidfd_open is unavailable ({error})");
-            return;
-        }
-
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
