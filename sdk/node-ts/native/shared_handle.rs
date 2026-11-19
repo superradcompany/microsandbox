@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -27,12 +25,23 @@ impl<T> SharedHandle<T> {
 
     /// Admit an operation without cloning the underlying sandbox configuration.
     pub(crate) async fn get(&self) -> Option<Arc<T>> {
-        self.inner.lock().await.clone()
+        self.get_now()
+    }
+
+    /// Read retained state synchronously; this lock never spans guest I/O or await.
+    pub(crate) fn get_now(&self) -> Option<Arc<T>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// Reject future admissions; already admitted operations retain their references.
     pub(crate) async fn take(&self) -> Option<Arc<T>> {
-        self.inner.lock().await.take()
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
     }
 }
 

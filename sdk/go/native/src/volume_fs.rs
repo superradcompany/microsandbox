@@ -8,13 +8,12 @@ use cap_std::fs::MetadataExt;
 use cap_std::fs::{DirBuilder, OpenOptions};
 #[cfg(unix)]
 use cap_std::fs::{DirBuilderExt, OpenOptionsExt};
-use microsandbox::{
-    MicrosandboxError, MicrosandboxResult, default_backend,
-    volume::{VolumeFs, fs::RootedVolumeFs},
-};
+use microsandbox::{MicrosandboxError, MicrosandboxResult, configured_context, volume::VolumeFs};
 use serde_json::{Value, json};
 
 use crate::FfiError;
+#[cfg(feature = "local")]
+use microsandbox::volume::fs::RootedVolumeFs;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -28,7 +27,7 @@ const ERROR_PATH_NOT_FOUND: i32 = 3;
 //--------------------------------------------------------------------------------------------------
 
 pub(crate) async fn dispatch(target: &str, op: &str, args: &Value) -> Result<String, FfiError> {
-    let path = args["path"]
+    let _path = args["path"]
         .as_str()
         .ok_or_else(|| FfiError::invalid_argument("missing volume fs path"))?;
     if let Some(op) = op.strip_prefix("local_") {
@@ -50,7 +49,14 @@ pub(crate) async fn dispatch(target: &str, op: &str, args: &Value) -> Result<Str
     }
 
     // Keep the existing cloud request shape and immutable cloud-id target intact.
-    let fs = VolumeFs::with_backend(default_backend(), target);
+    let fs = VolumeFs::with_backend(configured_context(), target);
+    dispatch_fs(fs, op, args).await
+}
+
+async fn dispatch_fs(fs: VolumeFs<'_>, op: &str, args: &Value) -> Result<String, FfiError> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| FfiError::invalid_argument("missing volume fs path"))?;
     match op {
         "read" => Ok(
             json!({"data_b64": base64::engine::general_purpose::STANDARD.encode(
@@ -84,112 +90,158 @@ pub(crate) async fn dispatch(target: &str, op: &str, args: &Value) -> Result<Str
 }
 
 fn local_dispatch(target: &str, op: &str, args: &Value) -> Result<String, FfiError> {
-    let path = args["path"].as_str().expect("dispatch validates path");
-    let data = if op == "write" {
-        Some(decode_data(args)?)
-    } else {
-        None
-    };
-    let operation = || -> MicrosandboxResult<Value> {
-        let opened = if op == "mkdir" {
-            RootedVolumeFs::open_or_create(Path::new(target))
+    #[cfg(not(feature = "local"))]
+    {
+        Err(FfiError::from(MicrosandboxError::local_only(
+            microsandbox::Operation::VolumeFsRead,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let data = if op == "write" {
+            Some(decode_data(args)?)
         } else {
-            RootedVolumeFs::open(Path::new(target))
+            None
         };
-        let root = match opened {
-            Ok(root) => root,
-            Err(MicrosandboxError::Io(error))
-                if op == "exists" && error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(json!({"exists": false}));
-            }
-            Err(MicrosandboxError::Io(error))
-                if op == "remove"
-                    && args["recursive"].as_bool().unwrap_or(false)
-                    && error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(json!({"ok": true}));
-            }
-            Err(error) => return Err(error),
-        };
-        let clean = args["clean_path"].as_str().unwrap_or(path);
-        let resolve = |path: &str| {
-            if op == "remove" {
-                root.resolve_entry(path)
+        let operation = || -> MicrosandboxResult<Value> {
+            let opened = if op == "mkdir" {
+                RootedVolumeFs::open_or_create(Path::new(target))
             } else {
-                root.resolve(path)
-            }
-        };
-        // Go previously used filepath.Clean before entering the filesystem.
-        // Never silently switch an ambiguous symlink/.. operation to another file.
-        let path = resolve(path)?;
-        let cleaned = resolve(clean)?;
-        if lexical_destination(&path) != lexical_destination(&cleaned)
-            && Path::new(args["path"].as_str().unwrap())
-                .components()
-                .any(|part| part == std::path::Component::ParentDir)
-        {
-            return Err(MicrosandboxError::InvalidConfig(
-                "ambiguous symlink/.. volume path; use an explicit destination".into(),
-            ));
-        }
-        if op == "remove" {
-            if clean == "." {
-                if args["recursive"].as_bool().unwrap_or(false) {
-                    root.remove_root()?;
-                } else {
-                    root.remove_empty_root()?;
-                }
-                return Ok(json!({"ok": true}));
-            }
-            return remove(&root, clean, args["recursive"].as_bool().unwrap_or(false));
-        }
-        let path = cleaned;
-        match op {
-            "read" => Ok(
-                json!({"data_b64": base64::engine::general_purpose::STANDARD.encode(
-                    root.dir.read(&path).map_err(|error| go_io_error(&root, &path, error, false))?
-                )}),
-            ),
-            "write" => {
-                // Go WriteFile creates the file, but does not create missing parents
-                // or change permissions on an existing file.
-                let mut options = OpenOptions::new();
-                options.write(true).create(true).truncate(true);
-                #[cfg(unix)]
-                options.mode(0o644);
-                root.dir
-                    .open_with(&path, &options)
-                    .map_err(|error| go_io_error(&root, &path, error, true))?
-                    .write_all(data.as_ref().expect("decoded write data"))?;
-                Ok(json!({"ok": true}))
-            }
-            "mkdir" => {
-                // Go MkdirAll reports ENOTDIR when the final entry exists as a
-                // file; create_dir_all would otherwise report EEXIST instead.
-                if root
-                    .dir
-                    .metadata(&path)
-                    .is_ok_and(|metadata| !metadata.is_dir())
+                RootedVolumeFs::open(Path::new(target))
+            };
+            let root = match opened {
+                Ok(root) => root,
+                Err(MicrosandboxError::Io(error))
+                    if op == "exists" && error.kind() == std::io::ErrorKind::NotFound =>
                 {
-                    return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory).into());
+                    return Ok(json!({"exists": false}));
                 }
-                let mut options = DirBuilder::new();
-                options.recursive(true);
-                #[cfg(unix)]
-                options.mode(0o755);
-                root.dir.create_dir_with(path, &options)?;
-                Ok(json!({"ok": true}))
-            }
-            "exists" => Ok(json!({"exists": root.dir.try_exists(path)?})),
-            _ => Err(MicrosandboxError::InvalidConfig(
-                "unknown local volume fs operation".into(),
-            )),
+                Err(MicrosandboxError::Io(error))
+                    if op == "remove"
+                        && args["recursive"].as_bool().unwrap_or(false)
+                        && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Ok(json!({"ok": true}));
+                }
+                Err(error) => return Err(error),
+            };
+            local_operation(root, op, args, data)
+        };
+        operation()
+            .map(|value| value.to_string())
+            .map_err(local_error)
+    }
+}
+
+/// Dispatch against the retained resource, including local identity validation under its name lock.
+pub(crate) async fn dispatch_volume(
+    volume: &microsandbox::Volume,
+    op: &str,
+    args: &Value,
+) -> Result<String, FfiError> {
+    #[cfg(feature = "local")]
+    if volume.local_state().is_some() {
+        let data = if op == "write" {
+            Some(decode_data(args)?)
+        } else {
+            None
+        };
+        let op = op.to_owned();
+        let args = args.clone();
+        return volume
+            .fs()
+            .with_local_root(move |root| local_operation(root, &op, &args, data))
+            .await
+            .map(|v| v.to_string())
+            .map_err(local_error);
+    }
+    dispatch_fs(volume.fs(), op, args).await
+}
+
+#[cfg(feature = "local")]
+fn local_operation(
+    root: RootedVolumeFs,
+    op: &str,
+    args: &Value,
+    data: Option<Vec<u8>>,
+) -> MicrosandboxResult<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| MicrosandboxError::InvalidConfig("missing volume fs path".into()))?;
+    let clean = args["clean_path"].as_str().unwrap_or(path);
+    let resolve = |path: &str| {
+        if op == "remove" {
+            root.resolve_entry(path)
+        } else {
+            root.resolve(path)
         }
     };
-    operation()
-        .map(|value| value.to_string())
-        .map_err(local_error)
+    // Go previously used filepath.Clean before entering the filesystem.
+    // Never silently switch an ambiguous symlink/.. operation to another file.
+    let path = resolve(path)?;
+    let cleaned = resolve(clean)?;
+    if lexical_destination(&path) != lexical_destination(&cleaned)
+        && Path::new(args["path"].as_str().unwrap())
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+    {
+        return Err(MicrosandboxError::InvalidConfig(
+            "ambiguous symlink/.. volume path; use an explicit destination".into(),
+        ));
+    }
+    if op == "remove" {
+        if clean == "." {
+            if args["recursive"].as_bool().unwrap_or(false) {
+                root.remove_root()?;
+            } else {
+                root.remove_empty_root()?;
+            }
+            return Ok(json!({"ok": true}));
+        }
+        return remove(&root, clean, args["recursive"].as_bool().unwrap_or(false));
+    }
+    let path = cleaned;
+    match op {
+        "read" => Ok(
+            json!({"data_b64": base64::engine::general_purpose::STANDARD.encode(
+                root.dir.read(&path).map_err(|error| go_io_error(&root, &path, error, false))?
+            )}),
+        ),
+        "write" => {
+            // Go WriteFile creates the file, but does not create missing parents
+            // or change permissions on an existing file.
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            options.mode(0o644);
+            root.dir
+                .open_with(&path, &options)
+                .map_err(|error| go_io_error(&root, &path, error, true))?
+                .write_all(data.as_ref().expect("decoded write data"))?;
+            Ok(json!({"ok": true}))
+        }
+        "mkdir" => {
+            // Go MkdirAll reports ENOTDIR when the final entry exists as a
+            // file; create_dir_all would otherwise report EEXIST instead.
+            if root
+                .dir
+                .metadata(&path)
+                .is_ok_and(|metadata| !metadata.is_dir())
+            {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory).into());
+            }
+            let mut options = DirBuilder::new();
+            options.recursive(true);
+            #[cfg(unix)]
+            options.mode(0o755);
+            root.dir.create_dir_with(path, &options)?;
+            Ok(json!({"ok": true}))
+        }
+        "exists" => Ok(json!({"exists": root.dir.try_exists(path)?})),
+        _ => Err(MicrosandboxError::InvalidConfig(
+            "unknown local volume fs operation".into(),
+        )),
+    }
 }
 
 // Compare destinations after resolution; missing/.. without a symlink is still
@@ -209,6 +261,7 @@ fn lexical_destination(path: &Path) -> std::path::PathBuf {
 }
 
 /// Match Go's Windows error interpretation without reopening an ambient path.
+#[cfg(feature = "local")]
 fn go_io_error(
     _root: &RootedVolumeFs,
     _path: &Path,
@@ -243,6 +296,7 @@ fn go_io_error(
     error
 }
 
+#[cfg(feature = "local")]
 fn remove(root: &RootedVolumeFs, path: &str, recursive: bool) -> MicrosandboxResult<Value> {
     let path = Path::new(path);
     let name = path.file_name().ok_or_else(|| {

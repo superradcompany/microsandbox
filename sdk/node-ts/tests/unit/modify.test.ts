@@ -8,8 +8,7 @@ import {
   type ModifyOptions,
 } from "../../dist/modify.js";
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
-import type { NapiSandbox, NapiSandboxHandle } from "../../dist/internal/napi.js";
+import type { NapiSandbox } from "../../dist/internal/napi.js";
 
 describe("modifyOptionsToNapi", () => {
   it("returns undefined for omitted options", () => {
@@ -135,7 +134,7 @@ describe("secret policy capability gate", () => {
     return {
       modify,
       sandbox: new Sandbox({ modify } as unknown as NapiSandbox, "api"),
-      handle: new SandboxHandle({ modify } as unknown as NapiSandboxHandle),
+      handle: new Sandbox({ modify } as unknown as NapiSandbox),
     };
   }
 

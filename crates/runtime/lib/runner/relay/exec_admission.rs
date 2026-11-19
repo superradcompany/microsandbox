@@ -440,7 +440,7 @@ fn deserialize_data_length<'de, D: Deserializer<'de>>(deserializer: D) -> Result
 
 #[cfg(test)]
 mod tests {
-    use microsandbox_protocol::exec::{ExecStderr, ExecStdout};
+    use microsandbox_protocol::exec::{ExecStarted, ExecStderr, ExecStdout};
 
     use super::*;
 
@@ -502,11 +502,73 @@ mod tests {
     }
 
     #[test]
+    fn stdin_credit_remains_bounded_for_old_and_new_guest_limits() {
+        // Ready, including a restored snapshot's Ready, is authoritative. A
+        // newer relay must never silently replace an older guest's allowance.
+        for input_limit in [64 * 1024, ExecLimits::default().input_limit] {
+            let policy = ExecLimits {
+                input_limit,
+                ..ExecLimits::default()
+            };
+            let flows = ExecutionTracker::default();
+            flows.install(Some(policy)).unwrap();
+            let mut request = Message::with_payload(MessageType::ExecRequest, 1, &()).unwrap();
+            request.v = 10;
+            assert!(matches!(
+                flows.admit(&request).unwrap(),
+                Admission::Accepted
+            ));
+            let started =
+                Message::with_payload(MessageType::ExecStarted, 1, &ExecStarted { pid: 42 })
+                    .unwrap();
+            flows.guest_message(&started, 0).unwrap();
+            let input = Message::with_payload(
+                MessageType::ExecStdin,
+                1,
+                &ExecStdin {
+                    data: vec![b'x'; policy.stdin_chunk_size as usize],
+                },
+            )
+            .unwrap();
+            for _ in 0..policy.input_limit / policy.stdin_chunk_size {
+                flows.client_message(&input, 0).unwrap();
+            }
+            assert!(flows.client_message(&input, 0).is_err());
+            let forged = Message::with_payload(
+                MessageType::ExecStdinAck,
+                1,
+                &ExecStdinAck {
+                    consumed: u64::from(input_limit) + 1,
+                },
+            )
+            .unwrap();
+            assert!(flows.guest_message(&forged, 0).is_err());
+            let ack = Message::with_payload(
+                MessageType::ExecStdinAck,
+                1,
+                &ExecStdinAck {
+                    consumed: u64::from(policy.stdin_chunk_size),
+                },
+            )
+            .unwrap();
+            flows.guest_message(&ack, 0).unwrap();
+            flows.guest_message(&ack, 0).unwrap();
+            flows.client_message(&input, 0).unwrap();
+            // Replaying the same cumulative ack cannot manufacture credit.
+            assert!(flows.client_message(&input, 0).is_err());
+        }
+    }
+
+    #[test]
     fn output_allowance_is_shared_and_replenished_by_consumption() {
-        for output_chunk_size in [4096, 16384] {
+        for (output_chunk_size, output_limit) in [
+            (4096, 1024 * 1024),
+            (16384, ExecLimits::default().output_limit),
+        ] {
             let flows = ExecutionTracker::default();
             let policy = ExecLimits {
                 output_chunk_size,
+                output_limit,
                 ..ExecLimits::default()
             };
             flows.install(Some(policy)).unwrap();

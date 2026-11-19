@@ -5,7 +5,7 @@ description: Inspect HTTPS traffic and manage certificate trust
 icon: "lock"
 ---
 
-<Tooltip tip="TLS inspection and host CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="TLS inspection and host CA trust are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 TLS inspection lets microsandbox inspect HTTPS traffic. This enables URL policy checks, request logging, and secure secret injection for matching hosts.
 
@@ -249,7 +249,9 @@ msb create python --name worker \
 
 ## Upstream CA trust
 
-The proxy verifies upstream certificates with the host's root store by default. You can add:
+The proxy verifies upstream certificates against host trust by default. On Windows, native chain validation follows Windows trust policy and can retrieve approved roots and issuers when that policy allows it. Other platforms load the host's native root certificates. Certificate and hostname checks remain enabled unless you explicitly override verification.
+
+Additional CA certificates apply only to the configured upstream connections; they are not installed in the host's trusted root store. You can add:
 
 - a CA trusted for every intercepted host
 - a CA trusted only for matching hosts

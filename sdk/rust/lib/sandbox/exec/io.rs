@@ -54,6 +54,8 @@ pub(crate) struct EventReceiver {
     events: mpsc::UnboundedReceiver<ExecEvent>,
     /// Consumption notifications; absent when the guest uses legacy buffering.
     consumed: Option<watch::Sender<ExecOutputAck>>,
+    /// Lives with the event reader, including when SSH splits execution into parts.
+    runtime: Option<Arc<crate::sandbox::state::RuntimeSession>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -163,11 +165,28 @@ impl EventReceiver {
         } else {
             (None, None)
         };
-        (EventReceiver { events, consumed }, acknowledgements)
+        (
+            EventReceiver {
+                events,
+                consumed,
+                runtime: None,
+            },
+            acknowledgements,
+        )
+    }
+
+    pub(super) fn retain_runtime(&mut self, runtime: Arc<crate::sandbox::state::RuntimeSession>) {
+        self.runtime = Some(runtime);
     }
 
     pub(crate) async fn recv(&mut self) -> Option<ExecEvent> {
-        let event = self.events.recv().await?;
+        let Some(event) = self.events.recv().await else {
+            self.runtime = None;
+            return None;
+        };
+        if matches!(event, ExecEvent::Exited { .. } | ExecEvent::Failed(_)) {
+            self.runtime = None;
+        }
         if let Some(consumed) = &self.consumed {
             consume(consumed, &event);
         }

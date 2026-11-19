@@ -1,7 +1,6 @@
 //! `msb create` command — create and boot a fresh sandbox.
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
 
 use super::common::{SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
 use crate::{sandbox_config, ui};
@@ -46,7 +45,11 @@ pub async fn run(
     if matches!(image, sandbox_config::ResolvedImage::Snapshot(_)) {
         anyhow::bail!("snapshot sources require `msb snap restore SNAPSHOT --name NAME`");
     }
-    let builder = resolved.apply(Sandbox::builder(&name))?;
+    let builder = resolved.apply(
+        crate::commands::common::selected_context()?
+            .sandboxes()
+            .builder(&name),
+    )?;
     let builder = image.apply(builder)?;
     let builder = if resolved.loaded() {
         apply_sandbox_opts_after_config(builder, &args.sandbox)?
@@ -69,7 +72,7 @@ pub async fn run(
         Ok(Ok(sandbox)) => {
             display.finish();
             super::common::display_restore_warnings(&sandbox).await;
-            sandbox.detach().await;
+            sandbox.detach().await?;
             // Print auto-generated name to stdout so it's scriptable.
             if !is_named {
                 println!("{name}");

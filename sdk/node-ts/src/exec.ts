@@ -105,12 +105,12 @@ export class ExecHandle implements AsyncIterable<ExecEvent>, AsyncDisposable {
     return new ExecSink(raw);
   }
 
-  /** Wait for the process to exit. */
+  /** Wait for exit, or return the terminal outcome already observed by wait, collect, or recv. */
   async wait(): Promise<ExitStatus> {
     return await withMappedErrors(() => this.inner.wait());
   }
 
-  /** Drain stdout/stderr and wait for exit. */
+  /** Drain stdout/stderr and wait for exit. Retains completion for later waits, not output. */
   async collect(): Promise<ExecOutput> {
     const raw = await withMappedErrors(() => this.inner.collect());
     return new ExecOutput(raw);

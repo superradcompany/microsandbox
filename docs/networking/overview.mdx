@@ -55,7 +55,7 @@ msb create python --name isolated --no-net
 ```
 </CodeGroup>
 
-The TypeScript and Rust examples disable the network device. Python `Network.none()`, Go `NetworkPolicy.None()`, and CLI `--no-net` retain the device but deny traffic in both directions through policy.
+Disabling the network device and denying all traffic are different: a deny-all policy leaves the device present. The examples below show the available option for each client.
 
 Ruby exposes network disablement, host/port allowlists, proxies, and basic TLS interception. Deployment profiles, policy profiles, NAT64, port publishing, and rate limits require TypeScript, Rust, Python, Go, or the CLI; see the [Ruby networking reference](/sdk/ruby/networking) for its available options.
 
@@ -110,7 +110,7 @@ msb create python --name shared-worker --deployment-profile multi-tenant
 
 In `multi-tenant` mode, traffic must pass both the platform's public-network policy and the sandbox's policy. Custom DNS servers and interface overrides are removed; host CA import and published ports are disabled. The sandbox cannot relax these restrictions.
 
-An operator can set `deployment_profile` in `~/.microsandbox/config.json` or on `LocalBackend`. This overrides the sandbox's choice on create and restart. Managed cloud requests do not carry a deployment profile; the hosting driver selects it.
+An operator can set `deployment_profile` in `~/.microsandbox/config.json` or on `LocalContext`. This overrides the sandbox's choice on create and restart. Managed cloud requests do not carry a deployment profile; the hosting driver selects it.
 
 </Accordion>
 
@@ -612,6 +612,7 @@ sb, err := m.CreateSandbox(ctx, "agent",
         Rules:           rules,
         TLS:             &m.TLSConfig{},
         HTTP: &m.HTTPConfig{
+            // Empty strings use the default message.
             DenyResponse: true,
             DenyResponseFormat: m.HTTPDenyResponseJSON,
             NetworkDenyMessage: "Ask the user for network access.",
@@ -685,7 +686,7 @@ Secret-policy denial:
 }
 ```
 
-Both custom messages are JSON-escaped. An omitted message uses the default; an empty string leaves `message` empty (Go treats an empty string as omitted). Text mode works with older runtimes that support denial responses. JSON mode requires the new runtime capability; the SDK returns an upgrade-required error if it is missing.
+Both custom messages are JSON-escaped. An omitted message uses the default; an explicit empty message stays empty when the SDK can represent it. Text mode works with older runtimes that support denial responses. JSON mode requires the new runtime capability; the SDK returns an upgrade-required error if it is missing.
 
 </Accordion>
 

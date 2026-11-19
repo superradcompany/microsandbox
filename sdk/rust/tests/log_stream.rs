@@ -14,6 +14,8 @@
 //! (libkrunfw, kernel image, etc.) — they're pure I/O exercises
 //! against the streaming engine through its public entry points.
 
+#![cfg(feature = "local")]
+
 use std::path::PathBuf;
 use std::sync::OnceLock;
 

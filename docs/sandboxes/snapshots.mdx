@@ -55,8 +55,7 @@ Start a `python:3.12` sandbox named `baseline` using the [create guide](/sandbox
 ```typescript TypeScript
 const baseline = await Sandbox.get("baseline");
 
-const session = await baseline.connect();
-await session.exec("pip", ["install", "requests"]);
+await baseline.exec("pip", ["install", "requests"]);
 
 await baseline.stop();
 ```
@@ -64,8 +63,7 @@ await baseline.stop();
 ```rust Rust
 let baseline = Sandbox::get("baseline").await?;
 
-let session = baseline.connect().await?;
-session.exec("pip", ["install", "requests"]).await?;
+baseline.exec("pip", ["install", "requests"]).await?;
 
 baseline.stop().await?;
 ```
@@ -73,8 +71,7 @@ baseline.stop().await?;
 ```python Python
 baseline = await Sandbox.get("baseline")
 
-session = await baseline.connect()
-await session.exec("pip", ["install", "requests"])
+await baseline.exec("pip", ["install", "requests"])
 
 await baseline.stop()
 ```
@@ -83,10 +80,7 @@ await baseline.stop()
 baseline, err := m.GetSandbox(ctx, "baseline")
 if err != nil { return err }
 
-session, err := baseline.Connect(ctx)
-if err != nil { return err }
-
-_, err = session.Exec(ctx, "pip", []string{"install", "requests"})
+_, err = baseline.Exec(ctx, "pip", []string{"install", "requests"})
 if err != nil { return err }
 
 err = baseline.Stop(ctx)
@@ -96,8 +90,7 @@ if err != nil { return err }
 ```ruby Ruby
 baseline = Microsandbox::Sandbox.get("baseline")
 
-session = baseline.connect
-session.exec("pip", ["install", "requests"])
+baseline.exec("pip", ["install", "requests"])
 
 baseline.stop
 ```
@@ -1076,7 +1069,7 @@ Locally, `group` selects its head; `group:member` selects an exact snapshot:
 
 <CodeGroup>
 ```typescript TypeScript
-await Snapshot.builder("cp01")
+const cp01 = await Snapshot.builder("cp01")
     .fromSandbox("baseline")
     .group("work")
     .create();
@@ -1096,11 +1089,11 @@ const earlier = await Sandbox.restore("work:cp01")
 
 await Snapshot.groupHead("work");
 
-await Snapshot.groupHead("work:cp01");
+await Snapshot.setGroupHead("work", cp01.id);
 ```
 
 ```rust Rust
-Snapshot::builder("cp01")
+let cp01 = Snapshot::builder("cp01")
     .from_sandbox("baseline")
     .group("work")
     .create()
@@ -1124,11 +1117,12 @@ let earlier = Sandbox::restore("work:cp01")
 
 Snapshot::group_head("work").await?;
 
-Snapshot::group_head("work:cp01").await?;
+let id = microsandbox::snapshot::SnapshotId::new(cp01.id())?;
+Snapshot::set_group_head("work", &id).await?;
 ```
 
 ```python Python
-await Snapshot.create("cp01", from_sandbox="baseline", group="work")
+cp01 = await Snapshot.create("cp01", from_sandbox="baseline", group="work")
 
 await Snapshot.create("cp02", from_sandbox="baseline", group="work")
 
@@ -1138,20 +1132,18 @@ earlier = await Sandbox.restore("work:cp01", name="earlier")
 
 await Snapshot.group_head("work")
 
-await Snapshot.group_head("work:cp01")
+await Snapshot.set_group_head("work", cp01.id)
 ```
 
 ```go Go
-var err error
-
-_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+cp01, err := m.CreateSnapshot(ctx, m.SnapshotCreateOptions{
     Name: "cp01",
     FromSandbox: "baseline",
     Group: "work",
 })
 if err != nil { return err }
 
-_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+_, err = m.CreateSnapshot(ctx, m.SnapshotCreateOptions{
     Name: "cp02",
     FromSandbox: "baseline",
     Group: "work",
@@ -1164,10 +1156,10 @@ if err != nil { return err }
 earlier, err := m.RestoreSandbox(ctx, "work:cp01", "earlier")
 if err != nil { return err }
 
-_, err = m.Snapshot.GroupHead(ctx, "work")
+_, err = m.SnapshotGroupHead(ctx, "work")
 if err != nil { return err }
 
-_, err = m.Snapshot.GroupHead(ctx, "work:cp01")
+_, err = m.SetSnapshotGroupHead(ctx, "work", cp01.ID())
 if err != nil { return err }
 ```
 
