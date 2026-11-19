@@ -653,6 +653,12 @@ server deployments might ignore these optional fields; there are no self-hosted
 deployments in the user's supported fleet and this is an approved server-support
 requirement. Local runtime capability checks are unchanged.
 
+## Local kill and drain process identity
+
+On Linux and macOS, kill and drain require evidence that the recorded PID belongs to the selected sandbox runtime. Linux sends signals through a captured pidfd. macOS verifies lifecycle ownership and process birth identity before signaling; Darwin’s PID-based syscall still leaves a narrow check-to-signal race.
+
+Denied process inspection does not establish that a run is stale. Reconciliation requires a free lifecycle guard, no possibly live runtime socket, and free owned-disk guards; ambiguous ownership returns an error and preserves the active run. No public API, runtime protocol, or persisted-format change is required. Replacement and fresh-start recovery are separate from this change.
+
 ## Concurrent catalog sidecar teardown
 
 Catalog hardening retries up to 16 complete inspections when SQLite sidecar teardown exposes an unlinked inode or the path changes during inspection. Every attempt repeats the ownership, link and permission checks; symlinks, hardlinks and untrusted access remain rejected. Continued churn returns an error. No SQLite schema, migration guard, lock protocol or runtime format changes.
