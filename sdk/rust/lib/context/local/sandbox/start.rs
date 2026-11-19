@@ -177,7 +177,7 @@ mod tests {
             super::super::process_record::ProcessRecord::load(pools.read(), &finished)
                 .await
                 .unwrap(),
-            super::super::process_record::LoadedProcessRecord::Missing
+            super::super::process_record::LoadedProcessRecord::Missing { .. }
         ));
         assert!(child.try_wait().unwrap().is_none());
     }

@@ -66,7 +66,9 @@ impl LocalContext {
                         pid: run.pid.unwrap_or_default(),
                     });
                 }
-                LoadedProcessRecord::Missing => {}
+                LoadedProcessRecord::Missing { pid } => {
+                    return Ok(RecordedRuntime::inspect(pid, lifecycle));
+                }
             }
         }
         let _ = db;
