@@ -278,7 +278,7 @@ Use the running-sandbox lookup to combine lookup and startup without creating a 
 
 ## Keep a sandbox running
 
-Detach a local sandbox when it should keep running after the client process exits. You can reconnect to it later by name.
+Detach a local sandbox when it should keep running after the client process exits. You can reconnect to it later by name. On Linux, the SDK collects the VM’s exit status after it stops, including while you retain the detached object. This cleanup does not stop a running detached sandbox.
 
 <CodeGroup>
 ```typescript TypeScript

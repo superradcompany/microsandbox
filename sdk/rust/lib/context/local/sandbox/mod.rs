@@ -2925,3 +2925,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod signal_tests;

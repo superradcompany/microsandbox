@@ -125,7 +125,11 @@ pub(super) fn lifecycle_matches(pid: i32, lifecycle: &Path) -> std::io::Result<b
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    let expected = std::fs::metadata(lifecycle)?;
+    let expected = match std::fs::metadata(lifecycle) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
     Ok((actual.dev(), actual.ino()) == (expected.dev(), expected.ino()))
 }
 
@@ -135,10 +139,12 @@ pub(super) fn lifecycle_matches(pid: i32, lifecycle: &Path) -> std::io::Result<b
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, Read, Write};
+    use std::io::{Read, Write};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
+    use super::super::super::control::identity::ProcessIdentity;
+    use super::super::signal_tests::{child_lines, cleanup_child, expect_line, wait_child};
     use super::*;
 
     #[test]
@@ -287,19 +293,10 @@ mod tests {
         }
         let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
             // A failed assertion must not leave a helper holding inherited disk locks.
-            let _ = child.kill();
-            let _ = child.wait();
+            cleanup_child(&mut child);
         });
-        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
-        let mut wait_line = |expected: &str| {
-            loop {
-                let mut line = String::new();
-                assert_ne!(output.read_line(&mut line).unwrap(), 0);
-                if line.trim() == expected {
-                    break;
-                }
-            }
-        };
+        let lines = child_lines(child.stdout.take().unwrap());
+        let wait_line = |expected: &str| expect_line(&lines, expected);
         wait_line("ready");
         let barrier = RuntimeExit::capture(
             Some(child.id() as i32),
@@ -338,7 +335,7 @@ mod tests {
         }
         assert!(identity.has_exited().unwrap());
         assert!(
-            child.wait().unwrap().success(),
+            wait_child(&mut child).success(),
             "exit observation must not reap Child"
         );
         // Completion is independent of this new owner's continuing exclusive attachment.
@@ -360,5 +357,57 @@ mod tests {
             .is_none()
         );
         assert!(RuntimeExit::capture(None, home.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn send_signal_targets_only_the_captured_process() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle =
+            microsandbox_runtime::ipc::acquire_lifecycle_guard(home.path(), "signal").unwrap();
+        let lifecycle_fd = lifecycle.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "context::local::sandbox::process_exit::tests::exit_barrier_child",
+                "--nocapture",
+            ])
+            .env("MSB_EXIT_BARRIER_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        unsafe {
+            command.pre_exec(move || {
+                let copy = libc::fcntl(lifecycle_fd, libc::F_DUPFD_CLOEXEC, 200);
+                if copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(copy, microsandbox_runtime::vm::LIFECYCLE_LOCK_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
+            cleanup_child(&mut child);
+        });
+        let lines = child_lines(child.stdout.take().unwrap());
+        let wait_line = |expected: &str| expect_line(&lines, expected);
+        wait_line("ready");
+        let barrier = RuntimeExit::capture(
+            Some(child.id() as i32),
+            &microsandbox_runtime::ipc::lifecycle_lock_path(home.path(), "signal"),
+        )
+        .unwrap()
+        .unwrap();
+        let identity = ProcessIdentity::capture(child.id() as i32).unwrap();
+        child.stdin.as_mut().unwrap().write_all(b"l").unwrap();
+        wait_line("lifecycle-released");
+        child.stdin.as_mut().unwrap().write_all(b"d").unwrap();
+        wait_line("disk-released");
+        // The helper keeps its worker alive until this final handshake byte.
+        child.stdin.take().unwrap().write_all(b"x").unwrap();
+        assert!(wait_child(&mut child).success());
+        identity.signal(libc::SIGKILL).unwrap();
+        assert!(barrier.has_exited().unwrap());
     }
 }

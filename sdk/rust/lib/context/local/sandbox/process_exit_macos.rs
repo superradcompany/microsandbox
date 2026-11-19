@@ -212,7 +212,13 @@ pub(super) fn lifecycle_matches(pid: i32, lifecycle: &Path) -> io::Result<bool> 
         ));
     }
     let info = unsafe { info.assume_init() };
-    let expected = std::fs::metadata(lifecycle)?;
+    let expected = match std::fs::metadata(lifecycle) {
+        Ok(metadata) => metadata,
+        Err(error) if matches!(error.kind(), io::ErrorKind::NotFound) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
     Ok((
         u64::from(info.vnode.vi_stat.vst_dev),
         info.vnode.vi_stat.vst_ino,
@@ -293,6 +299,8 @@ mod tests {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
+    use super::super::super::control::identity::ProcessIdentity;
+    use super::super::signal_tests::{child_lines, cleanup_child, expect_line};
     use super::*;
 
     fn lock_disk(path: &Path) -> io::Result<std::fs::File> {
@@ -543,5 +551,25 @@ mod tests {
         // Frozen public proc-info wrapper ABI, independently checked against the SDK headers.
         assert_eq!(std::mem::size_of::<ProcFileInfo>(), 24);
         assert_eq!(std::mem::size_of::<VnodeFdInfo>(), 176);
+    }
+
+    #[test]
+    fn signal_rejects_changed_birth_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle =
+            microsandbox_runtime::ipc::acquire_lifecycle_guard(home.path(), "identity").unwrap();
+        let disk = tempfile::NamedTempFile::new().unwrap();
+        let lock = lock_disk(disk.path()).unwrap();
+        let mut child = scopeguard::guard(
+            spawn_owner(lifecycle.as_raw_fd(), lock.as_raw_fd()),
+            |mut child| cleanup_child(&mut child),
+        );
+        expect_line(&child_lines(child.stdout.take().unwrap()), "ready");
+        // Dispatch now belongs to the shared recorded-process identity, not
+        // the observer. Exercise the actual dispatch guard after integration.
+        let mut identity = ProcessIdentity::capture(child.id() as i32).unwrap();
+        identity.start.0 += 1;
+        identity.signal(libc::SIGKILL).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
     }
 }
