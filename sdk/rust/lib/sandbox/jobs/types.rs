@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
-use super::{JobId, JobInfo};
+use super::{JobId, JobInfo, JobOutputSource};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -64,7 +64,7 @@ pub struct JobLogEntry {
     /// Capture time in Unix milliseconds.
     pub timestamp: i64,
     /// stdout, stderr, output (PTY), or stdin_error.
-    pub source: String,
+    pub source: JobOutputSource,
     /// Original output bytes, never lossy-decoded by the SDK.
     #[serde(rename = "data_base64", with = "super::encoding")]
     pub data: Bytes,
@@ -82,8 +82,8 @@ pub struct JobLogOptions {
     pub since: Option<i64>,
     /// Exclusive upper timestamp in Unix milliseconds.
     pub until: Option<i64>,
-    /// Source names; empty selects program output.
-    pub sources: Vec<String>,
+    /// Sources to include. An empty selection includes stdout, stderr and merged PTY output.
+    pub sources: Vec<JobOutputSource>,
     /// Resume after this opaque job-scoped cursor.
     pub from_cursor: Option<String>,
     /// Continue observing after the retained snapshot.

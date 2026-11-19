@@ -224,7 +224,8 @@ async fn secret_denials_answer_only_when_an_http_response_is_safe() {
                             .value("real-secret")
                             .placeholder("$KEY")
                             .allow("github.com")
-                            .build(),
+                            .build()
+                            .unwrap(),
                     ],
                     ..Default::default()
                 };

@@ -1,7 +1,6 @@
 //! `msb touch` command — explicitly refresh sandbox idle activity.
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
 
 use crate::ui;
 
@@ -57,7 +56,7 @@ pub async fn run(args: TouchArgs) -> anyhow::Result<()> {
 }
 
 async fn touch_one(name: &str, quiet: bool) -> anyhow::Result<()> {
-    let handle = Sandbox::get(name).await?;
+    let handle = crate::commands::common::sandbox_record(name).await?;
     let spinner = if quiet {
         ui::Spinner::quiet()
     } else {

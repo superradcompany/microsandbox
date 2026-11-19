@@ -155,10 +155,9 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 > msb snap restore snapshot.msb --name app3
 > ```
 >
-> Forking duplicates live execution. Restoring starts from saved state; add `--cow-mem` to share unchanged memory from a full snapshot. Snapshot generations describe progression, while branches describe distinct paths through snapshot history. The old `--forked` restore flag remains a deprecated alias. See [forking and snapshots](https://docs.microsandbox.dev/sandboxes/snapshots#forking).
->
 > ```sh
 > # Lifecycle
+> msb ls
 > msb stop app
 > msb start app
 > msb rm app

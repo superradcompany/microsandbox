@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../dist/internal/napi.js", () => ({ napi: {} }));
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
 import { SandboxAlreadyExistsError } from "../../dist/errors.js";
 
 describe("capture-once fork wrappers", () => {
@@ -20,7 +19,7 @@ describe("capture-once fork wrappers", () => {
           ]),
         };
         const source = kind === "sandbox"
-          ? new Sandbox(native as never, "source") : new SandboxHandle(native as never);
+          ? new Sandbox(native as never, "source") : new Sandbox(native as never);
         const results = await source[method](["alice", "bob"], { recordIntegrity: true, guestFlush: "required" });
         expect(native.forkMany).toHaveBeenCalledExactlyOnceWith(["alice", "bob"], true, "required", undefined);
         expect(native.fork).not.toHaveBeenCalled();

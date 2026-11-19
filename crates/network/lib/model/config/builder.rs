@@ -58,9 +58,10 @@ pub struct TlsBuilder {
 ///     .env("OPENAI_API_KEY")
 ///     .value(api_key)
 ///     .allow("api.openai.com")
-///     .build()
+///     .build()?
 /// ```
 pub struct SecretBuilder {
+    error: Option<BuildError>,
     env_var: Option<String>,
     value: Option<String>,
     source: Option<SecretSource>,
@@ -284,8 +285,14 @@ impl NetworkBuilder {
     ///     .allow("api.openai.com")
     /// )
     /// ```
-    pub fn secret(self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
-        self.secret_entry(f(SecretBuilder::new()).build())
+    pub fn secret(mut self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
+        match f(SecretBuilder::new()).build_at(self.config.secrets.secrets.len()) {
+            Ok(entry) => self.secret_entry(entry),
+            Err(error) => {
+                self.errors.push(error);
+                self
+            }
+        }
     }
 
     /// Add a materialized secret entry.
@@ -642,6 +649,7 @@ impl SecretBuilder {
     /// Start building a secret.
     pub fn new() -> Self {
         Self {
+            error: None,
             env_var: None,
             value: None,
             source: None,
@@ -704,10 +712,12 @@ impl SecretBuilder {
     /// [`allow_any_host_dangerous`](Self::allow_any_host_dangerous) for `*`.
     pub fn allow(mut self, host: impl AsRef<str>) -> Self {
         let host = host.as_ref();
-        assert!(
-            host != "*",
-            "SecretBuilder: use .allow_any_host_dangerous(true) for an explicit any-host secret"
-        );
+        if host == "*" {
+            self.error = Some(BuildError::InvalidSecretDeclaration(
+                "use .allow_any_host_dangerous(true) for an explicit any-host secret",
+            ));
+            return self;
+        }
         self.allowed_hosts.push(HostPattern::parse(host));
         self
     }
@@ -795,27 +805,29 @@ impl SecretBuilder {
     /// Consume the builder and return a [`SecretEntry`].
     ///
     /// Exactly one of [`value`](Self::value) or [`source`](Self::source) must
-    /// be set. A source-backed entry carries an empty durable value; see
-    /// [`source`](Self::source) for when the value is read.
-    ///
-    /// # Panics
-    /// Panics if `env` or at least one allowed host was not set, or if neither
-    /// (or both) of `value`/`source` was set.
-    pub fn build(self) -> SecretEntry {
-        let env_var = self.env_var.expect("SecretBuilder: .env() is required");
-        assert!(
-            self.value.is_some() ^ self.source.is_some(),
-            "SecretBuilder: exactly one of .value() or .source() is required"
-        );
-        assert!(
-            !self.allowed_hosts.is_empty(),
-            "SecretBuilder: at least one allowed host is required; use .allow_any_host_dangerous(true) for an explicit any-host secret"
-        );
+    /// be set. A source-backed entry carries an empty durable value; it is
+    /// resolved host-side at spawn time.
+    pub fn build(self) -> Result<SecretEntry, BuildError> {
+        self.build_at(0)
+    }
+
+    fn build_at(self, index: usize) -> Result<SecretEntry, BuildError> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        let env_var = self
+            .env_var
+            .ok_or(BuildError::InvalidSecretDeclaration(".env() is required"))?;
+        if self.value.is_some() == self.source.is_some() {
+            return Err(BuildError::InvalidSecretDeclaration(
+                "exactly one of .value() or .source() is required",
+            ));
+        }
         let placeholder = self
             .placeholder
             .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&env_var));
 
-        SecretEntry {
+        let entry = SecretEntry {
             env_var,
             value: Zeroizing::new(self.value.unwrap_or_default()),
             source: self.source,
@@ -825,7 +837,9 @@ impl SecretBuilder {
             passthrough_hosts: self.passthrough_hosts,
             violation_action: self.violation_action,
             require_tls_identity: self.require_tls_identity,
-        }
+        };
+        entry.validate(index)?;
+        Ok(entry)
     }
 }
 
@@ -1214,7 +1228,8 @@ mod tests {
             .allow_placeholder_for("api.anthropic.com")
             .allow_passthrough_for("*.anthropic.com")
             .violation_action(SecretViolationAction::BlockAndTerminate)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(
             secret.violation_action,
@@ -1230,12 +1245,37 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "SecretBuilder: at least one allowed host is required")]
+    fn secret_declaration_errors_reach_the_parent_builder() {
+        for secret in [
+            SecretBuilder::new().value("redacted").allow("example.com"),
+            SecretBuilder::new().env("TOKEN").allow("example.com"),
+            SecretBuilder::new()
+                .env("TOKEN")
+                .value("redacted")
+                .allow("*")
+                .allow("example.com"),
+        ] {
+            let error = NetworkBuilder::new()
+                .secret(|_| secret)
+                .build()
+                .unwrap_err();
+            assert!(matches!(error, BuildError::InvalidSecretDeclaration(_)));
+            assert!(!error.to_string().contains("redacted"));
+        }
+    }
+
+    #[test]
     fn secret_builder_rejects_empty_allowed_hosts() {
-        let _ = SecretBuilder::new()
+        let error = SecretBuilder::new()
             .env("TOKEN")
             .value("secret-value")
-            .build();
+            .build()
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("at least one allowed host is required")
+        );
     }
 
     #[test]
@@ -1246,7 +1286,8 @@ mod tests {
                 var: "HOST_API_KEY".into(),
             })
             .allow("api.example.com")
-            .build();
+            .build()
+            .unwrap();
 
         assert!(secret.value.is_empty());
         assert_eq!(
@@ -1262,16 +1303,21 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "exactly one of .value() or .source()")]
     fn secret_builder_rejects_both_value_and_source() {
-        let _ = SecretBuilder::new()
+        let error = SecretBuilder::new()
             .env("API_KEY")
             .value("inline")
             .source(SecretSource::Env {
                 var: "HOST_API_KEY".into(),
             })
             .allow("api.example.com")
-            .build();
+            .build()
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exactly one of .value() or .source()")
+        );
     }
 
     #[test]

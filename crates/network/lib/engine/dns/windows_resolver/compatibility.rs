@@ -205,7 +205,28 @@ fn parse_guest_query(raw_query: &[u8]) -> io::Result<GuestQuery> {
 fn take_result(guest: &GuestQuery, result: &mut dns::DNS_QUERY_RESULT) -> io::Result<Vec<u8>> {
     let records = result.pQueryRecords;
     result.pQueryRecords = ptr::null_mut();
-    let response = build_response(guest, result.QueryStatus, records);
+    // DnsQueryEx returns Unicode records even though windows-sys exposes the generic result
+    // pointer as DNS_RECORDA. Normalize every string, including CNAME/RDATA names, before the
+    // UTF-8 wire encoder reads it; otherwise "example.com" becomes "e" and cannot pin policy.
+    let response = if records.is_null() {
+        build_response(guest, result.QueryStatus, records)
+    } else {
+        // SAFETY: the original API-owned list is alive. Windows honors its charset flags and
+        // uses Unicode as the fallback for records without an explicit charset.
+        let utf8 = unsafe {
+            dns::DnsRecordSetCopyEx(records, dns::DnsCharSetUnicode, dns::DnsCharSetUtf8)
+        };
+        if utf8.is_null() {
+            Err(Error::other(
+                "could not normalize Windows DNS record encoding",
+            ))
+        } else {
+            let response = build_response(guest, result.QueryStatus, utf8);
+            // SAFETY: the copied list is independent and has the same matching free operation.
+            unsafe { dns::DnsFree(utf8.cast(), dns::DnsFreeRecordList) };
+            response
+        }
+    };
     if !records.is_null() {
         // SAFETY: DnsQueryEx allocates the list and requires this matching free operation.
         unsafe { dns::DnsFree(records.cast(), dns::DnsFreeRecordList) };
@@ -594,6 +615,53 @@ mod tests {
             assert_eq!(response_code(status).unwrap(), expected);
         }
         assert!(response_code(12345).is_err());
+    }
+
+    #[test]
+    fn unicode_query_results_preserve_owner_and_cname_target() {
+        let owner = CString::new("example.com.").unwrap();
+        let target = CString::new("alias.example.com.").unwrap();
+        let mut address = native_record(
+            &target,
+            dns::DNS_TYPE_A,
+            dns::DNS_RECORDA_1 {
+                A: dns::DNS_A_DATA {
+                    IpAddress: u32::from_ne_bytes([192, 0, 2, 1]),
+                },
+            },
+        );
+        let mut alias = native_record(
+            &owner,
+            dns::DNS_TYPE_CNAME,
+            dns::DNS_RECORDA_1 {
+                PTR: dns::DNS_PTR_DATAA {
+                    pNameHost: pstr(&target),
+                },
+            },
+        );
+        address.Flags.DW = dns::DNSREC_ANSWER;
+        address.wDataLength = std::mem::size_of::<dns::DNS_A_DATA>() as u16;
+        alias.Flags.DW = dns::DNSREC_ANSWER;
+        alias.wDataLength = std::mem::size_of::<dns::DNS_PTR_DATAA>() as u16;
+        alias.pNext = &mut address;
+        // Use the native allocator/encoder to reproduce DnsQueryEx's UTF-16 list, including
+        // its charset flags. take_result must both normalize it and release its ownership.
+        let wide =
+            unsafe { dns::DnsRecordSetCopyEx(&alias, dns::DnsCharSetUtf8, dns::DnsCharSetUnicode) };
+        assert!(!wide.is_null());
+        let mut result = dns::DNS_QUERY_RESULT {
+            QueryStatus: ERROR_SUCCESS as i32,
+            pQueryRecords: wide,
+            ..Default::default()
+        };
+        let guest = parse_guest_query(EXAMPLE_QUERY).unwrap();
+        let bytes = take_result(&guest, &mut result).unwrap();
+        assert!(result.pQueryRecords.is_null());
+        let response = Message::from_vec(&bytes).unwrap();
+        assert_eq!(response.answers[0].name.to_utf8(), "example.com.");
+        assert_eq!(response.answers[0].data.to_string(), "alias.example.com.");
+        assert_eq!(response.answers[1].name.to_utf8(), "alias.example.com.");
+        assert_eq!(response.answers[1].data.to_string(), "192.0.2.1");
     }
 
     #[test]

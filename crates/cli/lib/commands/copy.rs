@@ -150,7 +150,7 @@ pub async fn run(args: CopyArgs) -> anyhow::Result<()> {
 }
 
 /// Copy a host path into a sandbox.
-async fn copy_local_to_sandbox(fs: &SandboxFsOps<'_>, src: &Path, dst: &str) -> anyhow::Result<()> {
+async fn copy_local_to_sandbox(fs: &SandboxFsOps, src: &Path, dst: &str) -> anyhow::Result<()> {
     let metadata = tokio::fs::symlink_metadata(src)
         .await
         .with_context(|| format!("stat {}", src.display()))?;
@@ -160,7 +160,7 @@ async fn copy_local_to_sandbox(fs: &SandboxFsOps<'_>, src: &Path, dst: &str) -> 
 }
 
 /// Copy a sandbox path to the host.
-async fn copy_sandbox_to_local(fs: &SandboxFsOps<'_>, src: &str, dst: &Path) -> anyhow::Result<()> {
+async fn copy_sandbox_to_local(fs: &SandboxFsOps, src: &str, dst: &Path) -> anyhow::Result<()> {
     let metadata = fs
         .stat_with_follow(src, false)
         .await
@@ -181,7 +181,7 @@ async fn copy_sandbox_to_local(fs: &SandboxFsOps<'_>, src: &str, dst: &Path) -> 
 /// Copy a sandbox entry beneath a pinned host destination on Unix.
 #[cfg(unix)]
 async fn copy_sandbox_to_local_unix(
-    fs: &SandboxFsOps<'_>,
+    fs: &SandboxFsOps,
     src: &str,
     dst: &Path,
     metadata: FsMetadata,
@@ -231,7 +231,7 @@ async fn copy_sandbox_to_local_unix(
 /// Copy a sandbox entry beneath a pinned host destination on Windows.
 #[cfg(windows)]
 async fn copy_sandbox_to_local_windows(
-    fs: &SandboxFsOps<'_>,
+    fs: &SandboxFsOps,
     src: &str,
     dst: &Path,
     metadata: FsMetadata,
@@ -279,11 +279,7 @@ async fn copy_sandbox_to_local_windows(
 }
 
 /// Copy a sandbox path within the same sandbox.
-async fn copy_sandbox_to_sandbox(
-    fs: &SandboxFsOps<'_>,
-    src: &str,
-    dst: &str,
-) -> anyhow::Result<()> {
+async fn copy_sandbox_to_sandbox(fs: &SandboxFsOps, src: &str, dst: &str) -> anyhow::Result<()> {
     let metadata = fs
         .stat_with_follow(src, false)
         .await
@@ -295,9 +291,9 @@ async fn copy_sandbox_to_sandbox(
 
 /// Copy a sandbox path into another sandbox.
 async fn copy_sandbox_to_other_sandbox(
-    src_fs: &SandboxFsOps<'_>,
+    src_fs: &SandboxFsOps,
     src: &str,
-    dst_fs: &SandboxFsOps<'_>,
+    dst_fs: &SandboxFsOps,
     dst: &str,
 ) -> anyhow::Result<()> {
     let metadata = src_fs
@@ -311,7 +307,7 @@ async fn copy_sandbox_to_other_sandbox(
 
 /// Recursively copy a host entry into a sandbox.
 fn copy_local_entry_to_sandbox<'a>(
-    fs: &'a SandboxFsOps<'a>,
+    fs: &'a SandboxFsOps,
     src: PathBuf,
     dst: String,
     metadata: std::fs::Metadata,
@@ -358,7 +354,7 @@ fn copy_local_entry_to_sandbox<'a>(
 /// Recursively copy a sandbox entry beneath a pinned Unix destination root.
 #[cfg(unix)]
 fn copy_sandbox_entry_to_local_unix<'a>(
-    fs: &'a SandboxFsOps<'a>,
+    fs: &'a SandboxFsOps,
     src: String,
     dst: PathBuf,
     root: &'a host::CopyRoot,
@@ -408,7 +404,7 @@ fn copy_sandbox_entry_to_local_unix<'a>(
 /// Recursively copy a sandbox entry beneath a pinned Windows destination root.
 #[cfg(windows)]
 fn copy_sandbox_entry_to_local_windows<'a>(
-    fs: &'a SandboxFsOps<'a>,
+    fs: &'a SandboxFsOps,
     src: String,
     dst: PathBuf,
     root: &'a host::CopyRoot,
@@ -534,7 +530,7 @@ fn confine_symlink_target(dst: &Path, target: &str) -> anyhow::Result<PathBuf> {
 
 /// Recursively copy a sandbox entry within the same sandbox.
 fn copy_sandbox_entry_to_sandbox<'a>(
-    fs: &'a SandboxFsOps<'a>,
+    fs: &'a SandboxFsOps,
     src: String,
     dst: String,
     metadata: FsMetadata,
@@ -572,9 +568,9 @@ fn copy_sandbox_entry_to_sandbox<'a>(
 
 /// Recursively copy a sandbox entry into another sandbox.
 fn copy_sandbox_entry_to_other_sandbox<'a>(
-    src_fs: &'a SandboxFsOps<'a>,
+    src_fs: &'a SandboxFsOps,
     src: String,
-    dst_fs: &'a SandboxFsOps<'a>,
+    dst_fs: &'a SandboxFsOps,
     dst: String,
     metadata: FsMetadata,
 ) -> BoxFuture<'a, anyhow::Result<()>> {
@@ -618,7 +614,7 @@ fn copy_sandbox_entry_to_other_sandbox<'a>(
 
 /// Copy a host file into a sandbox using streaming I/O.
 async fn copy_local_file_to_sandbox(
-    fs: &SandboxFsOps<'_>,
+    fs: &SandboxFsOps,
     src: &Path,
     dst: &str,
 ) -> anyhow::Result<()> {
@@ -643,7 +639,7 @@ async fn copy_local_file_to_sandbox(
 /// Copy a sandbox file beneath a pinned Unix root using streaming I/O.
 #[cfg(unix)]
 async fn copy_sandbox_file_to_local_unix(
-    fs: &SandboxFsOps<'_>,
+    fs: &SandboxFsOps,
     src: &str,
     root: &host::CopyRoot,
     dst: &Path,
@@ -663,7 +659,7 @@ async fn copy_sandbox_file_to_local_unix(
 /// Copy a sandbox file to a Windows host using streaming I/O.
 #[cfg(windows)]
 async fn copy_sandbox_file_to_local_windows(
-    fs: &SandboxFsOps<'_>,
+    fs: &SandboxFsOps,
     src: &str,
     root: &host::CopyRoot,
     dst: &Path,
@@ -682,9 +678,9 @@ async fn copy_sandbox_file_to_local_windows(
 
 /// Copy a sandbox file into another sandbox using streaming I/O.
 async fn copy_sandbox_file_to_sandbox(
-    src_fs: &SandboxFsOps<'_>,
+    src_fs: &SandboxFsOps,
     src: &str,
-    dst_fs: &SandboxFsOps<'_>,
+    dst_fs: &SandboxFsOps,
     dst: &str,
 ) -> anyhow::Result<()> {
     let mut stream = src_fs.read_stream(src).await?;
@@ -700,7 +696,7 @@ async fn copy_sandbox_file_to_sandbox(
 
 /// Resolve a sandbox destination using cp-style "existing directory means copy into it" behavior.
 async fn sandbox_destination(
-    fs: &SandboxFsOps<'_>,
+    fs: &SandboxFsOps,
     dst: &str,
     basename: &str,
 ) -> anyhow::Result<String> {
@@ -724,7 +720,7 @@ async fn local_destination(dst: &Path, basename: &str) -> anyhow::Result<PathBuf
 
 /// Set guest permission bits.
 async fn set_guest_mode(
-    fs: &SandboxFsOps<'_>,
+    fs: &SandboxFsOps,
     path: &str,
     mode: u32,
     follow_symlink: bool,

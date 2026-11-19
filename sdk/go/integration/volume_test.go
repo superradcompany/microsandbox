@@ -46,21 +46,21 @@ func TestVolumeWithLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVolume: %v", err)
 	}
-	t.Cleanup(func() { _ = vol.Remove(context.Background()) })
+	t.Cleanup(func() { _ = vol.Destroy(context.Background()) })
 
 	h, err := microsandbox.GetVolume(ctx, name)
 	if err != nil {
 		t.Fatalf("GetVolume: %v", err)
 	}
-	labels := h.Labels()
+	labels := liveVolumeInfo(t, ctx, h).Labels
 	if labels["team"] != "agents" {
 		t.Errorf("labels[team]: got %q want agents", labels["team"])
 	}
 	if labels["tier"] != "test" {
 		t.Errorf("labels[tier]: got %q want test", labels["tier"])
 	}
-	if h.QuotaMiB() == nil || *h.QuotaMiB() != 64 {
-		t.Errorf("QuotaMiB: got %v want 64", h.QuotaMiB())
+	if liveVolumeInfo(t, ctx, h).QuotaMiB == nil || *liveVolumeInfo(t, ctx, h).QuotaMiB != 64 {
+		t.Errorf("QuotaMiB: got %v want 64", liveVolumeInfo(t, ctx, h).QuotaMiB)
 	}
 	if h.Path() == "" {
 		t.Error("VolumeHandle.Path: empty")
@@ -79,13 +79,13 @@ func TestListVolumesRichMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVolume: %v", err)
 	}
-	t.Cleanup(func() { _ = vol.Remove(context.Background()) })
+	t.Cleanup(func() { _ = vol.Destroy(context.Background()) })
 
 	vols, err := microsandbox.ListVolumes(ctx)
 	if err != nil {
 		t.Fatalf("ListVolumes: %v", err)
 	}
-	var found *microsandbox.VolumeHandle
+	var found *microsandbox.Volume
 	for _, v := range vols {
 		if v.Name() == name {
 			found = v
@@ -98,10 +98,10 @@ func TestListVolumesRichMetadata(t *testing.T) {
 	if found.Path() == "" {
 		t.Error("Path: empty in list result")
 	}
-	if found.Labels()["key"] != "value" {
-		t.Errorf("Labels: got %v", found.Labels())
+	if liveVolumeInfo(t, ctx, found).Labels["key"] != "value" {
+		t.Errorf("Labels: got %v", liveVolumeInfo(t, ctx, found).Labels)
 	}
-	if found.CreatedAt().IsZero() {
+	if liveVolumeInfo(t, ctx, found).CreatedAt.IsZero() {
 		t.Error("CreatedAt: zero")
 	}
 }
