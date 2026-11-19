@@ -1289,8 +1289,8 @@ impl SshSession {
             &runtime.config,
             cmd,
             opts,
-            rows,
-            cols,
+            (rows, cols),
+            true,
         )
         .await?;
         handle.retain_runtime(runtime);

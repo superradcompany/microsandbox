@@ -412,9 +412,8 @@ fn main() {
             return;
         }
         Commands::LaunchProtocol => {
-            println!(
-                "{}",
-                serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
+            let mut capabilities =
+                serde_json::to_value(microsandbox_runtime::launch::LaunchCapabilities {
                     storage_reader: microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
                     protected_guest_state: true,
                     protocols: vec![2, 1],
@@ -429,12 +428,13 @@ fn main() {
                     fs_state_limit: true,
                     configuration_retention: true,
                     nested_virt: Some(
-                        microsandbox_runtime::nested_virt_supported().unwrap_or(false)
+                        microsandbox_runtime::nested_virt_supported().unwrap_or(false),
                     ),
                     exec_limits: true,
                 })
-                .expect("serialize capabilities")
-            );
+                .expect("serialize capabilities");
+            capabilities["deferred_command_bindings"] = true.into();
+            println!("{capabilities}");
             return;
         }
         // Sandbox process entry — never returns (VMM takes over).

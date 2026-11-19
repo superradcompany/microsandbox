@@ -70,6 +70,7 @@ pub struct RunArgs {
 
 /// Parsed per-command execution options for `msb run`.
 struct ExecOpts {
+    inherited_command: bool,
     tty: bool,
     no_stdin: bool,
     timeout: Option<Duration>,
@@ -91,6 +92,8 @@ impl ExecOpts {
         };
 
         Ok(Self {
+            // OCI run may prepend a saved entrypoint even with a positional command.
+            inherited_command: args.command.is_empty() || args.sandbox.entrypoint.is_none(),
             tty: args.tty,
             no_stdin: args.no_stdin,
             timeout,
@@ -155,7 +158,8 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let exec_opts = ExecOpts::parse(&args)?;
+    let mut exec_opts = ExecOpts::parse(&args)?;
+    exec_opts.inherited_command = true;
     let interactive =
         common::use_interactive_tty(io::stdin().is_terminal(), args.no_tty || args.no_stdin);
 
@@ -361,13 +365,15 @@ async fn exec_in_sandbox(
         let rlimits = opts.rlimits.clone();
         let detach_keys = opts.detach_keys.clone();
         let timeout = opts.timeout;
-        let has_opts = !rlimits.is_empty() || detach_keys.is_some();
+        let has_opts = opts.inherited_command || !rlimits.is_empty() || detach_keys.is_some();
 
         let attach_fut = async {
             if has_opts {
                 Ok(sandbox
                     .attach_with(cmd, |a| {
-                        let mut a = a.args(cmd_args);
+                        let mut a = a
+                            .with_inherited_command(opts.inherited_command)
+                            .args(cmd_args);
                         for (resource, soft, hard) in rlimits {
                             a = a.rlimit_range(resource, soft, hard);
                         }
@@ -404,11 +410,17 @@ async fn exec_in_sandbox(
                 .await;
         }
 
-        let has_opts = tty || opts.no_stdin || timeout.is_some() || !rlimits.is_empty();
+        let has_opts = opts.inherited_command
+            || tty
+            || opts.no_stdin
+            || timeout.is_some()
+            || !rlimits.is_empty();
         let output: ExecOutput = if has_opts {
             sandbox
                 .exec_with(cmd, |e| {
-                    let mut e = e.args(cmd_args);
+                    let mut e = e
+                        .with_inherited_command(opts.inherited_command)
+                        .args(cmd_args);
                     if opts.no_stdin {
                         e = e.stdin_bytes(Vec::new());
                     }

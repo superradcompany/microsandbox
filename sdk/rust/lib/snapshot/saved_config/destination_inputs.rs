@@ -16,7 +16,7 @@ use super::SavedConfigurationPlan;
 /// resource obligations remain in `plan()`. No serialization or conversion into a bare
 /// SandboxSpec is provided: consumers must finish those checks before activation/persistence.
 pub struct SavedDestinationInputs {
-    spec: SandboxSpec,
+    config: crate::SandboxConfig,
     plan: SavedConfigurationPlan,
 }
 
@@ -26,14 +26,16 @@ pub struct SavedDestinationInputs {
 
 impl SavedDestinationInputs {
     pub(super) fn new(spec: SandboxSpec, plan: SavedConfigurationPlan) -> Self {
-        Self { spec, plan }
+        let mut config = crate::SandboxConfig::from(spec);
+        config.deferred_command_bindings = plan.runtime().inputs().deferred_command_bindings();
+        Self { config, plan }
     }
 
     /// Native inputs only. When this operation starts no command, unavailable future command
     /// defaults are still guarded by `plan().runtime().command_defaults()`. An empty native
     /// field must never be treated as resolution of a retained unknown or binding requirement.
     pub fn spec_inputs(&self) -> &SandboxSpec {
-        &self.spec
+        &self.config.spec
     }
 
     /// The same immutable source/operation plan that produced these inputs. It retains exact

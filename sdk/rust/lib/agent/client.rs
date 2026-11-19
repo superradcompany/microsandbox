@@ -12,24 +12,70 @@ use tokio::{
 #[cfg(feature = "local")]
 use super::AgentClientError;
 use super::AgentClientResult;
+use microsandbox_protocol::{
+    exec::ExecRequest,
+    exec_bindings::{BoundExecRequest, ExecBindingCapability, ExecBindingOverrides},
+    message::{Message, MessageType},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
 /// Client for communicating with `agentd` through a running sandbox's relay.
-pub struct AgentClient(microsandbox_agent_client::OptimizedAgentClient);
+pub struct AgentClient {
+    inner: microsandbox_agent_client::OptimizedAgentClient,
+    exec_bindings: Option<String>,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl AgentClient {
+    /// Send pre-merge origin only when the connected host advertises binding admission.
+    /// An established session fixes the destination. A dispatched exec is never retried.
+    pub(crate) async fn stream_exec(
+        &self,
+        command: &ExecRequest,
+        explicit_env: &[microsandbox_types::EnvVar],
+        explicit_argv: bool,
+    ) -> AgentClientResult<(u32, tokio::sync::mpsc::Receiver<Message>)> {
+        if self.exec_bindings.is_some() {
+            let request = BoundExecRequest {
+                command,
+                binding_overrides: ExecBindingOverrides {
+                    explicit_argv,
+                    env_keys: explicit_env.iter().map(|env| env.key.clone()).collect(),
+                },
+            };
+            return self.stream(MessageType::ExecRequest, &request).await;
+        }
+        self.stream(MessageType::ExecRequest, command).await
+    }
+
+    pub(crate) fn exec_binding_boot_id(&self) -> Option<&str> {
+        self.exec_bindings.as_deref()
+    }
+
+    fn from_transport(inner: microsandbox_agent_client::OptimizedAgentClient) -> Self {
+        let exec_bindings = microsandbox_protocol::wire::Envelope::decode(inner.ready_bytes())
+            .ok()
+            .and_then(|message| message.payload::<ExecBindingCapability>().ok())
+            .filter(|ready| ready.relay_exec_bindings == Some(1))
+            .and_then(|ready| ready.binding_boot_id)
+            .filter(|id| !id.is_empty() && id.len() <= 128);
+        Self {
+            inner,
+            exec_bindings,
+        }
+    }
+
     /// Connect to an arbitrary agent relay socket path.
     pub async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<Self> {
         microsandbox_agent_client::OptimizedAgentClient::connect(sock_path)
             .await
-            .map(Self)
+            .map(Self::from_transport)
     }
 
     /// Connect over an arbitrary byte-stream transport with an explicit
@@ -48,7 +94,7 @@ impl AgentClient {
             stream, timeout,
         )
         .await
-        .map(Self)
+        .map(Self::from_transport)
     }
 
     /// Connect to an arbitrary agent relay socket path with an explicit
@@ -59,7 +105,7 @@ impl AgentClient {
     ) -> AgentClientResult<Self> {
         microsandbox_agent_client::OptimizedAgentClient::connect_with_timeout(sock_path, timeout)
             .await
-            .map(Self)
+            .map(Self::from_transport)
     }
 
     /// Connect to an arbitrary agent relay socket path with an explicit
@@ -70,7 +116,7 @@ impl AgentClient {
     ) -> AgentClientResult<Self> {
         microsandbox_agent_client::OptimizedAgentClient::connect_with_deadline(sock_path, deadline)
             .await
-            .map(Self)
+            .map(Self::from_transport)
     }
 
     /// Resolve a sandbox name to its agent socket path and connect.
@@ -113,7 +159,7 @@ impl AgentClient {
 
     /// Close the connection.
     pub async fn close(self) {
-        self.0.close().await;
+        self.inner.close().await;
     }
 }
 
@@ -125,7 +171,7 @@ impl Deref for AgentClient {
     type Target = microsandbox_agent_client::OptimizedAgentClient;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.inner
     }
 }
 

@@ -377,6 +377,7 @@ impl RuntimeControlExecutor {
             request.operation,
             microsandbox_protocol::jobs::JobOperation::Hello
                 | microsandbox_protocol::jobs::JobOperation::Start { .. }
+                | microsandbox_protocol::jobs::JobOperation::StartWithBindings { .. }
         ) && !self
             .signal_workload
             .ordinary_writer()
@@ -408,6 +409,7 @@ impl RuntimeControlExecutor {
             && matches!(
                 request.operation,
                 microsandbox_protocol::jobs::JobOperation::Start { .. }
+                    | microsandbox_protocol::jobs::JobOperation::StartWithBindings { .. }
                     | microsandbox_protocol::jobs::JobOperation::Write { .. }
                     | microsandbox_protocol::jobs::JobOperation::Eof { .. }
             )

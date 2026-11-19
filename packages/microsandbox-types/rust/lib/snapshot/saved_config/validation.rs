@@ -78,15 +78,24 @@ pub(super) fn count(length: usize, field: &str) -> SnapshotManifestResult<()> {
 }
 
 pub(super) fn binding(id: &str, field: &str) -> SnapshotManifestResult<()> {
-    if id.is_empty()
-        || id.len() > MAX_BINDING_ID_BYTES
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-    {
+    if !valid_binding_id(id) {
         return invalid("SCFG_BINDING", field, "invalid logical binding identifier");
     }
     Ok(())
+}
+
+/// Whether a logical destination binding identifier can appear in saved configuration.
+pub fn valid_binding_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_BINDING_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// Whether an environment key can be carried intact to a guest process.
+pub fn valid_saved_env_key(name: &str) -> bool {
+    !name.is_empty() && name.len() <= MAX_NAME_BYTES && !name.contains(['=', '\0'])
 }
 
 fn validate_tree(

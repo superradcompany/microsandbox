@@ -133,6 +133,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         );
         let sandbox = handle.connect().await?;
         let tty = args.tty || interactive;
+        let inherited = args.command.is_empty();
         let (cmd, command_args) = super::common::resolve_exec_command(
             sandbox.config().await?.runtime(),
             args.command,
@@ -144,7 +145,10 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         let job = sandbox
             .exec_detached_with(cmd, |options| {
                 let options = apply_common_exec_opts(
-                    options.args(command_args).tty(tty),
+                    options
+                        .with_inherited_command(inherited)
+                        .args(command_args)
+                        .tty(tty),
                     &env_pairs,
                     &args.workdir,
                     &args.user,
@@ -210,7 +214,8 @@ async fn run_started(
     // An explicit command does not use the image defaults. Avoid a remote
     // config request here, but keep execution's identity/status revalidation
     // in prepare_runtime: skipping that check could target a replaced sandbox.
-    let resolved = if args.command.is_empty() {
+    let inherited = args.command.is_empty();
+    let resolved = if inherited {
         super::common::resolve_exec_command(
             sandbox.config().await?.runtime(),
             args.command,
@@ -227,7 +232,10 @@ async fn run_started(
 
     if args.stream || (!interactive && !stdin_is_terminal) {
         let options = apply_common_exec_opts(
-            ExecOptionsBuilder::default().args(cmd_args).tty(args.tty),
+            ExecOptionsBuilder::default()
+                .with_inherited_command(inherited)
+                .args(cmd_args)
+                .tty(args.tty),
             &env_pairs,
             &workdir,
             &args.user,
@@ -248,7 +256,7 @@ async fn run_started(
         // Interactive mode with TTY — use attach.
         let exit_code = sandbox
             .attach_with(cmd, |a| {
-                let mut a = a.args(cmd_args);
+                let mut a = a.with_inherited_command(inherited).args(cmd_args);
                 for (k, v) in &env_pairs {
                     a = a.env(k, v);
                 }
@@ -271,7 +279,9 @@ async fn run_started(
             .exec_with(cmd, |e| {
                 let mut e = apply_common_exec_opts(
                     // No host input is forwarded on this noninteractive terminal path.
-                    e.args(cmd_args).stdin_bytes(Vec::new()),
+                    e.with_inherited_command(inherited)
+                        .args(cmd_args)
+                        .stdin_bytes(Vec::new()),
                     &env_pairs,
                     &workdir,
                     &args.user,

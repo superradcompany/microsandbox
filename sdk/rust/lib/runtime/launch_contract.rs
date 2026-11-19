@@ -634,11 +634,12 @@ pub(crate) async fn validate_runtime_config(
     network.secrets.validate().map_err(|error| {
         MicrosandboxError::InvalidConfig(format!("invalid secret configuration: {error}"))
     })?;
+    let needs_guard = !config.deferred_command_bindings.is_empty();
     let runtime = match crate::setup::resolve_runtime(global) {
         Ok(runtime) => runtime,
         #[cfg(feature = "embed-binaries")]
         Err(MicrosandboxError::RuntimeNotInstalled(_))
-            if config.spec.resources.nested_virt == Some(true) =>
+            if config.spec.resources.nested_virt == Some(true) || needs_guard =>
         {
             // Keep first-use installation working, but discover host support
             // before replacement can remove the existing sandbox.
@@ -652,13 +653,22 @@ pub(crate) async fn validate_runtime_config(
             .await?
         }
         Err(MicrosandboxError::RuntimeNotInstalled(_))
-            if config.spec.resources.nested_virt != Some(true) =>
+            if config.spec.resources.nested_virt != Some(true) && !needs_guard =>
         {
             return Ok(());
         }
         Err(error) => return Err(error),
     };
     require_protected_guest_state(&runtime.msb_path).await?;
+    if needs_guard {
+        let advertisement: serde_json::Value =
+            serde_json::from_slice(&bounded_probe(&runtime.msb_path, "__launch-protocol").await?)?;
+        if advertisement["deferred_command_bindings"].as_bool() != Some(true) {
+            return Err(MicrosandboxError::Runtime(upgrade_required(
+                "deferred command bindings",
+            )));
+        }
+    }
     let contract = resolve(&runtime.msb_path).await?;
     validate_nested_virt(&runtime.msb_path, config, contract).await?;
     contract.validate_launch_intent(config)?;

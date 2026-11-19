@@ -76,5 +76,5 @@ pub use value::{SavedOrigin, SavedText, SavedUnknownReason, SavedValue};
 pub use validation::MAX_TEXT_BYTES as MAX_SAVED_TEXT_BYTES;
 pub use validation::{
     MAX_SAVED_CONFIG_BYTES, MAX_SAVED_CONFIG_ENTRIES, MAX_SAVED_SCRIPT_BYTES,
-    MAX_SAVED_SCRIPTS_BYTES,
+    MAX_SAVED_SCRIPTS_BYTES, valid_binding_id, valid_saved_env_key,
 };

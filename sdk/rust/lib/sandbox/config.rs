@@ -135,6 +135,11 @@ pub(crate) enum SnapshotRestoreMode {
 #[config_patch(serde_lossless)]
 #[serde(remote = "Self")]
 pub struct SandboxConfig {
+    /// Passed from saved-config admission to the reservation transaction. The guard
+    /// has separate durable ownership so legacy catalog updates cannot erase it.
+    #[serde(skip)]
+    pub(crate) deferred_command_bindings:
+        microsandbox_protocol::exec_bindings::DeferredCommandBindings,
     /// Preserve omission through catalog round trips. Older SDKs may omit this additive hint;
     /// absent historical HTTP documents are implicit, while concrete HTTP choices stay strict.
     #[serde(default, skip_serializing_if = "http_defaults_are_not_implicit")]
@@ -1462,6 +1467,7 @@ impl Default for SandboxConfig {
         Self {
             http_defaults_implicit: None,
             init_provenance: None,
+            deferred_command_bindings: Default::default(),
             init_provenance_unknown: false,
             command_provenance: None,
             command_provenance_unknown: false,

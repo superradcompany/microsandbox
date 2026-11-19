@@ -5,6 +5,7 @@
 //--------------------------------------------------------------------------------------------------
 
 pub mod boot_error;
+pub mod command_bindings;
 pub mod compat;
 pub mod control;
 #[cfg(windows)]

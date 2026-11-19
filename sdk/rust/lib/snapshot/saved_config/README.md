@@ -1,6 +1,6 @@
 # Saved configuration selection
 
-This module implements runtime, resource, execution, storage, network-policy, keyed secret/listener and gateway-input selection stages, plus runtime binding preparation of PR3's saved-config resolver. It is not called by snapshot capture, sandbox launch or exec yet. The required saved-config extension remains unsupported until the complete consumer and capture paths are integrated in this PR.
+This module implements runtime, resource, execution, storage, network-policy, keyed secret/listener and gateway-input selection stages, plus runtime binding preparation of PR3's saved-config resolver. Production capture and restore do not yet publish or activate this document. The host runtime can enforce deferred command requirements attached to a destination during reservation. The required saved-config extension remains unsupported until the complete consumer and capture paths are integrated in this PR.
 
 `select_runtime_defaults` accepts validated portable runtime metadata, the existing sparse `SandboxSpecPatch`, structural clear selectors and trusted operation facts. It returns the surviving lower-priority saved overlay, unresolved binding consumers, unknown fields and full-resume script identity obligations. The explicit destination patch stays separate, so this stage cannot copy destination credentials or scripts into portable metadata.
 
@@ -280,3 +280,13 @@ Pending init records the original `auto` choice from validated private provenanc
 Registered script evidence refuses backing whose host link count is not one. The portable representation recreates independent files and cannot preserve hard-link aliases, including aliases outside the scripts directory. Initial observation and later revalidation keep those cases unknown; existing snapshot operations still succeed with unavailable optional backing evidence. Exact staging also rejects an alias introduced before its final verification and removes the temporary output. No receipt fields, catalog schemas, runtime capabilities or released capture interfaces change.
 
 This checks registered-file relationships only. Unregistered runtime files and cached filesystem handles still need full-state closure validation; a successful script observation is not permission to resume a VM.
+
+## Deferred command bindings
+
+A restore that launches no new command can prepare a destination with unresolved command bindings. The plan keeps the logical binding for each affected environment key and for the saved entrypoint and CMD. Resolved sibling environment keys remain available. An immediate command still requires its inputs during preparation.
+
+The local reservation transaction saves these references beside the sandbox record. Each runtime loads them in the transaction that inserts its run record, before guest activation. An older runtime attempting to insert a run for that destination receives an upgrade error. Deleting the destination deletes the references. Catalog readers and unrelated sandbox starts work with the same database.
+
+The host relay checks foreground, streaming and attached commands before forwarding an exec to the guest. The detached-job manager checks the same requirements before recording a job. A capable SDK sends explicit environment keys and command origin on the negotiated path. Picking a saved default supplies no evidence of an argv override. Older SDKs can connect and stop or restart the sandbox on a capable runtime. A command that needs unresolved bindings receives a pre-start error. A per-command override applies only to that invocation.
+
+The capture and restore activation paths still need to connect validated portable configuration to reservation. The live enforcement fixture exercises an actual restored disk with the private requirements row populated after restore.

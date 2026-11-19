@@ -96,7 +96,7 @@ fn destination_inputs_compose_families_without_reapplying_the_raw_patch() {
 #[test]
 fn destination_inputs_keep_deferred_command_bindings_without_claiming_readiness() {
     let mut source = active();
-    source["runtime"] = json!({"env":known(json!({"TOKEN":{"kind":"binding","id":"token"}}))});
+    source["runtime"] = json!({"env":known(json!({"TOKEN":{"kind":"binding","id":"token"}, "MODE":{"kind":"literal","value":"batch"}}))});
     let saved = document(source, json!({"token":"text"}));
     let inputs = prepare(
         &saved,
@@ -116,7 +116,16 @@ fn destination_inputs_keep_deferred_command_bindings_without_claiming_readiness(
             .contains("token")
     );
     assert!(inputs.plan().runtime().command_defaults().is_err());
-    assert!(inputs.spec_inputs().env.is_empty());
+    let remaining = inputs.plan().runtime().inputs().deferred_command_bindings();
+    assert_eq!(
+        remaining.env,
+        BTreeMap::from([("TOKEN".into(), "token".into())])
+    );
+    assert!(remaining.cmd.is_empty() && remaining.entrypoint.is_empty());
+    assert_eq!(
+        inputs.spec_inputs().env,
+        vec![microsandbox_types::EnvVar::new("MODE", "batch")]
+    );
     // Starting that command now must still refuse, rather than using the empty native field.
     let error = prepare(
         &saved,

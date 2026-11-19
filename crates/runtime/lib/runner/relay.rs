@@ -46,6 +46,7 @@ use microsandbox_protocol::core::{
 use microsandbox_protocol::exec::{
     ExecFailed, ExecFailureKind, ExecOutputAck, ExecRequest, ExecSignal, ExecStderr, ExecStdout,
 };
+use microsandbox_protocol::exec_bindings::{DeferredCommandBindings, ExecBindingAdvertisement};
 use microsandbox_protocol::exec_control::{
     EXEC_CONTROL_VERSION, ExecControlAdvertisement, ExecControlReady,
 };
@@ -237,6 +238,8 @@ struct ClientState {
 /// Host-side execution ownership used by the idle monitor.
 #[derive(Default)]
 pub(crate) struct RelayIdleState {
+    /// Captured before accepting clients; shared with detached-job admission.
+    pub(crate) command_bindings: Option<Arc<DeferredCommandBindings>>,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     managed_connections: StdMutex<HashSet<[u8; 16]>>,
 }
@@ -283,6 +286,7 @@ struct ControlAdmission {
 /// copied, and cancellation releases reservations without dropping any already accepted frame.
 #[derive(Clone)]
 pub(crate) struct ControlWriter {
+    command_bindings: Option<Arc<DeferredCommandBindings>>,
     pub(crate) exec_controls: Arc<ExecControlRegistry>,
     /// Sandbox-wide execution admission, accounting, and pending stdin routing.
     execution_tracker: Arc<ExecutionTracker>,
@@ -502,6 +506,7 @@ struct GuestFrameMerger {
 /// for client connections on a Unix domain socket. Frames are routed between
 /// clients and the guest agent without decoding.
 pub struct AgentRelay {
+    binding_boot_id: Option<String>,
     idle_state: Arc<RelayIdleState>,
     restored_input: RestoreInput,
     /// Shared ring buffers + wake pipes for console backend communication.
@@ -773,6 +778,7 @@ impl ControlWriter {
     fn from_sender(tx: mpsc::Sender<ControlWrite>) -> Self {
         Self {
             tx,
+            command_bindings: None,
             exec_controls: Arc::new(ExecControlRegistry::default()),
             execution_tracker: Arc::new(ExecutionTracker::default()),
             data_bytes: Arc::new(Semaphore::new(AGENT_WRITE_DATA_BYTES)),
@@ -1283,6 +1289,7 @@ impl AgentRelay {
         tracing::info!("agent relay listening on {}", agent_sock_path.display());
 
         Ok(Self {
+            binding_boot_id: None,
             idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
@@ -1315,6 +1322,7 @@ impl AgentRelay {
         bulk_shared: Option<Arc<ConsoleSharedState>>,
     ) -> Self {
         Self {
+            binding_boot_id: None,
             idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
@@ -1347,6 +1355,18 @@ impl AgentRelay {
             self.endpoint.display()
         );
         Ok(())
+    }
+
+    /// Install the requirements from the run-admission transaction before serving clients.
+    pub(crate) fn install_command_bindings(
+        &mut self,
+        bindings: Option<DeferredCommandBindings>,
+        boot_id: &str,
+    ) {
+        self.binding_boot_id = bindings.as_ref().map(|_| boot_id.to_owned());
+        Arc::get_mut(&mut self.idle_state)
+            .expect("relay idle state shared before run admission")
+            .command_bindings = bindings.map(Arc::new);
     }
 
     /// Share live client ownership with the host idle monitor and job manager.
@@ -2019,7 +2039,10 @@ impl AgentRelay {
 
         // Bounded channel for client reader tasks to send frames to the ring writer.
         // Backpressure prevents unbounded memory growth from client floods.
-        let (agent_tx, agent_rx) = ControlWriter::new();
+        let (mut agent_tx, agent_rx) = ControlWriter::new();
+        agent_tx
+            .command_bindings
+            .clone_from(&self.idle_state.command_bindings);
         agent_tx
             .execution_tracker
             .install(ready_payload.ready.exec_limits)
@@ -2219,6 +2242,11 @@ impl AgentRelay {
                                     ready: ExecControlAdvertisement { ready: &ready_payload, exec_control: &capability },
                                     relay_resource_observation: RESOURCE_OBSERVATION_RELAY_VERSION,
                                 };
+                                let advertisement = ExecBindingAdvertisement {
+                                    ready: advertisement,
+                                    relay_exec_bindings: self.binding_boot_id.as_ref().map(|_| 1),
+                                    binding_boot_id: self.binding_boot_id.clone(),
+                                };
                                 let mut ready = Message::with_payload(MessageType::Ready, 0, &advertisement)
                                     .map_err(|error| RuntimeError::Custom(format!("encode exec control Ready: {error}")))?;
                                 ready.v = ready_message.v;
@@ -2233,6 +2261,11 @@ impl AgentRelay {
                                 let advertisement = ResourceRelayAdvertisement {
                                     ready: &ready_payload,
                                     relay_resource_observation: RESOURCE_OBSERVATION_RELAY_VERSION,
+                                };
+                                let advertisement = ExecBindingAdvertisement {
+                                    ready: advertisement,
+                                    relay_exec_bindings: self.binding_boot_id.as_ref().map(|_| 1),
+                                    binding_boot_id: self.binding_boot_id.clone(),
                                 };
                                 let mut ready = Message::with_payload(MessageType::Ready, 0, &advertisement)
                                     .map_err(|error| RuntimeError::Custom(format!("encode resource relay Ready: {error}")))?;
@@ -2714,6 +2747,24 @@ fn try_extract_frame(buf: &mut BytesMut) -> RuntimeResult<Option<RawFrame>> {
     let flags = data[8];
 
     Ok(Some(RawFrame { data, id, flags }))
+}
+
+/// Convert an admitted host request to the existing guest contract. Old guest agents
+/// never receive provenance, and a refusal cannot reserve a slot or reach the console.
+fn admit_bound_exec(
+    bindings: &DeferredCommandBindings,
+    message: &Message,
+) -> Result<Bytes, &'static str> {
+    let guest = Message {
+        v: message.v,
+        t: message.t,
+        id: message.id,
+        flags: message.flags,
+        p: bindings.admit_payload(&message.p)?,
+    };
+    let mut bytes = Vec::new();
+    codec::encode_to_buf(&guest, &mut bytes).map_err(|_| "cannot encode admitted command")?;
+    Ok(Bytes::from(bytes))
 }
 
 /// Decode raw frame bytes into a protocol `Message`.
@@ -4687,7 +4738,7 @@ async fn client_reader_task(
             }
         };
         #[cfg(not(unix))]
-        let frame = {
+        let mut frame = {
             let pending_frame = read_raw_frame(&mut reader);
             tokio::pin!(pending_frame);
 
@@ -4854,6 +4905,11 @@ async fn client_reader_task(
             .then(|| decode_frame(frame.data.as_ref()).ok())
             .flatten();
         let message_type = decoded_message.as_ref().map(|message| message.t);
+        // A guest with a newer decoder might interpret an unfamiliar session opener.
+        // A guarded relay must understand the opener before passing it to that guest.
+        if is_session_start && agent_tx.command_bindings.is_some() && decoded_message.is_none() {
+            break;
+        }
         // A suspended guest cannot reject new work itself. Existing stream data keeps the
         // bounded transport path; this does not touch guest slot ownership or bulk state.
         if is_session_start && resident_paused.load(Ordering::Acquire) {
@@ -4890,6 +4946,41 @@ async fn client_reader_task(
         let mut input_len = None;
         if let Some(message) = decoded_message.as_ref() {
             if message.t == MessageType::ExecRequest {
+                if let Some(bindings) = agent_tx.command_bindings.as_deref() {
+                    match admit_bound_exec(bindings, message) {
+                        Ok(bytes) => frame.data = bytes,
+                        Err(reason) => {
+                            let failure = ExecFailed {
+                                kind: ExecFailureKind::PermissionDenied,
+                                errno: None,
+                                errno_name: None,
+                                message: reason.into(),
+                                stage: Some("restore_binding".into()),
+                            };
+                            let Ok(mut response) = Message::with_payload(
+                                MessageType::ExecFailed,
+                                message.id,
+                                &failure,
+                            ) else {
+                                break;
+                            };
+                            response.v = message.v;
+                            // A signal can race rejection. Finish this unused correlation so
+                            // the controller reports a terminal without waiting for guest spawn.
+                            if let Some(client) = clients.lock().await.get(&slot)
+                                && !client.active_sessions.contains(&message.id)
+                                && let Some(control) = client.exec_control.as_ref()
+                            {
+                                control.mark_finished(message.id);
+                            }
+                            if queue_client_rejection(&write_tx, &write_budget, &response).is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                }
                 match agent_tx.execution_tracker.admit(message) {
                     Ok(exec_admission::Admission::Full) => {
                         let failure = ExecFailed {
@@ -11739,9 +11830,9 @@ mod tests {
         next_session_id: Arc<AtomicU64>,
         start: u32,
         end: u32,
+        write_tx: mpsc::UnboundedSender<ClientWrite>,
     ) {
         let (merge_tx, _merge_rx) = mpsc::channel(1);
-        let (write_tx, _write_rx) = mpsc::unbounded_channel();
         let (_disconnect_tx, disconnect_rx) = watch::channel(false);
         #[cfg(unix)]
         let (local_write_tx, _local_write_rx) = mpsc::unbounded_channel();
@@ -11770,6 +11861,79 @@ mod tests {
             local_write_tx,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn deferred_binding_refuses_legacy_before_guest_dispatch() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (reader, mut client) = tokio::io::duplex(8192);
+            let (mut agent, mut guest) = ControlWriter::new();
+            agent.command_bindings = Some(Arc::new(DeferredCommandBindings {
+                env: [("TOKEN".into(), "deploy".into())].into(),
+                ..Default::default()
+            }));
+            let (write_tx, mut responses) = mpsc::unbounded_channel();
+            let (drain_tx, _drain_rx) = mpsc::channel(1);
+            let registry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+            let reader = tokio::spawn(namespace_client_reader_task(
+                0,
+                reader,
+                agent,
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(Mutex::new(HashSet::from([0]))),
+                drain_tx,
+                registry.clone(),
+                Arc::new(AtomicU64::new(1)),
+                10,
+                20,
+                write_tx,
+            ));
+            let mut payload =
+                serde_json::json!({"cmd":"touch","args":["/tmp/ran"],"env":["TOKEN=example"], "future_guest_field":17});
+            let send = |id, payload: &serde_json::Value| {
+                let message = Message::with_payload(MessageType::ExecRequest, id, payload).unwrap();
+                let mut frame = Vec::new();
+                codec::encode_to_buf(&message, &mut frame).unwrap();
+                frame
+            };
+            // Both requests have the same guest environment. Only one declares its origin.
+            client.write_all(&send(10, &payload)).await.unwrap();
+            let rejection = responses.recv().await.unwrap();
+            let ClientWriteData::Inline(bytes) = &rejection.data else {
+                panic!("expected exec terminal")
+            };
+            let terminal = decode_frame(bytes).unwrap();
+            assert_eq!(terminal.id, 10);
+            assert_eq!(terminal.t, MessageType::ExecFailed);
+            assert_eq!(
+                terminal.payload::<ExecFailed>().unwrap().stage.as_deref(),
+                Some("restore_binding")
+            );
+            assert!(registry.lock().unwrap().is_empty());
+            assert!(guest.try_recv().is_err());
+
+            payload["binding_overrides"] =
+                serde_json::json!({"explicit_argv":true,"env_keys":["TOKEN"]});
+            client.write_all(&send(11, &payload)).await.unwrap();
+            let delivered = guest.recv().await.unwrap();
+            let message = decode_frame(&delivered.data).unwrap();
+            assert_eq!(message.id, 11);
+            assert_eq!(message.payload::<serde_json::Value>().unwrap()["future_guest_field"], 17);
+            assert_eq!(
+                message.payload::<ExecRequest>().unwrap().env,
+                ["TOKEN=example"]
+            );
+            assert!(
+                message
+                    .payload::<microsandbox_protocol::exec_bindings::ExecBindingDiscovery>()
+                    .unwrap()
+                    .binding_overrides
+                    .is_none()
+            );
+            reader.abort();
+        })
+        .await
+        .expect("binding admission stalled the connection");
     }
 
     #[tokio::test]
@@ -11821,6 +11985,7 @@ mod tests {
                         sequence.clone(),
                         10,
                         20,
+                        mpsc::unbounded_channel().0,
                     ));
                     let id = if flags == FLAG_SHUTDOWN { 0 } else { 10 };
                     write_fragmented(&mut client, &packet(name, id, flags)).await;
@@ -11865,6 +12030,7 @@ mod tests {
                 Arc::new(AtomicU64::new(0)),
                 10,
                 20,
+                mpsc::unbounded_channel().0,
             ));
             let mut future = packet("core.future", 10, 0);
             // Keep a future field in the exact frame to catch decode/re-encode.

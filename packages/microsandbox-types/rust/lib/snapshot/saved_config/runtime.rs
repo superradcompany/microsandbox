@@ -430,7 +430,7 @@ fn texts(values: &[SavedText], field: &str) -> SnapshotManifestResult<()> {
 fn environment(values: &BTreeMap<String, SavedText>, field: &str) -> SnapshotManifestResult<()> {
     count(values.len(), field)?;
     for (name, value) in values {
-        if name.is_empty() || name.len() > MAX_NAME_BYTES || name.contains(['=', '\0']) {
+        if !super::validation::valid_saved_env_key(name) {
             return invalid("SCFG_VALUE", field, "invalid environment variable name");
         }
         text(value, field)?;

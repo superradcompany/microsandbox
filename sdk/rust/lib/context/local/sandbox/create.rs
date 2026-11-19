@@ -2509,6 +2509,7 @@ impl LocalContext {
                 }
                 let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
                 let sandbox_id = result.last_insert_id;
+                microsandbox_runtime::command_bindings::install(&txn, sandbox_id, &config.deferred_command_bindings).await?;
                 if reserve {
                     txn.execute_raw(Statement::from_sql_and_values(
                         DatabaseBackend::Sqlite,
@@ -3515,6 +3516,93 @@ esac
         // and created-volume paths must keep this live state until the owner releases it.
         exercise_failed_startup_rollback(false, SandboxStatus::Running).await;
         exercise_failed_startup_rollback(true, SandboxStatus::Running).await;
+    }
+
+    #[tokio::test]
+    async fn deferred_command_reservation_installs_guard_atomically_and_deletes_it_with_destination()
+     {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("test.db")).await;
+        let db = pools.write();
+        let mut config = test_config("bound");
+        config
+            .deferred_command_bindings
+            .env
+            .insert("TOKEN".into(), "token".into());
+        let sandbox_id = LocalContext::insert_sandbox_record(db, &config)
+            .await
+            .unwrap();
+        let try_legacy_run = |id| {
+            run_entity::Entity::insert(run_entity::ActiveModel {
+                sandbox_id: Set(id),
+                status: Set(run_entity::RunStatus::Running),
+                ..Default::default()
+            })
+            .exec(db)
+        };
+        assert!(
+            try_legacy_run(sandbox_id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("outstanding command bindings")
+        );
+        let ordinary = LocalContext::insert_sandbox_record(db, &test_config("ordinary"))
+            .await
+            .unwrap();
+        assert!(try_legacy_run(ordinary).await.is_ok());
+        let persisted = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!persisted.config.contains("token"));
+        let guard_count = || {
+            db.query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT count(*) AS n FROM sandbox_command_bindings",
+            ))
+        };
+        assert_eq!(
+            guard_count()
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "n")
+                .unwrap(),
+            1
+        );
+        LocalContext::delete_sandbox_record(db, sandbox_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            guard_count()
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "n")
+                .unwrap(),
+            0
+        );
+
+        config
+            .deferred_command_bindings
+            .env
+            .insert("BAD=KEY".into(), "token".into());
+        assert!(
+            LocalContext::insert_sandbox_record(db, &config)
+                .await
+                .is_err()
+        );
+        assert!(
+            sandbox_entity::Entity::find()
+                .filter(sandbox_entity::Column::Name.eq("bound"))
+                .one(db)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn test_config(name: impl Into<String>) -> SandboxConfig {

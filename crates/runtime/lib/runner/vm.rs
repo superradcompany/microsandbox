@@ -784,6 +784,7 @@ fn run(
     socket_paths.prepare_canonical_directory(&config.agent_sock_path)?;
 
     // Create the relay and persist the run record with a single runtime hop.
+    let boot_id = super::control::RuntimeControlExecutor::new_boot_identity();
     let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
         let relay = async {
             if config.vm.checkpoint_restore.is_some() {
@@ -805,8 +806,9 @@ fn run(
             &config.sandbox_db_path,
             config.sandbox_db_connect_timeout_secs,
         );
-        let (relay, db) = tokio::try_join!(relay, db)?;
-        let run_db_id = insert_run(&db, config.sandbox_id, pid).await?;
+        let (mut relay, db) = tokio::try_join!(relay, db)?;
+        let (run_db_id, bindings) = insert_run(&db, config.sandbox_id, pid).await?;
+        relay.install_command_bindings(bindings, &boot_id);
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
 
@@ -818,7 +820,7 @@ fn run(
             &config.sandbox_db_path,
             config.sandbox_id,
             run_db_id,
-            super::control::RuntimeControlExecutor::new_boot_identity(),
+            boot_id,
         ))?;
         crate::retention::RetentionJournal::begin_start(
             config.runtime_dir.parent().ok_or_else(|| {
@@ -3541,7 +3543,14 @@ fn termination_reason(
 }
 
 /// Insert a run record into the database.
-async fn insert_run(db: &DbWriteConnection, sandbox_id: i32, pid: u32) -> RuntimeResult<i32> {
+async fn insert_run(
+    db: &DbWriteConnection,
+    sandbox_id: i32,
+    pid: u32,
+) -> RuntimeResult<(
+    i32,
+    Option<microsandbox_protocol::exec_bindings::DeferredCommandBindings>,
+)> {
     let now = chrono::Utc::now().naive_utc();
     let record = run_entity::ActiveModel {
         sandbox_id: Set(sandbox_id),
@@ -3550,11 +3559,19 @@ async fn insert_run(db: &DbWriteConnection, sandbox_id: i32, pid: u32) -> Runtim
         started_at: Set(Some(now)),
         ..Default::default()
     };
-    let result = run_entity::Entity::insert(record)
-        .exec(db)
-        .await
-        .map_err(|e| RuntimeError::Custom(format!("insert run: {e}")))?;
-    Ok(result.last_insert_id)
+    db.transaction(|txn| {
+        let record = record.clone();
+        async move {
+            let policy = crate::command_bindings::admit(&txn, sandbox_id).await?;
+            let result = run_entity::Entity::insert(record).exec(&txn).await?;
+            if policy.is_some() {
+                crate::command_bindings::set_admitting(&txn, sandbox_id, false).await?;
+            }
+            Ok((txn, (result.last_insert_id, policy)))
+        }
+    })
+    .await
+    .map_err(|e: sea_orm::DbErr| RuntimeError::Custom(format!("insert run: {e}")))
 }
 
 /// Mark a run record as failed (Terminated + InternalError) on startup error.

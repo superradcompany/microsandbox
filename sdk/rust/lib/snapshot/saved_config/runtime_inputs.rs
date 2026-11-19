@@ -77,6 +77,9 @@ pub struct RuntimeInputPlan {
     pub cmd: PreparedRuntimeValue<Zeroizing<Vec<String>>>,
     /// Complete selected environment, without partially dropping required keys.
     pub env: PreparedRuntimeValue<BTreeMap<String, Zeroizing<String>>>,
+    /// Resolved siblings of deferred keys. Only command admission with all remaining
+    /// overrides may consume these values. They are never part of portable metadata.
+    pub(super) deferred_env_values: BTreeMap<String, Zeroizing<String>>,
     /// Init inputs for a cold boot, including a later boot after full resume.
     pub init: PreparedRuntimeValue<PreparedRuntimeInit>,
     /// Exact backing bytes and permission bits for registered scripts.
@@ -109,6 +112,34 @@ struct PreparationBudget {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl RuntimeInputPlan {
+    /// Only unresolved new-command consumers belong in runtime command admission. The
+    /// same logical reference can be required by several environment keys independently.
+    pub fn deferred_command_bindings(
+        &self,
+    ) -> microsandbox_protocol::exec_bindings::DeferredCommandBindings {
+        let mut bindings = microsandbox_protocol::exec_bindings::DeferredCommandBindings::default();
+        if let PreparedRuntimeValue::Deferred(ids) = &self.entrypoint {
+            bindings.entrypoint.clone_from(ids);
+        }
+        if let PreparedRuntimeValue::Deferred(ids) = &self.cmd {
+            bindings.cmd.clone_from(ids);
+        }
+        if let PreparedRuntimeValue::Deferred(ids) = &self.env
+            && let Some(values) = self.retained.env.as_ref().and_then(SavedValue::value)
+        {
+            for (key, value) in values {
+                if let SavedText::Binding { id } = value
+                    && ids.contains(id)
+                {
+                    bindings.env.insert(key.clone(), id.clone());
+                }
+            }
+        }
+        bindings
+    }
+}
 
 impl<T> PreparedRuntimeValue<T> {
     /// Refuse unknown or unresolved input before a consumer reads its value. Default and
@@ -279,7 +310,16 @@ pub fn prepare_runtime_inputs(
     let mut budget = PreparationBudget::default();
     let entrypoint = text_list(saved.entrypoint.as_ref(), inputs, &mut budget)?;
     let cmd = text_list(saved.cmd.as_ref(), inputs, &mut budget)?;
-    let env = text_env(saved.env.as_ref(), inputs, &mut budget)?;
+    let mut deferred_env_values = BTreeMap::new();
+    let env = prepare_value(saved.env.as_ref(), |values, missing| {
+        let resolved = resolve_env(values, inputs, missing, &mut budget)?;
+        if missing.is_empty() {
+            Ok(resolved)
+        } else {
+            deferred_env_values = resolved;
+            Ok(BTreeMap::new())
+        }
+    })?;
     let init = prepare_value(saved.init.as_ref(), |init, missing| match init {
         SavedInit::Builtin {} => Ok(PreparedRuntimeInit::Builtin),
         SavedInit::RequestedHandoff { .. } => Err(error(
@@ -338,6 +378,7 @@ pub fn prepare_runtime_inputs(
         entrypoint,
         cmd,
         env,
+        deferred_env_values,
         init,
         scripts,
         hostname: literal(saved.hostname.as_ref()),
@@ -401,16 +442,6 @@ fn text_list(
 ) -> MicrosandboxResult<PreparedRuntimeValue<Zeroizing<Vec<String>>>> {
     prepare_value(saved, |values, missing| {
         resolve_list(values, inputs, missing, budget)
-    })
-}
-
-fn text_env(
-    saved: Option<&SavedValue<BTreeMap<String, SavedText>>>,
-    inputs: &BTreeMap<String, RuntimeBindingInput>,
-    budget: &mut PreparationBudget,
-) -> MicrosandboxResult<PreparedRuntimeValue<BTreeMap<String, Zeroizing<String>>>> {
-    prepare_value(saved, |values, missing| {
-        resolve_env(values, inputs, missing, budget)
     })
 }
 

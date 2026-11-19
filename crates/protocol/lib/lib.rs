@@ -9,6 +9,9 @@
 
 mod error;
 
+/// Host-side origin evidence for commands with deferred destination bindings.
+pub mod exec_bindings;
+
 /// Runtime-owned execution jobs on the host-control extension.
 pub mod jobs;
 /// Capability-probed runtime-owned label updates.

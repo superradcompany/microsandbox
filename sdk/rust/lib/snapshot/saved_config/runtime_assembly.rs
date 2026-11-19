@@ -179,18 +179,22 @@ pub fn prepare_runtime_configuration(
             RuntimeDefaultClear::GuestClock => runtime.guest_clock = None,
         }
     }
-    // Known complete maps replace the lower map before destination per-key merge. Unknown
-    // or deferred maps must not expose an apparently usable subset inherited from an image.
-    let mut env = match &inputs.env {
-        PreparedRuntimeValue::Omitted => lower_env,
-        PreparedRuntimeValue::Ready(values) => values
+    // Preserve resolved siblings for a later explicitly bound invocation. The whole
+    // default command remains unavailable while any selected key is deferred.
+    let selected_env = match &inputs.env {
+        PreparedRuntimeValue::Ready(values) => Some(values),
+        PreparedRuntimeValue::Deferred(_) => Some(&inputs.deferred_env_values),
+        _ => None,
+    };
+    let mut env = if let Some(values) = selected_env {
+        values
             .iter()
-            .map(|(key, value)| EnvVar {
-                key: key.clone(),
-                value: value.to_string(),
-            })
-            .collect(),
-        _ => Vec::new(),
+            .map(|(key, value)| EnvVar::new(key, value.as_str()))
+            .collect()
+    } else if matches!(inputs.env, PreparedRuntimeValue::Omitted) {
+        lower_env
+    } else {
+        Vec::new()
     };
     scalar(&mut runtime.workdir, &inputs.workdir);
     scalar(&mut runtime.shell, &inputs.shell);
