@@ -170,15 +170,9 @@ impl RecordedRuntime {
         }
     }
 
+    #[cfg(unix)]
     pub(super) fn is_live(&self) -> bool {
-        #[cfg(unix)]
-        {
-            matches!(self, Self::Live(_) | Self::Unverified { .. })
-        }
-        #[cfg(not(unix))]
-        {
-            matches!(self, Self::Live(_))
-        }
+        matches!(self, Self::Live(_) | Self::Unverified { .. })
     }
 
     /// Keep admission conservative without claiming an unverified PID is a live runtime.
