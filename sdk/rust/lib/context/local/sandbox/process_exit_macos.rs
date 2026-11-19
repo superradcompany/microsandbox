@@ -11,8 +11,6 @@ use std::path::Path;
 
 /// Public Darwin proc-info flavor from <sys/proc_info.h>.
 const PROC_PIDFDVNODEINFO: i32 = 1;
-/// Public Darwin proc-info flavor from <sys/proc_info.h>: vnode info plus the vnode's path.
-const PROC_PIDFDVNODEPATHINFO: i32 = 2;
 /// Public Darwin process flag: the process is working on exiting.
 const P_WEXIT: i32 = 0x00002000;
 
@@ -25,7 +23,6 @@ pub(super) struct RuntimeExit {
     queue: Option<OwnedFd>,
     pid: i32,
     identity: ProcessState,
-    signal_proven: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -51,12 +48,6 @@ struct VnodeFdInfo {
     vnode: libc::vnode_info,
 }
 
-#[repr(C)]
-struct VnodeFdInfoWithPath {
-    file: ProcFileInfo,
-    vnode: libc::vnode_info_path,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -78,7 +69,6 @@ impl RuntimeExit {
             queue,
             pid,
             identity,
-            signal_proven: true,
         };
         // The PID may have disappeared/recycled between the identity read and registration.
         // Never wait for a new occupant, even if it later opens the same lifecycle file.
@@ -107,7 +97,6 @@ impl RuntimeExit {
             // edge. Use the birth-identified late-exit path instead of awaiting that edge.
             return Ok(Some(Self {
                 queue: None,
-                signal_proven: false,
                 ..observer
             }));
         }
@@ -144,27 +133,6 @@ impl RuntimeExit {
         Ok(process_state(self.pid)?.is_none_or(|state| {
             state.birth != self.identity.birth || state.status == libc::SZOMB as u8
         }))
-    }
-
-    pub(super) fn send_signal(&self, signal: libc::c_int) -> io::Result<bool> {
-        if !self.signal_proven
-            || process_state(self.pid)?.is_none_or(|state| {
-                state.birth != self.identity.birth || state.status == libc::SZOMB as u8
-            })
-        {
-            return Ok(false);
-        }
-        // Darwin signals by PID; this check narrows but cannot close the reuse race.
-        let result = unsafe { libc::kill(self.pid, signal) };
-        if result < 0 {
-            let error = io::Error::last_os_error();
-            return if error.raw_os_error() == Some(libc::ESRCH) {
-                Ok(false)
-            } else {
-                Err(error)
-            };
-        }
-        Ok(true)
     }
 }
 
@@ -215,11 +183,7 @@ fn register_exit(pid: i32) -> io::Result<Option<OwnedFd>> {
     }
 }
 
-/// Whether `pid` holds the sandbox's lifecycle lock file on the runtime's inherited descriptor.
-///
-/// Only the live runtime of this sandbox name holds that exclusive lock, so a match identifies
-/// the process beyond its PID. A missing process or descriptor is `false`.
-pub(super) fn lifecycle_matches(pid: i32, lifecycle: &Path) -> io::Result<bool> {
+fn lifecycle_matches(pid: i32, lifecycle: &Path) -> io::Result<bool> {
     let mut info = std::mem::MaybeUninit::<VnodeFdInfo>::zeroed();
     let size = std::mem::size_of::<VnodeFdInfo>();
     let result = unsafe {
@@ -244,59 +208,11 @@ pub(super) fn lifecycle_matches(pid: i32, lifecycle: &Path) -> io::Result<bool> 
         ));
     }
     let info = unsafe { info.assume_init() };
-    let expected = match std::fs::metadata(lifecycle) {
-        Ok(metadata) => metadata,
-        Err(error) if matches!(error.kind(), io::ErrorKind::NotFound) => {
-            return Ok(false);
-        }
-        Err(error) => return Err(error),
-    };
+    let expected = std::fs::metadata(lifecycle)?;
     Ok((
         u64::from(info.vnode.vi_stat.vst_dev),
         info.vnode.vi_stat.vst_ino,
     ) == (expected.dev(), expected.ino()))
-}
-
-/// The path `pid`'s inherited lifecycle descriptor points at, as libproc renders it.
-///
-/// `None` when the process is gone or the descriptor is not open.
-pub(super) fn lifecycle_link(pid: i32) -> io::Result<Option<std::path::PathBuf>> {
-    let mut info = std::mem::MaybeUninit::<VnodeFdInfoWithPath>::zeroed();
-    let size = std::mem::size_of::<VnodeFdInfoWithPath>();
-    let result = unsafe {
-        libc::proc_pidfdinfo(
-            pid,
-            microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
-            PROC_PIDFDVNODEPATHINFO,
-            info.as_mut_ptr().cast(),
-            size as i32,
-        )
-    };
-    if result <= 0 {
-        let error = io::Error::last_os_error();
-        return match error.raw_os_error() {
-            Some(libc::ESRCH | libc::EBADF | libc::ENOENT) => Ok(None),
-            _ => Err(error),
-        };
-    }
-    if result as usize != size {
-        return Err(io::Error::other(
-            "incomplete runtime lifecycle descriptor path information",
-        ));
-    }
-    let info = unsafe { info.assume_init() };
-    // libc models the MAXPATHLEN buffer as 32 rows of 32; flatten it back into one C string.
-    let bytes: Vec<u8> = info
-        .vnode
-        .vip_path
-        .iter()
-        .flatten()
-        .take_while(|byte| **byte != 0)
-        .map(|byte| *byte as u8)
-        .collect();
-    Ok(Some(std::path::PathBuf::from(
-        String::from_utf8_lossy(&bytes).into_owned(),
-    )))
 }
 
 fn process_state(pid: i32) -> io::Result<Option<ProcessState>> {
@@ -549,7 +465,6 @@ mod tests {
             queue: None,
             pid: barrier.pid,
             identity: barrier.identity,
-            signal_proven: barrier.signal_proven,
         };
         assert!(!late.has_exited().unwrap());
         drop(lifecycle);
@@ -584,39 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn unproven_exit_observer_cannot_signal() {
-        let mut child = scopeguard::guard(
-            Command::new("/bin/sleep").arg("5").spawn().unwrap(),
-            |mut child| {
-                let _ = child.kill();
-                let _ = child.wait();
-            },
-        );
-        let pid = child.id() as i32;
-        let identity = process_state(pid).unwrap().unwrap();
-        let observer = RuntimeExit {
-            queue: None,
-            pid,
-            identity,
-            signal_proven: false,
-        };
-
-        observer.send_signal(libc::SIGKILL).unwrap();
-        assert!(child.try_wait().unwrap().is_none());
-
-        let stale = RuntimeExit {
-            signal_proven: true,
-            identity: ProcessState {
-                birth: (identity.birth.0 - 1, identity.birth.1),
-                ..identity
-            },
-            ..observer
-        };
-        stale.send_signal(libc::SIGKILL).unwrap();
-        assert!(child.try_wait().unwrap().is_none());
-    }
-
-    #[test]
     fn process_identity_layout_matches_libproc_and_recycled_identity_completes() {
         let pid = std::process::id() as i32;
         let state = process_state(pid).unwrap().unwrap();
@@ -646,12 +528,10 @@ mod tests {
             queue: None,
             pid,
             identity,
-            signal_proven: false,
         };
         assert!(stale.has_exited().unwrap());
         // Frozen public proc-info wrapper ABI, independently checked against the SDK headers.
         assert_eq!(std::mem::size_of::<ProcFileInfo>(), 24);
         assert_eq!(std::mem::size_of::<VnodeFdInfo>(), 176);
-        assert_eq!(std::mem::size_of::<VnodeFdInfoWithPath>(), 176 + 1024);
     }
 }

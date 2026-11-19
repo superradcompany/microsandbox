@@ -4,7 +4,6 @@
 //! methods for lifecycle management (signals, wait).
 
 use std::fs::File;
-use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::ExitStatus;
@@ -19,8 +18,6 @@ use nix::{
     unistd::Pid,
 };
 use tokio::process::Child;
-#[cfg(target_os = "linux")]
-use tokio::runtime::Handle;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
@@ -52,7 +49,7 @@ pub struct ProcessHandle {
     sandbox_name: String,
 
     /// The sandbox child process handle.
-    child: ReapedChild,
+    child: Child,
 
     /// Retained only until preparation completes. No background reader survives creation.
     pub(crate) startup_reader: Option<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>>,
@@ -90,21 +87,6 @@ pub(crate) struct CleanupControl {
     watchdog: Option<Arc<OwnedFd>>,
     #[cfg(windows)]
     job: Option<Arc<WindowsJob>>,
-}
-
-/// Sandbox child that is still reaped after its [`ProcessHandle`] is dropped.
-///
-/// Dropping a running Tokio child hands it to Tokio's orphan queue, which is drained only
-/// when Tokio's own SIGCHLD handler runs. Host runtimes such as Node.js (libuv) replace or
-/// reset the process-wide SIGCHLD disposition, so a detached or released VM would otherwise
-/// stay `<defunct>` until the creating process exits.
-struct ReapedChild {
-    /// Always `Some` until `Drop` takes it.
-    child: Option<Child>,
-
-    /// Runtime that spawned the child, so the reaper does not depend on the dropping thread.
-    #[cfg(target_os = "linux")]
-    runtime: Option<Handle>,
 }
 
 /// Cancellation owner for a process whose startup has not completed.
@@ -295,7 +277,7 @@ impl ProcessHandle {
             #[cfg(windows)]
             ownership: None,
             sandbox_name,
-            child: ReapedChild::new(child),
+            child,
             startup_reader: None,
             cleanup,
             _disk_locks: disk_locks,
@@ -319,10 +301,6 @@ impl ProcessHandle {
 
     /// Send SIGKILL to the sandbox process for immediate termination.
     pub fn kill(&self) -> MicrosandboxResult<()> {
-        // A completed wait releases the PID for reuse.
-        if self.child.id().is_none() {
-            return Ok(());
-        }
         #[cfg(unix)]
         {
             tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGKILL");
@@ -348,10 +326,6 @@ impl ProcessHandle {
     /// The libkrun signal handler catches SIGUSR1, writes to the exit event
     /// fd, exit observers run, and the process terminates.
     pub fn drain(&self) -> MicrosandboxResult<()> {
-        // A completed wait releases the PID for reuse.
-        if self.child.id().is_none() {
-            return Ok(());
-        }
         #[cfg(unix)]
         {
             tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGUSR1 (drain)");
@@ -426,7 +400,7 @@ impl ProcessHandle {
     pub fn disarm(&mut self) -> MicrosandboxResult<()> {
         // An already reaped child has no live Unix watchdog to notify.
         self.try_wait()?;
-        self.cleanup.disarm().map(|_| ())
+        self.cleanup.disarm()
     }
 
     pub(crate) fn cleanup_control(&self) -> Arc<CleanupControl> {
@@ -446,46 +420,7 @@ impl CleanupControl {
         !self.detached.load(Ordering::Acquire)
     }
 
-    /// Detaching transfers reaping responsibility even while SDK clones retain the handle.
-    pub(crate) fn disarm_retained(
-        &self,
-        handle: Option<&Arc<tokio::sync::Mutex<ProcessHandle>>>,
-    ) -> MicrosandboxResult<()> {
-        if self.disarm()? {
-            #[cfg(target_os = "linux")]
-            if let Some(handle) = handle {
-                let weak = Arc::downgrade(handle);
-                tokio::spawn(async move {
-                    let Some(handle) = weak.upgrade() else { return };
-                    let process = handle.lock().await;
-                    let Some(mut exit) = super::child_exit::ChildExit::observe(&process.child)
-                    else {
-                        return;
-                    };
-                    // Concurrent waits and explicit termination still need the process lock.
-                    drop(process);
-                    drop(handle);
-                    loop {
-                        exit.wait().await;
-                        let Some(handle) = weak.upgrade() else { return };
-                        match handle.lock().await.try_wait() {
-                            Ok(None) => continue,
-                            Ok(Some(_)) => return,
-                            Err(error) => {
-                                tracing::warn!(%error, "failed to reap detached sandbox");
-                                return;
-                            }
-                        }
-                    }
-                });
-            }
-            #[cfg(not(target_os = "linux"))]
-            let _ = handle;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn disarm(&self) -> MicrosandboxResult<bool> {
+    pub(crate) fn disarm(&self) -> MicrosandboxResult<()> {
         // This lock covers only the synchronous one-byte notification/job update,
         // never child wait, guest work, or an await. Concurrent detaches share it.
         let _transition = self
@@ -493,7 +428,7 @@ impl CleanupControl {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if !self.is_armed() {
-            return Ok(false);
+            return Ok(());
         }
         #[cfg(unix)]
         if !self.finished.load(Ordering::Acquire)
@@ -507,17 +442,7 @@ impl CleanupControl {
         }
         // A failed notification leaves authority armed and the receiver usable.
         self.detached.store(true, Ordering::Release);
-        Ok(true)
-    }
-}
-
-impl ReapedChild {
-    fn new(child: Child) -> Self {
-        Self {
-            child: Some(child),
-            #[cfg(target_os = "linux")]
-            runtime: Handle::try_current().ok(),
-        }
+        Ok(())
     }
 }
 
@@ -723,30 +648,6 @@ impl Drop for ProcessHandle {
     }
 }
 
-impl Deref for ReapedChild {
-    type Target = Child;
-
-    fn deref(&self) -> &Child {
-        self.child.as_ref().expect("child is present until drop")
-    }
-}
-
-impl DerefMut for ReapedChild {
-    fn deref_mut(&mut self) -> &mut Child {
-        self.child.as_mut().expect("child is present until drop")
-    }
-}
-
-impl Drop for ReapedChild {
-    /// Runs after `ProcessHandle::drop` has sent any release signal.
-    fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
-        if let Some(child) = self.child.take() {
-            reap_in_background(child, self.runtime.take());
-        }
-    }
-}
-
 #[cfg(windows)]
 impl Drop for WindowsJob {
     fn drop(&mut self) {
@@ -785,44 +686,6 @@ fn send_parent_watchdog_detach(fd: &OwnedFd) -> std::io::Result<()> {
             "failed to write parent-watch detach byte",
         ));
     }
-}
-
-/// Wait for a released child in the background so its exit is always collected.
-///
-/// Without a Tokio runtime the child falls back to the normal orphan queue.
-#[cfg(target_os = "linux")]
-fn reap_in_background(mut child: Child, runtime: Option<Handle>) {
-    if !matches!(child.try_wait(), Ok(None)) {
-        return;
-    }
-    let Some(runtime) = runtime.or_else(|| Handle::try_current().ok()) else {
-        return;
-    };
-
-    // Close our pipe ends now, as dropping the handle always has; keep only the exit status.
-    drop(child.stdin.take());
-    drop(child.stdout.take());
-    drop(child.stderr.take());
-
-    runtime.spawn(async move {
-        let pid = child.id();
-        let Some(mut exit) = super::child_exit::ChildExit::observe(&child) else {
-            return;
-        };
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    tracing::debug!(?pid, ?status, "reaped released sandbox process");
-                    return;
-                }
-                Ok(None) => exit.wait().await,
-                Err(error) => {
-                    tracing::warn!(?pid, %error, "failed to reap released sandbox process");
-                    return;
-                }
-            }
-        }
-    });
 }
 
 #[cfg(windows)]
@@ -1065,199 +928,6 @@ mod tests {
         let mut byte = [0_u8; 1];
         reader.read_exact(&mut byte).unwrap();
         assert_eq!(byte[0], microsandbox_runtime::vm::PARENT_WATCH_DETACH);
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod reap_tests {
-    use std::os::fd::FromRawFd;
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
-
-    use nix::errno::Errno;
-    use nix::sys::wait::{WaitPidFlag, waitpid};
-    use tokio::signal::unix::{SignalKind, signal as tokio_signal};
-
-    use super::*;
-
-    const CASE_ENV: &str = "MSB_REAP_TEST_CASE";
-    const REAP_TIMEOUT: Duration = Duration::from_secs(5);
-    const SETTLE_DELAY: Duration = Duration::from_millis(200);
-
-    /// How the child ends after its handle has been dropped.
-    #[derive(Clone, Copy)]
-    enum Ending {
-        /// The process exits on its own.
-        Exit,
-        /// Another handle stops it, e.g. `Sandbox::get(..).stop()`.
-        Term,
-        /// It is killed outright.
-        Kill,
-    }
-
-    /// Run one scenario in a fresh test process so the SIGCHLD change stays isolated.
-    fn run_isolated(case: &str) {
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "runtime::handle::reap_tests::isolated_case",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(CASE_ENV, case)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        assert!(
-            output.status.success(),
-            "case {case} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        assert!(
-            stdout.contains(&format!("reap case {case} passed")),
-            "case {case} did not run\nstdout:\n{stdout}"
-        );
-    }
-
-    /// Spawn a child that exits only on stdin EOF or a signal, after a host runtime reset
-    /// SIGCHLD (Node.js does this after every `child_process` call).
-    fn spawn_child(
-        parent_watchdog: Option<OwnedFd>,
-    ) -> (ProcessHandle, tokio::process::ChildStdin, u32) {
-        // The SDK installs Tokio's SIGCHLD handler before spawning a sandbox.
-        let sigchld = tokio_signal(SignalKind::child()).unwrap();
-        std::mem::forget(sigchld);
-
-        let mut child = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("read value")
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let pid = child.id().unwrap();
-        let handle = ProcessHandle::new(
-            pid,
-            "reap-test".into(),
-            child,
-            Vec::new(),
-            parent_watchdog,
-            None,
-        );
-
-        unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) };
-        (handle, stdin, pid)
-    }
-
-    async fn assert_reaped(pid: u32) {
-        let reaped = tokio::time::timeout(REAP_TIMEOUT, async {
-            // A zombie still answers kill(pid, 0); ESRCH means its status was collected.
-            while signal::kill(Pid::from_raw(pid as i32), None) != Err(Errno::ESRCH) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await;
-        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-
-        assert!(reaped.is_ok(), "child {pid} was not reaped: {state}");
-        assert_eq!(
-            waitpid(Pid::from_raw(pid as i32), Some(WaitPidFlag::WNOHANG)),
-            Err(Errno::ECHILD)
-        );
-    }
-
-    /// Release a running child as `detach()` does, or as dropping an unstopped attached
-    /// owner does (which only closes its parent-watchdog writer), then end it.
-    async fn released_child_is_reaped(detach: bool, ending: Ending) {
-        let mut fds = [0; 2];
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        let _watchdog_reader = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        let watchdog_writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-
-        let (mut handle, stdin, pid) = spawn_child(Some(watchdog_writer));
-        if detach {
-            handle.disarm().unwrap();
-        }
-
-        // Drop away from the runtime, as a JS finalizer or Python GC may.
-        std::thread::spawn(move || drop(handle)).join().unwrap();
-
-        // A real VM keeps running long after release; end the child only once any
-        // immediate post-drop reaping attempt has already passed.
-        tokio::time::sleep(SETTLE_DELAY).await;
-        match ending {
-            Ending::Exit => drop(stdin),
-            Ending::Term => signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).unwrap(),
-            Ending::Kill => signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL).unwrap(),
-        }
-
-        assert_reaped(pid).await;
-    }
-
-    async fn owned_wait_reports_status_once() {
-        let (mut handle, stdin, pid) = spawn_child(None);
-        signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL).unwrap();
-
-        let status = tokio::time::timeout(REAP_TIMEOUT, handle.wait())
-            .await
-            .expect("owned wait timed out")
-            .unwrap();
-        drop(handle);
-        drop(stdin);
-
-        assert_eq!(status.signal(), Some(libc::SIGKILL));
-        assert_reaped(pid).await;
-    }
-
-    #[test]
-    fn isolated_case() {
-        let Ok(case) = std::env::var(CASE_ENV) else {
-            return;
-        };
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        runtime.block_on(async {
-            match case.as_str() {
-                "detached-exit" => released_child_is_reaped(true, Ending::Exit).await,
-                "detached-term" => released_child_is_reaped(true, Ending::Term).await,
-                "detached-kill" => released_child_is_reaped(true, Ending::Kill).await,
-                "attached-drop" => released_child_is_reaped(false, Ending::Exit).await,
-                "owned-wait" => owned_wait_reports_status_once().await,
-                other => panic!("unknown reap case {other}"),
-            }
-        });
-        println!("reap case {case} passed");
-    }
-
-    #[test]
-    fn detached_child_is_reaped_after_it_exits() {
-        run_isolated("detached-exit");
-    }
-
-    #[test]
-    fn detached_child_is_reaped_after_another_handle_stops_it() {
-        run_isolated("detached-term");
-    }
-
-    #[test]
-    fn detached_child_is_reaped_after_sigkill() {
-        run_isolated("detached-kill");
-    }
-
-    #[test]
-    fn dropped_attached_child_is_reaped() {
-        run_isolated("attached-drop");
-    }
-
-    #[test]
-    fn owned_wait_still_reports_exit_status() {
-        run_isolated("owned-wait");
     }
 }
 

@@ -8,12 +8,6 @@ import { promisify } from "node:util";
 import { Sandbox } from "../dist/index.js";
 import { msbPath } from "../dist/internal/resolve-binary.js";
 
-it.skipIf(process.platform !== "linux" || !msbPath())("reaps detached VMs while their creator stays alive", async () => {
-  await promisify(execFile)(process.execPath, [
-    fileURLToPath(new URL("./fixtures/detached-child-reaping.mjs", import.meta.url)),
-  ], { timeout: 120_000 });
-}, 130_000);
-
 describe.skipIf(!msbPath())("revamp real-runtime contracts", () => {
   const name = `sdk-revamp-contract-${process.pid}`;
   let sb: Sandbox;

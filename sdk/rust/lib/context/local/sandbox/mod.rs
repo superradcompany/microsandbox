@@ -11,15 +11,7 @@ mod process_exit;
 #[cfg(target_os = "macos")]
 #[path = "process_exit_macos.rs"]
 mod process_exit;
-mod runtime_identity;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod signals;
-#[cfg(target_os = "linux")]
-mod start;
 mod stop;
-
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-mod signal_tests;
 
 use crate::context::sandbox::SandboxRecordPage;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -61,7 +53,6 @@ use crate::sandbox::{
     RootfsSource, Sandbox, SandboxConfig, SandboxListBuilder, SandboxRecord, SandboxStatus,
     load_sandbox_record, validate_env, validate_hostname, validate_labels, validate_volume_mounts,
 };
-use runtime_identity::{RecordedRuntime, RuntimeProcess, RuntimeSignal};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -98,8 +89,6 @@ impl LocalContext {
         let write_db = pools.write();
         let model = self.load_sandbox_record_reconciled(pools, name).await?;
         ensure_local_identity(name, expected_id, model.id)?;
-        #[cfg(target_os = "linux")]
-        let model = self.recover_recycled_start(pools, model).await?;
         tracing::debug!(sandbox = name, status = ?model.status, "start_local: current status");
 
         if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
@@ -180,8 +169,8 @@ impl LocalContext {
             })
             .transpose()?
             .flatten();
-        if let Some(pid) = previous_run.as_ref().and_then(|run| run.pid) {
-            let alive = async || -> MicrosandboxResult<bool> {
+        if let Some(pid) = previous_run.and_then(|run| run.pid) {
+            let alive = || -> MicrosandboxResult<bool> {
                 #[cfg(windows)]
                 if let Some(owner) = &previous_owner {
                     return Ok(owner
@@ -191,26 +180,13 @@ impl LocalContext {
                         .transpose()?
                         .unwrap_or(false));
                 }
-                #[cfg(target_os = "linux")]
-                if matches!(
-                    Self::recorded_runtime(
-                        previous_run.as_ref(),
-                        &microsandbox_runtime::ipc::lifecycle_lock_path(
-                            &self.config().run_dir(),
-                            name
-                        )
-                    ),
-                    RecordedRuntime::Recycled
-                ) {
-                    return self.start_endpoint_is_live(name).await;
-                }
                 Ok(!Self::pid_has_exited(pid))
             };
             let start = std::time::Instant::now();
-            while start.elapsed() < Duration::from_secs(5) && alive().await? {
+            while start.elapsed() < Duration::from_secs(5) && alive()? {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            if alive().await? {
+            if alive()? {
                 return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
                     "cannot start sandbox {name:?}: previous runtime pid {pid} is still alive"
                 )));
@@ -399,43 +375,47 @@ impl LocalContext {
         }
 
         self.invalidate_control_session(model.id);
+        let mut pids = Vec::new();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let all_dead = {
-            let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            if let Some(departing) = self.signal_runtime(&model, pid, libc::SIGKILL).await? {
-                tokio::time::timeout_at(exit_deadline, async {
-                    while !departing.has_exited()? {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                    Ok::<_, std::io::Error>(())
-                })
-                .await
-                .map_err(|_| {
-                    crate::MicrosandboxError::Runtime(format!(
-                        "sandbox {name:?} runtime has not finished releasing resources after kill"
-                    ))
-                })??;
-            }
-            true
-        };
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let all_dead = {
-            let signaled_pid = pid.filter(|p| Self::pid_is_alive(*p));
-            if let Some(pid) = signaled_pid {
-                Self::kill_pid(pid)?;
-                let timeout = Duration::from_secs(5);
-                let start = std::time::Instant::now();
-                let poll_interval = Duration::from_millis(50);
-                while start.elapsed() < timeout {
-                    if Self::pid_has_exited(pid) {
-                        break;
-                    }
-                    tokio::time::sleep(poll_interval).await;
-                }
-            }
-            signaled_pid.is_none_or(Self::pid_has_exited)
-        };
+        let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let departing = process_exit::RuntimeExit::capture(
+            pid,
+            &microsandbox_runtime::ipc::lifecycle_lock_path(&self.config().run_dir(), name),
+        )?;
+        if let Some(pid) = pid.filter(|p| Self::pid_is_alive(*p)) {
+            Self::kill_pid(pid)?;
+            pids.push(pid);
+        }
 
+        if !pids.is_empty() {
+            let timeout = Duration::from_secs(5);
+            let start = std::time::Instant::now();
+            let poll_interval = Duration::from_millis(50);
+            while start.elapsed() < timeout {
+                if pids.iter().all(|pid| Self::pid_has_exited(*pid)) {
+                    break;
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+        }
+
+        let all_dead = pids.is_empty() || pids.iter().all(|pid| Self::pid_has_exited(*pid));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(departing) = departing {
+            tokio::time::timeout_at(exit_deadline, async {
+                while !departing.has_exited()? {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Ok::<_, std::io::Error>(())
+            })
+            .await
+            .map_err(|_| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "sandbox {name:?} runtime has not finished releasing resources after kill"
+                ))
+            })??;
+        }
         if all_dead {
             #[cfg(unix)]
             {
@@ -474,7 +454,6 @@ impl LocalContext {
             return Ok(());
         }
 
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         if model.status == SandboxStatus::Running {
             Self::mark_sandbox_draining_if_running(self.db().await?.write(), model.id).await?;
         }
@@ -497,22 +476,10 @@ impl LocalContext {
             Ok(())
         }
 
-        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+        #[cfg(unix)]
         {
             if let Some(pid) = pid.filter(|p| Self::pid_is_alive(*p)) {
                 Self::drain_pid(pid)?;
-            }
-            Ok(())
-        }
-
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            if self
-                .signal_runtime(&model, pid, libc::SIGUSR1)
-                .await?
-                .is_some()
-            {
-                Self::mark_sandbox_draining_if_running(self.db().await?.write(), model.id).await?;
             }
             Ok(())
         }
@@ -1014,31 +981,6 @@ impl LocalContext {
             .filter(|pid| Self::pid_is_alive(*pid))
     }
 
-    fn recorded_runtime(run: Option<&run_entity::Model>, lifecycle: &Path) -> RecordedRuntime {
-        RecordedRuntime::inspect(
-            run.and_then(|run| run.pid),
-            run.and_then(|run| run.started_at),
-            lifecycle,
-        )
-    }
-
-    /// Poll a signalled runtime process until it exits or `timeout` elapses.
-    async fn wait_for_runtime_exit(process: &RuntimeProcess, timeout: Duration) {
-        let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(50);
-        while !process.has_exited() && start.elapsed() < timeout {
-            tokio::time::sleep(poll_interval).await;
-        }
-    }
-
-    /// Whether no process currently owns `name`'s lifecycle lock in this run directory.
-    ///
-    /// The probe acquires and immediately releases the lock, so it must only run while the
-    /// caller holds the name's transition guard.
-    fn lifecycle_is_unowned(run_dir: &Path, name: &str) -> MicrosandboxResult<bool> {
-        Ok(microsandbox_runtime::ipc::try_acquire_lifecycle_guard(run_dir, name)?.is_some())
-    }
-
     /// Terminal status + termination reason for a stale Running/Draining row.
     fn stale_runtime_terminal_state(
         status: SandboxStatus,
@@ -1219,8 +1161,24 @@ impl LocalContext {
         !Self::pid_is_alive(pid)
     }
 
+    /// Request graceful termination (SIGTERM).
+    #[cfg(unix)]
+    fn terminate_pid_gracefully(pid: i32) -> MicrosandboxResult<()> {
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGTERM,
+        )?;
+        Ok(())
+    }
+
+    /// Request termination (Windows has no graceful signal equivalent).
+    #[cfg(windows)]
+    fn terminate_pid_gracefully(pid: i32) -> MicrosandboxResult<()> {
+        Self::terminate_pid(pid)
+    }
+
     /// Force-kill a process (SIGKILL).
-    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(unix)]
     fn kill_pid(pid: i32) -> MicrosandboxResult<()> {
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(pid),
@@ -1236,7 +1194,7 @@ impl LocalContext {
     }
 
     /// Trigger the legacy drain path (SIGUSR1).
-    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(unix)]
     fn drain_pid(pid: i32) -> MicrosandboxResult<()> {
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(pid),

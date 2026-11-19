@@ -4,8 +4,6 @@
 //! process and [`spawn_sandbox`] for starting one from a
 //! [`crate::sandbox::SandboxConfig`].
 
-#[cfg(target_os = "linux")]
-mod child_exit;
 pub(crate) mod handle;
 pub(crate) mod launch_contract;
 mod launch_input;

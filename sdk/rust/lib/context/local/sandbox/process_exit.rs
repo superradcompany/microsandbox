@@ -33,13 +33,20 @@ impl RuntimeExit {
         // pidfd_open sets CLOEXEC. Neither this handle nor disk descriptors are retained
         // after the stop future finishes, and observing exit never steals Child's wait status.
         let process = Self(unsafe { OwnedFd::from_raw_fd(fd as i32) });
-        // A stale catalog PID can point to an unrelated process. Require the runtime's
-        // inherited lifecycle file, not just a live PID or a terminal database row.
-        match lifecycle_matches(pid, lifecycle) {
-            Ok(true) => {}
-            Ok(false) => return Ok(None),
+        let inherited = format!(
+            "/proc/{pid}/fd/{}",
+            microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
+        );
+        let actual = match std::fs::metadata(inherited) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
+        };
+        let expected = std::fs::metadata(lifecycle)?;
+        // A stale catalog PID can point to an unrelated process. Require the runtime's
+        // inherited lifecycle file, not just a live PID or a terminal database row.
+        if (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
+            return Ok(None);
         }
         Ok(Some(process))
     }
@@ -64,67 +71,6 @@ impl RuntimeExit {
         // A process pidfd becomes readable only once the entire thread group has exited;
         // the leader becoming a zombie is insufficient while workers release shared files.
         Ok(poll.revents & (libc::POLLIN | libc::POLLHUP) != 0)
-    }
-
-    pub(super) fn send_signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                self.0.as_raw_fd(),
-                signal,
-                std::ptr::null::<libc::siginfo_t>(),
-                0,
-            )
-        };
-        if result < 0 {
-            let error = std::io::Error::last_os_error();
-            return if error.raw_os_error() == Some(libc::ESRCH) {
-                Ok(false)
-            } else {
-                Err(error)
-            };
-        }
-        Ok(true)
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-/// Whether `pid` holds the sandbox's lifecycle lock file on the runtime's inherited descriptor.
-///
-/// Only the live runtime of this sandbox name holds that exclusive lock, so a match identifies
-/// the process beyond its PID. A missing descriptor is `false`; other `/proc` failures are
-/// reported so callers can decide how much doubt to tolerate.
-pub(super) fn lifecycle_matches(pid: i32, lifecycle: &Path) -> std::io::Result<bool> {
-    let inherited = format!(
-        "/proc/{pid}/fd/{}",
-        microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
-    );
-    let actual = match std::fs::metadata(inherited) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    let expected = std::fs::metadata(lifecycle)?;
-    Ok((actual.dev(), actual.ino()) == (expected.dev(), expected.ino()))
-}
-
-/// The path `pid`'s inherited lifecycle descriptor points at, as procfs renders it.
-///
-/// The link is rendered from the holder's own mount namespace, so it stays meaningful for a
-/// launcher whose run directory is a different mount of the same layout. `None` when the
-/// descriptor is not open; an unlinked target carries procfs's ` (deleted)` marker.
-pub(super) fn lifecycle_link(pid: i32) -> std::io::Result<Option<std::path::PathBuf>> {
-    let inherited = format!(
-        "/proc/{pid}/fd/{}",
-        microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
-    );
-    match std::fs::read_link(inherited) {
-        Ok(link) => Ok(Some(link)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
     }
 }
 
@@ -296,62 +242,5 @@ mod tests {
             .is_none()
         );
         assert!(RuntimeExit::capture(None, home.path()).unwrap().is_none());
-    }
-
-    #[test]
-    fn send_signal_targets_only_the_captured_process() {
-        let home = tempfile::tempdir().unwrap();
-        let lifecycle =
-            microsandbox_runtime::ipc::acquire_lifecycle_guard(home.path(), "signal").unwrap();
-        let lifecycle_fd = lifecycle.as_raw_fd();
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                "context::local::sandbox::process_exit::tests::exit_barrier_child",
-                "--nocapture",
-            ])
-            .env("MSB_EXIT_BARRIER_CHILD", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped());
-        unsafe {
-            command.pre_exec(move || {
-                let copy = libc::fcntl(lifecycle_fd, libc::F_DUPFD_CLOEXEC, 200);
-                if copy < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::dup2(copy, microsandbox_runtime::vm::LIFECYCLE_LOCK_FD) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
-            let _ = child.kill();
-            let _ = child.wait();
-        });
-        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
-        let mut wait_line = |expected: &str| {
-            loop {
-                let mut line = String::new();
-                assert_ne!(output.read_line(&mut line).unwrap(), 0);
-                if line.trim() == expected {
-                    break;
-                }
-            }
-        };
-        wait_line("ready");
-        let barrier = RuntimeExit::capture(
-            Some(child.id() as i32),
-            &microsandbox_runtime::ipc::lifecycle_lock_path(home.path(), "signal"),
-        )
-        .unwrap()
-        .unwrap();
-        child.stdin.as_mut().unwrap().write_all(b"l").unwrap();
-        wait_line("lifecycle-released");
-        child.stdin.as_mut().unwrap().write_all(b"d").unwrap();
-        wait_line("disk-released");
-        assert!(child.wait().unwrap().success());
-        barrier.send_signal(libc::SIGKILL).unwrap();
     }
 }

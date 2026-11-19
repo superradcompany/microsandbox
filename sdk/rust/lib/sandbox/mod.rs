@@ -1072,7 +1072,7 @@ impl Sandbox {
         if let Some(local) = self.local_state()
             && let Some(cleanup) = &local.cleanup
         {
-            cleanup.disarm_retained(local.handle.as_ref())?;
+            cleanup.disarm()?;
         }
         Ok(())
     }
