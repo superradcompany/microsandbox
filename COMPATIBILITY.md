@@ -654,3 +654,7 @@ still validates paired IDs and rejects owners on non-directory mounts. Earlier
 server deployments might ignore these optional fields; there are no self-hosted
 deployments in the user's supported fleet and this is an approved server-support
 requirement. Local runtime capability checks are unchanged.
+
+## Concurrent catalog sidecar teardown
+
+Catalog hardening retries up to 16 complete inspections when SQLite sidecar teardown exposes an unlinked inode or the path changes during inspection. Every attempt repeats the ownership, link and permission checks; symlinks, hardlinks and untrusted access remain rejected. Continued churn returns an error. No SQLite schema, migration guard, lock protocol or runtime format changes.
