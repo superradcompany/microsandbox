@@ -54,7 +54,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         assert snapshot.reference
         assert snapshot.reference_kind == "path"
         assert snapshot.size_bytes > 0
-        assert snapshot.source_sandbox == base_name
+        assert await snapshot.source_sandbox() == base_name
         assert snapshot.state_kind is SnapshotStateKind.FILE
         assert snapshot.format is SnapshotFormat.RAW
         assert snapshot.scope is SnapshotScope.DISK
@@ -74,7 +74,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         selected = await group.set_head("ready")
         assert selected["changed"] is False
         assert selected["head"] == snapshot.id
-        opened = await handle.open()
+        opened = handle
         assert opened.digest == snapshot.digest
         assert opened.state_kind is SnapshotStateKind.FILE
 
@@ -121,7 +121,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         copied_group = imported.snapshot
         assert len(imported.checkpoints) == len(imported.added) == 1
         copied = await imported.checkpoints[0].open()
-        assert copied.labels == {"environment": "test"}
+        assert await copied.labels() == {"environment": "test"}
         assert (await copied.verify())["upper"]["kind"] == "verified"
     finally:
         if copied_group is not None:

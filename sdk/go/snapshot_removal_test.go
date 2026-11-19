@@ -49,7 +49,7 @@ func TestCheckpointRemovalNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	checkpoint, err := Checkpoint.Open(ctx, path)
+	checkpoint, err := OpenSnapshot(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestCheckpointRemovalNative(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(groupPath, "group.json"), head, 0600); err != nil {
 		t.Fatal(err)
 	}
-	group, err := Snapshot.Get(ctx, "history")
+	group, err := testHistories(t).Get(ctx, "history")
 	if err != nil {
 		t.Fatal(err)
 	}

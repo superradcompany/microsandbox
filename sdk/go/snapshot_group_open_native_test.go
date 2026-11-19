@@ -37,14 +37,14 @@ func TestSnapshotGroupOpenDirectory(t *testing.T) {
 		}
 	}
 	ctx := context.Background()
-	history, err := Snapshot.Open(ctx, external)
+	history, err := testHistories(t).Open(ctx, external)
 	if os.Getenv("MSB_EXPECT_OLD_GROUP_PATHS") == "1" {
 		var unsupported *Error
 		if !errors.As(err, &unsupported) || unsupported.Kind != ErrUnsupportedOperation {
 			t.Fatalf("expected unsupported: %v", err)
 		}
 		// The refusal must leave existing name-based operations usable.
-		if _, err := Snapshot.Get(ctx, "history"); err != nil {
+		if _, err := testHistories(t).Get(ctx, "history"); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -63,7 +63,7 @@ func TestSnapshotGroupOpenDirectory(t *testing.T) {
 	if head, err := history.Head(ctx); err != nil || head != nil {
 		t.Fatalf("head: %v %v", head, err)
 	}
-	if _, err := Snapshot.Open(ctx, filepath.Join(root, "missing")); err == nil {
+	if _, err := testHistories(t).Open(ctx, filepath.Join(root, "missing")); err == nil {
 		t.Fatal("missing directory accepted")
 	}
 	if _, err := history.Remove(ctx); err != nil {

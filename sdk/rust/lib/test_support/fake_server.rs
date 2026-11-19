@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::backend::Backend;
+use crate::context::Context;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -79,7 +79,7 @@ impl FakeServer {
     }
 
     /// A cloud backend pointed at this server.
-    pub(crate) fn backend(&self) -> Arc<dyn Backend> {
+    pub(crate) fn backend(&self) -> Arc<dyn Context> {
         Arc::new(super::cloud_backend(&self.url, "test-key").unwrap())
     }
 

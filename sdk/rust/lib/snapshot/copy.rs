@@ -56,7 +56,7 @@ impl SnapshotCopyBuilder {
     pub async fn save(self) -> MicrosandboxResult<Manifest> {
         self.snapshot
             .backend
-            .snapshots()
+            .snapshot_ops()
             .copy(
                 &self.snapshot,
                 &self.output_archive_path,

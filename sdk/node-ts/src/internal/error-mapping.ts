@@ -1,5 +1,18 @@
 import { parseCheckpointRemoval, parseGroupRemoval } from "../snapshot-removal.js";
 import {
+  AgentClientError,
+  BootStartError,
+  ExecFailedError,
+  InvalidCursorError,
+  MissedRotationError,
+  NetworkBuilderError,
+  SnapshotAlreadyExistsError,
+  SnapshotImageMissingError,
+  SnapshotIntegrityError,
+  SnapshotMigrationError,
+  SnapshotNotFoundError,
+  SnapshotSandboxRunningError,
+  WindowsHostSetupError,
   CustomError,
   CloudHttpError,
   DatabaseError,
@@ -55,6 +68,19 @@ import { parseGroupVerification } from "../snapshot-verification.js";
 const PATTERN = /^\[(\w+)\] ([\s\S]*)$/;
 
 const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
+  ["AgentClient", (m, c) => new AgentClientError(m, { cause: c })],
+  ["BootStart", (m, c) => new BootStartError(m, { cause: c })],
+  ["ExecFailed", (m, c) => new ExecFailedError(m, { cause: c })],
+  ["InvalidCursor", (m, c) => new InvalidCursorError(m, { cause: c })],
+  ["MissedRotation", (m, c) => new MissedRotationError(m, { cause: c })],
+  ["NetworkBuilder", (m, c) => new NetworkBuilderError(m, { cause: c })],
+  ["SnapshotAlreadyExists", (m, c) => new SnapshotAlreadyExistsError(m, { cause: c })],
+  ["SnapshotImageMissing", (m, c) => new SnapshotImageMissingError(m, { cause: c })],
+  ["SnapshotIntegrity", (m, c) => new SnapshotIntegrityError(m, { cause: c })],
+  ["SnapshotMigration", (m, c) => new SnapshotMigrationError(m, { cause: c })],
+  ["SnapshotNotFound", (m, c) => new SnapshotNotFoundError(m, { cause: c })],
+  ["SnapshotSandboxRunning", (m, c) => new SnapshotSandboxRunningError(m, { cause: c })],
+  ["WindowsHostSetup", (m, c) => new WindowsHostSetupError(m, { cause: c })],
   ["Io", (m, c) => new IoError(m, { cause: c })],
   ["Http", (m, c) => new HttpError(m, { cause: c })],
   ["CloudHttp", (m, c) => new CloudHttpError(m, { cause: c })],

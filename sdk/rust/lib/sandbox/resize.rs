@@ -10,7 +10,7 @@ use microsandbox_protocol::resize::{
 use microsandbox_types::modify::{ResourceConvergenceState, ResourceKind, ResourceResizeStatus};
 use tokio::time::Instant;
 
-use crate::backend::{Backend, ControlSession, sandbox::SandboxIdentity};
+use crate::context::{Context, ControlSession, sandbox::SandboxIdentity};
 use crate::error::{Operation, ResizeWaitError, ResizeWaitFailure, UnsupportedReason};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -100,7 +100,7 @@ impl Sandbox {
 
 /// Read the latest retained resize status; empty means no recorded request.
 pub(crate) async fn resize_status(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     identity: &SandboxIdentity,
 ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
@@ -113,7 +113,7 @@ pub(crate) async fn resize_status(
 
 /// Read identities and status together without selecting or applying a new target.
 pub(crate) async fn resize_operations(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     identity: &SandboxIdentity,
 ) -> MicrosandboxResult<Vec<ResizeOperation>> {
@@ -128,7 +128,7 @@ pub(crate) async fn resize_operations(
 /// A zero timeout performs one check, bounded by the control request deadline.
 /// A timeout carries the latest completed read per resource, or an empty list if none completed.
 pub(crate) async fn wait_until_resized(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     identity: &SandboxIdentity,
     timeout: Option<Duration>,
@@ -137,7 +137,7 @@ pub(crate) async fn wait_until_resized(
 }
 
 pub(crate) async fn wait_for_operations(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     identity: &SandboxIdentity,
     selected: Option<&[ResizeOperation]>,
@@ -157,7 +157,7 @@ pub(crate) async fn wait_for_operations(
 /// Keep the single-check/polling policy separate from its remaining transport budget.
 /// Bindings can charge lookup time without placing a competing timer around partial replies.
 pub(crate) async fn wait_for_operations_with_budget(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     identity: &SandboxIdentity,
     selected: Option<&[ResizeOperation]>,
@@ -318,11 +318,11 @@ fn accepted_operation(
 }
 
 async fn open_session(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     identity: &SandboxIdentity,
 ) -> MicrosandboxResult<ControlSession> {
-    let handle = backend.sandboxes().get(backend.clone(), name).await?;
+    let handle = backend.sandbox_ops().get(backend.clone(), name).await?;
     ensure_same_identity(name, identity, &handle.identity())?;
     if !matches!(
         handle.status_snapshot(),
@@ -354,11 +354,11 @@ fn resize_status_unsupported() -> MicrosandboxError {
 }
 
 async fn ensure_same_sandbox(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     identity: &SandboxIdentity,
 ) -> MicrosandboxResult<()> {
-    let handle = backend.sandboxes().get(backend.clone(), name).await?;
+    let handle = backend.sandbox_ops().get(backend.clone(), name).await?;
     ensure_same_identity(name, identity, &handle.identity())
 }
 

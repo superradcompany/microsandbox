@@ -32,7 +32,7 @@ func TestCheckpointProducerReceiversLive(t *testing.T) {
 		t.Cleanup(func() {
 			cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
 			defer done()
-			if group, err := Snapshot.Get(cleanup, name); err == nil {
+			if group, err := testHistories(t).Get(cleanup, name); err == nil {
 				if _, err := group.Remove(cleanup); err != nil {
 					t.Errorf("cleanup %s: %v", name, err)
 				}
@@ -49,7 +49,7 @@ func TestCheckpointProducerReceiversLive(t *testing.T) {
 			_ = RemoveSandbox(cleanup, name)
 		})
 	}
-	seed, err := Snapshot.Load(ctx, "producer-seed", []string{archive})
+	seed, err := testHistories(t).Load(ctx, "producer-seed", []string{archive})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,22 +65,22 @@ func TestCheckpointProducerReceiversLive(t *testing.T) {
 	if err := source.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
-	created, err := Checkpoint.Create(ctx, SnapshotCreateOptions{FromSandbox: source.Name(), Group: "producer-history", Name: "ready", RecordIntegrity: true})
+	created, err := CreateSnapshot(ctx, SnapshotCreateOptions{FromSandbox: source.Name(), Group: "producer-history", Name: "ready", RecordIntegrity: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if (created.object == nil) != legacy {
+	if created.inner == nil {
 		t.Fatalf("Checkpoint.Create receiver disagrees with legacy=%v", legacy)
 	}
-	listed, err := Checkpoint.ListDir(ctx, filepath.Join(os.Getenv("MSB_HOME"), "snapshots", "producer-history"))
+	listed, err := ListSnapshotsDir(ctx, filepath.Join(os.Getenv("MSB_HOME"), "snapshots", "producer-history"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed) != 1 || listed[0].ID() != created.ID() || (listed[0].object == nil) != legacy {
+	if len(listed) != 1 || listed[0].ID() != created.ID() || listed[0].inner == nil {
 		t.Fatalf("ListDir lost exact receiver: %+v", listed)
 	}
 	if legacy {
-		for _, checkpoint := range []*SnapshotArtifact{created, listed[0]} {
+		for _, checkpoint := range []*Checkpoint{created, listed[0]} {
 			_, spawnErr := checkpoint.SpawnSandbox(ctx, "must-not-start")
 			_, removeErr := checkpoint.Remove(ctx)
 			for _, err := range []error{spawnErr, removeErr} {
@@ -95,11 +95,11 @@ func TestCheckpointProducerReceiversLive(t *testing.T) {
 		}
 		// Reopening is an explicit caller choice after validating the old producer;
 		// production capture/list routing must never silently reselect its result.
-		created, err = Checkpoint.Open(ctx, created.Path())
+		created, err = OpenSnapshot(ctx, mustCheckpointPath(t, created))
 		if err != nil {
 			t.Fatal(err)
 		}
-		listed[0], err = Checkpoint.Open(ctx, listed[0].Path())
+		listed[0], err = OpenSnapshot(ctx, mustCheckpointPath(t, listed[0]))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -107,7 +107,7 @@ func TestCheckpointProducerReceiversLive(t *testing.T) {
 	if err := RemoveSandbox(ctx, source.Name()); err != nil {
 		t.Fatal(err)
 	}
-	for index, checkpoint := range []*SnapshotArtifact{created, listed[0]} {
+	for index, checkpoint := range []*Checkpoint{created, listed[0]} {
 		name := []string{"prod-a", "prod-b"}[index]
 		child, err := checkpoint.SpawnSandbox(ctx, name)
 		if err != nil {
@@ -132,4 +132,11 @@ func TestCheckpointProducerReceiversLive(t *testing.T) {
 		t.Fatal("stale created receiver removed a nonexistent checkpoint")
 	}
 	t.Log("Create/ListDir receivers spawn exact saved contents after source deletion; removal reports exact identity")
+}
+
+func mustCheckpointPath(t *testing.T, member *Checkpoint) string {
+    t.Helper()
+    path, err := member.Path()
+    if err != nil { t.Fatal(err) }
+    return path
 }

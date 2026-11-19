@@ -430,7 +430,7 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
         full: args.full,
         guest_flush: args.guest_flush,
     };
-    let backend = microsandbox::backend::default_backend();
+    let backend = crate::commands::common::selected_context()?;
     if backend.as_local().is_some()
         && let Some(path) = config
             .group
@@ -442,7 +442,7 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
             "an explicit group path already selects its destination directory"
         );
         let path = std::path::absolute(path)?;
-        let group = SnapshotGroup::open(&path).await?;
+        let group = backend.snapshots().open(&path).await?;
         // Resolve the original, anchored spelling through the filesystem. Group
         // inspection would enumerate every member just to find the store root.
         let directory = tokio::fs::canonicalize(path).await?;
@@ -461,7 +461,7 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
     // Keep the optional sandbox selector through bound-source validation, just
     // as for a named group. It must never silently select another source.
     let outcome = backend
-        .snapshots()
+        .snapshot_ops()
         .checkpoint(backend.clone(), config)
         .await;
     match outcome {
@@ -485,7 +485,9 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
 
 async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     let source = args.sandbox.clone();
-    let mut builder = Snapshot::builder(args.snapshot_name())
+    let mut builder = crate::commands::common::selected_context()?
+        .checkpoints()
+        .builder(args.snapshot_name())
         .from_sandbox(&source)
         .guest_flush(args.guest_flush);
     if let Some(ref dest_dir) = args.dest_dir {
@@ -533,7 +535,10 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     // Group creation never turns a name collision into append. The receiver also
     // carries the source row identity, protecting against same-name replacement.
     let config = builder.build()?;
-    let source = microsandbox::Sandbox::get(&source).await?;
+    let source = crate::commands::common::selected_context()?
+        .sandboxes()
+        .get(&source)
+        .await?;
     let mut options = microsandbox::SnapshotCaptureOptions::default()
         .initial_checkpoint(config.name)
         .guest_flush(config.guest_flush);
@@ -579,7 +584,10 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
 
 async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
     let Some(group_name) = args.group else {
-        let groups = SnapshotGroup::list().await?;
+        let groups = crate::commands::common::selected_context()?
+            .snapshots()
+            .list()
+            .await?;
         if args.quiet {
             for group in groups {
                 println!("{}", group.name());
@@ -592,7 +600,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
             let members = group.checkpoints().await?;
             rows.push(serde_json::json!({
                 "name": group.name(),
-                "head": head.as_ref().map(|checkpoint| checkpoint.id().as_str()),
+                "head": head.as_ref().map(|checkpoint| checkpoint.id()),
                 "count": members.len(),
             }));
         }
@@ -626,7 +634,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
                     "group": s.group(),
                     "parent_digest": s.parent_digest(),
                     "scope": format_scope(s.scope()),
-                    "state_kind": s.state_kind(),
+                    "state_kind": s.state_kind().as_str(),
                     "image_ref": s.image_ref(),
                     "format": s.format().map(format_str),
                     "fstype": s.fstype(),
@@ -723,9 +731,9 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
         return Ok(());
     };
     let snap = group.get_checkpoint(&member).await?;
-    let m = snap.manifest();
+    let m = snap.manifest().await?;
 
-    ui::detail_kv("Snapshot ID", snap.id().as_str());
+    ui::detail_kv("Snapshot ID", snap.id());
     ui::detail_kv("Descriptor Digest", snap.digest());
     ui::detail_kv("Reference", &format_reference(&snap.reference()));
     ui::detail_kv("Image", &m.image.reference);
@@ -780,9 +788,9 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     if let Some(ref src) = m.capture.source_lineage {
         ui::detail_kv("Source Sandbox", src);
     }
-    if !snap.labels().is_empty() {
-        let labels = snap
-            .labels()
+    let labels = snap.labels().await?;
+    if !labels.is_empty() {
+        let labels = labels
             .iter()
             .map(|(key, value)| format!("{key}={value}"))
             .collect::<Vec<_>>()
@@ -949,7 +957,10 @@ async fn reindex(args: SnapshotReindexArgs) -> anyhow::Result<()> {
             local.snapshots_dir()
         }
     };
-    let n = Snapshot::reindex(&dir).await?;
+    let n = crate::commands::common::selected_context()?
+        .checkpoints()
+        .reindex(&dir)
+        .await?;
     println!("indexed {n} snapshot(s) from {}", dir.display());
     Ok(())
 }
@@ -968,14 +979,16 @@ fn select_group(
     selector: &str,
 ) -> impl std::future::Future<Output = microsandbox::MicrosandboxResult<SnapshotGroup>> + '_ {
     // Cloud names are never interpreted as paths in the client's filesystem.
-    let local = microsandbox::backend::default_backend()
-        .as_local()
-        .is_some();
-    let pending = (local && explicit_group_path(selector)).then(|| SnapshotGroup::open(selector));
+    let context = crate::commands::common::selected_context();
+    let pending = context
+        .as_ref()
+        .ok()
+        .filter(|context| context.as_local().is_some() && explicit_group_path(selector))
+        .map(|context| context.snapshots().open(selector));
     async move {
         match pending {
             Some(pending) => pending.await,
-            None => SnapshotGroup::get(selector).await,
+            None => context?.snapshots().get(selector).await,
         }
     }
 }
@@ -1027,9 +1040,17 @@ async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
     };
     let result = match args.identity {
         Some(identity) => {
-            SnapshotGroup::load_encrypted(&args.group, &args.archives, &identity, configure).await?
+            crate::commands::common::selected_context()?
+                .snapshots()
+                .load_encrypted(&args.group, &args.archives, &identity, configure)
+                .await?
         }
-        None => SnapshotGroup::load_with(&args.group, &args.archives, configure).await?,
+        None => {
+            crate::commands::common::selected_context()?
+                .snapshots()
+                .load_with(&args.group, &args.archives, configure)
+                .await?
+        }
     };
     report_head_update(&result.head_update);
     for warning in &result.warnings {
@@ -1056,7 +1077,7 @@ async fn head(args: SnapshotHeadArgs) -> anyhow::Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "group": group.name(), "head": head.as_ref().map(|checkpoint| checkpoint.id().as_str()),
+                "group": group.name(), "head": head.as_ref().map(|checkpoint| checkpoint.id()),
             }))?
         );
     } else {
@@ -1064,7 +1085,7 @@ async fn head(args: SnapshotHeadArgs) -> anyhow::Result<()> {
         ui::detail_kv(
             "Head",
             head.as_ref()
-                .map(|checkpoint| checkpoint.id().as_str())
+                .map(|checkpoint| checkpoint.id())
                 .unwrap_or("-"),
         );
     }

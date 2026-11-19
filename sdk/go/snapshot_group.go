@@ -13,7 +13,10 @@ import (
 
 // SnapshotGroup is a mutable history over immutable checkpoints. Its receiver
 // retains the backend that opened it; clearing head does not erase its members.
-type SnapshotGroup struct {
+type SnapshotGroup = Snapshot
+
+// Snapshot is a checkpoint history belonging to one provider.
+type Snapshot struct {
 	object *ffi.SnapshotObject
 	name   string
 }
@@ -109,13 +112,13 @@ func (g *SnapshotGroup) Inspect(ctx context.Context) (*SnapshotGroupInfo, error)
 // SnapshotCreateResult owns the initial checkpoint, even if head changes later.
 type SnapshotCreateResult struct {
 	Snapshot   *SnapshotGroup
-	Checkpoint *SnapshotArtifact
+	Checkpoint *Checkpoint
 	HeadUpdate *SnapshotHeadUpdate
 }
 
 // CheckpointCaptureResult reports this capture's publication, never a later head lookup.
 type CheckpointCaptureResult struct {
-	Checkpoint *SnapshotArtifact
+	Checkpoint *Checkpoint
 	HeadUpdate *SnapshotHeadUpdate
 }
 
@@ -134,7 +137,7 @@ type SnapshotImportOptions struct {
 type SnapshotImportResult struct {
 	OperationID string
 	Snapshot    *SnapshotGroup
-	Checkpoints []*SnapshotHandle
+	Checkpoints []*Checkpoint
 	Added       []string
 	Reused      []string
 	HeadUpdate  *SnapshotHeadUpdate
@@ -157,6 +160,38 @@ func WithSnapshotCaptureConfig(config SnapshotCaptureConfig) SnapshotCaptureOpti
 	return func(options *SnapshotCaptureConfig) { *options = config }
 }
 
+// Snapshots selects histories in a single provider context.
+type Snapshots struct{ selected Context }
+
+func SnapshotCtx(selected Context) *Snapshots { return &Snapshots{selected: selected} }
+func (s *Snapshots) Context() Context         { return s.selected }
+func (s *Snapshots) root() (*ffi.SnapshotObject, error) {
+	destination, err := nativeDestination(s.selected)
+	if err != nil {
+		return nil, err
+	}
+	return destination.SnapshotRoot(), nil
+}
+
+func checkpointFromRegistration(owner *ffi.SnapshotObject, raw json.RawMessage) (*Checkpoint, error) {
+	inner, err := owner.Resource(raw)
+	if err != nil {
+		return nil, err
+	}
+	return snapshotFromResource(inner)
+}
+func checkpointsFromRegistrations(owner *ffi.SnapshotObject, items []json.RawMessage) ([]*Checkpoint, error) {
+	checkpoints := make([]*Checkpoint, 0, len(items))
+	for _, item := range items {
+		member, err := checkpointFromRegistration(owner, item)
+		if err != nil {
+			return nil, err
+		}
+		checkpoints = append(checkpoints, member)
+	}
+	return checkpoints, nil
+}
+
 type snapshotGroupWire struct {
 	ObjectHandle uint64 `json:"object_handle"`
 	Name         string `json:"name"`
@@ -164,15 +199,15 @@ type snapshotGroupWire struct {
 
 type snapshotCaptureWire struct {
 	Snapshot   *snapshotGroupWire      `json:"snapshot"`
-	Checkpoint *ffi.SnapshotInfo       `json:"checkpoint"`
+	Checkpoint json.RawMessage         `json:"checkpoint"`
 	HeadUpdate *ffi.SnapshotHeadUpdate `json:"head_update"`
 }
 
-func snapshotGroupFromWire(group *snapshotGroupWire) (*SnapshotGroup, error) {
+func snapshotGroupFromWire(owner *ffi.SnapshotObject, group *snapshotGroupWire) (*SnapshotGroup, error) {
 	if group == nil || group.ObjectHandle == 0 {
 		return nil, fmt.Errorf("native SDK returned no snapshot group receiver")
 	}
-	return &SnapshotGroup{object: ffi.NewSnapshotObject(group.ObjectHandle), name: group.Name}, nil
+	return &SnapshotGroup{object: owner.Child(group.ObjectHandle), name: group.Name}, nil
 }
 
 func snapshotObjectRequest(ctx context.Context, object *ffi.SnapshotObject, request any, out any) error {
@@ -196,41 +231,49 @@ func snapshotObjectRequest(ctx context.Context, object *ffi.SnapshotObject, requ
 }
 
 // Load atomically imports files into a named group, with optional dependency/head policy.
-func (snapshotFactory) Load(ctx context.Context, group string, files []string, options ...SnapshotImportOptions) (*SnapshotImportResult, error) {
+func (s *Snapshots) Load(ctx context.Context, group string, files []string, options ...SnapshotImportOptions) (*SnapshotImportResult, error) {
 	if len(options) > 1 {
 		return nil, fmt.Errorf("snapshot load accepts at most one options value")
+	}
+	owner, err := s.root()
+	if err != nil {
+		return nil, err
 	}
 	var opts SnapshotImportOptions
 	if len(options) == 1 {
 		opts = options[0]
 	}
 	var wire struct {
-		OperationID string                    `json:"operation_id"`
-		Snapshot    *snapshotGroupWire        `json:"snapshot"`
-		Checkpoints []*ffi.SnapshotHandleInfo `json:"checkpoints"`
-		Added       []string                  `json:"added"`
-		Reused      []string                  `json:"reused"`
-		HeadUpdate  *ffi.SnapshotHeadUpdate   `json:"head_update"`
-		Warnings    []string                  `json:"warnings"`
+		OperationID string                  `json:"operation_id"`
+		Snapshot    *snapshotGroupWire      `json:"snapshot"`
+		Checkpoints []json.RawMessage       `json:"checkpoints"`
+		Added       []string                `json:"added"`
+		Reused      []string                `json:"reused"`
+		HeadUpdate  *ffi.SnapshotHeadUpdate `json:"head_update"`
+		Warnings    []string                `json:"warnings"`
 	}
-	if err := snapshotObjectRequest(ctx, nil, map[string]any{"op": "load", "name": group, "files": files,
+	if err := snapshotObjectRequest(ctx, owner, map[string]any{"op": "load", "name": group, "files": files,
 		"options": ffi.SnapshotLoadOptions{Dest: opts.Dest, Base: opts.Base, SetHead: opts.SetHead}}, &wire); err != nil {
 		return nil, err
 	}
-	history, err := snapshotGroupFromWire(wire.Snapshot)
+	history, err := snapshotGroupFromWire(owner, wire.Snapshot)
 	if err != nil {
 		return nil, err
 	}
-	checkpoints := make([]*SnapshotHandle, len(wire.Checkpoints))
-	for i, item := range wire.Checkpoints {
-		checkpoints[i] = snapshotHandleFromInfo(item)
+	checkpoints, err := checkpointsFromRegistrations(owner, wire.Checkpoints)
+	if err != nil {
+		return nil, err
 	}
 	return &SnapshotImportResult{OperationID: wire.OperationID, Snapshot: history, Checkpoints: checkpoints,
 		Added: wire.Added, Reused: wire.Reused, HeadUpdate: snapshotHeadUpdateFromInfo(wire.HeadUpdate), Warnings: wire.Warnings}, nil
 }
 
 // Open reopens an explicit local history directory without default-store lookup.
-func (snapshotFactory) Open(ctx context.Context, path string) (*SnapshotGroup, error) {
+func (s *Snapshots) Open(ctx context.Context, path string) (*SnapshotGroup, error) {
+	owner, err := s.root()
+	if err != nil {
+		return nil, err
+	}
 	if path == "" {
 		return nil, fmt.Errorf("snapshot group path cannot be empty")
 	}
@@ -249,32 +292,40 @@ func (snapshotFactory) Open(ctx context.Context, path string) (*SnapshotGroup, e
 		path = strings.TrimRight(cwd, string(os.PathSeparator)) + string(os.PathSeparator) + path
 	}
 	var wire snapshotGroupWire
-	data, err := ffi.SnapshotGroupOpen(ctx, path)
+	data, err := owner.Call(ctx, map[string]any{"op": "open_group", "directory": path})
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return nil, fmt.Errorf("parse snapshot group: %w", err)
 	}
-	return snapshotGroupFromWire(&wire)
+	return snapshotGroupFromWire(owner, &wire)
 }
 
-func (snapshotFactory) Get(ctx context.Context, name string) (*SnapshotGroup, error) {
-	var wire snapshotGroupWire
-	if err := snapshotObjectRequest(ctx, nil, map[string]any{"op": "get", "name": name}, &wire); err != nil {
+func (s *Snapshots) Get(ctx context.Context, name string) (*SnapshotGroup, error) {
+	owner, err := s.root()
+	if err != nil {
 		return nil, err
 	}
-	return snapshotGroupFromWire(&wire)
+	var wire snapshotGroupWire
+	if err := snapshotObjectRequest(ctx, owner, map[string]any{"op": "get", "name": name}, &wire); err != nil {
+		return nil, err
+	}
+	return snapshotGroupFromWire(owner, &wire)
 }
 
-func (snapshotFactory) List(ctx context.Context) ([]*SnapshotGroup, error) {
+func (s *Snapshots) List(ctx context.Context) ([]*SnapshotGroup, error) {
+	owner, err := s.root()
+	if err != nil {
+		return nil, err
+	}
 	var wire []*snapshotGroupWire
-	if err := snapshotObjectRequest(ctx, nil, map[string]any{"op": "list"}, &wire); err != nil {
+	if err := snapshotObjectRequest(ctx, owner, map[string]any{"op": "list"}, &wire); err != nil {
 		return nil, err
 	}
 	groups := make([]*SnapshotGroup, 0, len(wire))
 	for _, item := range wire {
-		group, err := snapshotGroupFromWire(item)
+		group, err := snapshotGroupFromWire(owner, item)
 		if err != nil {
 			return nil, err
 		}
@@ -286,36 +337,31 @@ func (snapshotFactory) List(ctx context.Context) ([]*SnapshotGroup, error) {
 func (group *SnapshotGroup) Name() string { return group.name }
 
 // Head returns nil for an explicitly headless history.
-func (group *SnapshotGroup) Head(ctx context.Context) (*SnapshotArtifact, error) {
-	var info *ffi.SnapshotInfo
+func (group *SnapshotGroup) Head(ctx context.Context) (*Checkpoint, error) {
+	var info json.RawMessage
 	if err := snapshotObjectRequest(ctx, group.object, map[string]any{"op": "head"}, &info); err != nil {
 		return nil, err
 	}
-	if info == nil {
+	if string(info) == "null" {
 		return nil, nil
 	}
-	return snapshotFromInfo(info), nil
+	return checkpointFromRegistration(group.object, info)
 }
 
-func (group *SnapshotGroup) GetCheckpoint(ctx context.Context, name string) (*SnapshotArtifact, error) {
-	var info ffi.SnapshotInfo
+func (group *SnapshotGroup) GetCheckpoint(ctx context.Context, name string) (*Checkpoint, error) {
+	var info json.RawMessage
 	if err := snapshotObjectRequest(ctx, group.object, map[string]any{"op": "member", "name": name}, &info); err != nil {
 		return nil, err
 	}
-	return snapshotFromInfo(&info), nil
+	return checkpointFromRegistration(group.object, info)
 }
 
-func (group *SnapshotGroup) Checkpoints(ctx context.Context) ([]*SnapshotHandle, error) {
-	var infos []*ffi.SnapshotHandleInfo
+func (group *SnapshotGroup) Checkpoints(ctx context.Context) ([]*Checkpoint, error) {
+	var infos []json.RawMessage
 	if err := snapshotObjectRequest(ctx, group.object, map[string]any{"op": "members"}, &infos); err != nil {
 		return nil, err
 	}
-	members := make([]*SnapshotHandle, len(infos))
-	for i, info := range infos {
-		members[i] = snapshotHandleFromInfo(info)
-		members[i].groupReceiver = group
-	}
-	return members, nil
+	return checkpointsFromRegistrations(group.object, infos)
 }
 
 func (group *SnapshotGroup) SetHead(ctx context.Context, member string) (*SnapshotHeadUpdate, error) {
@@ -346,7 +392,11 @@ func (group *SnapshotGroup) Checkpoint(ctx context.Context, opts ...SnapshotCapt
 	if result.Checkpoint == nil {
 		return nil, fmt.Errorf("native SDK returned no captured checkpoint")
 	}
-	return &CheckpointCaptureResult{Checkpoint: snapshotFromInfo(result.Checkpoint), HeadUpdate: snapshotHeadUpdateFromInfo(result.HeadUpdate)}, nil
+	member, err := checkpointFromRegistration(group.object, result.Checkpoint)
+	if err != nil {
+		return nil, err
+	}
+	return &CheckpointCaptureResult{Checkpoint: member, HeadUpdate: snapshotHeadUpdateFromInfo(result.HeadUpdate)}, nil
 }
 
 // Snapshot creates a new group; an existing group is an error, never an append.
@@ -355,22 +405,27 @@ func (sandbox *Sandbox) Snapshot(ctx context.Context, name string, opts ...Snaps
 	for _, configure := range opts {
 		configure(&options)
 	}
+	owner := sandbox.inner.SnapshotRoot()
 	var result snapshotCaptureWire
-	if err := snapshotObjectRequest(ctx, nil, map[string]any{"op": "create", "sandbox": sandbox.inner.Handle(), "name": name, "options": options}, &result); err != nil {
+	if err := snapshotObjectRequest(ctx, owner, map[string]any{"op": "create", "sandbox": sandbox.inner.Handle(), "name": name, "options": options}, &result); err != nil {
 		return nil, err
 	}
-	group, err := snapshotGroupFromWire(result.Snapshot)
+	group, err := snapshotGroupFromWire(owner, result.Snapshot)
 	if err != nil {
 		return nil, err
 	}
 	if result.Checkpoint == nil {
 		return nil, fmt.Errorf("native SDK returned no initial checkpoint")
 	}
-	return &SnapshotCreateResult{Snapshot: group, Checkpoint: snapshotFromInfo(result.Checkpoint), HeadUpdate: snapshotHeadUpdateFromInfo(result.HeadUpdate)}, nil
+	member, err := checkpointFromRegistration(owner, result.Checkpoint)
+	if err != nil {
+		return nil, err
+	}
+	return &SnapshotCreateResult{Snapshot: group, Checkpoint: member, HeadUpdate: snapshotHeadUpdateFromInfo(result.HeadUpdate)}, nil
 }
 
 // Save exports this exact checkpoint, using the retained receiver when available.
-func (checkpoint *SnapshotArtifact) Save(ctx context.Context, path string, opts ...SnapshotSaveOptions) error {
+func (checkpoint *Checkpoint) Save(ctx context.Context, path string, opts ...SnapshotSaveOptions) error {
 	// Accept one explicit options value or defaults; silently choosing one of several
 	// values could discard a requested compatibility target or dependency policy.
 	if len(opts) > 1 {
@@ -423,8 +478,8 @@ func (group *SnapshotGroup) SpawnSandbox(ctx context.Context, name string, opts 
 	return &Sandbox{inner: inner}, nil
 }
 
-func (checkpoint *SnapshotArtifact) SpawnSandbox(ctx context.Context, name string, opts ...RestoreOption) (*Sandbox, error) {
-	inner, err := spawnSnapshotReceiver(ctx, checkpoint.object, name, 0, opts)
+func (checkpoint *Checkpoint) SpawnSandbox(ctx context.Context, name string, opts ...RestoreOption) (*Sandbox, error) {
+	inner, err := spawnSnapshotReceiver(ctx, checkpoint.inner.SnapshotReceiver(), name, 0, opts)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -432,14 +487,14 @@ func (checkpoint *SnapshotArtifact) SpawnSandbox(ctx context.Context, name strin
 }
 
 func (group *SnapshotGroup) SpawnSandboxWithProgress(ctx context.Context, name string, opts ...RestoreOption) (<-chan CreationProgress, <-chan CreationResult) {
-	return sandboxWithProgress(ctx, func(progress uint64) (*ffi.Sandbox, error) {
+	return sandboxWithProgress(ctx, group.object.Library(), func(progress uint64) (*ffi.Sandbox, error) {
 		return spawnSnapshotReceiver(ctx, group.object, name, progress, opts)
 	})
 }
 
-func (checkpoint *SnapshotArtifact) SpawnSandboxWithProgress(ctx context.Context, name string, opts ...RestoreOption) (<-chan CreationProgress, <-chan CreationResult) {
-	return sandboxWithProgress(ctx, func(progress uint64) (*ffi.Sandbox, error) {
-		return spawnSnapshotReceiver(ctx, checkpoint.object, name, progress, opts)
+func (checkpoint *Checkpoint) SpawnSandboxWithProgress(ctx context.Context, name string, opts ...RestoreOption) (<-chan CreationProgress, <-chan CreationResult) {
+	return sandboxWithProgress(ctx, checkpoint.inner.SnapshotReceiver().Library(), func(progress uint64) (*ffi.Sandbox, error) {
+		return spawnSnapshotReceiver(ctx, checkpoint.inner.SnapshotReceiver(), name, progress, opts)
 	})
 }
 
@@ -455,16 +510,16 @@ type CheckpointRemoveResult struct {
 type CheckpointRemoveOptions struct{ Force bool }
 
 // Remove deletes this exact retained checkpoint and returns its publication outcome.
-func (s *SnapshotArtifact) Remove(ctx context.Context, options ...CheckpointRemoveOptions) (*CheckpointRemoveResult, error) {
+func (s *Checkpoint) Remove(ctx context.Context, options ...CheckpointRemoveOptions) (*CheckpointRemoveResult, error) {
 	if len(options) > 1 {
 		return nil, fmt.Errorf("checkpoint removal accepts at most one options value")
 	}
-	if s.object == nil {
+	if s.inner == nil {
 		return nil, &Error{Kind: ErrUnsupportedOperation, Message: "exact checkpoint removal requires a retained receiver from an updated native library"}
 	}
 	force := len(options) == 1 && options[0].Force
 	var result CheckpointRemoveResult
-	if err := snapshotObjectRequest(ctx, s.object, map[string]any{"op": "remove", "force": force}, &result); err != nil {
+	if err := snapshotObjectRequest(ctx, s.inner.SnapshotReceiver(), map[string]any{"op": "remove", "force": force}, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil

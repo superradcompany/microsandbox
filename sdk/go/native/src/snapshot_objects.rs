@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::os::raw::{c_char, c_uchar};
 use std::sync::{
     Arc, Mutex, OnceLock, RwLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use microsandbox::{Checkpoint, Snapshot, SnapshotCaptureOptions};
@@ -19,13 +19,20 @@ use crate::{FfiError, cstr, get, run_c, snapshot_handle_json, snapshot_json, ver
 #[derive(Clone)]
 enum Object {
     Group(Snapshot),
-    Source(Arc<microsandbox::sandbox::SandboxHandle>),
+    Source(Arc<microsandbox::sandbox::SandboxRecord>),
     Checkpoint(Box<Checkpoint>),
 }
 
 #[derive(serde::Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    // New provider-aware clients request the same retained checkpoint representation as the
+    // rest of their SDK. Older clients continue receiving their original object registrations.
+    WithContext {
+        context: Option<u64>,
+        checkpoint: Option<u64>,
+        request: Box<Request>,
+    },
     Load {
         name: String,
         files: Vec<std::path::PathBuf>,
@@ -111,7 +118,12 @@ struct CaptureOptions {
 /// Objects become caller-owned only after the entire result reaches its output buffer.
 /// Cancellation, serialization errors, and small buffers must not leak native receivers.
 #[derive(Default)]
-struct PendingObjects(Mutex<Vec<u64>>, Mutex<Vec<u64>>);
+struct PendingObjects {
+    objects: Mutex<Vec<u64>>,
+    sandboxes: Mutex<Vec<u64>>,
+    resources: Mutex<Vec<u64>>,
+    provider_resources: AtomicBool,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -144,16 +156,44 @@ impl CaptureOptions {
 
 impl PendingObjects {
     fn insert(&self, object: Object) -> Result<Value, FfiError> {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let mut value = match &object {
+        let value = match &object {
             Object::Group(group) => json!({"name": group.name()}),
             Object::Source(source) => serde_json::from_str(&crate::sandbox_handle_json(source))
                 .map_err(|e| FfiError::internal(e.to_string()))?,
-            Object::Checkpoint(checkpoint) => snapshot_json(checkpoint),
+            Object::Checkpoint(_) => {
+                return Err(FfiError::internal(
+                    "use checkpoint registration for a descriptor",
+                ));
+            }
         };
+        self.insert_with_value(object, value)
+    }
+
+    async fn checkpoint(&self, checkpoint: Checkpoint) -> Result<Value, FfiError> {
+        if self.provider_resources.load(Ordering::Relaxed) {
+            let mut resources = self
+                .resources
+                .lock()
+                .map_err(|_| FfiError::internal("pending resources lock poisoned"))?;
+            let value = crate::persistent_resource::register(
+                crate::persistent_resource::Resource::snapshot(checkpoint),
+            )?;
+            resources.push(
+                value["handle"]
+                    .as_u64()
+                    .expect("register returns an integer handle"),
+            );
+            return Ok(value);
+        }
+        let value = snapshot_json(&checkpoint).await?;
+        self.insert_with_value(Object::Checkpoint(Box::new(checkpoint)), value)
+    }
+
+    fn insert_with_value(&self, object: Object, mut value: Value) -> Result<Value, FfiError> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let mut pending = self
-            .0
+            .objects
             .lock()
             .map_err(|_| FfiError::internal("pending objects lock poisoned"))?;
         objects()
@@ -166,9 +206,9 @@ impl PendingObjects {
     }
 
     fn sandbox(&self, sandbox: microsandbox::Sandbox) -> Result<Value, FfiError> {
-        let mut value = json!({"name": sandbox.name(), "id": sandbox.id().to_string(), "backend_kind": sandbox.backend_kind().as_str()});
+        let mut value = json!({"name": sandbox.name(), "id": sandbox.id().to_string(), "backend_kind": sandbox.context_kind().as_str()});
         let mut pending = self
-            .1
+            .sandboxes
             .lock()
             .map_err(|_| FfiError::internal("pending sandboxes lock poisoned"))?;
         let handle = crate::register(sandbox)?;
@@ -177,11 +217,26 @@ impl PendingObjects {
         Ok(value)
     }
 
+    async fn members(&self, members: Vec<Checkpoint>) -> Result<Vec<Value>, FfiError> {
+        if !self.provider_resources.load(Ordering::Relaxed) {
+            return Ok(members.iter().map(snapshot_handle_json).collect());
+        }
+        let mut registrations = Vec::with_capacity(members.len());
+        for member in members {
+            registrations.push(self.checkpoint(member).await?);
+        }
+        Ok(registrations)
+    }
+
     fn publish(&self) {
-        if let Ok(mut pending) = self.1.lock() {
+        self.resources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        if let Ok(mut pending) = self.sandboxes.lock() {
             pending.clear();
         }
-        if let Ok(mut pending) = self.0.lock() {
+        if let Ok(mut pending) = self.objects.lock() {
             pending.clear();
         }
     }
@@ -193,12 +248,20 @@ impl PendingObjects {
 
 impl Drop for PendingObjects {
     fn drop(&mut self) {
-        if let Ok(pending) = self.1.get_mut() {
+        for handle in self
+            .resources
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            crate::persistent_resource::msb_resource_release(handle);
+        }
+        if let Ok(pending) = self.sandboxes.get_mut() {
             for handle in pending.drain(..) {
                 let _ = crate::remove(handle);
             }
         }
-        if let (Ok(pending), Ok(mut objects)) = (self.0.get_mut(), objects().write()) {
+        if let (Ok(pending), Ok(mut objects)) = (self.objects.get_mut(), objects().write()) {
             for id in pending.drain(..) {
                 objects.remove(&id);
             }
@@ -215,7 +278,11 @@ impl Drop for PendingObjects {
 fn prepare_request(json: &str) -> Result<Request, FfiError> {
     let mut request = serde_json::from_str::<Request>(json)
         .map_err(|e| FfiError::invalid_argument(format!("invalid snapshot operation: {e}")))?;
-    if let Request::OpenGroup { directory } = &mut request {
+    let inner = match &mut request {
+        Request::WithContext { request, .. } => request.as_mut(),
+        other => other,
+    };
+    if let Request::OpenGroup { directory } = inner {
         if directory.as_os_str().is_empty() {
             return Err(FfiError::invalid_argument(
                 "snapshot group path cannot be empty",
@@ -260,7 +327,38 @@ fn checkpoint(id: u64) -> Result<Checkpoint, FfiError> {
 }
 
 async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result<Value, FfiError> {
+    let (context, retained, request) = match request {
+        Request::WithContext {
+            context,
+            checkpoint,
+            request,
+        } => {
+            pending.provider_resources.store(true, Ordering::Relaxed);
+            (
+                context.map(crate::context::get).transpose()?,
+                checkpoint
+                    .map(crate::persistent_resource::checkpoint)
+                    .transpose()?,
+                *request,
+            )
+        }
+        other => (None, None, other),
+    };
+    let receiver = || match &retained {
+        Some(member) => Ok(Object::Checkpoint(Box::new(member.clone()))),
+        None => object(id),
+    };
+    let member = || match &retained {
+        Some(member) => Ok(member.clone()),
+        None => checkpoint(id),
+    };
+    let selected = || {
+        context
+            .clone()
+            .unwrap_or_else(microsandbox::configured_context)
+    };
     match request {
+        Request::WithContext { .. } => Err(FfiError::invalid_argument("nested provider context")),
         Request::Load {
             name,
             files,
@@ -276,8 +374,9 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
                     "import options cannot select a different destination group",
                 ));
             }
-            let result =
-                Snapshot::load_with(name, &files, |_| microsandbox::SnapshotImportOptions {
+            let result = selected()
+                .snapshots()
+                .load_with(&name, &files, |_| microsandbox::SnapshotImportOptions {
                     dest: options.dest,
                     base: options.base,
                     set_head: options.set_head,
@@ -286,16 +385,21 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
             Ok(json!({
                 "operation_id": result.operation_id,
                 "snapshot": pending.insert(Object::Group(result.snapshot))?,
-                "checkpoints": result.checkpoints.iter().map(snapshot_handle_json).collect::<Vec<_>>(),
+                "checkpoints": pending.members(result.checkpoints).await?,
                 "added": result.added, "reused": result.reused,
                 "head_update": result.head_update, "warnings": result.warnings,
             }))
         }
-        Request::LookupSource { name } => pending.insert(Object::Source(Arc::new(
-            microsandbox::Sandbox::get(&name).await?,
-        ))),
+        Request::LookupSource { name } => {
+            let context = selected();
+            pending.insert(Object::Source(Arc::new(
+                context.sandbox_ops().get(context.clone(), &name).await?,
+            )))
+        }
         Request::ListSources { options } => {
-            let page = microsandbox::Sandbox::list_with(|mut list| {
+            let context = selected();
+            let query = {
+                let mut list = microsandbox::SandboxListBuilder::default();
                 if let Some(limit) = options.limit {
                     list = list.limit(limit);
                 }
@@ -303,8 +407,8 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
                     list = list.cursor(cursor);
                 }
                 list.labels(options.labels)
-            })
-            .await?;
+            };
+            let page = context.sandbox_ops().list(context.clone(), query).await?;
             let sources = page
                 .sandboxes
                 .into_iter()
@@ -313,7 +417,7 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
             Ok(json!({"sandboxes": sources, "next_cursor": page.next_cursor}))
         }
         Request::CaptureSource { name, options } => {
-            let Object::Source(source) = object(id)? else {
+            let Object::Source(source) = receiver()? else {
                 return Err(FfiError::invalid_argument(
                     "capture requires a sandbox receiver",
                 ));
@@ -321,7 +425,7 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
             let result = source.snapshot_with(&name, |_| options.build()).await?;
             Ok(
                 json!({"snapshot": pending.insert(Object::Group(result.snapshot))?,
-                "checkpoint": pending.insert(Object::Checkpoint(Box::new(result.checkpoint)))?, "head_update":result.head_update}),
+                "checkpoint": pending.checkpoint(result.checkpoint).await?, "head_update":result.head_update}),
             )
         }
         Request::Open {
@@ -332,45 +436,47 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
                 reference,
                 reference_kind.as_deref().unwrap_or(""),
             )?;
-            pending.insert(Object::Checkpoint(Box::new(
-                Checkpoint::open_ref(reference).await?,
-            )))
+            pending
+                .checkpoint(selected().checkpoints().open_ref(reference).await?)
+                .await
         }
         Request::CreateArtifact { source, options } => {
-            let builder = crate::snapshot_builder_from_opts(source, *options)?;
-            pending.insert(Object::Checkpoint(Box::new(builder.create().await?)))
+            let builder = crate::snapshot_builder_in(selected(), source, *options)?;
+            pending.checkpoint(builder.create().await?).await
         }
-        Request::ListDir { directory } => Checkpoint::list_dir(directory)
-            .await?
-            .into_iter()
-            .map(|checkpoint| pending.insert(Object::Checkpoint(Box::new(checkpoint))))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
+        Request::ListDir { directory } => {
+            let mut members = Vec::new();
+            for member in selected().checkpoints().list_dir(directory).await? {
+                members.push(pending.checkpoint(member).await?);
+            }
+            Ok(Value::Array(members))
+        }
         Request::OpenGroup { directory } => {
-            pending.insert(Object::Group(Snapshot::open(directory).await?))
+            pending.insert(Object::Group(selected().snapshots().open(directory).await?))
         }
-        Request::Get { name } => pending.insert(Object::Group(Snapshot::get(name).await?)),
-        Request::List => Snapshot::list()
+        Request::Get { name } => {
+            pending.insert(Object::Group(selected().snapshots().get(&name).await?))
+        }
+        Request::List => selected()
+            .snapshots()
+            .list()
             .await?
             .into_iter()
             .map(|group| pending.insert(Object::Group(group)))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         Request::Head => match group(id)?.head().await? {
-            Some(member) => pending.insert(Object::Checkpoint(Box::new(member))),
+            Some(member) => pending.checkpoint(member).await,
             None => Ok(Value::Null),
         },
         Request::Members => Ok(Value::Array(
-            group(id)?
-                .checkpoints()
-                .await?
-                .iter()
-                .map(snapshot_handle_json)
-                .collect(),
+            pending.members(group(id)?.checkpoints().await?).await?,
         )),
-        Request::Member { name } => pending.insert(Object::Checkpoint(Box::new(
-            group(id)?.get_checkpoint(name).await?,
-        ))),
+        Request::Member { name } => {
+            pending
+                .checkpoint(group(id)?.get_checkpoint(name).await?)
+                .await
+        }
         Request::SetHead { name } => serde_json::to_value(group(id)?.set_head(name).await?)
             .map_err(|e| FfiError::internal(e.to_string())),
         Request::ClearHead => serde_json::to_value(group(id)?.clear_head().await?)
@@ -378,7 +484,7 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
         Request::Capture { options } => {
             let result = group(id)?.checkpoint_with(|_| options.build()).await?;
             Ok(
-                json!({"checkpoint": pending.insert(Object::Checkpoint(Box::new(result.checkpoint)))?, "head_update": result.head_update}),
+                json!({"checkpoint": pending.checkpoint(result.checkpoint).await?, "head_update": result.head_update}),
             )
         }
         Request::Create {
@@ -391,11 +497,11 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
                 .await?;
             Ok(
                 json!({"snapshot": pending.insert(Object::Group(result.snapshot))?,
-                "checkpoint": pending.insert(Object::Checkpoint(Box::new(result.checkpoint)))?, "head_update": result.head_update}),
+                "checkpoint": pending.checkpoint(result.checkpoint).await?, "head_update": result.head_update}),
             )
         }
         Request::Save { path, options } => {
-            checkpoint(id)?
+            member()?
                 .save_to(
                     std::path::Path::new(&path),
                     microsandbox::snapshot::SaveOpts {
@@ -435,12 +541,12 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
             serde_json::to_value(result).map_err(|error| FfiError::internal(error.to_string()))
         }
         Request::Remove { force } => {
-            let result = checkpoint(id)?
+            let result = member()?
                 .remove_with(|options| if force { options.force() } else { options })
                 .await?;
             serde_json::to_value(result).map_err(|error| FfiError::internal(error.to_string()))
         }
-        Request::Verify => match object(id)? {
+        Request::Verify => match receiver()? {
             Object::Group(group) => serde_json::to_value(group.verify().await?)
                 .map_err(|error| FfiError::internal(error.to_string())),
             Object::Checkpoint(checkpoint) => Ok(verify_report_json(checkpoint.verify().await?)),
@@ -450,7 +556,7 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
         },
         Request::Spawn { name, options } => {
             let builder = crate::restore::builder(name, &options)?;
-            let checkpoint = match object(id)? {
+            let checkpoint = match receiver()? {
                 Object::Checkpoint(checkpoint) => *checkpoint,
                 Object::Source(_) => {
                     return Err(FfiError::invalid_argument(
@@ -477,6 +583,10 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
 /// imply these operations exist, and clients must select capture before mutation.
 #[unsafe(no_mangle)]
 pub extern "C" fn msb_supports_snapshot_artifact_receivers() {}
+
+/// A provider-aware caller must select its receiver ABI before dispatching a mutation.
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_supports_context_snapshot_objects() {}
 
 /// Advertise explicit group-directory lookup separately from older group receivers.
 #[unsafe(no_mangle)]
@@ -580,6 +690,7 @@ pub extern "C" fn msb_snapshot_object_close(handle: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use microsandbox::Context as _;
 
     #[test]
     fn group_path_is_anchored_during_native_request_admission() {
@@ -602,11 +713,10 @@ mod tests {
         assert_eq!(name, "history");
     }
 
-    async fn empty_group(home: &std::path::Path) -> microsandbox::backend::LocalBackend {
-        let local = microsandbox::backend::LocalBackend::builder()
+    fn empty_group(home: &std::path::Path) -> microsandbox::LocalContext {
+        let local = microsandbox::LocalContext::builder()
             .home(home)
             .build()
-            .await
             .unwrap();
         let group = local.snapshots_dir().join("history");
         std::fs::create_dir_all(&group).unwrap();
@@ -622,11 +732,9 @@ mod tests {
     async fn unpublished_receivers_are_released_and_published_receivers_keep_their_backend() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        let first = empty_group(a.path()).await;
-        let second = empty_group(b.path()).await;
-        let selected =
-            microsandbox::with_backend(first, async { Snapshot::get("history").await.unwrap() })
-                .await;
+        let first = empty_group(a.path());
+        let second = empty_group(b.path());
+        let selected = first.snapshots().get("history").await.unwrap();
         let abandoned;
         {
             let pending = PendingObjects::default();
@@ -656,9 +764,11 @@ mod tests {
         // Closing another Go reference cannot invalidate an operation that already
         // cloned its receiver. Nor may an ambient backend switch retarget it.
         std::fs::remove_dir_all(a.path().join("snapshots/history")).unwrap();
-        microsandbox::with_backend(second, async {
+        {
             assert!(
-                Snapshot::get("history")
+                second
+                    .snapshots()
+                    .get("history")
                     .await
                     .unwrap()
                     .head()
@@ -667,8 +777,7 @@ mod tests {
                     .is_none()
             );
             assert!(receiver.head().await.is_err());
-        })
-        .await;
+        }
     }
 
     #[tokio::test]
@@ -740,10 +849,8 @@ mod tests {
     fn owned_response_publishes_receivers_only_when_result_transfers() {
         let home = tempfile::tempdir().unwrap();
         let selected = crate::rt().block_on(async {
-            let local = empty_group(home.path()).await;
-            microsandbox::with_backend(local, Snapshot::get("history"))
-                .await
-                .unwrap()
+            let local = empty_group(home.path());
+            local.snapshots().get("history").await.unwrap()
         });
         for cancelled in [false, true] {
             let pending = Arc::new(PendingObjects::default());

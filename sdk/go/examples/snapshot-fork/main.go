@@ -54,17 +54,7 @@ func main() {
 	if err := base.Stop(ctx); err != nil {
 		log.Fatalf("Stop base: %v", err)
 	}
-	if err := base.Close(); err != nil {
-		log.Fatalf("Close base: %v", err)
-	}
-
-	baseHandle, err := microsandbox.GetSandbox(ctx, baseName)
-	if err != nil {
-		log.Fatalf("GetSandbox base: %v", err)
-	}
-	created, err := baseHandle.Snapshot(ctx, snapshotName, microsandbox.WithSnapshotCaptureConfig(
-		microsandbox.SnapshotCaptureConfig{RecordIntegrity: true},
-	))
+	created, err := base.Snapshot(ctx, snapshotName, microsandbox.WithSnapshotCaptureConfig(microsandbox.SnapshotCaptureConfig{Name: "base", RecordIntegrity: true}))
 	if err != nil {
 		log.Fatalf("Snapshot: %v", err)
 	}
@@ -73,7 +63,11 @@ func main() {
 	snapshotSelector = snapshotName + ":" + artifact.ID()
 
 	size := "unknown"
-	if sizeBytes := artifact.SizeBytes(); sizeBytes != nil {
+	sizeBytes, err := artifact.SizeBytes(ctx)
+	if err != nil {
+		log.Fatalf("Snapshot size: %v", err)
+	}
+	if sizeBytes != nil {
 		size = fmt.Sprintf("%d", *sizeBytes)
 	}
 	fmt.Printf("snapshot created: digest=%s size=%s bytes\n", artifact.Digest(), size)
@@ -87,7 +81,7 @@ func main() {
 	}
 	fmt.Printf("snapshot verified: coverage=%s upper=%s\n", report.Coverage.Kind, report.Upper.Kind)
 
-	handle, err := microsandbox.Checkpoint.Get(ctx, snapshotSelector)
+	handle, err := microsandbox.GetSnapshot(ctx, snapshotSelector)
 	if err != nil {
 		log.Fatalf("Snapshot.Get: %v", err)
 	}
@@ -133,12 +127,13 @@ func cleanupSandbox(name string) {
 }
 
 func cleanupSnapshot(name string) {
-	group, err := microsandbox.Snapshot.Get(context.Background(), name)
+	ctx := context.Background()
+	provider, err := microsandbox.NewLocalContext(microsandbox.LocalOptions{})
 	if err != nil {
-		log.Printf("cleanup snapshot group: %v", err)
 		return
 	}
-	if _, err := group.Remove(context.Background()); err != nil {
-		log.Printf("cleanup snapshot group: %v", err)
+	group, err := provider.Snapshots().Get(ctx, name)
+	if err == nil {
+		_, _ = group.Remove(ctx)
 	}
 }

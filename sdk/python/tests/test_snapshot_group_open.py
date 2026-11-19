@@ -19,9 +19,9 @@ def test_group_open() -> None:
 async def exercise(root: Path) -> None:
     os.environ["MSB_HOME"] = str(root / "home")
     os.environ["MSB_CONFIG_PATH"] = str(root / "absent.json")
-    from microsandbox import BackendKind, Snapshot, set_default_backend
+    from microsandbox import LocalContext
 
-    set_default_backend(BackendKind.LOCAL)
+    groups = LocalContext(home=root / "home").snapshots
     first, second, target = root / "first", root / "second", root / "target"
     for path in (
         first,
@@ -39,7 +39,7 @@ async def exercise(root: Path) -> None:
     (first / "link").symlink_to(target / "child", target_is_directory=True)
     for selector in (str(external), "link/../history"):
         os.chdir(first)
-        future = Snapshot.open(selector)
+        future = groups.open(selector)
         os.chdir(second)
         history = await future
         assert history.name == "history"
@@ -48,13 +48,13 @@ async def exercise(root: Path) -> None:
         assert await history.checkpoints() == []
     for selector in ("", "./missing"):
         try:
-            await Snapshot.open(selector)
+            await groups.open(selector)
         except Exception:
             pass
         else:
             raise AssertionError(f"invalid group accepted: {selector!r}")
     assert not (second / "missing").exists()
-    named = await Snapshot.get("history")
+    named = await groups.get("history")
     assert Path((await named.inspect())["path"]).resolve() == default.resolve()
     await history.remove()
     assert not external.exists()

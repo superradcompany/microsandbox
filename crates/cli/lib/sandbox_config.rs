@@ -582,7 +582,7 @@ impl ResolvedSandboxConfig {
 
         self.image.clone().ok_or_else(|| {
             anyhow::anyhow!(
-                "missing required sandbox field `image`; provide an image argument or set `image` in --conf"
+                "missing required sandbox field `image`; provide an image argument or set `image` in a file passed with --file"
             )
         })
     }
@@ -995,7 +995,7 @@ fn reject_scoped_wrapper(path: &Path, wrapper: &str, flag: &str) -> anyhow::Resu
         .is_some_and(|map| map.contains_key(wrapper))
     {
         anyhow::bail!(
-            "{}: {flag} expects the contents without a `{wrapper}:` wrapper; use --conf for a root-shaped file",
+            "{}: {flag} expects the contents without a `{wrapper}:` wrapper; use --file for a root-shaped file",
             path.display()
         );
     }
@@ -3243,7 +3243,7 @@ secrets:
 
         let error = resolve(&sources).unwrap_err().to_string();
         assert!(error.contains("without a `network:` wrapper"));
-        assert!(error.contains("use --conf"));
+        assert!(error.contains("use --file"));
     }
 
     #[tokio::test]

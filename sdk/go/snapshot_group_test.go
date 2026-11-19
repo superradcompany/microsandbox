@@ -9,7 +9,7 @@ import (
 // Legacy producers remain usable, but cannot promise the retained identity needed
 // by the new spawn/removal operations. Refuse before loading or dispatching native code.
 func TestCheckpointWithoutReceiverReportsUnsupported(t *testing.T) {
-	checkpoint := &SnapshotArtifact{}
+	checkpoint := &Checkpoint{}
 	_, spawnErr := checkpoint.SpawnSandbox(context.Background(), "unused")
 	_, removeErr := checkpoint.Remove(context.Background())
 	for _, err := range []error{spawnErr, removeErr} {
@@ -22,8 +22,17 @@ func TestCheckpointWithoutReceiverReportsUnsupported(t *testing.T) {
 
 // Invalid option multiplicity must fail before loading a native library or publishing a group.
 func TestSnapshotLoadRejectsMultipleOptions(t *testing.T) {
-	_, err := Snapshot.Load(context.Background(), "history", nil, SnapshotImportOptions{}, SnapshotImportOptions{})
+	_, err := (&Snapshots{}).Load(context.Background(), "history", nil, SnapshotImportOptions{}, SnapshotImportOptions{})
 	if err == nil || err.Error() != "snapshot load accepts at most one options value" {
 		t.Fatalf("expected option validation, got %v", err)
 	}
+}
+
+func testHistories(t *testing.T) *Snapshots {
+	t.Helper()
+	selected, err := configuredContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selected.Snapshots()
 }

@@ -21,7 +21,7 @@ func TestSnapshotPullPolicyLive(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	loaded, err := Snapshot.Load(ctx, "go-pull-history", []string{archive})
+	loaded, err := testHistories(t).Load(ctx, "go-pull-history", []string{archive})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -91,13 +91,13 @@ fn operations_to_py(py: Python<'_>, operations: Vec<ResizeOperation>) -> PyResul
                             if key == "resource" {
                                 enum_to_py(py, value, "ResourceKind")?
                             } else {
-                                crate::sandbox_handle::json_value_to_py(py, value.clone())?
+                                crate::conversion::json_value_to_py(py, value.clone())?
                             },
                         )?;
                     }
                     target.unbind().into()
                 }
-                _ => crate::sandbox_handle::json_value_to_py(py, value.clone())?,
+                _ => crate::conversion::json_value_to_py(py, value.clone())?,
             };
             dict.set_item(key, value)?;
         }

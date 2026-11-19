@@ -15,7 +15,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use super::SandboxConfig;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    backend::LocalBackend,
+    context::LocalContext,
     db::entity::{sandbox, volume},
     error::RestoreKind,
     snapshot::Manifest,
@@ -106,7 +106,7 @@ pub(crate) fn require_guest_mounts(
 
 /// Reconnect only user-selected bindings or an exact locally recorded source binding.
 pub(crate) async fn resolve_external_mounts(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &mut SandboxConfig,
 ) -> MicrosandboxResult<()> {
     let Some(restore) = config.checkpoint_restore.as_ref() else {
@@ -391,7 +391,7 @@ pub(crate) async fn resolve_external_mounts(
 }
 
 async fn admit_existing_named_mount(
-    local: &LocalBackend,
+    local: &LocalContext,
     selected: Option<VolumeMount>,
 ) -> MicrosandboxResult<Option<VolumeMount>> {
     let Some(mut selected) = selected else {
@@ -421,7 +421,7 @@ async fn admit_existing_named_mount(
 }
 
 async fn authorized_source_mount(
-    local: &LocalBackend,
+    local: &LocalContext,
     resource: &ResourceDescriptor,
     guest: &str,
 ) -> MicrosandboxResult<Option<VolumeMount>> {
@@ -608,7 +608,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(temp.path())
             .build()
-            .await
             .unwrap();
         assert!(
             admit_existing_named_mount(&local, Some(requested_mount().await))
@@ -632,7 +631,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(temp.path())
             .build()
-            .await
             .unwrap();
         let db = local.db().await.unwrap();
         volume::Entity::insert(volume::ActiveModel {
@@ -656,7 +654,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(temp.path())
             .build()
-            .await
             .unwrap();
         let db = local.db().await.unwrap();
         volume::Entity::insert(volume::ActiveModel {

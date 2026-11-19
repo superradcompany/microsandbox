@@ -8,9 +8,9 @@ use microsandbox_types::{OwnedVolumeStorage, VolumeMount};
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use sha2::{Digest, Sha256};
 
-use crate::backend::local::creation::CreationStorage;
+use crate::context::local::creation::CreationStorage;
 use crate::sandbox::{RootDisk, RootfsSource, SandboxConfig, StorageRecoveryOptions};
-use crate::{LocalBackend, MicrosandboxError, MicrosandboxResult};
+use crate::{LocalContext, MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -72,7 +72,7 @@ pub(crate) fn bindings(
 
 /// Caller owns the sandbox lifecycle and creation/storage guards for the entire operation.
 pub(crate) async fn prepare(
-    backend: &LocalBackend,
+    backend: &LocalContext,
     config: &SandboxConfig,
     storage: &CreationStorage,
 ) -> MicrosandboxResult<()> {
@@ -81,7 +81,7 @@ pub(crate) async fn prepare(
 
 /// Explicit recovery uses the same validation, catalog fence and publication path as startup.
 pub(crate) async fn prepare_selected(
-    backend: &LocalBackend,
+    backend: &LocalContext,
     config: &SandboxConfig,
     storage: &CreationStorage,
     options: &StorageRecoveryOptions,
@@ -99,7 +99,7 @@ pub(crate) async fn prepare_selected(
 
 /// Launch callers explicitly distinguish a newly reserved sandbox from existing storage.
 pub(crate) async fn prepare_launch(
-    backend: &LocalBackend,
+    backend: &LocalContext,
     config: &SandboxConfig,
     storage: &CreationStorage,
     preparation: StoragePreparation<'_>,
@@ -116,7 +116,7 @@ pub(crate) async fn prepare_launch(
 }
 
 pub(crate) async fn prepare_storage(
-    backend: &LocalBackend,
+    backend: &LocalContext,
     config: &SandboxConfig,
     storage: &CreationStorage,
     preparation: StoragePreparation<'_>,
@@ -194,7 +194,7 @@ pub(crate) async fn prepare_storage(
     // A terminal catalog row and a free lifecycle lock do not prove teardown of older
     // runtimes. This shared gate covers stopped snapshots, growth and compaction as well
     // as startup/recovery; none may capture a disk still held by the previous process.
-    if LocalBackend::load_latest_run(db.read(), id)
+    if LocalContext::load_latest_run(db.read(), id)
         .await?
         .and_then(|run| run.pid)
         .is_some_and(microsandbox_utils::process::pid_exists)
@@ -276,7 +276,7 @@ pub(crate) fn filesystem_work<T>(
 
 /// A live legacy VM cannot be migrated under its lifecycle lock. Its checkpoint and disk
 /// journals remain guest-writable until a protected restart, so do not consume them as authority.
-pub(crate) fn require_running(backend: &LocalBackend, name: &str) -> MicrosandboxResult<()> {
+pub(crate) fn require_running(backend: &LocalContext, name: &str) -> MicrosandboxResult<()> {
     layout::require_ready(&backend.sandboxes_dir().join(name).join("runtime")).map_err(|_| {
         MicrosandboxError::Runtime(format!(
             "upgrade required: sandbox '{name}' is not running with protected sandbox state. \
@@ -319,7 +319,7 @@ mod tests {
         temporary
     }
 
-    async fn saved_sandbox(backend: &LocalBackend, name: &str) -> SandboxConfig {
+    async fn saved_sandbox(backend: &LocalContext, name: &str) -> SandboxConfig {
         let mut config = SandboxConfig::default();
         config.spec.name = name.into();
         backend
@@ -341,7 +341,7 @@ mod tests {
         config
     }
 
-    async fn reservation(backend: &LocalBackend, name: &str) -> (i32, String) {
+    async fn reservation(backend: &LocalContext, name: &str) -> (i32, String) {
         let db = backend.db().await.unwrap();
         db.write()
             .execute_raw(Statement::from_sql_and_values(
@@ -367,7 +367,7 @@ mod tests {
         )
     }
 
-    async fn registered(backend: &LocalBackend) -> i64 {
+    async fn registered(backend: &LocalContext) -> i64 {
         backend
             .db()
             .await
@@ -404,7 +404,6 @@ mod tests {
         let temporary = private_test_home();
         let backend = crate::test_support::local_backend_builder(temporary.path())
             .build()
-            .await
             .unwrap();
         let config = saved_sandbox(&backend, "forged-reservation").await;
         let storage = CreationStorage::acquire(&backend, "forged-reservation").unwrap();
@@ -427,7 +426,6 @@ mod tests {
         let temporary = private_test_home();
         let backend = crate::test_support::local_backend_builder(temporary.path())
             .build()
-            .await
             .unwrap();
         let config = saved_sandbox(&backend, "fresh").await;
         let storage = CreationStorage::acquire(&backend, "fresh").unwrap();
@@ -500,7 +498,6 @@ mod tests {
             let temporary = private_test_home();
             let backend = crate::test_support::local_backend_builder(temporary.path())
                 .build()
-                .await
                 .unwrap();
             let config = saved_sandbox(&backend, "untrusted").await;
             let storage = CreationStorage::acquire(&backend, "untrusted").unwrap();
@@ -540,7 +537,6 @@ mod tests {
         let temporary = private_test_home();
         let backend = crate::test_support::local_backend_builder(temporary.path())
             .build()
-            .await
             .unwrap();
         let config = saved_sandbox(&backend, "eligible").await;
         let storage = CreationStorage::acquire(&backend, "eligible").unwrap();
@@ -558,7 +554,6 @@ mod tests {
         let temporary = private_test_home();
         let backend = crate::test_support::local_backend_builder(temporary.path())
             .build()
-            .await
             .unwrap();
         let config = saved_sandbox(&backend, "fresh").await;
         let storage = CreationStorage::acquire(&backend, "fresh").unwrap();
@@ -591,7 +586,6 @@ mod tests {
         let temporary = private_test_home();
         let backend = crate::test_support::local_backend_builder(temporary.path())
             .build()
-            .await
             .unwrap();
         let config = saved_sandbox(&backend, "refused").await;
         let storage = CreationStorage::acquire(&backend, "refused").unwrap();
@@ -626,7 +620,6 @@ mod tests {
         let other_home = private_test_home();
         let backend = crate::test_support::local_backend_builder(target_home.path())
             .build()
-            .await
             .unwrap();
         let config = saved_sandbox(&backend, "legacy-target").await;
         let storage = CreationStorage::acquire(&backend, &config.spec.name).unwrap();
@@ -695,7 +688,6 @@ mod tests {
         let temporary = private_test_home();
         let backend = crate::test_support::local_backend_builder(temporary.path())
             .build()
-            .await
             .unwrap();
         let config = saved_sandbox(&backend, "departing").await;
         let storage = CreationStorage::acquire(&backend, "departing").unwrap();
@@ -741,7 +733,6 @@ mod tests {
         let temporary = private_test_home();
         let backend = crate::test_support::local_backend_builder(temporary.path())
             .build()
-            .await
             .unwrap();
         let config = saved_sandbox(&backend, "ready").await;
         let storage = CreationStorage::acquire(&backend, "ready").unwrap();
@@ -766,7 +757,6 @@ mod tests {
         let temporary = private_test_home();
         let backend = crate::test_support::local_backend_builder(temporary.path())
             .build()
-            .await
             .unwrap();
         let sandbox = backend.sandboxes_dir().join("source");
         std::fs::create_dir_all(sandbox.join("runtime")).unwrap();

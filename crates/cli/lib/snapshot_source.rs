@@ -87,7 +87,8 @@ impl SnapshotSourceArgs {
         };
         let (builder, label) = match source {
             SnapshotLaunchSource::Group { name, checkpoint } => {
-                let member = open_group_checkpoint(&name, checkpoint.as_deref()).await?;
+                let member =
+                    open_group_checkpoint(builder.context(), &name, checkpoint.as_deref()).await?;
                 (builder.override_snapshot_member(&member), name)
             }
             source @ SnapshotLaunchSource::Paths { .. } => {
@@ -234,10 +235,11 @@ impl SnapshotLaunchSource {
 /// Child preparation must validate and pin this identity before consuming payloads;
 /// the metadata receiver itself is not a lifetime lease. A cleared head never guesses.
 pub async fn open_group_checkpoint(
+    context: &dyn microsandbox::Context,
     name: &str,
     checkpoint: Option<&str>,
 ) -> anyhow::Result<microsandbox::snapshot::Checkpoint> {
-    let group = microsandbox::snapshot::Snapshot::get(name).await?;
+    let group = context.snapshots().get(name).await?;
     match checkpoint {
         Some(member) => Ok(group.get_checkpoint(member).await?),
         None => group.head().await?.ok_or_else(|| {
@@ -589,47 +591,52 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let backend: Arc<dyn microsandbox::Backend> = Arc::new(
-            microsandbox::LocalBackend::builder()
+        let backend: Arc<dyn microsandbox::Context> = Arc::new(
+            microsandbox::LocalContext::builder()
                 .home(home.path())
                 .build()
-                .await
                 .unwrap(),
         );
-        microsandbox::backend::with_backend(backend, async {
-            let selected = open_group_checkpoint("history", None).await.unwrap();
-            assert_eq!(selected.id(), &ids[0]);
-            let group = microsandbox::snapshot::Snapshot::get("history")
+        {
+            let selected = open_group_checkpoint(backend.as_ref(), "history", None)
                 .await
                 .unwrap();
+            assert_eq!(selected.id(), ids[0].as_str());
+            let group = backend.snapshots().get("history").await.unwrap();
             group.set_head(ids[1].as_str()).await.unwrap();
-            assert_eq!(selected.id(), &ids[0]);
+            assert_eq!(selected.id(), ids[0].as_str());
             assert_eq!(
-                open_group_checkpoint("history", None).await.unwrap().id(),
-                &ids[1]
+                open_group_checkpoint(backend.as_ref(), "history", None)
+                    .await
+                    .unwrap()
+                    .id(),
+                ids[1].as_str()
             );
             group.clear_head().await.unwrap();
             assert!(
-                open_group_checkpoint("history", None)
+                open_group_checkpoint(backend.as_ref(), "history", None)
                     .await
                     .unwrap_err()
                     .to_string()
                     .contains("no selected head")
             );
             assert_eq!(
-                open_group_checkpoint("history", Some(ids[0].as_str()))
+                open_group_checkpoint(backend.as_ref(), "history", Some(ids[0].as_str()))
                     .await
                     .unwrap()
                     .id(),
-                &ids[0]
+                ids[0].as_str()
             );
             assert!(
-                open_group_checkpoint("history", Some("missing"))
+                open_group_checkpoint(backend.as_ref(), "history", Some("missing"))
                     .await
                     .is_err()
             );
-            assert!(open_group_checkpoint("missing", None).await.is_err());
-        })
-        .await;
+            assert!(
+                open_group_checkpoint(backend.as_ref(), "missing", None)
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

@@ -35,6 +35,7 @@ engine = [
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:rustls-pki-types",
+    "dep:rustls-platform-verifier",
     "dep:serde_json",
     "dep:socket2",
     "dep:smoltcp",
@@ -114,6 +115,7 @@ core-foundation = { version = "0.9", optional = true }
 system-configuration = { version = "0.7", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+rustls-platform-verifier = { workspace = true, optional = true }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns", "Win32_System_LibraryLoader"], optional = true }
 
 [dev-dependencies]

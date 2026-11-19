@@ -30,7 +30,7 @@ use microsandbox::storage::MemoryPruneOptions;
 use microsandbox::{Checkpoint, Sandbox, Storage};
 
 // Uses the same accounting and reclamation implementation as the CLI.
-// Storage::usage_local and Storage::prune_local accept an explicit LocalBackend.
+// Storage::usage_local and Storage::prune_local accept an explicit LocalContext.
 let usage = Storage::usage().await?;
 let sandbox_storage = Sandbox::get("worker").await?.storage_usage().await?;
 let snapshot_storage = Checkpoint::open("worker:ready").await?.storage_usage().await?;

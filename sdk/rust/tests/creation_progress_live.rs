@@ -215,13 +215,13 @@ async fn cancelled_backing_preparation_reaps_and_reconciles() {
         waiting.unwrap(),
         "runtime never reported waiting for the deliberately held lock"
     );
-    let backend = microsandbox::backend::default_backend();
+    let backend = microsandbox::context::default_local_context();
     let local = backend.as_local().unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let handle = Sandbox::get(&name).await.unwrap();
             let terminal = matches!(
-                handle.status_snapshot(),
+                handle.status().await.unwrap(),
                 microsandbox::sandbox::SandboxStatus::Stopped
                     | microsandbox::sandbox::SandboxStatus::Crashed
             );
@@ -233,7 +233,7 @@ async fn cancelled_backing_preparation_reaps_and_reconciles() {
             if terminal && ownership.is_some() {
                 drop(ownership);
                 // Remove immediately: no flush-window sleep or force removal may be necessary.
-                handle.remove().await.unwrap();
+                handle.destroy().await.unwrap();
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

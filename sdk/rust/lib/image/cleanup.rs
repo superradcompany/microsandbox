@@ -13,7 +13,7 @@ use microsandbox_image::{
 use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, PaginatorTrait, QueryFilter};
 
 use super::{ImagePruneReport, cleanup_journal::Journal};
-use crate::backend::LocalBackend;
+use crate::context::LocalContext;
 use crate::db::{
     DbReadConnection,
     entity::{image_ref, layer, manifest, manifest_layer, snapshot},
@@ -78,7 +78,7 @@ impl Image {
     /// sandboxes and snapshots. Active storage operations always return
     /// [`MicrosandboxError::ImageInUse`], including with `force`.
     pub async fn remove_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         reference: &str,
         force: bool,
     ) -> MicrosandboxResult<()> {
@@ -93,15 +93,15 @@ impl Image {
     /// are preserved.
     /// If a later cleanup batch fails, the error message includes removal counts from
     /// completed batches. The failing batch may have made additional progress.
-    pub async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport> {
+    pub async fn prune_local(local: &LocalContext) -> MicrosandboxResult<ImagePruneReport> {
         Self::delete_local(local, None).await
     }
 
     async fn delete_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         selected: Option<(String, bool)>,
     ) -> MicrosandboxResult<ImagePruneReport> {
-        crate::backend::local::snapshot::publication::recover(local).await?;
+        crate::context::local::snapshot::publication::recover(local).await?;
         Journal::recover(local).await?;
         let pools = local.db().await?;
         // Freeze the scope of an explicit removal, not the mutable catalog contents. Every
@@ -178,7 +178,7 @@ impl Image {
     }
 
     async fn delete_local_batch(
-        local: &LocalBackend,
+        local: &LocalContext,
         selected: Option<(String, bool)>,
         selected_manifests: HashSet<i32>,
         selected_layers: HashSet<i32>,
@@ -678,7 +678,7 @@ impl PreparedCleanup {
     /// Recheck owners and commit only prepared entries, then finish filesystem cleanup.
     async fn commit(
         self,
-        local: &LocalBackend,
+        local: &LocalContext,
         cache: GlobalCache,
         selected: Option<(String, bool)>,
         selected_manifests: HashSet<i32>,
@@ -770,10 +770,9 @@ mod tests {
         true
     }
 
-    async fn local(home: &std::path::Path) -> LocalBackend {
+    async fn local(home: &std::path::Path) -> LocalContext {
         crate::test_support::local_backend_builder(home)
             .build()
-            .await
             .unwrap()
     }
 
@@ -794,7 +793,7 @@ mod tests {
     }
 
     async fn install(
-        local: &LocalBackend,
+        local: &LocalContext,
         reference: &str,
         metadata: &CachedImageMetadata,
     ) -> GlobalCache {

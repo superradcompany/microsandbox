@@ -148,7 +148,7 @@ func TestSmokeAllSandboxMetricsEmpty(t *testing.T) {
 func TestSmokeSnapshotListDirEmpty(t *testing.T) {
 	ctx := smokeSetup(t)
 	dir := t.TempDir()
-	snaps, err := Checkpoint.ListDir(ctx, dir)
+	snaps, err := ListSnapshotsDir(ctx, dir)
 	if err != nil {
 		t.Fatalf("Checkpoint.ListDir: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestSmokeSnapshotListDirEmpty(t *testing.T) {
 func TestSmokeSnapshotReindexEmpty(t *testing.T) {
 	ctx := smokeSetup(t)
 	dir := t.TempDir()
-	n, err := Checkpoint.Reindex(ctx, dir)
+	n, err := ReindexSnapshots(ctx, dir)
 	if err != nil {
 		t.Fatalf("Checkpoint.Reindex: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestSmokeSnapshotLoadBogusErrors(t *testing.T) {
 	}
 	dest := filepath.Join(tmp, "imported")
 
-	_, err := Snapshot.Load(ctx, "invalid-import", []string{archive}, SnapshotImportOptions{Dest: dest})
+	_, err := LoadSnapshot(ctx, archive, dest)
 	if err == nil {
 		t.Fatal("expected load of bogus archive to fail")
 	}

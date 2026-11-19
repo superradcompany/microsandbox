@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -15,7 +16,6 @@ use crate::helpers::{
 };
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
-use crate::sandbox_handle::PySandboxHandle;
 use crate::ssh::PySandboxSsh;
 
 //--------------------------------------------------------------------------------------------------
@@ -25,7 +25,8 @@ use crate::ssh::PySandboxSsh;
 /// A running sandbox instance.
 ///
 /// Sandbox names are limited to 128 UTF-8 bytes.
-#[pyclass(name = "Sandbox")]
+#[pyclass(skip_from_py_object, name = "Sandbox")]
+#[derive(Clone)]
 pub struct PySandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
     // Immutable identity is available even while a consuming operation holds the wrapper lock.
@@ -61,14 +62,14 @@ pub struct PySandboxStopResult {
     source: Option<String>,
 }
 
-/// Result returned by Sandbox.ping() / SandboxHandle.ping().
+/// Result returned by Sandbox.ping().
 #[pyclass(name = "SandboxPingResult")]
 pub struct PySandboxPingResult {
     name: String,
     latency_ms: f64,
 }
 
-/// Result returned by Sandbox.touch() / SandboxHandle.touch().
+/// Result returned by Sandbox.touch().
 #[pyclass(name = "SandboxTouchResult")]
 pub struct PySandboxTouchResult {
     name: String,
@@ -86,7 +87,7 @@ pub struct PyExternalMountWarning {
 /// One page returned by Sandbox.list() / Sandbox.list_with().
 #[pyclass(name = "SandboxPage")]
 pub struct PySandboxPage {
-    sandboxes: Vec<PySandboxHandle>,
+    sandboxes: Vec<PySandbox>,
     next_cursor: Option<String>,
 }
 
@@ -99,7 +100,7 @@ impl PySandbox {
         Self {
             stop_name: inner.name().to_string(),
             stop_identity: inner.id().to_string(),
-            local_backend: inner.backend_kind().as_str() == "local",
+            local_backend: inner.context_kind().as_str() == "local",
             inner: Arc::new(Mutex::new(Some(inner))),
         }
     }
@@ -157,12 +158,12 @@ impl PySandboxTouchResult {
 }
 
 impl PySandboxPage {
-    fn from_rust(page: microsandbox::sandbox::SandboxPage) -> Self {
+    pub(crate) fn from_rust(page: microsandbox::sandbox::SandboxPage) -> Self {
         Self {
             sandboxes: page
                 .sandboxes
                 .into_iter()
-                .map(PySandboxHandle::from_rust)
+                .map(PySandbox::from_rust)
                 .collect(),
             next_cursor: page.next_cursor,
         }
@@ -172,7 +173,7 @@ impl PySandboxPage {
 #[pymethods]
 impl PySandboxPage {
     #[getter]
-    fn sandboxes(&self) -> Vec<PySandboxHandle> {
+    fn sandboxes(&self) -> Vec<PySandbox> {
         self.sandboxes.clone()
     }
 
@@ -277,6 +278,43 @@ impl PySandbox {
             ))
         })
     }
+    /// Capture a local destination without consulting remote selection variables.
+    #[staticmethod]
+    fn local() -> crate::context::PySandboxes {
+        crate::context::PySandboxes {
+            inner: microsandbox::context::default_local_context(),
+        }
+    }
+
+    /// Capture remote environment settings before any deferred operation.
+    #[staticmethod]
+    fn remote() -> PyResult<crate::context::PySandboxes> {
+        Ok(crate::context::PySandboxes {
+            inner: microsandbox::context::remote_from_env().map_err(to_py_err)?,
+        })
+    }
+
+    #[staticmethod]
+    fn ctx(context: PyRef<'_, crate::context::PyContext>) -> crate::context::PySandboxes {
+        crate::context::PySandboxes {
+            inner: context.inner.clone(),
+        }
+    }
+
+    #[getter]
+    fn context(&self) -> PyResult<crate::context::PyContext> {
+        Ok(crate::context::PyContext {
+            inner: self
+                .inner
+                .try_lock()
+                .map_err(|_| PyRuntimeError::new_err("sandbox is busy"))?
+                .as_ref()
+                .ok_or_else(crate::error::consumed)?
+                .context()
+                .clone_shared(),
+        })
+    }
+
     fn get_job<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -313,15 +351,18 @@ impl PySandbox {
     // Static Methods — Creation
     //----------------------------------------------------------------------------------------------
 
-    /// Backend retained by this sandbox (`"local"` or `"cloud"`).
+    /// Context retained by this sandbox (`"local"` or `"remote"`).
     #[getter]
-    fn backend_kind(&self) -> PyResult<String> {
-        let guard = self
-            .inner
-            .try_lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sandbox is busy"))?;
-        let sandbox = guard.as_ref().ok_or_else(crate::error::consumed)?;
-        Ok(sandbox.backend_kind().as_str().to_string())
+    fn context_kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::helpers::str_enum_member(
+            py,
+            "ContextKind",
+            if self.local_backend {
+                "local"
+            } else {
+                "remote"
+            },
+        )
     }
 
     /// Import or recover stopped storage without booting or stopping a VM.
@@ -493,7 +534,7 @@ impl PySandbox {
     // Static Methods — Lookup
     //----------------------------------------------------------------------------------------------
 
-    /// Get a lightweight handle to an existing sandbox.
+    /// Look up an existing Sandbox without preparing its runtime.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
     #[staticmethod]
@@ -502,7 +543,19 @@ impl PySandbox {
             let handle = microsandbox::sandbox::Sandbox::get(&name)
                 .await
                 .map_err(to_py_err)?;
-            Ok(PySandboxHandle::from_rust(handle))
+            Ok(PySandbox::from_rust(handle))
+        })
+    }
+
+    /// Get an existing sandbox, connecting or starting it without creating it.
+    #[staticmethod]
+    fn get_running<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        // Retain the selected context before the future reaches the runtime.
+        let context = microsandbox::context::configured_context();
+        let sandboxes = microsandbox::Sandbox::ctx(context.as_ref());
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = sandboxes.get_running(&name).await.map_err(to_py_err)?;
+            Ok(PySandbox::from_rust(sandbox))
         })
     }
 
@@ -563,24 +616,17 @@ impl PySandbox {
     // Properties
     //----------------------------------------------------------------------------------------------
 
-    /// Sandbox name. Names are limited to 128 UTF-8 bytes.
+    /// Captured sandbox name, available without I/O or a live runtime.
     #[getter]
-    fn name<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let name = Self::with_sandbox(&inner, |sb| sb.name().to_string()).await?;
-            Ok(name)
-        })
+    fn name(&self) -> &str {
+        // Identity must remain readable while an operation owns the native slot.
+        &self.stop_name
     }
 
     /// Stable identity that changes when this name is removed and recreated.
     #[getter]
-    fn id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let id = Self::with_sandbox(&inner, |sandbox| sandbox.id().to_string()).await?;
-            Ok(id)
-        })
+    fn id(&self) -> &str {
+        &self.stop_identity
     }
 
     /// Whether this handle owns the sandbox lifecycle.
@@ -593,8 +639,7 @@ impl PySandbox {
         })
     }
 
-    /// Get a filesystem handle. Captures the backend Arc + name once — no
-    /// Sandbox mutex lock per FS op.
+    /// Construct an idle, identity-bound filesystem facade without retaining its run.
     #[getter]
     fn fs(&self) -> PyResult<PySandboxFs> {
         let guard = self
@@ -602,10 +647,7 @@ impl PySandbox {
             .try_lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sandbox is busy"))?;
         let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-        Ok(PySandboxFs::from_backend(
-            sb.backend().clone(),
-            sb.name().to_string(),
-        ))
+        Ok(PySandboxFs::new(sb.fs()))
     }
 
     //----------------------------------------------------------------------------------------------
@@ -630,7 +672,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -666,7 +708,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -706,7 +748,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -746,7 +788,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -786,7 +828,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -824,7 +866,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -862,7 +904,7 @@ impl PySandbox {
         cwd: Option<String>,
         user: Option<String>,
         env: Option<HashMap<String, String>>,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
@@ -885,8 +927,13 @@ impl PySandbox {
     //----------------------------------------------------------------------------------------------
 
     /// Return the SSH namespace for this sandbox.
-    fn ssh(&self) -> PySandboxSsh {
-        PySandboxSsh::new(self.inner.clone())
+    fn ssh(&self) -> PyResult<PySandboxSsh> {
+        let guard = self
+            .inner
+            .try_lock()
+            .map_err(|_| PyRuntimeError::new_err("sandbox is busy"))?;
+        let sandbox = guard.as_ref().ok_or_else(crate::error::consumed)?;
+        Ok(PySandboxSsh::new(sandbox.ssh()))
     }
 
     //----------------------------------------------------------------------------------------------
@@ -1058,8 +1105,8 @@ impl PySandbox {
         py: Python<'py>,
         cpus: Option<u8>,
         max_cpus: Option<u8>,
-        memory: Option<u32>,
-        max_memory: Option<u32>,
+        memory: Option<Bound<'py, PyAny>>,
+        max_memory: Option<Bound<'py, PyAny>>,
         root_disk_size: Option<u32>,
         env: Option<HashMap<String, String>>,
         env_rm: Option<Vec<String>>,
@@ -1073,6 +1120,14 @@ impl PySandbox {
         policy: Option<Py<PyAny>>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let memory = memory
+            .as_ref()
+            .map(crate::helpers::memory_mib)
+            .transpose()?;
+        let max_memory = max_memory
+            .as_ref()
+            .map(crate::helpers::memory_mib)
+            .transpose()?;
         let inner = self.inner.clone();
         let secrets = build_secret_patches(py, secrets)?;
         let mut patch = build_modify_patch(
@@ -1131,8 +1186,8 @@ impl PySandbox {
         py: Python<'py>,
         cpus: Option<u8>,
         max_cpus: Option<u8>,
-        memory: Option<u32>,
-        max_memory: Option<u32>,
+        memory: Option<Bound<'py, PyAny>>,
+        max_memory: Option<Bound<'py, PyAny>>,
         root_disk_size: Option<u32>,
         env: Option<HashMap<String, String>>,
         env_rm: Option<Vec<String>>,
@@ -1146,6 +1201,14 @@ impl PySandbox {
         policy: Option<Py<PyAny>>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let memory = memory
+            .as_ref()
+            .map(crate::helpers::memory_mib)
+            .transpose()?;
+        let max_memory = max_memory
+            .as_ref()
+            .map(crate::helpers::memory_mib)
+            .transpose()?;
         let inner = self.inner.clone();
         let secrets = build_secret_patches(py, secrets)?;
         let mut patch = build_modify_patch(
@@ -1343,8 +1406,12 @@ impl PySandbox {
 
     /// Wait indefinitely for graceful completion and runtime ownership release.
     #[pyo3(signature = (timeout = None))]
-    fn stop<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
-        let timeout = optional_duration(timeout)?;
+    fn stop<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let timeout = crate::helpers::timeout_input(timeout)?;
         let inner = self.inner.clone();
         let name = self.stop_name.clone();
         let identity = self.stop_identity.clone();
@@ -1375,7 +1442,11 @@ impl PySandbox {
     }
 
     /// Wait for graceful completion within one seconds budget; expiry never kills.
-    fn stop_with_timeout<'py>(&self, py: Python<'py>, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+    fn stop_with_timeout<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         self.stop(py, Some(timeout))
     }
 
@@ -1529,9 +1600,13 @@ impl PySandbox {
 
     /// Kill the sandbox and wait until stopped.
     #[pyo3(signature = (timeout = None))]
-    fn kill<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
+    fn kill<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let timeout = optional_duration(timeout)?;
+        let timeout = crate::helpers::timeout_input(timeout)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
             match timeout {
@@ -1575,17 +1650,131 @@ impl PySandbox {
         })
     }
 
+    /// Capture a snapshot of this retained sandbox identity.
+    fn checkpoint<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            Ok(crate::snapshot::PySnapshot::from_rust(
+                sandbox.checkpoint(&name).await.map_err(to_py_err)?,
+            ))
+        })
+    }
+
+    /// Fetch current storage usage without starting this sandbox.
+    fn storage_usage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            Ok(crate::storage::PyStorageItemUsage::from_rust(
+                sandbox.storage_usage().await.map_err(to_py_err)?,
+            ))
+        })
+    }
+
+    /// Fetch a fresh inspection observation.
+    fn info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let info = Self::clone_sandbox(&inner)
+                .await?
+                .info()
+                .await
+                .map_err(to_py_err)?;
+            let value = serde_json::to_value(&info).map_err(|error| to_py_err(error.into()))?;
+            Python::attach(|py| {
+                let result = crate::conversion::json_value_to_py(py, value)?;
+                let dict = result.bind(py).cast::<PyDict>()?;
+                dict.set_item("status", sandbox_status_member(py, info.status)?)?;
+                let datetime = py.import("datetime")?.getattr("datetime")?;
+                for field in ["created_at", "updated_at"] {
+                    if let Some(timestamp) = dict.get_item(field)?
+                        && !timestamp.is_none()
+                    {
+                        // Python 3.10 requires an explicit UTC offset, not the Z suffix.
+                        let text = timestamp.extract::<String>()?.replace('Z', "+00:00");
+                        dict.set_item(field, datetime.call_method1("fromisoformat", (text,))?)?;
+                    }
+                }
+                Ok::<_, PyErr>(result)
+            })
+        })
+    }
+
+    /// Latest persisted settings, not necessarily those applied to a running VM.
+    fn config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let config = Self::clone_sandbox(&inner)
+                .await?
+                .config()
+                .await
+                .map_err(to_py_err)?;
+            let value = serde_json::to_value(config).map_err(|error| to_py_err(error.into()))?;
+            Python::attach(|py| {
+                let inspection =
+                    py.import(crate::provider::public_module("inspection").as_str())?;
+                let value = crate::conversion::json_value_to_py(py, value)?;
+                Ok::<_, PyErr>(
+                    inspection
+                        .call_method1("_decode_config", (value,))?
+                        .unbind(),
+                )
+            })
+        })
+    }
+
+    fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let status = Self::clone_sandbox(&inner)
+                .await?
+                .status()
+                .await
+                .map_err(to_py_err)?;
+            Python::attach(|py| sandbox_status_member(py, status))
+        })
+    }
+
+    fn last_failure_message<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Self::clone_sandbox(&inner)
+                .await?
+                .last_failure_message()
+                .await
+                .map_err(to_py_err)
+        })
+    }
+
+    /// Prepare this receiver, retaining any newly started local run.
+    fn ensure_running<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Self::clone_sandbox(&inner)
+                .await?
+                .ensure_running()
+                .await
+                .map_err(to_py_err)?;
+            // PyO3 converts Rust unit to an empty tuple; this completion-only
+            // Python method explicitly promises None.
+            Ok(Python::attach(|py| py.None()))
+        })
+    }
+
     /// Wait until this exact sandbox reaches `status` with no built-in timeout.
     ///
     /// A same-name replacement is rejected instead of silently redirecting the
     /// wait to the new persisted identity.
     fn wait_for_status<'py>(&self, py: Python<'py>, status: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let status = crate::sandbox_handle::parse_sandbox_status(&status)?;
+        let status = crate::conversion::parse_sandbox_status(&status)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            let handle = sandbox.wait_for_status(status).await.map_err(to_py_err)?;
-            Ok(PySandboxHandle::from_rust(handle))
+            sandbox.wait_for_status(status).await.map_err(to_py_err)?;
+            // Return explicit None at the binding boundary rather than relying
+            // on Rust unit conversion for the completion-only contract.
+            Ok(Python::attach(|py| py.None()))
         })
     }
 
@@ -1598,7 +1787,7 @@ impl PySandbox {
         &self,
         py: Python<'py>,
         force: bool,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
         detached: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
@@ -1607,7 +1796,7 @@ impl PySandbox {
             detached,
             ..Default::default()
         };
-        if let Some(timeout) = optional_duration(timeout)? {
+        if let Some(timeout) = crate::helpers::timeout_input(timeout)? {
             options.timeout = timeout;
         }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1626,14 +1815,14 @@ impl PySandbox {
         &self,
         py: Python<'py>,
         force: bool,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let mut options = microsandbox::sandbox::DestroyOptions {
             force,
             ..Default::default()
         };
-        if let Some(timeout) = optional_duration(timeout)? {
+        if let Some(timeout) = crate::helpers::timeout_input(timeout)? {
             options.timeout = timeout;
         }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1667,10 +1856,8 @@ impl PySandbox {
     fn detach<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = inner.lock().await;
-            if let Some(sb) = guard.take() {
-                sb.detach().await;
-            }
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.detach().await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -1701,20 +1888,15 @@ impl PySandbox {
         &self,
         py: Python<'py>,
         _exc_type: &Bound<'py, PyAny>,
-        _exc_val: &Bound<'py, PyAny>,
+        exc_val: &Bound<'py, PyAny>,
         _exc_tb: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
+        let body_error = exc_val.clone().unbind();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sandbox = {
-                let mut guard = inner.lock().await;
-                guard.take()
-            };
-
-            if let Some(sb) = sandbox {
-                let name = sb.name().to_string();
-                let _ = sb.kill().await;
-                let _ = microsandbox::sandbox::Sandbox::remove(&name).await;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            if let Err(error) = sandbox.shutdown_owned().await {
+                return Err(scope_cleanup_error(to_py_err(error), body_error));
             }
             Ok(false) // don't suppress exceptions
         })
@@ -2030,7 +2212,7 @@ pub(crate) fn modification_plan_to_py(
             "policy" => serialized_enum_to_py(py, value, "ModificationPolicy", "plan.policy")?,
             "changes" => planned_changes_to_py(py, value)?,
             "resize_status" => resize_statuses_to_py(py, value)?,
-            _ => crate::sandbox_handle::json_value_to_py(py, value)?,
+            _ => crate::conversion::json_value_to_py(py, value)?,
         };
         dict.set_item(key, value)?;
     }
@@ -2080,7 +2262,7 @@ fn planned_change_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py
             "disposition" => {
                 serialized_enum_to_py(py, value, "ModificationDisposition", "change.disposition")?
             }
-            _ => crate::sandbox_handle::json_value_to_py(py, value)?,
+            _ => crate::conversion::json_value_to_py(py, value)?,
         };
         dict.set_item(key, value)?;
     }
@@ -2128,7 +2310,7 @@ pub(crate) fn resize_status_to_py(py: Python<'_>, value: serde_json::Value) -> P
             "state" => {
                 serialized_enum_to_py(py, value, "ResourceConvergenceState", "resize_status.state")?
             }
-            _ => crate::sandbox_handle::json_value_to_py(py, value)?,
+            _ => crate::conversion::json_value_to_py(py, value)?,
         };
         dict.set_item(key, value)?;
     }
@@ -2158,7 +2340,7 @@ struct ExecOpts {
     cwd: Option<String>,
     user: Option<String>,
     env: Vec<(String, String)>,
-    timeout_secs: Option<f64>,
+    timeout: Option<Duration>,
     tty: bool,
     stdin_mode: Option<String>,
     stdin_data: Option<Vec<u8>>,
@@ -2179,7 +2361,7 @@ fn parse_exec_call(
     cwd: Option<String>,
     user: Option<String>,
     env: Option<HashMap<String, String>>,
-    timeout_secs: Option<f64>,
+    timeout: Option<&Bound<'_, PyAny>>,
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
@@ -2190,7 +2372,7 @@ fn parse_exec_call(
         cwd,
         user,
         env: env_to_pairs(env),
-        timeout_secs,
+        timeout: None,
         tty,
         stdin_mode,
         stdin_data,
@@ -2207,7 +2389,10 @@ fn parse_exec_call(
         }
     }
 
-    validate_timeout(opts.timeout_secs)?;
+    // As with cwd and env, an explicit options-dict value wins over the keyword.
+    if opts.timeout.is_none() {
+        opts.timeout = crate::helpers::timeout_input(timeout)?;
+    }
     Ok((parsed_args, opts))
 }
 
@@ -2246,8 +2431,8 @@ fn apply_exec_options_dict(opts: &mut ExecOpts, dict: &Bound<'_, PyDict>) -> PyR
     if let Some(env) = extract_optional_dict_value::<HashMap<String, String>>(dict, "env")? {
         opts.env = env_to_pairs(Some(env));
     }
-    if let Some(timeout) = extract_optional_dict_value::<f64>(dict, "timeout")? {
-        opts.timeout_secs = Some(timeout);
+    if let Some(timeout) = dict.get_item("timeout")?.filter(|value| !value.is_none()) {
+        opts.timeout = crate::helpers::timeout_input(Some(&timeout))?;
     }
     if let Some(tty) = extract_optional_dict_value::<bool>(dict, "tty")? {
         opts.tty = tty;
@@ -2287,18 +2472,17 @@ fn parse_shell_call(
     cwd: Option<String>,
     user: Option<String>,
     env: Option<HashMap<String, String>>,
-    timeout_secs: Option<f64>,
+    timeout: Option<&Bound<'_, PyAny>>,
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ExecOpts> {
     let (stdin_mode, stdin_data) = parse_stdin(stdin)?;
-    validate_timeout(timeout_secs)?;
     Ok(ExecOpts {
         cwd,
         user,
         env: env_to_pairs(env),
-        timeout_secs,
+        timeout: crate::helpers::timeout_input(timeout)?,
         tty,
         stdin_mode,
         stdin_data,
@@ -2457,10 +2641,6 @@ fn validate_rlimit_resource(resource: &str) -> PyResult<()> {
     }
 }
 
-fn validate_timeout(timeout_secs: Option<f64>) -> PyResult<()> {
-    optional_duration(timeout_secs).map(|_| ())
-}
-
 fn required_from_dict<'py, T: for<'a> FromPyObject<'a, 'py, Error = PyErr>>(
     dict: &Bound<'py, PyDict>,
     key: &str,
@@ -2498,8 +2678,8 @@ fn apply_exec_options(
     if let Some(user) = opts.user {
         builder = builder.user(user);
     }
-    if let Some(timeout) = opts.timeout_secs {
-        builder = builder.timeout(std::time::Duration::from_secs_f64(timeout));
+    if let Some(timeout) = opts.timeout {
+        builder = builder.timeout(timeout);
     }
     if opts.tty {
         builder = builder.tty(true);
@@ -2571,20 +2751,20 @@ fn apply_attach_options(
 pub struct PyPullSession {
     abort: tokio::task::AbortHandle,
     progress: Arc<Mutex<Option<microsandbox::CreationProgressHandle>>>,
-    task: Arc<
-        Mutex<
-            Option<
-                tokio::task::JoinHandle<
-                    microsandbox::MicrosandboxResult<microsandbox::sandbox::Sandbox>,
-                >,
-            >,
-        >,
-    >,
+    state: Arc<Mutex<PullSessionState>>,
+}
+
+enum PullSessionState {
+    Creating(
+        tokio::task::JoinHandle<microsandbox::MicrosandboxResult<microsandbox::sandbox::Sandbox>>,
+    ),
+    Ready(PySandbox),
+    Consumed,
 }
 
 /// Async iterator over image and startup progress events.
 #[pyclass(name = "PullProgressIter")]
-struct PyPullProgressIter {
+pub(crate) struct PyPullProgressIter {
     handle: Arc<Mutex<Option<microsandbox::CreationProgressHandle>>>,
 }
 
@@ -2623,6 +2803,21 @@ pub struct PyPullEvent {
 // Methods: PullSession
 //--------------------------------------------------------------------------------------------------
 
+impl PullSessionState {
+    async fn finish(&mut self) -> PyResult<()> {
+        if let Self::Creating(task) = self {
+            // Borrow the join handle so cancelling a pending observer leaves it in the session.
+            let outcome = task.await;
+            *self = Self::Consumed;
+            let sandbox = outcome
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+                .map_err(to_py_err)?;
+            *self = Self::Ready(PySandbox::from_rust(sandbox));
+        }
+        Ok(())
+    }
+}
+
 impl PyPullSession {
     pub fn new(
         progress: microsandbox::CreationProgressHandle,
@@ -2633,7 +2828,7 @@ impl PyPullSession {
         Self {
             abort: task.abort_handle(),
             progress: Arc::new(Mutex::new(Some(progress))),
-            task: Arc::new(Mutex::new(Some(task))),
+            state: Arc::new(Mutex::new(PullSessionState::Creating(task))),
         }
     }
 }
@@ -2666,36 +2861,35 @@ impl PyPullSession {
         _exc_val: &Bound<'py, PyAny>,
         _exc_tb: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if !_exc_type.is_none() {
+        let body_failed = !_exc_type.is_none();
+        if body_failed {
             self.abort.abort();
         }
-        let task = self.task.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Ensure task is awaited/aborted.
-            let mut guard = task.lock().await;
-            if let Some(join_handle) = guard.take() {
-                // Wait for it to finish. Ignore errors — __aexit__ should be safe.
-                let _ = join_handle.await;
+            let mut state = state.lock().await;
+            if body_failed {
+                // Join cancelled work and release any unclaimed sandbox. The body error takes precedence.
+                if let PullSessionState::Creating(task) = &mut *state {
+                    let _ = task.await;
+                }
+                *state = PullSessionState::Consumed;
+            } else {
+                state.finish().await?;
             }
             Ok(false)
         })
     }
 
-    /// Await the task and return the Sandbox.
+    /// Claim the sandbox once, inside or after a successful progress scope.
     fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let task = self.task.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = task.lock().await;
-            if let Some(join_handle) = guard.take() {
-                let result = join_handle.await.map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("create task panicked: {e}"))
-                })?;
-                let sb = result.map_err(to_py_err)?;
-                Ok(PySandbox::from_rust(sb))
-            } else {
-                Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "result() already consumed",
-                ))
+            let mut state = state.lock().await;
+            state.finish().await?;
+            match std::mem::replace(&mut *state, PullSessionState::Consumed) {
+                PullSessionState::Ready(sandbox) => Ok(sandbox),
+                _ => Err(PyRuntimeError::new_err("result() already consumed")),
             }
         })
     }
@@ -2878,6 +3072,13 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+fn sandbox_status_member(
+    py: Python<'_>,
+    status: microsandbox::sandbox::SandboxStatus,
+) -> PyResult<Py<PyAny>> {
+    str_enum_member(py, "SandboxStatus", &format!("{status:?}").to_lowercase())
+}
+
 pub(crate) fn branch_outcomes(
     outcomes: Vec<microsandbox::sandbox::ForkOutcome>,
 ) -> PyResult<Vec<PyForkOutcome>> {
@@ -2897,6 +3098,16 @@ pub(crate) fn branch_outcomes(
             })
             .collect()
     })
+}
+
+/// Preserve both failures without requiring ExceptionGroup (Python 3.11+).
+fn scope_cleanup_error(cleanup: PyErr, body: Py<PyAny>) -> PyErr {
+    Python::attach(|py| {
+        if !body.is_none(py) {
+            cleanup.set_cause(py, Some(PyErr::from_value(body.into_bound(py))));
+        }
+    });
+    cleanup
 }
 
 pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Duration>> {
@@ -2922,6 +3133,66 @@ mod tests {
     use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
 
     use super::*;
+
+    #[test]
+    fn scope_failure_preserves_both_errors() {
+        Python::initialize();
+        Python::attach(|py| {
+            let body = PyValueError::new_err("body failed")
+                .into_value(py)
+                .into_any();
+            let cleanup = scope_cleanup_error(
+                PyRuntimeError::new_err("cleanup failed"),
+                body.clone_ref(py),
+            );
+            assert!(cleanup.is_instance_of::<PyRuntimeError>(py));
+            assert!(cleanup.cause(py).unwrap().value(py).is(body.bind(py)));
+        });
+    }
+
+    #[test]
+    fn scope_failure_without_body_still_reports_cleanup() {
+        Python::initialize();
+        Python::attach(|py| {
+            let cleanup = scope_cleanup_error(PyRuntimeError::new_err("cleanup failed"), py.None());
+            assert!(cleanup.is_instance_of::<PyRuntimeError>(py));
+            assert!(cleanup.cause(py).is_none());
+        });
+    }
+
+    #[test]
+    fn identity_properties_remain_synchronous_without_native_slot_access() {
+        Python::initialize();
+        let inner = Arc::new(Mutex::new(None));
+        // Holding the empty native slot covers both busy and disposed resources.
+        // These properties must neither lock it nor need an asyncio event loop.
+        let _guard = inner.try_lock().unwrap();
+        Python::attach(|py| {
+            let sandbox = Py::new(
+                py,
+                PySandbox {
+                    inner: inner.clone(),
+                    stop_name: "captured-name".into(),
+                    stop_identity: "persisted-id".into(),
+                    local_backend: true,
+                },
+            )
+            .unwrap();
+            let sandbox = sandbox.bind(py);
+            assert_eq!(
+                sandbox
+                    .getattr("name")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "captured-name"
+            );
+            assert_eq!(
+                sandbox.getattr("id").unwrap().extract::<String>().unwrap(),
+                "persisted-id"
+            );
+        });
+    }
 
     #[test]
     fn stdin_omission_preserves_defaults_but_explicit_null_overrides_a_pipe() {
@@ -2987,24 +3258,20 @@ mod tests {
     #[test]
     fn execution_timeouts_reject_non_finite_and_overflowing_values() {
         Python::initialize();
-        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, f64::MAX] {
-            assert!(validate_timeout(Some(value)).is_err());
-        }
-        assert!(validate_timeout(Some(0.5)).is_ok());
-        assert!(validate_timeout(Some(0.0)).is_ok());
-    }
-
-    #[test]
-    fn explicit_stop_duration_preserves_zero_and_fractional_seconds() {
-        assert_eq!(optional_duration(None).unwrap(), None);
-        assert_eq!(
-            optional_duration(Some(0.0)).unwrap(),
-            Some(std::time::Duration::ZERO)
-        );
-        assert_eq!(
-            optional_duration(Some(0.125)).unwrap(),
-            Some(std::time::Duration::from_millis(125))
-        );
+        Python::attach(|py| {
+            for seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, f64::MAX] {
+                let value = pyo3::types::PyFloat::new(py, seconds);
+                assert!(crate::helpers::timeout_input(Some(&value)).is_err());
+            }
+            assert_eq!(crate::helpers::timeout_input(None).unwrap(), None);
+            for seconds in [0.0, 0.125] {
+                let value = pyo3::types::PyFloat::new(py, seconds);
+                assert_eq!(
+                    crate::helpers::timeout_input(Some(&value)).unwrap(),
+                    Some(Duration::from_secs_f64(seconds))
+                );
+            }
+        });
     }
 
     fn secret_patch(

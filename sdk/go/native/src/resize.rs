@@ -8,7 +8,7 @@ use std::{
 
 use microsandbox::{
     MicrosandboxError,
-    sandbox::{DEFAULT_RESIZE_READ_TIMEOUT, ResizeOperation, ResourceResizeStatus, SandboxHandle},
+    sandbox::{DEFAULT_RESIZE_READ_TIMEOUT, ResizeOperation, ResourceResizeStatus, SandboxRecord},
 };
 
 use super::{FfiError, Handle, cstr, get, identified_sandbox_handle, run_c};
@@ -66,7 +66,7 @@ pub(super) async fn wait_with_lookup<L>(
     operations: Option<&[ResizeOperation]>,
 ) -> Result<Vec<ResourceResizeStatus>, FfiError>
 where
-    L: Future<Output = Result<SandboxHandle, FfiError>> + Send,
+    L: Future<Output = Result<SandboxRecord, FfiError>> + Send,
 {
     let Some(timeout) = timeout else {
         return wait_selected(&lookup.await?, operations, None)
@@ -112,7 +112,7 @@ where
 
 /// Share deadline handling without changing how the original current-operation wait selects IDs.
 async fn wait_selected(
-    handle: &SandboxHandle,
+    handle: &SandboxRecord,
     operations: Option<&[ResizeOperation]>,
     timeout: Option<Duration>,
 ) -> Result<Vec<ResourceResizeStatus>, MicrosandboxError> {
@@ -222,7 +222,7 @@ mod tests {
             } else {
                 timeout
             };
-            let lookup = std::future::pending::<Result<SandboxHandle, FfiError>>();
+            let lookup = std::future::pending::<Result<SandboxRecord, FfiError>>();
             let error = tokio::time::timeout(
                 budget + Duration::from_secs(2),
                 wait_with_lookup("blocked-exact-lookup", Some(timeout), lookup, Some(&[])),
@@ -243,7 +243,7 @@ mod tests {
             } else {
                 timeout
             };
-            let lookup = std::future::pending::<Result<SandboxHandle, FfiError>>();
+            let lookup = std::future::pending::<Result<SandboxRecord, FfiError>>();
             let error = tokio::time::timeout(
                 budget + Duration::from_secs(2),
                 wait_with_lookup("blocked-lookup", Some(timeout), lookup, None),

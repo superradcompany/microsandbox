@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use microsandbox_image::ext4::{Ext4FormatOptions, format_ext4};
 use microsandbox_types::{OwnedVolumeStorage, VolumeMount};
 
-use crate::backend::local::creation::CreationStorage;
+use crate::context::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------

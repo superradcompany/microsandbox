@@ -1150,7 +1150,11 @@ mod tests {
             assert_eq!(request_rx.await.unwrap(), request);
             drop(from_tx);
             while to_rx.recv().await.is_some() {}
-            relay.await.unwrap().unwrap();
+            // The sink closes after receiving the complete request asserted above. Windows
+            // can report that teardown as ConnectionAborted after successful forwarding.
+            if let Err(error) = relay.await.unwrap() {
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+            }
             server.await.unwrap().unwrap();
         };
         tokio::time::timeout(Duration::from_secs(5), check)
@@ -1436,11 +1440,14 @@ mod tests {
                 // reading queued-but-unsent bytes (e.g. TLS 1.3 session tickets the
                 // server sends unsolicited right after the handshake). Depending on
                 // scheduling, the kernel may report that abrupt drop as a reset
-                // rather than a clean EOF; both mean "no request bytes arrived".
+                // rather than a clean EOF (Windows can report ConnectionAborted/10053);
+                // all mean "no request bytes arrived" when this read returned no bytes.
                 Err(error)
                     if matches!(
                         error.kind(),
-                        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+                        io::ErrorKind::UnexpectedEof
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
                     ) =>
                 {
                     Vec::new()
@@ -1455,7 +1462,9 @@ mod tests {
                 Err(error)
                     if matches!(
                         error.kind(),
-                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                        io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
                     ) =>
                 {
                     Ok(())
@@ -1507,12 +1516,16 @@ mod tests {
                         stream.flush().await.unwrap();
                     }
                     let mut rejected = Vec::new();
+                    // Windows may report its local closure as ConnectionAborted rather than
+                    // a peer reset. The assertion below still rejects any forwarded payload.
                     match stream.read_to_end(&mut rejected).await {
                         Ok(_) => {}
                         Err(error)
                             if matches!(
                                 error.kind(),
-                                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+                                io::ErrorKind::UnexpectedEof
+                                    | io::ErrorKind::ConnectionReset
+                                    | io::ErrorKind::ConnectionAborted
                             ) => {}
                         Err(error) => panic!("upstream read failed: {error}"),
                     }

@@ -170,6 +170,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::LibkrunfwNotFound(_) => "LibkrunfwNotFound",
         MicrosandboxError::RuntimeNotInstalled(_) => "RuntimeNotInstalled",
         MicrosandboxError::RuntimeIncomplete(_) => "RuntimeIncomplete",
+        #[cfg(feature = "local")]
         MicrosandboxError::Database(_) => "Database",
         MicrosandboxError::InvalidConfig(_) | MicrosandboxError::MissingRestoreBindings { .. } => {
             "InvalidConfig"
@@ -182,6 +183,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::SandboxNotRunning(_) => "SandboxNotRunning",
         MicrosandboxError::SandboxStopTimedOut { .. } => "SandboxStopTimedOut",
         MicrosandboxError::Runtime(_) => "Runtime",
+        #[cfg(feature = "local")]
         MicrosandboxError::BootStart { .. } => "BootStart",
         MicrosandboxError::Json(_) => "Json",
         MicrosandboxError::Protocol(_) => "Protocol",
@@ -192,9 +194,9 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::ControlClient(_) => "Runtime",
         MicrosandboxError::ControlStateChanged => "Runtime",
         MicrosandboxError::ControlSecretBatch { .. } => "Runtime",
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "local"))]
         MicrosandboxError::Nix(_) => "Nix",
-        #[cfg(windows)]
+        #[cfg(all(windows, feature = "local"))]
         MicrosandboxError::WindowsHostSetup(_) => "WindowsHostSetup",
         MicrosandboxError::ExecTimeout(_) => "ExecTimeout",
         MicrosandboxError::StopTimeout { .. } => "StopTimeout",
@@ -210,6 +212,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::ServiceNotFound(_) => "ServiceNotFound",
         MicrosandboxError::ServiceAlreadyExists(_) => "ServiceAlreadyExists",
         MicrosandboxError::Service { .. } => "Service",
+        #[cfg(feature = "local")]
         MicrosandboxError::Image(_) => "Image",
         MicrosandboxError::NetworkBuilder(_) => "NetworkBuilder",
         MicrosandboxError::PatchFailed(_) => "PatchFailed",

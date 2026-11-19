@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
 import { modificationResultFromJson, resizeOperationsFromJson, resizeOperationsToJson } from "../../dist/resize.js";
 
 const max = "18446744073709551615";
@@ -39,9 +38,8 @@ it("rejects rounded or out-of-range generations in both directions", () => {
   }
 });
 
-for (const kind of ["sandbox", "handle"] as const) {
-  describe(`${kind} operation dispatch`, () => {
-    const wrap = (native: any) => kind === "sandbox" ? new Sandbox(native, "test") : new SandboxHandle(native);
+describe("sandbox operation dispatch", () => {
+    const wrap = (native: any) => new Sandbox(native, "test");
     it("preserves modify options and exact records across apply, read and wait", async () => {
       const native = {
         modifyWithResizeTracking: vi.fn().mockResolvedValue(JSON.stringify({ plan, resize_operations: [wire] })),
@@ -80,4 +78,3 @@ for (const kind of ["sandbox", "handle"] as const) {
       expect(native.waitForResizeOperations).not.toHaveBeenCalled();
     });
   });
-}

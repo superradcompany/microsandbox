@@ -4,12 +4,11 @@
 
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use futures::FutureExt;
-use microsandbox::backend::{Backend, LocalBackend};
-use microsandbox::sandbox::SandboxBuilder;
-use microsandbox::{Sandbox, Snapshot};
+use microsandbox::{Context, LocalContext};
+
+use microsandbox::Sandbox;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -25,10 +24,10 @@ async fn check(sandbox: &Sandbox, command: &str) -> String {
     output.stdout().unwrap()
 }
 
-async fn remove(name: &str) {
-    if let Ok(sandbox) = Sandbox::get(name).await {
+async fn remove(backend: &dyn Context, name: &str) {
+    if let Ok(sandbox) = backend.sandboxes().get(name).await {
         let _ = sandbox.kill().await;
-        let _ = sandbox.remove().await;
+        let _ = sandbox.destroy().await;
     }
 }
 
@@ -36,9 +35,11 @@ async fn verify_resumed_process(sandbox: &Sandbox) {
     check(sandbox, r#"pid=$(cat /root/counter.pid); kill -0 "$pid"; before=$(cat /root/counter); for i in $(seq 1 50); do after=$(cat /root/counter); test "$after" -gt "$before" && exit 0; sleep 0.1; done; exit 1"#).await;
 }
 
-async fn scenario(home: &Path, full: bool) {
+async fn scenario(backend: &dyn Context, home: &Path, full: bool) {
     eprintln!("launch qualification: creating source");
-    let source = Sandbox::builder("path-source")
+    let source = backend
+        .sandboxes()
+        .builder("path-source")
         .image("alpine:3.20")
         .cpus(1)
         .memory(256)
@@ -85,14 +86,16 @@ async fn scenario(home: &Path, full: bool) {
     })
     .await
     .unwrap();
-    remove("path-source").await;
+    remove(backend, "path-source").await;
     drop(source);
     group.remove().await.unwrap();
-    assert!(Snapshot::list().await.unwrap().is_empty());
+    assert!(backend.snapshots().list().await.unwrap().is_empty());
 
     if full {
         for option in ["command", "init", "hostname", "thp", "security"] {
-            let builder = Sandbox::builder("path-child")
+            let builder = backend
+                .sandboxes()
+                .builder("path-child")
                 .override_snapshot_paths(vec![tip_archive.clone(), base_archive.clone()], None)
                 .snapshot_launch_options(false, false);
             let builder = match option {
@@ -118,7 +121,9 @@ async fn scenario(home: &Path, full: bool) {
         vec![tip_archive.clone(), base_archive.clone()],
         vec![base_archive.clone(), tip_archive.clone()],
     ] {
-        let child = Sandbox::builder("path-child")
+        let child = backend
+            .sandboxes()
+            .builder("path-child")
             .memory(256)
             .override_snapshot_paths(paths, None)
             .snapshot_launch_options(false, false)
@@ -126,22 +131,34 @@ async fn scenario(home: &Path, full: bool) {
             .boxed()
             .await
             .unwrap();
-        assert_eq!(child.config().resumed_from_full_snapshot(), full);
+        assert_eq!(
+            backend
+                .sandbox_ops()
+                .get(backend.clone_shared(), child.name())
+                .await
+                .unwrap()
+                .config()
+                .unwrap()
+                .resumed_from_full_snapshot(),
+            full
+        );
         if full {
             verify_resumed_process(&child).await;
         }
         let result = check(&child, r#"test "$(find /root/tree -type f | wc -l)" -eq 500 && sha256sum -c /root/data.sha && printf 'PHASE=' && cat /root/phase"#).await;
         assert!(result.ends_with("PHASE=tip"), "{result}");
-        remove("path-child").await;
+        remove(backend, "path-child").await;
         drop(child);
-        assert!(Snapshot::list().await.unwrap().is_empty());
+        assert!(backend.snapshots().list().await.unwrap().is_empty());
     }
     eprintln!("launch qualification: preparing exact base");
-    let config = Sandbox::builder("path-child")
+    let config = backend
+        .sandboxes()
+        .builder("path-child")
         .memory(256)
         .override_snapshot_paths(
             vec![tip_archive.clone(), base_archive.clone()],
-            Some(base.id().clone()),
+            Some(microsandbox::snapshot::SnapshotId::new(base.id()).unwrap()),
         )
         .build()
         .boxed()
@@ -151,14 +168,24 @@ async fn scenario(home: &Path, full: bool) {
     // deleted source, select the tip instead, or depend on either archive file.
     std::fs::remove_file(base_archive).unwrap();
     std::fs::remove_file(tip_archive).unwrap();
-    let child = SandboxBuilder::from(config).create().boxed().await.unwrap();
-    assert_eq!(child.config().resumed_from_full_snapshot(), full);
+    let child = backend.sandboxes().create(config).boxed().await.unwrap();
+    assert_eq!(
+        backend
+            .sandbox_ops()
+            .get(backend.clone_shared(), child.name())
+            .await
+            .unwrap()
+            .config()
+            .unwrap()
+            .resumed_from_full_snapshot(),
+        full
+    );
     if full {
         verify_resumed_process(&child).await;
     }
     let result = check(&child, r#"test "$(find /root/tree -type f | wc -l)" -eq 500 && sha256sum -c /root/data.sha && printf 'PHASE=' && cat /root/phase"#).await;
     assert!(result.ends_with("PHASE=base"), "{result}");
-    remove("path-child").await;
+    remove(backend, "path-child").await;
     drop(child);
 }
 
@@ -198,28 +225,34 @@ async fn archive_sets_launch_after_source_and_group_deletion() {
     );
     let full =
         std::env::var_os("MSB_LAUNCH_TEST_FULL").as_deref() == Some(std::ffi::OsStr::new("1"));
-    let backend: Arc<dyn Backend> =
-        Arc::new(LocalBackend::builder().home(&home).build().await.unwrap());
-    microsandbox::with_backend(backend, async {
-        let outcome = AssertUnwindSafe(scenario(&home, full).boxed())
+    let provider = LocalContext::builder().home(&home).build().unwrap();
+    let backend: &dyn Context = &provider;
+    async {
+        let outcome = AssertUnwindSafe(scenario(backend, &home, full).boxed())
             .catch_unwind()
             .await;
-        remove("path-child").await;
-        remove("path-source").await;
-        if let Ok(group) = Snapshot::get("history").await {
+        remove(backend, "path-child").await;
+        remove(backend, "path-source").await;
+        if let Ok(group) = backend.snapshots().get("history").await {
             let _ = group.remove().await;
         }
         assert!(
-            Sandbox::list().await.unwrap().sandboxes.is_empty(),
+            backend
+                .sandboxes()
+                .list()
+                .await
+                .unwrap()
+                .sandboxes
+                .is_empty(),
             "test left a sandbox behind"
         );
         assert!(
-            Snapshot::list().await.unwrap().is_empty(),
+            backend.snapshots().list().await.unwrap().is_empty(),
             "test left a group behind"
         );
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }
-    })
+    }
     .await;
 }

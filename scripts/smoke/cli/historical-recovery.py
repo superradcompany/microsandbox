@@ -23,7 +23,7 @@ spec = importlib.util.spec_from_file_location(
     "historical_snapshots", Path(__file__).with_name("historical-snapshots.py"))
 history = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(history)
-WORKER = "backend::local::snapshot::historical_recovery_tests::historical_recovery_worker"
+WORKER = "context::local::snapshot::historical_recovery_tests::historical_recovery_worker"
 BOUNDARIES = {
     "upgrade": ("planned", "descriptor_published", "index_published", "legacy_retired"),
     "downgrade": ("planned", "canonical_backed_up", "legacy_descriptor_published",

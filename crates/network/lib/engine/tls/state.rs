@@ -47,6 +47,10 @@ pub struct TlsState {
 /// Errors that prevent TLS interception state from being initialized safely.
 #[derive(Debug, thiserror::Error)]
 pub enum TlsStateError {
+    /// The host TLS verifier could not be initialized.
+    #[error("failed to initialize upstream TLS verification: {0}")]
+    UpstreamVerifier(#[from] rustls::Error),
+
     /// Exactly one of the intercept CA certificate/key paths was configured.
     #[error("intercept CA config is incomplete; set both cert_path and key_path")]
     IncompleteInterceptCaConfig,
@@ -142,8 +146,8 @@ impl TlsState {
             NonZeroUsize::new(config.cache.capacity).unwrap_or(NonZeroUsize::new(1000).unwrap());
         let cert_cache = Mutex::new(LruCache::new(capacity));
 
-        let connector = build_upstream_connector(&config, config.verify_upstream, &[]);
-        let scoped_upstream_connectors = build_scoped_upstream_connectors(&config);
+        let connector = build_upstream_connector(&config, config.verify_upstream, &[])?;
+        let scoped_upstream_connectors = build_scoped_upstream_connectors(&config)?;
 
         // Pre-compute lowercased bypass patterns to avoid per-connection allocations.
         let bypass_patterns = config
@@ -303,38 +307,72 @@ impl ServerCertVerifier for NoVerify {
 
 /// Build the upstream TLS connector based on configuration.
 ///
-/// When `verify_upstream` is true, loads the system's native root certificates.
+/// Verified Windows connections use native chain validation; other platforms load native roots.
 /// When false, uses a permissive verifier that accepts all server certificates.
 fn build_upstream_connector(
     config: &TlsConfig,
     verify_upstream: bool,
     scoped_ca_cert: &[PathBuf],
-) -> TlsConnector {
+) -> Result<TlsConnector, TlsStateError> {
     let client_config = if verify_upstream {
-        let mut root_store = rustls::RootCertStore::empty();
-        let certs = rustls_native_certs::load_native_certs();
-        if !certs.errors.is_empty() {
-            tracing::warn!(
-                count = certs.errors.len(),
-                "errors loading native certificates"
-            );
-        }
-        let mut added = 0usize;
-        for cert in certs.certs {
-            if root_store.add(cert).is_ok() {
-                added += 1;
+        #[cfg(windows)]
+        let verified = {
+            let mut extra_roots = Vec::new();
+            let mut parsed_roots = rustls::RootCertStore::empty();
+            let mut add_root = |cert: CertificateDer<'static>| {
+                // Preserve the existing handling of malformed DER in user CA bundles.
+                if parsed_roots.add(cert.clone()).is_err() {
+                    return false;
+                }
+                extra_roots.push(cert);
+                true
+            };
+            load_upstream_ca_certificates(&config.upstream_ca_cert, &mut add_root);
+            load_upstream_ca_certificates(scoped_ca_cert, &mut add_root);
+            let builder = rustls::ClientConfig::builder();
+            let provider = Arc::clone(builder.crypto_provider());
+            // Native verification can retrieve a Windows-approved root on first use. Extra
+            // CAs belong only to this connector, never to the machine-wide trusted store.
+            let verifier = if extra_roots.is_empty() {
+                rustls_platform_verifier::Verifier::new(provider)?
+            } else {
+                rustls_platform_verifier::Verifier::new_with_extra_roots(extra_roots, provider)?
+            };
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier))
+                .with_no_client_auth()
+        };
+        #[cfg(not(windows))]
+        let verified = {
+            let mut root_store = rustls::RootCertStore::empty();
+            let certs = rustls_native_certs::load_native_certs();
+            if !certs.errors.is_empty() {
+                tracing::warn!(
+                    count = certs.errors.len(),
+                    "errors loading native certificates"
+                );
             }
-        }
-        if added == 0 {
-            tracing::error!("no native root certificates loaded — all upstream TLS will fail");
-        }
+            let mut added = 0usize;
+            for cert in certs.certs {
+                if root_store.add(cert).is_ok() {
+                    added += 1;
+                }
+            }
+            if added == 0 {
+                tracing::error!("no native root certificates loaded — all upstream TLS will fail");
+            }
 
-        load_upstream_ca_certificates(&mut root_store, &config.upstream_ca_cert);
-        load_upstream_ca_certificates(&mut root_store, scoped_ca_cert);
+            load_upstream_ca_certificates(&config.upstream_ca_cert, |cert| {
+                root_store.add(cert).is_ok()
+            });
+            load_upstream_ca_certificates(scoped_ca_cert, |cert| root_store.add(cert).is_ok());
 
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        };
+        verified
     } else {
         rustls::ClientConfig::builder()
             .dangerous()
@@ -342,25 +380,25 @@ fn build_upstream_connector(
             .with_no_client_auth()
     };
 
-    TlsConnector::from(Arc::new(client_config))
+    Ok(TlsConnector::from(Arc::new(client_config)))
 }
 
 /// Build host-scoped upstream TLS connectors from grouped scoped settings.
-fn build_scoped_upstream_connectors(config: &TlsConfig) -> Vec<ScopedUpstreamConnector> {
-    grouped_scoped_upstream_settings(config)
-        .into_iter()
-        .filter_map(|settings| {
-            let verify_upstream = settings.verify_upstream.unwrap_or(config.verify_upstream);
-            if verify_upstream == config.verify_upstream && settings.ca_cert.is_empty() {
-                return None;
-            }
-
-            Some(ScopedUpstreamConnector {
-                pattern: DomainPattern::new(&settings.pattern),
-                connector: build_upstream_connector(config, verify_upstream, &settings.ca_cert),
-            })
-        })
-        .collect()
+fn build_scoped_upstream_connectors(
+    config: &TlsConfig,
+) -> Result<Vec<ScopedUpstreamConnector>, TlsStateError> {
+    let mut connectors = Vec::new();
+    for settings in grouped_scoped_upstream_settings(config) {
+        let verify_upstream = settings.verify_upstream.unwrap_or(config.verify_upstream);
+        if verify_upstream == config.verify_upstream && settings.ca_cert.is_empty() {
+            continue;
+        }
+        connectors.push(ScopedUpstreamConnector {
+            pattern: DomainPattern::new(&settings.pattern),
+            connector: build_upstream_connector(config, verify_upstream, &settings.ca_cert)?,
+        });
+    }
+    Ok(connectors)
 }
 
 /// Group repeated scoped upstream settings by host pattern.
@@ -388,14 +426,17 @@ fn grouped_scoped_upstream_settings(config: &TlsConfig) -> Vec<ScopedUpstreamSet
     grouped.into_values().collect()
 }
 
-/// Load extra upstream CA certificates into the provided root store.
-fn load_upstream_ca_certificates(root_store: &mut rustls::RootCertStore, paths: &[PathBuf]) {
+/// Load extra upstream CA certificates, preserving caller-specific trust-store handling.
+fn load_upstream_ca_certificates(
+    paths: &[PathBuf],
+    mut add: impl FnMut(CertificateDer<'static>) -> bool,
+) {
     for path in paths {
         match std::fs::read(path) {
             Ok(pem_data) => {
                 let mut extra_added = 0usize;
                 for cert in CertificateDer::pem_slice_iter(&pem_data).flatten() {
-                    if root_store.add(cert).is_ok() {
+                    if add(cert) {
                         extra_added += 1;
                     }
                 }
@@ -538,6 +579,102 @@ mod tests {
 
     use crate::secrets::config::SecretsConfig;
     use crate::secrets::handle::SecretsHandle;
+
+    /// Drive a real certificate handshake entirely in memory. No fixture root is installed
+    /// in the host store, so each connector must enforce its own configured trust scope.
+    fn verify_fixture(
+        connector: &TlsConnector,
+        cert: &DomainCert,
+        name: &str,
+    ) -> Result<(), rustls::Error> {
+        let mut client = rustls::ClientConnection::new(
+            Arc::clone(connector.config()),
+            ServerName::try_from(name.to_owned()).unwrap(),
+        )?;
+        let mut server = rustls::ServerConnection::new(Arc::clone(&cert.server_config))?;
+        for _ in 0..8 {
+            let mut wire = Vec::new();
+            client.write_tls(&mut wire).unwrap();
+            server.read_tls(&mut std::io::Cursor::new(wire)).unwrap();
+            server.process_new_packets()?;
+            let mut wire = Vec::new();
+            server.write_tls(&mut wire).unwrap();
+            client.read_tls(&mut std::io::Cursor::new(wire)).unwrap();
+            client.process_new_packets()?;
+            if !client.is_handshaking() {
+                return Ok(());
+            }
+        }
+        panic!("fixture TLS handshake did not complete");
+    }
+
+    #[test]
+    fn upstream_verification_preserves_extra_roots_names_and_scope() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let ca = CertAuthority::generate();
+        let cert = certgen::generate_domain_cert("api.internal", &ca, 24).unwrap();
+        let other = certgen::generate_domain_cert("other.internal", &ca, 24).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("msb-upstream-scope-{}.pem", std::process::id()));
+        std::fs::write(&path, ca.cert_pem()).unwrap();
+
+        let mut config = TlsConfig::default();
+        let strict = build_upstream_connector(&config, true, &[]).unwrap();
+        assert!(verify_fixture(&strict, &cert, "api.internal").is_err());
+
+        config.upstream_ca_cert.push(path.clone());
+        let trusted = build_upstream_connector(&config, true, &[]).unwrap();
+        assert!(verify_fixture(&trusted, &cert, "api.internal").is_ok());
+        assert!(verify_fixture(&trusted, &cert, "wrong.internal").is_err());
+
+        config.upstream_ca_cert.clear();
+        config.scoped_upstream_ca_cert.push(ScopedUpstreamCaCert {
+            pattern: "api.internal".to_owned(),
+            path: path.clone(),
+        });
+        let state =
+            TlsState::new(config.clone(), SecretsHandle::new(SecretsConfig::default())).unwrap();
+        assert!(
+            verify_fixture(
+                state.upstream_connector_for("api.internal"),
+                &cert,
+                "api.internal"
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_fixture(
+                state.upstream_connector_for("other.internal"),
+                &other,
+                "other.internal"
+            )
+            .is_err()
+        );
+
+        config.scoped_upstream_ca_cert.clear();
+        config.scoped_verify_upstream.push(ScopedVerifyUpstream {
+            pattern: "api.internal".to_owned(),
+            verify: false,
+        });
+        let state = TlsState::new(config, SecretsHandle::new(SecretsConfig::default())).unwrap();
+        assert!(
+            verify_fixture(
+                state.upstream_connector_for("api.internal"),
+                &cert,
+                "api.internal"
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_fixture(
+                state.upstream_connector_for("other.internal"),
+                &other,
+                "other.internal"
+            )
+            .is_err()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn regenerates_cached_domain_cert_when_near_expiry() {
@@ -710,8 +847,8 @@ mod tests {
 
         let mut root_store = rustls::RootCertStore::empty();
         load_upstream_ca_certificates(
-            &mut root_store,
             &[path.clone(), PathBuf::from("/nonexistent/upstream-ca.pem")],
+            |cert| root_store.add(cert).is_ok(),
         );
         std::fs::remove_file(&path).ok();
 

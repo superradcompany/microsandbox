@@ -115,12 +115,12 @@ func TestSandboxPingTouch(t *testing.T) {
 		t.Fatal("SandboxHandle.Touch on stopped sandbox succeeded; want error")
 	}
 
-	refreshed, err := handle.Refresh(ctx)
+	refreshed, err := handle.Info(ctx)
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if refreshed.Status() != microsandbox.SandboxStatusStopped {
-		t.Fatalf("status after stopped ping/touch = %q, want stopped", refreshed.Status())
+	if refreshed.Status != microsandbox.SandboxStatusStopped {
+		t.Fatalf("status after stopped ping/touch = %q, want stopped", refreshed.Status)
 	}
 }
 
@@ -300,17 +300,14 @@ func TestOwnsLifecycleSignature(t *testing.T) {
 	}
 }
 
-// TestOwnsLifecycleAfterDetach verifies that OwnsLifecycle drops to false
-// once the handle is detached, *if* the handle survives the call. After
-// Detach the sandbox handle is invalidated and the FFI returns false; we
-// only assert that no panic occurs and a value comes back.
+// Detach disarms the original owner without invalidating it; an independent
+// connection never acquires that owner's shutdown authority.
 func TestOwnsLifecycleAfterDetachOrConnect(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-ownsconn-" + t.Name()
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithDetached(),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox detached: %v", err)
@@ -319,12 +316,24 @@ func TestOwnsLifecycleAfterDetachOrConnect(t *testing.T) {
 		t.Fatalf("Detach: %v", err)
 	}
 
+	if owns, err := sb.OwnsLifecycle(); err != nil || owns {
+		t.Fatalf("ownership after detach: %v, %v", owns, err)
+	}
+	if err := sb.Detach(ctx); err != nil {
+		t.Fatalf("repeated Detach: %v", err)
+	}
+	if _, err := sb.Shell(ctx, "echo usable-after-detach"); err != nil {
+		t.Fatal(err)
+	}
+	defer sb.Close()
+
 	// Reattach via Connect — the connect handle does NOT own the lifecycle.
 	h, err := microsandbox.GetSandbox(ctx, name)
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	sb2, err := h.Connect(ctx)
+	sb2 := h
+	err = h.EnsureRunning(ctx)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -527,7 +536,7 @@ func TestSandboxHandleListsRichMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSandboxes: %v", err)
 	}
-	var found *microsandbox.SandboxHandle
+	var found *microsandbox.Sandbox
 	for _, h := range page.Sandboxes {
 		if h.Name() == name {
 			found = h
@@ -537,13 +546,13 @@ func TestSandboxHandleListsRichMetadata(t *testing.T) {
 	if found == nil {
 		t.Fatalf("sandbox %q missing from ListSandboxes", name)
 	}
-	if found.Status() == "" {
+	if liveSandboxInfo(t, ctx, found).Status == "" {
 		t.Error("Status: empty")
 	}
-	if found.ConfigJSON() == "" {
+	if liveConfigJSON(t, ctx, found) == "" {
 		t.Error("ConfigJSON: empty")
 	}
-	if found.CreatedAt().IsZero() {
+	if liveSandboxInfo(t, ctx, found).CreatedAt.IsZero() {
 		t.Error("CreatedAt: zero — listing should populate timestamps")
 	}
 }
@@ -570,7 +579,7 @@ func TestSandboxHandleStopKill(t *testing.T) {
 	// After stop, kill should be a no-op or error cleanly — just verify it
 	// doesn't panic.
 	_ = h.Kill(ctx)
-	if err := h.Remove(ctx); err != nil {
+	if err := h.Destroy(ctx); err != nil {
 		t.Errorf("SandboxHandle.Remove: %v", err)
 	}
 }

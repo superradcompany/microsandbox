@@ -14,7 +14,7 @@ impl Sandbox {
     /// Attempt existing creator-owned cleanup without reacquiring the name transition lock.
     /// A failure to prove exit must not disappear behind the original creation error.
     pub(crate) async fn creation_failure(&self, error: MicrosandboxError) -> MicrosandboxError {
-        let result = if let Some(local) = self.local()
+        let result = if let Some(local) = self.local_state()
             && let Some(handle) = &local.handle
         {
             let mut handle = handle.lock().await;

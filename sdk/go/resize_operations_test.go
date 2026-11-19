@@ -73,13 +73,9 @@ func TestTrackedModifyPreservesOptionsAndMissingTracking(t *testing.T) {
 
 func TestInvalidOperationCountsFailBeforeFFI(t *testing.T) {
 	sandbox := new(Sandbox)
-	handle := new(SandboxHandle)
 	for _, records := range [][]ResizeOperation{nil, {}, {resizeRecord(), resizeRecord(), resizeRecord()}} {
 		if _, err := sandbox.WaitForResizeOperations(context.Background(), records); err == nil {
 			t.Fatal("sandbox accepted invalid count")
-		}
-		if _, err := handle.WaitForResizeOperations(context.Background(), records); err == nil {
-			t.Fatal("handle accepted invalid count")
 		}
 	}
 }

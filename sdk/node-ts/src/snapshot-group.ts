@@ -1,3 +1,4 @@
+import { nativeOwner } from "./internal/provider.js";
 import { parseGroupInfo, type SnapshotGroupInfo } from "./snapshot-inspection.js";
 import { UnsupportedError } from "./errors.js";
 import { parseGroupRemoval, type SnapshotRemoveResult } from "./snapshot-removal.js";
@@ -5,7 +6,7 @@ import type { NapiRestoreBuilder, NapiLoadOpts } from "./internal/napi.js";
 import { withMappedErrors } from "./internal/error-mapping.js";
 import { napi, type NapiSnapshotGroup, type NapiSnapshotCreateResult, type NapiSnapshotCaptureOptions, type NapiHeadUpdate } from "./internal/napi.js";
 import { Snapshot as Checkpoint, type HeadUpdate } from "./snapshot.js";
-import { SnapshotHandle as CheckpointHandle } from "./snapshot-handle.js";
+import { Context, LocalContext, RemoteContext, Snapshots } from "./context.js";
 import { Sandbox, CreationProgressCreate, type RestoreBuilder } from "./sandbox.js";
 import { parseGroupVerification, type SnapshotGroupVerifyReport } from "./snapshot-verification.js";
 
@@ -55,7 +56,7 @@ export class SnapshotLoadOptions {
 export interface SnapshotImportResult {
   readonly operationId: string;
   readonly snapshot: Snapshot;
-  readonly checkpoints: CheckpointHandle[];
+  readonly checkpoints: Checkpoint[];
   readonly added: string[];
   readonly reused: string[];
   readonly headUpdate: HeadUpdate;
@@ -65,6 +66,10 @@ export interface SnapshotImportResult {
 /** Named checkpoint history; its head is resolved when an operation begins. */
 export class Snapshot {
   /** @internal */
+  static local(): Snapshots { return new LocalContext().snapshots; }
+  static remote(): Snapshots { return RemoteContext.fromEnv().snapshots; }
+  static ctx(context: Context): Snapshots { return context.snapshots; }
+
   constructor(readonly inner: NapiSnapshotGroup) {}
 
   /** Observe the history and its exact saved source association. */
@@ -92,9 +97,7 @@ export class Snapshot {
   static async loadWith(group: string, files: string[], configure: (options: SnapshotLoadOptions) => SnapshotLoadOptions): Promise<SnapshotImportResult> {
     const options = configure(new SnapshotLoadOptions()).toNative();
     const result = await withMappedErrors(() => napi.SnapshotGroup.load(group, [...files], options));
-    return { operationId: result.operationId, snapshot: new Snapshot(result.snapshot),
-      checkpoints: result.checkpoints.map(member => new CheckpointHandle(member)),
-      added: [...result.added], reused: [...result.reused], headUpdate: headOutcome(result.headUpdate), warnings: [...result.warnings] };
+    return wrapImportResult(result);
   }
 
   /** Open a local history directory; relative paths are anchored at this call. */
@@ -116,6 +119,8 @@ export class Snapshot {
     return headOutcome(await withMappedErrors(() => napi.Snapshot.groupHead(selector)));
   }
 
+  get context(): Context { return Context.fromNative(this.inner.context()); }
+
   get name(): string { return this.inner.name; }
 
   async head(): Promise<Checkpoint | null> {
@@ -123,8 +128,8 @@ export class Snapshot {
     return value ? new Checkpoint(value) : null;
   }
 
-  async checkpoints(): Promise<CheckpointHandle[]> {
-    return (await withMappedErrors(() => this.inner.checkpoints())).map((member) => new CheckpointHandle(member));
+  async checkpoints(): Promise<Checkpoint[]> {
+    return (await withMappedErrors(() => this.inner.checkpoints())).map((member) => new Checkpoint(member));
   }
 
   async getCheckpoint(member: string): Promise<Checkpoint> {
@@ -152,7 +157,10 @@ export class Snapshot {
   async spawnSandboxWith(configure: (options: RestoreBuilder) => RestoreBuilder): Promise<Sandbox> {
     // Only destination options are passed native-side. Head selection stays inside the
     // receiver operation, so a callback cannot switch groups or backends.
-    const builder = configure(Sandbox.restore(""));
+    const builder = configure(this.context.sandboxes.restore(""));
+    if (nativeOwner(builder) !== nativeOwner(this.inner)) {
+      throw new TypeError("The restore builder belongs to a different native provider");
+    }
     const sandbox = await withMappedErrors(() => this.inner.spawnSandboxWithBuilder(builder as unknown as NapiRestoreBuilder));
     return new Sandbox(sandbox, await sandbox.name);
   }
@@ -161,7 +169,10 @@ export class Snapshot {
   }
 
   async spawnSandboxWithProgressWith(configure: (options: RestoreBuilder) => RestoreBuilder): Promise<CreationProgressCreate> {
-    const builder = configure(Sandbox.restore(""));
+    const builder = configure(this.context.sandboxes.restore(""));
+    if (nativeOwner(builder) !== nativeOwner(this.inner)) {
+      throw new TypeError("The restore builder belongs to a different native provider");
+    }
     const progress = await withMappedErrors(() => this.inner.spawnSandboxWithProgressBuilder(builder as unknown as NapiRestoreBuilder));
     return new CreationProgressCreate(progress, "");
   }
@@ -175,4 +186,10 @@ export function headOutcome(update: NapiHeadUpdate): HeadUpdate {
 /** @internal Do not reread the group's mutable head to construct capture results. */
 export function snapshotCreateResult(result: NapiSnapshotCreateResult): SnapshotCreateResult {
   return { snapshot: new Snapshot(result.snapshot), checkpoint: new Checkpoint(result.checkpoint), headUpdate: headOutcome(result.headUpdate) };
+}
+
+export function wrapImportResult(result: import("./internal/napi.js").NapiSnapshotImportResult): SnapshotImportResult {
+    return { operationId: result.operationId, snapshot: new Snapshot(result.snapshot),
+      checkpoints: result.checkpoints.map(member => new Checkpoint(member)),
+      added: [...result.added], reused: [...result.reused], headUpdate: headOutcome(result.headUpdate), warnings: [...result.warnings] };
 }

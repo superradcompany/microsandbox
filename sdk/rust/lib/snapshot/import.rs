@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::backend::{Backend, default_backend};
+use crate::context::{Context, configured_context};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{LoadOpts, SnapshotHandle, SnapshotImportResult};
+use super::{Checkpoint, LoadOpts, SnapshotImportResult};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -16,7 +16,7 @@ use super::{LoadOpts, SnapshotHandle, SnapshotImportResult};
 /// releasing the language thread. This is neither persisted data nor a public import result.
 #[doc(hidden)]
 pub struct PreparedSnapshotImport {
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     files: Vec<PathBuf>,
     options: LoadOpts,
 }
@@ -32,11 +32,11 @@ impl PreparedSnapshotImport {
     /// binding work can observe a different working directory. File contents are
     /// read and validated when an import method runs, not by this constructor.
     pub fn new(files: Vec<PathBuf>, options: LoadOpts) -> MicrosandboxResult<Self> {
-        Self::with_backend(default_backend(), files, options)
+        Self::with_backend(configured_context(), files, options)
     }
 
-    fn with_backend(
-        backend: Arc<dyn Backend>,
+    pub(crate) fn with_backend(
+        backend: Arc<dyn Context>,
         files: Vec<PathBuf>,
         options: LoadOpts,
     ) -> MicrosandboxResult<Self> {
@@ -52,7 +52,7 @@ impl PreparedSnapshotImport {
 
     #[cfg(feature = "local")]
     fn anchor_local(mut self) -> MicrosandboxResult<Self> {
-        if self.backend.kind() == crate::backend::BackendKind::Local {
+        if self.backend.kind() == crate::context::ContextKind::Local {
             self.files = self
                 .files
                 .into_iter()
@@ -62,7 +62,7 @@ impl PreparedSnapshotImport {
             self.options.base = self
                 .options
                 .base
-                .map(crate::backend::local::snapshot::anchor_archive_selector)
+                .map(crate::context::local::snapshot::anchor_archive_selector)
                 .transpose()?;
         }
         Ok(self)
@@ -73,7 +73,7 @@ impl PreparedSnapshotImport {
     pub async fn group(self, name: String) -> MicrosandboxResult<SnapshotImportResult> {
         #[cfg(feature = "local")]
         if let Some(local) = self.backend.as_local() {
-            return crate::backend::local::snapshot::load_group_admitted(
+            return crate::context::local::snapshot::load_group_admitted(
                 local,
                 self.backend.clone(),
                 &name,
@@ -83,17 +83,17 @@ impl PreparedSnapshotImport {
             .await;
         }
         self.backend
-            .snapshots()
+            .snapshot_ops()
             .load_group(self.backend.clone(), &name, &self.files, self.options)
             .await
     }
 
     /// Import the prepared inputs and return their retained checkpoint handles.
     /// Uses the backend and path meanings fixed when this request was constructed.
-    pub async fn checkpoints(self) -> MicrosandboxResult<Vec<SnapshotHandle>> {
+    pub async fn checkpoints(self) -> MicrosandboxResult<Vec<Checkpoint>> {
         #[cfg(feature = "local")]
         if let Some(local) = self.backend.as_local() {
-            return crate::backend::local::snapshot::load_many_admitted(
+            return crate::context::local::snapshot::load_many_admitted(
                 local,
                 self.backend.clone(),
                 &self.files,
@@ -102,7 +102,7 @@ impl PreparedSnapshotImport {
             .await;
         }
         self.backend
-            .snapshots()
+            .snapshot_ops()
             .load_many(self.backend.clone(), &self.files, self.options)
             .await
     }
@@ -110,7 +110,7 @@ impl PreparedSnapshotImport {
     /// Import the prepared inputs and return the first resulting checkpoint.
     /// Returns an error if the backend reports no checkpoints; this is not an
     /// exact-member selector and does not restrict a batch to one imported member.
-    pub async fn checkpoint(self) -> MicrosandboxResult<SnapshotHandle> {
+    pub async fn checkpoint(self) -> MicrosandboxResult<Checkpoint> {
         self.checkpoints().await?.into_iter().next().ok_or_else(|| {
             MicrosandboxError::Runtime("snapshot import returned no checkpoint".into())
         })
@@ -118,7 +118,7 @@ impl PreparedSnapshotImport {
 
     /// Preserve the old single-archive dispatch for backends that implement `load`
     /// without implementing the optional batch interface. An explicit base uses batch.
-    pub async fn legacy_checkpoint(self) -> MicrosandboxResult<SnapshotHandle> {
+    pub async fn legacy_checkpoint(self) -> MicrosandboxResult<Checkpoint> {
         if self.options.base.is_some() {
             return self.checkpoint().await;
         }
@@ -126,7 +126,7 @@ impl PreparedSnapshotImport {
             MicrosandboxError::InvalidConfig("snapshot import requires an archive".into())
         })?;
         self.backend
-            .snapshots()
+            .snapshot_ops()
             .load(self.backend.clone(), path, self.options.dest.as_deref())
             .await
     }

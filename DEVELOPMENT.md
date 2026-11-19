@@ -78,6 +78,8 @@ just build && just install
 
 This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows.
 
+For Linux development or tests that need shared libraries from the checkout, set the search path for that invocation from the repository root, for example `LD_LIBRARY_PATH="$PWD/build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cargo test -p microsandbox-runtime --lib`.
+
 On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64). `just build-agentd` and `just build-libkrunfw` use a Linux build backend for the guest/kernel artifacts, then link/install Windows-native outputs. The backend is selected with `MSB_WINDOWS_LINUX_BUILD_BACKEND=auto|docker|wsl` and defaults to `auto`, which prefers Docker Linux containers and falls back to Ubuntu WSL. Set `MSB_WSL_DISTRO=<name>` when your WSL distro is not named `Ubuntu`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
 
 For Windows Server development, use Ubuntu WSL as the Linux build backend:

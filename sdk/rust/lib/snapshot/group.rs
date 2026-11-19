@@ -4,12 +4,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::backend::Backend;
+use crate::context::Context;
 use crate::{MicrosandboxError, MicrosandboxResult, Sandbox};
 
 use super::{
-    Checkpoint, GuestFlush, HeadUpdate, SnapshotConfig, SnapshotHandle, SnapshotId,
-    SnapshotImportOptions, SnapshotReference,
+    Checkpoint, GuestFlush, HeadUpdate, SnapshotConfig, SnapshotId, SnapshotImportOptions,
+    SnapshotReference,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -19,7 +19,7 @@ use super::{
 /// A named checkpoint history. Opening a group does not freeze its mutable head.
 #[derive(Clone)]
 pub struct Snapshot {
-    pub(crate) backend: Arc<dyn Backend>,
+    pub(crate) backend: Arc<dyn Context>,
     pub(crate) name: String,
     pub(crate) reference: SnapshotReference,
 }
@@ -52,7 +52,7 @@ pub struct SnapshotImportResult {
     /// Destination history, including when it has no selected head.
     pub snapshot: Snapshot,
     /// Every unique member supplied by the batch, including bundled dependencies, in ID order.
-    pub checkpoints: Vec<SnapshotHandle>,
+    pub checkpoints: Vec<Checkpoint>,
     /// Members newly installed by this operation, in ID order.
     pub added: Vec<SnapshotId>,
     /// Identical members already installed at commit time, in ID order.
@@ -80,10 +80,15 @@ pub struct SnapshotCaptureOptions {
 //--------------------------------------------------------------------------------------------------
 
 impl Snapshot {
+    /// Provider that owns this history.
+    pub fn context(&self) -> &dyn Context {
+        self.backend.as_ref()
+    }
+
     /// Inspect group metadata and the exact saved source association without capturing.
     pub async fn inspect(&self) -> MicrosandboxResult<super::SnapshotGroupInfo> {
         self.backend
-            .snapshots()
+            .snapshot_ops()
             .inspect_group(&self.reference)
             .await
     }
@@ -95,13 +100,19 @@ impl Snapshot {
     /// the open-file limit prevents acquiring those locks, removal fails before publication.
     /// Increase the process/system limit or close other open files before retrying.
     pub async fn remove(&self) -> MicrosandboxResult<super::SnapshotRemoveResult> {
-        self.backend.snapshots().remove_group(&self.reference).await
+        self.backend
+            .snapshot_ops()
+            .remove_group(&self.reference)
+            .await
     }
 
     /// Verify every member, including a headless history. Shared physical payloads are hashed
     /// once per algorithm. Corruption returns an error containing the complete group report.
     pub async fn verify(&self) -> MicrosandboxResult<super::SnapshotGroupVerifyReport> {
-        self.backend.snapshots().verify_group(&self.reference).await
+        self.backend
+            .snapshot_ops()
+            .verify_group(&self.reference)
+            .await
     }
 
     /// Open a local history directory, including one outside the default store.
@@ -120,10 +131,10 @@ impl Snapshot {
         } else {
             std::path::absolute(path).map_err(MicrosandboxError::from)
         };
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::configured_context();
         async move {
             backend
-                .snapshots()
+                .snapshot_ops()
                 .open_group(backend.clone(), &directory?)
                 .await
         }
@@ -131,17 +142,17 @@ impl Snapshot {
 
     /// Reopen a named history through the active backend, including a headless history.
     pub async fn get(name: impl AsRef<str>) -> MicrosandboxResult<Self> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::configured_context();
         backend
-            .snapshots()
+            .snapshot_ops()
             .get_group(backend.clone(), name.as_ref())
             .await
     }
 
     /// List installed groups. Standalone artifacts are not invented into groups.
     pub async fn list() -> MicrosandboxResult<Vec<Self>> {
-        let backend = crate::backend::default_backend();
-        backend.snapshots().list_groups(backend.clone()).await
+        let backend = crate::context::configured_context();
+        backend.snapshot_ops().list_groups(backend.clone()).await
     }
 
     /// Atomically import an archive set into a named history, resolving dependencies together.
@@ -158,9 +169,9 @@ impl Snapshot {
         files: &[PathBuf],
         configure: impl FnOnce(SnapshotImportOptions) -> SnapshotImportOptions,
     ) -> MicrosandboxResult<SnapshotImportResult> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::configured_context();
         backend
-            .snapshots()
+            .snapshot_ops()
             .load_group(
                 backend.clone(),
                 group.as_ref(),
@@ -178,7 +189,7 @@ impl Snapshot {
         identity: &Path,
         configure: impl FnOnce(SnapshotImportOptions) -> SnapshotImportOptions,
     ) -> MicrosandboxResult<SnapshotImportResult> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::configured_context();
         let local = backend.as_local().ok_or_else(|| {
             MicrosandboxError::InvalidConfig("encrypted archives require the local backend".into())
         })?;
@@ -201,7 +212,7 @@ impl Snapshot {
     /// Read the selected checkpoint once. An explicitly cleared head returns `None`.
     pub async fn head(&self) -> MicrosandboxResult<Option<Checkpoint>> {
         self.backend
-            .snapshots()
+            .snapshot_ops()
             .read_head(self.backend.clone(), &self.reference)
             .await
     }
@@ -209,7 +220,7 @@ impl Snapshot {
     /// Select one existing member. Selecting the current head is an explicit no-op.
     pub async fn set_head(&self, member: impl AsRef<str>) -> MicrosandboxResult<HeadUpdate> {
         self.backend
-            .snapshots()
+            .snapshot_ops()
             .change_head(&self.reference, Some(member.as_ref()))
             .await
     }
@@ -217,15 +228,15 @@ impl Snapshot {
     /// Clear head selection while preserving all members. Clearing again is a no-op.
     pub async fn clear_head(&self) -> MicrosandboxResult<HeadUpdate> {
         self.backend
-            .snapshots()
+            .snapshot_ops()
             .change_head(&self.reference, None)
             .await
     }
 
     /// List immutable members in stable ID order.
-    pub async fn checkpoints(&self) -> MicrosandboxResult<Vec<SnapshotHandle>> {
+    pub async fn checkpoints(&self) -> MicrosandboxResult<Vec<Checkpoint>> {
         self.backend
-            .snapshots()
+            .snapshot_ops()
             .group_members(self.backend.clone(), &self.reference)
             .await
     }
@@ -233,7 +244,7 @@ impl Snapshot {
     /// Open one member by its group-local name or stable ID, without changing the head.
     pub async fn get_checkpoint(&self, member: impl AsRef<str>) -> MicrosandboxResult<Checkpoint> {
         self.backend
-            .snapshots()
+            .snapshot_ops()
             .get_checkpoint(self.backend.clone(), &self.reference, member.as_ref())
             .await
     }
@@ -281,7 +292,7 @@ impl Snapshot {
         config.dest_dir = destination;
         let checkpoint = self
             .backend
-            .snapshots()
+            .snapshot_ops()
             .checkpoint(self.backend.clone(), config)
             .await?;
         let head_update = captured_head(&checkpoint)?;
@@ -343,11 +354,14 @@ impl Snapshot {
     /// Retained read/select wrapper for the released `group[:member]` syntax.
     #[deprecated(note = "use Snapshot::get(group), then head() or set_head(member)")]
     pub async fn group_head(selector: &str) -> MicrosandboxResult<HeadUpdate> {
-        Checkpoint::group_head(selector).await
+        crate::configured_context()
+            .snapshot_ops()
+            .group_head_selector(selector)
+            .await
     }
 
     pub(crate) async fn create_for(
-        backend: Arc<dyn Backend>,
+        backend: Arc<dyn Context>,
         source: &str,
         source_id: crate::sandbox::SandboxId,
         name: &str,
@@ -355,7 +369,7 @@ impl Snapshot {
     ) -> MicrosandboxResult<SnapshotCreateResult> {
         let config = options.into_config(name.into(), source.into());
         let checkpoint = backend
-            .snapshots()
+            .snapshot_ops()
             .create_group(backend.clone(), config, source_id)
             .await?;
         let head_update = captured_head(&checkpoint)?;
@@ -448,8 +462,8 @@ impl Checkpoint {
         &self,
         configure: impl FnOnce(crate::sandbox::RestoreBuilder) -> crate::sandbox::RestoreBuilder,
     ) -> MicrosandboxResult<Sandbox> {
-        let builder = self.spawn_builder(configure);
-        crate::backend::with_backend(self.backend.clone(), builder.restore()).await
+        let builder = self.spawn_builder(configure)?;
+        builder.restore().await
     }
 
     /// Spawn this member with default destination options and progress.
@@ -473,21 +487,30 @@ impl Checkpoint {
         crate::CreationProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
     )> {
-        let builder = self.spawn_builder(configure);
-        crate::backend::with_backend(self.backend.clone(), async move {
-            builder.restore_with_progress()
-        })
-        .await
+        let builder = self.spawn_builder(configure)?;
+        builder.restore_with_progress()
     }
 
     fn spawn_builder(
         &self,
         configure: impl FnOnce(crate::sandbox::RestoreBuilder) -> crate::sandbox::RestoreBuilder,
-    ) -> crate::sandbox::RestoreBuilder {
-        let mut builder = configure(Sandbox::restore_ref(self.reference()));
+    ) -> MicrosandboxResult<crate::sandbox::RestoreBuilder> {
+        // Remote path restore accepts only a path. Even a digest check here would race
+        // with a replacement between that check and the provider opening the disk.
+        if self.backend.kind() == crate::ContextKind::Remote
+            && !matches!(self.reference(), SnapshotReference::Id(_))
+        {
+            return Err(MicrosandboxError::unsupported(
+                crate::Operation::SnapshotOps,
+                crate::error::UnsupportedReason::NotAvailable(
+                    "exact checkpoint spawn requires a managed remote snapshot ID; use explicit path restore to select the current contents".into(),
+                ),
+            ));
+        }
+        let mut builder = configure(self.backend.sandboxes().restore_ref(self.reference()));
         // A callback can return a completely different builder. The receiver still owns
         // source selection; only destination choices may be taken from that builder.
-        builder.inner = builder.inner.with_snapshot_reference(self.reference());
+        builder.inner = builder.inner.for_retained_checkpoint(self);
         #[cfg(feature = "local")]
         if self.backend.as_local().is_some() {
             // Opening a receiver reads metadata but does not keep a lifetime lease.
@@ -507,7 +530,7 @@ impl Checkpoint {
             // even an unlikely collision must refuse, never replace an existing sandbox.
             builder = builder.name(format!("msb-{:032x}", rand::random::<u128>()));
         }
-        builder
+        Ok(builder)
     }
 }
 
@@ -558,17 +581,16 @@ fn captured_head(checkpoint: &Checkpoint) -> MicrosandboxResult<HeadUpdate> {
 mod tests {
     use std::sync::Arc;
 
-    use crate::backend::Backend;
-    use crate::snapshot::{Checkpoint, DESCRIPTOR_FILENAME, SnapshotReference};
-    use crate::{MicrosandboxError, Sandbox};
+    use crate::MicrosandboxError;
+    use crate::context::Context;
+    use crate::snapshot::{DESCRIPTOR_FILENAME, SnapshotReference};
 
     #[tokio::test]
     async fn retained_checkpoint_spawn_refuses_replaced_descriptor() {
         let temp = tempfile::tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
+        let backend: Arc<dyn Context> = Arc::new(
             crate::test_support::local_backend_builder(temp.path().join("home"))
                 .build()
-                .await
                 .unwrap(),
         );
         let directory = temp.path().join("artifact");
@@ -587,12 +609,17 @@ mod tests {
         std::fs::write(directory.join("upper.ext4"), [42; 512]).unwrap();
         let reference = SnapshotReference::path(directory.to_string_lossy());
 
-        crate::with_backend(backend, async {
-            let selected = Checkpoint::open_ref(reference.clone()).await.unwrap();
+        async {
+            let selected = backend
+                .checkpoints()
+                .open_ref(reference.clone())
+                .await
+                .unwrap();
             // Exercise the actual spawn preparation without booting a guest. Successful
             // preparation must retain a reader lease until child materialization finishes.
             let prepared = selected
                 .spawn_builder(|options| options.name("child"))
+                .unwrap()
                 .inner
                 .build()
                 .await
@@ -613,7 +640,8 @@ mod tests {
             manifest.image.reference = "replacement:latest".into();
             std::fs::write(&descriptor, manifest.to_canonical_bytes().unwrap()).unwrap();
             let outcome = selected
-                .spawn_builder(|_| Sandbox::restore("different").name("child"))
+                .spawn_builder(|_| backend.sandboxes().restore("different").name("child"))
+                .unwrap()
                 .inner
                 .build()
                 .await;
@@ -629,7 +657,9 @@ mod tests {
 
             // Legacy reference-based restoration intentionally selects what is currently
             // stored at that reference; it must not inherit a stale receiver's constraint.
-            let current = Sandbox::restore_ref(reference.clone())
+            let current = backend
+                .sandboxes()
+                .restore_ref(reference.clone())
                 .name("current")
                 .inner
                 .build()
@@ -638,9 +668,14 @@ mod tests {
             assert!(current.snapshot_lease.is_some());
             drop(current);
 
-            let fresh = Checkpoint::open_ref(reference.clone()).await.unwrap();
+            let fresh = backend
+                .checkpoints()
+                .open_ref(reference.clone())
+                .await
+                .unwrap();
             let prepared = fresh
                 .spawn_builder(|options| options.name("fresh"))
+                .unwrap()
                 .inner
                 .build()
                 .await
@@ -654,6 +689,7 @@ mod tests {
             std::fs::write(&directory, b"not an archive").unwrap();
             let outcome = fresh
                 .spawn_builder(|options| options.name("file-replacement"))
+                .unwrap()
                 .inner
                 .build()
                 .await;
@@ -662,7 +698,7 @@ mod tests {
                 Err(MicrosandboxError::SnapshotIntegrity(message))
                     if message.contains("replaced since this handle was opened")
             ));
-        })
+        }
         .await;
     }
 }

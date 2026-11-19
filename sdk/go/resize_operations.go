@@ -78,33 +78,10 @@ func (s *Sandbox) ModifyWithResizeTracking(ctx context.Context, opts ModifyOptio
 	return parseModificationResult(out)
 }
 
-// ModifyWithResizeTracking preserves Modify's fresh-by-name planning and options.
-// Stopped/next-start changes return no live identities and do not start the sandbox.
-func (h *SandboxHandle) ModifyWithResizeTracking(ctx context.Context, opts ModifyOptions) (*SandboxModificationResult, error) {
-	request, err := trackedModifyRequest(opts)
-	if err != nil {
-		return nil, err
-	}
-	out, err := ffi.ResizeOperationsSandboxByName(ctx, h.name, h.id, request)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return parseModificationResult(out)
-}
-
 // ResizeOperations reads the latest operation per resource without changing targets.
 // Empty means no recorded request; unavailable observation never means completion.
 func (s *Sandbox) ResizeOperations(ctx context.Context) ([]ResizeOperation, error) {
 	out, err := s.inner.ResizeOperations(ctx, `{"operation":"read"}`)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return parseResizeOperations(out)
-}
-
-// ResizeOperations reads current records for this exact sandbox, refusing replacement.
-func (h *SandboxHandle) ResizeOperations(ctx context.Context) ([]ResizeOperation, error) {
-	out, err := ffi.ResizeOperationsSandboxByName(ctx, h.name, h.id, `{"operation":"read"}`)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -124,35 +101,12 @@ func (s *Sandbox) WaitForResizeOperationsWithTimeout(ctx context.Context, operat
 	return s.waitForResizeOperations(ctx, operations, resizeTimeoutMillis(timeout))
 }
 
-// WaitForResizeOperations waits on supplied identities for this exact sandbox.
-func (h *SandboxHandle) WaitForResizeOperations(ctx context.Context, operations []ResizeOperation) ([]ResourceResizeStatus, error) {
-	return h.waitForResizeOperations(ctx, operations, ffi.ResizeWaitUnbounded)
-}
-
-// WaitForResizeOperationsWithTimeout includes identity lookup in the same deadline.
-// Zero/negative checks once. Cancellation or timeout ends waiting only.
-func (h *SandboxHandle) WaitForResizeOperationsWithTimeout(ctx context.Context, operations []ResizeOperation, timeout time.Duration) ([]ResourceResizeStatus, error) {
-	return h.waitForResizeOperations(ctx, operations, resizeTimeoutMillis(timeout))
-}
-
 func (s *Sandbox) waitForResizeOperations(ctx context.Context, operations []ResizeOperation, timeoutMs uint64) ([]ResourceResizeStatus, error) {
 	request, err := resizeWaitRequest(operations, timeoutMs)
 	if err != nil {
 		return nil, err
 	}
 	out, err := s.inner.ResizeOperations(ctx, request)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return parseResizeStatus(out)
-}
-
-func (h *SandboxHandle) waitForResizeOperations(ctx context.Context, operations []ResizeOperation, timeoutMs uint64) ([]ResourceResizeStatus, error) {
-	request, err := resizeWaitRequest(operations, timeoutMs)
-	if err != nil {
-		return nil, err
-	}
-	out, err := ffi.ResizeOperationsSandboxByName(ctx, h.name, h.id, request)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}

@@ -11,7 +11,7 @@ This guide installs a pinned Claude Code release inside a Node.js microVM and op
 <Steps>
 <Step title="Start Claude Code">
 
-<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="These examples mount files from your computer. On our managed cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-limited">Limited on managed cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Replace `./my-project` with the project directory you want Claude Code to work on:
 
@@ -48,7 +48,7 @@ Choose a terminal theme, then follow the sign-in prompts. If Claude Code cannot 
 Anthropic recommends its standalone installer for normal host installations. This guide uses the pinned npm package for a reproducible sandbox setup; the package installs the same platform-native Claude Code binary.
 
 <Tip>
-  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`.
+  For an isolated workspace, or when using our managed cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`.
 </Tip>
 
 </Step>

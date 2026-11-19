@@ -1,20 +1,19 @@
 //! Source-bound group histories and operation-owned capture results for Ruby.
 
-use std::sync::Arc;
 
 use magnus::{
     Error, RArray, RHash, RModule, Ruby, Value, function, method, prelude::*, scan_args::scan_args,
     typed_data,
 };
 use microsandbox_core::snapshot::{
-    PreparedSnapshotImport, SnapshotVerifyCoverage, UpperVerifyStatus,
+    SnapshotVerifyCoverage, UpperVerifyStatus,
 };
 use microsandbox_core::{
-    BackendKind, CheckpointCaptureResult, Snapshot, SnapshotCaptureOptions, SnapshotCreateResult,
+    ContextKind, CheckpointCaptureResult, Snapshot, SnapshotCaptureOptions, SnapshotCreateResult,
 };
 
 use super::{
-    RubySandbox, RubySandboxHandle, RubySnapshot, RubySnapshotHandle, argument_error, current_ruby,
+    RubySandbox, RubySnapshot, argument_error, current_ruby,
     keyword, reject_unknown_keywords, run, string_map, symbol,
 };
 
@@ -42,7 +41,7 @@ struct RubyCheckpointCaptureResult {
 }
 
 #[magnus::wrap(class = "Microsandbox::SnapshotImportResult", free_immediately, size)]
-struct RubySnapshotImportResult {
+pub(super) struct RubySnapshotImportResult {
     inner: microsandbox_core::SnapshotImportResult,
 }
 
@@ -59,24 +58,6 @@ pub(super) struct RubySnapshotRemoveResult {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
-
-impl RubySandboxHandle {
-    pub(super) fn snapshot(
-        ruby: &Ruby,
-        this: typed_data::Obj<Self>,
-        args: &[Value],
-    ) -> Result<RubySnapshotCreateResult, Error> {
-        let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
-        let name = parsed.required.0;
-        let handle = Arc::clone(&this.inner);
-        let options = capture_options(ruby, parsed.keywords, Some(handle.backend_kind()))?;
-        Ok(RubySnapshotCreateResult {
-            inner: run(ruby, async move {
-                handle.snapshot_with(&name, |_| options).await
-            })?,
-        })
-    }
-}
 
 impl RubyCheckpointRemoveResult {
     fn id(&self) -> String {
@@ -130,25 +111,7 @@ impl RubyGroup {
     }
 
     fn load(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshotImportResult, Error> {
-        let parsed = scan_args::<(String, Vec<String>), (), (), (), RHash, ()>(args)?;
-        let (group, files) = parsed.required;
-        let keywords = parsed.keywords;
-        reject_unknown_keywords(ruby, keywords, &["dest", "base", "set_head"])?;
-        let options = microsandbox_core::snapshot::LoadOpts {
-            group: None,
-            dest: keyword::<String>(keywords, "dest")?.map(Into::into),
-            base: keyword(keywords, "base")?,
-            set_head: keyword::<bool>(keywords, "set_head")?.unwrap_or(false),
-        };
-        let files = files
-            .into_iter()
-            .map(std::path::PathBuf::from)
-            .collect::<Vec<_>>();
-        let prepared = PreparedSnapshotImport::new(files, options)
-            .map_err(|error| super::core_error(ruby, error))?;
-        Ok(RubySnapshotImportResult {
-            inner: run(ruby, prepared.group(group))?,
-        })
+        load_in(ruby, microsandbox_core::configured_context().snapshots(), args)
     }
 
     fn open(ruby: &Ruby, path: String) -> Result<Self, Error> {
@@ -187,7 +150,7 @@ impl RubyGroup {
         let members = run(ruby, async move { group.checkpoints().await })?;
         let result = ruby.ary_new();
         for inner in members {
-            result.push(RubySnapshotHandle { inner })?;
+            result.push(RubySnapshot { inner })?;
         }
         Ok(result)
     }
@@ -231,9 +194,6 @@ impl RubyGroup {
 }
 
 impl RubySnapshot {
-    pub(super) fn id(&self) -> String {
-        self.inner.id().to_string()
-    }
 
     pub(super) fn verify(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
         let checkpoint = this.inner.clone();
@@ -276,12 +236,6 @@ impl RubySnapshot {
     }
 }
 
-impl RubySnapshotHandle {
-    pub(super) fn id(&self) -> String {
-        self.inner.id().to_string()
-    }
-}
-
 impl RubySandbox {
     pub(super) fn snapshot(
         ruby: &Ruby,
@@ -291,7 +245,7 @@ impl RubySandbox {
         let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
         let (name,) = parsed.required;
         let sandbox = this.inner_clone()?;
-        let options = capture_options(ruby, parsed.keywords, Some(sandbox.backend_kind()))?;
+        let options = capture_options(ruby, parsed.keywords, Some(sandbox.context_kind()))?;
         Ok(RubySnapshotCreateResult {
             inner: run(ruby, async move {
                 sandbox.snapshot_with(&name, |_| options).await
@@ -312,7 +266,7 @@ impl RubySnapshotImportResult {
     fn checkpoints(&self) -> Result<RArray, Error> {
         let result = current_ruby().ary_new();
         for inner in &self.inner.checkpoints {
-            result.push(RubySnapshotHandle {
+            result.push(RubySnapshot {
                 inner: inner.clone(),
             })?;
         }
@@ -366,7 +320,7 @@ impl RubyCheckpointCaptureResult {
 pub(super) fn capture_options(
     ruby: &Ruby,
     keywords: RHash,
-    initial_backend: Option<BackendKind>,
+    initial_backend: Option<ContextKind>,
 ) -> Result<SnapshotCaptureOptions, Error> {
     let initial = initial_backend.is_some();
     let allowed = if initial {
@@ -395,7 +349,7 @@ pub(super) fn capture_options(
     }
     if let Some(dest) = keyword::<String>(keywords, "dest_dir")? {
         // Resolve local paths while the calling thread still owns Ruby's VM lock.
-        let destination = if initial_backend == Some(BackendKind::Local) {
+        let destination = if initial_backend == Some(ContextKind::Local) {
             std::path::absolute(dest).map_err(|e| super::core_error(ruby, e.into()))?
         } else {
             dest.into()
@@ -521,4 +475,26 @@ pub(super) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
         method!(RubyCheckpointCaptureResult::head_update, 0),
     )?;
     Ok(())
+}
+
+pub(super) fn load_in(ruby: &Ruby, groups: microsandbox_core::Snapshots, args: &[Value]) -> Result<RubySnapshotImportResult, Error> {
+        let parsed = scan_args::<(String, Vec<String>), (), (), (), RHash, ()>(args)?;
+        let (group, files) = parsed.required;
+        let keywords = parsed.keywords;
+        reject_unknown_keywords(ruby, keywords, &["dest", "base", "set_head"])?;
+        let options = microsandbox_core::snapshot::LoadOpts {
+            group: None,
+            dest: keyword::<String>(keywords, "dest")?.map(Into::into),
+            base: keyword(keywords, "base")?,
+            set_head: keyword::<bool>(keywords, "set_head")?.unwrap_or(false),
+        };
+        let files = files
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        let prepared = groups.prepare_import(files, options)
+            .map_err(|error| super::core_error(ruby, error))?;
+        Ok(RubySnapshotImportResult {
+            inner: run(ruby, prepared.group(group))?,
+        })
 }

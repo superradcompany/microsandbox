@@ -16,7 +16,7 @@ import urllib.request
 
 VERSION = "0.7.8"
 RELEASE = f"https://github.com/superradcompany/microsandbox/releases/download/v{VERSION}"
-PREFIX = "backend::local::snapshot::"
+PREFIX = "context::local::snapshot::"
 TESTS = (
     PREFIX + "archive::writer_tests::released_reader_accepts_historical_target_and_refuses_canonical_names",
     PREFIX + "group::generation::tests::legacy_cli_observes_complete_generation_after_publisher_crash",

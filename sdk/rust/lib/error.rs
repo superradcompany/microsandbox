@@ -570,6 +570,8 @@ pub enum RestoreKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Operation {
+    /// Host runtime discovery, installation, and setup.
+    RuntimeSetup,
     /// `Sandbox::create`.
     SandboxCreate,
     /// `Sandbox::start`.
@@ -590,6 +592,8 @@ pub enum Operation {
     SandboxDrain,
     /// `Sandbox::ping`.
     SandboxPing,
+    /// Low-level access to the prepared local agent connection.
+    SandboxClient,
     /// `Sandbox::touch`.
     SandboxTouch,
     /// `Sandbox::stop_and_wait`.
@@ -620,20 +624,18 @@ pub enum Operation {
     AllSandboxMetrics,
     /// Dialing a sandbox's agent (exec, attach, and guest-fs transport).
     AgentConnect,
-    /// `SandboxHandle::config`.
-    SandboxHandleConfig,
-    /// `SandboxHandle::connect`.
-    SandboxHandleConnect,
-    /// `SandboxHandle::metrics`.
-    SandboxHandleMetrics,
+    /// `Sandbox::config`.
+    SandboxConfig,
+    /// `Sandbox::ensure_running`.
+    SandboxEnsureRunning,
     /// Read the retained local runtime exit.
-    SandboxHandleTerminalExit,
-    /// `SandboxHandle::remove`.
-    SandboxHandleRemove,
-    /// `SandboxHandle::snapshot`.
-    SandboxHandleSnapshot,
-    /// `SandboxHandle::snapshot_to`.
-    SandboxHandleSnapshotTo,
+    SandboxTerminalExit,
+    /// `Sandbox::destroy`.
+    SandboxDestroy,
+    /// `Sandbox::snapshot`.
+    SandboxSnapshot,
+    /// `Sandbox::snapshot_to`.
+    SandboxSnapshotTo,
     /// `SandboxFsOps::open_file`.
     SandboxFsOpenFile,
     /// `SandboxFsOps::open_dir`.
@@ -765,6 +767,7 @@ impl Operation {
     /// The user-facing API path for this operation, e.g. `"Sandbox::kill"`.
     pub fn api_path(&self) -> &'static str {
         match self {
+            Operation::RuntimeSetup => "runtime setup",
             Operation::SandboxCreate => "Sandbox::create",
             Operation::SandboxStart => "Sandbox::start",
             Operation::SandboxStop => "Sandbox::stop",
@@ -775,6 +778,7 @@ impl Operation {
             Operation::SandboxKill => "Sandbox::kill",
             Operation::SandboxDrain => "Sandbox::drain",
             Operation::SandboxPing => "Sandbox::ping",
+            Operation::SandboxClient => "Sandbox::client",
             Operation::SandboxTouch => "Sandbox::touch",
             Operation::SandboxStopAndWait => "Sandbox::stop_and_wait",
             Operation::SandboxWait => "Sandbox::wait",
@@ -790,13 +794,12 @@ impl Operation {
             Operation::SandboxFs => "Sandbox::fs",
             Operation::AllSandboxMetrics => "all_sandbox_metrics",
             Operation::AgentConnect => "agent connections",
-            Operation::SandboxHandleConfig => "SandboxHandle::config",
-            Operation::SandboxHandleConnect => "SandboxHandle::connect",
-            Operation::SandboxHandleMetrics => "SandboxHandle::metrics",
-            Operation::SandboxHandleTerminalExit => "SandboxHandle::terminal_exit",
-            Operation::SandboxHandleRemove => "SandboxHandle::remove",
-            Operation::SandboxHandleSnapshot => "SandboxHandle::snapshot",
-            Operation::SandboxHandleSnapshotTo => "SandboxHandle::snapshot_to",
+            Operation::SandboxConfig => "Sandbox::config",
+            Operation::SandboxEnsureRunning => "Sandbox::ensure_running",
+            Operation::SandboxTerminalExit => "Sandbox::terminal_exit",
+            Operation::SandboxDestroy => "Sandbox::destroy",
+            Operation::SandboxSnapshot => "Sandbox::snapshot",
+            Operation::SandboxSnapshotTo => "Sandbox::snapshot_to",
             Operation::SandboxFsOpenFile => "SandboxFsOps::open_file",
             Operation::SandboxFsOpenDir => "SandboxFsOps::open_dir",
             Operation::SandboxFsCloseHandle => "SandboxFsOps::close_handle",

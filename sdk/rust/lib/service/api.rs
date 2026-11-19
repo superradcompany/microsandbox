@@ -8,7 +8,7 @@ use microsandbox_types::{CloudCreateServiceRequest, CloudService};
 
 use super::types::MAX_SERVICE_LIST_LIMIT;
 use super::{ServiceListBuilder, ServicePage, ServiceStatus, ServiceTarget, ServiceUpdate};
-use crate::backend::{Backend, default_backend};
+use crate::context::{Context, resolve_default_backend};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -20,7 +20,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 /// Services require a cloud backend. Accessors use the last response without making a request.
 #[derive(Clone)]
 pub struct Service {
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     info: CloudService,
 }
 
@@ -46,8 +46,14 @@ impl Service {
 
     /// Get a Service by slug through the default backend.
     pub async fn get(slug: &str) -> MicrosandboxResult<Service> {
-        let backend = default_backend();
-        backend.services().get(backend.clone(), slug).await
+        Self::get_in(resolve_default_backend()?, slug).await
+    }
+
+    pub(crate) async fn get_in(
+        backend: Arc<dyn Context>,
+        slug: &str,
+    ) -> MicrosandboxResult<Service> {
+        backend.service_ops().get(backend.clone(), slug).await
     }
 
     /// List the first page of the organization's Services.
@@ -61,6 +67,13 @@ impl Service {
     pub async fn list_with(
         configure: impl FnOnce(ServiceListBuilder) -> ServiceListBuilder,
     ) -> MicrosandboxResult<ServicePage> {
+        Self::list_in(resolve_default_backend()?, configure).await
+    }
+
+    pub(crate) async fn list_in(
+        backend: Arc<dyn Context>,
+        configure: impl FnOnce(ServiceListBuilder) -> ServiceListBuilder,
+    ) -> MicrosandboxResult<ServicePage> {
         let query = configure(ServiceListBuilder::default());
         if !(1..=MAX_SERVICE_LIST_LIMIT).contains(&query.limit) {
             return Err(MicrosandboxError::InvalidConfig(format!(
@@ -68,8 +81,7 @@ impl Service {
             )));
         }
 
-        let backend = default_backend();
-        backend.services().list(backend.clone(), query).await
+        backend.service_ops().list(backend.clone(), query).await
     }
 
     /// The Service's slug.
@@ -113,7 +125,7 @@ impl Service {
     ) -> MicrosandboxResult<Service> {
         let request = configure(ServiceUpdate::default()).into_request();
         self.backend
-            .services()
+            .service_ops()
             .update(self.backend.clone(), self.slug(), request)
             .await
     }
@@ -123,7 +135,7 @@ impl Service {
     /// To enable a detached Service, set a running target with [`Service::update`] instead.
     pub async fn enable(&self) -> MicrosandboxResult<Service> {
         self.backend
-            .services()
+            .service_ops()
             .enable(self.backend.clone(), self.slug())
             .await
     }
@@ -131,7 +143,7 @@ impl Service {
     /// Disable the Service without retrying while retaining its target.
     pub async fn disable(&self) -> MicrosandboxResult<Service> {
         self.backend
-            .services()
+            .service_ops()
             .disable(self.backend.clone(), self.slug())
             .await
     }
@@ -139,7 +151,7 @@ impl Service {
     /// Remove the Service and release its slug without retrying.
     pub async fn remove(self) -> MicrosandboxResult<()> {
         self.backend
-            .services()
+            .service_ops()
             .remove(self.backend.clone(), self.slug())
             .await
     }
@@ -147,13 +159,13 @@ impl Service {
     /// Get the Service again and return its current state. This value is not changed.
     pub async fn refresh(&self) -> MicrosandboxResult<Service> {
         self.backend
-            .services()
+            .service_ops()
             .get(self.backend.clone(), self.slug())
             .await
     }
 
     #[cfg(feature = "cloud")]
-    pub(crate) fn from_cloud(backend: Arc<dyn Backend>, info: CloudService) -> Self {
+    pub(crate) fn from_cloud(backend: Arc<dyn Context>, info: CloudService) -> Self {
         Self { backend, info }
     }
 }
@@ -172,6 +184,10 @@ impl ServiceBuilder {
     ///
     /// A missing target or port zero fails before any request.
     pub async fn create(self) -> MicrosandboxResult<Service> {
+        self.create_in(resolve_default_backend()?).await
+    }
+
+    pub(crate) async fn create_in(self, backend: Arc<dyn Context>) -> MicrosandboxResult<Service> {
         let Some(target) = self.target else {
             return Err(MicrosandboxError::InvalidConfig(format!(
                 "service {} requires a target",
@@ -183,8 +199,7 @@ impl ServiceBuilder {
             slug: self.slug,
             target,
         };
-        let backend = default_backend();
-        backend.services().create(backend.clone(), request).await
+        backend.service_ops().create(backend.clone(), request).await
     }
 }
 

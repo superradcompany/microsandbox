@@ -10,7 +10,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use microsandbox::backend::{Backend, LocalBackend};
+use microsandbox::context::{Context, LocalContext};
 use microsandbox::{Checkpoint as Snapshot, MicrosandboxResult, SaveOpts, SnapshotReference};
 use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId,
@@ -539,8 +539,8 @@ fn write_symlink_traversal_archive(archive: &Path, escape_dir: &Path) {
     builder.finish().unwrap();
 }
 
-async fn isolated_backend(home: &Path) -> Arc<dyn Backend> {
-    Arc::new(LocalBackend::builder().home(home).build().await.unwrap())
+async fn isolated_backend(home: &Path) -> Arc<dyn Context> {
+    Arc::new(LocalContext::builder().home(home).build().unwrap())
 }
 
 /// Export complete synthetic artifacts independently: their parent edges describe history,
@@ -619,14 +619,18 @@ async fn typed_id_reference_is_resolved_by_the_local_backend() {
     let (_dir, expected_digest) = make_artifact(&snapshots, "snap-by-id", b"upper data");
     let backend = isolated_backend(&home).await;
 
-    microsandbox::with_backend(backend, async {
-        Snapshot::reindex(&snapshots).await.unwrap();
-        let snap = Snapshot::open_ref(SnapshotReference::id(&expected_digest))
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        destination.checkpoints().reindex(&snapshots).await.unwrap();
+        let snap = destination
+            .checkpoints()
+            .open_ref(SnapshotReference::id(&expected_digest))
             .await
             .unwrap();
         assert_eq!(snap.digest(), expected_digest);
         assert_eq!(snap.reference().kind(), "path");
-    })
+    }
     .await;
 }
 
@@ -641,34 +645,38 @@ async fn indexed_handle_can_remove_a_missing_local_artifact() {
         let (source, digest) = make_artifact(&snapshots, "stale", b"upper data");
         let backend = isolated_backend(&home).await;
 
-        microsandbox::with_backend(backend, async {
+        async {
+            let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
             let handle = if grouped {
                 let archive = tmp.path().join("snapshot.msb");
-                Snapshot::save_by_reference(
-                    source.to_str().unwrap(),
-                    &archive,
-                    SaveOpts::default(),
-                )
-                .await
-                .unwrap();
-                Snapshot::remove_by_reference(source.to_str().unwrap(), false)
+                destination
+                    .checkpoints()
+                    .save(source.to_str().unwrap(), &archive, SaveOpts::default())
+                    .await
+                    .unwrap();
+                destination
+                    .checkpoints()
+                    .remove(source.to_str().unwrap(), false)
                     .await
                     .unwrap();
 
-                Snapshot::load_with_options(
-                    &archive,
-                    microsandbox::snapshot::LoadOpts {
-                        dest: Some(snapshots.clone()),
-                        group: Some("external".into()),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-                Snapshot::get(&digest).await.unwrap()
+                destination
+                    .checkpoints()
+                    .load_with_options(
+                        &archive,
+                        microsandbox::snapshot::LoadOpts {
+                            dest: Some(snapshots.clone()),
+                            group: Some("external".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                destination.checkpoints().get(&digest).await.unwrap()
             } else {
-                Snapshot::reindex(&snapshots).await.unwrap();
-                Snapshot::get(&digest).await.unwrap()
+                destination.checkpoints().reindex(&snapshots).await.unwrap();
+                destination.checkpoints().get(&digest).await.unwrap()
             };
             let dir = handle.path().unwrap().to_path_buf();
             let group_record = dir.parent().unwrap().join("group.json");
@@ -677,19 +685,19 @@ async fn indexed_handle_can_remove_a_missing_local_artifact() {
 
             if grouped && !remove_parent {
                 // A surviving group must retain its head checks, even for a missing member.
-                assert!(handle.remove(true).await.is_err());
+                assert!(handle.destroy(true).await.is_err());
                 assert_eq!(std::fs::read(group_record).unwrap(), group_before.unwrap());
-                assert_eq!(Snapshot::list().await.unwrap().len(), 1);
+                assert_eq!(destination.checkpoints().list().await.unwrap().len(), 1);
             } else {
-                handle.remove(false).await.unwrap();
-                assert!(Snapshot::get(&digest).await.is_err());
-                assert!(Snapshot::list().await.unwrap().is_empty());
+                handle.destroy(false).await.unwrap();
+                assert!(destination.checkpoints().get(&digest).await.is_err());
+                assert!(destination.checkpoints().list().await.unwrap().is_empty());
                 assert!(matches!(
-                    handle.remove(false).await,
+                    handle.destroy(false).await,
                     Err(microsandbox::MicrosandboxError::SnapshotNotFound(_))
                 ));
             }
-        })
+        }
         .await;
     }
 }
@@ -715,7 +723,7 @@ async fn snapshot_resolved_pins_the_validated_descriptor_in_both_builder_orders(
         };
         let mut config = builder.build().await.unwrap();
         backend
-            .snapshots()
+            .snapshot_ops()
             .prepare_restore(
                 backend.clone(),
                 &mut config,
@@ -772,8 +780,14 @@ async fn labels_only_copy_preserves_identity_and_every_layer() {
     .unwrap();
     std::fs::write(&descriptor, manifest.to_canonical_bytes().unwrap()).unwrap();
     let backend = isolated_backend(&tmp.path().join("home")).await;
-    microsandbox::with_backend(backend, async {
-        let source = Snapshot::open(dir.to_str().unwrap()).await.unwrap();
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        let source = destination
+            .checkpoints()
+            .open(dir.to_str().unwrap())
+            .await
+            .unwrap();
         let labels = BTreeMap::from([("owner".into(), "copy".into())]);
         let out = tmp.path().join("layered-copy.msb");
         let copied = source
@@ -783,18 +797,13 @@ async fn labels_only_copy_preserves_identity_and_every_layer() {
             .await
             .unwrap();
         assert_eq!(copied, manifest);
-        let imported = Snapshot::load(&out, None)
-            .await
-            .unwrap()
-            .open()
-            .await
-            .unwrap();
+        let imported = destination.checkpoints().load(&out, None).await.unwrap();
         assert_eq!(imported.id(), source.id());
-        assert_eq!(imported.labels(), &labels);
+        assert_eq!(imported.labels().await.unwrap(), labels);
         for layer in &manifest.state.as_file().unwrap().layers {
             assert_eq!(
-                std::fs::read(imported.layer_path(layer).unwrap()).unwrap(),
-                std::fs::read(source.layer_path(layer).unwrap()).unwrap()
+                std::fs::read(imported.layer_path(layer).await.unwrap()).unwrap(),
+                std::fs::read(source.layer_path(layer).await.unwrap()).unwrap()
             );
         }
         let integrity_out = tmp.path().join("layered-integrity.msb");
@@ -804,17 +813,19 @@ async fn labels_only_copy_preserves_identity_and_every_layer() {
             .save()
             .await
             .unwrap();
-        assert_ne!(recorded.snapshot_id, source.manifest().snapshot_id);
-        Snapshot::load(&integrity_out, None)
-            .await
-            .unwrap()
-            .open()
+        assert_ne!(
+            recorded.snapshot_id,
+            source.manifest().await.unwrap().snapshot_id
+        );
+        destination
+            .checkpoints()
+            .load(&integrity_out, None)
             .await
             .unwrap()
             .verify()
             .await
             .unwrap();
-    })
+    }
     .await;
 }
 
@@ -864,16 +875,27 @@ async fn explicit_open_migrates_v066_manifest_json_artifact() {
     )
     .unwrap();
 
-    let snap = microsandbox::with_backend(backend, async {
-        Snapshot::open(dir.to_string_lossy().as_ref())
+    let snap = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        destination
+            .checkpoints()
+            .open(dir.to_string_lossy().as_ref())
             .await
             .unwrap()
-    })
+    }
     .await;
-    assert_eq!(snap.state().as_file().unwrap().virtual_size, 15);
+    assert_eq!(
+        snap.state().await.unwrap().as_file().unwrap().virtual_size,
+        15
+    );
     assert!(dir.join(DESCRIPTOR_FILENAME).is_file());
     assert_eq!(
-        snap.labels().get("stage").map(String::as_str),
+        snap.labels()
+            .await
+            .unwrap()
+            .get("stage")
+            .map(String::as_str),
         Some("legacy")
     );
     assert!(dir.join("metadata.json").is_file());
@@ -892,23 +914,44 @@ async fn managed_v066_migration_rewrites_parent_to_stable_snapshot_id() {
     write_v066_artifact(&child_dir, b"child upper", Some(&parent_legacy_digest));
 
     let backend = isolated_backend(&home).await;
-    let (parent, child) = microsandbox::with_backend(backend, async {
+    let (parent, child) = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         // The first DB-backed operation reconciles the complete managed graph
         // in parent-first order before returning any indexed handles.
-        Snapshot::list().await.unwrap();
-        let parent = Snapshot::open(parent_dir.to_string_lossy().as_ref())
+        destination.checkpoints().list().await.unwrap();
+        let parent = destination
+            .checkpoints()
+            .open(parent_dir.to_string_lossy().as_ref())
             .await
             .unwrap();
-        let child = Snapshot::open(child_dir.to_string_lossy().as_ref())
+        let child = destination
+            .checkpoints()
+            .open(child_dir.to_string_lossy().as_ref())
             .await
             .unwrap();
         (parent, child)
-    })
+    }
     .await;
 
-    assert_eq!(child.manifest().parent.as_ref(), Some(parent.id()));
+    assert_eq!(
+        child
+            .manifest()
+            .await
+            .unwrap()
+            .parent
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some(parent.id())
+    );
     assert_ne!(
-        child.manifest().parent.as_ref().map(|id| id.as_str()),
+        child
+            .manifest()
+            .await
+            .unwrap()
+            .parent
+            .as_ref()
+            .map(|id| id.as_str()),
         Some(parent.digest())
     );
 }
@@ -921,7 +964,7 @@ async fn open_accepts_full_scope_artifact() {
     let snap = Snapshot::open(dir.to_string_lossy().as_ref())
         .await
         .unwrap();
-    assert_eq!(snap.manifest().scope, SnapshotScope::Full);
+    assert_eq!(snap.manifest().await.unwrap().scope, SnapshotScope::Full);
 }
 
 #[tokio::test]
@@ -1040,21 +1083,18 @@ async fn group_verify_headless_members_share_only_physical_hashes() {
     )
     .unwrap();
     verification_group(&home, &[first, second, third], None);
-    microsandbox::with_backend(backend, async {
-        let group = microsandbox::Snapshot::get("verification").await.unwrap();
-        assert!(group.head().await.unwrap().is_none());
-        let report = group.verify().await.unwrap();
-        assert_eq!(report.state, SnapshotVerificationState::Complete);
-        assert_eq!(report.checkpoints.len(), 3);
-        assert_eq!(report.payload_hashes, 2);
-        assert!(
-            report
-                .checkpoints
-                .iter()
-                .all(|member| member.report.is_some() && member.findings.is_empty())
-        );
-    })
-    .await;
+    let group = backend.snapshots().get("verification").await.unwrap();
+    assert!(group.head().await.unwrap().is_none());
+    let report = group.verify().await.unwrap();
+    assert_eq!(report.state, SnapshotVerificationState::Complete);
+    assert_eq!(report.checkpoints.len(), 3);
+    assert_eq!(report.payload_hashes, 2);
+    assert!(
+        report
+            .checkpoints
+            .iter()
+            .all(|member| member.report.is_some() && member.findings.is_empty())
+    );
 }
 
 #[tokio::test]
@@ -1069,42 +1109,39 @@ async fn group_verify_errors_keep_valid_corrupt_and_missing_members_in_report() 
     std::fs::write(second.join(DEFAULT_UPPER_FILE), b"tampered").unwrap();
     let missing = format!("snap_{:032x}", 999);
     verification_group(&home, &[first, second], Some(&missing));
-    microsandbox::with_backend(backend, async {
-        let group = microsandbox::Snapshot::get("verification").await.unwrap();
-        assert!(group.head().await.is_err());
-        let microsandbox::MicrosandboxError::SnapshotVerification(report) =
-            group.verify().await.unwrap_err()
-        else {
-            panic!("group failures must preserve the full report");
-        };
-        assert_eq!(report.state, SnapshotVerificationState::Invalid);
-        assert_eq!(report.checkpoints.len(), 3);
-        assert_eq!(report.payload_hashes, 2);
-        assert_eq!(
-            report
-                .checkpoints
-                .iter()
-                .find(|member| member.id.as_ref().is_some_and(|id| id.as_str() == first_id))
-                .unwrap()
-                .state,
-            SnapshotVerificationState::Complete
-        );
-        assert!(
-            report
-                .checkpoints
-                .iter()
-                .flat_map(|member| &member.findings)
-                .any(|finding| finding.kind == SnapshotVerificationFindingKind::Missing)
-        );
-        assert!(
-            report
-                .checkpoints
-                .iter()
-                .flat_map(|member| &member.findings)
-                .any(|finding| finding.kind == SnapshotVerificationFindingKind::Invalid)
-        );
-    })
-    .await;
+    let group = backend.snapshots().get("verification").await.unwrap();
+    assert!(group.head().await.is_err());
+    let microsandbox::MicrosandboxError::SnapshotVerification(report) =
+        group.verify().await.unwrap_err()
+    else {
+        panic!("group failures must preserve the full report");
+    };
+    assert_eq!(report.state, SnapshotVerificationState::Invalid);
+    assert_eq!(report.checkpoints.len(), 3);
+    assert_eq!(report.payload_hashes, 2);
+    assert_eq!(
+        report
+            .checkpoints
+            .iter()
+            .find(|member| member.id.as_ref().is_some_and(|id| id.as_str() == first_id))
+            .unwrap()
+            .state,
+        SnapshotVerificationState::Complete
+    );
+    assert!(
+        report
+            .checkpoints
+            .iter()
+            .flat_map(|member| &member.findings)
+            .any(|finding| finding.kind == SnapshotVerificationFindingKind::Missing)
+    );
+    assert!(
+        report
+            .checkpoints
+            .iter()
+            .flat_map(|member| &member.findings)
+            .any(|finding| finding.kind == SnapshotVerificationFindingKind::Invalid)
+    );
 }
 
 #[tokio::test]
@@ -1114,21 +1151,18 @@ async fn group_verify_empty_and_unrecorded_are_explicit() {
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
     let directory = verification_group(&home, &[], None);
-    microsandbox::with_backend(backend, async {
-        let group = microsandbox::Snapshot::get("verification").await.unwrap();
-        let empty = group.verify().await.unwrap();
-        assert_eq!(empty.state, SnapshotVerificationState::Empty);
-        assert!(empty.checkpoints.is_empty());
-        assert_eq!(empty.payload_hashes, 0);
-        let (member, _) = make_artifact(tmp.path(), "unrecorded", b"original");
-        std::fs::rename(&member, directory.join(artifact_id(&member))).unwrap();
-        let report = group.verify().await.unwrap();
-        assert_eq!(report.state, SnapshotVerificationState::Incomplete);
-        assert_eq!(report.payload_hashes, 0);
-        assert_eq!(report.checkpoints.len(), 1);
-        assert!(report.checkpoints[0].report.is_some());
-    })
-    .await;
+    let group = backend.snapshots().get("verification").await.unwrap();
+    let empty = group.verify().await.unwrap();
+    assert_eq!(empty.state, SnapshotVerificationState::Empty);
+    assert!(empty.checkpoints.is_empty());
+    assert_eq!(empty.payload_hashes, 0);
+    let (member, _) = make_artifact(tmp.path(), "unrecorded", b"original");
+    std::fs::rename(&member, directory.join(artifact_id(&member))).unwrap();
+    let report = group.verify().await.unwrap();
+    assert_eq!(report.state, SnapshotVerificationState::Incomplete);
+    assert_eq!(report.payload_hashes, 0);
+    assert_eq!(report.checkpoints.len(), 1);
+    assert!(report.checkpoints[0].report.is_some());
 }
 
 #[tokio::test]
@@ -1145,35 +1179,32 @@ async fn group_verify_reports_malformed_and_unsupported_members() {
     std::fs::write(legacy.join("manifest.json"), b"{}").unwrap();
     // A non-directory entry bearing a member ID must not disappear from the report.
     std::fs::write(directory.join(format!("snap_{:032x}", 998)), b"wrong kind").unwrap();
-    microsandbox::with_backend(backend, async {
-        let group = microsandbox::Snapshot::get("verification").await.unwrap();
-        let microsandbox::MicrosandboxError::SnapshotVerification(report) =
-            group.verify().await.unwrap_err()
-        else {
-            panic!("group failures must preserve the full report");
-        };
-        assert_eq!(report.checkpoints.len(), 4);
-        assert_eq!(report.payload_hashes, 0);
-        assert_eq!(std::fs::read(legacy.join("manifest.json")).unwrap(), b"{}");
-        assert!(
-            !legacy.join(DESCRIPTOR_FILENAME).exists(),
-            "verification must not migrate a descriptor"
-        );
-        assert!(
-            report
-                .checkpoints
-                .iter()
-                .flat_map(|member| &member.findings)
-                .any(|finding| finding.kind == SnapshotVerificationFindingKind::Unsupported)
-        );
-        assert!(
-            report
-                .checkpoints
-                .iter()
-                .all(|member| member.report.is_none())
-        );
-    })
-    .await;
+    let group = backend.snapshots().get("verification").await.unwrap();
+    let microsandbox::MicrosandboxError::SnapshotVerification(report) =
+        group.verify().await.unwrap_err()
+    else {
+        panic!("group failures must preserve the full report");
+    };
+    assert_eq!(report.checkpoints.len(), 4);
+    assert_eq!(report.payload_hashes, 0);
+    assert_eq!(std::fs::read(legacy.join("manifest.json")).unwrap(), b"{}");
+    assert!(
+        !legacy.join(DESCRIPTOR_FILENAME).exists(),
+        "verification must not migrate a descriptor"
+    );
+    assert!(
+        report
+            .checkpoints
+            .iter()
+            .flat_map(|member| &member.findings)
+            .any(|finding| finding.kind == SnapshotVerificationFindingKind::Unsupported)
+    );
+    assert!(
+        report
+            .checkpoints
+            .iter()
+            .all(|member| member.report.is_none())
+    );
 }
 
 #[tokio::test]
@@ -1371,7 +1402,12 @@ async fn save_then_load_round_trips_via_zstd() {
         .unwrap();
     assert_eq!(imported.digest(), original_digest);
     assert_eq!(
-        imported.labels().get("stage").map(String::as_str),
+        imported
+            .labels()
+            .await
+            .unwrap()
+            .get("stage")
+            .map(String::as_str),
         Some("deps")
     );
 }
@@ -1398,36 +1434,33 @@ async fn copy_to_applies_labels_and_records_integrity_without_changing_the_sourc
         ("environment".into(), "staging".into()),
         ("purpose".into(), "backup".into()),
     ]);
-    let (manifest, imported_manifest, imported_descriptor) =
-        microsandbox::with_backend(backend, async {
-            let snapshot = Snapshot::load(&source_archive, Some(&work_dir))
-                .await?
-                .open()
-                .await?;
-            let imported_manifest = snapshot.manifest().clone();
-            let imported_descriptor =
-                tokio::fs::read(snapshot.path()?.join(DESCRIPTOR_FILENAME)).await?;
-            let manifest = snapshot
-                .copy_to(&output_archive)
-                .labels(labels.clone())
-                .record_integrity(true)
-                .save()
-                .await?;
+    let (manifest, imported_manifest, imported_descriptor) = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
 
-            assert_eq!(snapshot.manifest(), &imported_manifest);
-            assert_eq!(
-                tokio::fs::read(snapshot.path()?.join(DESCRIPTOR_FILENAME)).await?,
-                imported_descriptor
-            );
+        let snapshot = destination
+            .checkpoints()
+            .load(&source_archive, Some(&work_dir))
+            .await?;
+        let imported_manifest = snapshot.manifest().await.unwrap().clone();
+        let imported_descriptor =
+            tokio::fs::read(snapshot.path()?.join(DESCRIPTOR_FILENAME)).await?;
+        let manifest = snapshot
+            .copy_to(&output_archive)
+            .labels(labels.clone())
+            .record_integrity(true)
+            .save()
+            .await?;
 
-            Ok::<_, microsandbox::MicrosandboxError>((
-                manifest,
-                imported_manifest,
-                imported_descriptor,
-            ))
-        })
-        .await
-        .unwrap();
+        assert_eq!(snapshot.manifest().await.unwrap(), imported_manifest);
+        assert_eq!(
+            tokio::fs::read(snapshot.path()?.join(DESCRIPTOR_FILENAME)).await?,
+            imported_descriptor
+        );
+
+        Ok::<_, microsandbox::MicrosandboxError>((manifest, imported_manifest, imported_descriptor))
+    }
+    .await
+    .unwrap();
 
     assert!(
         manifest.state.as_file().unwrap().layers[0]
@@ -1447,16 +1480,18 @@ async fn copy_to_applies_labels_and_records_integrity_without_changing_the_sourc
     );
 
     let verify_backend = isolated_backend(&tmp.path().join("verify-home")).await;
-    let imported = microsandbox::with_backend(verify_backend, async {
-        Snapshot::load(&output_archive, Some(&tmp.path().join("copied")))
-            .await?
-            .open()
+    let imported = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = verify_backend;
+
+        destination
+            .checkpoints()
+            .load(&output_archive, Some(&tmp.path().join("copied")))
             .await
-    })
+    }
     .await
     .unwrap();
-    assert_eq!(imported.manifest(), &manifest);
-    assert_eq!(imported.labels(), &labels);
+    assert_eq!(imported.manifest().await.unwrap(), manifest);
+    assert_eq!(imported.labels().await.unwrap(), labels);
     assert_eq!(
         std::fs::read(artifact_payload_path(imported.path().unwrap())).unwrap(),
         b"durable checkpoint data"
@@ -1468,21 +1503,23 @@ async fn copy_to_applies_labels_and_records_integrity_without_changing_the_sourc
 
     let backend = isolated_backend(&tmp.path().join("copy-without-integrity-home")).await;
     let output_without_integrity = tmp.path().join("explicit-without-integrity.tar.zst");
-    let manifest = microsandbox::with_backend(backend, async {
-        let snapshot = Snapshot::load(
-            &output_archive,
-            Some(&tmp.path().join("copy-without-integrity-work")),
-        )
-        .await?
-        .open()
-        .await?;
+    let manifest = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        let snapshot = destination
+            .checkpoints()
+            .load(
+                &output_archive,
+                Some(&tmp.path().join("copy-without-integrity-work")),
+            )
+            .await?;
         snapshot
             .copy_to(&output_without_integrity)
             .labels(BTreeMap::new())
             .record_integrity(false)
             .save()
             .await
-    })
+    }
     .await
     .unwrap();
 
@@ -1506,10 +1543,12 @@ async fn copy_to_translates_a_legacy_checkpoint() {
     let backend = isolated_backend(&tmp.path().join("copy-legacy-home")).await;
     let output_archive = tmp.path().join("explicit.tar.zst");
 
-    let manifest = microsandbox::with_backend(backend, async {
-        let snapshot = Snapshot::load(&source_archive, Some(&tmp.path().join("legacy-copy-work")))
-            .await?
-            .open()
+    let manifest = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        let snapshot = destination
+            .checkpoints()
+            .load(&source_archive, Some(&tmp.path().join("legacy-copy-work")))
             .await?;
         snapshot
             .copy_to(&output_archive)
@@ -1520,7 +1559,7 @@ async fn copy_to_translates_a_legacy_checkpoint() {
             .record_integrity(true)
             .save()
             .await
-    })
+    }
     .await
     .unwrap();
 
@@ -1532,12 +1571,14 @@ async fn copy_to_translates_a_legacy_checkpoint() {
             .is_some()
     );
     let verify_backend = isolated_backend(&tmp.path().join("legacy-verify-home")).await;
-    let imported = microsandbox::with_backend(verify_backend, async {
-        Snapshot::load(&output_archive, Some(&tmp.path().join("legacy-copied")))
-            .await?
-            .open()
+    let imported = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = verify_backend;
+
+        destination
+            .checkpoints()
+            .load(&output_archive, Some(&tmp.path().join("legacy-copied")))
             .await
-    })
+    }
     .await
     .unwrap();
     assert_eq!(
@@ -1557,10 +1598,15 @@ async fn copy_to_rejects_checkpoint_state_without_writing_an_archive() {
     );
     let output_archive = tmp.path().join("copy.tar.zst");
     let backend = isolated_backend(&tmp.path().join("resumable-copy-home")).await;
-    let error = microsandbox::with_backend(backend, async {
-        let snapshot = Snapshot::open(source_dir.to_str().unwrap()).await?;
+    let error = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        let snapshot = destination
+            .checkpoints()
+            .open(source_dir.to_str().unwrap())
+            .await?;
         snapshot.copy_to(&output_archive).save().await
-    })
+    }
     .await
     .expect_err("checkpoint-state copy should fail");
 
@@ -1600,19 +1646,25 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
     let archive = tmp.path().join("group.msb");
     let reexport = tmp.path().join("renamed.msb");
 
-    microsandbox::with_backend(backend, async {
-        Snapshot::save_by_reference(
-            source.to_string_lossy().as_ref(),
-            &archive,
-            microsandbox::snapshot::SaveOpts::default(),
-        )
-        .await
-        .unwrap();
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        destination
+            .checkpoints()
+            .save(
+                source.to_string_lossy().as_ref(),
+                &archive,
+                microsandbox::snapshot::SaveOpts::default(),
+            )
+            .await
+            .unwrap();
         let options = microsandbox::snapshot::LoadOpts {
             group: Some("work".into()),
             ..Default::default()
         };
-        let first = Snapshot::load_with_options(&archive, options.clone())
+        let first = destination
+            .checkpoints()
+            .load_with_options(&archive, options.clone())
             .await
             .unwrap();
         assert_eq!(first.group(), Some("work"));
@@ -1627,7 +1679,9 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
         );
 
         // Reimporting the same identity into the same group is idempotent.
-        let repeated = Snapshot::load_with_options(&archive, options)
+        let repeated = destination
+            .checkpoints()
+            .load_with_options(&archive, options)
             .await
             .unwrap();
         assert_eq!(repeated.path().unwrap(), first.path().unwrap());
@@ -1636,14 +1690,29 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
             repeated.head_update().unwrap().reason,
             microsandbox::snapshot::HeadUpdateReason::Unchanged
         );
-        assert_eq!(Snapshot::list().await.unwrap().len(), 1);
-        assert_eq!(Snapshot::open("work").await.unwrap().digest(), digest);
+        assert_eq!(destination.checkpoints().list().await.unwrap().len(), 1);
         assert_eq!(
-            Snapshot::open("work:clean").await.unwrap().id().as_str(),
+            destination
+                .checkpoints()
+                .open("work")
+                .await
+                .unwrap()
+                .digest(),
+            digest
+        );
+        assert_eq!(
+            destination
+                .checkpoints()
+                .open("work:clean")
+                .await
+                .unwrap()
+                .id(),
             snapshot_id
         );
         assert_eq!(
-            Snapshot::open(format!("work:{snapshot_id}"))
+            destination
+                .checkpoints()
+                .open(format!("work:{snapshot_id}"))
                 .await
                 .unwrap()
                 .digest(),
@@ -1651,48 +1720,76 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
         );
 
         // A default import always gets its own local namespace, even for identical bytes.
-        let fresh = Snapshot::load(&archive, None).await.unwrap();
-        let another = Snapshot::load(&archive, None).await.unwrap();
+        let fresh = destination
+            .checkpoints()
+            .load(&archive, None)
+            .await
+            .unwrap();
+        let another = destination
+            .checkpoints()
+            .load(&archive, None)
+            .await
+            .unwrap();
         assert_ne!(fresh.group(), another.group());
         assert_ne!(fresh.group(), Some("work"));
         assert_eq!(fresh.id(), first.id());
         assert_eq!(another.id(), first.id());
-        assert_eq!(Snapshot::list().await.unwrap().len(), 3);
+        assert_eq!(destination.checkpoints().list().await.unwrap().len(), 3);
 
-        Snapshot::save_by_reference(
-            "work:clean",
-            &reexport,
-            microsandbox::snapshot::SaveOpts::default(),
-        )
-        .await
-        .unwrap();
-        let renamed = Snapshot::load_with_options(
-            &reexport,
-            microsandbox::snapshot::LoadOpts {
-                group: Some("renamed".into()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        destination
+            .checkpoints()
+            .save(
+                "work:clean",
+                &reexport,
+                microsandbox::snapshot::SaveOpts::default(),
+            )
+            .await
+            .unwrap();
+        let renamed = destination
+            .checkpoints()
+            .load_with_options(
+                &reexport,
+                microsandbox::snapshot::LoadOpts {
+                    group: Some("renamed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(renamed.name(), Some("clean"));
         assert_eq!(renamed.id(), snapshot_id);
         assert_eq!(
-            Snapshot::group_head("renamed").await.unwrap().head,
-            Some(snapshot_id.clone())
+            destination
+                .checkpoints()
+                .group_head("renamed")
+                .await
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            snapshot_id
         );
 
         // Removing one installed copy does not erase another group's membership or payload.
-        Snapshot::remove_by_reference(&format!("{}:clean", fresh.group().unwrap()), false)
+        destination
+            .checkpoints()
+            .remove(&format!("{}:clean", fresh.group().unwrap()), false)
             .await
             .unwrap();
         assert!(!fresh.path().unwrap().exists());
         assert!(first.path().unwrap().is_dir());
         assert!(another.path().unwrap().is_dir());
         assert!(renamed.path().unwrap().is_dir());
-        assert_eq!(Snapshot::list().await.unwrap().len(), 3);
-        assert_eq!(Snapshot::open("work:clean").await.unwrap().digest(), digest);
-    })
+        assert_eq!(destination.checkpoints().list().await.unwrap().len(), 3);
+        assert_eq!(
+            destination
+                .checkpoints()
+                .open("work:clean")
+                .await
+                .unwrap()
+                .digest(),
+            digest
+        );
+    }
     .await;
 }
 
@@ -1709,35 +1806,45 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
     let competing = tmp.path().join("second.msb");
     let renamed_archive = tmp.path().join("renamed.msb");
 
-    microsandbox::with_backend(backend, async {
-        for (source, destination) in [(&first, &archive), (&second, &competing)] {
-            Snapshot::save_by_reference(
-                source.to_string_lossy().as_ref(),
-                destination,
-                microsandbox::snapshot::SaveOpts::default(),
-            )
-            .await
-            .unwrap();
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        for (source, output) in [(&first, &archive), (&second, &competing)] {
+            destination
+                .checkpoints()
+                .save(
+                    source.to_string_lossy().as_ref(),
+                    output,
+                    microsandbox::snapshot::SaveOpts::default(),
+                )
+                .await
+                .unwrap();
         }
 
         let renamed_source = first.with_file_name("renamed");
         std::fs::rename(&first, &renamed_source).unwrap();
-        Snapshot::save_by_reference(
-            renamed_source.to_str().unwrap(),
-            &renamed_archive,
-            SaveOpts::default(),
-        )
-        .await
-        .unwrap();
+        destination
+            .checkpoints()
+            .save(
+                renamed_source.to_str().unwrap(),
+                &renamed_archive,
+                SaveOpts::default(),
+            )
+            .await
+            .unwrap();
 
         let options = microsandbox::snapshot::LoadOpts {
             group: Some("work".into()),
             ..Default::default()
         };
-        let installed = Snapshot::load_with_options(&archive, options.clone())
+        let installed = destination
+            .checkpoints()
+            .load_with_options(&archive, options.clone())
             .await
             .unwrap();
-        let error = Snapshot::load_with_options(&competing, options.clone())
+        let error = destination
+            .checkpoints()
+            .load_with_options(&competing, options.clone())
             .await
             .unwrap_err();
         assert!(
@@ -1745,11 +1852,22 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
             "unexpected error: {error}"
         );
         assert_eq!(
-            Snapshot::group_head("work").await.unwrap().head,
-            Some(original_id.clone())
+            destination
+                .checkpoints()
+                .group_head("work")
+                .await
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            original_id
         );
         assert_eq!(
-            Snapshot::open("work:clean").await.unwrap().digest(),
+            destination
+                .checkpoints()
+                .open("work:clean")
+                .await
+                .unwrap()
+                .digest(),
             first_digest
         );
         assert_eq!(
@@ -1757,14 +1875,16 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
             b"first"
         );
         assert!(!home.join("snapshots/work").join(competing_id).exists());
-        assert_eq!(Snapshot::list().await.unwrap().len(), 1);
+        assert_eq!(destination.checkpoints().list().await.unwrap().len(), 1);
 
         // A live namespace pin (as held by Windows readers) must not hide an intact
         // snapshot after a failed same-ID import. Recovery cannot mask the failure here.
         let _pin =
             microsandbox_image::storage_lease::StorageLease::shared(installed.path().unwrap())
                 .unwrap();
-        let error = Snapshot::load_with_options(&renamed_archive, options)
+        let error = destination
+            .checkpoints()
+            .load_with_options(&renamed_archive, options)
             .await
             .unwrap_err();
         let microsandbox::MicrosandboxError::SnapshotImport(report) = error else {
@@ -1783,19 +1903,25 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
             report.source
         );
 
-        let listed = Snapshot::list().await.unwrap();
+        let listed = destination.checkpoints().list().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].availability(), "ready");
         assert_eq!(listed[0].name(), Some("clean"));
         assert_eq!(
-            Snapshot::group_head("work").await.unwrap().head,
-            Some(original_id.clone())
+            destination
+                .checkpoints()
+                .group_head("work")
+                .await
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            original_id
         );
         assert_eq!(
             std::fs::read(artifact_payload_path(installed.path().unwrap())).unwrap(),
             b"first"
         );
-    })
+    }
     .await;
 }
 
@@ -1813,11 +1939,15 @@ async fn load_many_selects_lineage_tip_independently_of_input_order() {
     let (third, _) =
         make_artifact_with_parent(&source, "cp03", b"third disk", Some(second_id.clone()));
     let third_id = artifact_id(&third);
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         let archives = save_batch_fixtures(tmp.path(), &[first, second, third]).await;
         for (group, order) in [("reverse", [2, 1, 0]), ("shuffled", [1, 0, 2])] {
             let input = order.map(|index| archives[index].clone());
-            let handles = Snapshot::load_many(&input, batch_group_options(group))
+            let handles = destination
+                .checkpoints()
+                .load_many(&input, batch_group_options(group))
                 .await
                 .unwrap();
             let expected_ids = [&first_id, &second_id, &third_id];
@@ -1827,15 +1957,31 @@ async fn load_many_selects_lineage_tip_independently_of_input_order() {
                 assert_eq!(handle.group(), Some(group));
             }
             assert_eq!(
-                Snapshot::group_head(group).await.unwrap().head,
+                destination
+                    .checkpoints()
+                    .group_head(group)
+                    .await
+                    .unwrap()
+                    .map(|id| id.to_string()),
                 Some(third_id.clone())
             );
             assert_eq!(
-                Snapshot::open(format!("{group}:cp01"))
+                destination
+                    .checkpoints()
+                    .group_head(group)
                     .await
                     .unwrap()
-                    .id()
+                    .unwrap()
                     .as_str(),
+                third_id
+            );
+            assert_eq!(
+                destination
+                    .checkpoints()
+                    .open(format!("{group}:cp01"))
+                    .await
+                    .unwrap()
+                    .id(),
                 first_id
             );
         }
@@ -1850,13 +1996,17 @@ async fn load_many_selects_lineage_tip_independently_of_input_order() {
             ("reverse", "cp02", b"second disk".as_slice()),
             ("shuffled", "cp03", b"third disk".as_slice()),
         ] {
-            let artifact = Snapshot::open(format!("{group}:{name}")).await.unwrap();
+            let artifact = destination
+                .checkpoints()
+                .open(format!("{group}:{name}"))
+                .await
+                .unwrap();
             assert_eq!(
                 std::fs::read(artifact_payload_path(artifact.path().unwrap())).unwrap(),
                 expected
             );
         }
-    })
+    }
     .await;
 }
 
@@ -1866,24 +2016,28 @@ async fn load_many_duplicate_inputs_return_input_heads_but_install_once() {
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
     let (source, _) = make_artifact(tmp.path(), "baseline", b"owned bytes");
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         let archive = save_batch_fixtures(tmp.path(), &[source]).await.remove(0);
         let copied_archive = tmp.path().join("identical-copy.msb");
         std::fs::copy(&archive, &copied_archive).unwrap();
-        let handles = Snapshot::load_many(
-            &[archive.clone(), copied_archive, archive],
-            batch_group_options("work"),
-        )
-        .await
-        .unwrap();
+        let handles = destination
+            .checkpoints()
+            .load_many(
+                &[archive.clone(), copied_archive, archive],
+                batch_group_options("work"),
+            )
+            .await
+            .unwrap();
         assert_eq!(handles.len(), 3);
         assert!(
             handles
                 .iter()
                 .all(|handle| handle.path().unwrap() == handles[0].path().unwrap())
         );
-        assert_eq!(Snapshot::list().await.unwrap().len(), 1);
-    })
+        assert_eq!(destination.checkpoints().list().await.unwrap().len(), 1);
+    }
     .await;
 }
 
@@ -1898,38 +2052,86 @@ async fn load_many_sibling_batch_preserves_existing_head_and_leaves_new_group_he
     let left_id = artifact_id(&left);
     let (right, _) =
         make_artifact_with_parent(tmp.path(), "right", b"right", Some(base_id.clone()));
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         let archives = save_batch_fixtures(tmp.path(), &[base, left, right]).await;
-        Snapshot::load_with_options(&archives[0], batch_group_options("existing"))
+        destination
+            .checkpoints()
+            .load_with_options(&archives[0], batch_group_options("existing"))
             .await
             .unwrap();
         let siblings = [archives[2].clone(), archives[1].clone()];
-        Snapshot::load_many(&siblings, batch_group_options("existing"))
+        destination
+            .checkpoints()
+            .load_many(&siblings, batch_group_options("existing"))
             .await
             .unwrap();
         assert_eq!(
-            Snapshot::group_head("existing").await.unwrap().head,
-            Some(base_id.clone())
+            destination
+                .checkpoints()
+                .group_head("existing")
+                .await
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            base_id
         );
-        let handles = Snapshot::load_many(&siblings, batch_group_options("fresh"))
+        let handles = destination
+            .checkpoints()
+            .load_many(&siblings, batch_group_options("fresh"))
             .await
             .unwrap();
         assert_eq!(handles.len(), 2);
         assert!(handles.iter().all(|handle| handle.head_update().is_none()));
-        assert!(Snapshot::open("fresh").await.is_err());
+        assert!(destination.checkpoints().open("fresh").await.is_err());
         assert_eq!(
-            Snapshot::open("fresh:left").await.unwrap().id().as_str(),
+            destination
+                .checkpoints()
+                .open("fresh:left")
+                .await
+                .unwrap()
+                .id(),
             left_id
         );
+        let fresh = destination.checkpoints();
+        assert!(matches!(
+            fresh.group_head("missing").await,
+            Err(microsandbox::MicrosandboxError::SnapshotNotFound(_))
+        ));
+        assert_eq!(fresh.group_head("fresh").await.unwrap(), None);
+        assert!(fresh.group_head("fresh:left").await.is_err());
+        let selected = SnapshotId::new(&left_id).unwrap();
+        let alias: SnapshotId = serde_json::from_value(serde_json::json!("left")).unwrap();
+        assert!(fresh.set_group_head("fresh", &alias).await.is_err());
+        let absent = SnapshotId::new(format!("snap_{:032x}", 0)).unwrap();
+        assert!(fresh.set_group_head("fresh", &absent).await.is_err());
+        assert_eq!(fresh.group_head("fresh").await.unwrap(), None);
         assert_eq!(
-            Snapshot::group_head("fresh:left").await.unwrap().head,
-            Some(left_id.clone())
+            fresh
+                .set_group_head("fresh", &selected)
+                .await
+                .unwrap()
+                .head
+                .as_deref(),
+            Some(left_id.as_str())
+        );
+        assert!(
+            !fresh
+                .set_group_head("fresh", &selected)
+                .await
+                .unwrap()
+                .changed
         );
         assert_eq!(
-            Snapshot::open("fresh").await.unwrap().id().as_str(),
+            fresh.group_head("fresh").await.unwrap().as_ref(),
+            Some(&selected)
+        );
+        assert_eq!(
+            destination.checkpoints().open("fresh").await.unwrap().id(),
             left_id
         );
-    })
+    }
     .await;
 }
 
@@ -1940,14 +2142,22 @@ async fn load_many_ambiguous_set_head_rejects_before_publishing_members() {
     let backend = isolated_backend(&home).await;
     let (left, _) = make_artifact(tmp.path(), "left", b"left");
     let (right, _) = make_artifact(tmp.path(), "right", b"right");
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         let archives = save_batch_fixtures(tmp.path(), &[left, right]).await;
         let mut options = batch_group_options("ambiguous");
         options.set_head = true;
-        assert!(Snapshot::load_many(&archives, options).await.is_err());
+        assert!(
+            destination
+                .checkpoints()
+                .load_many(&archives, options)
+                .await
+                .is_err()
+        );
         assert_no_batch_members(&home.join("snapshots/ambiguous"));
-        assert!(Snapshot::list().await.unwrap().is_empty());
-    })
+        assert!(destination.checkpoints().list().await.unwrap().is_empty());
+    }
     .await;
 }
 
@@ -1960,21 +2170,31 @@ async fn load_many_accepts_complete_payload_with_missing_historical_parent() {
     let (source, _) =
         make_artifact_with_parent(tmp.path(), "complete", b"complete payload", Some(missing));
     let id = artifact_id(&source);
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         let archives = save_batch_fixtures(tmp.path(), &[source]).await;
-        let handles = Snapshot::load_many(&archives, batch_group_options("work"))
+        let handles = destination
+            .checkpoints()
+            .load_many(&archives, batch_group_options("work"))
             .await
             .unwrap();
         assert_eq!(handles[0].id(), id);
         assert_eq!(
-            Snapshot::group_head("work").await.unwrap().head,
-            Some(id.clone())
+            destination
+                .checkpoints()
+                .group_head("work")
+                .await
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            id
         );
         assert_eq!(
             std::fs::read(artifact_payload_path(handles[0].path().unwrap())).unwrap(),
             b"complete payload"
         );
-    })
+    }
     .await;
 }
 
@@ -1985,9 +2205,13 @@ async fn load_many_conflicting_aliases_rejects_before_any_member_is_published() 
     let backend = isolated_backend(&home).await;
     let (first, _) = make_artifact(&tmp.path().join("one"), "same-name", b"one");
     let (second, _) = make_artifact(&tmp.path().join("two"), "same-name", b"two");
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         let archives = save_batch_fixtures(tmp.path(), &[first, second]).await;
-        let error = Snapshot::load_many(&archives, batch_group_options("work"))
+        let error = destination
+            .checkpoints()
+            .load_many(&archives, batch_group_options("work"))
             .await
             .unwrap_err();
         assert!(
@@ -1995,7 +2219,7 @@ async fn load_many_conflicting_aliases_rejects_before_any_member_is_published() 
             "unexpected error: {error}"
         );
         assert_no_batch_members(&home.join("snapshots/work"));
-    })
+    }
     .await;
 }
 
@@ -2024,10 +2248,14 @@ async fn load_many_duplicate_ids_with_conflicting_labels_rejects_before_publicat
         )
         .unwrap();
     }
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         for artifact in [&first, &second] {
             assert_eq!(
-                Snapshot::open(artifact.to_string_lossy().as_ref())
+                destination
+                    .checkpoints()
+                    .open(artifact.to_string_lossy().as_ref())
                     .await
                     .unwrap()
                     .digest(),
@@ -2037,14 +2265,16 @@ async fn load_many_duplicate_ids_with_conflicting_labels_rejects_before_publicat
         let archives = save_batch_fixtures(tmp.path(), &[first, second]).await;
         for (group, order) in [("forward", [0, 1]), ("reverse", [1, 0])] {
             let inputs = order.map(|index| archives[index].clone());
-            let error = Snapshot::load_many(&inputs, batch_group_options(group))
+            let error = destination
+                .checkpoints()
+                .load_many(&inputs, batch_group_options(group))
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("conflicting labels"), "{error}");
             assert_no_batch_members(&home.join("snapshots").join(group));
         }
-        assert!(Snapshot::list().await.unwrap().is_empty());
-    })
+        assert!(destination.checkpoints().list().await.unwrap().is_empty());
+    }
     .await;
 }
 
@@ -2063,15 +2293,19 @@ async fn load_many_conflicting_ids_rejects_before_any_member_is_published() {
         descriptor.to_canonical_bytes().unwrap(),
     )
     .unwrap();
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         let archives = save_batch_fixtures(tmp.path(), &[first, second]).await;
         assert!(
-            Snapshot::load_many(&archives, batch_group_options("work"))
+            destination
+                .checkpoints()
+                .load_many(&archives, batch_group_options("work"))
                 .await
                 .is_err()
         );
         assert_no_batch_members(&home.join("snapshots/work"));
-    })
+    }
     .await;
 }
 
@@ -2082,10 +2316,14 @@ async fn load_many_corrupt_later_archive_never_publishes_valid_earlier_member() 
     let backend = isolated_backend(&home).await;
     let (first, _) = make_artifact(tmp.path(), "first", b"one");
     let (second, _) = make_artifact(tmp.path(), "second", b"two");
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         let archives = save_batch_fixtures(tmp.path(), &[first, second]).await;
         corrupt_dense_tar_member(&archives[1], ".raw");
-        let error = Snapshot::load_many(&archives, batch_group_options("work"))
+        let error = destination
+            .checkpoints()
+            .load_many(&archives, batch_group_options("work"))
             .await
             .unwrap_err();
         assert!(
@@ -2093,7 +2331,7 @@ async fn load_many_corrupt_later_archive_never_publishes_valid_earlier_member() 
             "unexpected error: {error}"
         );
         assert_no_batch_members(&home.join("snapshots/work"));
-    })
+    }
     .await;
 }
 
@@ -2104,12 +2342,17 @@ async fn load_many_single_legacy_archive_preserves_single_load_compatibility() {
     let backend = isolated_backend(&home).await;
     let archive = tmp.path().join("legacy.tar");
     write_v066_archive(&archive, "sha256-0123456789abcdef", b"legacy disk");
-    microsandbox::with_backend(backend, async {
-        let batch =
-            Snapshot::load_many(std::slice::from_ref(&archive), batch_group_options("batch"))
-                .await
-                .unwrap();
-        let single = Snapshot::load_with_options(&archive, batch_group_options("single"))
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        let batch = destination
+            .checkpoints()
+            .load_many(std::slice::from_ref(&archive), batch_group_options("batch"))
+            .await
+            .unwrap();
+        let single = destination
+            .checkpoints()
+            .load_with_options(&archive, batch_group_options("single"))
             .await
             .unwrap();
         assert_eq!(batch.len(), 1);
@@ -2118,7 +2361,7 @@ async fn load_many_single_legacy_archive_preserves_single_load_compatibility() {
             std::fs::read(artifact_payload_path(batch[0].path().unwrap())).unwrap(),
             b"legacy disk"
         );
-    })
+    }
     .await;
 }
 
@@ -2475,19 +2718,23 @@ async fn save_with_image_includes_only_pinned_cache_artifacts() {
     );
     let archive = tmp.path().join("with-image.tar");
 
-    microsandbox::with_backend(backend, async {
-        save_snapshot(
-            dir.to_string_lossy().as_ref(),
-            &archive,
-            microsandbox::snapshot::SaveOpts {
-                with_image: true,
-                plain_tar: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    })
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        destination
+            .checkpoints()
+            .save(
+                dir.to_string_lossy().as_ref(),
+                &archive,
+                microsandbox::snapshot::SaveOpts {
+                    with_image: true,
+                    plain_tar: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
     .await;
 
     let file = std::fs::File::open(&archive).unwrap();
@@ -2657,9 +2904,15 @@ async fn load_translates_v066_plain_and_zstd_archives() {
         let home = tmp.path().join(format!("home-{index}"));
         let backend = isolated_backend(&home).await;
         let dest = tmp.path().join(format!("imported-{index}"));
-        let handle = microsandbox::with_backend(backend, async {
-            Snapshot::load(archive, Some(&dest)).await.unwrap()
-        })
+        let handle = async {
+            let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+            destination
+                .checkpoints()
+                .load(archive, Some(&dest))
+                .await
+                .unwrap()
+        }
         .await;
         let handle_path = reference_path(handle.reference());
         let manifest =
@@ -2685,14 +2938,20 @@ async fn load_translates_released_flat_inventory_archive() {
     let archive = tmp.path().join("released.tar");
     write_released_flat_archive(&archive, b"released upper");
 
-    microsandbox::with_backend(backend, async {
-        let handle = Snapshot::load(&archive, None).await.unwrap();
-        let snapshot = handle.open().await.unwrap();
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        let handle = destination
+            .checkpoints()
+            .load(&archive, None)
+            .await
+            .unwrap();
+        let snapshot = handle.clone();
         assert_eq!(
             std::fs::read(artifact_payload_path(snapshot.path().unwrap())).unwrap(),
             b"released upper"
         );
-    })
+    }
     .await;
 }
 
@@ -2709,29 +2968,40 @@ async fn load_selects_child_head_when_parents_are_present() {
     let child_id = artifact_id(&child_dir);
     let archive = tmp.path().join("chain.tar");
     let dest = tmp.path().join("imported-chain");
-    let handle = microsandbox::with_backend(
-        backend,
+    let handle = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
         Box::pin(async {
-            Snapshot::open(parent_dir.to_string_lossy().as_ref())
+            destination
+                .checkpoints()
+                .open(parent_dir.to_string_lossy().as_ref())
                 .await
                 .unwrap();
-            Snapshot::open(child_dir.to_string_lossy().as_ref())
+            destination
+                .checkpoints()
+                .open(child_dir.to_string_lossy().as_ref())
                 .await
                 .unwrap();
-            save_snapshot(
-                child_dir.to_string_lossy().as_ref(),
-                &archive,
-                microsandbox::snapshot::SaveOpts {
-                    with_parents: true,
-                    plain_tar: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-            Snapshot::load(&archive, Some(&dest)).await.unwrap()
-        }),
-    )
+            destination
+                .checkpoints()
+                .save(
+                    child_dir.to_string_lossy().as_ref(),
+                    &archive,
+                    microsandbox::snapshot::SaveOpts {
+                        with_parents: true,
+                        plain_tar: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            destination
+                .checkpoints()
+                .load(&archive, Some(&dest))
+                .await
+                .unwrap()
+        })
+        .await
+    }
     .await;
     assert_eq!(handle.digest(), child_digest);
     assert_eq!(handle.id(), child_id);
@@ -2761,15 +3031,19 @@ async fn failed_load_does_not_install_staged_cache_entries() {
     );
     let dest = tmp.path().join("dest");
 
-    microsandbox::with_backend(backend, async {
-        let err = Snapshot::load(&archive, Some(&dest))
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        let err = destination
+            .checkpoints()
+            .load(&archive, Some(&dest))
             .await
             .expect_err("expected cache-only import to fail");
         assert!(
             err.to_string().contains("no snapshot manifest"),
             "unexpected error: {err}"
         );
-    })
+    }
     .await;
 
     assert!(
@@ -2794,22 +3068,25 @@ async fn failed_load_with_conflicting_cache_target_does_not_install_cache_entrie
     );
     let archive = tmp.path().join("cache-conflict.tar");
 
-    microsandbox::with_backend(
-        export_backend,
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = export_backend;
         Box::pin(async {
-            save_snapshot(
-                dir.to_string_lossy().as_ref(),
-                &archive,
-                microsandbox::snapshot::SaveOpts {
-                    with_image: true,
-                    plain_tar: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        }),
-    )
+            destination
+                .checkpoints()
+                .save(
+                    dir.to_string_lossy().as_ref(),
+                    &archive,
+                    microsandbox::snapshot::SaveOpts {
+                        with_image: true,
+                        plain_tar: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        })
+        .await
+    }
     .await;
 
     let import_home = tmp.path().join("import-home");
@@ -2822,10 +3099,12 @@ async fn failed_load_with_conflicting_cache_target_does_not_install_cache_entrie
     let expected_vmdk = import_cache.vmdk_path(&seeded.image_digest);
     let dest = tmp.path().join("cache-conflict-dest");
 
-    microsandbox::with_backend(
-        import_backend,
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = import_backend;
         Box::pin(async {
-            let err = Snapshot::load(&archive, Some(&dest))
+            let err = destination
+                .checkpoints()
+                .load(&archive, Some(&dest))
                 .await
                 .expect_err("expected conflicting cache target to fail import");
             assert!(
@@ -2833,8 +3112,9 @@ async fn failed_load_with_conflicting_cache_target_does_not_install_cache_entrie
                     .contains("cache target already exists with different content"),
                 "unexpected error: {err}"
             );
-        }),
-    )
+        })
+        .await
+    }
     .await;
 
     assert!(
@@ -2882,22 +3162,25 @@ async fn load_accepts_cached_image_metadata_with_reordered_labels() {
         seeded.manifest_digest.clone(),
     );
     let archive = tmp.path().join("reordered-labels.tar");
-    microsandbox::with_backend(
-        export_backend,
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = export_backend;
         Box::pin(async {
-            save_snapshot(
-                dir.to_string_lossy().as_ref(),
-                &archive,
-                microsandbox::snapshot::SaveOpts {
-                    with_image: true,
-                    plain_tar: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        }),
-    )
+            destination
+                .checkpoints()
+                .save(
+                    dir.to_string_lossy().as_ref(),
+                    &archive,
+                    microsandbox::snapshot::SaveOpts {
+                        with_image: true,
+                        plain_tar: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        })
+        .await
+    }
     .await;
 
     // Destination metadata: identical values, but the labels object lists its keys in an order
@@ -2944,10 +3227,17 @@ async fn load_accepts_cached_image_metadata_with_reordered_labels() {
     std::fs::write(&import_metadata, reordered.as_bytes()).unwrap();
     let dest = tmp.path().join("reordered-labels-dest");
 
-    let handle = microsandbox::with_backend(
-        import_backend.clone(),
-        Box::pin(async { Snapshot::load(&archive, Some(&dest)).await.unwrap() }),
-    )
+    let handle = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = import_backend.clone();
+        Box::pin(async {
+            destination
+                .checkpoints()
+                .load(&archive, Some(&dest))
+                .await
+                .unwrap()
+        })
+        .await
+    }
     .await;
     assert_eq!(Snapshot::list_dir(&dest).await.unwrap().len(), 1);
     assert!(handle.path().unwrap().is_dir());
@@ -2961,10 +3251,12 @@ async fn load_accepts_cached_image_metadata_with_reordered_labels() {
     metadata.manifest_digest = "sha256:different".into();
     std::fs::write(&import_metadata, serde_json::to_vec(&metadata).unwrap()).unwrap();
     let dest = tmp.path().join("reordered-labels-conflict-dest");
-    microsandbox::with_backend(
-        import_backend,
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = import_backend;
         Box::pin(async {
-            let err = Snapshot::load(&archive, Some(&dest))
+            let err = destination
+                .checkpoints()
+                .load(&archive, Some(&dest))
                 .await
                 .expect_err("expected differing metadata to conflict");
             assert!(
@@ -2972,8 +3264,9 @@ async fn load_accepts_cached_image_metadata_with_reordered_labels() {
                     .contains("cache target already exists with different content"),
                 "unexpected error: {err}"
             );
-        }),
-    )
+        })
+        .await
+    }
     .await;
 }
 
@@ -2993,34 +3286,42 @@ async fn load_rebuilds_image_vmdk_for_destination_cache() {
     );
     let archive = tmp.path().join("vmdk-rebuild.tar");
 
-    microsandbox::with_backend(
-        export_backend,
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = export_backend;
         Box::pin(async {
-            save_snapshot(
-                dir.to_string_lossy().as_ref(),
-                &archive,
-                microsandbox::snapshot::SaveOpts {
-                    with_image: true,
-                    plain_tar: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        }),
-    )
+            destination
+                .checkpoints()
+                .save(
+                    dir.to_string_lossy().as_ref(),
+                    &archive,
+                    microsandbox::snapshot::SaveOpts {
+                        with_image: true,
+                        plain_tar: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        })
+        .await
+    }
     .await;
 
     let import_home = tmp.path().join("import-home");
     let import_backend = isolated_backend(&import_home).await;
     let import_cache = microsandbox_image::GlobalCache::new(&import_home.join("cache")).unwrap();
     let dest = tmp.path().join("vmdk-rebuild-dest");
-    microsandbox::with_backend(
-        import_backend.clone(),
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = import_backend.clone();
         Box::pin(async {
-            Snapshot::load(&archive, Some(&dest)).await.unwrap();
-        }),
-    )
+            destination
+                .checkpoints()
+                .load(&archive, Some(&dest))
+                .await
+                .unwrap();
+        })
+        .await
+    }
     .await;
 
     let vmdk = import_cache.vmdk_path(&seeded.image_digest);
@@ -3029,12 +3330,17 @@ async fn load_rebuilds_image_vmdk_for_destination_cache() {
     // A descriptor left by an earlier import, pointing elsewhere, is replaced too.
     std::fs::write(&vmdk, "RW 8 FLAT \"/elsewhere/fsmeta.erofs\" 0\n").unwrap();
     let dest = tmp.path().join("vmdk-rebuild-dest-stale");
-    microsandbox::with_backend(
-        import_backend,
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = import_backend;
         Box::pin(async {
-            Snapshot::load(&archive, Some(&dest)).await.unwrap();
-        }),
-    )
+            destination
+                .checkpoints()
+                .load(&archive, Some(&dest))
+                .await
+                .unwrap();
+        })
+        .await
+    }
     .await;
     assert_vmdk_references_cache(&import_cache, &seeded);
 }
@@ -3079,11 +3385,15 @@ async fn load_streams_large_archive_without_buffering() {
     file.set_len(4 * 1024 * 1024 * 1024).unwrap();
     drop(file);
 
-    let err = microsandbox::with_backend(backend, async {
-        Snapshot::load(&archive, Some(&tmp.path().join("dest")))
+    let err = async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        destination
+            .checkpoints()
+            .load(&archive, Some(&tmp.path().join("dest")))
             .await
             .expect_err("expected import of sparse archive to fail")
-    })
+    }
     .await;
 
     let msg = err.to_string();
@@ -3099,8 +3409,12 @@ async fn create_full_resolves_source_before_touching_anything() {
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
 
-    microsandbox::with_backend(backend, async {
-        let err = Snapshot::builder("warm")
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
+        let err = destination
+            .checkpoints()
+            .builder("warm")
             .from_sandbox("box")
             .full()
             .create()
@@ -3110,7 +3424,7 @@ async fn create_full_resolves_source_before_touching_anything() {
             &err,
             microsandbox::MicrosandboxError::SandboxNotFound(_)
         ));
-    })
+    }
     .await;
 
     assert!(!home.join("snapshots").join("box").exists());
@@ -3122,9 +3436,13 @@ async fn create_rejects_unaddressable_names() {
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
 
-    microsandbox::with_backend(backend, async {
+    async {
+        let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
         for name in ["~cache", "sha256:v1", "a\\b"] {
-            let err = Snapshot::builder(name)
+            let err = destination
+                .checkpoints()
+                .builder(name)
                 .from_sandbox("box")
                 .create()
                 .await
@@ -3134,7 +3452,7 @@ async fn create_rejects_unaddressable_names() {
                 "{name}: unexpected error: {err}"
             );
         }
-    })
+    }
     .await;
 }
 
@@ -3146,7 +3464,10 @@ async fn from_snapshot_rejects_unknown_required_extension_but_open_works() {
     let snap = Snapshot::open(dir.to_string_lossy().as_ref())
         .await
         .unwrap();
-    assert_eq!(snap.manifest().requires, vec!["msb.future/1".to_string()]);
+    assert_eq!(
+        snap.manifest().await.unwrap().requires,
+        vec!["msb.future/1".to_string()]
+    );
 
     let err = microsandbox::Sandbox::restore_ref(snap.reference())
         .name("requires-gate-test")
@@ -3169,7 +3490,9 @@ async fn replacing_child_in_place_does_not_inflate_parent_child_count() {
         let snapshots = home.join("snapshots");
         std::fs::create_dir_all(&snapshots).unwrap();
 
-        microsandbox::with_backend(backend, async {
+        async {
+            let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
+
             let (pdir, _pdigest) = make_artifact(&snapshots, "parent", b"parent upper");
             let parent_id = artifact_id(&pdir);
             let (cdir, _c1) = make_artifact_with_parent(
@@ -3178,7 +3501,7 @@ async fn replacing_child_in_place_does_not_inflate_parent_child_count() {
                 b"child v1",
                 Some(parent_id.clone()),
             );
-            Snapshot::reindex(&snapshots).await.unwrap();
+            destination.checkpoints().reindex(&snapshots).await.unwrap();
 
             // Replace the child in place: same name and path, different digest,
             // same parent. Opening it runs the auto-reindex upsert, which must
@@ -3190,21 +3513,27 @@ async fn replacing_child_in_place_does_not_inflate_parent_child_count() {
                 b"child v2 with different size",
                 Some(parent_id),
             );
-            Snapshot::open(cdir.to_string_lossy().as_ref())
+            destination
+                .checkpoints()
+                .open(cdir.to_string_lossy().as_ref())
                 .await
                 .unwrap();
 
-            let child = Snapshot::get(cdir.to_string_lossy().as_ref())
+            let child = destination
+                .checkpoints()
+                .get(cdir.to_string_lossy().as_ref())
                 .await
                 .unwrap();
             if missing_child {
                 std::fs::remove_dir_all(&cdir).unwrap();
             }
-            child.remove(false).await.unwrap();
-            Snapshot::remove_by_reference(pdir.to_string_lossy().as_ref(), false)
+            child.destroy(false).await.unwrap();
+            destination
+                .checkpoints()
+                .remove(pdir.to_string_lossy().as_ref(), false)
                 .await
                 .expect("parent should be removable once its only child is gone");
-        })
+        }
         .await;
     }
 }
@@ -3218,4 +3547,101 @@ async fn list_dir_skips_dot_prefixed_staging_directories() {
     let snaps = Snapshot::list_dir(tmp.path()).await.unwrap();
     assert_eq!(snaps.len(), 1);
     assert!(reference_path(snaps[0].reference()).ends_with("real"));
+}
+
+#[tokio::test]
+async fn unified_snapshot_lookup_is_lazy_and_retains_context_and_identity() {
+    let root = TempDir::new().unwrap();
+    let context = isolated_backend(&root.path().join("home")).await;
+    let (path, _) = make_artifact(&root.path().join("home/snapshots"), "lazy", b"data");
+    let snapshots = Snapshot::ctx(context.as_ref());
+    let opened = snapshots.open(path.to_string_lossy()).await.unwrap();
+    let identity = opened.id().to_owned();
+    let descriptor = path.join(DESCRIPTOR_FILENAME);
+    let original = std::fs::read(&descriptor).unwrap();
+
+    // The index supplies identity even when descriptor I/O is currently unavailable.
+    std::fs::remove_file(&descriptor).unwrap();
+    let fetched: Snapshot = snapshots.get(&identity).await.unwrap();
+    let listed: Snapshot = snapshots
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.id() == identity)
+        .unwrap();
+    drop(snapshots);
+    drop(context);
+    for snapshot in [&opened, &fetched, &listed] {
+        assert_eq!(snapshot.id(), identity);
+        assert!(snapshot.manifest().await.is_err());
+        assert!(snapshot.state().await.is_err());
+    }
+
+    // Failed inspection is not cached; all selection paths recover on the same identity.
+    std::fs::write(&descriptor, original).unwrap();
+    for snapshot in [&opened, &fetched, &listed] {
+        assert_eq!(
+            snapshot.manifest().await.unwrap().snapshot_id.as_str(),
+            identity
+        );
+        assert_eq!(
+            snapshot
+                .state()
+                .await
+                .unwrap()
+                .as_file()
+                .unwrap()
+                .virtual_size,
+            4
+        );
+    }
+    listed.destroy(false).await.unwrap();
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn unified_snapshot_inspection_rejects_replacements_and_refreshes_labels() {
+    let root = TempDir::new().unwrap();
+    let context = isolated_backend(&root.path().join("home")).await;
+    let (path, _) = make_artifact(&root.path().join("home/snapshots"), "mutable", b"data");
+    let snapshot = Snapshot::ctx(context.as_ref())
+        .open(path.to_string_lossy())
+        .await
+        .unwrap();
+    let manifest = snapshot.manifest().await.unwrap();
+    let metadata = path.join("metadata.json");
+    for value in ["first", "second"] {
+        std::fs::write(
+            &metadata,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "microsandbox.snapshot-metadata/1", "labels": {"revision": value}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot
+                .labels()
+                .await
+                .unwrap()
+                .get("revision")
+                .map(String::as_str),
+            Some(value)
+        );
+    }
+    let replacement = Manifest {
+        snapshot_id: SnapshotId::new("snap_ffffffffffffffffffffffffffffffff").unwrap(),
+        ..manifest
+    };
+    std::fs::write(
+        path.join(DESCRIPTOR_FILENAME),
+        replacement.to_canonical_bytes().unwrap(),
+    )
+    .unwrap();
+    assert!(snapshot.manifest().await.is_err());
+    assert!(snapshot.state().await.is_err());
+    assert!(snapshot.labels().await.is_err());
+    assert!(snapshot.destroy(true).await.is_err());
+    assert!(path.exists());
 }

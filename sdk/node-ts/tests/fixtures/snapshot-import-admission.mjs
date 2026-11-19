@@ -7,7 +7,7 @@ const root = process.argv[2];
 assert.ok(root, "an isolated fixture root must be supplied by the test runner");
 assert.equal(process.env.MSB_HOME, join(root, "home-a"));
 try {
-  const { Checkpoint, Snapshot, defaultBackendKind, setDefaultBackend } = await import("../../dist/index.js");
+  const { Checkpoint, Snapshot, LocalContext } = await import("../../dist/index.js");
   const first = join(root, "first"), second = join(root, "second");
   const source = join(first, "source");
   mkdirSync(source, { recursive: true });
@@ -22,36 +22,27 @@ try {
   writeFileSync(join(source, "upper.ext4"), Buffer.alloc(512, 42));
   for (const name of ["base.tar", "delta.tar", "base-group"]) writeFileSync(join(second, name), "unrelated shadow");
   process.chdir(first);
-  setDefaultBackend("local");
+  const firstContext = new LocalContext({ home: join(root, "home-a") });
+  const secondContext = new LocalContext({ home: join(root, "home-b") });
   const checkpoint = await Checkpoint.open(source);
   await checkpoint.saveTo(join(first, "base.tar"), { plainTar: true });
   await checkpoint.saveTo(join(first, "delta.tar"), { plainTar: true, since: join(first, "base.tar") });
   await Snapshot.load("base-group", ["base.tar"]);
 
-  // This child owns cwd/backend changes. Each import must resolve its omitted payload
+  // This child owns cwd and provider-home changes. Each import must resolve its omitted payload
   // from the original base, even after a same-named file shadows that group name.
   for (let index = 0; index < 16; index++) {
     process.chdir(first);
     process.env.MSB_HOME = join(root, "home-a");
-    setDefaultBackend("local");
     const base = ["base-group", "base.tar", "./base.tar"][index % 3];
     let pending;
-    if (index % 4 === 0) pending = Snapshot.loadWith(`group-${index}`, ["delta.tar"], o => o.destDir("destination").base(base));
+    if (index % 4 === 0) pending = firstContext.snapshots.load(`group-${index}`, ["delta.tar"], o => o.destDir("destination").base(base));
     else if (index % 4 === 1) pending = Checkpoint.loadWithOptions("delta.tar", { dest: "destination", base, group: `group-${index}` });
     else if (index % 4 === 2) pending = Checkpoint.loadMany(["delta.tar"], { dest: "destination", base, group: `group-${index}` });
     else pending = Checkpoint.load("delta.tar", "destination", base);
     assert.ok(pending instanceof Promise);
     process.chdir(second);
-    // Switch the native backend through its public API. Bun can keep process.env
-    // changes in JavaScript while the loaded Rust binding still sees the original home.
-    const switchToCloud = Boolean(process.versions.bun) || index % 2 === 0;
-    if (switchToCloud) {
-      setDefaultBackend({ kind: "cloud", url: "http://127.0.0.1:1", apiKey: "fixture" });
-      assert.equal(defaultBackendKind(), "cloud");
-    } else {
-      process.env.MSB_HOME = join(root, "home-b");
-      setDefaultBackend("local");
-    }
+    process.env.MSB_HOME = join(root, "home-b");
     const result = await pending;
     const handles = index % 4 === 0 ? result.checkpoints : index % 4 === 2 ? result : [result];
     assert.equal(handles.length, 1);
@@ -60,10 +51,9 @@ try {
     const payloads = readdirSync(path, { recursive: true }).filter(p => p.endsWith(".raw"));
     assert.equal(payloads.length, 1);
     assert.deepEqual(readFileSync(join(path, payloads[0])), Buffer.alloc(512, 42));
-    if (!switchToCloud) assert.deepEqual(await Snapshot.list(), []);
+    assert.deepEqual(await secondContext.snapshots.list(), []);
   }
   assert.ok(!existsSync(join(second, "destination")));
-  setDefaultBackend("local");
   // Native entry points must reject asynchronously, not introduce synchronous throws.
   const { napi } = await import("../../dist/internal/napi.js");
   const invalid = napi.SnapshotGroup.load("bad", [""], {});

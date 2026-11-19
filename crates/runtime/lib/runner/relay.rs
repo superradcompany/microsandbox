@@ -9244,6 +9244,7 @@ mod tests {
                 Some(ExecLimits {
                     max_executions: 7,
                     input_limit: 32768,
+                    output_limit: 1024 * 1024,
                     ..Default::default()
                 }),
             ),

@@ -108,26 +108,22 @@ Microsandbox::Sandbox.with(
 end
 ```
 
-## Backends
+## Destinations
 
-The local backend is the default. Select a backend explicitly when needed:
+Resource class methods use the configured backend and default to local. To select remote explicitly:
 
 ```ruby
-Microsandbox.use_local_backend! # Default
-# Or:
-Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
-# Or:
-Microsandbox.use_cloud_profile!("production")
+sandbox = Microsandbox::Sandbox.remote.get("worker") # Uses MSB_API_KEY and MSB_API_URL
+
+production = Microsandbox::RemoteContext.from_profile("production")
+volumes = production.volumes.list
 ```
 
 ## Lifecycle
 
-A lifecycle-owning `Sandbox` stops when Ruby garbage-collects it. Prefer
-`Sandbox.with` for scoped work. Call `sandbox.detach` when the VM must outlive
-the Ruby object, then manage it through `Sandbox.get`.
+Final-owner garbage collection triggers fallback cleanup without guaranteeing completed shutdown. Prefer `Sandbox.with` to await shutdown of its owned local run. Detached and remote runs are not stopped. `sandbox.detach` relinquishes automatic shutdown and leaves the object usable.
 
-If both a `Sandbox.with` block and its cleanup fail, the block's original
-exception is preserved.
+Cleanup failures are raised. If both a `Sandbox.with` block and its cleanup fail, the cleanup exception retains the body exception as its cause.
 
 Blocking calls do not prevent other Ruby threads from running. Forked child
 processes recreate the native runtime before use.
@@ -142,10 +138,10 @@ sandbox = Microsandbox::Sandbox.connect_or_create(
 )
 
 puts "#{sandbox.name}: #{sandbox.id}"
-running = Microsandbox::Sandbox.get("worker").connect_or_start
+running = Microsandbox::Sandbox.get_running("worker")
 running.request_stop
-stopped = running.wait_for_status("stopped")
-restarted = stopped.restart
+running.wait_for_status("stopped")
+restarted = running.restart
 restarted.destroy
 ```
 
@@ -269,9 +265,8 @@ operation. Its message names the Ruby API and the remedy, both also available
 as attributes:
 
 ```ruby
-Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
 begin
-  Microsandbox::Sandbox.create("my-sandbox", image: "python", replace: true)
+  Microsandbox::Sandbox.remote.create("my-sandbox", image: "python", replace: true)
 rescue Microsandbox::UnsupportedError => error
   error.message   # => "sandbox.create is not supported by this backend: the replace option is not accepted here"
   error.operation # => "sandbox.create"

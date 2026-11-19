@@ -1017,117 +1017,142 @@ async fn run_tls_intercept_ip_destination_without_sni(ipv6: bool) {
     }
 }
 
-/// Exercise the complete guest network stack with TLS records split independently
-/// of TCP writes. Both SNI and destination-IP identities must retain their policy.
+// Each policy has eight independent VM boots per address family. Give each
+// group its own nextest deadline and a distinct sandbox name for parallel runs.
+
 #[msb_test]
-async fn tls_versions_fragmentation_and_policy_matrix() {
-    run_tls_versions_fragmentation_and_policy_matrix(false).await;
+async fn tls_versions_fragmentation_and_policy_matrix_ipv4_intercept() {
+    run_tls_versions_fragmentation_and_policy_matrix(false, "intercept").await;
 }
 
 #[msb_test]
-async fn tls_versions_fragmentation_and_policy_matrix_ipv6() {
-    run_tls_versions_fragmentation_and_policy_matrix(true).await;
+async fn tls_versions_fragmentation_and_policy_matrix_ipv4_bypass() {
+    run_tls_versions_fragmentation_and_policy_matrix(false, "bypass").await;
 }
 
-async fn run_tls_versions_fragmentation_and_policy_matrix(ipv6: bool) {
+#[msb_test]
+async fn tls_versions_fragmentation_and_policy_matrix_ipv4_domain_allow() {
+    run_tls_versions_fragmentation_and_policy_matrix(false, "domain-allow").await;
+}
+
+#[msb_test]
+async fn tls_versions_fragmentation_and_policy_matrix_ipv4_strict_bypass() {
+    run_tls_versions_fragmentation_and_policy_matrix(false, "strict-bypass").await;
+}
+
+#[msb_test]
+async fn tls_versions_fragmentation_and_policy_matrix_ipv6_intercept() {
+    run_tls_versions_fragmentation_and_policy_matrix(true, "intercept").await;
+}
+
+#[msb_test]
+async fn tls_versions_fragmentation_and_policy_matrix_ipv6_bypass() {
+    run_tls_versions_fragmentation_and_policy_matrix(true, "bypass").await;
+}
+
+#[msb_test]
+async fn tls_versions_fragmentation_and_policy_matrix_ipv6_domain_allow() {
+    run_tls_versions_fragmentation_and_policy_matrix(true, "domain-allow").await;
+}
+
+#[msb_test]
+async fn tls_versions_fragmentation_and_policy_matrix_ipv6_strict_bypass() {
+    run_tls_versions_fragmentation_and_policy_matrix(true, "strict-bypass").await;
+}
+
+async fn run_tls_versions_fragmentation_and_policy_matrix(ipv6: bool, mode: &str) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut dns = HostDns::start().await;
-    for mode in ["intercept", "bypass", "domain-allow", "strict-bypass"] {
-        for version in [12, 13] {
-            for named in [false, true] {
-                for fragmented in [false, true] {
-                    let label = format!("{mode}/tls{version}/sni={named}/fragmented={fragmented}");
-                    let (config, certificate) = test_server_config_and_certificate();
-                    let mut server = HostHttps::start_with_config(async move { config })
-                        .await
-                        .unwrap();
-                    let port = server.port();
-                    let name = if ipv6 {
-                        "tls-record-policy-matrix-v6"
-                    } else {
-                        "tls-record-policy-matrix"
-                    };
-                    let domain_policy = matches!(mode, "domain-allow" | "strict-bypass");
-                    let bypass = matches!(mode, "bypass" | "strict-bypass");
-                    let blocked = mode == "strict-bypass";
-                    let policy = if domain_policy {
-                        NetworkPolicy::none().allow_domain("probe.example").unwrap()
-                    } else {
-                        NetworkPolicy::allow_all()
-                    };
-                    let sb = Sandbox::builder(name)
-                        .image("mirror.gcr.io/library/python:3.12-alpine")
-                        .cpus(1)
-                        .memory(256)
-                        .replace()
-                        .network(|n| {
-                            n.dns(|d| d.nameservers([dns.address]).rebind_protection(false))
-                                .policy(policy)
-                                .strict(true)
-                                .interface(probe_interface(ipv6))
-                                .tls(|t| {
-                                    let t = t.intercepted_ports(vec![port]).verify_upstream(false);
-                                    if bypass {
-                                        t.bypass("probe.example").bypass(if ipv6 {
-                                            IPV6_GATEWAY
-                                        } else {
-                                            "172.30.255.1"
-                                        })
+    let family = if ipv6 { "v6" } else { "v4" };
+    let name = format!("tls-matrix-{family}-{mode}");
+    for version in [12, 13] {
+        for named in [false, true] {
+            for fragmented in [false, true] {
+                let label = format!("{mode}/tls{version}/sni={named}/fragmented={fragmented}");
+                let (config, certificate) = test_server_config_and_certificate();
+                let mut server = HostHttps::start_with_config(async move { config })
+                    .await
+                    .unwrap();
+                let port = server.port();
+                let domain_policy = matches!(mode, "domain-allow" | "strict-bypass");
+                let bypass = matches!(mode, "bypass" | "strict-bypass");
+                let blocked = mode == "strict-bypass";
+                let policy = if domain_policy {
+                    NetworkPolicy::none().allow_domain("probe.example").unwrap()
+                } else {
+                    NetworkPolicy::allow_all()
+                };
+                let sb = Sandbox::builder(&name)
+                    .image("mirror.gcr.io/library/python:3.12-alpine")
+                    .cpus(1)
+                    .memory(256)
+                    .replace()
+                    .network(|n| {
+                        n.dns(|d| d.nameservers([dns.address]).rebind_protection(false))
+                            .policy(policy)
+                            .strict(true)
+                            .interface(probe_interface(ipv6))
+                            .tls(|t| {
+                                let t = t.intercepted_ports(vec![port]).verify_upstream(false);
+                                if bypass {
+                                    t.bypass("probe.example").bypass(if ipv6 {
+                                        IPV6_GATEWAY
                                     } else {
-                                        t
-                                    }
-                                })
-                        })
-                        .create()
-                        .await
-                        .expect("create matrix sandbox");
-                    sb.fs()
-                        .write("/tmp/tls_probe.py", include_str!("fixtures/tls_probe.py"))
-                        .await
-                        .unwrap();
-                    sb.fs()
-                        .write("/tmp/upstream.der", certificate)
-                        .await
-                        .unwrap();
-                    let out = sb
-                        .shell(format!(
-                            "python3 /tmp/tls_probe.py {port} {version} {} {} {} {} {}",
-                            u8::from(named),
-                            u8::from(fragmented),
-                            u8::from(blocked),
-                            u8::from(bypass),
-                            u8::from(ipv6)
-                        ))
-                        .await
-                        .unwrap();
-                    teardown(sb, name).await;
-                    dns.assert_running().await;
+                                        "172.30.255.1"
+                                    })
+                                } else {
+                                    t
+                                }
+                            })
+                    })
+                    .create()
+                    .await
+                    .expect("create matrix sandbox");
+                sb.fs()
+                    .write("/tmp/tls_probe.py", include_str!("fixtures/tls_probe.py"))
+                    .await
+                    .unwrap();
+                sb.fs()
+                    .write("/tmp/upstream.der", certificate)
+                    .await
+                    .unwrap();
+                let out = sb
+                    .shell(format!(
+                        "python3 /tmp/tls_probe.py {port} {version} {} {} {} {} {}",
+                        u8::from(named),
+                        u8::from(fragmented),
+                        u8::from(blocked),
+                        u8::from(bypass),
+                        u8::from(ipv6)
+                    ))
+                    .await
+                    .unwrap();
+                teardown(sb, &name).await;
+                dns.assert_running().await;
+                assert!(
+                    out.status().success,
+                    "{label}: {} {}",
+                    out.stdout().unwrap_or_default(),
+                    out.stderr().unwrap_or_default()
+                );
+                let received =
+                    tokio::time::timeout(Duration::from_secs(2), server.received_request()).await;
+                if blocked {
+                    assert!(out.stdout().unwrap().starts_with("blocked"), "{label}");
                     assert!(
-                        out.status().success,
-                        "{label}: {} {}",
-                        out.stdout().unwrap_or_default(),
-                        out.stderr().unwrap_or_default()
+                        !matches!(received, Ok(Ok(_))),
+                        "{label}: denied request reached upstream"
                     );
-                    let received =
-                        tokio::time::timeout(Duration::from_secs(2), server.received_request())
-                            .await;
-                    if blocked {
-                        assert!(out.stdout().unwrap().starts_with("blocked"), "{label}");
-                        assert!(
-                            !matches!(received, Ok(Ok(_))),
-                            "{label}: denied request reached upstream"
-                        );
-                    } else {
-                        let received = received
-                            .expect("fixture response deadline")
-                            .expect("upstream HTTP request");
-                        assert_eq!(
-                            received.peer.is_ipv6(),
-                            ipv6,
-                            "{label}: upstream address family"
-                        );
-                        assert_eq!(received.body, b"probe", "{label}");
-                    }
+                } else {
+                    let received = received
+                        .expect("fixture response deadline")
+                        .expect("upstream HTTP request");
+                    assert_eq!(
+                        received.peer.is_ipv6(),
+                        ipv6,
+                        "{label}: upstream address family"
+                    );
+                    assert_eq!(received.body, b"probe", "{label}");
                 }
             }
         }

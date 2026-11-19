@@ -1,4 +1,5 @@
 mod core_error;
+mod context;
 mod jobs;
 mod services;
 mod snapshot_group;
@@ -23,20 +24,19 @@ use magnus::{
     function, method, prelude::*, r_hash::ForEach, scan_args::scan_args, typed_data,
 };
 use microsandbox_core::{
-    AgentClientError, BackendKind, ChangeState, MicrosandboxError, MicrosandboxResult, Operation,
-    ServiceError, UnsupportedReason,
-    backend::{CloudBackend, LocalBackend, resolve_default_backend, set_default_backend},
+    AgentClientError, ChangeState, ContextKind, MicrosandboxError, MicrosandboxResult, Operation,
+    ServiceError,
+    UnsupportedReason,
     image::{Image, ImageHandle},
     logs::{LogEntry, LogOptions, LogSource},
     sandbox::{
         DestroyOptions, ExecOptionsBuilder, ExecOutput, FsEntry, FsEntryKind, FsMetadata,
         NetworkPolicy, PullPolicy, RestartOptions, RlimitResource, Sandbox as CoreSandbox,
-        SandboxBuilder, SandboxFsOps, SandboxHandle as CoreSandboxHandle, SandboxMetrics,
-        SandboxPage, SandboxPingResult, SandboxStatus, SandboxStopResult, SandboxTouchResult,
-        SecretSource,
+        SandboxBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxStatus,
+        SandboxStopResult, SandboxTouchResult, SecretSource,
     },
-    snapshot::{Checkpoint as Snapshot, SaveOpts, SnapshotHandle},
-    volume::{Volume, VolumeHandle, VolumeKind},
+    snapshot::{SaveOpts, Checkpoint as Snapshot},
+    volume::Volume,
 };
 
 use core_error::core_error;
@@ -148,55 +148,6 @@ fn current_ruby() -> Ruby {
     Ruby::get().expect("Ruby VM is not available")
 }
 
-#[derive(Clone)]
-enum BackendSelection {
-    Ambient,
-    Local,
-    Cloud {
-        api_key: String,
-        url: Option<String>,
-    },
-    CloudProfile(String),
-}
-
-static BACKEND_SELECTION: Mutex<BackendSelection> = Mutex::new(BackendSelection::Ambient);
-
-fn reset_backend_after_fork(ruby: &Ruby) -> Result<(), Error> {
-    let selection = BACKEND_SELECTION
-        .lock()
-        .map_err(|_| {
-            Error::new(
-                ruby.exception_runtime_error(),
-                "backend selection lock is poisoned",
-            )
-        })?
-        .clone();
-    match selection {
-        BackendSelection::Ambient => {
-            let backend = resolve_default_backend().map_err(|error| core_error(ruby, error))?;
-            set_default_backend(backend);
-        }
-        BackendSelection::Local => {
-            let backend = LocalBackend::lazy().map_err(|error| core_error(ruby, error))?;
-            set_default_backend(backend);
-        }
-        BackendSelection::Cloud { api_key, url } => {
-            let backend = match url {
-                Some(url) => CloudBackend::new(url, api_key),
-                None => CloudBackend::with_api_key(api_key),
-            }
-            .map_err(|error| core_error(ruby, error))?;
-            set_default_backend(backend);
-        }
-        BackendSelection::CloudProfile(name) => {
-            let backend =
-                CloudBackend::from_profile(&name).map_err(|error| core_error(ruby, error))?;
-            set_default_backend(backend);
-        }
-    }
-    Ok(())
-}
-
 fn runtime() -> Result<&'static tokio::runtime::Runtime, Error> {
     let process_id = std::process::id();
     let runtime_ptr = RUNTIME_PTR.load(Ordering::Acquire);
@@ -213,10 +164,6 @@ fn runtime() -> Result<&'static tokio::runtime::Runtime, Error> {
     let runtime_ptr = RUNTIME_PTR.load(Ordering::Acquire);
     if !runtime_ptr.is_null() && RUNTIME_PID.load(Ordering::Acquire) == process_id {
         return Ok(unsafe { &*runtime_ptr });
-    }
-
-    if RUNTIME_PID.load(Ordering::Acquire) != 0 {
-        reset_backend_after_fork(&current_ruby())?;
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -526,6 +473,33 @@ where
     block_without_gvl(ruby, future)?.map_err(|e| core_error(ruby, e))
 }
 
+/// A one-shot list can be the last owner of an empty local catalog. Wait for
+/// its SQLite workers to close before handing control back to Ruby: an
+/// immediate fork could otherwise inherit a mutex held by an exiting worker.
+fn run_catalog_list<F, T>(
+    ruby: &Ruby,
+    context: Arc<dyn microsandbox_core::Context>,
+    list: impl FnOnce(Arc<dyn microsandbox_core::Context>) -> F,
+) -> Result<T, Error>
+where
+    F: Future<Output = MicrosandboxResult<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    let local = context.as_local().cloned();
+    let query = list(context);
+    run(ruby, async move {
+        let result = query.await;
+        if let Some(local) = local {
+            let cleanup = local.finish_unshared_catalog_query().await;
+            // Preserve a query failure if both the query and its cleanup failed.
+            if result.is_ok() {
+                cleanup?;
+            }
+        }
+        result
+    })
+}
+
 /// Run a Service change and attach the core's change classification to every mapped error.
 fn run_service_change<F, T>(ruby: &Ruby, future: F) -> Result<T, Error>
 where
@@ -658,6 +632,7 @@ fn apply_secret_options(
         .map_err(|_| argument_error(ruby, "secrets must be an Array of Hashes"))?;
     for i in 0..secrets.len() {
         let spec: RHash = secrets.entry(i as isize)?;
+        reject_unknown_keywords(ruby, spec, &["env", "value", "allowed_host"])?;
         let env = required_keyword::<String>(spec, "env", ruby)?;
         let secret = required_keyword::<String>(spec, "value", ruby)?;
         let host = required_keyword::<String>(spec, "allowed_host", ruby)?;
@@ -905,10 +880,10 @@ fn apply_builder_options(
         builder = builder.ephemeral(v);
     }
     if let Some(v) = keyword::<u64>(kwargs, "max_duration")? {
-        builder = builder.max_duration(v);
+        builder = builder.max_duration(std::time::Duration::from_secs(v));
     }
     if let Some(v) = keyword::<u64>(kwargs, "idle_timeout")? {
-        builder = builder.idle_timeout(v);
+        builder = builder.idle_timeout(std::time::Duration::from_secs(v));
     }
     if keyword::<bool>(kwargs, "replace")?.unwrap_or(false) {
         builder = builder.replace();
@@ -948,7 +923,10 @@ fn apply_builder_options(
         if let Some(enabled) = keyword::<bool>(http, "deny_response")? {
             builder = builder.network(|network| network.http(|h| h.deny_response(enabled)));
         }
-        if let Some(format) = keyword::<String>(http, "deny_response_format")? {
+        if let Some(format) = keyword::<Value>(http, "deny_response_format")?
+            .map(|value| string_value(value, "deny_response_format"))
+            .transpose()?
+        {
             let format = match format.as_str() {
                 "text" => microsandbox_core::sandbox::HttpDenyResponseFormat::Text,
                 "json" => microsandbox_core::sandbox::HttpDenyResponseFormat::Json,
@@ -990,7 +968,10 @@ fn apply_builder_options(
     if let Some(v) = keyword::<String>(kwargs, "init")? {
         builder = builder.init(v);
     }
-    if let Some(v) = keyword::<String>(kwargs, "pull_policy")? {
+    if let Some(v) = keyword::<Value>(kwargs, "pull_policy")?
+        .map(|value| string_value(value, "pull_policy"))
+        .transpose()?
+    {
         let p = match v.to_ascii_lowercase().as_str() {
             "if_missing" | "if-missing" => PullPolicy::IfMissing,
             "always" => PullPolicy::Always,
@@ -1099,11 +1080,6 @@ struct RubySandbox {
     inner: std::cell::RefCell<Option<CoreSandbox>>,
 }
 
-#[magnus::wrap(class = "Microsandbox::SandboxHandle", free_immediately, size)]
-struct RubySandboxHandle {
-    inner: Arc<CoreSandboxHandle>,
-}
-
 #[magnus::wrap(class = "Microsandbox::SandboxBuilder", free_immediately, size)]
 struct RubySandboxBuilder {
     inner: std::cell::RefCell<Option<SandboxBuilder>>,
@@ -1139,14 +1115,9 @@ struct RubyImageHandle {
     inner: ImageHandle,
 }
 
-#[magnus::wrap(class = "Microsandbox::VolumeHandle", free_immediately, size)]
-struct RubyVolumeHandle {
-    inner: VolumeHandle,
-}
-
-#[magnus::wrap(class = "Microsandbox::SnapshotHandle", free_immediately, size)]
-struct RubySnapshotHandle {
-    inner: SnapshotHandle,
+#[magnus::wrap(class = "Microsandbox::Volume", free_immediately, size)]
+struct RubyVolume {
+    inner: Volume,
 }
 
 #[magnus::wrap(class = "Microsandbox::Checkpoint", free_immediately, size)]
@@ -1220,10 +1191,10 @@ impl RubySandboxBuilder {
         put_builder(&this, |b| b.ephemeral(v))
     }
     fn max_duration(this: typed_data::Obj<Self>, v: u64) -> Result<(), Error> {
-        put_builder(&this, |b| b.max_duration(v))
+        put_builder(&this, |b| b.max_duration(std::time::Duration::from_secs(v)))
     }
     fn idle_timeout(this: typed_data::Obj<Self>, v: u64) -> Result<(), Error> {
-        put_builder(&this, |b| b.idle_timeout(v))
+        put_builder(&this, |b| b.idle_timeout(std::time::Duration::from_secs(v)))
     }
     fn replace(this: typed_data::Obj<Self>) -> Result<(), Error> {
         put_builder(&this, SandboxBuilder::replace)
@@ -1342,11 +1313,22 @@ impl RubySandboxBuilder {
 // -------------------------------------------------------------------------------------------------
 
 impl RubySandbox {
+    fn checkpoint(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        name: String,
+    ) -> Result<RubySnapshot, Error> {
+        let sandbox = this.inner_clone()?;
+        Ok(RubySnapshot {
+            inner: run(ruby, async move { sandbox.checkpoint(&name).await })?,
+        })
+    }
+
     fn inner_clone(&self) -> Result<CoreSandbox, Error> {
         self.inner.borrow().as_ref().cloned().ok_or_else(|| {
             Error::new(
                 current_ruby().exception_runtime_error(),
-                "sandbox handle has been detached",
+                "sandbox handle has been disposed",
             )
         })
     }
@@ -1361,17 +1343,49 @@ impl RubySandbox {
         Ok(self.inner_clone()?.owns_lifecycle())
     }
     fn backend(&self) -> Result<String, Error> {
-        Ok(match self.inner_clone()?.backend_kind() {
-            BackendKind::Local => "local",
-            BackendKind::Cloud => "cloud",
+        Ok(match self.inner_clone()?.context_kind() {
+            ContextKind::Local => "local",
+            ContextKind::Remote => "cloud",
         }
         .to_owned())
     }
 
-    fn status(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<String, Error> {
+    /// Fresh persisted settings; inspection never implicitly starts the resource.
+    fn config(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<Value, Error> {
+        let sb = this.inner_clone()?;
+        let config = run(ruby, async move { sb.config().await })?;
+        let json = serde_json::to_string(&config)
+            .map_err(|error| Error::new(ruby.exception_runtime_error(), error.to_string()))?;
+        ruby.require("json")?;
+        ruby.class_object()
+            .const_get::<_, Value>("JSON")?
+            .funcall("parse", (json,))
+    }
+
+    /// One backend observation; returned hashes do not refresh themselves.
+    fn info(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
+        let sb = this.inner_clone()?;
+        let info = run(ruby, async move { sb.info().await })?;
+        let json = serde_json::to_string(&info)
+            .map_err(|error| Error::new(ruby.exception_runtime_error(), error.to_string()))?;
+        ruby.require("json")?;
+        let hash: RHash = ruby
+            .class_object()
+            .const_get::<_, Value>("JSON")?
+            .funcall("parse", (json,))?;
+        hash.aset("status", symbol(status_name(info.status)))?;
+        Ok(hash)
+    }
+
+    fn ensure_running(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<(), Error> {
+        let sb = this.inner_clone()?;
+        run(ruby, async move { sb.ensure_running().await })
+    }
+
+    fn status(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<Symbol, Error> {
         let sb = this.inner_clone()?;
         let status = run(ruby, async move { sb.status().await })?;
-        Ok(status_name(status).to_owned())
+        Ok(symbol(status_name(status)))
     }
 
     fn last_failure_message(
@@ -1393,6 +1407,22 @@ impl RubySandbox {
         let output = run(ruby, async move {
             sb.exec_with(cmd, move |_| opts.args(cmd_args)).await
         })?;
+        Ok(RubyExecOutput { inner: output })
+    }
+
+    /// Execute the persisted entrypoint and command from the retained runtime.
+    fn exec_default(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        args: &[Value],
+    ) -> Result<RubyExecOutput, Error> {
+        let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
+        let opts = apply_exec_options(ruby, ExecOptionsBuilder::default(), parsed.keywords)?;
+        let sb = this.inner_clone()?;
+        let output = run(
+            ruby,
+            async move { sb.exec_default_with(move |_| opts).await },
+        )?;
         Ok(RubyExecOutput { inner: output })
     }
 
@@ -1465,14 +1495,11 @@ impl RubySandbox {
     fn wait_for_status(
         ruby: &Ruby,
         this: typed_data::Obj<Self>,
-        status: String,
-    ) -> Result<RubySandboxHandle, Error> {
+        status: Value,
+    ) -> Result<(), Error> {
         let sandbox = this.inner_clone()?;
-        let status = parse_status(ruby, &status)?;
-        let handle = run(ruby, async move { sandbox.wait_for_status(status).await })?;
-        Ok(RubySandboxHandle {
-            inner: Arc::new(handle),
-        })
+        let status = parse_status(ruby, &string_value(status, "status")?)?;
+        run(ruby, async move { sandbox.wait_for_status(status).await })
     }
 
     fn restart(
@@ -1565,11 +1592,7 @@ impl RubySandbox {
 
     fn fs_read(ruby: &Ruby, this: typed_data::Obj<Self>, path: String) -> Result<RString, Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
-        let data = run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name).read(&path).await
-        })?;
+        let data = run(ruby, async move { sb.fs().read(&path).await })?;
         Ok(current_ruby().str_from_slice(&data))
     }
 
@@ -1580,34 +1603,18 @@ impl RubySandbox {
         data: RString,
     ) -> Result<(), Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
         let bytes = unsafe { data.as_slice() }.to_vec();
-        run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name)
-                .write(&path, bytes)
-                .await
-        })
+        run(ruby, async move { sb.fs().write(&path, bytes).await })
     }
 
     fn fs_mkdir(ruby: &Ruby, this: typed_data::Obj<Self>, path: String) -> Result<(), Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
-        run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name)
-                .mkdir(&path)
-                .await
-        })
+        run(ruby, async move { sb.fs().mkdir(&path).await })
     }
 
     fn fs_list(ruby: &Ruby, this: typed_data::Obj<Self>, path: String) -> Result<RArray, Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
-        let entries = run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name).list(&path).await
-        })?;
+        let entries = run(ruby, async move { sb.fs().list(&path).await })?;
         let ary = current_ruby().ary_new();
         for e in entries {
             ary.push(fs_entry_hash(e)?)?;
@@ -1617,23 +1624,13 @@ impl RubySandbox {
 
     fn fs_stat(ruby: &Ruby, this: typed_data::Obj<Self>, path: String) -> Result<RHash, Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
-        let md = run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name).stat(&path).await
-        })?;
+        let md = run(ruby, async move { sb.fs().stat(&path).await })?;
         fs_metadata_hash(md)
     }
 
     fn fs_exists(ruby: &Ruby, this: typed_data::Obj<Self>, path: String) -> Result<bool, Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
-        run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name)
-                .exists(&path)
-                .await
-        })
+        run(ruby, async move { sb.fs().exists(&path).await })
     }
 
     fn fs_copy(
@@ -1643,13 +1640,7 @@ impl RubySandbox {
         to: String,
     ) -> Result<(), Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
-        run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name)
-                .copy(&from, &to)
-                .await
-        })
+        run(ruby, async move { sb.fs().copy(&from, &to).await })
     }
 
     fn fs_rename(
@@ -1659,35 +1650,17 @@ impl RubySandbox {
         to: String,
     ) -> Result<(), Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
-        run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name)
-                .rename(&from, &to)
-                .await
-        })
+        run(ruby, async move { sb.fs().rename(&from, &to).await })
     }
 
     fn fs_remove(ruby: &Ruby, this: typed_data::Obj<Self>, path: String) -> Result<(), Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
-        run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name)
-                .remove(&path)
-                .await
-        })
+        run(ruby, async move { sb.fs().remove(&path).await })
     }
 
     fn fs_remove_dir(ruby: &Ruby, this: typed_data::Obj<Self>, path: String) -> Result<(), Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
-        run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name)
-                .remove_dir(&path)
-                .await
-        })
+        run(ruby, async move { sb.fs().remove_dir(&path).await })
     }
 
     fn fs_copy_from_host(
@@ -1697,12 +1670,8 @@ impl RubySandbox {
         guest_path: String,
     ) -> Result<(), Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
         run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name)
-                .copy_from_host(&host_path, &guest_path)
-                .await
+            sb.fs().copy_from_host(&host_path, &guest_path).await
         })
     }
 
@@ -1713,206 +1682,26 @@ impl RubySandbox {
         host_path: String,
     ) -> Result<(), Error> {
         let sb = this.inner_clone()?;
-        let backend = sb.backend().clone();
-        let name = sb.name().to_owned();
         run(ruby, async move {
-            SandboxFsOps::with_backend(backend, &name)
-                .copy_to_host(&guest_path, &host_path)
-                .await
+            sb.fs().copy_to_host(&guest_path, &host_path).await
         })
     }
 
     // -- lifecycle -----------------------------------------------------------
 
     fn detach(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<(), Error> {
-        let sb = this.inner.borrow_mut().take().ok_or_else(|| {
-            Error::new(
-                ruby.exception_runtime_error(),
-                "sandbox handle has been detached",
-            )
-        })?;
-        block_without_gvl(ruby, sb.detach())?;
-        Ok(())
+        let sb = this.inner_clone()?;
+        run(ruby, async move { sb.detach().await })
+    }
+
+    fn shutdown_owned(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<(), Error> {
+        let sb = this.inner_clone()?;
+        run(ruby, async move { sb.shutdown_owned().await })
     }
 }
 
 // -------------------------------------------------------------------------------------------------
 // Handle methods
-// -------------------------------------------------------------------------------------------------
-
-impl RubySandboxHandle {
-    fn name(&self) -> String {
-        self.inner.name().to_owned()
-    }
-    fn id(&self) -> String {
-        self.inner.id().to_string()
-    }
-    fn status(&self) -> String {
-        status_name(self.inner.status_snapshot()).to_owned()
-    }
-    fn config_json(&self) -> String {
-        self.inner.config_json().to_owned()
-    }
-    fn active_config_json(&self) -> Option<String> {
-        self.inner.active_config_json().map(str::to_owned)
-    }
-    fn last_failure_message(&self) -> Option<String> {
-        self.inner.last_failure_message_snapshot()
-    }
-
-    fn refresh(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySandboxHandle, Error> {
-        let handle = Arc::clone(&this.inner);
-        let inner = run(ruby, async move { handle.refresh().await })?;
-        Ok(RubySandboxHandle {
-            inner: Arc::new(inner),
-        })
-    }
-
-    fn connect(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySandbox, Error> {
-        let handle = Arc::clone(&this.inner);
-        let inner = run(ruby, async move { handle.connect().await })?;
-        Ok(RubySandbox {
-            inner: std::cell::RefCell::new(Some(inner)),
-        })
-    }
-
-    fn connect_or_start(
-        ruby: &Ruby,
-        this: typed_data::Obj<Self>,
-        args: &[Value],
-    ) -> Result<RubySandbox, Error> {
-        let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        reject_unknown_keywords(ruby, parsed.keywords, &["detached"])?;
-        let detached = keyword::<bool>(parsed.keywords, "detached")?.unwrap_or(false);
-        let handle = Arc::clone(&this.inner);
-        let sandbox = run(ruby, async move {
-            if detached {
-                handle.connect_or_start_detached().await
-            } else {
-                handle.connect_or_start().await
-            }
-        })?;
-        Ok(RubySandbox {
-            inner: std::cell::RefCell::new(Some(sandbox)),
-        })
-    }
-
-    fn start(
-        ruby: &Ruby,
-        this: typed_data::Obj<Self>,
-        args: &[Value],
-    ) -> Result<RubySandbox, Error> {
-        let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        reject_unknown_keywords(ruby, parsed.keywords, &["detached"])?;
-        let detached = keyword::<bool>(parsed.keywords, "detached")?.unwrap_or(false);
-        let handle = Arc::clone(&this.inner);
-        let inner = run(ruby, async move {
-            if detached {
-                handle.start_detached().await
-            } else {
-                handle.start().await
-            }
-        })?;
-        Ok(RubySandbox {
-            inner: std::cell::RefCell::new(Some(inner)),
-        })
-    }
-
-    fn stop(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
-        let parsed = scan_args::<(), (Option<f64>,), (), (), RHash, ()>(args)?;
-        let timeout = parse_timeout(ruby, parsed.optional.0, parsed.keywords, "stop")?;
-        let handle = Arc::clone(&this.inner);
-        run(ruby, async move {
-            match timeout {
-                Some(timeout) => handle.stop_with_timeout(timeout).await,
-                None => handle.stop().await,
-            }
-        })
-    }
-
-    fn stop_with_timeout(
-        ruby: &Ruby,
-        this: typed_data::Obj<Self>,
-        seconds: f64,
-    ) -> Result<(), Error> {
-        let timeout = duration(ruby, seconds, "timeout")?;
-        let handle = Arc::clone(&this.inner);
-        run(ruby, async move { handle.stop_with_timeout(timeout).await })
-    }
-
-    fn kill(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
-        let parsed = scan_args::<(), (Option<f64>,), (), (), RHash, ()>(args)?;
-        let timeout = parse_timeout(ruby, parsed.optional.0, parsed.keywords, "kill")?;
-        let handle = Arc::clone(&this.inner);
-        run(ruby, async move {
-            match timeout {
-                Some(timeout) => handle.kill_with_timeout(timeout).await,
-                None => handle.kill().await,
-            }
-        })
-    }
-
-    fn remove(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<(), Error> {
-        let handle = Arc::clone(&this.inner);
-        run(ruby, async move { handle.remove().await })
-    }
-
-    fn wait_until_stopped(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
-        let handle = Arc::clone(&this.inner);
-        stop_result_hash(run(ruby, async move { handle.wait_until_stopped().await })?)
-    }
-
-    fn wait_for_status(
-        ruby: &Ruby,
-        this: typed_data::Obj<Self>,
-        status: String,
-    ) -> Result<RubySandboxHandle, Error> {
-        let status = parse_status(ruby, &status)?;
-        let handle = Arc::clone(&this.inner);
-        let current = run(ruby, async move { handle.wait_for_status(status).await })?;
-        Ok(RubySandboxHandle {
-            inner: Arc::new(current),
-        })
-    }
-
-    fn restart(
-        ruby: &Ruby,
-        this: typed_data::Obj<Self>,
-        args: &[Value],
-    ) -> Result<RubySandbox, Error> {
-        let options = restart_options(ruby, args)?;
-        let handle = Arc::clone(&this.inner);
-        let sandbox = run(ruby, async move { handle.restart_with(options).await })?;
-        Ok(RubySandbox {
-            inner: std::cell::RefCell::new(Some(sandbox)),
-        })
-    }
-
-    fn destroy(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
-        let options = destroy_options(ruby, args)?;
-        let handle = Arc::clone(&this.inner);
-        run(ruby, async move { handle.destroy_with(options).await })
-    }
-
-    fn metrics(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySandboxMetrics, Error> {
-        let handle = Arc::clone(&this.inner);
-        let inner = run(ruby, async move { handle.metrics().await })?;
-        Ok(RubySandboxMetrics { inner })
-    }
-
-    fn ping(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
-        let handle = Arc::clone(&this.inner);
-        ping_result_hash(run(ruby, async move { handle.ping().await })?)
-    }
-
-    fn touch(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
-        let handle = Arc::clone(&this.inner);
-        touch_result_hash(run(ruby, async move { handle.touch().await })?)
-    }
-}
-
-// -------------------------------------------------------------------------------------------------
-// ExecOutput methods
 // -------------------------------------------------------------------------------------------------
 
 impl RubyExecOutput {
@@ -1974,8 +1763,8 @@ impl RubyLogEntry {
     fn timestamp(&self) -> String {
         self.inner.timestamp.to_rfc3339()
     }
-    fn source(&self) -> String {
-        log_source_name(&self.inner.source).to_owned()
+    fn source(&self) -> Symbol {
+        symbol(log_source_name(&self.inner.source))
     }
     fn data(&self) -> RString {
         current_ruby().str_from_slice(&self.inner.data)
@@ -2018,38 +1807,51 @@ impl RubyImageHandle {
 }
 
 // -------------------------------------------------------------------------------------------------
-// VolumeHandle methods
+// Volume methods
 // -------------------------------------------------------------------------------------------------
 
-impl RubyVolumeHandle {
+impl RubyVolume {
+    /// Identity is available without I/O and remains bound to the retained context.
+    fn id(&self) -> String {
+        self.inner.id().to_string()
+    }
+    fn path(&self) -> Result<String, Error> {
+        self.inner
+            .path()
+            .map(|path| path.display().to_string())
+            .map_err(|error| core_error(&current_ruby(), error))
+    }
     fn name(&self) -> String {
         self.inner.name().to_owned()
     }
-    fn kind(&self) -> String {
-        volume_kind_name(self.inner.kind()).to_owned()
+    fn kind(&self) -> Symbol {
+        symbol(self.inner.kind().as_str())
     }
-    fn quota_mib(&self) -> Option<u32> {
-        self.inner.quota_mib()
-    }
-    fn used_bytes(&self) -> u64 {
-        self.inner.used_bytes()
-    }
-    fn capacity_bytes(&self) -> Option<u64> {
-        self.inner.capacity_bytes()
-    }
-    fn labels(&self) -> Result<RHash, Error> {
-        let hash = current_ruby().hash_new();
-        for (key, value) in self.inner.labels() {
-            hash.aset(key.as_str(), value.as_str())?;
-        }
+    fn info(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
+        let volume = this.inner.clone();
+        let info = run(ruby, async move { volume.info().await })?;
+        let mut value =
+            serde_json::to_value(&info).map_err(|error| argument_error(ruby, error.to_string()))?;
+        value["labels"] = serde_json::to_value(
+            info.labels
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .map_err(|error| argument_error(ruby, error.to_string()))?;
+        ruby.require("json")?;
+        let hash: RHash = ruby
+            .class_object()
+            .const_get::<_, Value>("JSON")?
+            .funcall("parse", (value.to_string(),))?;
+        hash.aset("kind", symbol(info.kind.as_str()))?;
         Ok(hash)
     }
     fn created_at(&self) -> Option<String> {
         self.inner.created_at().map(|dt| dt.to_rfc3339())
     }
-    fn remove(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<(), Error> {
+    fn destroy(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<(), Error> {
         let handle = this.inner.clone();
-        run(ruby, async move { handle.remove().await })
+        run(ruby, async move { handle.destroy().await })
     }
 }
 
@@ -2075,26 +1877,33 @@ impl RubySnapshot {
         Ok(snapshot_group::RubyCheckpointRemoveResult { inner })
     }
 
-    fn digest(&self) -> String {
-        self.inner.digest().to_owned()
+    fn id(&self) -> String {
+        self.inner.id().to_owned()
     }
-    fn size_bytes(&self) -> Option<u64> {
-        self.inner.size_bytes()
-    }
-    fn reference(&self) -> String {
-        self.inner.reference().value().to_owned()
-    }
-    fn reference_kind(&self) -> &'static str {
-        self.inner.reference().kind()
-    }
-    fn save_to(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
-        let (out, opts) = parse_snapshot_save_args(ruby, args)?;
-        let snapshot = this.inner.clone();
-        run(ruby, async move { snapshot.save_to(&out, opts).await })
-    }
-}
 
-impl RubySnapshotHandle {
+    // Ruby methods keep their blocking style while the runtime performs a fresh lookup.
+    fn manifest(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<Value, Error> {
+        let snapshot = this.inner.clone();
+        let manifest = run(ruby, async move { snapshot.manifest().await })?;
+        let json = serde_json::to_string(&manifest)
+            .map_err(|error| argument_error(ruby, error.to_string()))?;
+        ruby.require("json")?;
+        ruby.class_object()
+            .const_get::<_, Value>("JSON")?
+            .funcall("parse", (json,))
+    }
+
+    fn state(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<Value, Error> {
+        let snapshot = this.inner.clone();
+        let state = run(ruby, async move { snapshot.state().await })?;
+        let json = serde_json::to_string(&state)
+            .map_err(|error| argument_error(ruby, error.to_string()))?;
+        ruby.require("json")?;
+        ruby.class_object()
+            .const_get::<_, Value>("JSON")?
+            .funcall("parse", (json,))
+    }
+
     fn digest(&self) -> String {
         self.inner.digest().to_owned()
     }
@@ -2107,23 +1916,18 @@ impl RubySnapshotHandle {
     fn image_ref(&self) -> String {
         self.inner.image_ref().to_owned()
     }
-    fn state_kind(&self) -> String {
-        self.inner.state_kind().to_owned()
+    fn state_kind(&self) -> Symbol {
+        symbol(self.inner.state_kind().as_str())
     }
     fn reference(&self) -> String {
         self.inner.reference().value().to_owned()
     }
-    fn reference_kind(&self) -> &'static str {
-        self.inner.reference().kind()
+    fn reference_kind(&self) -> Symbol {
+        symbol(self.inner.reference().kind())
     }
-    fn remove(ruby: &Ruby, this: typed_data::Obj<Self>, force: bool) -> Result<(), Error> {
+    fn destroy(ruby: &Ruby, this: typed_data::Obj<Self>, force: bool) -> Result<(), Error> {
         let handle = this.inner.clone();
-        run(ruby, async move { handle.remove(force).await })
-    }
-    fn open(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySnapshot, Error> {
-        let handle = this.inner.clone();
-        let inner = run(ruby, async move { handle.open().await })?;
-        Ok(RubySnapshot { inner })
+        run(ruby, async move { handle.destroy(force).await })
     }
     fn save_to(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
         let (out, opts) = parse_snapshot_save_args(ruby, args)?;
@@ -2165,47 +1969,6 @@ fn set_runtime_libkrunfw_path(path: String) {
     microsandbox_core::config::set_sdk_libkrunfw_path(path);
 }
 
-fn default_backend_kind_str(ruby: &Ruby) -> Result<String, Error> {
-    let info =
-        microsandbox_core::default_backend_info().map_err(|error| core_error(ruby, error))?;
-    Ok(info.kind.as_str().to_owned())
-}
-
-fn remember_backend_selection(ruby: &Ruby, selection: BackendSelection) -> Result<(), Error> {
-    *BACKEND_SELECTION.lock().map_err(|_| {
-        Error::new(
-            ruby.exception_runtime_error(),
-            "backend selection lock is poisoned",
-        )
-    })? = selection;
-    Ok(())
-}
-
-fn set_default_backend_local(ruby: &Ruby) -> Result<(), Error> {
-    let backend = LocalBackend::lazy().map_err(|error| core_error(ruby, error))?;
-    set_default_backend(backend);
-    remember_backend_selection(ruby, BackendSelection::Local)
-}
-
-fn set_default_backend_cloud(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
-    let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
-    reject_unknown_keywords(ruby, parsed.keywords, &["url"])?;
-    let api_key = parsed.required.0;
-    let url = keyword::<String>(parsed.keywords, "url")?;
-    let backend = match &url {
-        Some(url) => CloudBackend::new(url, &api_key),
-        None => CloudBackend::with_api_key(&api_key),
-    }
-    .map_err(|error| core_error(ruby, error))?;
-    set_default_backend(backend);
-    remember_backend_selection(ruby, BackendSelection::Cloud { api_key, url })
-}
-
-fn set_default_backend_profile(ruby: &Ruby, name: String) -> Result<(), Error> {
-    let backend = CloudBackend::from_profile(&name).map_err(|error| core_error(ruby, error))?;
-    set_default_backend(backend);
-    remember_backend_selection(ruby, BackendSelection::CloudProfile(name))
-}
 // -- Sandbox statics ---------------------------------------------------------
 
 fn sandbox_builder(name: String) -> RubySandboxBuilder {
@@ -2295,10 +2058,18 @@ impl RubyOutboundProxy {
 }
 
 fn sandbox_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
+    sandbox_create_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn sandbox_create_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RubySandbox, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     let builder = apply_builder_options(
         ruby,
-        SandboxBuilder::new(parsed.required.0),
+        context.sandboxes().builder(parsed.required.0),
         parsed.keywords,
     )?;
     let inner = run(ruby, builder.create())?;
@@ -2308,10 +2079,18 @@ fn sandbox_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
 }
 
 fn sandbox_connect_or_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
+    sandbox_connect_or_create_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn sandbox_connect_or_create_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RubySandbox, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     let builder = apply_builder_options(
         ruby,
-        SandboxBuilder::new(parsed.required.0),
+        context.sandboxes().builder(parsed.required.0),
         parsed.keywords,
     )?;
     let inner = run(ruby, builder.connect_or_create())?;
@@ -2321,15 +2100,23 @@ fn sandbox_connect_or_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox,
 }
 
 fn sandbox_start(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
+    sandbox_start_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn sandbox_start_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RubySandbox, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     reject_unknown_keywords(ruby, parsed.keywords, &["detached"])?;
     let name = parsed.required.0;
     let detached = keyword::<bool>(parsed.keywords, "detached")?.unwrap_or(false);
     let inner = run(ruby, async move {
         if detached {
-            CoreSandbox::start_detached(&name).await
+            context.sandboxes().start_detached(&name).await
         } else {
-            CoreSandbox::start(&name).await
+            context.sandboxes().start(&name).await
         }
     })?;
     Ok(RubySandbox {
@@ -2337,28 +2124,71 @@ fn sandbox_start(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     })
 }
 
-fn sandbox_get(ruby: &Ruby, args: &[Value]) -> Result<RubySandboxHandle, Error> {
+fn sandbox_get(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
+    sandbox_get_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn sandbox_get_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RubySandbox, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "get does not accept keywords"));
     }
     let name = parsed.required.0;
-    let inner = run(ruby, async move { CoreSandbox::get(&name).await })?;
-    Ok(RubySandboxHandle {
-        inner: Arc::new(inner),
+    let inner = run(ruby, async move { context.sandboxes().get(&name).await })?;
+    Ok(RubySandbox {
+        inner: std::cell::RefCell::new(Some(inner)),
+    })
+}
+
+fn sandbox_get_running(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
+    sandbox_get_running_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn sandbox_get_running_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RubySandbox, Error> {
+    let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
+    reject_unknown_keywords(ruby, parsed.keywords, &[])?;
+    let name = parsed.required.0;
+    let sandboxes = CoreSandbox::ctx(context.as_ref());
+    let inner = run(ruby, async move { sandboxes.get_running(&name).await })?;
+    Ok(RubySandbox {
+        inner: std::cell::RefCell::new(Some(inner)),
     })
 }
 
 fn sandbox_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
+    sandbox_remove_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn sandbox_remove_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<(), Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "remove does not accept keywords"));
     }
     let name = parsed.required.0;
-    run(ruby, async move { CoreSandbox::remove(&name).await })
+    run(ruby, async move { context.sandboxes().remove(&name).await })
 }
 
 fn sandbox_list(ruby: &Ruby, args: &[Value]) -> Result<RHash, Error> {
+    sandbox_list_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn sandbox_list_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RHash, Error> {
     let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
     reject_unknown_keywords(ruby, parsed.keywords, &["cursor", "limit", "labels"])?;
     let cursor = keyword::<String>(parsed.keywords, "cursor")?;
@@ -2368,56 +2198,84 @@ fn sandbox_list(ruby: &Ruby, args: &[Value]) -> Result<RHash, Error> {
         .get(symbol("labels"))
         .map(|value| string_map(value, "labels"))
         .transpose()?;
-    let page = run(
-        ruby,
-        CoreSandbox::list_with(move |mut builder| {
-            if let Some(limit) = limit {
-                builder = builder.limit(limit);
-            }
-            if let Some(cursor) = cursor {
-                builder = builder.cursor(cursor);
-            }
-            if let Some(labels) = labels {
-                builder = builder.labels(labels);
-            }
-            builder
-        }),
-    )?;
+    let page = run_catalog_list(ruby, context, |context| async move {
+        context
+            .sandboxes()
+            .list_with(move |mut builder| {
+                if let Some(limit) = limit {
+                    builder = builder.limit(limit);
+                }
+                if let Some(cursor) = cursor {
+                    builder = builder.cursor(cursor);
+                }
+                if let Some(labels) = labels {
+                    builder = builder.labels(labels);
+                }
+                builder
+            })
+            .await
+    })?;
     page_hash(page)
 }
 
 // -- Volume statics ----------------------------------------------------------
 
-fn volume_get(ruby: &Ruby, args: &[Value]) -> Result<RubyVolumeHandle, Error> {
+fn volume_get(ruby: &Ruby, args: &[Value]) -> Result<RubyVolume, Error> {
+    volume_get_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn volume_get_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RubyVolume, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "get does not accept keywords"));
     }
     let name = parsed.required.0;
-    let inner = run(ruby, async move { Volume::get(&name).await })?;
-    Ok(RubyVolumeHandle { inner })
+    let inner = run(ruby, async move { context.volumes().get(&name).await })?;
+    Ok(RubyVolume { inner })
 }
 
 fn volume_list(ruby: &Ruby, args: &[Value]) -> Result<RArray, Error> {
+    volume_list_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn volume_list_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RArray, Error> {
     let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "list does not accept keywords"));
     }
-    let handles = run(ruby, Volume::list())?;
+    let handles = run_catalog_list(ruby, context, |context| async move {
+        context.volumes().list().await
+    })?;
     let array = current_ruby().ary_new();
     for inner in handles {
-        array.push(RubyVolumeHandle { inner })?;
+        array.push(RubyVolume { inner })?;
     }
     Ok(array)
 }
 
 fn volume_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
+    volume_remove_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn volume_remove_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<(), Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "remove does not accept keywords"));
     }
     let name = parsed.required.0;
-    run(ruby, async move { Volume::remove(&name).await })
+    run(ruby, async move { context.volumes().remove(&name).await })
 }
 
 fn volume_builder(name: String) -> RubyVolumeBuilder {
@@ -2429,39 +2287,76 @@ fn volume_builder(name: String) -> RubyVolumeBuilder {
 // -- Snapshot statics --------------------------------------------------------
 
 fn snapshot_open(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshot, Error> {
+    snapshot_open_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn snapshot_open_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RubySnapshot, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "open does not accept keywords"));
     }
     let reference = parsed.required.0;
-    let inner = run(ruby, async move { Snapshot::open(&reference).await })?;
+    let inner = run(
+        ruby,
+        async move { context.checkpoints().open(&reference).await },
+    )?;
     Ok(RubySnapshot { inner })
 }
 
-fn snapshot_get(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshotHandle, Error> {
+fn snapshot_get(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshot, Error> {
+    snapshot_get_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn snapshot_get_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RubySnapshot, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "get does not accept keywords"));
     }
     let name = parsed.required.0;
-    let inner = run(ruby, async move { Snapshot::get(&name).await })?;
-    Ok(RubySnapshotHandle { inner })
+    let inner = run(ruby, async move { context.checkpoints().get(&name).await })?;
+    Ok(RubySnapshot { inner })
 }
 
 fn snapshot_list(ruby: &Ruby, args: &[Value]) -> Result<RArray, Error> {
+    snapshot_list_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn snapshot_list_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<RArray, Error> {
     let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "list does not accept keywords"));
     }
-    let handles = run(ruby, Snapshot::list())?;
+    let handles = run_catalog_list(ruby, context, |context| async move {
+        context.checkpoints().list().await
+    })?;
     let array = current_ruby().ary_new();
     for inner in handles {
-        array.push(RubySnapshotHandle { inner })?;
+        array.push(RubySnapshot { inner })?;
     }
     Ok(array)
 }
 
 fn snapshot_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
+    snapshot_remove_in(microsandbox_core::context::configured_context(), ruby, args)
+}
+
+fn snapshot_remove_in(
+    context: Arc<dyn microsandbox_core::Context>,
+    ruby: &Ruby,
+    args: &[Value],
+) -> Result<(), Error> {
     let parsed = scan_args::<(String,), (Option<bool>,), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
         return Err(argument_error(ruby, "remove does not accept keywords"));
@@ -2469,7 +2364,7 @@ fn snapshot_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
     let name = parsed.required.0;
     let force = parsed.optional.0.unwrap_or(false);
     run(ruby, async move {
-        Snapshot::remove_by_reference(&name, force).await
+        context.checkpoints().remove(&name, force).await
     })
 }
 
@@ -2603,13 +2498,11 @@ impl RubyVolumeBuilder {
         Ok(this)
     }
 
-    fn create(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubyVolumeHandle, Error> {
-        let config = take_volume_builder(&this)?.build();
-        let inner = run(ruby, async move {
-            let volume = Volume::create(config).await?;
-            Volume::get(volume.name()).await
-        })?;
-        Ok(RubyVolumeHandle { inner })
+    fn create(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubyVolume, Error> {
+        // Keep the builder's captured destination and the exact created identity.
+        let builder = take_volume_builder(&this)?;
+        let inner = run(ruby, async move { builder.create().await })?;
+        Ok(RubyVolume { inner })
     }
 }
 
@@ -2626,13 +2519,6 @@ fn status_name(status: SandboxStatus) -> &'static str {
         SandboxStatus::Paused => "paused",
         SandboxStatus::Stopped => "stopped",
         SandboxStatus::Crashed => "crashed",
-    }
-}
-
-fn volume_kind_name(kind: VolumeKind) -> &'static str {
-    match kind {
-        VolumeKind::Directory => "dir",
-        VolumeKind::Disk => "disk",
     }
 }
 
@@ -2658,7 +2544,7 @@ fn parse_log_source(ruby: &Ruby, name: &str) -> Result<LogSource, Error> {
 fn stop_result_hash(r: SandboxStopResult) -> Result<RHash, Error> {
     let h = current_ruby().hash_new();
     h.aset("name", r.name)?;
-    h.aset("status", status_name(r.status))?;
+    h.aset("status", symbol(status_name(r.status)))?;
     h.aset("exit_code", r.exit_code)?;
     h.aset("signal", r.signal)?;
     h.aset("observed_at", r.observed_at.to_rfc3339())?;
@@ -2683,8 +2569,8 @@ fn touch_result_hash(r: SandboxTouchResult) -> Result<RHash, Error> {
 fn page_hash(page: SandboxPage) -> Result<RHash, Error> {
     let array = current_ruby().ary_new();
     for inner in page.sandboxes {
-        array.push(RubySandboxHandle {
-            inner: Arc::new(inner),
+        array.push(RubySandbox {
+            inner: std::cell::RefCell::new(Some(inner)),
         })?;
     }
     let hash = current_ruby().hash_new();
@@ -2791,23 +2677,6 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         "set_runtime_libkrunfw_path",
         function!(set_runtime_libkrunfw_path, 1),
     )?;
-    module.define_module_function(
-        "default_backend_kind",
-        function!(default_backend_kind_str, 0),
-    )?;
-    module.define_module_function(
-        "use_local_backend!",
-        function!(set_default_backend_local, 0),
-    )?;
-    module.define_module_function(
-        "use_cloud_backend!",
-        function!(set_default_backend_cloud, -1),
-    )?;
-    module.define_module_function(
-        "use_cloud_profile!",
-        function!(set_default_backend_profile, 1),
-    )?;
-
     // -- Proxy ---------------------------------------------------------------
     let secret_source = module.define_class("SecretSource", ruby.class_object())?;
     secret_source.define_singleton_method("env", function!(secret_source_env, 1))?;
@@ -2830,18 +2699,23 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     )?;
     sandbox.define_singleton_method("start", function!(sandbox_start, -1))?;
     sandbox.define_singleton_method("get", function!(sandbox_get, -1))?;
+    sandbox.define_singleton_method("get_running", function!(sandbox_get_running, -1))?;
     sandbox.define_singleton_method("list", function!(sandbox_list, -1))?;
     sandbox.define_singleton_method("remove", function!(sandbox_remove, -1))?;
     sandbox.define_method("name", method!(RubySandbox::name, 0))?;
     sandbox.define_method("id", method!(RubySandbox::id, 0))?;
     sandbox.define_method("owns_lifecycle?", method!(RubySandbox::owns_lifecycle, 0))?;
+    sandbox.define_method("__shutdown_owned", method!(RubySandbox::shutdown_owned, 0))?;
     sandbox.define_method("backend", method!(RubySandbox::backend, 0))?;
     sandbox.define_method("status", method!(RubySandbox::status, 0))?;
+    sandbox.define_method("info", method!(RubySandbox::info, 0))?;
+    sandbox.define_method("config", method!(RubySandbox::config, 0))?;
     sandbox.define_method(
         "last_failure_message",
         method!(RubySandbox::last_failure_message, 0),
     )?;
     sandbox.define_method("exec", method!(RubySandbox::exec, -1))?;
+    sandbox.define_method("exec_default", method!(RubySandbox::exec_default, -1))?;
     sandbox.define_method("shell", method!(RubySandbox::shell, -1))?;
     sandbox.define_method("stop", method!(RubySandbox::stop, -1))?;
     sandbox.define_method(
@@ -2855,6 +2729,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         "wait_until_stopped",
         method!(RubySandbox::wait_until_stopped, 0),
     )?;
+    sandbox.define_method("ensure_running", method!(RubySandbox::ensure_running, 0))?;
     sandbox.define_method("wait_for_status", method!(RubySandbox::wait_for_status, 1))?;
     sandbox.define_method("restart", method!(RubySandbox::restart, -1))?;
     sandbox.define_method("destroy", method!(RubySandbox::destroy, -1))?;
@@ -2862,7 +2737,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     sandbox.define_method("ping", method!(RubySandbox::ping, 0))?;
     sandbox.define_method("touch", method!(RubySandbox::touch, 0))?;
     sandbox.define_method("metrics", method!(RubySandbox::metrics, 0))?;
-    sandbox.define_method("snapshot", method!(RubySandbox::snapshot, -1))?;
+    sandbox.define_method("checkpoint", method!(RubySandbox::checkpoint, 1))?;
     sandbox.define_method("logs", method!(RubySandbox::logs, -1))?;
     sandbox.define_method("ssh_exec", method!(RubySandbox::ssh_exec, -1))?;
     // filesystem
@@ -2882,48 +2757,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     )?;
     sandbox.define_method("fs_copy_to_host", method!(RubySandbox::fs_copy_to_host, 2))?;
 
-    // -- SandboxHandle -------------------------------------------------------
-    let handle = module.define_class("SandboxHandle", ruby.class_object())?;
-    handle.define_method("name", method!(RubySandboxHandle::name, 0))?;
-    handle.define_method("id", method!(RubySandboxHandle::id, 0))?;
-    handle.define_method("status", method!(RubySandboxHandle::status, 0))?;
-    handle.define_method("config_json", method!(RubySandboxHandle::config_json, 0))?;
-    handle.define_method(
-        "active_config_json",
-        method!(RubySandboxHandle::active_config_json, 0),
-    )?;
-    handle.define_method(
-        "last_failure_message",
-        method!(RubySandboxHandle::last_failure_message, 0),
-    )?;
-    handle.define_method("refresh", method!(RubySandboxHandle::refresh, 0))?;
-    handle.define_method("connect", method!(RubySandboxHandle::connect, 0))?;
-    handle.define_method(
-        "connect_or_start",
-        method!(RubySandboxHandle::connect_or_start, -1),
-    )?;
-    handle.define_method("start", method!(RubySandboxHandle::start, -1))?;
-    handle.define_method("stop", method!(RubySandboxHandle::stop, -1))?;
-    handle.define_method(
-        "stop_with_timeout",
-        method!(RubySandboxHandle::stop_with_timeout, 1),
-    )?;
-    handle.define_method("kill", method!(RubySandboxHandle::kill, -1))?;
-    handle.define_method("remove", method!(RubySandboxHandle::remove, 0))?;
-    handle.define_method(
-        "wait_until_stopped",
-        method!(RubySandboxHandle::wait_until_stopped, 0),
-    )?;
-    handle.define_method(
-        "wait_for_status",
-        method!(RubySandboxHandle::wait_for_status, 1),
-    )?;
-    handle.define_method("restart", method!(RubySandboxHandle::restart, -1))?;
-    handle.define_method("destroy", method!(RubySandboxHandle::destroy, -1))?;
-    handle.define_method("snapshot", method!(RubySandboxHandle::snapshot, -1))?;
-    handle.define_method("metrics", method!(RubySandboxHandle::metrics, 0))?;
-    handle.define_method("ping", method!(RubySandboxHandle::ping, 0))?;
-    handle.define_method("touch", method!(RubySandboxHandle::touch, 0))?;
+    sandbox.define_method("snapshot", method!(RubySandbox::snapshot, -1))?;
 
     // -- SandboxBuilder ------------------------------------------------------
     let builder = module.define_class("SandboxBuilder", ruby.class_object())?;
@@ -3032,18 +2866,13 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     vol_builder.define_method("label", method!(RubyVolumeBuilder::label, 2))?;
     vol_builder.define_method("create", method!(RubyVolumeBuilder::create, 0))?;
 
-    let vol_handle = module.define_class("VolumeHandle", ruby.class_object())?;
-    vol_handle.define_method("name", method!(RubyVolumeHandle::name, 0))?;
-    vol_handle.define_method("kind", method!(RubyVolumeHandle::kind, 0))?;
-    vol_handle.define_method("quota_mib", method!(RubyVolumeHandle::quota_mib, 0))?;
-    vol_handle.define_method("used_bytes", method!(RubyVolumeHandle::used_bytes, 0))?;
-    vol_handle.define_method(
-        "capacity_bytes",
-        method!(RubyVolumeHandle::capacity_bytes, 0),
-    )?;
-    vol_handle.define_method("labels", method!(RubyVolumeHandle::labels, 0))?;
-    vol_handle.define_method("created_at", method!(RubyVolumeHandle::created_at, 0))?;
-    vol_handle.define_method("remove", method!(RubyVolumeHandle::remove, 0))?;
+    volume.define_method("info", method!(RubyVolume::info, 0))?;
+    volume.define_method("id", method!(RubyVolume::id, 0))?;
+    volume.define_method("path", method!(RubyVolume::path, 0))?;
+    volume.define_method("name", method!(RubyVolume::name, 0))?;
+    volume.define_method("kind", method!(RubyVolume::kind, 0))?;
+    volume.define_method("created_at", method!(RubyVolume::created_at, 0))?;
+    volume.define_method("destroy", method!(RubyVolume::destroy, 0))?;
 
     // -- Snapshot ------------------------------------------------------------
     let snapshot = module.define_class("Checkpoint", ruby.class_object())?;
@@ -3057,29 +2886,20 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     snapshot.define_method("id", method!(RubySnapshot::id, 0))?;
     snapshot.define_method("remove", method!(RubySnapshot::remove, -1))?;
     snapshot.define_method("digest", method!(RubySnapshot::digest, 0))?;
+    snapshot.define_method("name", method!(RubySnapshot::name, 0))?;
     snapshot.define_method("size_bytes", method!(RubySnapshot::size_bytes, 0))?;
+    snapshot.define_method("image_ref", method!(RubySnapshot::image_ref, 0))?;
+    snapshot.define_method("state_kind", method!(RubySnapshot::state_kind, 0))?;
     snapshot.define_method("reference", method!(RubySnapshot::reference, 0))?;
     snapshot.define_method("reference_kind", method!(RubySnapshot::reference_kind, 0))?;
+    snapshot.define_method("manifest", method!(RubySnapshot::manifest, 0))?;
+    snapshot.define_method("state", method!(RubySnapshot::state, 0))?;
+    snapshot.define_method("destroy", method!(RubySnapshot::destroy, 1))?;
     snapshot.define_method("save_to", method!(RubySnapshot::save_to, -1))?;
     snapshot.define_method("save", method!(RubySnapshot::save_to, -1))?;
     snapshot.define_method("verify", method!(RubySnapshot::verify, 0))?;
 
-    let snap_handle = module.define_class("SnapshotHandle", ruby.class_object())?;
-    snap_handle.define_method("id", method!(RubySnapshotHandle::id, 0))?;
-    snap_handle.define_method("digest", method!(RubySnapshotHandle::digest, 0))?;
-    snap_handle.define_method("name", method!(RubySnapshotHandle::name, 0))?;
-    snap_handle.define_method("size_bytes", method!(RubySnapshotHandle::size_bytes, 0))?;
-    snap_handle.define_method("image_ref", method!(RubySnapshotHandle::image_ref, 0))?;
-    snap_handle.define_method("state_kind", method!(RubySnapshotHandle::state_kind, 0))?;
-    snap_handle.define_method("reference", method!(RubySnapshotHandle::reference, 0))?;
-    snap_handle.define_method(
-        "reference_kind",
-        method!(RubySnapshotHandle::reference_kind, 0),
-    )?;
-    snap_handle.define_method("remove", method!(RubySnapshotHandle::remove, 1))?;
-    snap_handle.define_method("open", method!(RubySnapshotHandle::open, 0))?;
-    snap_handle.define_method("save_to", method!(RubySnapshotHandle::save_to, -1))?;
-
+    context::register(ruby, module)?;
     services::init(ruby, module)?;
     jobs::init(ruby, module)?;
     Ok(())

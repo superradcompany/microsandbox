@@ -22,7 +22,7 @@ func TestSnapshotProxyLive(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	loaded, err := Snapshot.Load(ctx, "go-proxy-history", []string{archive})
+	loaded, err := testHistories(t).Load(ctx, "go-proxy-history", []string{archive})
 	if err != nil {
 		t.Fatal(err)
 	}

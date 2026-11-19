@@ -10,6 +10,7 @@ import (
 // startup command can cross the restore entry point. Optional pointers retain
 // explicit zero values so the native restore path can validate the user's intent.
 type RestoreOptions struct {
+	ContextHandle               uint64                `json:"context_handle,omitempty"`
 	PullPolicy                  string                `json:"pull_policy,omitempty"`
 	Proxy                       *OutboundProxyOptions `json:"proxy,omitempty"`
 	Workdir                     *string               `json:"workdir,omitempty"`
@@ -55,13 +56,17 @@ type RestoreOptions struct {
 // CheckRestoreGuestClock requires acknowledgement only for explicit selection. Older native
 // libraries must not silently ignore an option, including an explicit sync over a saved off.
 func CheckRestoreGuestClock(ctx context.Context, policy string) error {
+	return defaultLibrary().CheckRestoreGuestClock(ctx, policy)
+}
+
+func (library *Library) CheckRestoreGuestClock(ctx context.Context, policy string) error {
 	if policy == "" {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	raw, err := SnapshotObjectCall(ctx, 0, map[string]any{"op": "restore_guest_clock"})
+	raw, err := library.SnapshotObjectCall(ctx, 0, map[string]any{"op": "restore_guest_clock"})
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -86,6 +91,10 @@ func CheckRestoreGuestClock(ctx context.Context, policy string) error {
 // CheckRestoreBootOptions refuses explicit options an older native library cannot apply.
 // Ordinary restoration makes no capability call and retains its existing wire shape.
 func CheckRestoreBootOptions(ctx context.Context, options RestoreOptions) error {
+	return defaultLibrary().CheckRestoreBootOptions(ctx, options)
+}
+
+func (library *Library) CheckRestoreBootOptions(ctx context.Context, options RestoreOptions) error {
 	var requested []string
 	if options.PullPolicy != "" {
 		requested = append(requested, "pull_policy")
@@ -129,7 +138,7 @@ func CheckRestoreBootOptions(ctx context.Context, options RestoreOptions) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	raw, err := SnapshotObjectCall(ctx, 0, map[string]any{"op": "restore_boot_options"})
+	raw, err := library.SnapshotObjectCall(ctx, 0, map[string]any{"op": "restore_boot_options"})
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()

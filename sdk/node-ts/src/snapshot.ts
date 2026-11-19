@@ -1,6 +1,8 @@
+import { nativeOwner } from "./internal/provider.js";
 import { parseCheckpointRemoval, type CheckpointRemoveResult } from "./snapshot-removal.js";
 import { Sandbox, CreationProgressCreate, type RestoreBuilder } from "./sandbox.js";
 import type { NapiRestoreBuilder } from "./internal/napi.js";
+import { Context, LocalContext, RemoteContext, Checkpoints } from "./context.js";
 import { UnsupportedError } from "./errors.js";
 import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
@@ -11,13 +13,8 @@ import {
   type NapiSnapshotBuilderSetters,
   type NapiSnapshotCopyBuilder,
   type NapiSnapshotCopyBuilderSetters,
-  type NapiSnapshotInfo,
   type NapiSnapshotVerifyReport,
 } from "./internal/napi.js";
-import {
-  SnapshotHandle,
-  snapshotInfoToHandle,
-} from "./snapshot-handle.js";
 
 /**
  * Snapshot payload scope.
@@ -184,7 +181,7 @@ export class CheckpointRemoveOptions {
  * A backend-neutral snapshot artifact.
  *
  * Returned by `Snapshot.builder(name).create()`, `Snapshot.open(...)`,
- * and `SandboxHandle.snapshot(name)`.
+ * and `Sandbox.snapshot(name)`.
  *
  * The snapshot retains its originating backend internally and exposes a
  * stable reference for subsequent lifecycle and restore operations.
@@ -210,8 +207,16 @@ export class Snapshot {
     return parseCheckpointRemoval(JSON.parse(result));
   }
 
+  /** Capture a local destination; never changes ambient routing. */
+  static local(): Checkpoints { return new LocalContext().checkpoints; }
+  /** Capture remote environment credentials now, before creating or looking up a resource. */
+  static remote(): Checkpoints { return RemoteContext.fromEnv().checkpoints; }
+  static ctx(context: Context): Checkpoints { return context.checkpoints; }
+
+  get context(): Context { return Context.fromNative(this.inner.context()); }
+
   /**
-   * Begin building a snapshot using the active backend; local names may be generated.
+   * Begin building a snapshot on the configured backend; local names may be generated.
    *
    * The source sandbox is required:
    * `Snapshot.builder("clean").fromSandbox("box").create()`.
@@ -234,15 +239,15 @@ export class Snapshot {
   }
 
   /** Look up a snapshot using the active backend's public identifier. */
-  static async get(nameOrDigest: string): Promise<SnapshotHandle> {
+  static async get(nameOrDigest: string): Promise<Snapshot> {
     const raw = await withMappedErrors(() => napi.Snapshot.get(nameOrDigest));
-    return new SnapshotHandle(raw);
+    return new Snapshot(raw);
   }
 
   /** List snapshots visible through the active backend. */
-  static async list(): Promise<SnapshotHandle[]> {
+  static async list(): Promise<Snapshot[]> {
     const infos = await withMappedErrors(() => napi.Snapshot.list());
-    return infos.map(snapshotInfoToHandle);
+    return infos.map((snapshot) => new Snapshot(snapshot));
   }
 
   /**
@@ -286,27 +291,30 @@ export class Snapshot {
    * snapshots directory. Recorded payload integrity is preserved for
    * explicit verification. Compression is detected from magic bytes.
    */
-  static async load(archive: string, dest?: string, base?: string): Promise<SnapshotHandle> {
+  static async load(archive: string, dest?: string, base?: string): Promise<Snapshot> {
     const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest, base));
-    return new SnapshotHandle(raw);
+    return new Snapshot(raw);
   }
 
   /** Import into a selected or generated group, with optional head selection. */
-  static async loadWithOptions(archive: string, opts: LoadOpts = {}): Promise<SnapshotHandle> {
+  static async loadWithOptions(archive: string, opts: LoadOpts = {}): Promise<Snapshot> {
     const raw = await withMappedErrors(() => napi.Snapshot.loadWithOptions(archive, opts));
-    return new SnapshotHandle(raw);
+    return new Snapshot(raw);
   }
 
   /** Import archives together into one group, resolving dependencies regardless of input order. */
-  static async loadMany(archives: string[], opts: LoadOpts = {}): Promise<SnapshotHandle[]> {
+  static async loadMany(archives: string[], opts: LoadOpts = {}): Promise<Snapshot[]> {
     const raw = await withMappedErrors(() => napi.Snapshot.loadMany(archives, opts));
-    return raw.map((handle) => new SnapshotHandle(handle));
+    return raw.map((handle) => new Snapshot(handle));
   }
 
-  /** Read a group's head, or select `group:member` as its head. */
-  static async groupHead(selector: string): Promise<HeadUpdate> {
-    const update = await withMappedErrors(() => napi.Snapshot.groupHead(selector));
-    return { ...update, previous: update.previous ?? null, head: update.head ?? null };
+  static async groupHead(group: string): Promise<string | null> {
+    return (await withMappedErrors(() => napi.Snapshot.readGroupHead(group))) ?? null;
+  }
+
+  static async setGroupHead(group: string, id: string): Promise<HeadUpdate> {
+    const update = await withMappedErrors(() => napi.Snapshot.setGroupHead(group, id));
+    return { ...update, previous: update.previous ?? null };
   }
 
   //--------------------------------------------------------------------------
@@ -344,10 +352,35 @@ export class Snapshot {
     return update ? { ...update, previous: update.previous ?? null, head: update.head ?? null } : null;
   }
 
-  /** Canonical content digest (`sha256:hex`). The snapshot's identity. */
+  /** Stable opaque snapshot identity. */
   get id(): string {
     return this.inner.id;
   }
+
+  /** Captured name; operations retain the resource identity even if a path is reused. */
+  get name(): string | null { return this.inner.name ?? null; }
+
+  get group(): string | null { return this.inner.group ?? null; }
+
+  /** Delete this captured identity; remote path snapshots require conditional deletion support. */
+  async destroy(opts?: { force?: boolean }): Promise<void> {
+    await withMappedErrors(() => this.inner.destroy(opts));
+  }
+
+  /** Captured index metadata from resource selection. */
+  get parentDigest(): string | null { return this.inner.parentDigest ?? null; }
+
+  /** Captured index metadata from resource selection. */
+  get locality(): string { return this.inner.locality; }
+
+  /** Captured index metadata from resource selection. */
+  get availability(): string { return this.inner.availability; }
+
+  /** Captured index metadata from resource selection. */
+  get migrationState(): string { return this.inner.migrationState; }
+
+  /** Captured index metadata from resource selection. */
+  get migrationErrorCode(): string | null { return this.inner.migrationErrorCode ?? null; }
 
   /** SHA-256 digest of the canonical descriptor. */
   get digest(): string {
@@ -359,35 +392,41 @@ export class Snapshot {
     return this.inner.sizeBytes ?? null;
   }
 
-  /** Closed state projection matching `snapshot.json`. */
-  get state(): SnapshotState {
-    if (this.inner.stateKind === "checkpoint") {
+  /** Fetch the full normalized descriptor as a detached observation. */
+  async manifest(): Promise<Readonly<Record<string, unknown>>> {
+    return JSON.parse(await withMappedErrors(() => this.inner.manifest()));
+  }
+
+  /** Fetch one descriptor observation and project its state. */
+  async state(): Promise<SnapshotState> {
+    const metadata = await withMappedErrors(() => this.inner.metadata());
+    if (metadata.stateKind === "checkpoint") {
       return {
         kind: "checkpoint",
         checkpointId: requiredProjectionString(
-          this.inner.checkpointId,
+          metadata.checkpointId,
           "checkpointId",
         ),
         manifest: requiredProjectionString(
-          this.inner.checkpointManifestDigest,
+          metadata.checkpointManifestDigest,
           "checkpointManifestDigest",
         ),
       };
     }
-    if (this.inner.stateKind !== "file") {
-      throw invalidProjection(`unknown stateKind ${this.inner.stateKind}`);
+    if (metadata.stateKind !== "file") {
+      throw invalidProjection(`unknown stateKind ${metadata.stateKind}`);
     }
 
-    const format = requiredProjectionString(this.inner.format, "format");
+    const format = requiredProjectionString(metadata.format, "format");
     if (format !== "raw" && format !== "qcow2") {
       throw invalidProjection(`unknown file-state format ${format}`);
     }
-    const sizeBytes = this.inner.sizeBytes;
+    const sizeBytes = metadata.sizeBytes;
     if (typeof sizeBytes !== "bigint") {
       throw invalidProjection("missing file-state sizeBytes");
     }
-    const algorithm = this.inner.upperIntegrityAlgorithm;
-    const value = this.inner.upperIntegrityDigest;
+    const algorithm = metadata.upperIntegrityAlgorithm;
+    const value = metadata.upperIntegrityDigest;
     let projectedIntegrity: Extract<SnapshotState, { kind: "file" }>["upper"]["integrity"];
     if (algorithm == null && value == null) {
       projectedIntegrity = null;
@@ -401,8 +440,8 @@ export class Snapshot {
         "upperIntegrityDigest",
       );
       if (requiredAlgorithm === "msb-file-merkle-blake3-v1") {
-        const logicalSize = this.inner.upperIntegrityLogicalSize;
-        const leafSize = this.inner.upperIntegrityLeafSize;
+        const logicalSize = metadata.upperIntegrityLogicalSize;
+        const leafSize = metadata.upperIntegrityLeafSize;
         if (typeof logicalSize !== "bigint") {
           throw invalidProjection("missing upperIntegrityLogicalSize");
         }
@@ -434,9 +473,9 @@ export class Snapshot {
     return {
       kind: "file",
       format,
-      fstype: requiredProjectionString(this.inner.fstype, "fstype"),
+      fstype: requiredProjectionString(metadata.fstype, "fstype"),
       upper: {
-        file: requiredProjectionString(this.inner.upperFile, "upperFile"),
+        file: requiredProjectionString(metadata.upperFile, "upperFile"),
         sizeBytes,
         integrity: projectedIntegrity,
       },
@@ -449,8 +488,8 @@ export class Snapshot {
   }
 
   /** OCI manifest digest of the pinned image. */
-  get imageManifestDigest(): string {
-    return this.inner.imageManifestDigest;
+  async imageManifestDigest(): Promise<string> {
+    return (await withMappedErrors(() => this.inner.metadata())).imageManifestDigest;
   }
 
   /** On-disk format of the upper layer. */
@@ -479,13 +518,13 @@ export class Snapshot {
   }
 
   /** User-supplied labels (sorted by key in canonical form). */
-  get labels(): ReadonlyArray<readonly [string, string]> {
-    return Object.entries(this.inner.labels);
+  async labels(): Promise<ReadonlyArray<readonly [string, string]>> {
+    return Object.entries(await withMappedErrors(() => this.inner.labels()));
   }
 
   /** Best-effort source-sandbox name, if recorded. */
-  get sourceSandbox(): string | null {
-    return this.inner.sourceSandbox ?? null;
+  async sourceSandbox(): Promise<string | null> {
+    return (await withMappedErrors(() => this.inner.metadata())).sourceSandbox ?? null;
   }
 
   /**
@@ -557,7 +596,7 @@ export class Snapshot {
 }
 
 /** @internal */
-function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBuilder {
+export function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBuilder {
   const origCreate = nb.create.bind(nb);
   const origCreateArchive = nb.createArchive.bind(nb);
   (nb as unknown as { create: () => Promise<Snapshot> }).create = async () => {
@@ -642,14 +681,6 @@ function requiredProjectionString(
 function invalidProjection(detail: string): Error {
   return new Error(`invalid native snapshot projection: ${detail}`);
 }
-
-/** @internal */
-export function _napiSnapshotInfoIsHandle(
-  info: NapiSnapshotInfo,
-): info is NapiSnapshotInfo {
-  return typeof info?.digest === "string";
-}
-
 /** @internal Never let an older native option decoder silently ignore an explicit target. */
 export function requireArchiveCompatibility(opts?: SaveOpts): void {
   if (opts?.compatibility !== undefined &&

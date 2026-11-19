@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::PreparedSnapshotImport;
-use crate::backend::{Backend, LocalBackend, set_default_backend};
+use crate::context::{Context, LocalContext};
 use crate::snapshot::{LoadOpts, SaveOpts, SnapshotReference};
 
 //--------------------------------------------------------------------------------------------------
@@ -12,8 +12,9 @@ use crate::snapshot::{LoadOpts, SaveOpts, SnapshotReference};
 #[cfg(feature = "cloud")]
 #[tokio::test]
 async fn cloud_import_keeps_backend_paths_and_unsupported_errors() {
-    let backend: Arc<dyn Backend> =
-        Arc::new(crate::CloudBackend::new("http://127.0.0.1:1", "test-only-placeholder").unwrap());
+    let backend: Arc<dyn Context> = Arc::new(
+        crate::test_support::cloud_backend("http://127.0.0.1:1", "test-only-placeholder").unwrap(),
+    );
     for kind in 0..3 {
         let request = PreparedSnapshotImport::with_backend(
             backend.clone(),
@@ -98,18 +99,16 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
         .build()
         .unwrap()
         .block_on(async {
-            let local = LocalBackend::builder()
+            let local = LocalContext::builder()
                 .home(root.join("home-a"))
                 .config_path(root.join("absent.json"))
                 .managed_config_path(root.join("absent-managed.json"))
                 .build()
-                .await
                 .unwrap();
-            let backend: Arc<dyn Backend> = Arc::new(local);
-            set_default_backend(backend.clone());
+            let backend: Arc<dyn Context> = Arc::new(local);
             let reference = SnapshotReference::path(source.to_string_lossy());
             backend
-                .snapshots()
+                .checkpoints()
                 .save(
                     reference.clone(),
                     &first.join("base.tar"),
@@ -121,7 +120,7 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                 .await
                 .unwrap();
             backend
-                .snapshots()
+                .checkpoints()
                 .save(
                     reference,
                     &first.join("delta.tar"),
@@ -133,11 +132,15 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                 )
                 .await
                 .unwrap();
-            PreparedSnapshotImport::new(vec!["base.tar".into()], LoadOpts::default())
-                .unwrap()
-                .group("base-group".into())
-                .await
-                .unwrap();
+            PreparedSnapshotImport::with_backend(
+                backend.clone(),
+                vec!["base.tar".into()],
+                LoadOpts::default(),
+            )
+            .unwrap()
+            .group("base-group".into())
+            .await
+            .unwrap();
 
             let mut requests = Vec::new();
             for (group, base) in [
@@ -147,7 +150,8 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
             ] {
                 requests.push((
                     group,
-                    PreparedSnapshotImport::new(
+                    PreparedSnapshotImport::with_backend(
+                        backend.clone(),
                         vec!["delta.tar".into()],
                         LoadOpts {
                             dest: Some("destination".into()),
@@ -158,7 +162,8 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                     .unwrap(),
                 ));
             }
-            let many = PreparedSnapshotImport::new(
+            let many = PreparedSnapshotImport::with_backend(
+                backend.clone(),
                 vec!["delta.tar".into()],
                 LoadOpts {
                     base: Some("base-group".into()),
@@ -167,7 +172,8 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                 },
             )
             .unwrap();
-            let single = PreparedSnapshotImport::new(
+            let single = PreparedSnapshotImport::with_backend(
+                backend.clone(),
                 vec!["delta.tar".into()],
                 LoadOpts {
                     base: Some("base-group".into()),
@@ -176,7 +182,8 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                 },
             )
             .unwrap();
-            let legacy = PreparedSnapshotImport::new(
+            let legacy = PreparedSnapshotImport::with_backend(
+                backend.clone(),
                 vec!["base.tar".into()],
                 LoadOpts {
                     dest: Some("legacy".into()),
@@ -190,7 +197,8 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                 std::os::unix::fs::symlink(second.join("nested"), first.join("alias")).unwrap();
                 // The OS resolves alias/.. to second, whose archive is deliberately
                 // invalid. Lexically removing .. would wrongly import first/base.tar.
-                let request = PreparedSnapshotImport::new(
+                let request = PreparedSnapshotImport::with_backend(
+                    backend.clone(),
                     vec!["alias/../base.tar".into()],
                     LoadOpts::default(),
                 )
@@ -198,20 +206,21 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                 assert_eq!(request.files, vec![first.join("alias/../base.tar")]);
                 request
             };
-            let missing =
-                PreparedSnapshotImport::new(vec!["missing.tar".into()], LoadOpts::default())
-                    .unwrap();
+            let missing = PreparedSnapshotImport::with_backend(
+                backend.clone(),
+                vec!["missing.tar".into()],
+                LoadOpts::default(),
+            )
+            .unwrap();
 
-            let other: Arc<dyn Backend> = Arc::new(
-                LocalBackend::builder()
+            let other: Arc<dyn Context> = Arc::new(
+                LocalContext::builder()
                     .home(root.join("home-b"))
                     .config_path(root.join("absent.json"))
                     .managed_config_path(root.join("absent-managed.json"))
                     .build()
-                    .await
                     .unwrap(),
             );
-            set_default_backend(other.clone());
             std::env::set_current_dir(&second).unwrap();
             for (group, request) in requests {
                 let imported = request.group(group.into()).await.unwrap();
@@ -224,8 +233,8 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                         .starts_with(first.join("destination"))
                 );
                 assert!(Arc::ptr_eq(&handle.backend, &backend));
-                let opened = handle.open().await.unwrap();
-                let crate::snapshot::SnapshotState::File(file) = &opened.manifest().state else {
+                let opened = handle.manifest().await.unwrap();
+                let crate::snapshot::SnapshotState::File(file) = &opened.state else {
                     panic!("expected a file snapshot");
                 };
                 let payload = file.layer_path(&file.layers[0]);
@@ -253,14 +262,7 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                     .unwrap()
                     .starts_with(first.join("legacy"))
             );
-            assert!(
-                other
-                    .snapshots()
-                    .list(other.clone())
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(other.checkpoints().list().await.unwrap().is_empty());
             assert!(!second.join("destination").exists());
             assert_eq!(
                 std::fs::read(second.join("base-group")).unwrap(),
@@ -282,8 +284,12 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
             assert!(!root.join("home-a/snapshots/missing-archive").exists());
             // Empty paths must fail during admission, rather than silently meaning the cwd.
             assert!(
-                PreparedSnapshotImport::new(vec![Path::new("").into()], LoadOpts::default())
-                    .is_err()
+                PreparedSnapshotImport::with_backend(
+                    backend.clone(),
+                    vec![Path::new("").into()],
+                    LoadOpts::default()
+                )
+                .is_err()
             );
         });
     std::env::set_current_dir(original).unwrap();

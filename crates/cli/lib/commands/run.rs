@@ -113,7 +113,7 @@ pub async fn run(args: RunArgs, log_level: Option<microsandbox::LogLevel>) -> an
     // or --replace-with-timeout). --replace-with-timeout implies --replace,
     // so either flag opts out of the reuse path.
     let replace_requested = args.sandbox.replace || args.sandbox.replace_with_timeout.is_some();
-    if is_named && !replace_requested && Sandbox::get(&name).await.is_ok() {
+    if is_named && !replace_requested && common::sandbox_record(&name).await.is_ok() {
         // Preserve image-run reuse (including ignored configuration), but never
         // discard a canonical snapshot source in favor of an existing sandbox.
         let configured = sandbox_config::resolve(&args.sandbox.config).ok();
@@ -150,7 +150,7 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
     // Detach mode: ensure running and exit.
     if args.detach {
         warn_detached_command_ignored(&name, &args);
-        sandbox.detach().await;
+        sandbox.detach().await?;
         println!("{name}");
         return Ok(());
     }
@@ -160,7 +160,8 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
         common::use_interactive_tty(io::stdin().is_terminal(), args.no_tty || args.no_stdin);
 
     let result: anyhow::Result<i32> = async {
-        let (cmd, cmd_args) = common::resolve_command(sandbox.config(), args.command, interactive)?;
+        let (cmd, cmd_args) =
+            common::resolve_command(sandbox.config().await?.runtime(), args.command, interactive)?;
         match cmd {
             Some(cmd) => exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await,
             None => Ok(0),
@@ -187,7 +188,7 @@ async fn run_new(
     let exec_opts = ExecOpts::parse(&args)?;
     let launch_started_at = chrono::Utc::now();
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
-    let builder = resolved.apply(Sandbox::builder(&name))?;
+    let builder = resolved.apply(common::selected_context()?.sandboxes().builder(&name))?;
     let (builder, display_label) = args
         .snapshot
         .apply(&resolved, args.image.as_deref(), builder)
@@ -242,7 +243,7 @@ async fn run_new(
 
     // Detach mode: just print the name and exit.
     if args.detach {
-        sandbox.detach().await;
+        sandbox.detach().await?;
         println!("{name}");
         return Ok(());
     }
@@ -250,7 +251,10 @@ async fn run_new(
     let interactive =
         common::use_interactive_tty(io::stdin().is_terminal(), args.no_tty || args.no_stdin);
 
-    if sandbox.config().init_owns_boot_workload() {
+    if sandbox
+        .launch_info()
+        .is_some_and(|info| info.init_owns_boot_workload)
+    {
         let observe = observe_init_owned_workload(&sandbox, launch_started_at);
         let result = match exec_opts.timeout {
             Some(duration) => match tokio::time::timeout(duration, observe).await {
@@ -269,7 +273,8 @@ async fn run_new(
         return handle_exit(result?);
     }
 
-    let (cmd, cmd_args) = common::resolve_command(sandbox.config(), args.command, interactive)?;
+    let (cmd, cmd_args) =
+        common::resolve_command(sandbox.config().await?.runtime(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
         (Some(cmd), args) => (cmd, args),
         (None, _) => {
@@ -667,6 +672,8 @@ mod tests {
             "base.yaml",
             "--resource-conf",
             "second.yaml",
+            "--file",
+            "Sandboxfile",
             "--net-conf",
             "network.yaml",
         ]);
@@ -681,6 +688,7 @@ mod tests {
                 (SandboxConfigKind::Resources, PathBuf::from("first.yaml")),
                 (SandboxConfigKind::Root, PathBuf::from("base.yaml")),
                 (SandboxConfigKind::Resources, PathBuf::from("second.yaml")),
+                (SandboxConfigKind::Root, PathBuf::from("Sandboxfile")),
                 (SandboxConfigKind::Network, PathBuf::from("network.yaml")),
             ]
         );

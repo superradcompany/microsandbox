@@ -320,10 +320,10 @@ fn destination(ruby: &Ruby, args: &[Value], local: bool) -> Result<RestoreBuilde
         builder = builder.hostname(v);
     }
     if let Some(v) = keyword::<u64>(options, "max_duration")? {
-        builder = builder.max_duration(v);
+        builder = builder.max_duration(std::time::Duration::from_secs(v));
     }
     if let Some(v) = keyword::<u64>(options, "idle_timeout")? {
-        builder = builder.idle_timeout(v);
+        builder = builder.idle_timeout(std::time::Duration::from_secs(v));
     }
     if let Some(v) = keyword::<usize>(options, "max_tcp_connections")? {
         builder = builder.max_tcp_connections(v);

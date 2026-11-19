@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::error::to_py_err;
-use crate::snapshot::{PySnapshot, PySnapshotHandle, guest_flush_policy, head_update_to_py};
+use crate::snapshot::{PySnapshot, guest_flush_policy, head_update_to_py};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -16,7 +16,7 @@ use crate::snapshot::{PySnapshot, PySnapshotHandle, guest_flush_policy, head_upd
 
 #[pyclass(name = "SnapshotGroup")]
 pub struct PySnapshotGroup {
-    inner: RustGroup,
+    pub(crate) inner: RustGroup,
 }
 
 #[pyclass(name = "SnapshotCreateResult")]
@@ -31,7 +31,7 @@ pub struct PyCheckpointCaptureResult {
 
 #[pyclass(name = "SnapshotImportResult")]
 pub struct PySnapshotImportResult {
-    inner: microsandbox::SnapshotImportResult,
+    pub(crate) inner: microsandbox::SnapshotImportResult,
 }
 
 /// Complete history and head outcome belonging to one committed removal.
@@ -66,13 +66,43 @@ impl PySnapshotRemoveResult {
 
 #[pymethods]
 impl PySnapshotGroup {
+    /// Capture a local destination without consulting remote selection variables.
+    #[staticmethod]
+    fn local() -> crate::context::PySnapshots {
+        crate::context::PySnapshots {
+            inner: microsandbox::context::default_local_context(),
+        }
+    }
+
+    /// Capture remote environment settings before any deferred operation.
+    #[staticmethod]
+    fn remote() -> PyResult<crate::context::PySnapshots> {
+        Ok(crate::context::PySnapshots {
+            inner: microsandbox::context::remote_from_env().map_err(to_py_err)?,
+        })
+    }
+
+    #[staticmethod]
+    fn ctx(context: PyRef<'_, crate::context::PyContext>) -> crate::context::PySnapshots {
+        crate::context::PySnapshots {
+            inner: context.inner.clone(),
+        }
+    }
+
+    #[getter]
+    fn context(&self) -> PyResult<crate::context::PyContext> {
+        Ok(crate::context::PyContext {
+            inner: self.inner.context().clone_shared(),
+        })
+    }
+
     /// Observe the history and saved source association without changing its selection.
     fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let group = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let info = group.inspect().await.map_err(to_py_err)?;
             let value = serde_json::to_value(info).map_err(|error| to_py_err(error.into()))?;
-            Python::attach(|py| crate::sandbox_handle::json_value_to_py(py, value))
+            Python::attach(|py| crate::conversion::json_value_to_py(py, value))
         })
     }
 
@@ -92,7 +122,7 @@ impl PySnapshotGroup {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let report = group.verify().await.map_err(to_py_err)?;
             let value = serde_json::to_value(report).map_err(|error| to_py_err(error.into()))?;
-            Python::attach(|py| crate::sandbox_handle::json_value_to_py(py, value))
+            Python::attach(|py| crate::conversion::json_value_to_py(py, value))
         })
     }
 
@@ -166,6 +196,7 @@ impl PySnapshotGroup {
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let builder = crate::helpers::restore_builder_from_reference(
+            self.inner.context().clone_shared(),
             microsandbox::SnapshotReference::auto(""),
             name.unwrap_or_default(),
             kwargs,
@@ -189,6 +220,7 @@ impl PySnapshotGroup {
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let builder = crate::helpers::restore_builder_from_reference(
+            self.inner.context().clone_shared(),
             microsandbox::SnapshotReference::auto(""),
             name.unwrap_or_default(),
             kwargs,
@@ -236,7 +268,7 @@ impl PySnapshotGroup {
                 .await
                 .map_err(to_py_err)?
                 .into_iter()
-                .map(PySnapshotHandle::from_rust)
+                .map(PySnapshot::from_rust)
                 .collect::<Vec<_>>())
         })
     }
@@ -302,12 +334,12 @@ impl PySnapshotImportResult {
         }
     }
     #[getter]
-    fn checkpoints(&self) -> Vec<PySnapshotHandle> {
+    fn checkpoints(&self) -> Vec<PySnapshot> {
         self.inner
             .checkpoints
             .iter()
             .cloned()
-            .map(PySnapshotHandle::from_rust)
+            .map(PySnapshot::from_rust)
             .collect()
     }
     #[getter]

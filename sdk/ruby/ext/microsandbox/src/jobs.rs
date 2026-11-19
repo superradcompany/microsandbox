@@ -18,8 +18,8 @@ use microsandbox_core::sandbox::jobs::{
 use tokio::sync::{Mutex, Notify};
 
 use super::{
-    RubySandbox, RubySandboxHandle, apply_exec_options, argument_error, block_without_gvl,
-    exec_args_and_kwargs, keyword, reject_unknown_keywords,
+    RubySandbox, apply_exec_options, argument_error, block_without_gvl, exec_args_and_kwargs,
+    keyword, reject_unknown_keywords,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -80,26 +80,6 @@ impl RubySandbox {
     ) -> Result<String, Error> {
         let options = list_options(ruby, args)?;
         let sb = this.inner_clone()?;
-        json(
-            ruby,
-            run_job(ruby, async move { sb.list_jobs_with(|_| options).await })?,
-        )
-    }
-}
-impl RubySandboxHandle {
-    fn get_job(ruby: &Ruby, this: typed_data::Obj<Self>, id: String) -> Result<RubyJob, Error> {
-        let sb = this.inner.clone();
-        Ok(RubyJob {
-            inner: run_job(ruby, async move { sb.get_job(id).await })?,
-        })
-    }
-    fn jobs_json(
-        ruby: &Ruby,
-        this: typed_data::Obj<Self>,
-        args: &[Value],
-    ) -> Result<String, Error> {
-        let options = list_options(ruby, args)?;
-        let sb = this.inner.clone();
         json(
             ruby,
             run_job(ruby, async move { sb.list_jobs_with(|_| options).await })?,
@@ -274,9 +254,6 @@ pub(super) fn init(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     sandbox.define_method("exec_detached", method!(RubySandbox::exec_detached, -1))?;
     sandbox.define_method("get_job", method!(RubySandbox::get_job, 1))?;
     sandbox.define_method("_jobs_json", method!(RubySandbox::jobs_json, -1))?;
-    let handle: magnus::RClass = module.const_get("SandboxHandle")?;
-    handle.define_method("get_job", method!(RubySandboxHandle::get_job, 1))?;
-    handle.define_method("_jobs_json", method!(RubySandboxHandle::jobs_json, -1))?;
     let job = module.define_class("Job", ruby.class_object())?;
     job.define_method("id", method!(RubyJob::id, 0))?;
     job.define_method("_inspect_json", method!(RubyJob::inspect_json, 0))?;

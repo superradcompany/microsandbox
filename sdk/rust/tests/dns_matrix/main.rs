@@ -152,5 +152,9 @@ fn with_policy_and_block_list(n: NetworkBuilder, policy: NetworkPolicy) -> Netwo
         .expect("BLOCKED_EXACT parses")
         .deny_domain_suffix(BLOCKED_SUFFIX)
         .expect("BLOCKED_SUFFIX parses");
+    // This suite already targets Cloudflare explicitly. Use that same resolver
+    // for gateway forwarding: host/VPN DNS may answer UDP while refusing TCP,
+    // which otherwise makes both gateway TCP and DoT depend on host settings.
     n.policy(policy)
+        .dns(|d| d.nameservers([std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1))]))
 }

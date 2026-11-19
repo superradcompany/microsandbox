@@ -259,7 +259,7 @@ class CatalogHistoryTests(unittest.TestCase):
         exclusion = f"test(/^{HARNESS.TEST}$/)"
         self.assertEqual(workflow.count(exclusion), 1)
         self.assertIsNotNone(re.fullmatch(HARNESS.TEST, HARNESS.TEST))
-        self.assertIsNone(re.fullmatch(HARNESS.TEST, "backend::local::catalog::tests::historical_config_survives_catalog_upgrade"))
+        self.assertIsNone(re.fullmatch(HARNESS.TEST, "context::local::catalog::tests::historical_config_survives_catalog_upgrade"))
         self.assertIn("python3 scripts/smoke/cli/catalog-history.py", workflow)
         self.assertIn("name: Historical catalog compatibility (v0.6.18)", workflow)
         self.assertIn("--cleanup-binary build/msb", workflow)

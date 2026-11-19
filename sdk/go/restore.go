@@ -96,11 +96,28 @@ func RestoreSandbox[T SnapshotSeed](ctx context.Context, snapshot T, name string
 	if err := validateRestoreConfig(config); err != nil {
 		return nil, err
 	}
-	inner, err := ffi.RestoreSandbox(ctx, name, buildFFIRestoreOptions(snapshot, config))
+	selected, err := restoreContext(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := selected.nativeContext().RestoreSandbox(ctx, name, buildFFIRestoreOptions(snapshot, config))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
 	return &Sandbox{inner: inner}, nil
+}
+
+// Retained checkpoints select their own provider even if ambient configuration changes.
+func restoreContext[T SnapshotSeed](source T) (Context, error) {
+	if checkpoint, ok := any(source).(*Checkpoint); ok {
+		if checkpoint == nil {
+			return nil, fmt.Errorf("nil checkpoint")
+		}
+		if selected := checkpoint.Context(); selected != nil {
+			return selected, nil
+		}
+	}
+	return configuredContext()
 }
 
 // WithRestoreWorkdir sets the guest working directory for new commands.
@@ -234,12 +251,12 @@ func WithRestoreSecurityProfile(profile SecurityProfile) RestoreOption {
 	return func(o *RestoreConfig) { o.SecurityProfile = profile }
 }
 
-// WithRestoreMaxDuration sets the destination runtime limit. Zero requests immediate expiry.
+// WithRestoreMaxDuration sets the destination runtime limit in whole seconds. Zero requests immediate expiry.
 func WithRestoreMaxDuration(duration time.Duration) RestoreOption {
 	return func(o *RestoreConfig) { o.MaxDuration = &duration }
 }
 
-// WithRestoreIdleTimeout sets the destination idle limit. Zero requests immediate expiry.
+// WithRestoreIdleTimeout sets the destination idle limit in whole seconds. Zero requests immediate expiry.
 func WithRestoreIdleTimeout(duration time.Duration) RestoreOption {
 	return func(o *RestoreConfig) { o.IdleTimeout = &duration }
 }
@@ -256,12 +273,8 @@ func validateRestoreConfig(config RestoreConfig) error {
 	if config.MaxConnections != nil && config.MaxTCPConnections != nil {
 		return fmt.Errorf("microsandbox: restore MaxConnections and MaxTCPConnections cannot both be specified")
 	}
-	for name, duration := range map[string]*time.Duration{
-		"max duration": config.MaxDuration, "idle timeout": config.IdleTimeout,
-	} {
-		if duration != nil && *duration < 0 {
-			return fmt.Errorf("microsandbox: restore %s must be non-negative", name)
-		}
+	if err := validateLifecycleLimits(config.MaxDuration, config.IdleTimeout); err != nil {
+		return err
 	}
 	if config.NetworkPolicy != nil {
 		remaining := *config.NetworkPolicy
@@ -294,11 +307,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 	switch value := any(snapshot).(type) {
 	case string:
 		reference = value
-	case *SnapshotArtifact:
-		if value != nil {
-			reference, referenceKind = value.Reference(), value.ReferenceKind()
-		}
-	case *SnapshotHandle:
+	case *Checkpoint:
 		if value != nil {
 			reference, referenceKind = value.Reference(), value.ReferenceKind()
 		}
@@ -314,7 +323,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		if duration == nil {
 			return nil
 		}
-		value := durationSecsCeil(*duration)
+		value := uint64(*duration / time.Second)
 		return &value
 	}
 	return ffi.RestoreOptions{
@@ -349,4 +358,24 @@ func restoreArgv(value *[]string) *[]string {
 	}
 	copy := append([]string{}, (*value)...)
 	return &copy
+}
+
+// Restore restores a snapshot reference in the retained destination.
+func (s *Sandboxes) Restore(ctx context.Context, snapshot string, name string, opts ...RestoreOption) (*Sandbox, error) {
+	destination, err := nativeDestination(s.selected)
+	if err != nil {
+		return nil, err
+	}
+	config := RestoreConfig{}
+	for _, opt := range opts {
+		opt(&config)
+	}
+	if err := validateRestoreConfig(config); err != nil {
+		return nil, err
+	}
+	inner, err := destination.RestoreSandbox(ctx, name, buildFFIRestoreOptions(snapshot, config))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
 }

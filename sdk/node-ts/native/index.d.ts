@@ -77,6 +77,38 @@ export declare class AttachOptionsBuilder {
 }
 export type JsAttachOptionsBuilder = AttachOptionsBuilder
 
+/** An explicit shared destination. Construction never changes global selection. */
+export declare class Context {
+  /** Snapshot destination selection is captured before the restore builder escapes. */
+  sandboxRestore(snapshot: string, kind?: string | undefined | null): JsRestoreBuilder
+  constructor(optionsJson: string)
+  /** Derive inside the retained provider; credentials never cross back into JavaScript. */
+  deriveRemote(optionsJson: string): Context
+  get kind(): string
+  sandboxBuilder(name: string): JsSandboxBuilder
+  sandboxGet(name: string): Promise<Sandbox>
+  sandboxGetRunning(name: string): Promise<Sandbox>
+  sandboxStart(name: string, detached: boolean): Promise<Sandbox>
+  sandboxList(options?: SandboxListOptions | undefined | null): Promise<JsSandboxPage>
+  sandboxRemove(name: string): Promise<void>
+  volumeBuilder(name: string): JsVolumeBuilder
+  volumeGet(name: string): Promise<JsVolume>
+  volumeGetDefault(): Promise<JsVolume>
+  volumeList(): Promise<Array<JsVolume>>
+  volumeRemove(name: string): Promise<void>
+  snapshotBuilder(name: string): JsSnapshotBuilder
+  snapshotGroupHead(group: string): Promise<string | null>
+  snapshotSetGroupHead(group: string, id: string): Promise<HeadUpdate>
+  snapshotGroupGet(name: string): Promise<JsSnapshotGroup>
+  snapshotGroupList(): Promise<Array<JsSnapshotGroup>>
+  snapshotGroupOpen(path: string): Promise<SnapshotGroup>
+  snapshotGroupLoad(group: string, archives: string[], opts?: LoadOpts): Promise<SnapshotImportResult>
+  snapshotGet(reference: string): Promise<JsSnapshot>
+  snapshotList(): Promise<Array<JsSnapshot>>
+  snapshotRemove(reference: string, force: boolean): Promise<void>
+}
+export type JsContext = Context
+
 /** Fluent builder for DNS interception settings. */
 export declare class DnsBuilder {
   constructor()
@@ -143,7 +175,7 @@ export declare class ExecOptionsBuilder {
   /** Set environment variables from an object. */
   envs(vars: Record<string, string>): this
   /** Kill the process if it hasn't exited within `ms` milliseconds. */
-  timeout(ms: number): this
+  timeoutMilliseconds(ms: number): this
   stdinNull(): this
   stdinPipe(): this
   stdinBytes(data: Buffer): this
@@ -869,9 +901,9 @@ export declare class RestoreBuilder {
   /** Explicit wall-clock policy; omission preserves the snapshot/default policy. */
   guestClock(policy: string): this
   /** Apply the destination host's maximum runtime in seconds; zero expires immediately. */
-  maxDuration(secs: number): this
+  maxDurationSeconds(secs: number): this
   /** Apply the destination host's idle timeout in seconds; zero expires immediately. */
-  idleTimeout(secs: number): this
+  idleTimeoutSeconds(secs: number): this
   /** Accept missing restore resources without inheriting host resources. */
   allowMissingResources(): this
   /** Explicitly reuse locally validated source resource bindings. */
@@ -1105,6 +1137,12 @@ export type JsRuleDestinationBuilder = RuleDestinationBuilder
 export declare class Sandbox {
   /** Create a new history from this exact sandbox incarnation. */
   snapshot(name: string, options?: SnapshotCaptureOptions): Promise<SnapshotCreateResult>
+  /** Capture this retained identity without resolving a replacement by name. */
+  checkpoint(name: string): Promise<JsSnapshot>
+  /** Fetch storage usage through this resource's retained destination. */
+  storageUsage(): Promise<StorageItemUsageJs>
+  /** Return the retained destination without selecting a new one. */
+  context(): Context
   /** Retrieve a retained managed job in this sandbox. */
   getJob(id: string): Promise<Job>
   /** List bounded managed-job metadata without creating processes. */
@@ -1125,11 +1163,13 @@ export declare class Sandbox {
    */
   static startDetached(name: string): Promise<Sandbox>
   /**
-   * Get a lightweight handle to an existing sandbox.
+   * Look up an existing Sandbox without preparing its runtime.
    *
    * Sandbox names are limited to 128 UTF-8 bytes.
    */
-  static get(name: string): Promise<JsSandboxHandle>
+  static get(name: string): Promise<Sandbox>
+  /** Get an existing sandbox, connecting or starting it without creating it. */
+  static getRunning(name: string): Promise<Sandbox>
   /** Import or recover stopped storage without starting a VM. */
   static recoverStorage(name: string, optionsJson: string): Promise<string>
   /** List the first page of sandboxes. */
@@ -1142,17 +1182,20 @@ export declare class Sandbox {
    * Sandbox names are limited to 128 UTF-8 bytes.
    */
   static remove(name: string): Promise<void>
-  /** Backend retained by this sandbox (`"local"` or `"cloud"`). */
+  /** Context retained by this sandbox (`"local"` or `"cloud"`). */
   get backendKind(): string
-  /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
-  get name(): Promise<string>
+  /** Captured sandbox name, available without I/O or a live runtime. */
+  get name(): string
   /** Stable backend-assigned identity for this persisted sandbox. */
   get id(): string
   /** Whether this handle owns the sandbox lifecycle (attached mode). */
   get ownsLifecycle(): boolean
+  /** Prepare this receiver and retain a newly started local run. */
+  ensureRunning(): Promise<void>
+  /** Fetch a single live observation without preparing or starting the resource. */
+  infoJson(): Promise<string>
   /**
-   * Get the full configuration this sandbox was created with
-   * (image, cpus, memory, env, mounts, etc.) as a JSON string.
+   * Fetch the latest persisted configuration as a JSON string.
    * The TS layer parses + camelCase-remaps this into a plain object.
    */
   configJson(): Promise<string>
@@ -1186,10 +1229,8 @@ export declare class Sandbox {
   shellStream(script: string): Promise<ExecHandle>
   /** Get a filesystem handle for operations on the running sandbox. */
   fs(): SandboxFsOps
-  /** Connect a native in-process SSH client to this sandbox. */
-  sshConnect(options?: SshClientOptions | undefined | null): Promise<JsSshClient>
-  /** Prepare a reusable SSH server endpoint for this sandbox. */
-  sshServer(options?: SshServerOptions | undefined | null): Promise<JsSshServer>
+  /** Return an idle SSH facade without retaining a local shutdown owner. */
+  ssh(): JsSandboxSshOps
   /** Get point-in-time resource metrics. */
   metrics(): Promise<SandboxMetrics>
   /** Check whether agentd is reachable without refreshing idle activity. */
@@ -1265,7 +1306,7 @@ export declare class Sandbox {
   /** Request graceful drain without waiting for observed exit. */
   requestDrain(): Promise<void>
   /** Wait until this exact sandbox reaches the requested status. */
-  waitForStatus(status: string): Promise<JsSandboxHandle>
+  waitForStatus(status: string): Promise<void>
   /** Stop and start this exact sandbox. */
   restart(options?: SandboxRestartOptions | undefined | null): Promise<Sandbox>
   /** Stop and remove this exact sandbox. */
@@ -1274,11 +1315,10 @@ export declare class Sandbox {
   waitUntilStopped(): Promise<SandboxStopResult>
   /** Wait for the sandbox process to exit. */
   wait(): Promise<ExitStatus>
-  /**
-   * Detach from the sandbox — it will continue running after this handle is dropped.
-   * New operations are rejected; already admitted operations retain their connection.
-   */
+  /** Disarm shared automatic cleanup, keeping this sandbox usable. */
   detach(): Promise<void>
+  /** Native implementation of ownership-aware language scope cleanup. */
+  shutdownOwned(): Promise<void>
   /**
    * Remove the persisted database record after stopping.
    * Consumes this wrapper even on failure. Already admitted operations may finish or
@@ -1488,9 +1528,9 @@ export declare class SandboxBuilder {
   /** Mount many scripts at once. */
   scripts(scripts: Record<string, string>): this
   /** Auto-stop after `secs` seconds. */
-  maxDuration(secs: number): this
+  maxDurationSeconds(secs: number): this
   /** Auto-stop after `secs` seconds of inactivity. */
-  idleTimeout(secs: number): this
+  idleTimeoutSeconds(secs: number): this
   /**
    * Configure a volume mount via a callback. The callback receives a
    * `MountBuilder` already pre-bound to `guestPath`.
@@ -1580,145 +1620,12 @@ export declare class SandboxFsOps {
 }
 export type JsSandboxFsOps = SandboxFsOps
 
-/**
- * A lightweight handle to a sandbox from the database.
- *
- * Does NOT hold a live connection — use `connect()` or `start()` to get a live `Sandbox`.
- */
-export declare class SandboxHandle {
-  /** Retrieve a retained managed job in this sandbox. */
-  getJob(id: string): Promise<Job>
-  /** List bounded managed-job metadata without creating processes. */
-  listJobs(all: boolean, limit: number, cursor?: string | undefined | null): Promise<string>
-  /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
-  get name(): string
-  /** Stable backend-assigned identity for this persisted sandbox. */
-  get id(): string
-  /** Status at time of query. */
-  get status(): string
-  /** Backend retained by this handle (`"local"` or `"cloud"`). */
-  get backendKind(): string
-  /** Raw config JSON string from the database. */
-  get configJson(): string
-  /** Return a fresh handle for the same sandbox. */
-  refresh(): Promise<SandboxHandle>
-  /** Observe this sandbox's managed directory through its captured backend. */
-  storageUsage(): Promise<StorageItemUsageJs>
-  /** Creation timestamp as ms since Unix epoch. */
-  get createdAt(): number | null
-  /** Last update timestamp as ms since Unix epoch. */
-  get updatedAt(): number | null
-  /** Get point-in-time metrics from the database. */
-  metrics(): Promise<SandboxMetrics>
-  /**
-   * Check whether agentd is reachable without refreshing idle activity.
-   *
-   * Connects to an already-running sandbox; stopped sandboxes are not
-   * started implicitly.
-   */
-  ping(): Promise<SandboxPingResult>
-  /**
-   * Explicitly refresh this sandbox's idle activity timer.
-   *
-   * Connects to an already-running sandbox; stopped sandboxes are not
-   * started implicitly.
-   */
-  touch(): Promise<SandboxTouchResult>
-  /**
-   * Plan or apply a sandbox modification. Returns the plan as a JSON
-   * string; the TS wrapper parses it into a `SandboxModificationPlan`.
-   */
-  modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
-  /** Apply once and retain exact operation identities; older runtimes return no tracking. */
-  modifyWithResizeTracking(options?: SandboxModifyOptions | undefined | null): Promise<string>
-  /** Read current operation identities without changing targets. */
-  resizeOperations(): Promise<string>
-  /** Wait on supplied operation identities without following later requests. */
-  waitForResizeOperations(operationsJson: string, timeoutMs?: number | undefined | null): Promise<string>
-  /** Read the current live resize status as a JSON array. */
-  resizeStatus(): Promise<string>
-  /** Wait for live resizes to settle. Omitted waits without a deadline; `0` checks once. */
-  waitUntilResized(timeoutMs?: number | undefined | null): Promise<string>
-  /** Compact root and owned-data disk prefixes of a running or stopped sandbox. */
-  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
-  /** Start the sandbox (attached mode) — returns a live Sandbox handle. */
-  start(): Promise<Sandbox>
-  /** Start the sandbox (detached mode). */
-  startDetached(): Promise<Sandbox>
-  /** Connect to an already-running sandbox (no lifecycle ownership). */
-  connect(): Promise<Sandbox>
-  /** Connect when running, or start the same persisted sandbox when stopped. */
-  connectOrStart(detached?: boolean | undefined | null): Promise<Sandbox>
-  /**
-   * Connect with an explicit timeout in milliseconds.
-   *
-   * If the sandbox doesn't respond within this window, the call
-   * returns a typed error instead of blocking. `connect()` uses
-   * 10_000 ms by default.
-   */
-  connectWithTimeout(timeoutMs: number): Promise<Sandbox>
-  /**
-   * Stop the sandbox gracefully.
-   *
-   * Wait indefinitely for the targeted runtime to finish gracefully and release
-   * ownership. No implicit kill; use `stopWithTimeout` for a bounded wait.
-   */
-  stop(): Promise<void>
-  /** @deprecated Use fork for live execution duplication. */
-  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
-  /** @deprecated Use forkMany for live execution duplication. */
-  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
-  /** Create an independent local CoW child without a durable full snapshot. */
-  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
-  /** Capture once and return individual child startup outcomes. */
-  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
-  /** Explicit resident pause through host control. */
-  pause(guestFlush?: string | undefined | null): Promise<void>
-  /** Explicit resident resume through host control. */
-  resume(): Promise<void>
-  /** Request graceful shutdown without waiting. */
-  requestStop(): Promise<void>
-  /**
-   * One graceful-completion budget in milliseconds. Timeout rejects without killing;
-   * zero expires before dispatch.
-   */
-  stopWithTimeout(timeoutMs: number): Promise<void>
-  /** Force-kill the sandbox and wait until stopped state is observed. */
-  kill(): Promise<void>
-  /** Request force termination without waiting. */
-  requestKill(): Promise<void>
-  /** Force-kill the sandbox with an explicit observation timeout in milliseconds. */
-  killWithTimeout(timeoutMs: number): Promise<void>
-  /** Request graceful drain without waiting for completion. */
-  requestDrain(): Promise<void>
-  /** Wait until this exact sandbox reaches the requested status. */
-  waitForStatus(status: string): Promise<SandboxHandle>
-  /** Stop and start this exact sandbox. */
-  restart(options?: SandboxRestartOptions | undefined | null): Promise<Sandbox>
-  /** Stop and remove this exact sandbox. */
-  destroy(options?: SandboxDestroyOptions | undefined | null): Promise<void>
-  /** Wait until the sandbox is observed in a terminal non-running state. */
-  waitUntilStopped(): Promise<SandboxStopResult>
-  /** Remove the sandbox from the database. */
-  remove(): Promise<void>
-  /**
-   * Read captured output from `exec.log` for this sandbox.
-   *
-   * Works without starting the sandbox.
-   */
-  logs(opts?: LogOptions | undefined | null): Promise<Array<LogEntry>>
-  /**
-   * Stream captured output as it appears, with optional follow.
-   *
-   * Works without starting the sandbox; with `follow: true`, the
-   * stream picks up new entries the moment they land in
-   * `exec.log`.
-   */
-  logStream(opts?: LogStreamOptions | undefined | null): Promise<LogStream>
-  /** Create a new history with the exact initial checkpoint and capture head outcome. */
-  snapshot(name: string, options?: SnapshotCaptureOptions): Promise<SnapshotCreateResult>
+/** Idle SSH facade that resolves its original receiver when work begins. */
+export declare class SandboxSshOps {
+  openClient(options?: SshClientOptions | undefined | null): Promise<SshClient>
+  prepareServer(options?: SshServerOptions | undefined | null): Promise<SshServer>
 }
-export type JsSandboxHandle = SandboxHandle
+export type JsSandboxSshOps = SandboxSshOps
 
 /** Fluent builder for a single secret entry. */
 export declare class SecretBuilder {
@@ -1762,11 +1669,7 @@ export declare class SecretBuilder {
   substituteInBody(enabled: boolean): this
   /** Configure the blocking action for this secret. */
   violationAction(action: string): this
-  /**
-   * Materialize into a `SecretEntry`. Panics if required fields are not
-   * set (matches the underlying Rust builder's contract; surface as a
-   * typed error here).
-   */
+  /** Validate the declaration and materialize a secret entry. */
   build(): SecretEntry
 }
 export type JsSecretBuilder = SecretBuilder
@@ -1838,42 +1741,49 @@ export declare class Snapshot {
    * The destination builder is consumed before suspension and must not be reused.
    */
   spawnSandboxWithProgressBuilder(builder: RestoreBuilder): Promise<PullProgressCreate>
+  /** Return the retained destination without selecting a new one. */
+  context(): Context
   static open(pathOrName: string): Promise<Snapshot>
-  static get(nameOrDigest: string): Promise<SnapshotHandle>
-  static list(): Promise<Array<SnapshotInfo>>
+  static get(nameOrDigest: string): Promise<Snapshot>
+  static list(): Promise<Array<Snapshot>>
   static remove(pathOrName: string, opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
-  static load(archive: string, dest?: string | undefined | null, base?: string | undefined | null): Promise<SnapshotHandle>
-  static loadWithOptions(archive: string, opts?: LoadOpts | undefined | null): Promise<SnapshotHandle>
+  static load(archive: string, dest?: string | undefined | null, base?: string | undefined | null): Promise<Snapshot>
+  static loadWithOptions(archive: string, opts?: LoadOpts | undefined | null): Promise<Snapshot>
   /** Import archives together, retaining their call-time path interpretation. */
-  static loadMany(archives: Array<string>, opts?: LoadOpts | undefined | null): Promise<SnapshotHandle[]>
-  /** Read a group's head, or select `group:member` as its head. */
+  static loadMany(archives: Array<string>, opts?: LoadOpts | undefined | null): Promise<Snapshot[]>
+  /** Preserve the legacy selector while the read-only collection method stays separate. */
   static groupHead(selector: string): Promise<HeadUpdate>
+  static readGroupHead(group: string): Promise<string | null>
+  static setGroupHead(group: string, id: string): Promise<HeadUpdate>
   /** Deprecated: use `reference`. Throws when no local filesystem path exists. */
   get path(): string
   get reference(): string
   get referenceKind(): 'id' | 'path'
-  /** Outcome of the group head update performed by this capture. */
   get headUpdate(): HeadUpdate | null
   get id(): string
   get digest(): string
   get sizeBytes(): bigint | null
   get imageRef(): string
-  get imageManifestDigest(): string
   get stateKind(): string
   get format(): string | null
   get fstype(): string | null
-  get upperFile(): string | null
-  get upperIntegrityAlgorithm(): string | null
-  get upperIntegrityDigest(): string | null
-  get upperIntegrityLogicalSize(): bigint | null
-  get upperIntegrityLeafSize(): number | null
-  get checkpointId(): string | null
   get checkpointManifestDigest(): string | null
   get parent(): string | null
   get scope(): 'disk' | 'full'
   get createdAt(): string
-  get labels(): Record<string, string>
-  get sourceSandbox(): string | null
+  get group(): string | null
+  get name(): string | null
+  get parentDigest(): string | null
+  get locality(): string
+  get availability(): string
+  get migrationState(): string
+  get migrationErrorCode(): string | null
+  /** Full normalized descriptor document; the wire descriptor digest remains `digest`. */
+  manifest(): Promise<string>
+  /** A fresh descriptor observation. It is safe to retain this value as a snapshot of metadata. */
+  metadata(): Promise<SnapshotMetadata>
+  labels(): Promise<Record<string, string>>
+  destroy(opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
   /** Walk `dir` and parse each snapshot artifact within it. */
   static listDir(dir: string): Promise<Array<Snapshot>>
   /** Rebuild the backend snapshot index from artifacts in `dir`. */
@@ -1963,6 +1873,8 @@ export type JsSnapshotCopyBuilder = SnapshotCopyBuilder
 
 /** A named snapshot history, separate from an immutable checkpoint. */
 export declare class SnapshotGroup {
+  /** A restore builder must come from the same native provider as this history. */
+  context(): Context
   /** Observe metadata and source association without selecting a checkpoint for execution. */
   inspectJson(): Promise<string>
   /** Return the committed member set and head outcome without a later catalog read. */
@@ -1990,7 +1902,7 @@ export declare class SnapshotGroup {
   static list(): Promise<Array<SnapshotGroup>>
   get name(): string
   head(): Promise<Snapshot | null>
-  checkpoints(): Promise<Array<SnapshotHandle>>
+  checkpoints(): Promise<Array<Snapshot>>
   getCheckpoint(member: string): Promise<Snapshot>
   setHead(member: string): Promise<HeadUpdate>
   clearHead(): Promise<HeadUpdate>
@@ -1999,38 +1911,27 @@ export declare class SnapshotGroup {
 }
 export type JsSnapshotGroup = SnapshotGroup
 
-/** Lightweight snapshot handle returned by the active backend. */
-export declare class SnapshotHandle {
-  /** Observe this artifact's storage through its captured backend. */
-  storageUsage(): Promise<StorageItemUsageJs>
-  get group(): string | null
-  get headUpdate(): HeadUpdate | null
-  get id(): string
-  get digest(): string
-  get name(): string | null
-  get parentDigest(): string | null
-  get scope(): 'disk' | 'full'
+/** One loaded descriptor observation used to project state without repeated backend lookups. */
+export declare class SnapshotMetadata {
   get imageRef(): string
+  get imageManifestDigest(): string
   get stateKind(): string
   get format(): string | null
   get fstype(): string | null
+  get upperFile(): string | null
+  get upperIntegrityAlgorithm(): string | null
+  get upperIntegrityDigest(): string | null
+  get upperIntegrityLogicalSize(): bigint | null
+  get upperIntegrityLeafSize(): number | null
+  get checkpointId(): string | null
   get checkpointManifestDigest(): string | null
+  get parent(): string | null
+  get scope(): 'disk' | 'full'
+  get createdAt(): string
+  get sourceSandbox(): string | null
   get sizeBytes(): bigint | null
-  get locality(): string
-  get availability(): string
-  get migrationState(): string
-  get migrationErrorCode(): string | null
-  get createdAt(): number
-  /** Deprecated: use `reference`. Throws when no local filesystem path exists. */
-  get path(): string
-  get reference(): string
-  get referenceKind(): 'id' | 'path'
-  open(): Promise<Snapshot>
-  remove(opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
-  /** Bundle this snapshot into a `.tar.zst` archive. */
-  saveTo(out: string, opts?: SaveOpts | undefined | null): Promise<void>
 }
-export type JsSnapshotHandle = SnapshotHandle
+export type JsSnapshotMetadata = SnapshotMetadata
 
 /** Builds a SOCKS4 outbound proxy. */
 export declare class Socks4ProxyBuilder {
@@ -2095,10 +1996,22 @@ export declare class TlsBuilder {
 export type JsTlsBuilder = TlsBuilder
 
 export declare class Volume {
-  static get(name: string): Promise<VolumeHandle>
-  static getDefault(): Promise<VolumeHandle>
-  static list(): Promise<Array<VolumeInfo>>
+  /** Return the retained destination without selecting a new one. */
+  context(): Context
+  static get(name: string): Promise<Volume>
+  static getDefault(): Promise<Volume>
+  static list(): Promise<Array<Volume>>
   static remove(name: string): Promise<void>
+  /** Stable identity within the retained destination; no I/O. */
+  get id(): string
+  get isDefault(): boolean
+  get kind(): string
+  get diskFormat(): string | null
+  get diskFstype(): string | null
+  get createdAt(): number | null
+  /** Return one fresh provider observation without cached fallback. */
+  info(): Promise<string>
+  destroy(): Promise<void>
   get name(): string
   get path(): string
   /** Direct filesystem operations through this volume's bound backend. */
@@ -2168,23 +2081,6 @@ export declare class VolumeFsWriteSink {
 }
 export type JsVolumeFsWriteSink = VolumeFsWriteSink
 
-export declare class VolumeHandle {
-  get name(): string
-  get isDefault(): boolean
-  get quotaMib(): number | null
-  get kind(): string
-  get usedBytes(): number
-  get capacityBytes(): number | null
-  get diskFormat(): string | null
-  get diskFstype(): string | null
-  get labels(): Record<string, string>
-  get createdAt(): number | null
-  remove(): Promise<void>
-  /** Direct filesystem operations through this volume's bound backend. */
-  fs(): VolumeFs
-}
-export type JsVolumeHandle = VolumeHandle
-
 /** Options for connecting to an agent relay. */
 export interface AgentConnectOptions {
   /** Handshake timeout in milliseconds. Defaults to 10_000. */
@@ -2210,11 +2106,8 @@ export interface CheckpointCaptureResult {
   headUpdate: HeadUpdate
 }
 
-/** Return secret-safe information about the active default backend. */
-export declare function defaultBackendInfo(): JsBackendInfo
-
-/** Return the active default backend kind (`"local"` or `"cloud"`). */
-export declare function defaultBackendKind(): string
+/** Read selection before choosing a provider-specific native library. */
+export declare function configuredProviderKind(): string
 
 /** Inspect explicitly selected storage without initializing the normal backend. */
 export declare function diagnoseStorage(configJson: string, selectionJson: string): Promise<string>
@@ -2397,14 +2290,6 @@ export declare function installRuntime(configJson: string, optionsJson: string):
 /** Check whether a complete runtime pair resolves. */
 export declare function isRuntimeInstalled(configJson: string): boolean
 
-/** Secret-safe backend diagnostics returned to JavaScript. */
-export interface JsBackendInfo {
-  kind: string
-  apiUrl?: string
-  source: string
-  profile?: string
-}
-
 /** One child result from a capture-once batch, in caller order. */
 export interface JsBranchOutcome {
   name: string
@@ -2414,7 +2299,7 @@ export interface JsBranchOutcome {
 
 /** One page returned by `Sandbox.list` / `Sandbox.listWith`. */
 export interface JsSandboxPage {
-  sandboxes: Array<JsSandboxHandle>
+  sandboxes: Array<Sandbox>
   nextCursor?: string
 }
 
@@ -2616,8 +2501,8 @@ export interface PatchReplaceOnly {
   replace?: boolean
 }
 
-/** Restore the backend saved by `pushDefaultBackend`. */
-export declare function popDefaultBackend(token: number): void
+/** Package loaders validate this before accepting any native objects. */
+export declare function providerInfo(): string
 
 /**
  * One progress event emitted during image pull and EROFS materialization.
@@ -2649,14 +2534,6 @@ export interface PullProgressEvent {
   totalBytes?: number
   bytesRead?: number
 }
-
-/**
- * Temporarily replace the process-wide default backend and return a scope token.
- *
- * The caller must pass the returned token to `popDefaultBackend`; concurrent
- * JavaScript work in the same process can observe the temporary backend.
- */
-export declare function pushDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): number
 
 /**
  * A raw protocol frame: correlation id, flags, and CBOR-encoded body bytes.
@@ -2741,7 +2618,7 @@ export interface SandboxMetrics {
 }
 
 /**
- * Options accepted by `Sandbox.modify()` / `SandboxHandle.modify()`.
+ * Options accepted by `Sandbox.modify()`.
  *
  * `memoryMib` / `maxMemoryMib` / `rootDiskSizeMib` are in MiB. `policy` is `"no_restart"`
  * (default), `"next_start"`, or `"restart"`. With `dryRun: true` the plan
@@ -2766,7 +2643,7 @@ export interface SandboxModifyOptions {
   dryRun?: boolean
 }
 
-/** Result returned by `Sandbox.ping()` / `SandboxHandle.ping()`. */
+/** Result returned by `Sandbox.ping()`. */
 export interface SandboxPingResult {
   name: string
   latencyMs: number
@@ -2789,7 +2666,7 @@ export interface SandboxStopResult {
   source?: string
 }
 
-/** Result returned by `Sandbox.touch()` / `SandboxHandle.touch()`. */
+/** Result returned by `Sandbox.touch()`. */
 export interface SandboxTouchResult {
   name: string
   activitySeq: number
@@ -2920,14 +2797,6 @@ export interface ServiceUpdateOptions {
   target: ServiceTarget
 }
 
-/**
- * Set the process-wide default backend.
- *
- * `kind="local"` selects the local backend. `kind="cloud"` requires either an
- * API key (with an optional URL override), or a profile.
- */
-export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
-
 /** Register the platform package executable as a fallback after the runtime home. */
 export declare function setPackagedMsbPath(path: string): void
 
@@ -2984,39 +2853,11 @@ export interface SnapshotCreateResult {
 export interface SnapshotImportResult {
   operationId: string
   snapshot: SnapshotGroup
-  checkpoints: Array<SnapshotHandle>
+  checkpoints: Array<Snapshot>
   added: Array<string>
   reused: Array<string>
   headUpdate: HeadUpdate
   warnings: Array<string>
-}
-
-/** Snapshot index info from the local DB cache. */
-export interface SnapshotInfo {
-  id: string
-  digest: string
-  name?: string
-  group?: string
-  headUpdate?: HeadUpdate
-  parentDigest?: string
-  imageRef: string
-  /** `"disk"` for file state or `"full"` for a complete VM checkpoint. */
-  scope: string
-  /** `"raw"` or `"qcow2"`. */
-  stateKind: string
-  format?: string
-  fstype?: string
-  checkpointManifestDigest?: string
-  sizeBytes?: number
-  locality: string
-  availability: string
-  migrationState: string
-  migrationErrorCode?: string
-  createdAt: number
-  /** Local filesystem path, absent for remote snapshots. */
-  path?: string
-  reference: string
-  referenceKind: 'id' | 'path'
 }
 
 export interface SnapshotLabel {
@@ -3168,20 +3009,6 @@ export interface VolumeConfig {
   quotaMib?: number
   capacityMib?: number
   labels: Record<string, string>
-}
-
-/** Volume handle info from the database. */
-export interface VolumeInfo {
-  name: string
-  isDefault: boolean
-  kind: string
-  quotaMib?: number
-  usedBytes: number
-  capacityBytes?: number
-  diskFormat?: string
-  diskFstype?: string
-  labels: Record<string, string>
-  createdAt?: number
 }
 
 /**

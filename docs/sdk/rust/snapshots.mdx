@@ -9,6 +9,8 @@ keywords: ["Rust SDK", "Rust snapshots", "microsandbox snapshots"]
 
 Manage local snapshot groups and immutable checkpoints. See the [snapshot guide](/sandboxes/snapshots) for workflows, cloud support and migration.
 
+Use `ctx.snapshots().get(name)` for a history and `ctx.checkpoints().get(id)` for one checkpoint. Both collections retain the selected provider. Cloud supports individual disk checkpoints. Spawning from an exact remote checkpoint requires a managed ID. An explicit host-volume path restore selects the contents currently at that path.
+
 ## Sandbox capture
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">snapshot()</span>
@@ -17,7 +19,7 @@ Manage local snapshot groups and immutable checkpoints. See the [snapshot guide]
 async fn snapshot(&self, group: &str) -> MicrosandboxResult<SnapshotCreateResult>
 ```
 
-Create a source-bound group and its first disk checkpoint with default capture options. Available on both `Sandbox` and `SandboxHandle`; an existing group is refused.
+Create a source-bound group and its first disk checkpoint with default capture options. Available on both `Sandbox`; an existing group is refused.
 
 <span id="group-lifecycle-and-08-migration" />
 
@@ -118,7 +120,7 @@ Clear selection while preserving every member. Clearing an already empty selecti
 #### <span className="msb-recv">group.</span><span className="msb-hn">checkpoints()</span>
 
 ```rust
-async fn checkpoints(&self) -> MicrosandboxResult<Vec<SnapshotHandle>>
+async fn checkpoints(&self) -> MicrosandboxResult<Vec<Checkpoint>>
 ```
 
 List immutable members in stable ID order, including when the group has no head.
@@ -278,12 +280,24 @@ Local-only. Returns a progress handle and a result task. Await the result task t
 
 A failed capture can still have published its requested artifact before source recovery failed. `SnapshotSourceRecoveryError` preserves the source checkpoint recovery locator and, when publication completed, the published artifact’s kind, path, identity, digest and `head_update`. The head outcome belongs to that publication even if another operation changes the group afterward. Archive-only capture and older producers omit it; do not infer it by reading the current head. Inspect those details before retrying or removing the source. The error does not prove that the source is running or safely paused.
 
+
 ## Static methods
 
-Artifact helpers formerly owned by `Snapshot` are now accessed through `Checkpoint`. Existing `SnapshotHandle`, builder, archive, ID, and verification type names remain; this public object rename does not rewrite persisted artifact IDs. Retained artifact helpers below also cover supported cloud workflows, where local group operations return unsupported.
+#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">local()</span>
 
-<span id="snapshot-builder" />
-<span id="snapshotbuilder" />
+```rust
+fn local() -> Snapshots
+```
+
+Select the default-local destination. Requires the local feature. Does not consult remote selection variables. See [selector examples](/operations/backends#resource-selectors).
+
+#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">remote()</span>
+
+```rust
+fn remote() -> MicrosandboxResult<Snapshots>
+```
+
+Capture remote environment credentials and endpoint without network I/O. Requires the cloud feature. Missing credentials fail; existing resources keep their destination. See [selector examples](/operations/backends#resource-selectors).
 
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">builder()</span>
 
@@ -314,8 +328,6 @@ Configure a snapshot. Set the required source with `from_sandbox()`; see [Snapsh
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
 let snap = Checkpoint::builder("baseline")
     .from_sandbox("api")
     .create()
@@ -325,9 +337,6 @@ let snap = Checkpoint::builder("baseline")
 </Accordion>
 
 ---
-
-<span id="snapshot-create" />
-<span id="snapshotcreate" />
 
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">create()</span>
 
@@ -358,8 +367,6 @@ Create an installed snapshot artifact atomically, then best-effort update the re
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
 let snap = Checkpoint::create(
     Checkpoint::builder("baseline").from_sandbox("api").build()?
 ).await?;
@@ -368,9 +375,6 @@ let snap = Checkpoint::create(
 </Accordion>
 
 ---
-
-<span id="snapshot-create_archive" />
-<span id="snapshotcreate_archive" />
 
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">create_archive()</span>
 
@@ -387,8 +391,6 @@ Capture a disk or full snapshot directly into an archive without installing it l
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
 let archive = Checkpoint::create_archive(
     Checkpoint::builder("baseline").from_sandbox("api").build()?,
     "/tmp/baseline.msb",
@@ -401,9 +403,6 @@ println!("{} {}", archive.id(), archive.path().display());
 
 ---
 
-<span id="snapshot-open" />
-<span id="snapshotopen" />
-
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">open()</span>
 
 ```rust
@@ -413,8 +412,6 @@ async fn open(path_or_name: impl AsRef<str>) -> MicrosandboxResult<Checkpoint>
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
 let snap = Checkpoint::open("api:baseline").await?;
 println!("{}", snap.manifest().image.reference);
 ```
@@ -447,9 +444,6 @@ For the local backend, relative artifact paths are resolved when the operation b
   </div>
 </div>
 
-<span id="snapshot-open_ref" />
-<span id="snapshotopen_ref" />
-
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">open_ref()</span>
 
 ```rust
@@ -464,35 +458,27 @@ a path.
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-use microsandbox::SnapshotReference;
-
 let snap = Checkpoint::open_ref(SnapshotReference::Id(snapshot_id)).await?;
 ```
 
 </Accordion>
 
-<span id="snapshot-get" />
-<span id="snapshotget" />
-
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">get()</span>
 
 ```rust
-async fn get(name_or_digest: &str) -> MicrosandboxResult<SnapshotHandle>
+async fn get(name_or_digest: &str) -> MicrosandboxResult<Checkpoint>
 ```
 
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
 let h = Checkpoint::get("api:baseline").await?;
 println!("{} from {}", h.digest(), h.image_ref());
 ```
 
 </Accordion>
 
-Look up a lightweight [`SnapshotHandle`](#snapshothandle) by group head, `group:member`, stable snapshot ID, descriptor digest, or artifact path. Global IDs and digests must resolve unambiguously.
+Look up a lightweight [`Checkpoint`](#snapshot) by group head, `group:member`, stable snapshot ID, descriptor digest, or artifact path. Global IDs and digests must resolve unambiguously.
 
 <p className="msb-label">Parameters</p>
 
@@ -507,25 +493,20 @@ Look up a lightweight [`SnapshotHandle`](#snapshothandle) by group head, `group:
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">SnapshotHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
     <div className="msb-param-desc">Handle backed by the matching index row.</div>
   </div>
 </div>
 
-<span id="snapshot-list" />
-<span id="snapshotlist" />
-
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">list()</span>
 
 ```rust
-async fn list() -> MicrosandboxResult<Vec<SnapshotHandle>>
+async fn list() -> MicrosandboxResult<Vec<Checkpoint>>
 ```
 
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
 for h in Checkpoint::list().await? {
     println!("{:?} - {}", h.name(), h.digest());
 }
@@ -541,13 +522,10 @@ included automatically.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Vec&lt;SnapshotHandle&gt;</a></div>
-    <div className="msb-param-desc">Indexed snapshot handles, ordered by creation time descending.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Vec&lt;Checkpoint&gt;</a></div>
+    <div className="msb-param-desc">Indexed snapshot resources, ordered by creation time descending.</div>
   </div>
 </div>
-
-<span id="snapshot-list_dir" />
-<span id="snapshotlist_dir" />
 
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">list_dir()</span>
 
@@ -575,23 +553,21 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
   </div>
 </div>
 
-#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">remove_by_reference()</span>
+#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">remove()</span>
 
 ```rust
-async fn remove_by_reference(path_or_name: &str, force: bool) -> MicrosandboxResult<()>
+async fn remove(path_or_name: &str, force: bool) -> MicrosandboxResult<()>
 ```
 
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
-Checkpoint::remove_by_reference("api:baseline", false).await?;
+Checkpoint::remove("api:baseline", false).await?;
 ```
 
 </Accordion>
 
-Remove a snapshot artifact by group selector, unambiguous ID or digest, or path, along with its index row. Refuses if the snapshot has indexed children unless `force` is set. Removing head atomically selects its surviving recorded same-group parent, or clears head if none survives. Non-head removal leaves head unchanged. Active readers still prevent removal, including with `force`. Group-member removal requires the same filesystem capabilities and older-writer maintenance interval as atomic import.
+Remove a snapshot artifact by group selector, unambiguous ID or digest, or path, along with its index row. Refuses if the snapshot has indexed children unless `force` is set. A group's head cannot be removed while other members remain, even with `force`; select another head first.
 
 <p className="msb-label">Parameters</p>
 
@@ -606,9 +582,6 @@ Remove a snapshot artifact by group selector, unambiguous ID or digest, or path,
   </div>
 </div>
 
-<span id="snapshot-remove_ref" />
-<span id="snapshotremove_ref" />
-
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">remove_ref()</span>
 
 ```rust
@@ -619,11 +592,8 @@ async fn remove_ref(
 ```
 
 Remove a snapshot using an explicit backend-neutral reference. Prefer this
-over `Checkpoint::remove_by_reference()` when the value came from
-`Checkpoint::reference()` or `SnapshotHandle::reference()`.
-
-<span id="snapshot-reindex" />
-<span id="snapshotreindex" />
+over [`remove()`](#snapshotremove) when the value came from
+`Checkpoint::reference()` or `Checkpoint::reference()`.
 
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">reindex()</span>
 
@@ -654,16 +624,11 @@ Rebuild the local snapshot index from artifacts in `dir`.
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
 let n = Checkpoint::reindex("/data/snapshots").await?;
 println!("indexed {n} snapshots");
 ```
 
 </Accordion>
-
-<span id="snapshot-reindex_default" />
-<span id="snapshotreindex_default" />
 
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">reindex_default()</span>
 
@@ -678,14 +643,11 @@ on backends without a rebuildable artifact index.
 
 ---
 
-<span id="snapshot-save" />
-<span id="snapshotsave" />
-
-#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">save_by_reference()</span>
+#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">save()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
-async fn save_by_reference(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()>
+async fn save(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()>
 ```
 
 Bundle a snapshot into a `.msb` archive (or plain `.tar`) at `out`. Recorded payload integrity is preserved but not executed implicitly; call [`verify()`](#snap-verify) when an independent content scan is part of your workflow. See [`SaveOpts`](#saveopts) to also include ancestors and the OCI image cache.
@@ -710,11 +672,10 @@ Bundle a snapshot into a `.msb` archive (or plain `.tar`) at `out`. Recorded pay
 <Accordion title="Example">
 
 ```rust
-use std::path::Path;
-use microsandbox::Checkpoint;
 use microsandbox::snapshot::SaveOpts;
+use std::path::Path;
 
-Checkpoint::save_by_reference(
+Checkpoint::save(
     "api:baseline",
     Path::new("/tmp/baseline.msb"),
     SaveOpts { with_parents: true, with_image: true, ..Default::default() },
@@ -725,21 +686,17 @@ Checkpoint::save_by_reference(
 
 ---
 
-<span id="snapshot-load" />
-<span id="snapshotload" />
-
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">load()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
-async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<SnapshotHandle>
+async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Checkpoint>
 ```
 
 <Accordion title="Example">
 
 ```rust
 use std::path::Path;
-use microsandbox::Checkpoint;
 
 let h = Checkpoint::load(Path::new("/tmp/baseline.msb"), None).await?;
 println!("loaded {}", h.digest());
@@ -766,7 +723,7 @@ Unpack a snapshot archive (`.msb` or `.tar`, detected from magic bytes) into the
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">SnapshotHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
     <div className="msb-param-desc">Handle for the archive-declared head snapshot, which may differ from the receiving group's selected head.</div>
   </div>
 </div>
@@ -775,7 +732,6 @@ Unpack a snapshot archive (`.msb` or `.tar`, detected from magic bytes) into the
 
 ```rust
 use std::path::Path;
-use microsandbox::Checkpoint;
 
 let h = Checkpoint::load(Path::new("/tmp/baseline.msb"), None).await?;
 println!("loaded {}", h.digest());
@@ -789,9 +745,6 @@ println!("loaded {}", h.digest());
 
 Methods on an opened [`Checkpoint`](#snapshotopen) artifact.
 
-<span id="snapshot-load_with_base" />
-<span id="snapshotload_with_base" />
-
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">load_with_base()</span>
 
 ```rust
@@ -799,13 +752,10 @@ async fn load_with_base(
     path: &Path,
     dest: Option<&Path>,
     base: &str,
-) -> MicrosandboxResult<SnapshotHandle>
+) -> MicrosandboxResult<Checkpoint>
 ```
 
 Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
-
-<span id="snapshot-load_with_options" />
-<span id="snapshotload_with_options" />
 
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">load_with_options()</span>
 
@@ -813,13 +763,10 @@ Import an archive with an explicit dependency base or destination group. See [im
 async fn load_with_options(
     path: &Path,
     opts: LoadOpts,
-) -> MicrosandboxResult<SnapshotHandle>
+) -> MicrosandboxResult<Checkpoint>
 ```
 
 Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
-
-<span id="snapshot-load_many" />
-<span id="snapshotload_many" />
 
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">load_many()</span>
 
@@ -827,21 +774,19 @@ Import an archive with an explicit dependency base or destination group. See [im
 async fn load_many(
     paths: &[PathBuf],
     opts: LoadOpts,
-) -> MicrosandboxResult<Vec<SnapshotHandle>>
+) -> MicrosandboxResult<Vec<Checkpoint>>
 ```
 
 Import archives as one batch. Returns handles in input order. Dependencies resolve from the batch, the named group, or an explicit base; input order does not matter. All members are validated before publication.
 
-<span id="snapshot-group_head" />
-<span id="snapshotgroup_head" />
-
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">group_head()</span>
 
 ```rust
-async fn group_head(selector: &str) -> MicrosandboxResult<HeadUpdate>
+async fn group_head(group: &str) -> MicrosandboxResult<Option<SnapshotId>>
+async fn set_group_head(group: &str, id: &SnapshotId) -> MicrosandboxResult<HeadUpdate>
 ```
 
-Read a group’s head, or select an exact member with `group:member`. Returns the group, previous and current snapshot IDs, reason, and whether the head changed. See [group selection](/sandboxes/snapshots#snapshot-groups).
+Read the selected ID from a local group, or explicitly set it to an installed member’s stable ID. A headless group returns an absent ID. A missing group or qualified group name raises an error. The write returns the previous and current IDs, reason and change flag. See [group selection](/sandboxes/snapshots#snapshot-groups).
 
 <span id="snapshot-groups" />
 
@@ -851,166 +796,41 @@ Read a group’s head, or select an exact member with `group:member`. Returns th
 
 Options for `LoadOpts`.
 
-#### <span className="msb-recv">LoadOpts.</span><span className="msb-hn">dest</span>
-
-```rust
-dest: Option<PathBuf>
-```
-
-Parent directory containing groups. Defaults to the local snapshot store.
-
-
-#### <span className="msb-recv">LoadOpts.</span><span className="msb-hn">base</span>
-
-```rust
-base: Option<String>
-```
-
-External snapshot or standalone archive for missing dependencies.
-
-
-#### <span className="msb-recv">LoadOpts.</span><span className="msb-hn">group</span>
-
-```rust
-group: Option<String>
-```
-
-Destination group. Omit to create one group for the import.
-
-
-#### <span className="msb-recv">LoadOpts.</span><span className="msb-hn">set_head</span>
-
-```rust
-set_head: bool
-```
-
-Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip.
-
+| Option | Purpose |
+| --- | --- |
+| `dest` | Parent directory containing groups. Defaults to the local snapshot store. |
+| `base` | External snapshot or standalone archive for missing dependencies. |
+| `group` | Destination group. Omit to create one group for the import. |
+| `set_head` | Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip. |
 
 With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
 
 ## Instance methods
 
-<span id="save-an-exact-checkpoint" />
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">save()</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">destroy()</span>
 
 ```rust
-async fn save(&self, out: impl AsRef<Path>) -> MicrosandboxResult<()>
+async fn destroy(&self, force: bool) -> MicrosandboxResult<()>
 ```
+
+Delete the captured snapshot through its retained context. Local deletion checks the descriptor identity under the deletion lease; managed remote snapshots use the captured resource ID. Remote path snapshots return `Unsupported` until the provider supports atomic conditional deletion. `force` does not bypass identity checks or enable unsafe path deletion. Explicit path-selected removal remains available through `Checkpoint::remove_ref(...)` and context collections.
 
 <Accordion title="Example">
 
 ```rust
-checkpoint.save("ready.msb").await?;
-checkpoint.save_with("portable.msb", |save| save.with_parents().with_image()).await?;
+let snapshot = Checkpoint::open("api:baseline").await?;
+snapshot.destroy(false).await?;
 ```
 
 </Accordion>
-
-The receiver selects one immutable checkpoint. Use the group’s optional head or exact-member lookup first; saving a group’s whole history is not implied. The no-options call writes a compressed `.msb` archive. `save_to` retains its explicit options form for compatibility. See the archive compatibility option below before sending output to an older reader.
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">save_with()</span>
-
-```rust
-async fn save_with(
-    &self,
-    out: impl AsRef<Path>,
-    configure: impl FnOnce(SaveOpts) -> SaveOpts,
-) -> MicrosandboxResult<()>
-```
-
-Configure archive options for this exact checkpoint. See [SaveOpts](#saveopts).
-
-<span id="exact-checkpoint-removal" />
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">remove()</span>
-
-```rust
-async fn remove(&self) -> MicrosandboxResult<CheckpointRemoveResult>
-```
-
-Migration: static Rust `Snapshot::remove(reference, force)` becomes `Checkpoint::remove_by_reference(reference, force)`. Use the instance method below for exact identity and a removal result. Legacy `SnapshotHandle::remove(force)` retains its unit-returning contract.
-
-<Accordion title="Example">
-
-```rust
-let removed = checkpoint.remove().await?;
-let forced = checkpoint.remove_with(|options| options.force()).await?;
-```
-
-</Accordion>
-
-These are alternative calls, not successive removals of the same checkpoint. The instance method removes the retained checkpoint identity, refuses a replacement at the same address, and returns `CheckpointRemoveResult` with `id`, optional `head_update`, and `warnings`. The head outcome belongs to this operation; later head edits do not change it. Removing the head selects its surviving same-group parent or clears selection. Removing another member reports an unchanged head. Standalone artifacts have no head outcome.
-
-Force permits removal despite indexed children, but never bypasses reader protection. A repeated removal reports a missing checkpoint rather than fabricating another successful result. Backends or native libraries without exact-removal reporting return unsupported instead of falling back to deletion by name.
-
-If removal commits but catalog cleanup fails, the call returns `MicrosandboxError::SnapshotRemovalRecovery { result, source }`. Its result is authoritative: removal already happened. Recover the affected storage before retrying cleanup; do not assume an error means the checkpoint still exists.
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">remove_with()</span>
-
-```rust
-async fn remove_with(
-    &self,
-    configure: impl FnOnce(CheckpointRemoveOptions) -> CheckpointRemoveOptions,
-) -> MicrosandboxResult<CheckpointRemoveResult>
-```
-
-Configure exact removal with `CheckpointRemoveOptions`. Force never bypasses active-reader protection.
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox()</span>
-
-```rust
-async fn spawn_sandbox(&self) -> MicrosandboxResult<Sandbox>
-```
-
-Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with()</span>
-
-```rust
-async fn spawn_sandbox_with(
-    &self,
-    configure: impl FnOnce(RestoreBuilder) -> RestoreBuilder,
-) -> MicrosandboxResult<Sandbox>
-```
-
-Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with_progress()</span>
-
-```rust
-async fn spawn_sandbox_with_progress(
-    &self,
-) -> MicrosandboxResult<(
-    CreationProgressHandle,
-    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
-)>
-```
-
-Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with_progress_with()</span>
-
-```rust
-async fn spawn_sandbox_with_progress_with(
-    &self,
-    configure: impl FnOnce(RestoreBuilder) -> RestoreBuilder,
-) -> MicrosandboxResult<(
-    CreationProgressHandle,
-    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
-)>
-```
-
-Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">id()</span>
 
 ```rust
-fn id(&self) -> &SnapshotId
+fn id(&self) -> &str
 ```
 
-Stable opaque `snap_...` identity. Copying, archiving, or relabeling the snapshot preserves this value.
+Stable opaque identity captured at selection time; older catalog entries may use a descriptor digest. Copying, archiving, or relabeling the snapshot preserves this value.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">digest()</span>
 
@@ -1046,31 +866,45 @@ Backend-neutral locator that preserves whether the snapshot is addressed by an i
   </div>
 </div>
 
+#### <span className="msb-recv">snap.</span><span className="msb-hn">state()</span>
+
+```rust
+async fn state(&self) -> MicrosandboxResult<SnapshotState>
+```
+
+Load current descriptor metadata and return its state. The lookup validates the captured descriptor identity; missing or replaced artifacts return errors.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">labels()</span>
+
+```rust
+async fn labels(&self) -> MicrosandboxResult<BTreeMap<String, String>>
+```
+
+Fetch current mutable labels. No stale fallback is returned if loading fails.
+
 #### <span className="msb-recv">snap.</span><span className="msb-hn">manifest()</span>
 
 ```rust
-fn manifest(&self) -> &Manifest
+async fn manifest(&self) -> MicrosandboxResult<Manifest>
 ```
 
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
 let snap = Checkpoint::open("api:baseline").await?;
-let m = snap.manifest();
+let m = snap.manifest().await?;
 println!("{} @ {}", m.image.reference, m.image.manifest_digest);
 ```
 
 </Accordion>
 
-The parsed [`Manifest`](#manifest): stable identity, state closure, capture provenance, pinned image, parent identity, and extensions. Mutable labels are exposed by `labels()` and are not part of this descriptor.
+An owned, freshly loaded [`Manifest`](#manifest), validated against the captured descriptor identity: stable identity, state closure, capture provenance, pinned image, parent identity, and extensions. Mutable labels are exposed by `labels()` and are not part of this descriptor.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#manifest">&amp;Manifest</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#manifest">Manifest</a></div>
     <div className="msb-param-desc">Parsed snapshot manifest.</div>
   </div>
 </div>
@@ -1127,8 +961,6 @@ and integrity metadata. The source snapshot is unchanged. Artifact copies are
 currently local-only; other backends return `MicrosandboxError::Unsupported`
 when `save()` is awaited.
 
-<Accordion title="Example">
-
 ```rust
 use std::collections::BTreeMap;
 
@@ -1140,8 +972,6 @@ let copied_manifest = snapshot
     .await?;
 ```
 
-</Accordion>
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
 
 ```rust
@@ -1151,22 +981,16 @@ async fn verify(&self) -> MicrosandboxResult<SnapshotVerifyReport>
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Snapshot;
-use microsandbox::snapshot::SnapshotVerifyCoverage;
+use microsandbox::snapshot::UpperVerifyStatus;
 
-let group = Snapshot::get("api").await?;
-let checkpoint = group.get_checkpoint("baseline").await?;
-match checkpoint.verify().await?.coverage {
-    SnapshotVerifyCoverage::Complete => println!("all required payload integrity verified"),
-    SnapshotVerifyCoverage::Incomplete { unrecorded } => {
-        println!("incomplete: {} payload(s) have no checksum", unrecorded.len());
-    }
+let snap = Checkpoint::open("api:baseline").await?;
+match snap.verify().await?.upper {
+    UpperVerifyStatus::Verified { algorithm, .. } => println!("ok via {algorithm}"),
+    UpperVerifyStatus::NotRecorded => println!("no integrity hash recorded"),
 }
 ```
 
 </Accordion>
-
-Check `coverage` for complete versus incomplete integrity coverage, including ancestor layers and owned disks. `upper` remains the head-only projection; `checkpoint` identifies verified composite metadata and recorded integrity. Missing checksums produce `SnapshotVerifyCoverage::Incomplete { unrecorded }`; corruption still returns an error.
 
 Verify the snapshot's complete state closure. File state recomputes recorded upper-layer integrity and returns `NotRecorded` without reading the payload when integrity is absent. Checkpoint state validates the root, manifests, disk layers, device/execution objects, and every referenced memory object, then returns the verified checkpoint root.
 
@@ -1179,21 +1003,7 @@ Verify the snapshot's complete state closure. File state recomputes recorded upp
   </div>
 </div>
 
-## SnapshotHandle methods
-
-Accessors and lifecycle on a [`SnapshotHandle`](#snapshothandle) returned by
-the active backend. Returned by [`Checkpoint::get()`](#snapshotget),
-[`Checkpoint::list()`](#snapshotlist), and [`Checkpoint::load()`](#snapshotload).
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">digest()</span>
-
-```rust
-fn digest(&self) -> &str
-```
-
-Descriptor digest (`sha256:hex`), separate from the stable snapshot ID.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">name()</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">name()</span>
 
 ```rust
 fn name(&self) -> Option<&str>
@@ -1201,7 +1011,7 @@ fn name(&self) -> Option<&str>
 
 Member name within its group, or `None` when no alias is recorded.
 
-#### <span className="msb-recv">h.</span><span className="msb-hn">parent_digest()</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">parent_digest()</span>
 
 ```rust
 fn parent_digest(&self) -> Option<&str>
@@ -1211,18 +1021,7 @@ The captured parent snapshot's stable ID, or `None` when no parent is known. The
 
 ---
 
-#### <span className="msb-recv">h.</span><span className="msb-hn">scope()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span></div>
-
-```rust
-fn scope(&self) -> SnapshotScope
-```
-
-Checkpoint payload scope: [`SnapshotScope::Disk`](#snapshotscope) for a disk-only snapshot or `Full` for disk plus VM execution state.
-
----
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">image_ref()</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">image_ref()</span>
 
 ```rust
 fn image_ref(&self) -> &str
@@ -1230,7 +1029,7 @@ fn image_ref(&self) -> &str
 
 Image reference the snapshot was taken from.
 
-#### <span className="msb-recv">h.</span><span className="msb-hn">format()</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">format()</span>
 
 ```rust
 fn format(&self) -> Option<SnapshotFormat>
@@ -1242,111 +1041,18 @@ On-disk format of the upper layer.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Option&lt;SnapshotFormat&gt;</span></div>
-    <div className="msb-param-desc">File-backed format when present; <code>None</code> for checkpoint-backed state.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotformat">SnapshotFormat</a></div>
+    <div className="msb-param-desc">Upper-layer format (<code>Raw</code> today).</div>
   </div>
 </div>
 
-#### <span className="msb-recv">h.</span><span className="msb-hn">size_bytes()</span>
-
-```rust
-fn size_bytes(&self) -> Option<u64>
-```
-
-Backend-reported stored payload size, if known.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">path()</span>
-
-```rust
-fn path(&self) -> MicrosandboxResult<&Path>
-```
-
-Return the local artifact directory. Cloud snapshots return
-`MicrosandboxError::Unsupported`. Use `reference()` for backend-neutral restore
-and lifecycle operations.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">created_at()</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">created_at()</span>
 
 ```rust
 fn created_at(&self) -> chrono::NaiveDateTime
 ```
 
 Checkpoint creation time, parsed from the manifest.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">open()</span>
-
-```rust
-async fn open(&self) -> MicrosandboxResult<Checkpoint>
-```
-
-<Accordion title="Example">
-
-```rust
-use microsandbox::Checkpoint;
-
-let h = Checkpoint::get("api:baseline").await?;
-let snap = h.open().await?;
-snap.verify().await?;
-```
-
-</Accordion>
-
-Open the underlying snapshot metadata using the backend retained by the handle,
-without requiring the caller to interpret its storage location.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#instance-methods">Checkpoint</a></div>
-    <div className="msb-param-desc">The opened artifact.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">remove()</span>
-
-```rust
-async fn remove(&self, force: bool) -> MicrosandboxResult<()>
-```
-
-<Accordion title="Example">
-
-```rust
-use microsandbox::Checkpoint;
-
-let h = Checkpoint::get("api:baseline").await?;
-h.remove(false).await?;
-```
-
-</Accordion>
-
-Remove this installed snapshot copy by its stored artifact path. Other groups containing the same snapshot ID or digest remain unchanged.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">When <code>true</code>, remove even if the snapshot has indexed children.</div>
-  </div>
-</div>
-
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">reference()</span>
-
-```rust
-fn reference(&self) -> SnapshotReference
-```
-
-Return the retained backend-neutral reference.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">save_to()</span>
-
-```rust
-async fn save_to(&self, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()>
-```
-
-Bundle this exact handle through its retained backend. Local-only; archive options are described by [SaveOpts](#saveopts).
 
 ## SnapshotBuilder
 
@@ -1355,8 +1061,6 @@ Builder for a [`SnapshotConfig`](#snapshotconfig). Obtained via [`Checkpoint::bu
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Checkpoint;
-
 let snap = Checkpoint::builder("deps")
     .from_sandbox("api")           // sandbox to capture
     .label("stage", "post-deps")
@@ -1510,36 +1214,131 @@ Build and execute the snapshot in one step. Equivalent to [`Checkpoint::create(s
 Returned by [`Checkpoint::copy_to()`](#snap-copy_to). It reuses the source disk
 data while replacing explicit-snapshot metadata in a new archive.
 
-#### <span className="msb-recv">copy.</span><span className="msb-hn">labels()</span>
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `labels(BTreeMap<String, String>)` | `Self` | Replace all labels in the copied manifest |
+| `record_integrity(bool)` | `Self` | Compute integrity when true, or omit it when false |
+| `save()` | `MicrosandboxResult<Manifest>` | Write the archive and return its manifest |
+
+<span id="save-an-exact-checkpoint" />
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">save()</span>
 
 ```rust
-fn labels(mut self, labels: BTreeMap<String, String>) -> Self
+async fn save(&self, out: impl AsRef<Path>) -> MicrosandboxResult<()>
 ```
 
-Replace all labels in the copied manifest
-
-
-#### <span className="msb-recv">copy.</span><span className="msb-hn">record_integrity()</span>
+<Accordion title="Example">
 
 ```rust
-fn record_integrity(mut self, enabled: bool) -> Self
+checkpoint.save("ready.msb").await?;
+checkpoint.save_with("portable.msb", |save| save.with_parents().with_image()).await?;
 ```
 
-Compute integrity when true, or omit it when false
+</Accordion>
 
+The receiver selects one immutable checkpoint. Use the group’s optional head or exact-member lookup first; saving a group’s whole history is not implied. The no-options call writes a compressed `.msb` archive. `save_to` retains its explicit options form for compatibility. See the archive compatibility option below before sending output to an older reader.
 
-#### <span className="msb-recv">copy.</span><span className="msb-hn">save()</span>
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">save_with()</span>
 
 ```rust
-async fn save(self) -> MicrosandboxResult<Manifest>
+async fn save_with(
+    &self,
+    out: impl AsRef<Path>,
+    configure: impl FnOnce(SaveOpts) -> SaveOpts,
+) -> MicrosandboxResult<()>
 ```
 
-Write the archive and return its manifest
+Configure archive options for this exact checkpoint. See [SaveOpts](#saveopts).
+
+<span id="exact-checkpoint-removal" />
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">remove()</span>
+
+```rust
+async fn remove(&self) -> MicrosandboxResult<CheckpointRemoveResult>
+```
+
+Migration: static Rust `Snapshot::remove(reference, force)` becomes `Checkpoint::remove_by_reference(reference, force)`. Use the instance method below for exact identity and a removal result. Legacy `Checkpoint::remove(force)` retains its unit-returning contract.
+
+<Accordion title="Example">
+
+```rust
+let removed = checkpoint.remove().await?;
+let forced = checkpoint.remove_with(|options| options.force()).await?;
+```
+
+</Accordion>
+
+These are alternative calls, not successive removals of the same checkpoint. The instance method removes the retained checkpoint identity, refuses a replacement at the same address, and returns `CheckpointRemoveResult` with `id`, optional `head_update`, and `warnings`. The head outcome belongs to this operation; later head edits do not change it. Removing the head selects its surviving same-group parent or clears selection. Removing another member reports an unchanged head. Standalone artifacts have no head outcome.
+
+Force permits removal despite indexed children, but never bypasses reader protection. A repeated removal reports a missing checkpoint rather than fabricating another successful result. Backends or native libraries without exact-removal reporting return unsupported instead of falling back to deletion by name.
+
+If removal commits but catalog cleanup fails, the call returns `MicrosandboxError::SnapshotRemovalRecovery { result, source }`. Its result is authoritative: removal already happened. Recover the affected storage before retrying cleanup; do not assume an error means the checkpoint still exists.
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">remove_with()</span>
+
+```rust
+async fn remove_with(
+    &self,
+    configure: impl FnOnce(CheckpointRemoveOptions) -> CheckpointRemoveOptions,
+) -> MicrosandboxResult<CheckpointRemoveResult>
+```
+
+Configure exact removal with `CheckpointRemoveOptions`. Force never bypasses active-reader protection.
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox()</span>
+
+```rust
+async fn spawn_sandbox(&self) -> MicrosandboxResult<Sandbox>
+```
+
+Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with()</span>
+
+```rust
+async fn spawn_sandbox_with(
+    &self,
+    configure: impl FnOnce(RestoreBuilder) -> RestoreBuilder,
+) -> MicrosandboxResult<Sandbox>
+```
+
+Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with_progress()</span>
+
+```rust
+async fn spawn_sandbox_with_progress(
+    &self,
+) -> MicrosandboxResult<(
+    CreationProgressHandle,
+    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+)>
+```
+
+Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with_progress_with()</span>
+
+```rust
+async fn spawn_sandbox_with_progress_with(
+    &self,
+    configure: impl FnOnce(RestoreBuilder) -> RestoreBuilder,
+) -> MicrosandboxResult<(
+    CreationProgressHandle,
+    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+)>
+```
+
+Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
+
+
 
 
 ## Forking
 
-Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `SandboxHandle` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
+Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `Sandbox` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
 
 ### fork()
 
@@ -1967,7 +1766,7 @@ Allow unavailable external filesystems or additional disks. Full restore records
 fn restore_ref(reference: impl Into<SnapshotReference>) -> RestoreBuilder
 ```
 
-Restore from an explicit backend-neutral snapshot reference. Pass a `Checkpoint` or `SnapshotHandle` reference without reinterpreting an identifier as a path. This uses the same dedicated restore options and backend capability checks as `Sandbox::restore()`.
+Restore from an explicit backend-neutral snapshot reference. Pass a `Checkpoint` or `Checkpoint` reference without reinterpreting an identifier as a path. This uses the same dedicated restore options and backend capability checks as `Sandbox::restore()`.
 
 <Accordion title="Example">
 
@@ -1984,7 +1783,7 @@ let restored = Sandbox::restore_ref(snapshot.reference())
 
 <span id="sandbox-and-sandboxhandle-capture" />
 
-See [sandbox capture](#sandbox-capture) for `Sandbox` and `SandboxHandle` group creation. Both retain the receiver’s backend and stable sandbox identity.
+See [sandbox capture](#sandbox-capture) for `Sandbox` group creation. Both retain the receiver’s backend and stable sandbox identity.
 
 <span id="disk-maintenance-and-incremental-export" />
 
@@ -2086,7 +1885,7 @@ Results include aggregate counts and per-disk entries keyed by `guest_path`. `ma
     <div className="msb-param-desc">Destination history, including when it has no selected head.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>checkpoints</code><span className="msb-type">Vec&lt;SnapshotHandle&gt;</span></div>
+    <div className="msb-param-key"><code>checkpoints</code><span className="msb-type">Vec&lt;Checkpoint&gt;</span></div>
     <div className="msb-param-desc">Every unique member supplied by the batch, including bundled dependencies, in ID order.</div>
   </div>
   <div className="msb-param">
@@ -2288,7 +2087,7 @@ Results include aggregate counts and per-disk entries keyed by `guest_path`. `ma
 <div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
 A backend-neutral snapshot locator. Obtain one from `Checkpoint::reference()` or
-`SnapshotHandle::reference()` and pass it to
+`Checkpoint::reference()` and pass it to
 `Sandbox::restore_ref()`, `Checkpoint::open_ref()`, or
 `Checkpoint::remove_ref()`. This preserves whether a value is an identifier or a
 path without exposing the selected backend.
@@ -2312,7 +2111,7 @@ Use `SnapshotReference::auto()`, `id()`, or `path()` to construct a reference.
 `value()` returns the underlying string and `kind()` returns `auto`, `id`, or
 `path`.
 
-### SnapshotHandle
+### Checkpoint
 
 See [handle methods](#snapshothandle-methods) for metadata access and lifecycle operations. A handle retains its selected backend; callers do not need to interpret the storage location.
 

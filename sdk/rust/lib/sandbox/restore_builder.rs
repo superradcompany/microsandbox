@@ -1,5 +1,7 @@
 //! Dedicated snapshot restoration with explicit destination resource choices.
 
+use std::time::Duration;
+
 #[cfg(feature = "net")]
 use microsandbox_network::policy::NetworkPolicy;
 #[cfg(feature = "net")]
@@ -124,7 +126,14 @@ impl Sandbox {
 
 impl RestoreBuilder {
     fn new(reference: SnapshotReference) -> Self {
-        let mut inner = SandboxBuilder::new("").with_snapshot_reference(reference);
+        Self::for_context(crate::context::configured_context(), reference)
+    }
+
+    pub(crate) fn for_context(
+        context: std::sync::Arc<dyn crate::Context>,
+        reference: SnapshotReference,
+    ) -> Self {
+        let mut inner = SandboxBuilder::for_context(context, "").with_snapshot_reference(reference);
         // The creation builder's empty environment is not a caller request to
         // clear captured settings. Destination bindings start absent as well.
         inner.config.spec.clear_env_mut();
@@ -337,16 +346,16 @@ impl RestoreBuilder {
         self
     }
 
-    /// Set the destination sandbox's maximum lifetime in seconds, including full restore.
+    /// Set the destination sandbox's maximum lifetime in whole seconds, including full restore.
     /// This is runtime-owned enforcement, not a timeout on the restore call.
-    pub fn max_duration(mut self, secs: u64) -> Self {
-        self.inner = self.inner.max_duration(secs);
+    pub fn max_duration(mut self, duration: Duration) -> Self {
+        self.inner = self.inner.max_duration(duration);
         self
     }
 
-    /// Auto-stop the destination sandbox after this many seconds of inactivity, including full restore.
-    pub fn idle_timeout(mut self, secs: u64) -> Self {
-        self.inner = self.inner.idle_timeout(secs);
+    /// Auto-stop the destination sandbox after this duration of inactivity, in whole seconds, including full restore.
+    pub fn idle_timeout(mut self, duration: Duration) -> Self {
+        self.inner = self.inner.idle_timeout(duration);
         self
     }
 
@@ -393,7 +402,6 @@ impl RestoreBuilder {
     }
 
     /// Restore with the shared image/preparation/activation progress stream.
-    #[cfg(feature = "local")]
     pub fn restore_with_progress(
         self,
     ) -> MicrosandboxResult<(
@@ -800,8 +808,8 @@ mod tests {
             .name("child")
             .cpus(2)
             .memory(2048)
-            .max_duration(600)
-            .idle_timeout(120);
+            .max_duration(std::time::Duration::from_secs(600))
+            .idle_timeout(std::time::Duration::from_secs(120));
         assert_eq!(config(&restore).spec.resources.cpus, 2);
         assert_eq!(config(&restore).spec.resources.memory_mib, 2048);
         assert_eq!(config(&restore).spec.lifecycle.max_duration_secs, Some(600));

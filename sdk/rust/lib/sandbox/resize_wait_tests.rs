@@ -183,7 +183,7 @@ async fn fault_peer(listener: tokio::net::UnixListener, scenario: Arc<PeerScenar
 
 async fn fixture() -> (
     tempfile::TempDir,
-    Arc<dyn Backend>,
+    Arc<dyn Context>,
     sandbox::Model,
     tokio::net::UnixListener,
 ) {
@@ -194,7 +194,6 @@ async fn fixture() -> (
     let local = Arc::new(
         crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap(),
     );
     let pools = local.db().await.unwrap();
@@ -250,7 +249,7 @@ async fn timeout_keeps_each_completed_resource_reply() {
             .unwrap();
         let selected = [recorded(ResourceKind::Cpus), recorded(ResourceKind::Memory)];
         let result = if check_once {
-            let handle = super::super::SandboxHandle::from_local_model(backend, sandbox, None);
+            let handle = super::super::SandboxRecord::from_local_model(backend, sandbox, None);
             handle
                 .check_resize_operations_with_budget(Some(&selected), Duration::from_secs(2))
                 .await

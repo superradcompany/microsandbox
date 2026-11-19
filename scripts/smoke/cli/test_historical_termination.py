@@ -12,7 +12,7 @@ import time
 import unittest
 
 
-WORKER = "backend::local::snapshot::historical_recovery_tests::historical_recovery_worker"
+WORKER = "context::local::snapshot::historical_recovery_tests::historical_recovery_worker"
 
 
 @unittest.skipUnless(os.name == "posix", "Unix process-group qualification")

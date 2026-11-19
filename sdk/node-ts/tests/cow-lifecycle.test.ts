@@ -11,7 +11,7 @@ it.skipIf(process.env.MSB_COW_LIVE !== "1")("captures a resident pause and resto
     await source.exec("sh", ["-c", "echo source > /dev/shm/sdk-marker"]);
     await source.pause();
     const paused = await Sandbox.get(name);
-    expect(paused.status).toBe("paused");
+    expect(await paused.status()).toBe("paused");
     const branched = await paused.fork(`${name}-paused-branch`);
     branches.push(branched);
     expect((await branched.exec("cat", ["/dev/shm/sdk-marker"])).stdout().trim()).toBe("source");
@@ -30,7 +30,7 @@ it.skipIf(process.env.MSB_COW_LIVE !== "1")("captures a resident pause and resto
     // A paused VM cannot stop gracefully. Attempt every cleanup even when one
     // fails so an assertion or cleanup error does not strand sibling VMs.
     const results = await Promise.allSettled([...branches, ...(child ? [child] : []), source].map(async (sandbox) => {
-      if ((await Sandbox.get(sandbox.name)).status === "paused") await sandbox.resume();
+      if (await sandbox.status() === "paused") await sandbox.resume();
       await sandbox.stop();
     }));
     for (const result of results) if (result.status === "rejected") throw result.reason;

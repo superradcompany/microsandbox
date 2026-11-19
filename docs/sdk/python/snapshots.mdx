@@ -15,6 +15,8 @@ Export methods `save` and `save_to` accept the keyword `compatibility` (`"curren
 
 <span id="group-lifecycle-and-08-migration" />
 
+Use `await ctx.snapshots.get(name)` for a history and `await ctx.checkpoints.get(id)` for one checkpoint. Both collections retain the selected provider. Cloud supports individual disk checkpoints. Spawning from an exact remote checkpoint requires a managed ID. An explicit host-volume path restore selects the contents currently at that path.
+
 ## Sandbox capture
 
 <span id="sandbox-group-capture" />
@@ -30,7 +32,7 @@ async def snapshot(
 ) -> SnapshotCreateResult
 ```
 
-Available on `Sandbox` and `SandboxHandle`. `name` selects a new group; `initial_checkpoint` names its first member. `dest_dir` selects the parent storage directory. An existing group is refused. Omitted member names are generated; capture is disk-only by default. Set `full=True` to capture memory and device state, or `record_integrity=True` to record payload checksums. `guest_flush` accepts `"auto"`, `"required"` or `"skip"`; omission uses Auto.
+Available on `Sandbox`. `name` selects a new group; `initial_checkpoint` names its first member. `dest_dir` selects the parent storage directory. An existing group is refused. Omitted member names are generated; capture is disk-only by default. Set `full=True` to capture memory and device state, or `record_integrity=True` to record payload checksums. `guest_flush` accepts `"auto"`, `"required"` or `"skip"`; omission uses Auto.
 
 <Accordion title="Example">
 
@@ -51,7 +53,7 @@ reopened = await Snapshot.get("history")
 
 </Accordion>
 
-Artifact helpers formerly owned by `Snapshot` are now accessed through `Checkpoint`. Existing `SnapshotHandle`, builder, archive, ID, and verification type names remain; this public object rename does not rewrite persisted artifact IDs. Retained artifact helpers below also cover supported cloud workflows, where local group operations return unsupported.
+Artifact helpers formerly owned by `Snapshot` are now accessed through `Checkpoint`. Existing `Checkpoint`, builder, archive, ID, and verification type names remain; this public object rename does not rewrite persisted artifact IDs. Retained artifact helpers below also cover supported cloud workflows, where local group operations return unsupported.
 
 ## Snapshot group methods
 
@@ -109,7 +111,7 @@ Read the selected checkpoint once. The returned checkpoint retains that identity
 #### <span className="msb-recv">group.</span><span className="msb-hn">checkpoints()</span>
 
 ```python
-async def checkpoints(self) -> list[SnapshotHandle]
+async def checkpoints(self) -> list[Checkpoint]
 ```
 
 List member handles in stable ID order, including when no head is selected.
@@ -269,7 +271,7 @@ If publication commits but catalog cleanup fails, the call raises `SnapshotGroup
 
 ## Exact checkpoint removal
 
-Migration: static Python `Snapshot.remove(reference, force=...)` becomes `Checkpoint.remove_by_reference(reference, force=...)`. The canonical `Checkpoint.remove()` is now an instance method. Legacy `SnapshotHandle.remove(force=...)` still returns `None`.
+Migration: static Python `Snapshot.remove(reference, force=...)` becomes `Checkpoint.remove_by_reference(reference, force=...)`. The canonical `Checkpoint.remove()` is now an instance method. Legacy `Checkpoint.remove(force=...)` still returns `None`.
 
 <Accordion title="Example">
 
@@ -336,7 +338,7 @@ If removal commits but catalog cleanup fails, the call raises `SnapshotRemovalRe
     <div className="msb-param-desc">The destination group.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>checkpoints</code><span className="msb-type">list[SnapshotHandle]</span></div>
+    <div className="msb-param-key"><code>checkpoints</code><span className="msb-type">list[Checkpoint]</span></div>
     <div className="msb-param-desc">All unique supplied members, including bundled dependencies, in stable ID order.</div>
   </div>
   <div className="msb-param">
@@ -390,6 +392,7 @@ Head outcomes are dictionaries. Capture and import results expose read-only prop
 
 A failed capture can still have published its requested artifact before source recovery failed. `SnapshotSourceRecoveryError` preserves the source checkpoint recovery locator and, when publication completed, the published artifact’s kind, path, identity, digest and `head_update`. The head outcome belongs to that publication even if another operation changes the group afterward. Archive-only capture and older producers omit it; do not infer it by reading the current head. Inspect those details before retrying or removing the source. The error does not prove that the source is running or safely paused.
 
+
 ## Guest writeback
 
 Pass `guest_flush=GuestFlush.REQUIRED` to `Checkpoint.create`, `Checkpoint.create_archive`, `source.fork`, `source.fork_many`, or `source.pause`. Import `GuestFlush` from `microsandbox`.
@@ -398,16 +401,13 @@ The default `AUTO` flushes live disk-only captures, but adds no optional flush t
 
 A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
-<span id="snapshot" />
-
 ## Checkpoint
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-Create, open, and manage snapshots. See [properties](#snapshot-properties) for returned metadata.
+<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Checkpoint.create()</a> · <a href="#snapshot-open">Checkpoint.open()</a> · <a href="#snapshot-list_dir">Checkpoint.list_dir()</a></p>
 
-<span id="snapshot-create" />
-<span id="snapshotcreate" />
+Create, open, and manage snapshots. See [properties](#snapshot-properties) for returned metadata.
 
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">create()</span>
 
@@ -490,9 +490,6 @@ snap = await Checkpoint.create(
 
 ---
 
-<span id="snapshot-create_archive" />
-<span id="snapshotcreate_archive" />
-
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">create_archive()</span>
 
 ```python
@@ -514,8 +511,6 @@ async def create_archive(
 
 Capture directly into an archive without installing a local snapshot.
 
-<Accordion title="Example">
-
 ```python
 archive = await Checkpoint.create_archive(
     "deps",
@@ -524,12 +519,7 @@ archive = await Checkpoint.create_archive(
 )
 ```
 
-</Accordion>
-
 ---
-<span id="snapshot-open" />
-<span id="snapshotopen" />
-
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">open()</span>
 
 ```python
@@ -566,14 +556,11 @@ Open an existing artifact by group head, `group:member`, or path. This validates
   </div>
 </div>
 
-<span id="snapshot-get" />
-<span id="snapshotget" />
-
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">get()</span>
 
 ```python
 @staticmethod
-async def get(name_or_digest: str) -> SnapshotHandle
+async def get(name_or_digest: str) -> Checkpoint
 ```
 
 <Accordion title="Example">
@@ -600,19 +587,16 @@ Look up a handle by group head, `group:member`, stable snapshot ID, descriptor d
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">SnapshotHandle</a></div>
-    <div className="msb-param-desc">Lightweight handle returned by the active backend.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
+    <div className="msb-param-desc">Operational snapshot with metadata loaded on demand.</div>
   </div>
 </div>
-
-<span id="snapshot-list" />
-<span id="snapshotlist" />
 
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">list()</span>
 
 ```python
 @staticmethod
-async def list() -> list[SnapshotHandle]
+async def list() -> list[Checkpoint]
 ```
 
 <Accordion title="Example">
@@ -632,13 +616,10 @@ reference.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">list[SnapshotHandle]</a></div>
-    <div className="msb-param-desc">Indexed snapshot handles.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">list[Checkpoint]</a></div>
+    <div className="msb-param-desc">Indexed snapshot resources.</div>
   </div>
 </div>
-
-<span id="snapshot-list_dir" />
-<span id="snapshotlist_dir" />
 
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">list_dir()</span>
 
@@ -670,17 +651,17 @@ entries that don't look like snapshot artifacts. Cloud raises
   </div>
 </div>
 
-#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">remove_by_reference()</span>
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">remove()</span>
 
 ```python
 @staticmethod
-async def remove_by_reference(path_or_name: str, *, force: bool = False) -> None
+async def remove(path_or_name: str, *, force: bool = False) -> None
 ```
 
 <Accordion title="Example">
 
 ```python
-await Checkpoint.remove_by_reference("baseline:deps", force=True)
+await Checkpoint.remove("baseline:deps", force=True)
 ```
 
 </Accordion>
@@ -700,9 +681,6 @@ the index and refuses indexed children unless `force=True`.
     <div className="msb-param-desc">Remove even if the snapshot has indexed children. Default <code>False</code>.</div>
   </div>
 </div>
-
-<span id="snapshot-reindex" />
-<span id="snapshotreindex" />
 
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">reindex()</span>
 
@@ -743,22 +721,18 @@ Returns the number of artifacts indexed. Cloud raises `UnsupportedError`.
 
 ---
 
-<span id="snapshot-save" />
-<span id="snapshotsave" />
-
-#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">save_by_reference()</span>
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">save()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
-async def save_by_reference(
+async def save(
     name_or_path: str,
     out: str | os.PathLike,
     *,
     with_parents: bool = False,
     with_image: bool = False,
     plain_tar: bool = False,
-    compatibility: Literal["current", "0.7.8"] = "current",
     since: str | None = None,
     last_layers: int | None = None,
 ) -> None
@@ -767,7 +741,7 @@ async def save_by_reference(
 <Accordion title="Example">
 
 ```python
-await Checkpoint.save_by_reference(
+await Checkpoint.save(
     "baseline:deps",
     "/tmp/deps.msb",
     with_parents=True,
@@ -806,7 +780,7 @@ Bundle a snapshot into a `.msb` archive. The existing snapshot manifest is archi
 <Accordion title="Example">
 
 ```python
-await Checkpoint.save_by_reference(
+await Checkpoint.save(
     "baseline:deps",
     "/tmp/deps.msb",
     with_parents=True,
@@ -818,9 +792,6 @@ await Checkpoint.save_by_reference(
 
 
 ---
-
-<span id="snapshot-load" />
-<span id="snapshotload" />
 
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">load()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
@@ -834,7 +805,7 @@ async def load(
     base: str | None = None,
     group: str | None = None,
     set_head: bool = False,
-) -> SnapshotHandle
+) -> Checkpoint
 ```
 
 Unpack a snapshot archive (`.msb` or `.tar`) into the selected or generated group. The returned handle's `group` identifies the group and `head_update` reports the head selection outcome. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
@@ -856,7 +827,7 @@ Unpack a snapshot archive (`.msb` or `.tar`) into the selected or generated grou
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">SnapshotHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
     <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
@@ -872,9 +843,6 @@ print(h.path)
 
 ---
 
-<span id="snapshot-load_many" />
-<span id="snapshotload_many" />
-
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">load_many()</span>
 
 ```python
@@ -885,21 +853,19 @@ async def load_many(
     base: str | None = None,
     group: str | None = None,
     set_head: bool = False,
-) -> list[SnapshotHandle]
+) -> list[Checkpoint]
 ```
 
 Import archives as one batch. Returns handles in input order. Dependencies resolve from the batch, the named group, or an explicit base; input order does not matter. All members are validated before publication.
 
-<span id="snapshot-group_head" />
-<span id="snapshotgroup_head" />
-
 #### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">group_head()</span>
 
 ```python
-async def group_head(selector: str) -> dict[str, str | bool | None]
+async def group_head(group: str) -> str | None
+async def set_group_head(group: str, id: str) -> dict[str, str | bool | None]
 ```
 
-Read a group’s head, or select an exact member with `group:member`. Returns the group, previous and current snapshot IDs, reason, and whether the head changed. See [group selection](/sandboxes/snapshots#snapshot-groups).
+Read the selected ID from a local group, or explicitly set it to an installed member’s stable ID. A headless group returns an absent ID. A missing group or qualified group name raises an error. The write returns the previous and current IDs, reason and change flag. See [group selection](/sandboxes/snapshots#snapshot-groups).
 
 <span id="snapshot-groups" />
 
@@ -909,24 +875,12 @@ Read a group’s head, or select an exact member with `group:member`. Returns th
 
 Options for `load()` and `load_many()`.
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>dest</code></div>
-    <div className="msb-param-desc">Parent directory containing groups. Defaults to the local snapshot store.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>base</code></div>
-    <div className="msb-param-desc">External snapshot or standalone archive for missing dependencies.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>group</code></div>
-    <div className="msb-param-desc">Destination group. Omit to create one group for the import.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>set_head</code></div>
-    <div className="msb-param-desc">Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip.</div>
-  </div>
-</div>
+| Option | Purpose |
+| --- | --- |
+| `dest` | Parent directory containing groups. Defaults to the local snapshot store. |
+| `base` | External snapshot or standalone archive for missing dependencies. |
+| `group` | Destination group. Omit to create one group for the import. |
+| `set_head` | Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip. |
 
 With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
 
@@ -942,7 +896,6 @@ async def save_to(
     with_parents: bool = False,
     with_image: bool = False,
     plain_tar: bool = False,
-    compatibility: Literal["current", "0.7.8"] = "current",
     since: str | None = None,
     last_layers: int | None = None,
 ) -> None
@@ -985,8 +938,6 @@ await (
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
 
-Check `report["coverage"]["kind"]` for `complete` or `incomplete` before treating all payloads as authenticated. Incomplete coverage lists required payload paths without recorded checksums, including ancestors and owned disks. The existing upper/head and checkpoint-root fields do not establish whole-artifact coverage. Corruption still raises an error.
-
 ```python
 async def verify(self) -> dict[str, Any]
 ```
@@ -1025,46 +976,19 @@ The report shape:
 }
 ```
 
-## SnapshotHandle methods
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">destroy()</span>
 
 ```python
-async def open(self) -> Checkpoint
+async def destroy(self, *, force: bool = False) -> None
 ```
+
+Instance deletion of a remote path-based snapshot returns `Unsupported` until the provider supports atomic conditional deletion. Explicit path-selected static removal remains available. Managed remote snapshot deletion uses its captured server ID; local deletion retains its identity checks. Force does not bypass this restriction.
 
 <Accordion title="Example">
 
 ```python
 h = await Checkpoint.get("baseline:deps")
-snap = await h.open()
-print(snap.fstype)
-```
-
-</Accordion>
-
-Load the full [`Checkpoint`](#snapshot) metadata for this handle. Metadata-validated only; does not read the upper file.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
-    <div className="msb-param-desc">The opened snapshot.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
-
-```python
-async def remove(self, *, force: bool = False) -> None
-```
-
-<Accordion title="Example">
-
-```python
-h = await Checkpoint.get("baseline:deps")
-await h.remove(force=False)
+await h.destroy(force=False)
 ```
 
 </Accordion>
@@ -1090,7 +1014,6 @@ async def save_to(
     with_parents: bool = False,
     with_image: bool = False,
     plain_tar: bool = False,
-    compatibility: Literal["current", "0.7.8"] = "current",
     since: str | None = None,
     last_layers: int | None = None,
 ) -> None
@@ -1101,23 +1024,51 @@ Cloud raises `UnsupportedError`.
 
 <span id="take-a-snapshot" />
 
-## SandboxHandle
+## Sandbox
 
-<span id="handle-snapshot" />
+#### <span className="msb-recv">handle.</span><span className="msb-hn">checkpoint()</span>
 
 ```python
-async def snapshot(self, name: str, *, initial_checkpoint: str | None = None,
-                   dest_dir: str | os.PathLike | None = None,
-                   labels: dict[str, str] | None = None, full: bool = False,
-                   record_integrity: bool = False, guest_flush: str | None = None
-                   ) -> SnapshotCreateResult
+async def snapshot(self, name: str) -> Checkpoint
 ```
 
-The first positional name selects the new group. Use the initial-checkpoint option to name its first member, then call the returned group’s checkpoint method for subsequent captures. Both a connected sandbox and its metadata handle support this group-creation flow. See [group lifecycle and migration](#group-lifecycle-and-08-migration) for a complete example.
+Checkpoint this sandbox into its default group with the given member name. Local live disk captures preserve the source's running or paused state. Cloud requires a stopped persistent source. Use the returned artifact path or `sandbox:member` to open it later. Called on a [`Sandbox`](/sdk/python/sandbox#sandbox), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Member name within the source sandbox's group.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
+    <div className="msb-param-desc">The captured snapshot.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+handle = await Sandbox.get("baseline")
+snap = await handle.checkpoint("deps")
+print(snap.digest)
+```
+
+</Accordion>
+
+---
+
+
 
 ## Forking
 
-Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `SandboxHandle` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
+Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `Sandbox` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
 
 ### fork()
 
@@ -1638,7 +1589,7 @@ async def save(self) -> None
 
 Write the configured archive
 
-### SnapshotHandle
+### Checkpoint
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 

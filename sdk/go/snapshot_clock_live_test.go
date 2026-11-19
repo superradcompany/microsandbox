@@ -44,19 +44,21 @@ func TestSnapshotGuestClockLive(t *testing.T) {
 			t.Fatal(err)
 		}
 		var config struct {
-			Runtime struct {
+            Spec struct { Runtime struct {
 				GuestClock string `json:"guest_clock"`
-			} `json:"runtime"`
+			} `json:"runtime"` } `json:"spec"`
 		}
-		if err := json.Unmarshal([]byte(h.ConfigJSON()), &config); err != nil {
+		raw, err := h.ConfigJSON(ctx)
+        if err != nil { t.Fatal(err) }
+        if err := json.Unmarshal([]byte(raw), &config); err != nil {
 			t.Fatal(err)
 		}
-		actual := config.Runtime.GuestClock
+		actual := config.Spec.Runtime.GuestClock
 		if actual == "" {
 			actual = "sync"
 		}
 		if actual != expected {
-			t.Fatalf("expected %s in config: %s", expected, h.ConfigJSON())
+			t.Fatalf("expected %s in config: %s", expected, raw)
 		}
 		out, err := sb.Exec(ctx, "cat", []string{"/root/clock-marker"})
 		if err != nil || out.Stdout() != "clock-marker" {

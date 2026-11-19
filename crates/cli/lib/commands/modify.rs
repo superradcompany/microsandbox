@@ -7,8 +7,8 @@ use console::style;
 use microsandbox::MicrosandboxError;
 use microsandbox::sandbox::{
     ChangeKind, ConfigPlannedChange, ModificationDisposition, ModificationWarning, PlannedChange,
-    ResizeOperation, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
-    SandboxHandle, SandboxModificationBuilder, SandboxModificationPlan, SecretChangeKind,
+    ResizeOperation, ResourceConvergenceState, ResourceKind, ResourceResizeStatus,
+    SandboxModificationBuilder, SandboxModificationPlan, SandboxRecord, SecretChangeKind,
     SecretPlannedChange, SecretSource,
 };
 
@@ -154,7 +154,7 @@ pub struct ModifyArgs {
 /// Execute the `msb modify` command.
 pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
     let json = args.format == Some(OutputFormat::Json);
-    let handle = Sandbox::get(&args.name).await?;
+    let handle = crate::commands::common::sandbox_record(&args.name).await?;
     if args.compact {
         let mut compact = handle.compact();
         if let Some(layers) = args.layers {
@@ -295,7 +295,7 @@ fn resize_wait_budget(timeout_secs: Option<u64>) -> Duration {
 ///
 /// The SDK owns the single deadline and operation selection, including reconnect checks.
 async fn wait_for_resize(
-    handle: &SandboxHandle,
+    handle: &SandboxRecord,
     applied: &[ResourceResizeStatus],
     operations: Option<&[ResizeOperation]>,
     budget: Duration,

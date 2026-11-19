@@ -18,9 +18,8 @@ type snapshotCopier interface {
 }
 
 var (
-	_ snapshotSaver  = (*SnapshotArtifact)(nil)
-	_ snapshotSaver  = (*SnapshotHandle)(nil)
-	_ snapshotCopier = (*SnapshotArtifact)(nil)
+	_ snapshotSaver  = (*Checkpoint)(nil)
+	_ snapshotCopier = (*Checkpoint)(nil)
 )
 
 func TestSnapshotVerificationCoveragePreservesUncertainty(t *testing.T) {
@@ -50,7 +49,7 @@ func TestSnapshotVerificationCoveragePreservesUncertainty(t *testing.T) {
 }
 
 func TestSnapshotCopyBuilderCopiesMutableInput(t *testing.T) {
-	snapshot := &SnapshotArtifact{reference: "/snapshots/example", referenceKind: "path"}
+	snapshot := &Checkpoint{reference: "/snapshots/example", referenceKind: "path"}
 	labels := map[string]string{"environment": "test"}
 	builder := snapshot.CopyTo("/tmp/copied.tar.zst").Labels(labels).RecordIntegrity(true)
 	labels["environment"] = "changed"
@@ -75,7 +74,7 @@ func TestZeroSnapshotCopyBuilderFailsCleanly(t *testing.T) {
 }
 
 func TestSnapshotCreateEmptyFromSandbox(t *testing.T) {
-	_, err := Snapshot.Create(context.Background(), SnapshotCreateOptions{Name: "after-pip-install"})
+	_, err := CreateSnapshot(context.Background(), SnapshotCreateOptions{Name: "after-pip-install"})
 	if !IsKind(err, ErrInvalidConfig) {
 		t.Fatalf("err = %v, want ErrInvalidConfig", err)
 	}
@@ -197,28 +196,32 @@ func TestSnapshotStateProjectionDistinguishesMissingAndMerkleIntegrity(t *testin
 	}
 }
 
-func TestLegacySnapshotPaths(t *testing.T) {
-	path := "/local/snapshot"
-	snapshot := snapshotFromInfo(&ffi.SnapshotInfo{Path: &path, Reference: path, ReferenceKind: "path"})
-	handle := snapshotHandleFromInfo(&ffi.SnapshotHandleInfo{Path: &path, Reference: path, ReferenceKind: "path"})
-	if snapshot.Path() != path || handle.Path() != path {
-		t.Fatal("legacy accessors did not preserve local path")
+func TestSnapshotPathIsFallibleForRemoteResources(t *testing.T) {
+	localPath := "/local/snapshot"
+	local := &Checkpoint{path: &localPath}
+	if path, err := local.Path(); err != nil || path != localPath {
+		t.Fatalf("Path() = %q, %v", path, err)
 	}
-	for _, kind := range []string{"id", "path"} {
-		t.Run(kind, func(t *testing.T) {
-			remoteSnapshot := snapshotFromInfo(&ffi.SnapshotInfo{Reference: "/remote/snapshot", ReferenceKind: kind})
-			remoteHandle := snapshotHandleFromInfo(&ffi.SnapshotHandleInfo{Reference: "/remote/snapshot", ReferenceKind: kind})
-			for name, accessor := range map[string]func() string{"snapshot": remoteSnapshot.Path, "handle": remoteHandle.Path} {
-				t.Run(name, func(t *testing.T) {
-					defer func() {
-						if recover() == nil {
-							t.Fatal("remote path accessor must panic")
-						}
-					}()
-					accessor()
-				})
-			}
-		})
+	remote := &Checkpoint{reference: "/remote/snapshot", referenceKind: "path"}
+	if _, err := remote.Path(); !IsKind(err, ErrUnsupportedOperation) {
+		t.Fatalf("remote Path() = %v", err)
+	}
+}
+
+func TestSnapshotStateKindPreservesUnknownTags(t *testing.T) {
+	for _, kind := range []SnapshotStateKind{SnapshotStateFile, SnapshotStateCheckpoint, "future"} {
+		wire, err := json.Marshal(map[string]string{"state_kind": string(kind)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var info SnapshotInfo
+		if err := json.Unmarshal(wire, &info); err != nil {
+			t.Fatal(err)
+		}
+		state := snapshotStateFromInfo(&ffi.SnapshotInfo{StateKind: string(kind)})
+		if info.StateKind != kind || state.Kind != kind || (state.File != nil) != (kind == SnapshotStateFile) || (state.Checkpoint != nil) != (kind == SnapshotStateCheckpoint) {
+			t.Fatalf("incorrect indexed or artifact state for %q: %q, %+v", kind, info.StateKind, state)
+		}
 	}
 }
 

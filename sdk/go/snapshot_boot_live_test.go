@@ -23,7 +23,7 @@ func TestSnapshotBootOptionsLive(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	imported, err := Snapshot.Load(ctx, "go-boot", []string{archive})
+	imported, err := testHistories(t).Load(ctx, "go-boot", []string{archive})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,14 +94,14 @@ func TestSnapshotBootOptionsLive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		config, err := handle.Config()
-		if err != nil || config.MaxCPUs != 2 || config.MaxMemoryMiB != 512 {
+		config, err := handle.Config(ctx)
+		if err != nil || config.Spec.Resources.MaxCPUs == nil || *config.Spec.Resources.MaxCPUs != 2 || config.Spec.Resources.MaxMemoryMiB == nil || *config.Spec.Resources.MaxMemoryMiB != 512 {
 			t.Fatalf("resource ceilings: %v %+v", err, config)
 		}
-		if config.Workdir != "/root" || config.Shell != "/bin/ash" || strings.Join(config.Entrypoint, "|") != "/bin/sh|-c" || len(config.Cmd) != 1 || config.Cmd[0] != "touch /root/default-ran" {
+		if config.Spec.Runtime.Workdir == nil || *config.Spec.Runtime.Workdir != "/root" || config.Spec.Runtime.Shell == nil || *config.Spec.Runtime.Shell != "/bin/ash" || strings.Join(config.Spec.Runtime.Entrypoint, "|") != "/bin/sh|-c" || len(config.Spec.Runtime.Cmd) != 1 || config.Spec.Runtime.Cmd[0] != "touch /root/default-ran" {
 			t.Fatalf("command defaults missing from retained child configuration: %+v", config)
 		}
-		if config.Labels["destination"] != "go-child" {
+		if config.Spec.Labels["destination"] != "go-child" {
 			t.Fatalf("destination policy lost: %+v", config)
 		}
 		capacity, err := child.Exec(ctx, "sh", []string{"-c", "nproc; cat /sys/devices/system/cpu/possible"})

@@ -35,12 +35,17 @@
 // be repetitive without adding signal.
 #![allow(clippy::missing_safety_doc)]
 
+mod context;
 mod creation_progress;
 mod exec_adapter;
+mod execution_result;
 mod ffi_error;
 mod jobs;
+mod persistent_resource;
+mod provider;
 mod resize;
 mod resize_operations;
+mod resource;
 mod restore;
 mod service;
 mod setup;
@@ -63,18 +68,20 @@ use std::{
 };
 
 use base64::Engine;
+#[cfg(feature = "local")]
+use microsandbox::sandbox::all_sandbox_metrics_local;
 use microsandbox::{
     AgentBridge, Checkpoint as Snapshot, LogLevel, MicrosandboxError, RegistryAuth, Sandbox,
-    SnapshotReference, UnsupportedReason, UpperVerifyStatus, default_backend,
+    SnapshotReference, UnsupportedReason, UpperVerifyStatus, configured_context,
     logs::{LogOptions, LogSource},
     sandbox::{
-        DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
+        DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile,
         exec::{ExecControl, ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
     snapshot::{SaveOpts, SnapshotFormat, SnapshotScope},
-    volume::{Volume, VolumeBuilder, VolumeHandle, VolumeKind},
+    volume::{Volume, VolumeBuilder, VolumeKind},
 };
 use microsandbox_network::secrets::config::SecretViolationAction;
 use tokio::io::AsyncWriteExt;
@@ -662,6 +669,18 @@ fn run_c(
     let result = (|| -> Result<(), FfiError> {
         let token = lookup_cancel_token(cancel_id)?;
         let fut = f()?;
+        // Windows CGO threads can have only a 1 MiB native stack. Polling nested, unoptimized Rust
+        // creation futures there can overflow before validation returns. Use the existing
+        // Rust worker pool; only owned operation state crosses this boundary, and the FFI
+        // call still waits before writing its caller-owned output buffer. Cancellation stays
+        // inside the worker future, so returning a cancelled result also drops that work.
+        #[cfg(windows)]
+        let json = rt()
+            .block_on(rt().spawn(run_cancellable(token, fut)))
+            .map_err(|error| {
+                FfiError::internal(format!("native operation task failed: {error}"))
+            })??;
+        #[cfg(not(windows))]
         let json = rt().block_on(run_cancellable(token, fut))?;
         write_output(buf, buf_len, &json)
     })();
@@ -1022,6 +1041,7 @@ struct RootDiskOpts {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SandboxCreateOpts {
+    context_handle: Option<u64>,
     creation_progress: Option<u64>,
     image: Option<String>,
     image_fstype: Option<String>,
@@ -2421,6 +2441,11 @@ pub unsafe extern "C" fn msb_sandbox_create(
         let opts: SandboxCreateOpts = serde_json::from_str(&opts_raw)
             .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
 
+        let context = match opts.context_handle {
+            Some(handle) => context::get(handle)?,
+            None => microsandbox::context::configured_context(),
+        };
+
         // Pre-parse pull policy / log level / violation action so any error
         // surfaces from the synchronous prologue, not inside the async block.
         let pull_policy = match opts.pull_policy.as_deref() {
@@ -2441,7 +2466,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
         };
 
         Ok(Box::pin(async move {
-            let mut builder = Sandbox::builder(&name);
+            let mut builder = Sandbox::ctx(context.as_ref()).builder(&name);
 
             if opts.root_disk.is_some() && opts.oci_upper_size_mib.is_some() {
                 return Err(FfiError::invalid_argument(
@@ -2556,12 +2581,12 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(secs) = opts.max_duration_secs
                 && secs > 0
             {
-                builder = builder.max_duration(secs);
+                builder = builder.max_duration(std::time::Duration::from_secs(secs));
             }
             if let Some(secs) = opts.idle_timeout_secs
                 && secs > 0
             {
-                builder = builder.idle_timeout(secs);
+                builder = builder.idle_timeout(std::time::Duration::from_secs(secs));
             }
             // `registry` overwrites insecure and ca_certs wholesale, so all
             // three overrides have to be applied in one call.
@@ -2640,7 +2665,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
             } else {
                 builder.create().await?
             };
-            let backend_kind = sandbox.backend_kind().as_str();
+            let backend_kind = sandbox.context_kind().as_str();
             let id = sandbox.id().to_string();
             let handle = register(sandbox)?;
             Ok(serde_json::json!({
@@ -2654,7 +2679,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox — lookup (name-addressed SandboxHandle metadata)
+// Sandbox — lookup (name-addressed SandboxRecord metadata)
 //
 // Returns the persisted DB record for a sandbox without connecting. If you want a
 // live `Sandbox`, call `msb_sandbox_connect(name)` instead.
@@ -2804,7 +2829,7 @@ pub unsafe extern "C" fn msb_sandbox_lookup(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             Ok(serde_json::json!({
                 "id": h.id().to_string(),
                 "name": h.name(),
@@ -2812,7 +2837,7 @@ pub unsafe extern "C" fn msb_sandbox_lookup(
                 "config_json": h.config_json(),
                 "created_at_unix": h.created_at().map(|t| t.timestamp()),
                 "updated_at_unix": h.updated_at().map(|t| t.timestamp()),
-                "backend_kind": h.backend_kind().as_str(),
+                "backend_kind": h.context_kind().as_str(),
             })
             .to_string())
         }))
@@ -2837,8 +2862,8 @@ pub unsafe extern "C" fn msb_sandbox_connect(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let sb = Sandbox::get(&name).await?.connect().await?;
-            let backend_kind = sb.backend_kind().as_str();
+            let sb = sandbox_record(&name).await?.connect().await?;
+            let backend_kind = sb.context_kind().as_str();
             let id = sb.id().to_string();
             let handle = register(sb)?;
             Ok(serde_json::json!({
@@ -2871,13 +2896,13 @@ pub unsafe extern "C" fn msb_sandbox_start(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             let sb = if detached {
                 h.start_detached().await.map_err(FfiError::from)?
             } else {
                 h.start().await.map_err(FfiError::from)?
             };
-            let backend_kind = sb.backend_kind().as_str();
+            let backend_kind = sb.context_kind().as_str();
             let id = sb.id().to_string();
             let handle = register(sb)?;
             Ok(serde_json::json!({
@@ -2900,11 +2925,19 @@ struct SandboxHandleLifecycleOpts {
     status: Option<String>,
 }
 
+// Provider observations serve the existing metadata FFI while resource wrappers migrate.
+async fn sandbox_record(
+    name: &str,
+) -> microsandbox::MicrosandboxResult<microsandbox::sandbox::SandboxRecord> {
+    let context = microsandbox::context::configured_context();
+    context.sandbox_ops().get(context.clone(), name).await
+}
+
 async fn identified_sandbox_handle(
     name: &str,
     expected_id: &str,
-) -> Result<microsandbox::sandbox::SandboxHandle, FfiError> {
-    let handle = Sandbox::get(name).await.map_err(FfiError::from)?;
+) -> Result<microsandbox::sandbox::SandboxRecord, FfiError> {
+    let handle = sandbox_record(name).await.map_err(FfiError::from)?;
     resize::ensure_expected_identity(name, expected_id, handle.id().to_string())?;
     Ok(handle)
 }
@@ -2918,7 +2951,7 @@ async fn stop_identified_with_timeout<L>(
     lookup: L,
 ) -> Result<(), FfiError>
 where
-    L: Future<Output = Result<microsandbox::sandbox::SandboxHandle, FfiError>>,
+    L: Future<Output = Result<microsandbox::sandbox::SandboxRecord, FfiError>>,
 {
     let expired = || {
         FfiError::from(MicrosandboxError::StopTimeout {
@@ -2940,7 +2973,7 @@ where
 }
 
 fn registered_sandbox_json(sandbox: Sandbox) -> Result<String, FfiError> {
-    let backend_kind = sandbox.backend_kind().as_str();
+    let backend_kind = sandbox.context_kind().as_str();
     let id = sandbox.id().to_string();
     let handle = register(sandbox)?;
     Ok(serde_json::json!({
@@ -2951,7 +2984,7 @@ fn registered_sandbox_json(sandbox: Sandbox) -> Result<String, FfiError> {
     .to_string())
 }
 
-/// Identity-safe lifecycle dispatch for Go `SandboxHandle` receivers.
+/// Identity-safe lifecycle dispatch for Go `SandboxRecord` receivers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
     cancel_id: u64,
@@ -2962,7 +2995,11 @@ pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
+    // A successful allocation is not transferred until write_output succeeds.
+    // Keep a rollback token for cancellation/output errors on the new named lookup path.
+    let published = std::sync::Arc::new(AtomicU64::new(0));
+    let publication = published.clone();
+    let result = run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         let expected_id = unsafe { cstr(expected_id) }?;
         let operation = unsafe { cstr(operation) }?;
@@ -2972,7 +3009,31 @@ pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
                 FfiError::invalid_argument(format!("invalid lifecycle opts: {error}"))
             })?;
 
+        let running_lookup = matches!(operation.as_str(), "get" | "get_running").then(|| {
+            let context = microsandbox::context::configured_context();
+            Sandbox::ctx(context.as_ref())
+        });
         Ok(Box::pin(async move {
+            if let Some(sandboxes) = running_lookup {
+                if !expected_id.is_empty() || opts.detached {
+                    return Err(FfiError::invalid_argument(
+                        "get/get_running select by name and do not accept detached mode",
+                    ));
+                }
+                let sandbox = if operation == "get" {
+                    sandboxes.get(&name).await?
+                } else {
+                    sandboxes.get_running(&name).await?
+                };
+                let backend_kind = sandbox.context_kind().as_str();
+                let id = sandbox.id().to_string();
+                let handle = register(sandbox)?;
+                publication.store(handle, Ordering::Release);
+                return Ok(serde_json::json!({
+                    "handle": handle, "backend_kind": backend_kind, "id": id,
+                })
+                .to_string());
+            }
             if operation == "stop_with_timeout" {
                 let timeout = opts.timeout_ms.ok_or_else(|| {
                     FfiError::invalid_argument("stop_with_timeout requires timeout_ms")
@@ -3080,7 +3141,14 @@ pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
                 ))),
             }
         }))
-    })
+    });
+    if !result.is_null() {
+        let handle = published.load(Ordering::Acquire);
+        if handle != 0 {
+            let _ = remove(handle);
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -3102,7 +3170,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_stop(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             h.stop_with_timeout(Duration::from_millis(timeout_ms))
                 .await
                 .map_err(FfiError::from)?;
@@ -3159,7 +3227,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_request_stop(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             h.request_stop().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
@@ -3177,7 +3245,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_kill(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             h.kill_with_timeout(Duration::from_millis(timeout_ms))
                 .await
                 .map_err(FfiError::from)?;
@@ -3196,7 +3264,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_request_kill(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             h.request_kill().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
@@ -3213,7 +3281,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_request_drain(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             h.request_drain().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
@@ -3230,7 +3298,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_wait_until_stopped(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             let result = h.wait_until_stopped().await.map_err(FfiError::from)?;
             Ok(sandbox_stop_result_json(result))
         }))
@@ -3247,7 +3315,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_ping(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             let result = h.ping().await.map_err(FfiError::from)?;
             Ok(sandbox_ping_result_json(result))
         }))
@@ -3264,7 +3332,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_touch(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             let result = h.touch().await.map_err(FfiError::from)?;
             Ok(sandbox_touch_result_json(result))
         }))
@@ -3287,7 +3355,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_modify(
         let opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
         let policy = parse_modify_policy(opts.policy.as_deref())?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let h = sandbox_record(&name).await.map_err(FfiError::from)?;
             let builder = configure_modify(h.modify(), opts.patch, policy);
             run_modify(builder, opts.dry_run).await
         }))
@@ -3329,7 +3397,10 @@ pub unsafe extern "C" fn msb_sandbox_compact(
             let mut builder = if let Some(sandbox) = sandbox {
                 sandbox.compact()
             } else {
-                Sandbox::get(&name).await.map_err(FfiError::from)?.compact()
+                sandbox_record(&name)
+                    .await
+                    .map_err(FfiError::from)?
+                    .compact()
             };
             if let Some(layers) = opts.layers {
                 builder = builder.layers(layers);
@@ -3380,10 +3451,8 @@ pub unsafe extern "C" fn msb_sandbox_close(
 // ---------------------------------------------------------------------------
 // Sandbox — detach
 //
-// Disarm the SIGTERM safety net so the sandbox keeps running after the
-// handle is released. This is the counterpart to `close` for sandboxes
-// created with `detached: true`: the caller calls `detach` before dropping
-// the handle so the VM survives. After this call the handle is invalid.
+// Disarm automatic cleanup without consuming the registered resource. Admitted
+// operations and future calls keep using the same sandbox and ownership group.
 // Output: {"ok":true}
 // ---------------------------------------------------------------------------
 
@@ -3395,19 +3464,9 @@ pub unsafe extern "C" fn msb_sandbox_detach(
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
-        let arc = remove(handle)?.ok_or_else(|| FfiError::invalid_handle(handle))?;
-        // Unwrap the Arc so we can call `detach(self)`. This fails only if
-        // another caller is still holding a clone (e.g. a concurrent FFI
-        // call that cloned the Arc out of the registry). Detaching while
-        // another op is in flight is a misuse — the SIGTERM safety net
-        // would still fire when the last clone drops.
+        let sb = get(handle)?;
         Ok(Box::pin(async move {
-            let sb = std::sync::Arc::try_unwrap(arc).map_err(|_| {
-                FfiError::internal(
-                    "detach while another sandbox operation is in flight on the same handle",
-                )
-            })?;
-            sb.detach().await;
+            sb.detach().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -3580,7 +3639,7 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
             let mut builder = if let Some(live) = live {
                 live.fork_many(request.names)
             } else {
-                let source = Sandbox::get(&source).await.map_err(FfiError::from)?;
+                let source = sandbox_record(&source).await.map_err(FfiError::from)?;
                 if let Some(expected) = request.source_identity.filter(|id| !id.is_empty())
                     && source.id().as_str() != expected
                 {
@@ -3605,7 +3664,7 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
             for outcome in outcomes {
                 let row = match outcome.result {
                     Ok(child) => {
-                        let kind = child.backend_kind().as_str();
+                        let kind = child.context_kind().as_str();
                         let id = child.id().to_string();
                         match register(child) {
                             Ok(handle) => {
@@ -3651,7 +3710,7 @@ pub unsafe extern "C" fn msb_sandbox_branch_with_options(
             let mut builder = if let Some(live) = live {
                 live.fork(child)
             } else {
-                Sandbox::get(&source)
+                sandbox_record(&source)
                     .await
                     .map_err(FfiError::from)?
                     .fork(child)
@@ -3660,7 +3719,7 @@ pub unsafe extern "C" fn msb_sandbox_branch_with_options(
                 builder = builder.record_integrity();
             }
             let sb = builder.fork().await.map_err(FfiError::from)?;
-            let backend_kind = sb.backend_kind().as_str();
+            let backend_kind = sb.context_kind().as_str();
             let handle = register(sb)?;
             Ok(serde_json::json!({ "handle": handle, "backend_kind": backend_kind }).to_string())
         }))
@@ -3928,18 +3987,9 @@ pub unsafe extern "C" fn msb_sandbox_list(
             .map_err(|e| FfiError::invalid_argument(format!("invalid list filter JSON: {e}")))?;
 
         Ok(Box::pin(async move {
-            let page = Sandbox::list_with(|list| {
-                let mut list = list;
-                if let Some(limit) = opts.limit {
-                    list = list.limit(limit);
-                }
-                if let Some(cursor) = opts.cursor {
-                    list = list.cursor(cursor);
-                }
-                list.labels(opts.labels)
-            })
-            .await
-            .map_err(FfiError::from)?;
+            let context = microsandbox::context::configured_context();
+            let query = resource::list_query(opts)?;
+            let page = context.sandbox_ops().list(context.clone(), query).await?;
             let mut out = String::from("{\"sandboxes\":[");
             for (i, h) in page.sandboxes.iter().enumerate() {
                 if i > 0 {
@@ -3958,9 +4008,9 @@ pub unsafe extern "C" fn msb_sandbox_list(
     })
 }
 
-/// Serialise a `SandboxHandle` into the public JSON shape, matching what
+/// Serialise a `SandboxRecord` into the public JSON shape, matching what
 /// `msb_sandbox_lookup` returns for a single handle.
-fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
+fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxRecord) -> String {
     let name_json = serde_json::to_string(h.name()).unwrap_or_else(|_| "\"\"".into());
     let cfg_json = serde_json::to_string(h.config_json()).unwrap_or_else(|_| "\"\"".into());
     let created = match h.created_at() {
@@ -3977,7 +4027,7 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
         name = name_json,
         status = sandbox_status_str(h.status_snapshot()),
         config = cfg_json,
-        backend_kind = h.backend_kind().as_str(),
+        backend_kind = h.context_kind().as_str(),
     )
 }
 
@@ -4135,7 +4185,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_logs(
         let name = unsafe { cstr(name) }?.to_owned();
         let opts = parse_log_options(opts_json)?;
         Ok(Box::pin(async move {
-            let handle = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let handle = sandbox_record(&name).await.map_err(FfiError::from)?;
             let entries = handle.logs(&opts).await.map_err(FfiError::from)?;
             log_entries_json(entries)
         }))
@@ -5190,38 +5240,38 @@ pub unsafe extern "C" fn msb_volume_create(
             for (k, v) in &opts.labels {
                 b = b.label(k, v);
             }
-            b.create().await.map_err(FfiError::from)?;
-            Ok(volume_handle_json(
-                &Volume::get(&name).await.map_err(FfiError::from)?,
-            ))
+            // Creation now supplies the full resource; a name lookup could observe a replacement.
+            let volume = b.create().await.map_err(FfiError::from)?;
+            Ok(volume_handle_json(&volume))
         }))
     })
 }
 
-/// Serialise a `VolumeHandle` into the public JSON shape.
-fn volume_handle_json(vh: &VolumeHandle) -> String {
+/// Serialise a `Volume` into the public JSON shape.
+fn volume_handle_json(vh: &Volume) -> String {
+    let observation = vh.observation();
     // Use serde_json for the labels object so escaping is correct.
-    let labels_map: HashMap<&str, &str> = vh
-        .labels()
+    let labels_map: HashMap<&str, &str> = observation
+        .labels
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     // Best-effort: local handles carry their exact backend path; cloud
     // volumes don't expose a host-side directory.
     let path = vh
-        .local()
+        .local_state()
         .map(|local| local.path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let id = vh.cloud().map(|cloud| cloud.id.as_str());
+    let id = vh.remote_state().map(|cloud| cloud.id.as_str());
     serde_json::json!({
         "id": id,
         "name": vh.name(),
         "is_default": vh.is_default(),
         "path": path,
         "kind": vh.kind().as_str(),
-        "quota_mib": vh.quota_mib(),
-        "used_bytes": vh.used_bytes(),
-        "capacity_bytes": vh.capacity_bytes(),
+        "quota_mib": observation.quota_mib,
+        "used_bytes": observation.used_bytes.unwrap_or(0),
+        "capacity_bytes": observation.capacity_bytes,
         "disk_format": vh.disk_format(),
         "disk_fstype": vh.disk_fstype(),
         "labels": labels_map,
@@ -5498,7 +5548,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_log_stream(
         let name = unsafe { cstr(name) }?.to_owned();
         let opts = parse_log_stream_options(opts_json)?;
         Ok(Box::pin(async move {
-            let handle = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let handle = sandbox_record(&name).await.map_err(FfiError::from)?;
             let stream = handle.log_stream(&opts).await.map_err(FfiError::from)?;
             let sh = start_log_stream_from_stream(stream).await?;
             Ok(format!(r#"{{"stream_handle":{sh}}}"#))
@@ -6031,26 +6081,37 @@ pub unsafe extern "C" fn msb_all_sandbox_metrics(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("metrics require a local backend"))?;
-            let map = all_sandbox_metrics_local(local)
-                .await
-                .map_err(FfiError::from)?;
-            let mut sandboxes = serde_json::Map::with_capacity(map.len());
-            for (name, metrics) in &map {
-                sandboxes.insert(name.clone(), metrics_json(metrics));
-            }
-            Ok(serde_json::json!({ "sandboxes": sandboxes }).to_string())
-        }))
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::AllSandboxMetrics,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Ok(Box::pin(async move {
+                let backend = microsandbox::context::configured_context();
+                let local = backend
+                    .as_local()
+                    .ok_or_else(|| FfiError::invalid_argument("metrics require a local backend"))?;
+                let map = all_sandbox_metrics_local(local)
+                    .await
+                    .map_err(FfiError::from)?;
+                let mut sandboxes = serde_json::Map::with_capacity(map.len());
+                for (name, metrics) in &map {
+                    sandboxes.insert(name.clone(), metrics_json(metrics));
+                }
+                Ok(serde_json::json!({ "sandboxes": sandboxes }).to_string())
+            }))
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
-// SandboxHandle metrics (by name, no live sandbox handle required)
+// SandboxRecord metrics (by name, no live sandbox handle required)
 // ---------------------------------------------------------------------------
 
 /// Return metrics for a specific sandbox by name.
@@ -6065,7 +6126,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_metrics(
     run_c(cancel_id, buf, buf_len, || {
         let name_str = unsafe { cstr(name) }?.to_owned();
         Ok(Box::pin(async move {
-            let handle = Sandbox::get(&name_str).await.map_err(FfiError::from)?;
+            let handle = sandbox_record(&name_str).await.map_err(FfiError::from)?;
             let m = handle.metrics().await.map_err(FfiError::from)?;
             Ok(format!(
                 r#"{{"cpu_percent":{cpu},"memory_bytes":{mem},"memory_limit_bytes":{lim},"disk_read_bytes":{dr},"disk_write_bytes":{dw},"net_rx_bytes":{rx},"net_tx_bytes":{tx},"uptime_secs":{up}}}"#,
@@ -6186,7 +6247,7 @@ pub unsafe extern "C" fn msb_default_backend_info(
     buf_len: usize,
 ) -> *mut c_char {
     run(buf, buf_len, || {
-        serde_json::to_string(&microsandbox::default_backend_info()?)
+        serde_json::to_string(&microsandbox::configured_context().info()?)
             .map_err(|error| FfiError::internal(format!("serialize backend info: {error}")))
     })
 }
@@ -6196,6 +6257,7 @@ pub unsafe extern "C" fn msb_default_backend_info(
 // ---------------------------------------------------------------------------
 
 /// Serialise an `ImageHandle` to the public JSON shape used by the Go SDK.
+#[cfg(feature = "local")]
 fn image_handle_json(h: &microsandbox::image::ImageHandle) -> serde_json::Value {
     serde_json::json!({
         "reference": h.reference(),
@@ -6216,19 +6278,30 @@ pub unsafe extern "C" fn msb_image_get(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let reference = unsafe { cstr(reference) }?;
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let h = microsandbox::image::Image::get_local(local, &reference)
-                .await
-                .map_err(FfiError::from)?;
-            Ok(image_handle_json(&h).to_string())
-        }))
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::ImageGet,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            let reference = unsafe { cstr(reference) }?;
+            Ok(Box::pin(async move {
+                let backend = microsandbox::context::configured_context();
+                let local = backend.as_local().ok_or_else(|| {
+                    FfiError::invalid_argument("image ops require a local backend")
+                })?;
+                let h = microsandbox::image::Image::get_local(local, &reference)
+                    .await
+                    .map_err(FfiError::from)?;
+                Ok(image_handle_json(&h).to_string())
+            }))
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -6237,19 +6310,30 @@ pub unsafe extern "C" fn msb_image_list(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let handles = microsandbox::image::Image::list_local(local)
-                .await
-                .map_err(FfiError::from)?;
-            let arr: Vec<serde_json::Value> = handles.iter().map(image_handle_json).collect();
-            Ok(serde_json::Value::Array(arr).to_string())
-        }))
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::ImageList,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Ok(Box::pin(async move {
+                let backend = microsandbox::context::configured_context();
+                let local = backend.as_local().ok_or_else(|| {
+                    FfiError::invalid_argument("image ops require a local backend")
+                })?;
+                let handles = microsandbox::image::Image::list_local(local)
+                    .await
+                    .map_err(FfiError::from)?;
+                let arr: Vec<serde_json::Value> = handles.iter().map(image_handle_json).collect();
+                Ok(serde_json::Value::Array(arr).to_string())
+            }))
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -6259,53 +6343,64 @@ pub unsafe extern "C" fn msb_image_inspect(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let reference = unsafe { cstr(reference) }?;
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let detail = microsandbox::image::Image::inspect_local(local, &reference)
-                .await
-                .map_err(FfiError::from)?;
-            let config = detail.config.as_ref().map(|c| {
-                serde_json::json!({
-                    "digest": c.digest,
-                    "env": c.env,
-                    "cmd": c.cmd,
-                    "entrypoint": c.entrypoint,
-                    "working_dir": c.working_dir,
-                    "user": c.user,
-                    "labels": c.labels,
-                    "stop_signal": c.stop_signal,
-                })
-            });
-            let layers: Vec<serde_json::Value> = detail
-                .layers
-                .iter()
-                .map(|l| {
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::ImageInspect,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            let reference = unsafe { cstr(reference) }?;
+            Ok(Box::pin(async move {
+                let backend = microsandbox::context::configured_context();
+                let local = backend.as_local().ok_or_else(|| {
+                    FfiError::invalid_argument("image ops require a local backend")
+                })?;
+                let detail = microsandbox::image::Image::inspect_local(local, &reference)
+                    .await
+                    .map_err(FfiError::from)?;
+                let config = detail.config.as_ref().map(|c| {
                     serde_json::json!({
-                        "diff_id": l.diff_id,
-                        "blob_digest": l.blob_digest,
-                        "media_type": l.media_type,
-                        "compressed_size_bytes": l.compressed_size_bytes,
-                        "erofs_size_bytes": l.erofs_size_bytes,
-                        "position": l.position,
+                        "digest": c.digest,
+                        "env": c.env,
+                        "cmd": c.cmd,
+                        "entrypoint": c.entrypoint,
+                        "working_dir": c.working_dir,
+                        "user": c.user,
+                        "labels": c.labels,
+                        "stop_signal": c.stop_signal,
                     })
-                })
-                .collect();
-            let mut obj = image_handle_json(&detail.handle);
-            if let serde_json::Value::Object(ref mut map) = obj {
-                map.insert(
-                    "config".to_string(),
-                    config.unwrap_or(serde_json::Value::Null),
-                );
-                map.insert("layers".to_string(), serde_json::Value::Array(layers));
-            }
-            Ok(obj.to_string())
-        }))
-    })
+                });
+                let layers: Vec<serde_json::Value> = detail
+                    .layers
+                    .iter()
+                    .map(|l| {
+                        serde_json::json!({
+                            "diff_id": l.diff_id,
+                            "blob_digest": l.blob_digest,
+                            "media_type": l.media_type,
+                            "compressed_size_bytes": l.compressed_size_bytes,
+                            "erofs_size_bytes": l.erofs_size_bytes,
+                            "position": l.position,
+                        })
+                    })
+                    .collect();
+                let mut obj = image_handle_json(&detail.handle);
+                if let serde_json::Value::Object(ref mut map) = obj {
+                    map.insert(
+                        "config".to_string(),
+                        config.unwrap_or(serde_json::Value::Null),
+                    );
+                    map.insert("layers".to_string(), serde_json::Value::Array(layers));
+                }
+                Ok(obj.to_string())
+            }))
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -6316,19 +6411,30 @@ pub unsafe extern "C" fn msb_image_remove(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let reference = unsafe { cstr(reference) }?;
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            microsandbox::image::Image::remove_local(local, &reference, force)
-                .await
-                .map_err(FfiError::from)?;
-            Ok(r#"{"ok":true}"#.into())
-        }))
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::ImageRemove,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            let reference = unsafe { cstr(reference) }?;
+            Ok(Box::pin(async move {
+                let backend = microsandbox::context::configured_context();
+                let local = backend.as_local().ok_or_else(|| {
+                    FfiError::invalid_argument("image ops require a local backend")
+                })?;
+                microsandbox::image::Image::remove_local(local, &reference, force)
+                    .await
+                    .map_err(FfiError::from)?;
+                Ok(r#"{"ok":true}"#.into())
+            }))
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -6337,27 +6443,38 @@ pub unsafe extern "C" fn msb_image_prune(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let report = microsandbox::image::Image::prune_local(local)
-                .await
-                .map_err(FfiError::from)?;
-            Ok(serde_json::json!({
-                "image_refs_removed": report.image_refs_removed,
-                "manifests_removed": report.manifests_removed,
-                "layers_removed": report.layers_removed,
-                "fsmeta_removed": report.fsmeta_removed,
-                "vmdk_removed": report.vmdk_removed,
-                "skipped_in_use": report.skipped_in_use,
-                "bytes_reclaimed": report.bytes_reclaimed,
-            })
-            .to_string())
-        }))
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::ImagePrune,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Ok(Box::pin(async move {
+                let backend = microsandbox::context::configured_context();
+                let local = backend.as_local().ok_or_else(|| {
+                    FfiError::invalid_argument("image ops require a local backend")
+                })?;
+                let report = microsandbox::image::Image::prune_local(local)
+                    .await
+                    .map_err(FfiError::from)?;
+                Ok(serde_json::json!({
+                    "image_refs_removed": report.image_refs_removed,
+                    "manifests_removed": report.manifests_removed,
+                    "layers_removed": report.layers_removed,
+                    "fsmeta_removed": report.fsmeta_removed,
+                    "vmdk_removed": report.vmdk_removed,
+                    "skipped_in_use": report.skipped_in_use,
+                    "bytes_reclaimed": report.bytes_reclaimed,
+                })
+                .to_string())
+            }))
+        })
+    }
 }
 
 /// Load images from a local archive (`docker save` tarball or OCI Image
@@ -6372,27 +6489,38 @@ pub unsafe extern "C" fn msb_image_load(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let input_path = unsafe { cstr(input_path) }?;
-        let raw_tags = unsafe { cstr(tags_json) }?;
-        let tags: Vec<String> = serde_json::from_str(&raw_tags)
-            .map_err(|e| FfiError::invalid_argument(format!("invalid tags payload: {e}")))?;
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            let handles = microsandbox::image::Image::load_local(
-                local,
-                std::path::Path::new(&input_path),
-                tags,
-            )
-            .await
-            .map_err(FfiError::from)?;
-            let arr: Vec<serde_json::Value> = handles.iter().map(image_handle_json).collect();
-            Ok(serde_json::Value::Array(arr).to_string())
-        }))
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::ImageLoad,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            let input_path = unsafe { cstr(input_path) }?;
+            let raw_tags = unsafe { cstr(tags_json) }?;
+            let tags: Vec<String> = serde_json::from_str(&raw_tags)
+                .map_err(|e| FfiError::invalid_argument(format!("invalid tags payload: {e}")))?;
+            Ok(Box::pin(async move {
+                let backend = microsandbox::context::configured_context();
+                let local = backend.as_local().ok_or_else(|| {
+                    FfiError::invalid_argument("image ops require a local backend")
+                })?;
+                let handles = microsandbox::image::Image::load_local(
+                    local,
+                    std::path::Path::new(&input_path),
+                    tags,
+                )
+                .await
+                .map_err(FfiError::from)?;
+                let arr: Vec<serde_json::Value> = handles.iter().map(image_handle_json).collect();
+                Ok(serde_json::Value::Array(arr).to_string())
+            }))
+        })
+    }
 }
 
 /// Save cached images to an archive file. `references_json` is a JSON array
@@ -6407,41 +6535,53 @@ pub unsafe extern "C" fn msb_image_save(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let raw_references = unsafe { cstr(references_json) }?;
-        let references: Vec<String> = serde_json::from_str(&raw_references)
-            .map_err(|e| FfiError::invalid_argument(format!("invalid references payload: {e}")))?;
-        if references.is_empty() {
-            return Err(FfiError::invalid_argument(
-                "at least one image reference is required",
-            ));
-        }
-        let output_path = unsafe { cstr(output_path) }?;
-        let format = match unsafe { cstr(format) }?.as_str() {
-            "" | "docker" => microsandbox::ImageArchiveFormat::Docker,
-            "oci" => microsandbox::ImageArchiveFormat::Oci,
-            other => {
-                return Err(FfiError::invalid_argument(format!(
-                    "invalid archive format '{other}': expected 'docker' or 'oci'"
-                )));
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::ImageSave,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            let raw_references = unsafe { cstr(references_json) }?;
+            let references: Vec<String> = serde_json::from_str(&raw_references).map_err(|e| {
+                FfiError::invalid_argument(format!("invalid references payload: {e}"))
+            })?;
+            if references.is_empty() {
+                return Err(FfiError::invalid_argument(
+                    "at least one image reference is required",
+                ));
             }
-        };
-        Ok(Box::pin(async move {
-            let backend = microsandbox::backend::default_backend();
-            let local = backend
-                .as_local()
-                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
-            microsandbox::image::Image::save_local(
-                local,
-                &references,
-                std::path::Path::new(&output_path),
-                format,
-            )
-            .await
-            .map_err(FfiError::from)?;
-            Ok(r#"{"ok":true}"#.into())
-        }))
-    })
+            let output_path = unsafe { cstr(output_path) }?;
+            let format = match unsafe { cstr(format) }?.as_str() {
+                "" | "docker" => microsandbox::ImageArchiveFormat::Docker,
+                "oci" => microsandbox::ImageArchiveFormat::Oci,
+                other => {
+                    return Err(FfiError::invalid_argument(format!(
+                        "invalid archive format '{other}': expected 'docker' or 'oci'"
+                    )));
+                }
+            };
+            Ok(Box::pin(async move {
+                let backend = microsandbox::context::configured_context();
+                let local = backend.as_local().ok_or_else(|| {
+                    FfiError::invalid_argument("image ops require a local backend")
+                })?;
+                microsandbox::image::Image::save_local(
+                    local,
+                    &references,
+                    std::path::Path::new(&output_path),
+                    format,
+                )
+                .await
+                .map_err(FfiError::from)?;
+                Ok(r#"{"ok":true}"#.into())
+            }))
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6462,9 +6602,9 @@ fn snapshot_scope_str(scope: SnapshotScope) -> &'static str {
     }
 }
 
-fn snapshot_json(s: &Snapshot) -> serde_json::Value {
-    let manifest = s.manifest();
-    let labels = s.labels();
+async fn snapshot_json(s: &Snapshot) -> Result<serde_json::Value, FfiError> {
+    let manifest = s.manifest().await.map_err(FfiError::from)?;
+    let labels = s.labels().await.map_err(FfiError::from)?;
     let (
         state_kind,
         format,
@@ -6517,9 +6657,9 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
             Some(state.checkpoint_root.as_str()),
         ),
     };
-    serde_json::json!({
+    Ok(serde_json::json!({
         "head_update": s.head_update(),
-        "id": s.id().as_str(),
+        "id": s.id(),
         "path": s.path().ok().map(|path| path.to_string_lossy().into_owned()),
         "reference": s.reference().value(),
         "reference_kind": s.reference().kind(),
@@ -6543,10 +6683,10 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         "created_at": manifest.capture.created_at,
         "labels": labels,
         "source_sandbox": manifest.capture.source_lineage,
-    })
+    }))
 }
 
-fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
+fn snapshot_handle_json(h: &microsandbox::Checkpoint) -> serde_json::Value {
     serde_json::json!({
         "id": h.id(),
         "digest": h.digest(),
@@ -6556,7 +6696,7 @@ fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
         "parent_digest": h.parent_digest(),
         "image_ref": h.image_ref(),
         "scope": snapshot_scope_str(h.scope()),
-        "state_kind": h.state_kind(),
+        "state_kind": h.state_kind().as_str(),
         "format": h.format().map(snapshot_format_str),
         "fstype": h.fstype(),
         "checkpoint_manifest_digest": h.checkpoint_manifest_digest(),
@@ -6609,7 +6749,21 @@ fn snapshot_builder_from_opts(
     source_sandbox: String,
     opts: SnapshotCreateOpts,
 ) -> Result<microsandbox::SnapshotBuilder, FfiError> {
-    let mut builder = Snapshot::builder(opts.name.unwrap_or_default())
+    snapshot_builder_in(
+        microsandbox::context::configured_context(),
+        source_sandbox,
+        opts,
+    )
+}
+
+fn snapshot_builder_in(
+    context: std::sync::Arc<dyn microsandbox::Context>,
+    source_sandbox: String,
+    opts: SnapshotCreateOpts,
+) -> Result<microsandbox::SnapshotBuilder, FfiError> {
+    let mut builder = context
+        .checkpoints()
+        .builder(opts.name.unwrap_or_default())
         .from_sandbox(source_sandbox)
         .guest_flush(opts.guest_flush);
     if let Some(group) = opts.group {
@@ -6645,18 +6799,21 @@ pub unsafe extern "C" fn msb_sandbox_handle_snapshot(
         let sandbox_name = unsafe { cstr(sandbox_name) }?;
         let snapshot_name = unsafe { cstr(snapshot_name) }?;
         Ok(Box::pin(async move {
-            // This released symbol still serves older Go SDKs: its argument is
-            // a member name, not the new group name accepted by capture_source.
-            let backend = default_backend();
-            backend
-                .sandboxes()
-                .get(backend.clone(), &sandbox_name)
+            let context = microsandbox::configured_context();
+            let h = context
+                .sandbox_ops()
+                .get(context.clone(), &sandbox_name)
                 .await?;
-            let config = Snapshot::builder(snapshot_name)
-                .from_sandbox(sandbox_name)
+            let config = context
+                .checkpoints()
+                .builder(snapshot_name)
+                .from_sandbox(&sandbox_name)
                 .build()?;
-            let snap = backend.snapshots().create(backend.clone(), config).await?;
-            Ok(snapshot_json(&snap).to_string())
+            let snap = context
+                .snapshot_ops()
+                .create_from(context.clone(), config, &h.id())
+                .await?;
+            Ok(snapshot_json(&snap).await?.to_string())
         }))
     })
 }
@@ -6677,7 +6834,7 @@ pub unsafe extern "C" fn msb_snapshot_create(
         let builder = snapshot_builder_from_opts(source_sandbox, opts)?;
         Ok(Box::pin(async move {
             let snap = builder.create().await.map_err(FfiError::from)?;
-            Ok(snapshot_json(&snap).to_string())
+            Ok(snapshot_json(&snap).await?.to_string())
         }))
     })
 }
@@ -6730,7 +6887,7 @@ pub unsafe extern "C" fn msb_snapshot_open(
             let snap = Snapshot::open_ref(reference)
                 .await
                 .map_err(FfiError::from)?;
-            Ok(snapshot_json(&snap).to_string())
+            Ok(snapshot_json(&snap).await?.to_string())
         }))
     })
 }
@@ -6803,7 +6960,10 @@ pub unsafe extern "C" fn msb_snapshot_list_dir(
             let snaps = Snapshot::list_dir(PathBuf::from(dir))
                 .await
                 .map_err(FfiError::from)?;
-            let arr: Vec<serde_json::Value> = snaps.iter().map(snapshot_json).collect();
+            let mut arr = Vec::with_capacity(snaps.len());
+            for snapshot in &snaps {
+                arr.push(snapshot_json(snapshot).await?);
+            }
             Ok(serde_json::Value::Array(arr).to_string())
         }))
     })
@@ -6871,9 +7031,9 @@ pub unsafe extern "C" fn msb_snapshot_export(
         let opts: SnapshotSaveOptsJson = serde_json::from_str(&opts_raw)
             .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
         Ok(Box::pin(async move {
-            let backend = default_backend();
+            let backend = configured_context();
             backend
-                .snapshots()
+                .snapshot_ops()
                 .save(
                     reference,
                     &PathBuf::from(out),
@@ -7056,7 +7216,9 @@ pub unsafe extern "C" fn msb_snapshot_group_head(
     run_c(cancel_id, buf, buf_len, || {
         let selector = unsafe { cstr(selector) }?;
         Ok(Box::pin(async move {
-            let update = Snapshot::group_head(&selector)
+            let update = microsandbox::context::configured_context()
+                .snapshot_ops()
+                .group_head_selector(&selector)
                 .await
                 .map_err(FfiError::from)?;
             serde_json::to_string(&update)
@@ -7309,9 +7471,20 @@ async fn connect_agent_sandbox(
     name: &str,
     timeout_ms: u64,
 ) -> microsandbox::AgentClientResult<AgentBridge> {
-    match agent_timeout(timeout_ms) {
-        Some(timeout) => AgentBridge::connect_sandbox_with_timeout(name, timeout).await,
-        None => AgentBridge::connect_sandbox(name).await,
+    #[cfg(not(feature = "local"))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "local agent socket discovery is unavailable in the remote provider",
+        )
+        .into())
+    }
+    #[cfg(feature = "local")]
+    {
+        match agent_timeout(timeout_ms) {
+            Some(timeout) => AgentBridge::connect_sandbox_with_timeout(name, timeout).await,
+            None => AgentBridge::connect_sandbox(name).await,
+        }
     }
 }
 
@@ -7335,14 +7508,25 @@ pub unsafe extern "C" fn msb_agent_socket_path(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run(buf, buf_len, || {
-        let name = unsafe { cstr(name) }?;
-        let path = microsandbox::AgentClient::socket_path(&name)
-            .map_err(FfiError::from)?
-            .to_string_lossy()
-            .into_owned();
-        Ok(serde_json::json!({ "path": path }).to_string())
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        run(buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::AgentConnect,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run(buf, buf_len, || {
+            let name = unsafe { cstr(name) }?;
+            let path = microsandbox::AgentClient::socket_path(&name)
+                .map_err(FfiError::from)?
+                .to_string_lossy()
+                .into_owned();
+            Ok(serde_json::json!({ "path": path }).to_string())
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -7804,6 +7988,78 @@ mod tests {
     use microsandbox::{MicrosandboxError, RestoreKind};
 
     use super::FfiError;
+
+    #[cfg(all(windows, feature = "local"))]
+    #[test]
+    fn creation_validation_fits_windows_caller_stack() {
+        // An invalid image reaches the real creation path without launching a VM or pulling
+        // an image. Match the CGO thread's stack, rather than Rust's larger test-thread stack.
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let mut output = [0u8; 4096];
+                let error = unsafe {
+                    super::msb_sandbox_create(
+                        super::msb_cancel_alloc(),
+                        c"small-stack-validation".as_ptr(),
+                        c"{\"image\":\"not a valid image reference\"}".as_ptr(),
+                        false,
+                        output.as_mut_ptr(),
+                        output.len(),
+                    )
+                };
+                assert!(!error.is_null());
+                // This pointer is allocated by the FFI and released after copying its payload.
+                let message = unsafe { std::ffi::CStr::from_ptr(error) }
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                unsafe { super::msb_free_string(error) };
+                let result: serde_json::Value = serde_json::from_str(&message).unwrap();
+                assert_eq!(result["kind"], super::error_kind::INVALID_CONFIG);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelled_worker_drops_operation_before_ffi_returns() {
+        struct OperationGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for OperationGuard {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = OperationGuard(dropped.clone());
+        let id = unsafe { super::msb_cancel_alloc() };
+        let token =
+            super::lookup_cancel_token(id).unwrap_or_else(|error| panic!("{}", error.message));
+        let mut output = [0u8; 4096];
+        let error = super::run_c(id, output.as_mut_ptr(), output.len(), || {
+            Ok(Box::pin(async move {
+                let _guard = guard;
+                // Cancel only after polling has begun. run_c must join the cancelled task,
+                // not return while a detached worker still holds operation resources.
+                token.cancel();
+                std::future::pending::<Result<String, FfiError>>().await
+            }))
+        });
+
+        assert!(!error.is_null());
+        let message = unsafe { std::ffi::CStr::from_ptr(error) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { super::msb_free_string(error) };
+        let result: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(result["kind"], super::error_kind::CANCELLED);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(super::lookup_cancel_token(id).is_err());
+    }
 
     #[test]
     fn missing_restore_bindings_keep_the_invalid_config_kind() {

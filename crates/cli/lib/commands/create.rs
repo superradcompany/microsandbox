@@ -1,9 +1,8 @@
 //! `msb create` command — create and boot a fresh sandbox.
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
 
-use super::common::{SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
+use super::common::{self, SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
 use crate::{sandbox_config, ui};
 
 //--------------------------------------------------------------------------------------------------
@@ -46,7 +45,7 @@ pub async fn run(
     }
 
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
-    let builder = resolved.apply(Sandbox::builder(&name))?;
+    let builder = resolved.apply(common::selected_context()?.sandboxes().builder(&name))?;
     let (builder, display_label) = args
         .snapshot
         .apply(&resolved, args.image.as_deref(), builder)
@@ -72,7 +71,7 @@ pub async fn run(
         Ok(Ok(sandbox)) => {
             display.finish();
             super::common::display_restore_warnings(&sandbox).await;
-            sandbox.detach().await;
+            sandbox.detach().await?;
             // Print auto-generated name to stdout so it's scriptable.
             if !is_named {
                 println!("{name}");

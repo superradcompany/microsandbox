@@ -29,7 +29,7 @@ use tokio::io::AsyncReadExt;
 
 use super::types::{Patch, RootfsSource};
 use crate::MicrosandboxResult;
-use crate::backend::local::creation::CreationStorage;
+use crate::context::local::creation::CreationStorage;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -3959,7 +3959,7 @@ mod tests {
                 },
             ],
             &[base_path, top_path],
-            &crate::backend::local::creation::CreationStorage::for_test(&spool_path),
+            &crate::context::local::creation::CreationStorage::for_test(&spool_path),
         )
         .await
         .unwrap();

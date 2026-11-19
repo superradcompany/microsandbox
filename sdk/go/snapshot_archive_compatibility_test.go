@@ -43,7 +43,7 @@ func TestArchiveCompatibilityNative(t *testing.T) {
 		}
 	}
 	ctx := context.Background()
-	snapshot, err := Checkpoint.Open(ctx, path)
+	snapshot, err := OpenSnapshot(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,8 @@ Export methods `save` and `save_to` accept the keyword `compatibility` (`"curren
 
 <span id="group-lifecycle-and-08-migration" />
 
+Use `ctx.snapshots.get(name)` for a history and `ctx.checkpoints.get(id)` for one checkpoint. Both collections retain the selected provider. Cloud supports individual disk checkpoints. Spawning from an exact remote checkpoint requires a managed ID. An explicit host-volume path restore selects the contents currently at that path.
+
 ## Sandbox capture
 
 <span id="sandbox-group-capture" />
@@ -21,7 +23,7 @@ sandbox.snapshot(group, initial_checkpoint: nil, dest_dir: nil, labels: nil,
                  full: false, record_integrity: false, guest_flush: "auto") # => SnapshotCreateResult
 ```
 
-Available on `Microsandbox::Sandbox` and `SandboxHandle`. `group` selects a new history; `initial_checkpoint` names the first member. `dest_dir` selects its parent storage directory. An existing group is refused. Omitted member names are generated; capture is disk-only by default. Set `full: true` to include memory and device state, or `record_integrity: true` to record payload checksums. `guest_flush` accepts `"auto"`, `"required"` or `"skip"`. Unknown keywords are rejected.
+Available on `Microsandbox::Sandbox`. `group` selects a new history; `initial_checkpoint` names the first member. `dest_dir` selects its parent storage directory. An existing group is refused. Omitted member names are generated; capture is disk-only by default. Set `full: true` to include memory and device state, or `record_integrity: true` to record payload checksums. `guest_flush` accepts `"auto"`, `"required"` or `"skip"`. Unknown keywords are rejected.
 
 <Accordion title="Example">
 
@@ -40,7 +42,7 @@ reopened = Microsandbox::Snapshot.get("history")
 
 </Accordion>
 
-Artifact helpers formerly owned by `Snapshot` are now accessed through `Checkpoint`. Existing `SnapshotHandle`, builder, archive, ID, and verification type names remain; this public object rename does not rewrite persisted artifact IDs. Retained artifact helpers below also cover supported cloud workflows, where local group operations return unsupported.
+Artifact helpers formerly owned by `Snapshot` are now accessed through `Checkpoint`. Existing `Checkpoint`, builder, archive, ID, and verification type names remain; this public object rename does not rewrite persisted artifact IDs. Retained artifact helpers below also cover supported cloud workflows, where local group operations return unsupported.
 
 ## Snapshot group methods
 
@@ -98,7 +100,7 @@ Read the selected checkpoint once. The returned checkpoint retains that identity
 #### <span className="msb-recv">group.</span><span className="msb-hn">checkpoints</span>
 
 ```ruby
-group.checkpoints # => Array<Microsandbox::SnapshotHandle>
+group.checkpoints # => Array<Microsandbox::Checkpoint>
 ```
 
 List member handles in stable ID order, including when no head is selected.
@@ -406,7 +408,7 @@ If removal commits but catalog cleanup fails, `SnapshotRemovalRecoveryError` ret
     <div className="msb-param-desc">The destination group.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>checkpoints</code><span className="msb-type">Array&lt;Microsandbox::SnapshotHandle&gt;</span></div>
+    <div className="msb-param-key"><code>checkpoints</code><span className="msb-type">Array&lt;Microsandbox::Checkpoint&gt;</span></div>
     <div className="msb-param-desc">All unique supplied members, including bundled dependencies, in stable ID order.</div>
   </div>
   <div className="msb-param">
@@ -456,23 +458,8 @@ If removal commits but catalog cleanup fails, `SnapshotRemovalRecoveryError` ret
 
 Head outcomes use string keys. Capture and import results expose readers; read the returned checkpoint directly instead of looking up the mutable group head.
 
-## SandboxHandle
-
-<span id="handle-snapshot" />
-
-```ruby
-handle.snapshot(group, initial_checkpoint: nil, dest_dir: nil, labels: nil,
-                full: false, record_integrity: false, guest_flush: "auto") # => SnapshotCreateResult
-```
-
-The first positional name selects the new group. Use the initial-checkpoint option to name its first member, then call the returned group’s checkpoint method for subsequent captures. Both a connected sandbox and its metadata handle support this group-creation flow. See [group lifecycle and migration](#group-lifecycle-and-08-migration) for a complete example.
-
-<span id="snapshot" />
 
 ## Checkpoint
-
-<span id="snapshot-open" />
-<span id="snapshotopen" />
 
 #### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">open()</span>
 
@@ -500,13 +487,10 @@ Open a snapshot using the selected backend.
   </div>
 </div>
 
-<span id="snapshot-get" />
-<span id="snapshotget" />
-
 #### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">get()</span>
 
 ```ruby
-Microsandbox::Checkpoint.get(name) # => SnapshotHandle
+Microsandbox::Checkpoint.get(name) # => Checkpoint
 ```
 
 Look up snapshot metadata using the selected backend.
@@ -524,31 +508,25 @@ Look up snapshot metadata using the selected backend.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">SnapshotHandle</span></div>
+    <div className="msb-param-key"><span className="msb-type">Checkpoint</span></div>
     <div className="msb-param-desc">Checkpoint metadata and lifecycle handle.</div>
   </div>
 </div>
 
-<span id="snapshot-list" />
-<span id="snapshotlist" />
-
 #### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">list()</span>
 
 ```ruby
-Microsandbox::Checkpoint.list # => Array<SnapshotHandle>
+Microsandbox::Checkpoint.list # => Array<Checkpoint>
 ```
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Array&lt;SnapshotHandle&gt;</span></div>
+    <div className="msb-param-key"><span className="msb-type">Array&lt;Checkpoint&gt;</span></div>
     <div className="msb-param-desc">List snapshots using the selected backend.</div>
   </div>
 </div>
-
-<span id="snapshot-remove" />
-<span id="snapshotremove" />
 
 #### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">remove()</span>
 
@@ -579,9 +557,6 @@ Remove a snapshot using the selected backend.
     <div className="msb-param-desc">No return value.</div>
   </div>
 </div>
-
-<span id="snapshot-save" />
-<span id="snapshotsave" />
 
 #### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">save()</span>
 
@@ -728,81 +703,19 @@ snapshot.reference # => String
 #### <span className="msb-recv">snapshot.</span><span className="msb-hn">reference_kind</span>
 
 ```ruby
-snapshot.reference_kind # => String
+snapshot.reference_kind # => Symbol
 ```
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-key"><span className="msb-type">Symbol</span></div>
     <div className="msb-param-desc">Kind of reference; preserve it with the value.</div>
   </div>
 </div>
 
-## SnapshotHandle
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">digest</span>
-
-```ruby
-handle.digest # => String
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Checkpoint digest.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">size_bytes</span>
-
-```ruby
-handle.size_bytes # => Integer | nil
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Integer | nil</span></div>
-    <div className="msb-param-desc">Checkpoint size.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">reference</span>
-
-```ruby
-handle.reference # => String
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Backend-specific reference.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">reference_kind</span>
-
-```ruby
-handle.reference_kind # => String
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Kind of reference; preserve it with the value.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">name</span>
 
 ```ruby
 handle.name # => String | nil
@@ -817,7 +730,7 @@ handle.name # => String | nil
   </div>
 </div>
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">image_ref</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">image_ref</span>
 
 ```ruby
 handle.image_ref # => String
@@ -832,41 +745,28 @@ handle.image_ref # => String
   </div>
 </div>
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">state_kind</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">state_kind</span>
 
 ```ruby
-handle.state_kind # => String
+snapshot.state_kind # => Symbol
 ```
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-key"><span className="msb-type">Symbol</span></div>
     <div className="msb-param-desc">Captured state kind.</div>
   </div>
 </div>
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">destroy()</span>
 
 ```ruby
-handle.open # => Checkpoint
+snapshot.destroy(force) # => nil
 ```
 
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Checkpoint</span></div>
-    <div className="msb-param-desc">Open the snapshot through the retained backend.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
-
-```ruby
-handle.remove(force) # => nil
-```
+Instance deletion of a remote path-based snapshot returns `Unsupported` until the provider supports atomic conditional deletion. Explicit path-selected static removal remains available. Managed remote snapshot deletion uses its captured server ID; local deletion retains its identity checks. Force does not bypass this restriction.
 
 Remove the snapshot through the retained backend.
 
@@ -888,43 +788,30 @@ Remove the snapshot through the retained backend.
   </div>
 </div>
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">save_to()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">id</span>
 
 ```ruby
-handle.save_to(output_path, **options) # => nil
+snapshot.id # => String
 ```
 
-Export through the backend retained by this handle. Archive export is local-only.
+Stable identity captured at selection time; no backend I/O.
 
-<p className="msb-label">Parameters</p>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">manifest</span>
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>output_path</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Destination archive path on the host.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>with_parents</code><span className="msb-type">Boolean</span></div>
-    <div className="msb-param-desc">Include parent snapshots; defaults to false.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>with_image</code><span className="msb-type">Boolean</span></div>
-    <div className="msb-param-desc">Include the source image; defaults to false.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>plain_tar</code><span className="msb-type">Boolean</span></div>
-    <div className="msb-param-desc">Write an uncompressed tar archive; defaults to false.</div>
-  </div>
-</div>
+```ruby
+snapshot.manifest # => Hash
+```
 
-<p className="msb-label">Returns</p>
+Fresh normalized descriptor, validated against the captured identity.
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">nil</span></div>
-    <div className="msb-param-desc">No return value.</div>
-  </div>
-</div>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">state</span>
+
+```ruby
+snapshot.state # => Hash
+```
+
+Fresh descriptor state. Missing or replaced artifacts raise errors rather than returning cached data.
+
 
 ## Checkpoint verification
 
@@ -945,3 +832,13 @@ puts report["coverage"]["kind"]
 ## Forking
 
 The Ruby SDK does not currently expose single or batch sandbox forking. For supported APIs and examples, see [TypeScript](/sdk/typescript/snapshots#forking), [Rust](/sdk/rust/snapshots#forking), [Python](/sdk/python/snapshots#forking), or [Go](/sdk/go/snapshots#forking).
+
+
+## Checkpoint.local / Checkpoint.remote
+
+```ruby
+Microsandbox::Checkpoint.local  # => Snapshots
+Microsandbox::Checkpoint.remote # => Snapshots
+```
+
+Select before creation/lookup/listing; the collection retains its destination. Remote selection captures environment credentials and raises on invalid configuration. Neither selector changes an existing resource or global default. See [selector examples](/operations/backends#resource-selectors).

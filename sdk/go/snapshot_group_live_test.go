@@ -23,21 +23,21 @@ func TestSnapshotGroupsLive(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	imported, err := Snapshot.Load(ctx, "seed", []string{archive, archive})
+	imported, err := testHistories(t).Load(ctx, "seed", []string{archive, archive})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(imported.Added) == 0 || len(imported.Reused) != 0 || imported.OperationID == "" || len(imported.Warnings) != 0 {
 		t.Fatalf("initial import: %+v", imported)
 	}
-	retried, err := Snapshot.Load(ctx, "seed", []string{archive})
+	retried, err := testHistories(t).Load(ctx, "seed", []string{archive})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(retried.Added) != 0 || len(retried.Reused) != len(imported.Added) || retried.OperationID == imported.OperationID {
 		t.Fatalf("retry: %+v", retried)
 	}
-	if _, err := Checkpoint.LoadMany(ctx, []string{archive}, SnapshotLoadOptions{Group: "seed"}); err != nil {
+	if _, err := LoadSnapshots(ctx, []string{archive}, SnapshotLoadOptions{Group: "seed"}); err != nil {
 		t.Fatal(err)
 	}
 	seed := imported.Snapshot
@@ -67,11 +67,7 @@ func TestSnapshotGroupsLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refreshed, err := sourceHandle.Refresh(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := refreshed.Snapshot(ctx, "handle-history"); err != nil {
+	if _, err := sourceHandle.Snapshot(ctx, "handle-history"); err != nil {
 		t.Fatal(err)
 	}
 	sources, err := ListSandboxes(ctx)
@@ -139,7 +135,7 @@ func TestSnapshotGroupsLive(t *testing.T) {
 	if err := RemoveSandbox(ctx, source.Name()); err != nil {
 		t.Fatal(err)
 	}
-	for index, checkpoint := range []*SnapshotArtifact{first.Checkpoint, second.Checkpoint} {
+	for index, checkpoint := range []*Checkpoint{first.Checkpoint, second.Checkpoint} {
 		_, results := checkpoint.SpawnSandboxWithProgress(ctx, "", WithRestoreCPUs(2), WithRestoreMemory(512))
 		result := <-results // Deliberately ignore progress: telemetry must never block completion.
 		if result.Err != nil {
@@ -170,7 +166,7 @@ func TestSnapshotGroupsLive(t *testing.T) {
 	if _, err := sourceHandle.Snapshot(ctx, "stale-history"); !IsKind(err, ErrSandboxReplaced) {
 		t.Fatalf("stale source capture: expected replacement refusal, got %v", err)
 	}
-	if _, err := Snapshot.Get(ctx, "stale-history"); err == nil {
+	if _, err := testHistories(t).Get(ctx, "stale-history"); err == nil {
 		t.Fatal("stale capture created a group")
 	}
 
@@ -186,7 +182,7 @@ func TestSnapshotVerificationCoverageLive(t *testing.T) {
 	defer cancel()
 	for _, name := range []string{"complete", "incomplete", "corrupt", "future"} {
 		t.Run(name, func(t *testing.T) {
-			group, err := Snapshot.Get(ctx, name)
+			group, err := testHistories(t).Get(ctx, name)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -222,7 +218,7 @@ func TestSnapshotGroupVerificationLive(t *testing.T) {
 	defer cancel()
 	for _, name := range []string{"complete", "incomplete", "corrupt", "future"} {
 		t.Run(name, func(t *testing.T) {
-			group, err := Snapshot.Get(ctx, name)
+			group, err := testHistories(t).Get(ctx, name)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -264,7 +260,7 @@ func TestSnapshotGroupFullVerificationLive(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	group, err := Snapshot.Get(ctx, "fullverify")
+	group, err := testHistories(t).Get(ctx, "fullverify")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +275,7 @@ func TestSnapshotGroupFullVerificationLive(t *testing.T) {
 	if artifact == nil || artifact.Checkpoint == nil || artifact.Checkpoint.Kind != "verified" || artifact.Checkpoint.Root == "" || artifact.Coverage.Kind != "incomplete" {
 		t.Fatalf("full artifact: %+v", artifact)
 	}
-	corrupt, err := Snapshot.Get(ctx, "fullcorrupt")
+	corrupt, err := testHistories(t).Get(ctx, "fullcorrupt")
 	if err != nil {
 		t.Fatal(err)
 	}

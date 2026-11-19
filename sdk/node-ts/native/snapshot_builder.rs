@@ -57,18 +57,8 @@ pub struct JsSnapshotBuilder {
 impl JsSnapshotBuilder {
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
-        Self {
-            guest_flush: "auto".into(),
-            inner: Some(RustSnapshot::builder(&name)),
-            name,
-            group: None,
-            source_sandbox: None,
-            dest_dir: None,
-            labels: Vec::new(),
-            force: false,
-            record_integrity: false,
-            full: false,
-        }
+        let builder = RustSnapshot::builder(&name);
+        Self::from_builder(name, builder)
     }
 
     /// Create the artifact under this parent directory instead of the
@@ -227,4 +217,21 @@ pub(crate) fn guest_flush_policy(
         .unwrap_or("auto")
         .parse()
         .map_err(napi::Error::from_reason)
+}
+
+impl JsSnapshotBuilder {
+    pub(crate) fn from_builder(name: String, builder: microsandbox::SnapshotBuilder) -> Self {
+        Self {
+            guest_flush: "auto".into(),
+            inner: Some(builder),
+            name,
+            group: None,
+            source_sandbox: None,
+            dest_dir: None,
+            labels: Vec::new(),
+            force: false,
+            record_integrity: false,
+            full: false,
+        }
+    }
 }

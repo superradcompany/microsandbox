@@ -95,7 +95,7 @@ fn first_resize_status(json: &str) -> serde_json::Value {
 async fn cleanup(name: &str) {
     if let Ok(handle) = Sandbox::get(name).await {
         let _ = handle.kill().await;
-        let _ = handle.remove().await;
+        let _ = handle.destroy().await;
     }
 }
 

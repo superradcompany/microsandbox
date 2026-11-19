@@ -25,7 +25,7 @@ def test_deferred_import_admission() -> None:
 async def exercise(root: Path) -> None:
     os.environ["MSB_HOME"] = str(root / "home-a")
     os.environ["MSB_CONFIG_PATH"] = str(root / "absent.json")
-    from microsandbox import BackendKind, Checkpoint, Snapshot, set_default_backend
+    from microsandbox import Checkpoint, LocalContext, Snapshot
 
     first, second = root / "first", root / "second"
     source = first / "source"
@@ -54,13 +54,14 @@ async def exercise(root: Path) -> None:
     for name in ["base.tar", "delta.tar", "base-group"]:
         (second / name).write_text("unrelated shadow")
     os.chdir(first)
-    set_default_backend(BackendKind.LOCAL)
+    groups = LocalContext(home=root / "home-a").snapshots
+    other = LocalContext(home=root / "home-b").snapshots
     checkpoint = await Checkpoint.open(str(source))
     await checkpoint.save_to(str(first / "base.tar"), plain_tar=True)
     await checkpoint.save_to(
         str(first / "delta.tar"), plain_tar=True, since=str(first / "base.tar")
     )
-    await Snapshot.load("base-group", ["base.tar"])
+    await groups.load("base-group", ["base.tar"])
 
     # Every iteration restores the intended backend, calls an import, and immediately
     # changes both ambient inputs before awaiting it. Incremental imports must actually
@@ -68,18 +69,16 @@ async def exercise(root: Path) -> None:
     for index in range(12):
         os.chdir(first)
         os.environ["MSB_HOME"] = str(root / "home-a")
-        set_default_backend(BackendKind.LOCAL)
         base = ["base-group", "base.tar", "./base.tar"][index % 3]
         kwargs = {"dest": "destination", "base": base}
         if index % 3 == 0:
-            future = Snapshot.load(f"group-{index}", ["delta.tar"], **kwargs)
+            future = groups.load(f"group-{index}", ["delta.tar"], **kwargs)
         elif index % 3 == 1:
             future = Checkpoint.load("delta.tar", group=f"group-{index}", **kwargs)
         else:
             future = Checkpoint.load_many(["delta.tar"], group=f"group-{index}", **kwargs)
         os.chdir(second)
         os.environ["MSB_HOME"] = str(root / "home-b")
-        set_default_backend(BackendKind.LOCAL)
         result = await future
         handles = result.checkpoints if index % 3 == 0 else [result] if index % 3 == 1 else result
         assert len(handles) == 1
@@ -89,7 +88,7 @@ async def exercise(root: Path) -> None:
         payloads = list(Path(handle.path).rglob("*.raw"))
         assert len(payloads) == 1
         assert payloads[0].read_bytes() == b"*" * 512
-        assert await Snapshot.list() == []
+        assert await other.list() == []
     assert not (second / "destination").exists()
     # Admission failures remain asynchronous errors, preserving the native API contract.
     future = Snapshot.load("bad", [""])

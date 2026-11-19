@@ -9,7 +9,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
-use crate::snapshot::{JsHeadUpdate, JsSnapshot, JsSnapshotHandle, head_update_to_js};
+use crate::snapshot::{HeadUpdate, JsSnapshot, head_update_to_js};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -38,14 +38,14 @@ pub struct JsSnapshotCaptureOptions {
 pub struct JsSnapshotCreateResult {
     pub snapshot: JsSnapshotGroup,
     pub checkpoint: JsSnapshot,
-    pub head_update: JsHeadUpdate,
+    pub head_update: HeadUpdate,
 }
 
 /// The exact member and head outcome of one capture.
 #[napi(object, object_from_js = false, js_name = "CheckpointCaptureResult")]
 pub struct JsCheckpointCaptureResult {
     pub checkpoint: JsSnapshot,
-    pub head_update: JsHeadUpdate,
+    pub head_update: HeadUpdate,
 }
 
 /// A committed archive batch, including reused members and deferred cleanup.
@@ -53,10 +53,10 @@ pub struct JsCheckpointCaptureResult {
 pub struct JsSnapshotImportResult {
     pub operation_id: String,
     pub snapshot: JsSnapshotGroup,
-    pub checkpoints: Vec<JsSnapshotHandle>,
+    pub checkpoints: Vec<JsSnapshot>,
     pub added: Vec<String>,
     pub reused: Vec<String>,
-    pub head_update: JsHeadUpdate,
+    pub head_update: HeadUpdate,
     pub warnings: Vec<String>,
 }
 
@@ -66,6 +66,14 @@ pub struct JsSnapshotImportResult {
 
 #[napi]
 impl JsSnapshotGroup {
+    /// A restore builder must come from the same native provider as this history.
+    #[napi]
+    pub fn context(&self) -> crate::context::JsContext {
+        crate::context::JsContext {
+            inner: self.inner.context().clone_shared(),
+        }
+    }
+
     /// Observe metadata and source association without selecting a checkpoint for execution.
     #[napi]
     pub async fn inspect_json(&self) -> Result<String> {
@@ -97,47 +105,13 @@ impl JsSnapshotGroup {
         archives: Vec<String>,
         opts: Option<crate::snapshot::JsLoadOpts>,
     ) -> Result<PromiseRaw<'env, JsSnapshotImportResult>> {
-        let opts = opts.unwrap_or_default();
-        // Own and anchor inputs on the JS thread, before spawning any async work.
-        let prepared = (|| -> Result<_> {
-            if opts
-                .group
-                .as_deref()
-                .is_some_and(|selected| selected != group)
-            {
-                return Err(to_napi_error(
-                    microsandbox::MicrosandboxError::InvalidConfig(
-                        "import options cannot select a different destination group".into(),
-                    ),
-                ));
-            }
-            microsandbox::snapshot::PreparedSnapshotImport::new(
-                archives.into_iter().map(PathBuf::from).collect(),
-                microsandbox::snapshot::LoadOpts {
-                    dest: opts.dest.map(PathBuf::from),
-                    base: opts.base,
-                    group: None,
-                    set_head: opts.set_head.unwrap_or(false),
-                },
-            )
-            .map_err(to_napi_error)
-        })();
-        env.spawn_future(async move {
-            let result = prepared?.group(group).await.map_err(to_napi_error)?;
-            Ok(JsSnapshotImportResult {
-                operation_id: result.operation_id,
-                snapshot: Self::from_rust(result.snapshot),
-                checkpoints: result
-                    .checkpoints
-                    .into_iter()
-                    .map(JsSnapshotHandle::from_rust)
-                    .collect(),
-                added: result.added.into_iter().map(|id| id.to_string()).collect(),
-                reused: result.reused.into_iter().map(|id| id.to_string()).collect(),
-                head_update: head_update_to_js(&result.head_update),
-                warnings: result.warnings,
-            })
-        })
+        load_in(
+            env,
+            microsandbox::configured_context().snapshots(),
+            group,
+            archives,
+            opts,
+        )
     }
 
     /// Consume destination options; the receiver always selects the source and backend.
@@ -224,14 +198,14 @@ impl JsSnapshotGroup {
     }
 
     #[napi]
-    pub async fn checkpoints(&self) -> Result<Vec<JsSnapshotHandle>> {
+    pub async fn checkpoints(&self) -> Result<Vec<JsSnapshot>> {
         Ok(self
             .inner
             .checkpoints()
             .await
             .map_err(to_napi_error)?
             .into_iter()
-            .map(JsSnapshotHandle::from_rust)
+            .map(JsSnapshot::from_rust)
             .collect())
     }
 
@@ -246,14 +220,14 @@ impl JsSnapshotGroup {
     }
 
     #[napi]
-    pub async fn set_head(&self, member: String) -> Result<JsHeadUpdate> {
+    pub async fn set_head(&self, member: String) -> Result<HeadUpdate> {
         Ok(head_update_to_js(
             &self.inner.set_head(member).await.map_err(to_napi_error)?,
         ))
     }
 
     #[napi]
-    pub async fn clear_head(&self) -> Result<JsHeadUpdate> {
+    pub async fn clear_head(&self) -> Result<HeadUpdate> {
         Ok(head_update_to_js(
             &self.inner.clear_head().await.map_err(to_napi_error)?,
         ))
@@ -348,4 +322,55 @@ pub(crate) fn capture_options_for_backend(
         result = result.label(key, value);
     }
     Ok(result)
+}
+
+pub(crate) fn load_in<'env>(
+    env: &'env Env,
+    groups: microsandbox::Snapshots,
+    group: String,
+    archives: Vec<String>,
+    opts: Option<crate::snapshot::JsLoadOpts>,
+) -> Result<PromiseRaw<'env, JsSnapshotImportResult>> {
+    let opts = opts.unwrap_or_default();
+    // Own and anchor inputs on the JS thread, before spawning any async work.
+    let prepared = (|| -> Result<_> {
+        if opts
+            .group
+            .as_deref()
+            .is_some_and(|selected| selected != group)
+        {
+            return Err(to_napi_error(
+                microsandbox::MicrosandboxError::InvalidConfig(
+                    "import options cannot select a different destination group".into(),
+                ),
+            ));
+        }
+        groups
+            .prepare_import(
+                archives.into_iter().map(PathBuf::from).collect(),
+                microsandbox::snapshot::LoadOpts {
+                    dest: opts.dest.map(PathBuf::from),
+                    base: opts.base,
+                    group: None,
+                    set_head: opts.set_head.unwrap_or(false),
+                },
+            )
+            .map_err(to_napi_error)
+    })();
+    env.spawn_future(async move {
+        let result = prepared?.group(group).await.map_err(to_napi_error)?;
+        Ok(JsSnapshotImportResult {
+            operation_id: result.operation_id,
+            snapshot: JsSnapshotGroup::from_rust(result.snapshot),
+            checkpoints: result
+                .checkpoints
+                .into_iter()
+                .map(JsSnapshot::from_rust)
+                .collect(),
+            added: result.added.into_iter().map(|id| id.to_string()).collect(),
+            reused: result.reused.into_iter().map(|id| id.to_string()).collect(),
+            head_update: head_update_to_js(&result.head_update),
+            warnings: result.warnings,
+        })
+    })
 }

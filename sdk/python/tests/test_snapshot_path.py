@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from microsandbox import Checkpoint, SnapshotHandle
+from microsandbox import Checkpoint
 
 
 @pytest.mark.asyncio
@@ -37,7 +37,7 @@ async def test_local_snapshot_path(tmp_path: Path) -> None:
     assert snapshot.path == str(tmp_path.resolve())
     assert snapshot.reference == snapshot.path
     assert snapshot.reference_kind == "path"
-    assert hasattr(SnapshotHandle, "path")
+    assert hasattr(Checkpoint, "path")
     report = await snapshot.verify()
     assert report["upper"]["kind"] == "not_recorded"
     assert report["coverage"] == {

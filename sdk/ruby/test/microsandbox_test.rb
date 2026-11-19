@@ -192,6 +192,21 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_equal "unsupported", error.code
   end
 
+  def test_secret_hash_rejects_unknown_keys_before_creation
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("invalid-secret", secrets: [
+        { env: "TOKEN", value: "private-value", allowed_host: "api.example", allow_host: "typo" }
+      ])
+    end
+    assert_match(/unknown keyword: :allow_host/, error.message)
+    assert_not_match(/private-value/, error.message)
+  end
+
+  def test_snapshot_head_read_rejects_member_selectors
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Snapshot.group_head("app:previous") }
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Snapshot.local.group_head("app:previous") }
+  end
+
   def test_snapshot_source_recovery_error_attributes_default_to_nil
     error = Microsandbox::SnapshotSourceRecoveryError.new("boom")
 
@@ -227,12 +242,11 @@ class MicrosandboxTest < Test::Unit::TestCase
     # Ruby process and this process keeps its backend selection. A fork would
     # not do: on macOS the cloud client initializes Foundation classes on
     # first use, which the Objective-C runtime refuses in a forked child.
-    backend_kind = Microsandbox.default_backend_kind
     script = <<~RUBY
       require "microsandbox"
-      Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:9")
+      remote = Microsandbox::RemoteContext.new(api_key: "test-key", url: "http://127.0.0.1:9")
       begin
-        Microsandbox::Sandbox.create("ruby-test", image: "alpine", replace: true)
+        remote.sandboxes.create("ruby-test", image: "alpine", replace: true)
         puts "no error raised"
       rescue Microsandbox::UnsupportedError => error
         puts error.message, error.operation, error.hint
@@ -248,15 +262,14 @@ class MicrosandboxTest < Test::Unit::TestCase
       "sandbox.create",
       "the replace option is not accepted here"
     ], output.lines(chomp: true)
-    assert_equal backend_kind, Microsandbox.default_backend_kind
   end
 
   def test_http_deny_messages_reach_cloud_validation
     script = <<~RUBY
       require "microsandbox"
-      Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:9")
+      remote = Microsandbox::RemoteContext.new(api_key: "test-key", url: "http://127.0.0.1:9")
       settings = Microsandbox::HttpBuilder.new
-      settings.deny_message("legacy {host}").deny_response_format("json")
+      settings.deny_message("legacy {host}").deny_response_format(:json)
       abort "legacy config lost" unless settings.message == "legacy {host}" && settings.format == "json"
       settings.network_deny_message("dormant").secret_deny_message("secret")
       abort "secret message lost" unless settings.secret_message == "secret"
@@ -265,12 +278,12 @@ class MicrosandboxTest < Test::Unit::TestCase
       abort "disable ignored" unless settings.response == false
       operations = [
         -> {
-          builder = Microsandbox::Sandbox.builder("ruby-test").image("alpine")
+          builder = remote.sandboxes.builder("ruby-test").image("alpine")
           builder.http!(true, "legacy {host}")
           builder.create
         },
-        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http: { deny_response: true, deny_response_format: "json", deny_message: "legacy", network_deny_message: "network", secret_deny_message: "secret" }) },
-        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http { |h| h.deny_response(true).deny_response_format("json").deny_message("legacy").network_deny_message("blocked {host}").secret_deny_message("secret") }.create }
+        -> { remote.sandboxes.create("ruby-test", image: "alpine", http: { deny_response: true, deny_response_format: "json", deny_message: "legacy", network_deny_message: "network", secret_deny_message: "secret" }) },
+        -> { remote.sandboxes.builder("ruby-test").image("alpine").http { |h| h.deny_response(true).deny_response_format("json").deny_message("legacy").network_deny_message("blocked {host}").secret_deny_message("secret") }.create }
       ]
       operations.each do |operation|
         begin
@@ -294,7 +307,7 @@ class MicrosandboxTest < Test::Unit::TestCase
   end
 
   def test_explicit_stop_timeout_requires_one_argument_on_both_receivers
-    [Microsandbox::Sandbox, Microsandbox::SandboxHandle].each do |receiver|
+    [Microsandbox::Sandbox].each do |receiver|
       assert_equal 1, receiver.instance_method(:stop_with_timeout).arity
       assert_equal(-1, receiver.instance_method(:stop).arity)
     end
@@ -310,22 +323,24 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_raise(TypeError) { builder.entrypoint(["sh", 1]) }
   end
 
-  def test_with_preserves_block_error_when_stop_also_fails
+  def test_with_retains_block_error_as_cleanup_failure_cause
     fake = Object.new
-    fake.define_singleton_method(:stop) { raise "stop failed" }
+    fake.define_singleton_method(:__shutdown_owned) { raise "stop failed" }
     sandbox_class = Class.new(Microsandbox::Sandbox)
     sandbox_class.define_singleton_method(:create) { |*, **| fake }
 
-    error = assert_raise(ArgumentError) do
+    error = assert_raise(RuntimeError) do
       sandbox_class.with("ruby-test") { raise ArgumentError, "block failed" }
     end
 
-    assert_equal "block failed", error.message
+    assert_equal "stop failed", error.message
+    assert_kind_of ArgumentError, error.cause
+    assert_equal "block failed", error.cause.message
   end
 
   def test_with_raises_stop_error_after_successful_block
     fake = Object.new
-    fake.define_singleton_method(:stop) { raise "stop failed" }
+    fake.define_singleton_method(:__shutdown_owned) { raise "stop failed" }
     sandbox_class = Class.new(Microsandbox::Sandbox)
     sandbox_class.define_singleton_method(:create) { |*, **| fake }
 
