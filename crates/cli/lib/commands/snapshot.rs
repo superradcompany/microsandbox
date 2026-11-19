@@ -471,6 +471,7 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
         Ok(checkpoint) => {
             spinner.finish_success("Checkpointed");
             if !args.quiet {
+                report_full_capture_defaults(args.full, checkpoint.has_portable_defaults());
                 if let Some(update) = checkpoint.head_update() {
                     report_head_update(update);
                 }
@@ -483,6 +484,12 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
             spinner.finish_clear();
             Err(error.into())
         }
+    }
+}
+
+fn report_full_capture_defaults(full: bool, recorded: Option<bool>) {
+    if full && recorded == Some(false) {
+        ui::warn("portable defaults are unavailable for this full checkpoint");
     }
 }
 
@@ -523,6 +530,15 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
             Ok(archive) => {
                 spinner.finish_success("Snapshotted");
                 if !args.quiet {
+                    report_full_capture_defaults(
+                        args.full,
+                        Some(
+                            archive
+                                .manifest()
+                                .extensions
+                                .contains_key(SAVED_CONFIG_EXTENSION),
+                        ),
+                    );
                     println!("{}", archive.id());
                     println!("{}", archive.path().display());
                 }
@@ -570,6 +586,7 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
             let snap = created.checkpoint;
             spinner.finish_success("Snapshotted");
             if !args.quiet {
+                report_full_capture_defaults(args.full, snap.has_portable_defaults());
                 if let Some(update) = snap.head_update() {
                     report_head_update(update);
                 }

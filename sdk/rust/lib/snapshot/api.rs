@@ -254,6 +254,16 @@ impl Checkpoint {
         Ok(observed)
     }
 
+    /// Whether the checkpoint descriptor returned by this operation records portable defaults.
+    /// An unopened handle has no descriptor evidence and returns `None` without provider I/O.
+    pub fn has_portable_defaults(&self) -> Option<bool> {
+        self.loaded_manifest.as_ref().map(|manifest| {
+            manifest
+                .extensions
+                .contains_key(microsandbox_types::snapshot::saved_config::SAVED_CONFIG_EXTENSION)
+        })
+    }
+
     /// Internal restore preparation has already opened the descriptor under its storage lease.
     pub(crate) fn loaded_manifest(&self) -> MicrosandboxResult<&Manifest> {
         self.loaded_manifest.as_ref().ok_or_else(|| {
