@@ -274,6 +274,35 @@ fn pending_storage_records_requests_without_borrowing_active_owned_payloads() {
 }
 
 #[test]
+fn pending_external_storage_keeps_unobserved_mounts_unknown_and_socket_routes_independent() {
+    let mut record = source();
+    let project = |raw: &Value| {
+        let source = RuntimeCaptureSource::from_recorded(raw, None, None).unwrap();
+        let mut bindings = StorageCaptureBindings::default();
+        source
+            .complete_socket_bindings(&mut bindings, "pending.storage.routes")
+            .unwrap();
+        source.project_pending_storage(bindings).unwrap()
+    };
+    let mixed = project(&record);
+    assert!(unknown(&mixed.mounts));
+    assert_eq!(mixed.vsock.as_ref().unwrap().value().unwrap().len(), 2);
+    let disk = record["mounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mount| mount["type"] == "DiskImage")
+        .unwrap()
+        .clone();
+    record["mounts"] = json!([disk]);
+    let pending = project(&record);
+    let encoded = serde_json::to_string(&pending).unwrap();
+    assert!(encoded.contains("pending.storage.mounts.0"));
+    assert!(!encoded.contains("PRIVATE_"));
+    assert_eq!(pending.binding_uses().unwrap().len(), 3);
+}
+
+#[test]
 fn pending_owned_policy_omissions_keep_the_whole_inventory_unknown() {
     let raw = source();
     let owned = raw["mounts"]

@@ -52,9 +52,31 @@ impl RuntimeCaptureSource<'_> {
     /// requirements; source paths, volume names and transient provisioning are not exported.
     pub fn project_pending_storage(
         &self,
-        bindings: StorageCaptureBindings,
+        mut bindings: StorageCaptureBindings,
     ) -> MicrosandboxResult<SavedStorageConfig> {
-        self.project_storage_sections(bindings, None, true)
+        // Explicit selections must match the complete declaration. Without a selection,
+        // a pending bind's root kind or a named volume's actual backing cannot be derived
+        // from its private source path/name or borrowed from the currently running guest.
+        let complete =
+            !bindings.mounts.is_empty()
+                || !self.config.spec.mounts.iter().any(|mount| {
+                    matches!(mount, VolumeMount::Bind { .. } | VolumeMount::Named { .. })
+                });
+        if complete && bindings.mounts.is_empty() && self.complete_mount_inventory(true) {
+            for (index, mount) in self.config.spec.mounts.iter().enumerate() {
+                if let VolumeMount::DiskImage { guest, .. } = mount {
+                    bindings.mounts.insert(
+                        guest.clone(),
+                        SavedExternalMountCapture::DiskImage {
+                            binding: SavedBindingReference {
+                                id: format!("pending.storage.mounts.{index}"),
+                            },
+                        },
+                    );
+                }
+            }
+        }
+        self.project_storage_sections(bindings, None, complete)
     }
 
     fn complete_mount_inventory(&self, pending: bool) -> bool {

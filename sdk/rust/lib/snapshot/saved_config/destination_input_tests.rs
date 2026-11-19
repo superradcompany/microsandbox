@@ -168,6 +168,49 @@ fn destination_inputs_require_complete_command_fields_before_launch() {
 }
 
 #[test]
+fn unknown_environment_needs_a_complete_replacement_even_when_no_command_starts() {
+    let mut source = active();
+    source["runtime"] = json!({"env":{"state":"unknown","reason":"not_observed"}});
+    let saved = document(source, json!({}));
+    let resources = SandboxResources::default();
+    let captured = Default::default();
+    for full in [false, true] {
+        let vars = vec![microsandbox_types::EnvVar::new("ONLY", "destination")];
+        let resolve = |patch: &SandboxSpecPatch| {
+            let context = if full {
+                SavedConfigurationContext::Full {
+                    exec_limits: None,
+                    resources: &resources,
+                    security: SecurityProfile::default(),
+                    bindings: &captured,
+                }
+            } else {
+                disk()
+            };
+            prepare(
+                &saved,
+                patch,
+                SnapshotConfigMode::Saved,
+                context,
+                BTreeMap::new(),
+            )
+            .and_then(SavedConfigurationPlan::into_destination_inputs)
+        };
+        let merge = SandboxSpecPatch::new().env(vars.clone());
+        let error = resolve(&merge).unwrap_err().to_string();
+        assert!(
+            error.contains("SCFG_UNKNOWN") && error.contains("runtime.env"),
+            "{error}"
+        );
+        for replacement in [vars, Vec::new()] {
+            let inputs =
+                resolve(&SandboxSpecPatch::new().replace_env(replacement.clone())).unwrap();
+            assert_eq!(inputs.spec_inputs().env, replacement);
+        }
+    }
+}
+
+#[test]
 fn destination_inputs_refuse_each_unknown_immediate_family_without_mutating_source() {
     for (section, field) in [
         ("runtime", "hostname"),
