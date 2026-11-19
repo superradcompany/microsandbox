@@ -175,12 +175,7 @@ impl CapturedSandboxConfiguration {
     ) -> MicrosandboxResult<Option<PendingCaptureSource<'_>>> {
         self.pending
             .as_ref()
-            .map(|pending| {
-                let source = RuntimeCaptureSource::from_recorded(pending, None, None)?;
-                let network =
-                    source.network_requirements(NetworkCaptureSection::Pending, guest_trust)?;
-                PendingCaptureSource::from_recorded(pending, network, storage)
-            })
+            .map(|pending| PendingCaptureSource::from_capture(pending, guest_trust, storage))
             .transpose()
     }
 
@@ -715,6 +710,9 @@ mod tests {
         fixture.value["pending"]["runtime"]["user"] = "pending-user".into();
         fixture.value["pending"]["network"]["dns"]["nameservers"] =
             serde_json::json!(["PRIVATE_PENDING_RESOLVER", "PRIVATE_PENDING_SECOND"]);
+        fixture.value["pending"]["vsock"]["routes"] = serde_json::json!([
+            {"port": 456, "socket_type": "stream", "host_socket": "/PRIVATE_PENDING_SOCKET"}
+        ]);
         // These files deliberately disagree. Neither is authoritative for an immutable capture.
         std::fs::write(
             fixture.home.path().join("last-active/state.json"),
@@ -794,6 +792,13 @@ mod tests {
                 .and_then(SavedValue::value)
                 .map(String::as_str),
             Some("captured-user")
+        );
+        assert!(document.bindings.contains_key("pending.storage.routes.0"));
+        assert!(!document.bindings.contains_key("active.storage.routes.0"));
+        assert!(
+            !serde_json::to_string(&document)
+                .unwrap()
+                .contains("PRIVATE_PENDING_SOCKET")
         );
         let encoded = serde_json::to_value(&document).unwrap();
         // Requirements are derived separately from the immutable active/pending cuts.

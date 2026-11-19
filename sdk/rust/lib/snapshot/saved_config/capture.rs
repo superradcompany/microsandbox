@@ -4,16 +4,17 @@ use std::collections::BTreeMap;
 
 use microsandbox_types::snapshot::saved_config::{
     MAX_SAVED_CONFIG_ENTRIES, RuntimeCaptureAction, RuntimeCaptureTarget,
-    SAVED_CONFIG_SCHEMA_VERSION, SavedActiveConfig, SavedBindingKind, SavedCaptureProvenance,
-    SavedResourcesConfig, SavedSandboxConfig, SavedValue, collect_binding_uses,
-    project_runtime_capture,
+    SAVED_CONFIG_SCHEMA_VERSION, SavedActiveConfig, SavedBindingKind, SavedBindingReference,
+    SavedCaptureProvenance, SavedResourcesConfig, SavedSandboxConfig, SavedValue,
+    collect_binding_uses, project_runtime_capture,
 };
 use microsandbox_types::snapshot::{Manifest, SnapshotScope};
 use serde_json::Value;
 
 use super::{
     ExecutionCaptureControls, NetworkCaptureBindings, NetworkCaptureControls,
-    ResourceCaptureObservation, RuntimeCaptureSource, StorageCaptureBindings,
+    NetworkCaptureSection, ResourceCaptureObservation, RuntimeCaptureSource,
+    StorageCaptureBindings,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -66,6 +67,23 @@ impl<'a> PendingCaptureSource<'a> {
     /// Compare provenance without exposing private source values in diagnostics.
     pub(crate) fn matches_recorded(&self, recorded: &Value) -> bool {
         self.source.recorded == recorded
+    }
+
+    /// Use the same pending record for both requirement discovery and projection;
+    /// decoding it again can duplicate large scripts and environment values.
+    pub(crate) fn from_capture(
+        recorded: &'a Value,
+        guest_trust: Vec<SavedBindingReference>,
+        mut storage: StorageCaptureBindings,
+    ) -> MicrosandboxResult<Self> {
+        let source = RuntimeCaptureSource::from_recorded(recorded, None, None)?;
+        let network = source.network_requirements(NetworkCaptureSection::Pending, guest_trust)?;
+        source.complete_socket_bindings(&mut storage, "pending.storage.routes")?;
+        Ok(Self {
+            source,
+            network,
+            storage,
+        })
     }
 
     /// Decode recorded next-start intent without borrowing active init/script observations.

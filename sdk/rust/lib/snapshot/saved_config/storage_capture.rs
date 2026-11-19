@@ -168,16 +168,30 @@ impl RuntimeCaptureSource<'_> {
                 "no captured mount for a selected binding",
             ));
         }
-        if !selection.routes.is_empty() {
-            bindings.routes = selection.routes;
-        } else if self.complete_route_inventory() {
-            bindings.routes = (0..self.config.spec.vsock.routes.len())
+        bindings.routes = selection.routes;
+        self.complete_socket_bindings(&mut bindings, "active.storage.routes")?;
+        self.project_storage_sections(bindings, Some(manifest), complete)
+    }
+
+    /// A complete socket declaration establishes the guest port and type. Its private
+    /// host endpoint becomes a destination requirement scoped to this capture section.
+    pub(super) fn complete_socket_bindings(
+        &self,
+        bindings: &mut StorageCaptureBindings,
+        prefix: &'static str,
+    ) -> MicrosandboxResult<()> {
+        let count = self.config.spec.vsock.routes.len();
+        if count > MAX_SAVED_CONFIG_ENTRIES {
+            return Err(error("SCFG_LIMIT", "too many socket routes"));
+        }
+        if bindings.routes.is_empty() && self.complete_route_inventory() {
+            bindings.routes = (0..count)
                 .map(|index| SavedBindingReference {
-                    id: format!("active.storage.routes.{index}"),
+                    id: format!("{prefix}.{index}"),
                 })
                 .collect();
         }
-        self.project_storage_sections(bindings, Some(manifest), complete)
+        Ok(())
     }
 
     fn project_storage_sections(
