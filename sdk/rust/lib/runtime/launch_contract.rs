@@ -933,6 +933,12 @@ pub(crate) async fn validate_multi_tenant_config(
     {
         return Ok(());
     }
+    if global.dns.nameservers.as_ref().is_some_and(Vec::is_empty) {
+        return Err(MicrosandboxError::InvalidConfig(
+            "dns.nameservers must not be empty in multi-tenant mode".into(),
+        ));
+    }
+
     let supported = bounded_probe(path, "__launch-protocol")
         .await
         .ok()
@@ -1961,6 +1967,22 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"multi_tenant":true}'"#,
         );
         validate_multi_tenant_config(&path, &config, &global)
+            .await
+            .unwrap();
+
+        global.dns.nameservers = Some(vec![]);
+        let error = validate_multi_tenant_config(&path, &config, &global)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("dns.nameservers must not be empty")
+        );
+
+        config.spec.deployment_profile = microsandbox_types::DeploymentProfile::SingleTenant;
+        validate_multi_tenant_config(&dir.path().join("no-probe"), &config, &global)
             .await
             .unwrap();
     }
