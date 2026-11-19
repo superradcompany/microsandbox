@@ -185,7 +185,9 @@ impl DnsForwarder {
     ///
     /// Reuse a cached answer if it has not expired. Otherwise, look up the name
     /// using the sandbox's DNS rules and resolver settings. Return `false` if
-    /// the lookup fails, the answer is blocked, or it does not include `addr`.
+    /// the lookup fails or the answer is blocked. An answer without `addr`
+    /// still succeeds if an earlier filtered answer bound `addr` to `hostname`
+    /// within the revalidation grace period.
     pub(crate) async fn revalidate_hostname(&self, hostname: &str, addr: IpAddr) -> bool {
         let addr = normalize_ip_addr(addr);
         let Ok(name) = Name::from_ascii(hostname) else {
@@ -198,6 +200,7 @@ impl DnsForwarder {
         if self
             .shared
             .any_resolved_hostname(addr, |candidate| candidate == hostname)
+            || self.shared.sni_renewed_hostname(addr, hostname)
         {
             return true;
         }
@@ -240,13 +243,24 @@ impl DnsForwarder {
             response = complete;
         }
 
-        extract_addrs_and_ttl(&response, family, hostname).is_some_and(|(addresses, _)| {
-            addresses
-                .into_iter()
-                .any(|ip| normalize_ip_addr(ip) == addr)
-        }) && self
-            .shared
-            .any_resolved_hostname(addr, |candidate| candidate == hostname)
+        let Some((addresses, ttl)) = extract_addrs_and_ttl(&response, family, hostname) else {
+            return false;
+        };
+        if addresses
+            .into_iter()
+            .any(|ip| normalize_ip_addr(ip) == addr)
+        {
+            return self
+                .shared
+                .any_resolved_hostname(addr, |candidate| candidate == hostname);
+        }
+
+        // Load-balancing resolvers may answer with another member of the same
+        // pool while the client still uses the address it cached. The name
+        // still resolves and is still allowed, so accept an address an earlier
+        // filtered answer bound to it within the revalidation grace period.
+        self.shared
+            .renew_recent_resolved_hostname(hostname, family, addr, ttl)
     }
 
     /// Process a single raw DNS query: parse, apply block list, select
@@ -1599,6 +1613,7 @@ mod tests {
             for outcome in [
                 "same",
                 "changed",
+                "changed-after-grace",
                 "nxdomain",
                 "servfail",
                 "timeout",
@@ -1616,7 +1631,7 @@ mod tests {
                 let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
                 let upstream = socket.local_addr().unwrap();
                 let address: IpAddr = "198.51.100.23".parse().unwrap();
-                let returned = if outcome == "changed" {
+                let returned = if matches!(outcome, "changed" | "changed-after-grace") {
                     Ipv4Addr::new(198, 51, 100, 24)
                 } else if outcome == "rebind" {
                     Ipv4Addr::new(10, 0, 0, 7)
@@ -1671,6 +1686,10 @@ mod tests {
                     );
                 }
                 inner.network_policy = Arc::new(policy.clone());
+                if outcome == "changed-after-grace" {
+                    inner.shared =
+                        Arc::new(SharedState::new(4).with_revalidation_grace(Duration::ZERO));
+                }
                 inner.config = Arc::new(NormalizedDnsConfig {
                     rebind_protection: outcome == "rebind",
                     nameservers: Vec::new(),
@@ -1749,7 +1768,11 @@ mod tests {
                     .evaluate_tcp_egress(dst, &forwarder.shared, source, &handle)
                     .await;
                 let has_sni = matches!(source, HostnameSource::Sni(_));
-                let allowed = has_sni && matches!(outcome, "same" | "suffix" | "unobserved");
+                // "changed": the resolver moved on to another pool member, but
+                // an earlier filtered answer bound the address within the
+                // revalidation grace period.
+                let allowed =
+                    has_sni && matches!(outcome, "same" | "changed" | "suffix" | "unobserved");
                 assert_eq!(
                     result,
                     if allowed {
@@ -1783,6 +1806,104 @@ mod tests {
                 server.abort();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn rotating_pool_revalidation_holds_until_the_name_stops_resolving() {
+        use crate::policy::{EgressEvaluation, HostnameSource};
+
+        let cached = Ipv4Addr::new(198, 51, 100, 23);
+        let rotated = Ipv4Addr::new(198, 51, 100, 24);
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream = socket.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut buf = [0; 4096];
+            // Reconnect, guest lookup, reconnect. The pool answers one address
+            // per query; the guest lookup finds that the name is gone.
+            for answer in [Some(rotated), None, Some(rotated)] {
+                let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+                let query = Message::from_bytes(&buf[..len]).unwrap();
+                let mut response = make_response(&query);
+                match answer {
+                    Some(address) => {
+                        response.add_answer(Record::from_rdata(
+                            query.queries[0].name().clone(),
+                            12,
+                            RData::A(A::from(address)),
+                        ));
+                    }
+                    None => response.metadata.response_code = ResponseCode::NXDomain,
+                }
+                socket
+                    .send_to(&response.to_bytes().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+        let forwarder = forwarder_over(&[upstream]).await;
+        let policy = NetworkPolicy::none().allow_domain("example.com").unwrap();
+        let (_sender, handle) = watch::channel(Some(forwarder.clone()));
+        let dst = SocketAddr::new(cached.into(), 443);
+        let reconnect = || {
+            policy.evaluate_tcp_egress(
+                dst,
+                &forwarder.shared,
+                HostnameSource::Sni("example.com"),
+                &handle,
+            )
+        };
+        assert!(forwarder.shared.cache_resolved_hostname(
+            "example.com",
+            ResolvedHostnameFamily::Ipv4,
+            [cached.into()],
+            Duration::from_millis(20),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while forwarder
+                .shared
+                .any_resolved_hostname(cached.into(), |name| name == "example.com")
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            reconnect().await,
+            EgressEvaluation::Allow,
+            "an address from an earlier answer stays usable while the name resolves"
+        );
+        for protocol in [Protocol::Tcp, Protocol::Udp] {
+            assert_eq!(
+                policy.evaluate_egress_with_source(
+                    dst,
+                    protocol,
+                    &forwarder.shared,
+                    HostnameSource::CacheOnly,
+                ),
+                EgressEvaluation::Deny,
+                "the renewal must not admit {protocol:?} traffic without SNI"
+            );
+        }
+        assert_eq!(
+            policy.evaluate_egress_with_source(
+                dst,
+                Protocol::Tcp,
+                &forwarder.shared,
+                HostnameSource::Sni("other.example.com"),
+            ),
+            EgressEvaluation::Deny,
+            "the renewal covers only the revalidated name"
+        );
+
+        assert_eq!(resolve_via_gateway(&forwarder).await, None);
+        assert_eq!(
+            reconnect().await,
+            EgressEvaluation::Deny,
+            "a guest lookup without addresses ends the grace period"
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]

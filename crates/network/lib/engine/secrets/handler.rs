@@ -2715,10 +2715,13 @@ fn host_pattern_allowed(
         return true;
     };
 
+    // `pattern` already matched `sni`, so a revalidation of that exact name
+    // proves the same binding a DNS answer would.
     host_alias_matches(pattern, sni, identity)
         || identity
             .shared
             .any_resolved_hostname(identity.guest_ip, |hostname| pattern.matches(hostname))
+        || identity.shared.sni_renewed_hostname(identity.guest_ip, sni)
 }
 
 fn host_alias_matches(pattern: &HostPattern, sni: &str, identity: &SecretHostIdentity<'_>) -> bool {

@@ -1154,7 +1154,7 @@ impl From<bool> for DestinationMatch {
 /// IP rules use the address alone. Domain rules also use the client's hostname:
 ///
 /// - With SNI, an allow needs both a matching name and an unexpired DNS answer
-///   tying it to `addr`. A deny needs only the name, so choosing an IP directly
+///   tying it to `addr`, or an unexpired SNI revalidation of that exact name. A deny needs only the name, so choosing an IP directly
 ///   cannot bypass a blocked domain. Claiming an allowed name cannot grant
 ///   access to an unrelated IP.
 /// - Without SNI, use only unexpired DNS answers for the address.
@@ -1175,8 +1175,10 @@ fn matches_egress_destination_with_source(
         Destination::Domain(domain) => match source {
             HostnameSource::Sni(name) => {
                 let name_matches = name == domain.as_str();
-                let cache_matches =
-                    || shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str());
+                let cache_matches = || {
+                    shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str())
+                        || shared.sni_renewed_hostname(addr, name)
+                };
                 (name_matches && (action.is_deny() || cache_matches())).into()
             }
             HostnameSource::CacheOnly => shared
@@ -1190,7 +1192,7 @@ fn matches_egress_destination_with_source(
                 let cache_matches = || {
                     shared.any_resolved_hostname(addr, |hostname| {
                         matches_suffix(hostname, suffix.as_str())
-                    })
+                    }) || shared.sni_renewed_hostname(addr, name)
                 };
                 (name_matches && (action.is_deny() || cache_matches())).into()
             }

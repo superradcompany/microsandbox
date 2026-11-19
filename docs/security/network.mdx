@@ -106,13 +106,13 @@ Gateway replies are checked for restricted names and addresses in every record s
 
 Even without rebinding, a time-of-check to time-of-use race exists: an allowed domain resolves to an allowed IP when policy is checked, then the guest looks it up again at connect time and reaches a different IP.
 
-Domain rules require a live DNS binding between the allowed name and destination IP. When an allowed TLS SNI name has no live binding, microsandbox re-resolves it through the policy-filtered resolver and requires the answer to contain the chosen IP. No prior guest lookup is required; connections without SNI still need a live binding. The same pin set gates [secret injection](/security/secrets).
+Domain rules require a live DNS binding between the allowed name and destination IP. When an allowed TLS SNI name has no live binding, microsandbox re-resolves it through the policy-filtered resolver. The answer must contain the chosen IP, or an earlier filtered answer for that name must have returned it within a five-minute grace period after its TTL. No prior guest lookup is required; connections without SNI still need a live binding. The same pin set gates [secret injection](/security/secrets).
 
 ## SNI spoofing
 
 A TLS client picks the SNI in its ClientHello, and it's plaintext and unsigned. Some servers don't reject a mismatched SNI and complete the handshake against their default certificate anyway. That gives a workload a way to claim an allowed name while actually connecting elsewhere.
 
-With SNI, both the name match and DNS-to-IP binding must pass. Refreshing a missing binding does not authorize an IP absent from the fresh answer. Intercepted HTTP also requires `Host` or `:authority` to match SNI, preventing domain-fronting.
+With SNI, both the name match and DNS-to-IP binding must pass. Refreshing a missing binding never authorizes an IP that no filtered answer for that name returned. Intercepted HTTP also requires `Host` or `:authority` to match SNI, preventing domain-fronting.
 
 ## The DNS bypass surface
 
