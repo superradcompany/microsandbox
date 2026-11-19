@@ -1161,7 +1161,10 @@ mod tests {
         tokio::time::pause();
         let started = tokio::time::Instant::now();
         assert!(paths.may_be_live().await.unwrap());
-        assert_eq!(started.elapsed(), Duration::from_millis(50));
+        // Tokio rounds timer deadlines to millisecond ticks. Depending on the
+        // clock's alignment, the 50 ms deadline can fire on the next 1 ms tick.
+        let budget = Duration::from_millis(50);
+        assert!((budget..=budget + Duration::from_millis(1)).contains(&started.elapsed()));
         tokio::time::resume();
         assert!(path.exists());
         // Free one slot while the next probe is retrying. Verify a new connection
