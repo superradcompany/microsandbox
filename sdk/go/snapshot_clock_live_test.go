@@ -4,15 +4,13 @@ package microsandbox
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// Full capture preserves off; disk capture currently has no recorded clock policy.
-// Exercise both without silently expanding the saved-configuration contract.
+// Exercise policy inheritance through a second capture, including a stopped disk source.
 func TestSnapshotGuestClockLive(t *testing.T) {
 	if os.Getenv("MSB_CLOCK_LIVE") != "1" {
 		t.Skip("requires disposable native VM home")
@@ -39,26 +37,16 @@ func TestSnapshotGuestClockLive(t *testing.T) {
 	}()
 	check := func(sb *Sandbox, expected string) {
 		t.Helper()
-		h, err := GetSandbox(ctx, sb.Name())
+		config, err := sb.Config(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var config struct {
-            Spec struct { Runtime struct {
-				GuestClock string `json:"guest_clock"`
-			} `json:"runtime"` } `json:"spec"`
-		}
-		raw, err := h.ConfigJSON(ctx)
-        if err != nil { t.Fatal(err) }
-        if err := json.Unmarshal([]byte(raw), &config); err != nil {
-			t.Fatal(err)
-		}
-		actual := config.Spec.Runtime.GuestClock
-		if actual == "" {
-			actual = "sync"
+		actual := "sync"
+		if clock := config.Spec.Runtime.GuestClock; clock != nil {
+			actual = *clock
 		}
 		if actual != expected {
-			t.Fatalf("expected %s in config: %s", expected, raw)
+			t.Fatalf("guest clock = %q, want %q", actual, expected)
 		}
 		out, err := sb.Exec(ctx, "cat", []string{"/root/clock-marker"})
 		if err != nil || out.Stdout() != "clock-marker" {
@@ -125,16 +113,12 @@ func TestSnapshotGuestClockLive(t *testing.T) {
 	if err := saved.Checkpoint.Save(ctx, archive, SnapshotSaveOptions{WithImage: true}); err != nil {
 		t.Fatal(err)
 	}
-	inherited := "sync"
-	if full {
-		inherited = "off"
-	}
 	for _, scenario := range []struct {
 		name     string
 		opts     []RestoreOption
 		expected string
 	}{
-		{"clock-inherit", nil, inherited}, {"clock-sync", []RestoreOption{WithRestoreGuestClock(GuestClockSync)}, "sync"},
+		{"clock-inherit", nil, "off"}, {"clock-sync", []RestoreOption{WithRestoreGuestClock(GuestClockSync)}, "sync"},
 	} {
 		names = append(names, scenario.name)
 		child, err := saved.Snapshot.SpawnSandbox(ctx, scenario.name, scenario.opts...)

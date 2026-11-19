@@ -21,8 +21,8 @@ describe.skipIf(!archive)("snapshot clock inheritance", () => {
         const child = progress
           ? await (await source.spawnSandboxWithProgressWith(configure)).awaitSandbox()
           : await source.spawnSandboxWith(configure);
-        const config = JSON.parse((await Sandbox.get(name)).configJson);
-        expect(config.runtime.guest_clock ?? "sync").toBe(policy ?? process.env.MSB_CLOCK_EXPECTED ?? "sync");
+        const config = await child.config();
+        expect(config.spec.runtime.guestClock ?? "sync").toBe(policy ?? process.env.MSB_CLOCK_EXPECTED ?? "sync");
         expect((await child.shell("cat /root/clock-marker")).stdout()).toBe("clock-marker");
         await child.stop();
       }

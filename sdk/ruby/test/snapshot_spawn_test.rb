@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "test/unit"
-require "json"
 require "securerandom"
 require "tmpdir"
 require "fileutils"
@@ -27,7 +26,7 @@ class SnapshotSpawnTest < Test::Unit::TestCase
     @group = created.snapshot
     @checkpoint = created.checkpoint
     # Neither the group nor member spawn may depend on a surviving source sandbox.
-    Microsandbox::Sandbox.get(source_name).remove
+    Microsandbox::Sandbox.remove(source_name)
     @names.delete(source_name)
   end
 
@@ -35,8 +34,8 @@ class SnapshotSpawnTest < Test::Unit::TestCase
     @names&.reverse_each do |name|
       begin
         handle = Microsandbox::Sandbox.get(name)
-        handle.stop if handle.status == "running"
-        handle.remove
+        handle.stop if handle.status == :running
+        Microsandbox::Sandbox.remove(name)
       rescue Microsandbox::SandboxNotFoundError
         nil
       end
@@ -86,7 +85,7 @@ class SnapshotSpawnTest < Test::Unit::TestCase
   end
 
   def check_command_defaults(child)
-    runtime = JSON.parse(Microsandbox::Sandbox.get(child.name).config_json).fetch("runtime")
+    runtime = child.config.fetch("spec").fetch("runtime")
     assert_equal "/root", runtime.fetch("workdir")
     assert_equal "/bin/ash", runtime.fetch("shell")
     assert_equal ["/bin/sh", "-c"], runtime.fetch("entrypoint")
@@ -100,10 +99,11 @@ class SnapshotSpawnTest < Test::Unit::TestCase
       check_guest(child)
       check_command_defaults(child)
       assert_equal "/root:ruby-value", child.shell('test ! -e /root/default-ran && printf "%s:%s" "$PWD" "$DEST_VALUE"').stdout
-      resources = JSON.parse(Microsandbox::Sandbox.get(child.name).config_json).fetch("resources")
+      config = child.config.fetch("spec")
+      resources = config.fetch("resources")
       assert_equal 2, resources.fetch("max_cpus")
       assert_equal 512, resources.fetch("max_memory_mib")
-      assert_equal "ruby-child", JSON.parse(Microsandbox::Sandbox.get(child.name).config_json).fetch("labels").fetch("destination")
+      assert_equal "ruby-child", config.fetch("labels").fetch("destination")
       assert_equal "0-1", child.shell("cat /sys/devices/system/cpu/possible").stdout.strip
       child.stop
     end
@@ -133,7 +133,7 @@ class SnapshotSpawnTest < Test::Unit::TestCase
     created = source.snapshot("ruby-full-#{SecureRandom.hex(5)}", full: true, record_integrity: true)
     @extra_groups = [created.snapshot]
     source.stop
-    Microsandbox::Sandbox.get(source_name).remove
+    Microsandbox::Sandbox.remove(source_name)
     @names.delete(source_name)
     assert_raise(Microsandbox::UnsupportedError) do
       created.checkpoint.spawn_sandbox(name: child_name("full-security"), security: :restricted)
