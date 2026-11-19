@@ -69,6 +69,9 @@ pub struct SandboxBuilder {
     config_source: ConfigSource,
     /// Canonical launch checks explicit boot choices separately from deprecated restore.
     canonical_snapshot_launch: bool,
+    // The empty replacement used to build fresh image environments is implementation
+    // state. Only a replacement actually supplied by the caller masks saved keys.
+    explicit_env_replacement: bool,
 }
 
 /// Source of the configuration baseline used during final layering.
@@ -176,11 +179,13 @@ impl SandboxBuilder {
             config_scripts: BTreeMap::new(),
             config_source: ConfigSource::default(),
             canonical_snapshot_launch: false,
+            explicit_env_replacement: false,
         }
     }
 
     /// Overlay sparse sandbox configuration on the hardcoded and global defaults.
     pub fn overlay(mut self, mut patch: SandboxConfigPatch) -> Self {
+        self.explicit_env_replacement |= patch.spec.replaces_env();
         // Public sparse inputs are explicit even when the selected value equals the default.
         if patch.has_http_override() {
             patch.http_defaults_implicit = Some(false);
@@ -1796,7 +1801,13 @@ impl SandboxBuilder {
             if rebuilt {
                 prepared.overlay_mut(self.rebuild_overrides());
             } else {
-                prepared.spec.resources = self.config.spec.resources.clone();
+                if !prepared
+                    .restore_resources
+                    .as_ref()
+                    .is_some_and(|r| r.portable_defaults_applied)
+                {
+                    prepared.spec.resources = self.config.spec.resources.clone();
+                }
                 prepared.spec.deployment_profile = self.config.spec.deployment_profile;
             }
             prepared
@@ -2096,10 +2107,23 @@ impl SandboxBuilder {
 
         inspection.spec.resources = Default::default();
         inspection.apply_to(&mut config);
-        config.caller_config_overrides = Some(Box::new(self.config.clone()));
+        let mut caller = self.config.clone();
+        if !self.explicit_env_replacement && caller.spec.replaces_env() {
+            let entries = caller.spec.get_env().cloned().unwrap_or_default();
+            caller.spec = caller.spec.clear_env();
+            if !entries.is_empty() {
+                caller.spec = caller.spec.env(entries);
+            }
+        }
+        config.caller_config_overrides = Some(Box::new(caller));
         config.snapshot_reference = snapshot_ref.clone();
         if snapshot_ref.is_some() || has_paths {
             config.clear_prepared_restore();
+        }
+        if let Some(settings) = BackendConfig::for_backend(backend.as_ref()) {
+            config.restore_resources.destination_defaults =
+                Some(Box::new(settings.sandbox_layers().build().spec));
+            config.restore_resources.minimum_security = settings.minimum_snapshot_security();
         }
 
         #[cfg(feature = "local")]
@@ -2734,6 +2758,72 @@ impl SandboxBuilder {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Read defaults from the immutable descriptor selected for this child. Explicit caller
+/// choices stay sparse, including values equal to builtin defaults.
+#[cfg(feature = "local")]
+pub(crate) fn apply_portable_snapshot_defaults(
+    config: &mut SandboxConfig,
+    manifest: &crate::snapshot::Manifest,
+) -> MicrosandboxResult<()> {
+    use crate::snapshot::saved_config::{
+        DestinationGuestSecurity, DestinationNetworkBaseline, SavedConfigurationClears,
+        SavedConfigurationContext, SavedConfigurationRequest, SnapshotConfigMode,
+        prepare_saved_configuration,
+    };
+    if !manifest
+        .extensions
+        .contains_key(microsandbox_types::snapshot::saved_config::SAVED_CONFIG_EXTENSION)
+    {
+        return Ok(());
+    }
+    if manifest.scope == crate::snapshot::SnapshotScope::Full
+        && config.snapshot_restore_mode != SnapshotRestoreMode::DiskOnly
+    {
+        return Err(MicrosandboxError::InvalidConfig(
+            "SCFG_IDENTITY: portable full resume requires captured backing admission".into(),
+        ));
+    }
+    let caller = config
+        .caller_config_overrides
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
+    let lower_patch = config
+        .restore_resources
+        .destination_defaults
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
+    let mut lower = microsandbox_types::SandboxSpec::default();
+    lower_patch.clone().apply_to(&mut lower);
+    let tls = lower.network.tls.clone().unwrap_or_default();
+    let baseline = DestinationNetworkBaseline {
+        strict: lower.network.strict,
+        tls_enabled: tls.enabled,
+        intercepted_ports: tls.intercepted_ports,
+    };
+    let plan = prepare_saved_configuration(
+        SavedConfigurationRequest {
+            manifest,
+            lower: &lower,
+            lower_resources: &lower_patch.resources,
+            explicit: &caller.spec,
+            clears: &SavedConfigurationClears::default(),
+            mode: SnapshotConfigMode::Saved,
+            context: SavedConfigurationContext::Disk {
+                starts_command: config.restore_boot_overrides.new_command,
+            },
+            guest_security: DestinationGuestSecurity {
+                baseline: lower.security_profile,
+                minimum: config.restore_resources.minimum_security,
+            },
+            network_baseline: &baseline,
+        },
+        Default::default(),
+    )?;
+    plan.into_destination_inputs()?.apply_disk(config)
+}
+
 /// Populate local restore inputs without changing capture semantics during backend dispatch.
 #[cfg(feature = "local")]
 pub(crate) fn prepare_local_snapshot_restore(
@@ -2760,12 +2850,15 @@ pub(crate) fn prepare_local_snapshot_restore(
             ));
         }
     }
+    apply_portable_snapshot_defaults(config, snap.loaded_manifest()?)?;
     if config.spec.runtime.user.is_none() {
         config.spec.runtime.user = snap.loaded_manifest()?.restore_defaults()?.user;
     }
     apply_snapshot_guest_clock(config, snap.loaded_manifest()?)?;
     config.snapshot_parent = Some(snap.id().to_string());
-    let unsupported = snap.loaded_manifest()?.unsupported_requires();
+    let unsupported = config
+        .restore_resources
+        .unsupported_for_restore(snap.loaded_manifest()?);
     if !unsupported.is_empty() {
         return Err(crate::MicrosandboxError::unsupported(
             Operation::SnapshotOps,
@@ -3163,6 +3256,7 @@ impl From<SandboxConfig> for SandboxBuilder {
 
         Self {
             context: configured_context(),
+            explicit_env_replacement: caller_overrides.spec.replaces_env(),
             config: caller_overrides,
             detached: false,
             build_error: None,

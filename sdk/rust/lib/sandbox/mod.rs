@@ -17,7 +17,7 @@ mod lifetime;
 mod readiness;
 mod state;
 #[cfg(feature = "local")]
-pub(crate) use builder::prepare_local_snapshot_restore;
+pub(crate) use builder::{apply_portable_snapshot_defaults, prepare_local_snapshot_restore};
 mod caller_config_overrides;
 #[cfg(feature = "cloud")]
 mod cloud;

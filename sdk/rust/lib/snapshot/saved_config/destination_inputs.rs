@@ -36,6 +36,55 @@ impl SavedDestinationInputs {
         Self { config, plan }
     }
 
+    /// Install the selected disk-boot inputs only after checking all unresolved obligations.
+    /// Keep host paths, runtime handles, replacement policy and source staging on the destination.
+    #[cfg(feature = "local")]
+    pub(crate) fn apply_disk(
+        self,
+        destination: &mut crate::SandboxConfig,
+    ) -> crate::MicrosandboxResult<()> {
+        let plan = &self.plan;
+        if !plan
+            .network_policy()
+            .selection()
+            .required_approvals
+            .is_empty()
+            || !plan.storage().selection().required_approvals.is_empty()
+            || !plan.secrets().selection().tls_identity_approvals.is_empty()
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "SCFG_POLICY: restore needs explicit destination permission for a saved policy"
+                    .into(),
+            ));
+        }
+        if !plan.gateway().guest_trust_certificates()?.is_empty()
+            || !plan.runtime().scripts().is_empty()
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "SCFG_BINDING: guest certificate or registered script backing requires preparation"
+                    .into(),
+            ));
+        }
+        let (cpu_default, memory_default) = plan.resources().destination_allocation();
+        if cpu_default {
+            tracing::warn!(
+                cpus = self.config.spec.resources.cpus,
+                "snapshot CPU allocation was unknown; using destination CPU count"
+            );
+        }
+        if memory_default {
+            tracing::warn!(
+                memory_mib = self.config.spec.resources.memory_mib,
+                "snapshot memory allocation was unknown; using destination memory size"
+            );
+        }
+        destination.restore_resources.portable_defaults_applied = true;
+        destination.spec = self.config.spec;
+        destination.deferred_command_bindings = self.config.deferred_command_bindings;
+        destination.restored_exec_limits = self.config.restored_exec_limits;
+        Ok(())
+    }
+
     /// Native inputs only. Known bindings for a future command remain on the destination
     /// and must be enforced by its runtime. Whole unknown command fields fail preparation.
     pub fn spec_inputs(&self) -> &SandboxSpec {

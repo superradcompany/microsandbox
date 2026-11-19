@@ -401,7 +401,22 @@ impl LocalContext {
             ));
         }
 
-        let unsupported = manifest.unsupported_requires();
+        // Bind authorization to the descriptor that supplied the destination settings.
+        // The archive may have changed between inspection and extraction.
+        if choices.portable_defaults_applied
+            && choices
+                .archive_manifest
+                .as_ref()
+                .map(|m| m.digest())
+                .transpose()?
+                .as_ref()
+                != Some(&descriptor_digest)
+        {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "snapshot archive changed after configuration was built".into(),
+            ));
+        }
+        let unsupported = choices.unsupported_for_restore(&manifest);
         if !unsupported.is_empty() {
             return Err(MicrosandboxError::unsupported(
                 Operation::SnapshotOps,

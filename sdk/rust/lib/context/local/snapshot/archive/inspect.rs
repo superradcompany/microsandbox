@@ -54,7 +54,9 @@ impl SandboxConfig {
             .read_metadata(archive)
             .await?;
 
-        let unsupported = manifest.unsupported_requires();
+        self.validate_restore_options(manifest.scope, self.snapshot_restore_mode)?;
+        crate::sandbox::apply_portable_snapshot_defaults(self, &manifest)?;
+        let unsupported = self.restore_resources.unsupported_for_restore(&manifest);
         if !unsupported.is_empty() {
             return Err(MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
@@ -64,8 +66,6 @@ impl SandboxConfig {
                 )),
             ));
         }
-
-        self.validate_restore_options(manifest.scope, self.snapshot_restore_mode)?;
 
         self.spec.image = RootfsSource::oci(manifest.image.reference.clone());
         if self.spec.runtime.user.is_none() {
