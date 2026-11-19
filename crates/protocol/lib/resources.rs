@@ -54,6 +54,37 @@ pub struct ObservedResources {
     pub memory: ResourceObservation<MemoryReadiness>,
 }
 
+/// Optional detail on the existing observation request. Old observers ignore the flag.
+#[derive(Serialize, Deserialize)]
+pub struct ResourceObservationRequest {
+    /// Original query and correlation identity.
+    #[serde(flatten)]
+    pub query: ObserveResources,
+    /// Only shrink admission needs a read of the guest memory accounting.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_memory_pressure: bool,
+}
+
+/// The original observation payload plus an optional, query-bound pressure sample.
+#[derive(Serialize, Deserialize)]
+pub struct ResourceObservationReport {
+    /// Original readiness fields remain readable by existing clients.
+    #[serde(flatten)]
+    pub resources: ObservedResources,
+    /// Absent for older guests, unreadable accounting or an ordinary readiness query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_pressure: Option<GuestMemoryPressure>,
+}
+
+/// Usable guest capacity and currently available bytes from the same meminfo read.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct GuestMemoryPressure {
+    /// MemTotal in bytes.
+    pub total_bytes: u64,
+    /// MemAvailable in bytes, including reclaimable memory.
+    pub available_bytes: u64,
+}
+
 /// Explicit availability of one resource observation; unavailable never means applied/refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -152,5 +183,76 @@ impl ObservedResources {
             ResourceObservation::Unavailable { .. } => true,
         };
         cpu_valid && memory_valid
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pressure_detail_is_optional_in_both_wire_directions() {
+        let query = ObserveResources { query_id: [7; 16] };
+        let original = ciborium::Value::serialized(&query).unwrap();
+        assert!(
+            !original
+                .deserialized::<ResourceObservationRequest>()
+                .unwrap()
+                .include_memory_pressure
+        );
+        let extended = ResourceObservationRequest {
+            query: query.clone(),
+            include_memory_pressure: false,
+        };
+        assert_eq!(ciborium::Value::serialized(&extended).unwrap(), original);
+        let requested = ResourceObservationRequest {
+            include_memory_pressure: true,
+            ..extended
+        };
+        assert_eq!(
+            ciborium::Value::serialized(&requested)
+                .unwrap()
+                .deserialized::<ObserveResources>()
+                .unwrap(),
+            query
+        );
+
+        let resources = ObservedResources {
+            query_id: query.query_id,
+            cpu: ResourceObservation::Unavailable {
+                reason: ObservationUnavailable::Unsupported,
+            },
+            memory: ResourceObservation::Unavailable {
+                reason: ObservationUnavailable::Unsupported,
+            },
+        };
+        let original = ciborium::Value::serialized(&resources).unwrap();
+        assert!(
+            original
+                .deserialized::<ResourceObservationReport>()
+                .unwrap()
+                .memory_pressure
+                .is_none()
+        );
+        let mut report = ResourceObservationReport {
+            resources: resources.clone(),
+            memory_pressure: None,
+        };
+        assert_eq!(ciborium::Value::serialized(&report).unwrap(), original);
+        report.memory_pressure = Some(GuestMemoryPressure {
+            total_bytes: 1024,
+            available_bytes: 128,
+        });
+        assert_eq!(
+            ciborium::Value::serialized(&report)
+                .unwrap()
+                .deserialized::<ObservedResources>()
+                .unwrap(),
+            resources
+        );
     }
 }

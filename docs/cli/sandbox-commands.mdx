@@ -649,6 +649,8 @@ msb modify api --cpus 8 --dry-run           # Show the plan, apply nothing
 
 Like create/run, modify accepts `-c`/`--cpus`, `-m`/`--memory`, `-e`/`--env`, and `-w`/`--workdir`. Use `--wait` to wait for resize completion and `-t`/`--timeout SECS` to bound that wait (default 60 seconds). The timeout option requires `--wait`.
 
+Before lowering a live memory target, a capable runtime asks the guest how much memory is available. If the guest clearly cannot release enough memory, the request fails before unplugging. The previous target stays in effect. Free memory or request a larger target and retry. A process can still allocate memory after the check, and the guest can run out of memory during an accepted shrink. Older guests without pressure reporting retain their existing shrink behavior.
+
 Set `--max-cpus` and `--max-memory` at creation to leave room for live growth. They default to the initial CPU and memory allocation; increasing the ceilings requires a restart.
 
 Resize can take time. The immediate output and JSON `resize_status` report the [`accepted` resize state](/sdk/rust/sandbox#resourceresizestatus) after the runtime accepts a target. The plan's `applied` field means the modification request was applied; it does not confirm usable guest capacity. Equal reported quantities, or current memory above a shrink target, do not prove guest completion.

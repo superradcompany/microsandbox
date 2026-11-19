@@ -6,8 +6,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use microsandbox_protocol::resources::{
-    CpuReadiness, MemoryReadiness, ObservationUnavailable, ObserveResources, ObservedResources,
-    ResourceObservation,
+    CpuReadiness, GuestMemoryPressure, MemoryReadiness, ObservationUnavailable, ObserveResources,
+    ObservedResources, ResourceObservation, ResourceObservationReport, ResourceObservationRequest,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -22,8 +22,61 @@ const MAX_RECORD_BYTES: u64 = 512;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) fn observe(request: ObserveResources) -> ObservedResources {
-    observe_at(Path::new(DEVICE_ROOT), request)
+pub(crate) fn observe(request: ResourceObservationRequest) -> ResourceObservationReport {
+    let resources = observe_at(Path::new(DEVICE_ROOT), request.query);
+    let memory_pressure = if request.include_memory_pressure {
+        read_memory_pressure()
+    } else {
+        None
+    };
+    ResourceObservationReport {
+        resources,
+        memory_pressure,
+    }
+}
+
+fn read_memory_pressure() -> Option<GuestMemoryPressure> {
+    // procfs reports sizes in KiB. Read both fields together; an absent or
+    // truncated record must never be interpreted as zero available memory.
+    const MAX_MEMINFO_BYTES: u64 = 64 * 1024;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open("/proc/meminfo")
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut contents = String::new();
+    file.take(MAX_MEMINFO_BYTES + 1)
+        .read_to_string(&mut contents)
+        .ok()?;
+    if contents.len() as u64 > MAX_MEMINFO_BYTES {
+        return None;
+    }
+    parse_memory_pressure(&contents)
+}
+
+fn parse_memory_pressure(contents: &str) -> Option<GuestMemoryPressure> {
+    let mut total = None;
+    let mut available = None;
+    for line in contents.lines() {
+        let mut parts = line.split_whitespace();
+        let field = match parts.next() {
+            Some("MemTotal:") => &mut total,
+            Some("MemAvailable:") => &mut available,
+            _ => continue,
+        };
+        let bytes = parts.next()?.parse::<u64>().ok()?.checked_mul(1024)?;
+        if parts.next() != Some("kB") || parts.next().is_some() || field.replace(bytes).is_some() {
+            return None;
+        }
+    }
+    let report = GuestMemoryPressure {
+        total_bytes: total?,
+        available_bytes: available?,
+    };
+    (report.total_bytes > 0 && report.available_bytes <= report.total_bytes).then_some(report)
 }
 
 fn observe_at(root: &Path, request: ObserveResources) -> ObservedResources {
@@ -235,6 +288,23 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+
+    #[test]
+    fn pressure_requires_a_complete_consistent_meminfo_pair() {
+        let source = "MemTotal: 1048576 kB\nMemFree: 10 kB\nMemAvailable: 123456 kB\n";
+        let report = parse_memory_pressure(source).unwrap();
+        assert_eq!(report.total_bytes, 1 << 30);
+        assert_eq!(report.available_bytes, 123456 * 1024);
+        for invalid in [
+            "MemTotal: 10 kB\nMemFree: 1 kB",
+            "MemTotal: 10 kB\nMemAvailable: 11 kB",
+            "MemTotal: 10 kB\nMemAvailable: 1 MB",
+            "MemTotal: 10 kB\nMemAvailable: 0 kB\nMemAvailable: 2 kB",
+            "MemTotal: 18446744073709551615 kB\nMemAvailable: 0 kB",
+        ] {
+            assert!(parse_memory_pressure(invalid).is_none());
+        }
+    }
 
     const CPU: &str = "schema=1 possible=4 requested_online=2 actual_online=2 exact=1\n";
     const MEMORY: &str = "schema=1 addr=4294967296 region_size=536870912 requested_size=268435456 plugged_size=268435456 all_online=0\n";

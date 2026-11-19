@@ -245,8 +245,11 @@ impl Handler for ControlContext {
                 .error
                 .clone()
                 .unwrap_or_else(|| "control operation failed".into()),
-            effect: if mutation && result.error_code.as_deref() != Some("configuration_not_applied")
-            {
+            effect: if mutation
+                && !matches!(
+                    result.error_code.as_deref(),
+                    Some("configuration_not_applied" | "memory_pressure")
+                ) {
                 ErrorEffect::Unknown
             } else {
                 ErrorEffect::None

@@ -2569,7 +2569,7 @@ async fn handle_message_with_charge(
                 );
             }
             let Some(request) = decode_payload_or_core_error::<
-                microsandbox_protocol::resources::ObserveResources,
+                microsandbox_protocol::resources::ResourceObservationRequest,
             >(&msg, out_buf)?
             else {
                 return Ok(());

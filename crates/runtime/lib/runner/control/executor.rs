@@ -329,6 +329,14 @@ impl RuntimeControlExecutor {
                 };
                 let result = self.execute_locked(&mut state, command, Some(id.clone()));
                 if !result.ok {
+                    if result.error_code.as_deref() == Some("memory_pressure") {
+                        return Err(FramedControlError::rejected(
+                            "memory_pressure",
+                            result
+                                .error
+                                .unwrap_or_else(|| "insufficient available guest memory".into()),
+                        ));
+                    }
                     return Err(FramedControlError {
                         code: result.error_code.unwrap_or_else(|| "resize_failed".into()),
                         message: result
@@ -545,6 +553,12 @@ impl RuntimeControlExecutor {
                 "runtime_busy",
                 "runtime lifecycle does not currently admit mutations",
             );
+        }
+
+        if let ControlRequest::MemoryTarget { total_mib } = &request
+            && let Some(reason) = self.unsafe_memory_shrink(*total_mib)
+        {
+            return control_error("memory_pressure", reason);
         }
 
         if mutation {

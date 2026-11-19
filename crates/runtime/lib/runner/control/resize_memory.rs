@@ -1,8 +1,11 @@
 //! Join a query-bound guest memory report to the host device and accepted operation.
 
+use std::time::Duration;
+
+use microsandbox_agent_client::AgentClient;
 use microsandbox_protocol::resize::ResizeObservation;
 use microsandbox_protocol::resources::{
-    MemoryReadiness, ObservationUnavailable, ResourceObservation,
+    GuestMemoryPressure, MemoryReadiness, ObservationUnavailable, ResourceObservation,
 };
 use microsandbox_types::modify::{ResourceConvergenceState, ResourceResizeStatus};
 
@@ -21,8 +24,69 @@ pub(super) struct MemoryDeviceEvidence {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl super::executor::RuntimeControlExecutor {
+    /// Called with runtime mutation authority, before journaling or unplugging.
+    /// Only a tighter target below currently plugged capacity needs a guest query.
+    pub(super) fn unsafe_memory_shrink(&self, requested_mib: u64) -> Option<String> {
+        let before = self.vm.memory_state()?;
+        let target_mib = requested_mib.max(before.boot_mib);
+        if target_mib >= before.current_mib || target_mib >= before.target_mib {
+            return None;
+        }
+        let pressure = self.signal_runtime.block_on(async {
+            let budget = Duration::from_secs(1);
+            tokio::time::timeout(budget, async {
+                let client = AgentClient::connect_with(&self.agent_sock, |options| {
+                    options.setup_timeout(budget)
+                })
+                .await
+                .ok()?;
+                let report = microsandbox_agent_client::resources::observe_memory_pressure(
+                    &client,
+                    rand::random(),
+                    budget,
+                )
+                .await;
+                client.close().await;
+                report.ok()?.memory_pressure
+            })
+            .await
+            .ok()
+            .flatten()
+        })?;
+        // An earlier target can still be converging while this query runs. Use the
+        // smaller capacity across the observations; offlined pages cannot free RAM twice.
+        let current_mib = before.current_mib.min(self.vm.memory_state()?.current_mib);
+        let needed_bytes = shrink_exceeds_available(current_mib, target_mib, pressure)?;
+        Some(format!(
+            "memory shrink to {target_mib} MiB refused before unplugging: at least {needed_bytes} bytes must be released; guest reports {} bytes available. Free memory or choose a larger target",
+            pressure.available_bytes
+        ))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Use a lower bound on the memory that needs reclaiming. Reserved/offline
+/// memory and guest-visible capacity outside the device must not inflate it.
+fn shrink_exceeds_available(
+    current_mib: u64,
+    target_mib: u64,
+    pressure: GuestMemoryPressure,
+) -> Option<u64> {
+    const MIB: u64 = 1 << 20;
+    if pressure.total_bytes == 0 || pressure.available_bytes > pressure.total_bytes {
+        return None;
+    }
+    let usable = current_mib.checked_mul(MIB)?.min(pressure.total_bytes);
+    let reduction = usable.saturating_sub(target_mib.checked_mul(MIB)?);
+    (reduction > pressure.available_bytes).then_some(reduction)
+}
 
 /// The caller fences the guest query against mutations and holds mutation authority
 /// while matching the host read.
@@ -85,6 +149,32 @@ pub(super) fn observe_memory(
 mod tests {
     use super::*;
     use microsandbox_types::modify::ResourceKind;
+
+    #[test]
+    fn shrink_refuses_only_when_available_is_below_the_lower_bound() {
+        const MIB: u64 = 1 << 20;
+        let pressure = |total, available| GuestMemoryPressure {
+            total_bytes: total * MIB,
+            available_bytes: available * MIB,
+        };
+        assert_eq!(
+            shrink_exceeds_available(1024, 512, pressure(992, 330)),
+            Some(480 * MIB)
+        );
+        // Exact coverage and surplus can proceed. Unusable or already unplugged
+        // capacity cannot justify refusal, even when the requested cap is smaller.
+        assert_eq!(
+            shrink_exceeds_available(1024, 512, pressure(992, 480)),
+            None
+        );
+        assert_eq!(shrink_exceeds_available(768, 512, pressure(990, 256)), None);
+        assert_eq!(shrink_exceeds_available(512, 768, pressure(512, 0)), None);
+        assert_eq!(shrink_exceeds_available(1024, 512, pressure(0, 0)), None);
+        assert_eq!(
+            shrink_exceeds_available(1024, 512, pressure(995, 1000)),
+            None
+        );
+    }
 
     fn fixture() -> (ResourceResizeStatus, MemoryDeviceEvidence, MemoryReadiness) {
         let host = MemoryDeviceEvidence {

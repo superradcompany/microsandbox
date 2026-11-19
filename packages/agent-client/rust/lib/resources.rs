@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use microsandbox_protocol::message::{FLAG_TERMINAL, MessageType};
 use microsandbox_protocol::resources::{
-    ObserveResources, ObservedResources, RESOURCE_OBSERVATION_RELAY_VERSION, ResourceRelayDiscovery,
+    ObserveResources, ObservedResources, RESOURCE_OBSERVATION_RELAY_VERSION,
+    ResourceObservationReport, ResourceObservationRequest, ResourceRelayDiscovery,
 };
 use microsandbox_protocol::wire::Envelope;
 
@@ -29,7 +30,31 @@ pub async fn observe_resources(
     query_id: [u8; 16],
     timeout: Duration,
 ) -> ClientResult<ObservedResources> {
-    let request = ObserveResources { query_id };
+    Ok(query_resources(client, query_id, timeout, false)
+        .await?
+        .resources)
+}
+
+/// Ask for memory accounting at the same instant as device readiness. A peer
+/// which only supports the original query returns no pressure sample.
+pub async fn observe_memory_pressure(
+    client: &AgentClient,
+    query_id: [u8; 16],
+    timeout: Duration,
+) -> ClientResult<ResourceObservationReport> {
+    query_resources(client, query_id, timeout, true).await
+}
+
+async fn query_resources(
+    client: &AgentClient,
+    query_id: [u8; 16],
+    timeout: Duration,
+    include_memory_pressure: bool,
+) -> ClientResult<ResourceObservationReport> {
+    let request = ResourceObservationRequest {
+        query: ObserveResources { query_id },
+        include_memory_pressure,
+    };
     let reply = client
         .request_with(
             TypedMessage::new(MessageType::ObserveResources, &request),
@@ -44,9 +69,9 @@ pub async fn observe_resources(
         return Err(invalid());
     }
     let observation = reply
-        .payload::<ObservedResources>()
+        .payload::<ResourceObservationReport>()
         .map_err(|_| invalid())?;
-    if observation.query_id != query_id || !observation.is_valid() {
+    if observation.resources.query_id != query_id || !observation.resources.is_valid() {
         return Err(invalid());
     }
     Ok(observation)
