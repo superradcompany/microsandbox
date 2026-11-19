@@ -12,7 +12,6 @@ mod local;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(feature = "local")]
 pub use builder::SandboxModificationResult;
 pub use builder::{SandboxModificationBuilder, SecretPatchBuilder};
 pub use microsandbox_types::modify::{

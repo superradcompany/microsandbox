@@ -967,6 +967,18 @@ jobs:
           cargo +stable check -p microsandbox-network --no-default-features
           cargo +stable check -p microsandbox-types --features utoipa
 
+      - name: Check native SDK provider feature surfaces
+        run: |
+          # Separate invocations prevent Cargo feature unification from hiding
+          # remote-only failures behind another SDK's local/full dependency.
+          for provider in local remote; do
+            for sdk in microsandbox-node microsandbox-py microsandbox-go; do
+              cargo +stable check --locked -p "$sdk" --no-default-features --features "$provider"
+            done
+          done
+          cargo +stable test -p microsandbox --no-default-features --features cloud,net --lib remote_resize_refuses
+          cargo +stable test -p microsandbox --no-default-features --features cloud,net --lib cloud_projection_retains_source_digest
+
       - name: Docs
         env:
           RUSTDOCFLAGS: "-D warnings"
