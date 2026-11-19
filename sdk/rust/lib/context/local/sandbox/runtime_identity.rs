@@ -19,8 +19,12 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 
 pub(super) enum RecordedRuntime {
     Dead,
+    #[cfg(unix)]
     Recycled,
-    Unverified { pid: i32 },
+    #[cfg(unix)]
+    Unverified {
+        pid: i32,
+    },
     Live(RuntimeProcess),
 }
 
@@ -157,17 +161,27 @@ impl RecordedRuntime {
     }
 
     pub(super) fn is_live(&self) -> bool {
-        matches!(self, Self::Live(_) | Self::Unverified { .. })
+        #[cfg(unix)]
+        {
+            matches!(self, Self::Live(_) | Self::Unverified { .. })
+        }
+        #[cfg(not(unix))]
+        {
+            matches!(self, Self::Live(_))
+        }
     }
 
     pub(super) fn signallable(
         self,
-        refuse: impl FnOnce(i32) -> MicrosandboxError,
+        _refuse: impl FnOnce(i32) -> MicrosandboxError,
     ) -> MicrosandboxResult<Option<RuntimeProcess>> {
         match self {
             Self::Live(process) => Ok(Some(process)),
-            Self::Dead | Self::Recycled => Ok(None),
-            Self::Unverified { pid } => Err(refuse(pid)),
+            Self::Dead => Ok(None),
+            #[cfg(unix)]
+            Self::Recycled => Ok(None),
+            #[cfg(unix)]
+            Self::Unverified { pid } => Err(_refuse(pid)),
         }
     }
 }
