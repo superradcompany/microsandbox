@@ -1563,7 +1563,7 @@ mod tests {
             eprintln!("skipping permission-denial test as root");
             return;
         }
-        for deny_metadata in [true, false] {
+        for deny_directory_search in [true, false] {
             let (dir, db) = test_db().await;
             let run_dir = dir.path().join("run");
             let sandbox_dir = dir.path().join("uncertain");
@@ -1581,7 +1581,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let restricted = if deny_metadata {
+            let restricted = if deny_directory_search {
                 fallback_dir
             } else {
                 &paths.fallback_agent
@@ -1600,12 +1600,12 @@ mod tests {
             };
             assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
             let message = error.to_string();
-            let operation = if deny_metadata {
-                "inspect runtime endpoint"
-            } else {
-                "connect to runtime endpoint"
-            };
-            assert!(message.contains(operation), "missing operation: {message}");
+            // Direct connection probes report both inaccessible directories and
+            // socket permissions at the connect step; neither permits cleanup.
+            assert!(
+                message.contains("connect to runtime endpoint"),
+                "missing operation: {message}"
+            );
             assert!(
                 message.contains(&paths.fallback_agent.display().to_string()),
                 "missing endpoint: {message}"
