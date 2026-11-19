@@ -3,13 +3,12 @@
 #[cfg(test)]
 use std::path::PathBuf;
 
-use crate::context::local::creation::CreationStorage;
-
 use microsandbox_image::checkpoint::CompactLayer;
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
 #[cfg(test)]
 use tempfile::TempDir;
 
+use crate::context::local::creation::CreationStorage;
 use crate::sandbox::config::SnapshotRestoreMode;
 use crate::sandbox::{RootDisk, RootfsSource};
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};

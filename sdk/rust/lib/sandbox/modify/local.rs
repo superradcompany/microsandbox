@@ -6,8 +6,9 @@ use std::{
     sync::Arc,
 };
 
-use super::SandboxModificationResult;
-use crate::sandbox::resize;
+use microsandbox_control_client::{
+    GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
+};
 use microsandbox_protocol::resize::ResizeTarget;
 use microsandbox_types::secret_plan::{
     self, DesiredSecret, RunningSecret, SecretPlanCapability, SecretPlanInput, SecretPlanStatus,
@@ -21,16 +22,15 @@ use crate::context::local::creation::{self, CreationStorage};
 use crate::context::{Context, ControlSession};
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
+use crate::sandbox::resize;
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_control_client::{
-    GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
-};
 
 use super::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
     ResourceResizeStatus, SandboxModificationBuilder, SandboxModificationPatch,
-    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretSource,
+    SandboxModificationPlan, SandboxModificationResult, SecretChangeKind, SecretModificationPatch,
+    SecretSource,
 };
 use crate::sandbox::{SandboxConfig, SandboxStatus};
 
