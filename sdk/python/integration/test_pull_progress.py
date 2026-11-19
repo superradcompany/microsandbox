@@ -20,7 +20,6 @@ async def test_create_with_progress_emits_events_and_returns_sandbox(sandbox_nam
         image=IMAGE,
         cpus=1,
         memory=512,
-        replace=True,
         pull_policy=PullPolicy.ALWAYS,
     )
 
@@ -65,7 +64,6 @@ async def test_create_with_progress_result_rejects_on_second_call(sandbox_name):
         image=IMAGE,
         cpus=1,
         memory=512,
-        replace=True,
     )
 
     sandbox = None
@@ -96,7 +94,6 @@ async def test_create_with_progress_detached_returns_detached_sandbox(sandbox_na
         image=IMAGE,
         cpus=1,
         memory=512,
-        replace=True,
         detached=True,
     )
 
@@ -152,7 +149,6 @@ async def test_create_with_progress_failure_surfaces_from_result(sandbox_name):
         image="sdk-nonexistent-image-xyz789:never",
         cpus=1,
         memory=512,
-        replace=True,
         pull_policy=PullPolicy.NEVER,
     )
 
