@@ -34,8 +34,7 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
-              "getting-started/versions",
-              "cloud/overview",
+              "getting-started/managed-cloud",
               "getting-started/agents"
             ]
           },
@@ -50,6 +49,7 @@
               "sandboxes/secrets",
               "images/overview",
               "sandboxes/volumes",
+              "sandboxes/services",
               "sandboxes/ssh",
               "sandboxes/snapshots",
               "sandboxes/tuning",
@@ -74,7 +74,6 @@
             "group": "Deep dive",
             "icon": "gauge",
             "pages": [
-              "operations/backends",
               "operations/configuration",
               "observability/msb-metrics",
               "sandboxes/optimization"
@@ -100,6 +99,7 @@
             "pages": [
               "sdk/overview",
               "sdk/setup",
+              "getting-started/versions",
               "sdk/errors",
               "configuration"
             ]
@@ -118,6 +118,7 @@
                   "sdk/typescript/ssh",
                   "sdk/typescript/filesystem",
                   "sdk/typescript/volumes",
+                  "sdk/typescript/services",
                   "sdk/typescript/networking",
                   "sdk/typescript/proxies",
                   "sdk/typescript/vsock",
@@ -138,6 +139,7 @@
                   "sdk/rust/ssh",
                   "sdk/rust/filesystem",
                   "sdk/rust/volumes",
+                  "sdk/rust/services",
                   "sdk/rust/networking",
                   "sdk/rust/proxies",
                   "sdk/rust/vsock",
@@ -157,6 +159,7 @@
                   "sdk/python/ssh",
                   "sdk/python/filesystem",
                   "sdk/python/volumes",
+                  "sdk/python/services",
                   "sdk/python/networking",
                   "sdk/python/proxies",
                   "sdk/python/vsock",
@@ -176,6 +179,7 @@
                   "sdk/go/ssh",
                   "sdk/go/filesystem",
                   "sdk/go/volumes",
+                  "sdk/go/services",
                   "sdk/go/images",
                   "sdk/go/networking",
                   "sdk/go/proxies",
@@ -196,6 +200,7 @@
                   "sdk/ruby/ssh",
                   "sdk/ruby/filesystem",
                   "sdk/ruby/volumes",
+                  "sdk/ruby/services",
                   "sdk/ruby/networking",
                   "sdk/ruby/vsock",
                   "sdk/ruby/snapshots",
@@ -214,6 +219,7 @@
               "cli/snapshot-commands",
               "cli/ssh-commands",
               "cli/volume-commands",
+              "cli/service-commands",
               "cli/storage-commands",
               "cli/image-commands",
               "cli/registry-commands",
@@ -223,30 +229,43 @@
         ]
       },
       {
-        "tab": "API Reference",
+        "tab": "Managed Cloud",
         "groups": [
           {
-            "group": "Getting Started",
-            "icon": "book-open",
+            "group": "Managed Cloud",
+            "icon": "cloud",
             "pages": [
-              "api-reference/overview"
+              "cloud/overview",
+              "cloud/connect",
+              "cloud/pricing",
+              "cloud/limitations"
             ]
           },
           {
-            "group": "API keys",
-            "icon": "key",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            }
-          },
-          {
-            "group": "Personal tokens",
-            "icon": "user",
-            "openapi": {
-              "source": "/api-reference/openapi.personal.json",
-              "directory": "api-reference/personal"
-            }
+            "group": "API Reference",
+            "icon": "book-open",
+            "pages": [
+              "api-reference/overview",
+              {
+                "group": "API keys",
+                "icon": "key",
+                "openapi": {
+                  "source": "/api-reference/openapi.json",
+                  "directory": "api-reference/endpoints"
+                },
+                "expanded": false
+              },
+              {
+                "group": "Personal tokens",
+                "icon": "user",
+                "openapi": {
+                  "source": "/api-reference/openapi.personal.json",
+                  "directory": "api-reference/personal"
+                },
+                "expanded": false
+              }
+            ],
+            "expanded": false
           }
         ]
       },
@@ -406,7 +425,16 @@
             "pages": [
               "migrations/overview",
               "migrations/v0.7",
-              "migrations/sandbox-storage"
+              "migrations/sdk-contexts",
+              "migrations/sdk-distributions"
+            ]
+          },
+          {
+            "group": "Repair guides",
+            "icon": "wrench",
+            "pages": [
+              "repairs/sandbox-storage",
+              "repairs/file-permissions"
             ]
           },
           {
@@ -498,6 +526,26 @@
   },
   "redirects": [
     {
+      "source": "/getting-started/managed-cloud",
+      "destination": "/cloud/overview"
+    },
+    {
+      "source": "/operations/backends",
+      "destination": "/cloud/connect"
+    },
+    {
+      "source": "/cloud/compute-types",
+      "destination": "/cloud/pricing#standard-or-shared"
+    },
+    {
+      "source": "/cloud/supported-features",
+      "destination": "/cloud/limitations"
+    },
+    {
+      "source": "/migrations/sandbox-storage",
+      "destination": "/repairs/sandbox-storage"
+    },
+    {
       "source": "/getting-started/installation",
       "destination": "/getting-started/versions"
     },
@@ -531,11 +579,11 @@
     },
     {
       "source": "/getting-started/backends",
-      "destination": "/operations/backends"
+      "destination": "/cloud/connect"
     },
     {
       "source": "/operations/backend-selection",
-      "destination": "/operations/backends"
+      "destination": "/cloud/connect"
     },
     {
       "source": "/observability/deep-dive",
@@ -579,7 +627,7 @@
     },
     {
       "source": "/cloud/compatibility",
-      "destination": "/cloud/overview#compatibility"
+      "destination": "/cloud/limitations"
     },
     {
       "source": "/enterprise/offline-deployment",

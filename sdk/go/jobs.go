@@ -13,6 +13,36 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
+// JobEventType identifies the discriminator of a job attachment event.
+type JobEventType string
+
+const (
+	JobEventOutput    JobEventType = "output"
+	JobEventGap       JobEventType = "gap"
+	JobEventCompleted JobEventType = "completed"
+)
+
+// JobOutputSource identifies the origin of job output, including merged PTY and stdin error records.
+type JobOutputSource string
+
+const (
+	JobOutputStdout     JobOutputSource = "stdout"
+	JobOutputStderr     JobOutputSource = "stderr"
+	JobOutputPTY        JobOutputSource = "output"
+	JobOutputStdinError JobOutputSource = "stdin_error"
+)
+
+// JobState identifies the current lifecycle state of a managed job.
+type JobState string
+
+const (
+	JobStateStarting JobState = "starting"
+	JobStateRunning  JobState = "running"
+	JobStateExited   JobState = "exited"
+	JobStateFailed   JobState = "failed"
+	JobStateLost     JobState = "lost"
+)
+
 // JobError identifies managed-job failures across runtimes and SDKs.
 // JobID is retained when a launch was admitted but its result is uncertain.
 type JobError struct {
@@ -28,7 +58,7 @@ type JobInfo struct {
 	ID            string       `json:"id"`
 	RuntimeBootID string       `json:"runtime_boot_id"`
 	Command       []string     `json:"command"`
-	State         string       `json:"state"`
+	State         JobState     `json:"state"`
 	TTY           bool         `json:"tty"`
 	StdinClosed   bool         `json:"stdin_closed"`
 	PID           *uint32      `json:"pid"`
@@ -56,25 +86,25 @@ type JobExit struct {
 
 // JobLogEntry preserves original output bytes and a job-specific replay cursor.
 type JobLogEntry struct {
-	Timestamp int64  `json:"timestamp"`
-	Source    string `json:"source"`
-	Data      []byte `json:"data_base64"`
-	Cursor    string `json:"cursor"`
+	Timestamp int64           `json:"timestamp"`
+	Source    JobOutputSource `json:"source"`
+	Data      []byte          `json:"data_base64"`
+	Cursor    string          `json:"cursor"`
 }
 
 // JobLogOptions selects retained output. Follow continues after that snapshot.
 type JobLogOptions struct {
-	Tail       *uint    `json:"tail,omitempty"`
-	Since      *int64   `json:"since,omitempty"`
-	Until      *int64   `json:"until,omitempty"`
-	Sources    []string `json:"sources,omitempty"`
-	FromCursor string   `json:"from_cursor,omitempty"`
-	Follow     bool     `json:"follow"`
+	Tail       *uint             `json:"tail,omitempty"`
+	Since      *int64            `json:"since,omitempty"`
+	Until      *int64            `json:"until,omitempty"`
+	Sources    []JobOutputSource `json:"sources,omitempty"`
+	FromCursor string            `json:"from_cursor,omitempty"`
+	Follow     bool              `json:"follow"`
 }
 
 // JobEvent contains one attachment observation. Only the field matching Type is populated.
 type JobEvent struct {
-	Type      string
+	Type      JobEventType
 	Output    *JobLogEntry
 	GapCursor string
 	Completed *JobInfo
@@ -148,20 +178,30 @@ func WithJobReplayAfter(cursor string) JobAttachOption {
 
 // Job is a native reference to a runtime-owned command. Close never terminates it.
 type Job struct {
-	id     string
-	handle atomic.Uint64
+	library *ffi.Library
+	id      string
+	handle  atomic.Uint64
 }
 
 func (j *Job) ID() string { return j.id }
 
 // JobAttachment supports one concurrent receiver plus writes, resize and detach.
-type JobAttachment struct{ handle atomic.Uint64 }
+type JobAttachment struct {
+	handle  atomic.Uint64
+	library *ffi.Library
+}
 
 // JobLogStream is a bounded pull stream. Close cancels pending Next calls.
-type JobLogStream struct{ handle atomic.Uint64 }
+type JobLogStream struct {
+	handle  atomic.Uint64
+	library *ffi.Library
+}
 
-func jobRequest(ctx context.Context, sandbox uint64, request map[string]any, result any) error {
-	raw, err := ffi.Jobs(ctx, sandbox, request)
+func jobRequest(ctx context.Context, library *ffi.Library, sandbox uint64, request map[string]any, result any) error {
+	if library == nil {
+		return &Error{Kind: ErrInvalidHandle, Message: "job has no owning provider"}
+	}
+	raw, err := library.Jobs(ctx, sandbox, request)
 	if err != nil {
 		var native *ffi.Error
 		if errors.As(err, &native) {
@@ -182,15 +222,15 @@ func jobRequest(ctx context.Context, sandbox uint64, request map[string]any, res
 	}
 	return json.Unmarshal(raw, result)
 }
-func newJob(ctx context.Context, sandbox uint64, request map[string]any) (*Job, error) {
+func newJob(ctx context.Context, library *ffi.Library, sandbox uint64, request map[string]any) (*Job, error) {
 	var raw struct {
 		ID     string `json:"id"`
 		Handle uint64 `json:"handle"`
 	}
-	if err := jobRequest(ctx, sandbox, request, &raw); err != nil {
+	if err := jobRequest(ctx, library, sandbox, request, &raw); err != nil {
 		return nil, err
 	}
-	j := &Job{id: raw.ID}
+	j := &Job{id: raw.ID, library: library}
 	j.handle.Store(raw.Handle)
 	runtime.SetFinalizer(j, func(j *Job) { _ = j.Close() })
 	return j, nil
@@ -228,15 +268,13 @@ func (s *Sandbox) ExecDetached(ctx context.Context, cmd string, args []string, o
 	if cfg.input != nil {
 		options["input_base64"] = base64.StdEncoding.EncodeToString(*cfg.input)
 	}
-	return newJob(ctx, s.inner.Handle(), map[string]any{"op": "start", "options": options})
+	return newJob(ctx, s.inner.Library(), s.inner.Handle(), map[string]any{"op": "start", "options": options})
 }
 func (s *Sandbox) GetJob(ctx context.Context, id string) (*Job, error) {
-	return newJob(ctx, s.inner.Handle(), map[string]any{"op": "get", "id": id})
+	return newJob(ctx, s.inner.Library(), s.inner.Handle(), map[string]any{"op": "get", "id": id})
 }
-func (h *SandboxHandle) GetJob(ctx context.Context, id string) (*Job, error) {
-	return newJob(ctx, 0, map[string]any{"op": "get", "name": h.name, "sandbox_id": h.id, "id": id})
-}
-func listJobs(ctx context.Context, sandbox uint64, request map[string]any, opts []JobListOption) (*JobPage, error) {
+
+func listJobs(ctx context.Context, library *ffi.Library, sandbox uint64, request map[string]any, opts []JobListOption) (*JobPage, error) {
 	cfg := jobListConfig{limit: 50}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -248,14 +286,11 @@ func listJobs(ctx context.Context, sandbox uint64, request map[string]any, opts 
 		request["cursor"] = cfg.cursor
 	}
 	var page JobPage
-	err := jobRequest(ctx, sandbox, request, &page)
+	err := jobRequest(ctx, library, sandbox, request, &page)
 	return &page, err
 }
 func (s *Sandbox) ListJobs(ctx context.Context, opts ...JobListOption) (*JobPage, error) {
-	return listJobs(ctx, s.inner.Handle(), map[string]any{}, opts)
-}
-func (h *SandboxHandle) ListJobs(ctx context.Context, opts ...JobListOption) (*JobPage, error) {
-	return listJobs(ctx, 0, map[string]any{"name": h.name, "sandbox_id": h.id}, opts)
+	return listJobs(ctx, s.inner.Library(), s.inner.Handle(), map[string]any{}, opts)
 }
 
 func (j *Job) request(ctx context.Context, op string, args map[string]any, result any) error {
@@ -264,7 +299,7 @@ func (j *Job) request(ctx context.Context, op string, args map[string]any, resul
 	}
 	args["op"] = op
 	args["handle"] = j.handle.Load()
-	err := jobRequest(ctx, 0, args, result)
+	err := jobRequest(ctx, j.library, 0, args, result)
 	runtime.KeepAlive(j)
 	return err
 }
@@ -297,7 +332,7 @@ func (j *Job) LogStream(ctx context.Context, options JobLogOptions) (*JobLogStre
 	if err := j.request(ctx, "log_stream", map[string]any{"options": options}, &raw); err != nil {
 		return nil, err
 	}
-	stream := &JobLogStream{}
+	stream := &JobLogStream{library: j.library}
 	stream.handle.Store(raw.Handle)
 	runtime.SetFinalizer(stream, func(s *JobLogStream) { _ = s.Close() })
 	return stream, nil
@@ -324,34 +359,43 @@ func (j *Job) Attach(ctx context.Context, opts ...JobAttachOption) (*JobAttachme
 	if err := j.request(ctx, "attach", args, &raw); err != nil {
 		return nil, err
 	}
-	a := &JobAttachment{}
+	a := &JobAttachment{library: j.library}
 	a.handle.Store(raw.Handle)
 	runtime.SetFinalizer(a, func(a *JobAttachment) { _ = a.Close() })
 	return a, nil
 }
-func closeJobObject(handle *atomic.Uint64) error {
+func closeJobObject(library *ffi.Library, handle *atomic.Uint64) error {
 	id := handle.Swap(0)
 	if id == 0 {
 		return nil
 	}
-	return jobRequest(context.Background(), 0, map[string]any{"op": "close", "handle": id}, nil)
+	return jobRequest(context.Background(), library, 0, map[string]any{"op": "close", "handle": id}, nil)
 }
-func (j *Job) Close() error           { runtime.SetFinalizer(j, nil); return closeJobObject(&j.handle) }
-func (a *JobAttachment) Close() error { runtime.SetFinalizer(a, nil); return closeJobObject(&a.handle) }
-func (s *JobLogStream) Close() error  { runtime.SetFinalizer(s, nil); return closeJobObject(&s.handle) }
+func (j *Job) Close() error {
+	runtime.SetFinalizer(j, nil)
+	return closeJobObject(j.library, &j.handle)
+}
+func (a *JobAttachment) Close() error {
+	runtime.SetFinalizer(a, nil)
+	return closeJobObject(a.library, &a.handle)
+}
+func (s *JobLogStream) Close() error {
+	runtime.SetFinalizer(s, nil)
+	return closeJobObject(s.library, &s.handle)
+}
 func (a *JobAttachment) request(ctx context.Context, op string, args map[string]any, result any) error {
 	if args == nil {
 		args = map[string]any{}
 	}
 	args["op"] = op
 	args["handle"] = a.handle.Load()
-	err := jobRequest(ctx, 0, args, result)
+	err := jobRequest(ctx, a.library, 0, args, result)
 	runtime.KeepAlive(a)
 	return err
 }
 func (a *JobAttachment) Recv(ctx context.Context) (*JobEvent, error) {
 	var raw *struct {
-		Type  string          `json:"type"`
+		Type  JobEventType    `json:"type"`
 		Value json.RawMessage `json:"value"`
 	}
 	if err := a.request(ctx, "recv", nil, &raw); err != nil {
@@ -362,17 +406,17 @@ func (a *JobAttachment) Recv(ctx context.Context) (*JobEvent, error) {
 	}
 	event := &JobEvent{Type: raw.Type}
 	switch raw.Type {
-	case "output":
+	case JobEventOutput:
 		event.Output = &JobLogEntry{}
 		if err := json.Unmarshal(raw.Value, event.Output); err != nil {
 			return nil, err
 		}
-	case "completed":
+	case JobEventCompleted:
 		event.Completed = &JobInfo{}
 		if err := json.Unmarshal(raw.Value, event.Completed); err != nil {
 			return nil, err
 		}
-	case "gap":
+	case JobEventGap:
 		var value struct {
 			Cursor string `json:"cursor"`
 		}
@@ -394,7 +438,7 @@ func (a *JobAttachment) Resize(ctx context.Context, rows, cols uint16) error {
 func (a *JobAttachment) Detach(ctx context.Context) error { return a.request(ctx, "detach", nil, nil) }
 func (s *JobLogStream) Next(ctx context.Context) (*JobLogEntry, error) {
 	var entry *JobLogEntry
-	err := jobRequest(ctx, 0, map[string]any{"op": "next", "handle": s.handle.Load()}, &entry)
+	err := jobRequest(ctx, s.library, 0, map[string]any{"op": "next", "handle": s.handle.Load()}, &entry)
 	runtime.KeepAlive(s)
 	if err != nil {
 		return nil, err

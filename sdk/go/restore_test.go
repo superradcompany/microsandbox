@@ -17,7 +17,7 @@ func TestRestoreDestinationControlsPreserveExplicitValues(t *testing.T) {
 		WithRestoreNetworkPolicy(NetworkPolicy.FromProfiles(NetworkProfilePublic)),
 		WithRestoreMaxConnections(0), WithRestoreDisableNetwork(),
 		WithRestoreSecurityProfile(SecurityProfileDefault),
-		WithRestoreMaxDuration(0), WithRestoreIdleTimeout(1500 * time.Millisecond),
+		WithRestoreMaxDuration(0), WithRestoreIdleTimeout(2 * time.Second),
 	} {
 		option(&config)
 	}
@@ -186,12 +186,35 @@ func TestRestoreRejectsBroadNetworkOptionsBeforeFFI(t *testing.T) {
 	}
 }
 
-func TestRestoreRejectsNegativeLifetimes(t *testing.T) {
-	for _, option := range []RestoreOption{WithRestoreMaxDuration(-1), WithRestoreIdleTimeout(-1)} {
-		var config RestoreConfig
-		option(&config)
-		if err := validateRestoreConfig(config); err == nil {
-			t.Fatal("negative duration accepted")
+func TestRejectInvalidLifecycleLimitsAtPublicEntryPoints(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		create  func(time.Duration) SandboxOption
+		restore func(time.Duration) RestoreOption
+	}{
+		{"max duration", WithMaxDuration, WithRestoreMaxDuration},
+		{"idle timeout", WithIdleTimeout, WithRestoreIdleTimeout},
+	} {
+		for _, d := range []time.Duration{-time.Second, time.Nanosecond, 1500 * time.Millisecond} {
+			t.Run(tc.name+"/"+d.String(), func(t *testing.T) {
+				check := func(method string, err error) {
+					t.Helper()
+					if !IsKind(err, ErrInvalidConfig) || !strings.Contains(err.Error(), tc.name) {
+						t.Errorf("%s returned %v, want invalid %s", method, err, tc.name)
+					}
+				}
+				_, err := CreateSandbox(ctx, "child", tc.create(d))
+				check("create", err)
+				_, err = ConnectOrCreateSandbox(ctx, "child", tc.create(d))
+				check("connect or create", err)
+				_, created := CreateSandboxWithProgress(ctx, "child", tc.create(d))
+				check("create with progress", (<-created).Err)
+				_, err = RestoreSandbox(ctx, "baseline", "child", tc.restore(d))
+				check("restore", err)
+				_, restored := RestoreSandboxWithProgress(ctx, "baseline", "child", tc.restore(d))
+				check("restore with progress", (<-restored).Err)
+			})
 		}
 	}
 }

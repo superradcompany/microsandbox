@@ -21,7 +21,7 @@ mod windows;
 
 #[cfg(feature = "local")]
 #[doc(hidden)]
-pub use bindings::binding_diagnose_storage;
+pub use bindings::{binding_diagnose_storage, binding_diagnose_storage_in};
 #[doc(hidden)]
 pub use bindings::{binding_install_options, binding_runtime_config};
 pub use host::*;

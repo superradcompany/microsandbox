@@ -19,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
             .build()
             .expect("fuzz runtime")
     });
-    rt.block_on(microsandbox::backend::fuzz_unpack_local_snapshot_archive(
+    rt.block_on(microsandbox::context::fuzz_unpack_local_snapshot_archive(
         data,
     ));
 });

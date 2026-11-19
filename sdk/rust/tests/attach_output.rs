@@ -82,12 +82,7 @@ fn terminal_output(mut master: File, ready: Option<mpsc::SyncSender<()>>) -> Vec
 }
 
 async fn attach_child_process() {
-    let sandbox = Sandbox::get(NAME)
-        .await
-        .expect("get sandbox")
-        .connect()
-        .await
-        .expect("connect to sandbox");
+    let sandbox = Sandbox::get(NAME).await.expect("get sandbox");
 
     let code = sandbox
         .attach("echo", ["hello"])
@@ -105,12 +100,7 @@ async fn attach_child_process() {
 }
 
 async fn attach_input_child_process() {
-    let sandbox = Sandbox::get(INPUT_NAME)
-        .await
-        .expect("get sandbox")
-        .connect()
-        .await
-        .expect("connect to sandbox");
+    let sandbox = Sandbox::get(INPUT_NAME).await.expect("get sandbox");
 
     let code = sandbox
         .attach(
@@ -126,12 +116,7 @@ async fn attach_input_child_process() {
 }
 
 async fn attach_detach_child_process() {
-    let sandbox = Sandbox::get(DETACH_NAME)
-        .await
-        .expect("get sandbox")
-        .connect()
-        .await
-        .expect("connect to sandbox");
+    let sandbox = Sandbox::get(DETACH_NAME).await.expect("get sandbox");
 
     sandbox
         .attach("sh", ["-c", "stty raw -echo; printf 'READY\\n'; sleep 60"])

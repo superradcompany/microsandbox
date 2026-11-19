@@ -487,6 +487,9 @@ impl RestoredAgentState {
             .parent()
             .ok_or("runtime has no host-only parent")?;
         let mut file = tempfile::NamedTempFile::new_in(sandbox_dir).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden(file.as_file(), false)
+            .map_err(|error| error.to_string())?;
         file.write_all(&serde_json::to_vec(&warnings).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         // These warnings are diagnostics, not recovery state. Readers need a complete atomic

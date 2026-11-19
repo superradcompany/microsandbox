@@ -77,8 +77,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-android-arm64')
         const bindingPackageVersion = require('@superradcompany/microsandbox-android-arm64/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -93,8 +93,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-android-arm-eabi')
         const bindingPackageVersion = require('@superradcompany/microsandbox-android-arm-eabi/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -114,8 +114,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-win32-x64-gnu')
         const bindingPackageVersion = require('@superradcompany/microsandbox-win32-x64-gnu/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -130,8 +130,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-win32-x64-msvc')
         const bindingPackageVersion = require('@superradcompany/microsandbox-win32-x64-msvc/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -147,8 +147,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-win32-ia32-msvc')
         const bindingPackageVersion = require('@superradcompany/microsandbox-win32-ia32-msvc/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -163,8 +163,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-win32-arm64-msvc')
         const bindingPackageVersion = require('@superradcompany/microsandbox-win32-arm64-msvc/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -182,8 +182,8 @@ function requireNative() {
     try {
       const binding = require('@superradcompany/microsandbox-darwin-universal')
       const bindingPackageVersion = require('@superradcompany/microsandbox-darwin-universal/package.json').version
-      if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-        throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+      if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+        throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
       }
       return binding
     } catch (e) {
@@ -198,8 +198,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-darwin-x64')
         const bindingPackageVersion = require('@superradcompany/microsandbox-darwin-x64/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -214,8 +214,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-darwin-arm64')
         const bindingPackageVersion = require('@superradcompany/microsandbox-darwin-arm64/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -234,8 +234,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-freebsd-x64')
         const bindingPackageVersion = require('@superradcompany/microsandbox-freebsd-x64/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -250,8 +250,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-freebsd-arm64')
         const bindingPackageVersion = require('@superradcompany/microsandbox-freebsd-arm64/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -271,8 +271,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-x64-musl')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-x64-musl/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -287,8 +287,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-x64-gnu')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-x64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -305,8 +305,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-arm64-musl')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-arm64-musl/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -321,8 +321,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-arm64-gnu')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-arm64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -339,8 +339,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-arm-musleabihf')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-arm-musleabihf/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -355,8 +355,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-arm-gnueabihf')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-arm-gnueabihf/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -373,8 +373,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-loong64-musl')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-loong64-musl/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -389,8 +389,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-loong64-gnu')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-loong64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -407,8 +407,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-riscv64-musl')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-riscv64-musl/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -423,8 +423,8 @@ function requireNative() {
         try {
           const binding = require('@superradcompany/microsandbox-linux-riscv64-gnu')
           const bindingPackageVersion = require('@superradcompany/microsandbox-linux-riscv64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -440,8 +440,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-linux-ppc64-gnu')
         const bindingPackageVersion = require('@superradcompany/microsandbox-linux-ppc64-gnu/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -456,8 +456,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-linux-s390x-gnu')
         const bindingPackageVersion = require('@superradcompany/microsandbox-linux-s390x-gnu/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -476,8 +476,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-openharmony-arm64')
         const bindingPackageVersion = require('@superradcompany/microsandbox-openharmony-arm64/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -492,8 +492,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-openharmony-x64')
         const bindingPackageVersion = require('@superradcompany/microsandbox-openharmony-x64/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -508,8 +508,8 @@ function requireNative() {
       try {
         const binding = require('@superradcompany/microsandbox-openharmony-arm')
         const bindingPackageVersion = require('@superradcompany/microsandbox-openharmony-arm/package.json').version
-        if (bindingPackageVersion !== '0.7.15' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.7.15 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.7.16' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.7.16 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -579,6 +579,8 @@ module.exports = nativeBinding
 module.exports.AgentClient = nativeBinding.AgentClient
 module.exports.AttachOptionsBuilder = nativeBinding.AttachOptionsBuilder
 module.exports.JsAttachOptionsBuilder = nativeBinding.JsAttachOptionsBuilder
+module.exports.Context = nativeBinding.Context
+module.exports.JsContext = nativeBinding.JsContext
 module.exports.DnsBuilder = nativeBinding.DnsBuilder
 module.exports.JsDnsBuilder = nativeBinding.JsDnsBuilder
 module.exports.ExecHandle = nativeBinding.ExecHandle
@@ -647,10 +649,12 @@ module.exports.SandboxBuilder = nativeBinding.SandboxBuilder
 module.exports.JsSandboxBuilder = nativeBinding.JsSandboxBuilder
 module.exports.SandboxFsOps = nativeBinding.SandboxFsOps
 module.exports.JsSandboxFsOps = nativeBinding.JsSandboxFsOps
-module.exports.SandboxHandle = nativeBinding.SandboxHandle
-module.exports.JsSandboxHandle = nativeBinding.JsSandboxHandle
+module.exports.SandboxSshOps = nativeBinding.SandboxSshOps
+module.exports.JsSandboxSshOps = nativeBinding.JsSandboxSshOps
 module.exports.SecretBuilder = nativeBinding.SecretBuilder
 module.exports.JsSecretBuilder = nativeBinding.JsSecretBuilder
+module.exports.Service = nativeBinding.Service
+module.exports.JsService = nativeBinding.JsService
 module.exports.SftpClient = nativeBinding.SftpClient
 module.exports.JsSftpClient = nativeBinding.JsSftpClient
 module.exports.Snapshot = nativeBinding.Snapshot
@@ -661,8 +665,8 @@ module.exports.SnapshotBuilder = nativeBinding.SnapshotBuilder
 module.exports.JsSnapshotBuilder = nativeBinding.JsSnapshotBuilder
 module.exports.SnapshotCopyBuilder = nativeBinding.SnapshotCopyBuilder
 module.exports.JsSnapshotCopyBuilder = nativeBinding.JsSnapshotCopyBuilder
-module.exports.SnapshotHandle = nativeBinding.SnapshotHandle
-module.exports.JsSnapshotHandle = nativeBinding.JsSnapshotHandle
+module.exports.SnapshotMetadata = nativeBinding.SnapshotMetadata
+module.exports.JsSnapshotMetadata = nativeBinding.JsSnapshotMetadata
 module.exports.Socks4ProxyBuilder = nativeBinding.Socks4ProxyBuilder
 module.exports.JsSocks4ProxyBuilder = nativeBinding.JsSocks4ProxyBuilder
 module.exports.Socks5ProxyBuilder = nativeBinding.Socks5ProxyBuilder
@@ -683,11 +687,7 @@ module.exports.VolumeFsReadStream = nativeBinding.VolumeFsReadStream
 module.exports.JsVolumeFsReadStream = nativeBinding.JsVolumeFsReadStream
 module.exports.VolumeFsWriteSink = nativeBinding.VolumeFsWriteSink
 module.exports.JsVolumeFsWriteSink = nativeBinding.JsVolumeFsWriteSink
-module.exports.VolumeHandle = nativeBinding.VolumeHandle
-module.exports.JsVolumeHandle = nativeBinding.JsVolumeHandle
 module.exports.allSandboxMetrics = nativeBinding.allSandboxMetrics
-module.exports.defaultBackendInfo = nativeBinding.defaultBackendInfo
-module.exports.defaultBackendKind = nativeBinding.defaultBackendKind
 module.exports.diagnoseStorage = nativeBinding.diagnoseStorage
 module.exports.ensureRuntime = nativeBinding.ensureRuntime
 module.exports.imageGet = nativeBinding.imageGet
@@ -699,11 +699,10 @@ module.exports.imageRemove = nativeBinding.imageRemove
 module.exports.imageSave = nativeBinding.imageSave
 module.exports.installRuntime = nativeBinding.installRuntime
 module.exports.isRuntimeInstalled = nativeBinding.isRuntimeInstalled
-module.exports.popDefaultBackend = nativeBinding.popDefaultBackend
-module.exports.pushDefaultBackend = nativeBinding.pushDefaultBackend
+module.exports.configuredProviderKind = nativeBinding.configuredProviderKind
+module.exports.providerInfo = nativeBinding.providerInfo
 module.exports.resolveRuntime = nativeBinding.resolveRuntime
 module.exports.resolveRuntimeVersion = nativeBinding.resolveRuntimeVersion
-module.exports.setDefaultBackend = nativeBinding.setDefaultBackend
 module.exports.setPackagedMsbPath = nativeBinding.setPackagedMsbPath
 module.exports.setRuntimeLibkrunfwPath = nativeBinding.setRuntimeLibkrunfwPath
 module.exports.setRuntimeMsbPath = nativeBinding.setRuntimeMsbPath

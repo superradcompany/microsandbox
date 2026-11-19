@@ -3,11 +3,11 @@
 //! Unlike [`SandboxFsOps`](crate::sandbox::fs::SandboxFsOps) which goes through the
 //! agent protocol, [`VolumeFs`] reads + writes a volume's bytes directly. For
 //! the local backend that is capability-scoped access to `volumes_dir/<name>/`; for
-//! cloud it routes through msb-cloud HTTP.
+//! cloud it routes through the cloud HTTP API.
 //!
 //! `VolumeFs` is a single type per D6.4 — no public variants. It borrows the
-//! parent volume's `Arc<dyn Backend>` + name and dispatches through the
-//! [`VolumeBackend`](crate::backend::VolumeBackend) trait.
+//! parent volume's `Arc<dyn Context>` + name and dispatches through the
+//! [`VolumeOps`](crate::context::VolumeOps) trait.
 
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 #[cfg(feature = "cloud")]
 use tokio::task::JoinHandle;
 
-use crate::backend::Backend;
+use crate::context::Context;
 use crate::{
     MicrosandboxResult,
     sandbox::fs::{FsEntry, FsMetadata},
@@ -44,11 +44,11 @@ const STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Filesystem operations on a volume.
 ///
-/// Borrows the parent volume's `Arc<dyn Backend>` + name and dispatches every
-/// op through the [`VolumeBackend`](crate::backend::VolumeBackend) trait.
+/// Borrows the parent volume's `Arc<dyn Context>` + name and dispatches every
+/// op through the [`VolumeOps`](crate::context::VolumeOps) trait.
 /// Local operations stay beneath an open volume directory; cloud operations use the authenticated volume API.
 pub struct VolumeFs<'a> {
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     name: &'a str,
 }
 
@@ -131,20 +131,34 @@ impl<'a> VolumeFs<'a> {
     /// Construct a volume FS handle for the named volume.
     ///
     /// Called by [`Volume::fs`](super::Volume::fs) and
-    /// [`VolumeHandle::fs`](super::VolumeHandle::fs) — those are the public
+    /// [`Volume::fs`](super::Volume::fs) — those are the public
     /// entry points; this constructor itself is crate-private.
-    pub(crate) fn new(backend: Arc<dyn Backend>, name: &'a str) -> Self {
+    pub(crate) fn new(backend: Arc<dyn Context>, name: &'a str) -> Self {
         Self { backend, name }
     }
 
     /// Public constructor for FFI shims that don't hold a [`Volume`](super::Volume) /
-    /// [`VolumeHandle`](super::VolumeHandle) directly.
+    /// [`Volume`](super::Volume) directly.
     ///
     /// Most callers should use [`Volume::fs`](super::Volume::fs) /
-    /// [`VolumeHandle::fs`](super::VolumeHandle::fs); this is here for the
+    /// [`Volume::fs`](super::Volume::fs); this is here for the
     /// language bindings that re-assemble a `VolumeFs` per FFI call.
-    pub fn with_backend(backend: Arc<dyn Backend>, name: &'a str) -> Self {
+    pub fn with_backend(backend: Arc<dyn Context>, name: &'a str) -> Self {
         Self { backend, name }
+    }
+
+    /// Run a native binding's local operation under the volume identity lock and root capability.
+    #[cfg(feature = "local")]
+    #[doc(hidden)]
+    pub async fn with_local_root<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(RootedVolumeFs) -> MicrosandboxResult<T> + Send + 'static,
+    ) -> MicrosandboxResult<T> {
+        let local = self
+            .backend
+            .as_local()
+            .ok_or_else(|| crate::MicrosandboxError::local_only(crate::Operation::VolumePath))?;
+        local::with_root(local, self.name, operation).await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -153,13 +167,13 @@ impl<'a> VolumeFs<'a> {
 
     /// Read an entire file into memory as raw bytes.
     pub async fn read(&self, path: &str) -> MicrosandboxResult<Bytes> {
-        self.backend.volumes().fs_read(self.name, path).await
+        self.backend.volume_ops().fs_read(self.name, path).await
     }
 
     /// Read an entire file into memory as a UTF-8 string.
     pub async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String> {
         self.backend
-            .volumes()
+            .volume_ops()
             .fs_read_to_string(self.name, path)
             .await
     }
@@ -167,10 +181,13 @@ impl<'a> VolumeFs<'a> {
     /// Read a file with streaming. Returns a [`VolumeFsReadStream`] that
     /// yields chunks of bytes.
     ///
-    /// Routes through the [`VolumeBackend`](crate::backend::VolumeBackend)
+    /// Routes through the [`VolumeOps`](crate::context::VolumeOps)
     /// trait for both local and Cloud volumes.
     pub async fn read_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsReadStream> {
-        self.backend.volumes().fs_read_stream(self.name, path).await
+        self.backend
+            .volume_ops()
+            .fs_read_stream(self.name, path)
+            .await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -182,7 +199,7 @@ impl<'a> VolumeFs<'a> {
     pub async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
         let bytes = data.as_ref().to_vec();
         self.backend
-            .volumes()
+            .volume_ops()
             .fs_write(self.name, path, bytes)
             .await
     }
@@ -190,11 +207,11 @@ impl<'a> VolumeFs<'a> {
     /// Write to a file with streaming. Returns a [`VolumeFsWriteSink`] that
     /// accepts chunks of bytes. Creates parent directories as needed.
     ///
-    /// Routes through the [`VolumeBackend`](crate::backend::VolumeBackend)
+    /// Routes through the [`VolumeOps`](crate::context::VolumeOps)
     /// trait for both local and Cloud volumes.
     pub async fn write_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsWriteSink> {
         self.backend
-            .volumes()
+            .volume_ops()
             .fs_write_stream(self.name, path)
             .await
     }
@@ -206,18 +223,18 @@ impl<'a> VolumeFs<'a> {
     /// List the immediate children of a directory (non-recursive).
     /// Each entry includes the path, kind, size, permissions, and modification time.
     pub async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>> {
-        self.backend.volumes().fs_list(self.name, path).await
+        self.backend.volume_ops().fs_list(self.name, path).await
     }
 
     /// Create a directory (and parents).
     pub async fn mkdir(&self, path: &str) -> MicrosandboxResult<()> {
-        self.backend.volumes().fs_mkdir(self.name, path).await
+        self.backend.volume_ops().fs_mkdir(self.name, path).await
     }
 
     /// Remove a directory recursively.
     pub async fn remove_dir(&self, path: &str) -> MicrosandboxResult<()> {
         self.backend
-            .volumes()
+            .volume_ops()
             .fs_remove(self.name, path, true)
             .await
     }
@@ -225,19 +242,22 @@ impl<'a> VolumeFs<'a> {
     /// Delete a single file. Use [`remove_dir`](Self::remove_dir) for directories.
     pub async fn remove(&self, path: &str) -> MicrosandboxResult<()> {
         self.backend
-            .volumes()
+            .volume_ops()
             .fs_remove(self.name, path, false)
             .await
     }
 
     /// Copy a file within the volume.
     pub async fn copy(&self, from: &str, to: &str) -> MicrosandboxResult<()> {
-        self.backend.volumes().fs_copy(self.name, from, to).await
+        self.backend.volume_ops().fs_copy(self.name, from, to).await
     }
 
     /// Rename/move a file or directory.
     pub async fn rename(&self, from: &str, to: &str) -> MicrosandboxResult<()> {
-        self.backend.volumes().fs_rename(self.name, from, to).await
+        self.backend
+            .volume_ops()
+            .fs_rename(self.name, from, to)
+            .await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -246,13 +266,13 @@ impl<'a> VolumeFs<'a> {
 
     /// Get file/directory metadata.
     pub async fn stat(&self, path: &str) -> MicrosandboxResult<FsMetadata> {
-        self.backend.volumes().fs_stat(self.name, path).await
+        self.backend.volume_ops().fs_stat(self.name, path).await
     }
 
     /// Check whether a file or directory exists at the given path.
     /// Returns `false` (not an error) if the path is absent.
     pub async fn exists(&self, path: &str) -> MicrosandboxResult<bool> {
-        self.backend.volumes().fs_exists(self.name, path).await
+        self.backend.volume_ops().fs_exists(self.name, path).await
     }
 }
 
@@ -342,7 +362,7 @@ impl VolumeFsWriteSink {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Module: local (free fn impls called by LocalBackend's VolumeBackend impl)
+// Module: local (free fn impls called by LocalContext's VolumeOps impl)
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(feature = "local")]
@@ -358,10 +378,10 @@ pub use rooted::RootedVolumeFs;
 pub(crate) mod local {
     //! Local FS ops keyed by `(volume_name, rel_path)`.
     //!
-    //! Lives in a sub-module so the `LocalBackend` trait impl in
+    //! Lives in a sub-module so the `LocalContext` trait impl in
     //! `backend/volume.rs` can call into one place. Each function takes
-    //! the `&LocalBackend` whose `volumes_dir` it should resolve against,
-    //! so `with_backend` scoping and explicit `LocalBackend::builder()`
+    //! the `&LocalContext` whose `volumes_dir` it should resolve against,
+    //! so `with_backend` scoping and explicit `LocalContext::builder()`
     //! constructions correctly route to the right host directory.
 
     use std::path::Path;
@@ -372,7 +392,7 @@ pub(crate) mod local {
 
     use crate::{
         MicrosandboxError, MicrosandboxResult,
-        backend::LocalBackend,
+        context::LocalContext,
         sandbox::fs::{FsEntry, FsEntryKind, FsMetadata},
         volume,
     };
@@ -381,27 +401,42 @@ pub(crate) mod local {
 
     // Run directory-relative filesystem calls off the async executor. Every operation
     // opens its root once and keeps that capability through resolution and use.
-    async fn with_root<T: Send + 'static>(
-        local: &LocalBackend,
+    pub(super) async fn with_root<T: Send + 'static>(
+        local: &LocalContext,
         name: &str,
         operation: impl FnOnce(RootedVolumeFs) -> MicrosandboxResult<T> + Send + 'static,
     ) -> MicrosandboxResult<T> {
+        let (name, expected) = volume::identity::local_target(name)?;
         volume::validate_volume_name(name)?;
+        // Bound resources serialize validation and root opening with replacement.
+        // Keep the lock in the blocking worker if the async observer is cancelled.
+        let identity_lock = if expected.is_some() {
+            Some(volume::lock_volume_name(local, name).await?)
+        } else {
+            None
+        };
         let pools = local.db().await?;
-        if let Some(volume) = crate::db::entity::volume::Entity::find()
+        let current = crate::db::entity::volume::Entity::find()
             .filter(crate::db::entity::volume::Column::Name.eq(name))
             .one(pools.read())
-            .await?
+            .await?;
+        if let Some(expected) = expected
+            && current.as_ref().is_none_or(|row| row.id != expected)
         {
+            return Err(crate::MicrosandboxError::VolumeNotFound(name.to_owned()));
+        }
+        if let Some(volume) = current {
             local.ensure_volume_available(volume.id, None).await?;
         }
-
         let root_path = local.volume_path(name);
-        tokio::task::spawn_blocking(move || operation(RootedVolumeFs::open(&root_path)?))
-            .await
-            .map_err(|error| {
-                MicrosandboxError::SandboxFsOps(format!("volume filesystem task failed: {error}"))
-            })?
+        tokio::task::spawn_blocking(move || {
+            let _identity_lock = identity_lock;
+            operation(RootedVolumeFs::open(&root_path)?)
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::SandboxFsOps(format!("volume filesystem task failed: {error}"))
+        })?
     }
 
     /// Normalize a volume-relative path to `/`-separated absolute form
@@ -427,7 +462,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn read(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<Bytes> {
@@ -439,7 +474,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn read_to_string(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<String> {
@@ -451,7 +486,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn write(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
         data: &[u8],
@@ -468,7 +503,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn list(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<Vec<FsEntry>> {
@@ -506,7 +541,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn mkdir(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<()> {
@@ -519,7 +554,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn remove(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
         recursive: bool,
@@ -539,7 +574,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn copy(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         from: &str,
         to: &str,
@@ -557,7 +592,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn rename(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         from: &str,
         to: &str,
@@ -577,7 +612,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn stat(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<FsMetadata> {
@@ -591,7 +626,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn exists(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<bool> {
@@ -604,7 +639,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn read_stream(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<VolumeFsReadStream> {
@@ -619,7 +654,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn write_stream(
-        local: &LocalBackend,
+        local: &LocalContext,
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<VolumeFsWriteSink> {
@@ -763,7 +798,7 @@ pub(crate) mod local {
 #[cfg(all(test, feature = "local"))]
 mod tests {
     use super::*;
-    use crate::backend::LocalBackend;
+    use crate::context::LocalContext;
 
     #[tokio::test]
     async fn remove_dir_rejects_slash_volume_root() {
@@ -1183,14 +1218,13 @@ mod tests {
         assert_eq!(std::fs::read(moved.join("report")).unwrap(), b"inside");
     }
 
-    async fn local_backend() -> (tempfile::TempDir, LocalBackend) {
+    async fn local_backend() -> (tempfile::TempDir, LocalContext) {
         let temp = tempfile::tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("config.json"))
             .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
-            .await
             .unwrap();
         tokio::fs::create_dir_all(backend.volume_path("vol"))
             .await

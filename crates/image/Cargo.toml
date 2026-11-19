@@ -19,7 +19,7 @@ futures.workspace = true
 hex.workspace = true
 imago.workspace = true
 libc.workspace = true
-microsandbox-types.workspace = true
+microsandbox-types = { workspace = true, features = ["progress"] }
 microsandbox-utils.workspace = true
 msb_krun = { workspace = true, features = ["blk"] }
 oci-client.workspace = true

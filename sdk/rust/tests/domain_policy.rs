@@ -10,6 +10,8 @@
 //! own `~/.microsandbox` so they can run in parallel without sharing
 //! the sqlite db, image cache, or sandbox namespace.
 
+#![cfg(feature = "net")]
+
 use std::net::{IpAddr, ToSocketAddrs};
 
 use microsandbox::{NetworkPolicy, Sandbox};

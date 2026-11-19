@@ -3,12 +3,196 @@
 //! These helpers operate on one caller-owned object, not its ancestors. Callers must first
 //! establish namespace authority and exclude symlinks/reparse points and concurrent replacement.
 
-use std::fs::File;
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io;
+use std::path::Path;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Create a new owner-private file without following an existing path.
+///
+/// Unix creation starts at `0600` before the name is visible, then restores owner access if the
+/// inherited umask is more restrictive. Windows inherits the parent directory's ACL; callers
+/// should use this only beneath a storage parent whose publication policy they already checked.
+pub fn create_new(path: &Path) -> io::Result<File> {
+    create_new_with_access(path, false, false)
+}
+
+/// Create a new owner-private file opened for reading and writing.
+///
+/// See [`create_new`] for the parent-directory and platform guarantees.
+pub fn create_new_read_write(path: &Path) -> io::Result<File> {
+    create_new_with_access(path, true, false)
+}
+
+/// Create a new owner-private file opened for appending.
+pub fn create_new_append(path: &Path) -> io::Result<File> {
+    create_new_with_access(path, false, true)
+}
+
+/// Create missing directories with owner-only access, leaving existing directories unchanged.
+///
+/// Callers remain responsible for verifying the authority and intended sharing policy of
+/// existing ancestors. On Unix, every directory created by the recursive operation starts at
+/// `0700`, so a permissive process umask cannot expose new host-managed storage.
+pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "private storage path is not a directory",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let components = path.components().collect::<Vec<_>>();
+    let mut current = std::path::PathBuf::new();
+    for component in components {
+        current.push(component.as_os_str());
+        match std::fs::metadata(&current) {
+            Ok(metadata) if metadata.is_dir() => continue,
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "private storage path component is not a directory",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match create_private_directory(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        if !std::fs::metadata(&current)?.is_dir() {
+                            return Err(io::Error::other(
+                                "private storage path changed during directory creation",
+                            ));
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Create one new owner-private directory, failing if its name already exists.
+pub fn create_private_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(path)?;
+    }
+    #[cfg(not(unix))]
+    DirBuilder::new().create(path)?;
+    let directory = open_directory(path)?;
+    // Apply ACL and mode restrictions through the opened directory, not by resolving the path
+    // again. macOS inherits extended ACLs when creating children even when their mode is 0700.
+    if let Err(error) = harden(&directory, true) {
+        drop(directory);
+        let _ = std::fs::remove_dir(path);
+        return Err(error);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = directory.metadata()?;
+        let current = std::fs::symlink_metadata(path)?;
+        if !current.is_dir() || opened.dev() != current.dev() || opened.ino() != current.ino() {
+            return Err(io::Error::other(
+                "private storage directory changed during creation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Tighten an existing directory after its namespace has been authorized by the caller.
+pub fn harden_existing_directory(path: &Path) -> io::Result<()> {
+    let directory = open_directory(path)?;
+    harden(&directory, true)
+}
+
+/// Tighten an existing single-link regular file after its namespace has been authorized.
+#[cfg(unix)]
+pub fn harden_existing_file(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(io::Error::other(
+            "private storage must be a single-link regular file",
+        ));
+    }
+    harden(&file, false)
+}
+
+fn open_directory(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options
+            .access_mode(0x0006_0080)
+            .share_mode(0x7)
+            .custom_flags(0x0220_0000);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_dir() {
+        return Err(io::Error::other("private storage entry is not a directory"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(io::Error::other(
+                "private storage cannot use reparse points",
+            ));
+        }
+    }
+    Ok(file)
+}
+
+fn create_new_with_access(path: &Path, read: bool, append: bool) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .read(read)
+        .append(append)
+        .create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    if let Err(error) = harden(&file, false) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(file)
+}
 
 /// Remove inherited grants from a newly created object and grant only its owner access.
 /// The caller must not use this to adopt an untrusted existing object's contents.
@@ -21,17 +205,53 @@ pub fn harden(file: &File, directory: bool) -> io::Result<()> {
                 "private storage is owned by another account",
             ));
         }
-        #[cfg(target_os = "macos")]
-        macos::clear(file)?;
         file.set_permissions(std::fs::Permissions::from_mode(if directory {
             0o700
         } else {
             0o600
         }))?;
+        // Restrict the mode first. On Linux this narrows a POSIX ACL's mask before removal,
+        // which also lets repair handle owner-only read-only files without a write-open.
+        #[cfg(target_os = "linux")]
+        linux_acl::clear(file, directory)?;
+        #[cfg(target_os = "macos")]
+        macos::clear(file)?;
     }
     #[cfg(windows)]
     windows::harden(file, directory)?;
     verify(file)
+}
+
+#[cfg(target_os = "linux")]
+mod linux_acl {
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::AsRawFd;
+
+    pub(super) fn clear(file: &File, directory: bool) -> io::Result<()> {
+        let attributes: &[&[u8]] = if directory {
+            &[b"system.posix_acl_access\0", b"system.posix_acl_default\0"]
+        } else {
+            &[b"system.posix_acl_access\0"]
+        };
+
+        for attribute in attributes {
+            let result = unsafe { libc::fremovexattr(file.as_raw_fd(), attribute.as_ptr().cast()) };
+            if result == 0 {
+                continue;
+            }
+
+            let error = io::Error::last_os_error();
+            if error.raw_os_error().is_some_and(|code| {
+                code == libc::ENODATA || code == libc::ENOTSUP || code == libc::EOPNOTSUPP
+            }) {
+                continue;
+            }
+            return Err(error);
+        }
+
+        Ok(())
+    }
 }
 
 /// Verify one object's ownership and access policy without changing permissions or contents.
@@ -135,6 +355,47 @@ mod macos {
             Err(io::Error::other("private storage has an extended ACL"))
         } else {
             Err(error)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::fs::{self, File};
+        use std::path::Path;
+        use std::process::Command;
+
+        use super::*;
+
+        #[test]
+        fn hardening_removes_extended_acls_from_files_and_directories() {
+            let temporary = tempfile::tempdir().unwrap();
+            let file_path = temporary.path().join("private-file");
+            let directory_path = temporary.path().join("private-directory");
+            fs::write(&file_path, b"private").unwrap();
+            fs::create_dir(&directory_path).unwrap();
+            let file = File::open(&file_path).unwrap();
+            let directory = File::open(&directory_path).unwrap();
+
+            set_extended_acl(&file_path);
+            set_extended_acl(&directory_path);
+            assert!(verify(&file).is_err());
+            assert!(verify(&directory).is_err());
+
+            crate::private_file::harden(&file, false).unwrap();
+            crate::private_file::harden(&directory, true).unwrap();
+
+            verify(&file).unwrap();
+            verify(&directory).unwrap();
+        }
+
+        fn set_extended_acl(path: &Path) {
+            let result = Command::new("/bin/chmod")
+                .arg("+a")
+                .arg("everyone allow read")
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(result.success(), "cannot set test ACL");
         }
     }
 }
@@ -540,5 +801,140 @@ mod windows_tests {
         std::fs::write(&path, b"private bytes").unwrap();
         super::verify(&directory(&path)).unwrap();
         assert!(super::verify_publication_parent(&directory(&path)).is_err());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    #[cfg(target_os = "linux")]
+    use std::fs::{self, File};
+
+    #[test]
+    fn created_files_have_owner_only_mode() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("private");
+        let file = super::create_new(&path).unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        super::verify(&file).unwrap();
+    }
+
+    #[test]
+    fn private_directory_stays_owner_only_under_zero_umask() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("private-directory");
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "private_file::unix_tests::private_directory_creation_child",
+                "--nocapture",
+            ])
+            .env("MSB_PRIVATE_DIRECTORY_CHILD", &path)
+            .status()
+            .unwrap();
+
+        assert!(status.success());
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn private_directory_creation_child() {
+        let Some(path) = std::env::var_os("MSB_PRIVATE_DIRECTORY_CHILD") else {
+            return;
+        };
+        unsafe { libc::umask(0) };
+        super::create_private_directory(std::path::Path::new(&path)).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hardening_removes_posix_access_and_default_acls() {
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let file_path = temporary.path().join("private-file");
+        let directory_path = temporary.path().join("private-directory");
+        fs::write(&file_path, b"private").unwrap();
+        fs::create_dir(&directory_path).unwrap();
+        let file = File::open(&file_path).unwrap();
+        let directory = File::open(&directory_path).unwrap();
+        let acl = extended_acl();
+
+        if !set_acl(&file_path, b"system.posix_acl_access\0", &acl)
+            || !set_acl(&directory_path, b"system.posix_acl_access\0", &acl)
+            || !set_acl(&directory_path, b"system.posix_acl_default\0", &acl)
+        {
+            return;
+        }
+
+        super::harden(&file, false).unwrap();
+        super::harden(&directory, true).unwrap();
+
+        assert_acl_absent(&file, b"system.posix_acl_access\0");
+        assert_acl_absent(&directory, b"system.posix_acl_access\0");
+        assert_acl_absent(&directory, b"system.posix_acl_default\0");
+
+        fn set_acl(path: &Path, name: &[u8], acl: &[u8]) -> bool {
+            let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+            let result = unsafe {
+                libc::setxattr(
+                    path.as_ptr(),
+                    name.as_ptr().cast(),
+                    acl.as_ptr().cast(),
+                    acl.len(),
+                    0,
+                )
+            };
+            if result == 0 {
+                return true;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error().is_some_and(|code| {
+                code == libc::ENOTSUP || code == libc::EOPNOTSUPP || code == libc::EPERM
+            }) {
+                return false;
+            }
+            panic!("cannot set test POSIX ACL: {error}");
+        }
+
+        fn assert_acl_absent(file: &File, name: &[u8]) {
+            let size = unsafe {
+                libc::fgetxattr(
+                    file.as_raw_fd(),
+                    name.as_ptr().cast(),
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            assert_eq!(size, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ENODATA)
+            );
+        }
+
+        fn extended_acl() -> Vec<u8> {
+            let mut acl = 2u32.to_le_bytes().to_vec();
+            for (tag, permission, id) in [
+                (0x01u16, 0x07u16, u32::MAX),
+                (0x02, 0x04, 1001),
+                (0x04, 0x00, u32::MAX),
+                (0x10, 0x04, u32::MAX),
+                (0x20, 0x00, u32::MAX),
+            ] {
+                acl.extend_from_slice(&tag.to_le_bytes());
+                acl.extend_from_slice(&permission.to_le_bytes());
+                acl.extend_from_slice(&id.to_le_bytes());
+            }
+            acl
+        }
     }
 }
