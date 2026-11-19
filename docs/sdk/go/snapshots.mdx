@@ -30,7 +30,9 @@ Available on `Sandbox`. `name` selects a new group. Configure its first member t
 <Accordion title="Example">
 
 ```go
-source, err := m.GetSandbox(ctx, "worker")
+provider, err := m.NewLocalContext(m.LocalOptions{})
+if err != nil { return err }
+source, err := provider.Sandboxes().Get(ctx, "worker")
 if err != nil { return err }
 created, err := source.Snapshot(ctx, "history", m.WithSnapshotCaptureConfig(
     m.SnapshotCaptureConfig{Name: "ready", RecordIntegrity: true}))
