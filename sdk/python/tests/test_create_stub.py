@@ -225,3 +225,14 @@ def test_fork_methods_take_restore_volumes() -> None:
             }:
                 annotations = {arg.arg: ast.unparse(arg.annotation) for arg in node.args.kwonlyargs}
                 assert annotations["volumes"] == restore["volumes"]
+
+
+def test_running_sandbox_identity_members_are_awaitable_properties() -> None:
+    for name in ("name", "id"):
+        member = _method(name)
+        assert isinstance(member, ast.FunctionDef)
+        assert any(
+            isinstance(decorator, ast.Name) and decorator.id == "property"
+            for decorator in member.decorator_list
+        )
+        assert ast.unparse(member.returns) == "Awaitable[str]"

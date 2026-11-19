@@ -130,6 +130,10 @@ pub(crate) enum SnapshotRestoreMode {
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 #[config_patch(serde_lossless)]
 pub struct SandboxConfig {
+    /// Process-local mode used only when creating a private, fixed recovery reader VM.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) storage_reader: Option<bool>,
     /// Protect the installed source while a local restore builder materializes child-owned files.
     #[cfg(feature = "local")]
     #[serde(skip)]
@@ -1192,6 +1196,8 @@ impl Default for SandboxConfig {
                 ..Default::default()
             },
             registry_auth: None,
+            #[cfg(feature = "local")]
+            storage_reader: None,
             #[cfg(feature = "local")]
             creation_progress: None,
             #[cfg(feature = "local")]

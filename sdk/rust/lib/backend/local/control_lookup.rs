@@ -118,6 +118,8 @@ mod tests {
     use microsandbox_migration::schema_metadata;
     use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
+    use crate::{backend::local::creation::CreationStorage, sandbox::identity::BranchSource};
+
     use super::*;
 
     async fn fixture() -> (tempfile::TempDir, LocalBackend) {
@@ -182,6 +184,10 @@ mod tests {
     #[tokio::test]
     async fn branch_refuses_a_restarted_source_before_writing_handoff_state() {
         let (home, backend) = fixture().await;
+        // Keep this fixture eligible for storage operations so the test reaches run identity validation.
+        let runtime = backend.sandboxes_dir().join("source/runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        microsandbox_runtime::checkpoint::layout::initialize_new(&runtime).unwrap();
         let selected = backend.control_run_identity("source", 1).await.unwrap();
         let writer = backend.db().await.unwrap().write();
         writer
@@ -211,14 +217,14 @@ mod tests {
         let result = crate::sandbox::branch::capture_child(
             &backend,
             &mut child,
-            &crate::sandbox::identity::BranchSource {
+            &BranchSource {
                 guest_flush: None,
                 batch: None,
                 record_integrity: false,
                 name: "source".into(),
                 run: selected,
             },
-            &child_dir,
+            &CreationStorage::for_test(&child_dir),
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("changed runtime"));
@@ -271,7 +277,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("schema is newer")
+                .contains("newer or unrecognized database schema")
         );
         writer
             .execute_unprepared(

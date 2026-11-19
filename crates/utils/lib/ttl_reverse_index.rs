@@ -138,6 +138,18 @@ where
         })
     }
 
+    /// Visit live bindings at one instant without changing their expiry or ordering.
+    /// Callers can use this under their own read lock to build a consistent snapshot.
+    pub fn visit_live_bindings(&self, now: Instant, mut visitor: impl FnMut(&K, &M)) {
+        for (key, bindings) in &self.by_key {
+            for (member, expiry) in bindings {
+                if expiry.expires_at > now {
+                    visitor(key, member);
+                }
+            }
+        }
+    }
+
     /// Evict all bindings whose TTL has expired by `now`.
     pub fn evict_expired(&mut self, now: Instant) {
         while self
@@ -239,6 +251,21 @@ impl<K, M> Default for TtlReverseIndex<K, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_visits_only_live_bindings_without_removing_entries() {
+        let mut index = TtlReverseIndex::<&str, i32>::default();
+        let now = Instant::now();
+        index.insert("expired", [1], Duration::from_secs(1), now);
+        index.insert("live", [1, 2], Duration::from_secs(10), now);
+        let mut bindings = Vec::new();
+        index.visit_live_bindings(now + Duration::from_secs(1), |key, member| {
+            bindings.push((*key, *member))
+        });
+        bindings.sort_unstable();
+        assert_eq!(bindings, [("live", 1), ("live", 2)]);
+        assert_eq!(index.binding_count(), 3);
+    }
 
     #[test]
     fn replaces_members_for_key() {

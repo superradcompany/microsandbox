@@ -76,6 +76,17 @@ describe("modifyOptionsToNapi", () => {
     expect(napi?.secretsRemove).toEqual(["OLD"]);
   });
 
+  it("keeps repeated removals so the native planner refuses them", () => {
+    const napi = modifyOptionsToNapi({
+      secrets: { API_KEY: { value: "dummy" }, DB_PASS: {} },
+      secretsRemove: ["OLD", "OLD"],
+    });
+
+    // Configured secrets are keyed by name: one spec per name.
+    expect(Object.keys(napi?.secrets ?? {})).toEqual(["API_KEY", "DB_PASS"]);
+    expect(napi?.secretsRemove).toEqual(["OLD", "OLD"]);
+  });
+
   it("rejects unknown secret spec keys without echoing their values", () => {
     const opts = {
       secrets: { API_KEY: { value: "dummy-secret", allowedHost: ["api.example.com"] } },

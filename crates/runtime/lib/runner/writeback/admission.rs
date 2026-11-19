@@ -761,12 +761,14 @@ fn clean_unpublished_lease(file: &File, lease_path: &Path) {
 }
 
 fn prepare_lease_dir(path: &Path) -> RuntimeResult<()> {
-    std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        // Missing ancestors must start private too, before the final directory is opened.
+        microsandbox_utils::private_file::create_private_dir_all(path)?;
+        microsandbox_utils::private_file::harden_existing_directory(path)?;
     }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(path)?;
     Ok(())
 }
 

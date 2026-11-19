@@ -20,6 +20,7 @@ use super::connection::ProxyConnectState;
 #[cfg(test)]
 use super::connection::ProxyConnectStatus;
 use super::upstream::UpstreamTcpTarget;
+use crate::engine::dns::forwarder::DnsForwarderHandle;
 use crate::engine::http_deny::classify_http_request;
 use crate::engine::secrets::config::SecretsConfigExt;
 use crate::engine::tls::proxy::TlsProxy;
@@ -90,6 +91,7 @@ pub(crate) struct TcpProxy {
     strict: bool,
     proxy_connect: Arc<ProxyConnectState>,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+    dns_forwarder: DnsForwarderHandle,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -142,9 +144,10 @@ impl ConnectTarget {
 }
 
 impl TcpProxy {
-    /// Build a proxy for a newly established guest TCP connection.
-    /// `upstream` is reused when present; otherwise, dial after policy checks.
-    /// Policy uses `guest_dst`; host connections use the resolved `connect_target`.
+    /// Create a proxy for a guest TCP connection.
+    ///
+    /// Check the rules against the address the guest chose (`guest_dst`). Reuse
+    /// `upstream` if supplied; otherwise, connect to `connect_target` once allowed.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         upstream: Option<TcpStream>,
@@ -159,6 +162,7 @@ impl TcpProxy {
         strict: bool,
         proxy_connect: Arc<ProxyConnectState>,
         outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+        dns_forwarder: DnsForwarderHandle,
     ) -> Self {
         Self {
             upstream,
@@ -173,6 +177,7 @@ impl TcpProxy {
             strict,
             proxy_connect,
             outbound_proxy,
+            dns_forwarder,
         }
     }
 
@@ -206,6 +211,7 @@ impl TcpProxy {
             strict,
             proxy_connect,
             outbound_proxy,
+            dns_forwarder,
         } = self;
 
         // Mirror the SYN-time policy walk so only flows that actually reached a
@@ -246,12 +252,12 @@ impl TcpProxy {
                 Some(name) => HostnameSource::Sni(name),
                 None => HostnameSource::CacheOnly,
             };
-            match network_policy.evaluate_egress_with_source(
-                guest_dst,
-                Protocol::Tcp,
-                &shared,
-                source,
-            ) {
+
+            let evaluation = network_policy
+                .evaluate_tcp_egress(guest_dst, &shared, source, &dns_forwarder)
+                .await;
+
+            match evaluation {
                 EgressEvaluation::Allow => {
                     if strict_hostname_allow_is_opaque(
                         strict,
@@ -340,6 +346,7 @@ impl TcpProxy {
                 proxy_connect,
                 outbound_proxy,
                 upstream,
+                dns_forwarder.clone(),
             )
             .await;
         }
@@ -416,6 +423,7 @@ impl TcpProxy {
                 proxy_connect,
                 outbound_proxy,
                 Some(proxy_stream),
+                dns_forwarder.clone(),
             )
             .await;
         }
@@ -514,6 +522,7 @@ impl TcpProxy {
                                     proxy_connect,
                                     outbound_proxy,
                                     Some(proxy_stream),
+                                    dns_forwarder.clone(),
                                 )
                                 .await;
                             }
@@ -621,6 +630,9 @@ pub fn spawn_tcp_proxy(
     proxy_connect: Arc<ProxyConnectState>,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) {
+    // This public low-level helper has no DNS configuration. Preserve its
+    // existing behavior; the network engine supplies its actual forwarder.
+    let (_sender, dns_forwarder) = tokio::sync::watch::channel(None);
     let proxy = TcpProxy::new(
         None,
         guest_dst,
@@ -634,6 +646,7 @@ pub fn spawn_tcp_proxy(
         strict,
         proxy_connect,
         outbound_proxy,
+        dns_forwarder,
     );
 
     handle.spawn(proxy.run());
@@ -681,6 +694,7 @@ async fn handle_connect_tunnel(
     proxy_connect: Arc<ProxyConnectState>,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     preconnected_proxy: Option<TcpStream>,
+    dns_forwarder: DnsForwarderHandle,
 ) -> io::Result<()> {
     let connect_req =
         parse_connect_request(buffer_connect_request(initial_buf, &mut from_smoltcp).await?)?;
@@ -803,6 +817,7 @@ async fn handle_connect_tunnel(
         proxy_connect,
         // The outbound proxy was already applied to the supplied stream.
         None,
+        dns_forwarder,
     )
     .with_expected_sni(expected_sni)
     .with_initial_buf(tls_seed)
@@ -1504,6 +1519,7 @@ mod tests {
             proxy_connect.clone(),
             Some(Arc::new(outbound_proxy)),
             None,
+            tokio::sync::watch::channel(None).1,
         )
         .await
         .unwrap();
@@ -1726,6 +1742,7 @@ mod tests {
                 false,
                 status.clone(),
                 None,
+                tokio::sync::watch::channel(None).1,
             )
             .try_run()
             .await
@@ -2310,6 +2327,33 @@ mod tests {
         };
 
         assert_server_first_banner_is_immediate(policy, None).await;
+
+        // These domain rules match the TCP protocol and port, so only the
+        // later address/default allow can avoid waiting for client bytes.
+        for rules in [
+            vec![Rule::allow_egress(Destination::Domain(
+                "unused.example".parse().unwrap(),
+            ))],
+            vec![
+                Rule::allow_egress(Destination::Domain("unused.example".parse().unwrap())),
+                Rule::allow_egress(Destination::Cidr("127.0.0.0/8".parse().unwrap())),
+            ],
+        ] {
+            let default_egress = if rules.len() == 1 {
+                Action::Allow
+            } else {
+                Action::Deny
+            };
+            assert_server_first_banner_is_immediate(
+                NetworkPolicy {
+                    default_egress,
+                    default_ingress: Action::Allow,
+                    rules,
+                },
+                None,
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
@@ -2393,6 +2437,7 @@ mod tests {
             false,
             proxy_connect,
             None,
+            tokio::sync::watch::channel(None).1,
         )
         .try_run()
         .await
@@ -2517,6 +2562,7 @@ mod tests {
             false,
             Arc::new(ProxyConnectState::new()),
             None,
+            tokio::sync::watch::channel(None).1,
         )
         .try_run();
         tokio::time::timeout(Duration::from_secs(5), proxy)
@@ -2785,6 +2831,7 @@ mod tests {
             true,
             proxy_connect.clone(),
             None,
+            tokio::sync::watch::channel(None).1,
         )
         .try_run()
         .await
@@ -2827,6 +2874,7 @@ mod tests {
             true,
             proxy_connect.clone(),
             None,
+            tokio::sync::watch::channel(None).1,
         )
         .try_run()
         .await;
@@ -2930,6 +2978,7 @@ mod tests {
             false,
             proxy_connect,
             None,
+            tokio::sync::watch::channel(None).1,
         )
         .try_run()
         .await
@@ -3004,6 +3053,7 @@ mod tests {
             false,
             proxy_connect,
             None,
+            tokio::sync::watch::channel(None).1,
         )
         .try_run()
         .await
@@ -3109,6 +3159,7 @@ mod tests {
             false,
             proxy_connect,
             None,
+            tokio::sync::watch::channel(None).1,
         )
         .try_run()
         .await

@@ -1,7 +1,10 @@
-//! Fixture decoding, isolated backend construction, and synchronization for crate unit tests.
+//! Fixture decoding, isolated backend construction, a scripted HTTP server, and synchronization
+//! for crate unit tests.
 
 use std::sync::{Mutex, MutexGuard};
 
+#[cfg(feature = "cloud")]
+pub(crate) mod fake_server;
 pub(crate) mod fixtures;
 mod json;
 

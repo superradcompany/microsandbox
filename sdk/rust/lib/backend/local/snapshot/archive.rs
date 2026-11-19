@@ -44,6 +44,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::backend::LocalBackend;
+use crate::backend::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 pub use crate::snapshot::{LoadOpts, SaveOpts};
@@ -235,7 +236,7 @@ impl LocalBackend {
     pub(crate) async fn materialize_archive_for_child(
         &self,
         archive: &Path,
-        child_stage: &Path,
+        child_stage: &CreationStorage,
         disk_only: bool,
         base: Option<&str>,
         choices: &crate::sandbox::restore_resources::RestoreResources,
@@ -413,7 +414,7 @@ impl LocalBackend {
             validate_checkpoint_owned_inventory(&manifest, &checkpoint)?;
 
             if disk_only {
-                let materialized = super::materialize_checkpoint_child_disk_state(
+                let materialized = super::materialize_checkpoint_disk_for_child(
                     &extracted_closure,
                     &state.checkpoint_root,
                     &state.checkpoint_id,
@@ -1545,10 +1546,12 @@ pub(crate) async fn materialize_archive_for_child_with_base(
     base: Option<&str>,
     choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<ArchiveChildMaterialization> {
+    use crate::backend::local::creation::CreationStorage;
+
     local
         .materialize_archive_for_child(
             archive,
-            child_stage,
+            &CreationStorage::for_test(child_stage),
             disk_only,
             base,
             choices,
@@ -6102,7 +6105,7 @@ mod tests {
         let error = local
             .materialize_archive_for_child(
                 &archive,
-                &rejected_stage,
+                &crate::backend::local::creation::CreationStorage::for_test(&rejected_stage),
                 false,
                 None,
                 &Default::default(),
@@ -6134,7 +6137,7 @@ mod tests {
         let disk_restored = local
             .materialize_archive_for_child(
                 &archive,
-                &disk_child_stage,
+                &crate::backend::local::creation::CreationStorage::for_test(&disk_child_stage),
                 true,
                 None,
                 &Default::default(),

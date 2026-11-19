@@ -198,6 +198,18 @@ impl Sandbox {
         Ok(JsSandboxHandle::from_rust(handle))
     }
 
+    /// Import or recover stopped storage without starting a VM.
+    #[napi]
+    pub async fn recover_storage(name: String, options_json: String) -> Result<String> {
+        let options: microsandbox::sandbox::StorageRecoveryOptions =
+            serde_json::from_str(&options_json)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let result = microsandbox::Sandbox::recover_storage(&name, options)
+            .await
+            .map_err(to_napi_error)?;
+        serde_json::to_string(&result).map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
     /// List the first page of sandboxes.
     #[napi]
     pub async fn list() -> Result<JsSandboxPage> {

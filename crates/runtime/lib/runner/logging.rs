@@ -46,11 +46,11 @@ impl RotatingLog {
     ///
     /// The log file is created at `<log_dir>/<prefix>.log`.
     pub fn new(log_dir: &Path, prefix: &str, max_bytes: u64) -> RuntimeResult<Self> {
-        fs::create_dir_all(log_dir)?;
+        microsandbox_utils::private_file::create_private_dir_all(log_dir)?;
 
         let path = log_dir.join(format!("{prefix}.log"));
         let written = path.metadata().map(|m| m.len()).unwrap_or(0);
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = open_log(&path)?;
 
         Ok(Self {
             path,
@@ -100,12 +100,83 @@ impl RotatingLog {
         fs::rename(&self.path, &rotated)?;
 
         // Open a fresh log file
-        self.file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        self.file = open_log(&self.path)?;
         self.written = 0;
 
         Ok(())
+    }
+}
+
+fn open_log(path: &Path) -> std::io::Result<File> {
+    match microsandbox_utils::private_file::create_new_append(path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let mut options = OpenOptions::new();
+            options.append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let file = options.open(path)?;
+            if !file.metadata()?.is_file() {
+                return Err(std::io::Error::other("runtime log is not a regular file"));
+            }
+            Ok(file)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_and_rotated_logs_are_owner_private() {
+        for host_umask in [0o000, 0o022, 0o077] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("log_umask_child")
+                .arg("--nocapture")
+                .env("MSB_TEST_LOG_UMASK", format!("{host_umask:o}"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "host umask {host_umask:03o}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn log_umask_child() {
+        let Ok(value) = std::env::var("MSB_TEST_LOG_UMASK") else {
+            return;
+        };
+        let host_umask = u32::from_str_radix(&value, 8).unwrap();
+        let previous_umask = unsafe { libc::umask(host_umask as libc::mode_t) };
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary_root = tempfile::tempdir().unwrap();
+        let directory = temporary_root.path().join("logs");
+        let mut log = RotatingLog::new(&directory, "vm", 1).unwrap();
+        log.write(b"a").unwrap();
+        log.write(b"b").unwrap();
+
+        for name in ["vm.log", "vm.log.1"] {
+            let metadata = fs::metadata(directory.join(name)).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600, "{name}");
+        }
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        unsafe { libc::umask(previous_umask) };
     }
 }

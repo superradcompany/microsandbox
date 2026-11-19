@@ -6,11 +6,13 @@ mod cache_storage;
 #[cfg(feature = "runner")]
 mod capture_pipeline;
 mod compaction;
+mod compat;
 #[cfg(feature = "runner")]
 mod coordinator;
 mod disk;
 mod execution;
 mod external_mounts;
+pub mod layout;
 mod local;
 #[cfg(feature = "runner")]
 mod local_disk;
@@ -18,6 +20,7 @@ mod local_memory;
 #[cfg(target_os = "linux")]
 mod local_memory_budget;
 mod memory_cache;
+pub mod migration;
 mod network;
 mod object_pipeline;
 mod owned_disk;

@@ -62,13 +62,12 @@ impl ExtentMap {
     /// [`ExtentMap::scan`] over an already-open file.
     pub fn scan_file(file: &File) -> io::Result<Option<ExtentMap>> {
         let len = file.metadata()?.len();
-        if len == 0 {
-            return Ok(Some(ExtentMap {
-                len,
-                extents: Vec::new(),
-            }));
-        }
-        scan_impl(file, len)
+        let mut extents = Vec::new();
+        let supported = scan_impl(file, len, |offset, length| {
+            extents.push((offset, length));
+            Ok(())
+        })?;
+        Ok(supported.then_some(ExtentMap { len, extents }))
     }
 
     /// Sum of extent lengths — the bytes a sparse-aware reader must actually move.
@@ -85,6 +84,16 @@ impl ExtentMap {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Walk allocated byte ranges without retaining an extent table. A highly fragmented disk
+/// costs constant scan memory. False means enumeration is unsupported and the caller must
+/// handle the remaining bytes as dense. Callbacks may have received earlier valid ranges.
+pub fn visit_allocated_ranges(
+    file: &File,
+    visit: impl FnMut(u64, u64) -> io::Result<()>,
+) -> io::Result<bool> {
+    scan_impl(file, file.metadata()?.len(), visit)
+}
 
 /// Return the filesystem allocation charged to a file rather than its logical length.
 pub fn allocated_file_bytes(path: &Path) -> io::Result<u64> {
@@ -184,10 +193,13 @@ pub fn punch_hole_aligned(_file: &File, _offset: u64, _len: u64) -> io::Result<(
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
-fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
+fn scan_impl(
+    file: &File,
+    len: u64,
+    mut visit: impl FnMut(u64, u64) -> io::Result<()>,
+) -> io::Result<bool> {
     let fd = file.as_raw_fd();
 
-    let mut extents: Vec<(u64, u64)> = Vec::new();
     let mut off: i64 = 0;
     while (off as u64) < len {
         let data_start = unsafe { libc::lseek(fd, off, libc::SEEK_DATA) };
@@ -197,9 +209,9 @@ fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
                 // No more data past this offset: trailing hole.
                 Some(libc::ENXIO) => break,
                 // Filesystem doesn't implement the seek flags — report "can't enumerate" rather than failing the caller. ENOTSUP and EOPNOTSUPP are distinct on macOS / BSDs.
-                Some(libc::EINVAL) | Some(libc::ENOTSUP) => return Ok(None),
+                Some(libc::EINVAL) | Some(libc::ENOTSUP) => return Ok(false),
                 #[cfg(not(target_os = "linux"))]
-                Some(libc::EOPNOTSUPP) => return Ok(None),
+                Some(libc::EOPNOTSUPP) => return Ok(false),
                 _ => return Err(err),
             }
         }
@@ -209,23 +221,26 @@ fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
         }
         let data_end = (data_end as u64).min(len);
         let data_start = data_start as u64;
-        if data_end <= data_start {
-            break;
+        if data_start < off as u64 || data_end <= data_start {
+            return Err(io::Error::other("allocation scan made no forward progress"));
         }
-        extents.push((data_start, data_end - data_start));
+        visit(data_start, data_end - data_start)?;
         off = data_end as i64;
     }
 
-    Ok(Some(ExtentMap { len, extents }))
+    Ok(true)
 }
 
 #[cfg(windows)]
-fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
+fn scan_impl(
+    file: &File,
+    len: u64,
+    mut visit: impl FnMut(u64, u64) -> io::Result<()>,
+) -> io::Result<bool> {
     // Query in batches; ERROR_MORE_DATA means the output buffer filled and the walk continues from the end of the last returned range.
     const BATCH: usize = 64;
 
     let handle = file.as_raw_handle() as HANDLE;
-    let mut extents: Vec<(u64, u64)> = Vec::new();
     let mut next_offset: u64 = 0;
 
     while next_offset < len {
@@ -256,31 +271,44 @@ fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
                 true
             } else {
                 // Filesystem without allocated-range support (FAT, network shares): report "can't enumerate".
-                return Ok(None);
+                return Ok(false);
             }
         } else {
             false
         };
 
         let count = bytes_returned as usize / size_of::<FILE_ALLOCATED_RANGE_BUFFER>();
-        if count == 0 {
+        if count == 0 && !more {
             break;
         }
-        for range in &out[..count] {
-            let start = range.FileOffset as u64;
-            let end = (start + range.Length as u64).min(len);
+        let previous = next_offset;
+        for range in out
+            .get(..count)
+            .ok_or_else(|| io::Error::other("invalid allocated-range count"))?
+        {
+            let offset = u64::try_from(range.FileOffset)
+                .map_err(|_| io::Error::other("invalid allocated range"))?;
+            let length = u64::try_from(range.Length)
+                .map_err(|_| io::Error::other("invalid allocated range"))?;
+            let start = offset.max(next_offset);
+            let end = offset
+                .checked_add(length)
+                .ok_or_else(|| io::Error::other("allocated range overflow"))?
+                .min(len);
             if end > start {
-                extents.push((start, end - start));
+                visit(start, end - start)?;
+                next_offset = end;
             }
         }
-        let (last_off, last_len) = extents[extents.len() - 1];
-        next_offset = last_off + last_len;
+        if more && next_offset <= previous {
+            return Err(io::Error::other("allocation scan made no forward progress"));
+        }
         if !more {
             break;
         }
     }
 
-    Ok(Some(ExtentMap { len, extents }))
+    Ok(true)
 }
 
 /// Fundamental allocation block size of the filesystem hosting `file`.

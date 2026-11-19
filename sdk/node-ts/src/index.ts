@@ -112,6 +112,15 @@ export {
   VolumeFsWriteSink,
 } from "./volume-fs.js";
 
+// Services
+export { Service, ServiceBuilder, ServiceListBuilder } from "./service.js";
+export type {
+  ServicePage,
+  ServiceStatus,
+  ServiceTarget,
+  ServiceUpdateOptions,
+} from "./service.js";
+
 // Snapshots
 export { Snapshot, SnapshotArchive } from "./snapshot.js";
 export type { DiskCompactionOptions, DiskCompactionDiskResult, DiskCompactionResult } from "./compact.js";
@@ -479,6 +488,7 @@ export {
   MetricsDisabledError,
   MetricsUnavailableError,
   MicrosandboxError,
+  ModificationNotConfirmedError,
   NixError,
   PatchFailedError,
   ProtocolError,
@@ -492,6 +502,9 @@ export {
   SandboxStopTimedOutError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  ServiceAlreadyExistsError,
+  ServiceError,
+  ServiceNotFoundError,
   SnapshotSourceRecoveryError,
   TerminalError,
   UnsupportedOperationError,
@@ -500,8 +513,11 @@ export {
   VolumeNotFoundError,
 } from "./errors.js";
 export type {
+  ChangeState,
   MicrosandboxErrorCode,
   PublishedSnapshotArtifact,
+  ServiceErrorDetails,
+  ServiceErrorReason,
   SnapshotSourceRecoveryDetails,
 } from "./errors.js";
 
@@ -635,3 +651,8 @@ export type Rule = _Types.Rule;
 
 export { Job, JobAttachment, JobError, JobLogStream, JobListBuilder, JobAttachOptionsBuilder } from "./jobs.js";
 export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState } from "./jobs.js";
+
+export { diagnoseStorage } from "./storage-diagnosis.js";
+export type { StorageSelection, StorageDiagnosticStatus, StorageCandidate, StorageInspection, StorageSandboxDiagnosis, StorageDiagnosis } from "./storage-diagnosis.js";
+
+export type { StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection } from "./storage-recovery.js";

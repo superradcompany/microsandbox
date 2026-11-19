@@ -1,5 +1,8 @@
 //! Tests for CLI self-update and downgrade operations.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use microsandbox_db::compat as db_compat;
 use microsandbox_db::compat::config::prepare;
 use serde_json::Value;
@@ -223,6 +226,15 @@ async fn vacuum_into_writes_backup_file() {
     vacuum_into(db.inner(), &backup_path).await.unwrap();
 
     assert!(backup_path.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(
+            fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777,
+            microsandbox_db::pool::PRIVATE_DATABASE_FILE_MODE
+        );
+    }
 
     let backup_db = microsandbox_db::connection::DbWriteConnection::open(
         &backup_path,
@@ -276,6 +288,37 @@ async fn rollback_schema_steps_through_latest_migrations() {
     .await
     .unwrap();
     Migrator::up(db.inner(), None).await.unwrap();
+
+    // An empty catalog can retire protection before the older creation migrations.
+    rollback_schema(db.inner(), 1).await.unwrap();
+    assert!(
+        !microsandbox_db::catalog::has_table(&db, "protected_sandbox_state")
+            .await
+            .unwrap()
+    );
+
+    // Retire standalone volume tracking before sandbox-owned creation tracking.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "volume", "creation_state")
+            .await
+            .unwrap()
+    );
+
+    // Completed catalogs can retire creation tracking before the older schema changes.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "sandbox", "creation_state")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "volume", "pending_creation_sandbox_id")
+            .await
+            .unwrap()
+    );
 
     // Remove saved caller overrides before rolling back the older schema changes.
     rollback_schema(db.inner(), 1).await.unwrap();
@@ -1289,4 +1332,47 @@ async fn released_sdk_secret_downgrade() {
         .unwrap();
     drop(db);
     phase("restart", old_python, old_runtime).await;
+}
+
+#[cfg(unix)]
+#[test]
+fn standalone_downgrade_secures_legacy_storage_before_preparing_copies() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    let db_dir = root.path().join("db");
+    fs::create_dir(&db_dir).unwrap();
+    fs::set_permissions(&db_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let legacy_backup = db_dir.join("msb.db.bak-legacy");
+    fs::write(&legacy_backup, "synthetic secret").unwrap();
+    fs::set_permissions(&legacy_backup, fs::Permissions::from_mode(0o644)).unwrap();
+    let _lock = acquire_downgrade_operation_lock(&db_dir).unwrap();
+    for directory in [&db_dir, &db_dir.join("self-downgrade")] {
+        assert_eq!(
+            fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert_eq!(
+        fs::metadata(&legacy_backup).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::read_to_string(legacy_backup).unwrap(),
+        "synthetic secret"
+    );
+}
+
+#[tokio::test]
+async fn resume_verification_rejects_empty_or_missing_backups_without_creating_them() {
+    let root = tempfile::tempdir().unwrap();
+    let backup = root.path().join("msb.db.bak-test");
+    assert!(verify_sqlite_backup(&backup).await.is_err());
+    assert!(!backup.exists());
+    fs::write(&backup, "").unwrap();
+    assert!(verify_sqlite_backup(&backup).await.is_err());
+    assert_eq!(fs::metadata(&backup).unwrap().len(), 0);
 }

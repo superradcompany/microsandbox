@@ -39,13 +39,18 @@ Everything from the [quickstart](/getting-started/quickstart) works unchanged. W
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("hello")
+const sb = await Sandbox.builder("hello")
     .image("python")
     .memory(512)
     .create();
 
-const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
-console.log(output.stdout());
+try {
+    const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
+    console.log(output.stdout());
+} finally {
+    await sb.stop();
+    await Sandbox.remove("hello");
+}
 ```
 
 ```rust Rust
@@ -61,6 +66,7 @@ let output = sb.exec("python", ["-c", "print('Hello from the cloud!')"]).await?;
 println!("{}", output.stdout()?);
 
 sb.stop().await?;
+Sandbox::remove("hello").await?;
 ```
 
 ```python Python
@@ -72,6 +78,7 @@ output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"])
 print(output.stdout_text)
 
 await sb.stop()
+await Sandbox.remove("hello")
 ```
 
 ```go Go
@@ -82,9 +89,15 @@ sb, err := m.CreateSandbox(ctx, "hello",
 if err != nil {
     return err
 }
-defer sb.Stop(ctx)
+defer func() {
+    _ = sb.Stop(ctx)
+    _ = m.RemoveSandbox(ctx, "hello")
+}()
 
 output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from the cloud!')"})
+if err != nil {
+    return err
+}
 fmt.Println(output.Stdout())
 ```
 
@@ -95,6 +108,7 @@ Microsandbox::Sandbox.with("hello", image: "python", memory: 512) do |sb|
   output = sb.exec("python", ["-c", "print('Hello from the cloud!')"])
   puts output.stdout
 end
+Microsandbox::Sandbox.remove("hello")
 ```
 
 ```bash CLI
@@ -135,12 +149,13 @@ Across the docs, no badge means a feature works everywhere. Exceptions use only 
 | Volume and host paths | **Limited on cloud** | Bind and disk-image source paths resolve against the organization's host volume, not the machine running the client. |
 | Network policy and secrets | **Works everywhere** | Egress policies and hostname-scoped secret substitution carry across backends. |
 | Custom networking | **Local-only** | Published ports, custom nameservers, interface overrides, rate limiters, TLS interception, and host-CA trust are not accepted by cloud create. |
+| [Services](/sandboxes/services) | **Cloud-only** | Give a sandbox port a public HTTPS URL. Locally, publish the port to the host instead. |
 | Logs | **Limited on cloud** | SDK live-follow and `msb logs -f` work. Bounded or historical reads are local-only; persist followed output externally when retention matters. |
 | SSH | **Limited on cloud** | Native SDK sessions and `msb ssh` work. `msb ssh serve` is local-only; reusable SDK servers require explicit key material. |
 | Images | **Limited on cloud** | OCI image references and registry credentials work. Local cache commands, host-directory or disk-image roots, plain-HTTP registries, and custom registry CAs are local-only. |
-| Reconfiguration | **Local-only** | Recreate the sandbox with the new CPU, memory, mounts, or other settings instead of using `modify`. |
+| Reconfiguration | **Limited on cloud** | `modify` changes secrets only. A secret's value, allowed hosts, and removal can apply live; other secret changes need the next-start policy. Recreate the sandbox to change CPU, memory, mounts, or other settings. |
 | Snapshots | **Limited on cloud** | Capture disk snapshots from stopped persistent sandboxes and restore them into new sandboxes. Live capture, full checkpoints, forking, groups, and local artifact archives remain local-only. |
-| Resource metrics | **Local-only** | Instrument the workload with an external monitoring system. |
+| Resource metrics | **Limited on cloud** | View cloud metrics in the [dashboard](https://dashboard.microsandbox.dev) or query history through the [REST API](/api-reference/endpoints/sandboxes/get-sandbox-metrics). SDK metrics methods, `msb metrics`, and `msb-metrics` exporters are local-only. |
 | Process controls | **Limited on cloud** | Graceful stop plus maximum-duration and idle-timeout policies work. Force kill, drain, ping, and touch are local-only. |
 
 ## REST API
@@ -154,6 +169,7 @@ The same key also authenticates the [REST API](/api-reference/overview) directly
 - **Images.** Specify an OCI image when you create the sandbox; the cloud pulls it for you.
 - **Managed settings.** [Device policy](/enterprise/managed-configuration) applies to create requests and CLI/SDK SSH sessions. Unsupported create settings fail before the request is sent. Existing cloud sandboxes and the hosted SSH gateway keep their settings.
 - **Keys and billing.** API keys, usage, and invoices live in the [dashboard](https://dashboard.microsandbox.dev).
+- **Free plan.** The Free plan runs ephemeral sandboxes only, for up to an hour each; they are removed when they stop. Set `ephemeral` when you create one, as in the [quickstart](/getting-started/quickstart), or use `msb run` without `--name`.
 
 ## Next steps
 

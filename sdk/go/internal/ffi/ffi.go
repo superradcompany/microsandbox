@@ -230,6 +230,15 @@ typedef char *(*msb_image_prune_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf
 typedef char *(*msb_storage_usage_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_storage_usage_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_storage_prune_fn)(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_create_fn)(uint64_t cancel_id, const char *request_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_get_fn)(uint64_t cancel_id, const char *slug, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_list_fn)(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_update_fn)(uint64_t cancel_id, uint64_t handle, const char *request_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_enable_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_disable_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_remove_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_refresh_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_service_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_load_fn)(uint64_t cancel_id, const char *input_path, const char *tags_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_save_fn)(uint64_t cancel_id, const char *references_json, const char *output_path, const char *format, uint8_t *buf, size_t buf_len);
 
@@ -418,6 +427,15 @@ static msb_image_prune_fn         ptr_msb_image_prune         = NULL;
 static msb_storage_usage_fn       ptr_msb_storage_usage       = NULL;
 static msb_sandbox_storage_usage_fn ptr_msb_sandbox_storage_usage = NULL;
 static msb_storage_prune_fn       ptr_msb_storage_prune       = NULL;
+static msb_service_create_fn      ptr_msb_service_create      = NULL;
+static msb_service_get_fn         ptr_msb_service_get         = NULL;
+static msb_service_list_fn        ptr_msb_service_list        = NULL;
+static msb_service_update_fn      ptr_msb_service_update      = NULL;
+static msb_service_enable_fn      ptr_msb_service_enable      = NULL;
+static msb_service_disable_fn     ptr_msb_service_disable     = NULL;
+static msb_service_remove_fn      ptr_msb_service_remove      = NULL;
+static msb_service_refresh_fn     ptr_msb_service_refresh     = NULL;
+static msb_service_close_fn       ptr_msb_service_close       = NULL;
 static msb_image_load_fn           ptr_msb_image_load           = NULL;
 static msb_image_save_fn           ptr_msb_image_save           = NULL;
 static msb_sandbox_handle_snapshot_fn ptr_msb_sandbox_handle_snapshot = NULL;
@@ -629,6 +647,15 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE_OPTIONAL(msb_storage_usage);
 	RESOLVE_OPTIONAL(msb_sandbox_storage_usage);
 	RESOLVE_OPTIONAL(msb_storage_prune);
+	RESOLVE_OPTIONAL(msb_service_create);
+	RESOLVE_OPTIONAL(msb_service_get);
+	RESOLVE_OPTIONAL(msb_service_list);
+	RESOLVE_OPTIONAL(msb_service_update);
+	RESOLVE_OPTIONAL(msb_service_enable);
+	RESOLVE_OPTIONAL(msb_service_disable);
+	RESOLVE_OPTIONAL(msb_service_remove);
+	RESOLVE_OPTIONAL(msb_service_refresh);
+	RESOLVE_OPTIONAL(msb_service_close);
 	RESOLVE(msb_image_load);
 	RESOLVE(msb_image_save);
 	RESOLVE(msb_sandbox_handle_snapshot);
@@ -1097,6 +1124,39 @@ char *call_msb_storage_usage(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
 char *call_msb_storage_prune(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_storage_prune ? ptr_msb_storage_prune(cancel_id, options_json, buf, buf_len) : NULL;
 }
+bool has_msb_service(void) {
+	return ptr_msb_service_create != NULL && ptr_msb_service_get != NULL && ptr_msb_service_list != NULL &&
+		ptr_msb_service_update != NULL && ptr_msb_service_enable != NULL &&
+		ptr_msb_service_disable != NULL && ptr_msb_service_remove != NULL &&
+		ptr_msb_service_refresh != NULL && ptr_msb_service_close != NULL;
+}
+char *call_msb_service_create(uint64_t cancel_id, const char *request_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_create ? ptr_msb_service_create(cancel_id, request_json, buf, buf_len) : NULL;
+}
+char *call_msb_service_get(uint64_t cancel_id, const char *slug, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_get ? ptr_msb_service_get(cancel_id, slug, buf, buf_len) : NULL;
+}
+char *call_msb_service_list(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_list ? ptr_msb_service_list(cancel_id, options_json, buf, buf_len) : NULL;
+}
+char *call_msb_service_update(uint64_t cancel_id, uint64_t handle, const char *request_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_update ? ptr_msb_service_update(cancel_id, handle, request_json, buf, buf_len) : NULL;
+}
+char *call_msb_service_enable(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_enable ? ptr_msb_service_enable(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_disable(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_disable ? ptr_msb_service_disable(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_remove(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_remove ? ptr_msb_service_remove(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_refresh(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_refresh ? ptr_msb_service_refresh(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_service_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_service_close ? ptr_msb_service_close(cancel_id, handle, buf, buf_len) : NULL;
+}
 char *call_msb_image_load(uint64_t cancel_id, const char *input_path, const char *tags_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_load ? ptr_msb_image_load(cancel_id, input_path, tags_json, buf, buf_len) : NULL;
 }
@@ -1167,6 +1227,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1264,6 +1325,10 @@ func ensureLoaded() error {
 // KindBufferTooSmall; streaming is a follow-up.
 const defaultBufSize = 1 << 20
 
+// storageDiagnosisMaxBufSize bounds a whole-home report, including its trailing NUL.
+// Larger inventories must be inspected as smaller named subsets.
+const storageDiagnosisMaxBufSize = 32 << 20
+
 // fsStreamBufSize is the output buffer used for fs read-stream Recv calls.
 // The protocol's FS_CHUNK_SIZE is 3 MiB; after base64 inflation (~33%) plus
 // the {"chunk_b64":"..."} JSON wrapper, each Recv response can reach ~4.1
@@ -1280,11 +1345,32 @@ const logsBufSize = 48 << 20
 // serialises {kind, message} JSON with optional recovery metadata; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
 type Error struct {
-	Kind     string                         `json:"kind"`
-	Message  string                         `json:"message"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+	// Changed reports whether a failed Service change may have been applied.
+	Changed  string                         `json:"changed,omitempty"`
 	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+	Service  *ServiceErrorDetails           `json:"service,omitempty"`
 	// Local volume errors retain host errno/Win32 identity. Older libraries omit it.
 	OSError *int32 `json:"os_error,omitempty"`
+}
+
+// UndispatchedServiceChangeError records a Service change failure that happened
+// before the native request was called.
+type UndispatchedServiceChangeError struct {
+	err error
+}
+
+func (e *UndispatchedServiceChangeError) Error() string { return e.err.Error() }
+
+// Unwrap preserves the original pre-dispatch failure.
+func (e *UndispatchedServiceChangeError) Unwrap() error { return e.err }
+
+func undispatchedServiceChange(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &UndispatchedServiceChangeError{err: err}
 }
 
 // SnapshotSourceRecoveryDetails preserves native recovery metadata across the FFI.
@@ -1310,37 +1396,42 @@ func (e *Error) Error() string { return e.Message }
 
 // Error kind strings. Keep in sync with sdk/go/native/src/lib.rs FfiError::kind.
 const (
-	KindSandboxNotFound        = "sandbox_not_found"
-	KindSandboxAlreadyExists   = "sandbox_already_exists"
-	KindSandboxReplaced        = "sandbox_replaced"
-	KindSandboxStopTimedOut    = "sandbox_stop_timed_out"
-	KindSandboxStillRunning    = "sandbox_still_running"
-	KindVolumeNotFound         = "volume_not_found"
-	KindVolumeAlreadyExists    = "volume_already_exists"
-	KindExecTimeout            = "exec_timeout"
-	KindStopTimeout            = "stop_timeout"
-	KindNoDefaultCommand       = "no_default_command"
-	KindInvalidConfig          = "invalid_config"
-	KindInvalidArgument        = "invalid_argument"
-	KindInvalidHandle          = "invalid_handle"
-	KindBufferTooSmall         = "buffer_too_small"
-	KindCancelled              = "cancelled"
-	KindInternal               = "internal"
-	KindFilesystem             = "filesystem"
-	KindImageNotFound          = "image_not_found"
-	KindImageInUse             = "image_in_use"
-	KindSnapshotNotFound       = "snapshot_not_found"
-	KindSnapshotAlreadyExists  = "snapshot_already_exists"
-	KindSnapshotSandboxRunning = "snapshot_sandbox_running"
-	KindSnapshotImageMissing   = "snapshot_image_missing"
-	KindSnapshotIntegrity      = "snapshot_integrity"
-	KindSnapshotMigration      = "snapshot_migration"
-	KindSnapshotSourceRecovery = "snapshot_source_recovery"
-	KindPatchFailed            = "patch_failed"
-	KindMetricsDisabled        = "metrics_disabled"
-	KindMetricsUnavailable     = "metrics_unavailable"
-	KindUnsupportedOperation   = "unsupported_operation"
-	KindIO                     = "io"
+	KindSandboxNotFound          = "sandbox_not_found"
+	KindSandboxAlreadyExists     = "sandbox_already_exists"
+	KindSandboxReplaced          = "sandbox_replaced"
+	KindSandboxStopTimedOut      = "sandbox_stop_timed_out"
+	KindSandboxStillRunning      = "sandbox_still_running"
+	KindVolumeNotFound           = "volume_not_found"
+	KindVolumeAlreadyExists      = "volume_already_exists"
+	KindExecTimeout              = "exec_timeout"
+	KindStopTimeout              = "stop_timeout"
+	KindNoDefaultCommand         = "no_default_command"
+	KindInvalidConfig            = "invalid_config"
+	KindInvalidArgument          = "invalid_argument"
+	KindInvalidHandle            = "invalid_handle"
+	KindBufferTooSmall           = "buffer_too_small"
+	KindCancelled                = "cancelled"
+	KindInternal                 = "internal"
+	KindFilesystem               = "filesystem"
+	KindImageNotFound            = "image_not_found"
+	KindImageInUse               = "image_in_use"
+	KindSnapshotNotFound         = "snapshot_not_found"
+	KindSnapshotAlreadyExists    = "snapshot_already_exists"
+	KindSnapshotSandboxRunning   = "snapshot_sandbox_running"
+	KindSnapshotImageMissing     = "snapshot_image_missing"
+	KindSnapshotIntegrity        = "snapshot_integrity"
+	KindSnapshotMigration        = "snapshot_migration"
+	KindSnapshotSourceRecovery   = "snapshot_source_recovery"
+	KindPatchFailed              = "patch_failed"
+	KindMetricsDisabled          = "metrics_disabled"
+	KindMetricsUnavailable       = "metrics_unavailable"
+	KindUnsupportedOperation     = "unsupported_operation"
+	KindCloudOnly                = "cloud_only"
+	KindModificationNotConfirmed = "modification_not_confirmed"
+	KindServiceNotFound          = "service_not_found"
+	KindServiceAlreadyExists     = "service_already_exists"
+	KindService                  = "service"
+	KindIO                       = "io"
 )
 
 // Sandbox is an opaque handle to a Rust-side sandbox. Call Close to release.
@@ -5418,6 +5509,145 @@ func PruneStorage(ctx context.Context, options StoragePruneOptions) (*StoragePru
 	return report, nil
 }
 
+// CreateService creates a Service and returns it once the change is committed.
+func CreateService(ctx context.Context, request ServiceCreateRequest) (*ServiceInfo, error) {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, undispatchedServiceChange(err)
+	}
+	cRequest := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cRequest))
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_create(cancelID, cRequest, buf, bufLen)
+	})
+}
+
+// GetService returns a Service by slug.
+func GetService(ctx context.Context, slug string) (*ServiceInfo, error) {
+	// The slug is passed as a C string, which ends at the first NUL, so a slug with one
+	// would fetch a different Service.
+	if strings.IndexByte(slug, 0) >= 0 {
+		return nil, &Error{Kind: KindInvalidConfig, Message: fmt.Sprintf("invalid config: service slug %q is not valid", slug)}
+	}
+	cSlug := C.CString(slug)
+	defer C.free(unsafe.Pointer(cSlug))
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_get(cancelID, cSlug, buf, bufLen)
+	})
+}
+
+// UpdateService sends one change and returns the Service once it is committed.
+func UpdateService(ctx context.Context, handle uint64, request ServiceUpdateRequest) (*ServiceInfo, error) {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, undispatchedServiceChange(err)
+	}
+	cRequest := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cRequest))
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_update(cancelID, C.uint64_t(handle), cRequest, buf, bufLen)
+	})
+}
+
+// EnableService enables a Service and returns it once committed.
+func EnableService(ctx context.Context, handle uint64) (*ServiceInfo, error) {
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_enable(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// DisableService disables a Service and returns it once committed.
+func DisableService(ctx context.Context, handle uint64) (*ServiceInfo, error) {
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_disable(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// ListServices returns one page of Services.
+func ListServices(ctx context.Context, options ServiceListOptions) (*ServicePage, error) {
+	if err := ensureService(ctx); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+	cOptions := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOptions))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_list(cancelID, cOptions, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var page *ServicePage
+	if err := json.Unmarshal([]byte(out), &page); err != nil {
+		return nil, fmt.Errorf("parse service page: %w", err)
+	}
+	if page == nil {
+		return nil, fmt.Errorf("native SDK returned no service page")
+	}
+	return page, nil
+}
+
+// RemoveService removes a Service.
+func RemoveService(ctx context.Context, handle uint64) error {
+	if err := ensureService(ctx); err != nil {
+		return undispatchedServiceChange(err)
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_remove(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+	return err
+}
+
+// RefreshService gets a Service through the backend retained by its handle.
+func RefreshService(ctx context.Context, handle uint64) (*ServiceInfo, error) {
+	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_refresh(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// CloseService releases a Service handle. It runs with context.Background so a finalizer can always complete it.
+func CloseService(handle uint64) error {
+	_, err := call(context.Background(), func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_service_close(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+	return err
+}
+
+// ensureService loads the library and refuses before dispatch when it predates Services.
+func ensureService(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if !bool(C.has_msb_service()) {
+		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support services; update the native SDK"}
+	}
+	return nil
+}
+
+func callService(ctx context.Context, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char) (*ServiceInfo, error) {
+	if err := ensureService(ctx); err != nil {
+		return nil, undispatchedServiceChange(err)
+	}
+	out, err := call(ctx, fn)
+	if err != nil {
+		return nil, err
+	}
+	var info *ServiceInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse service: %w", err)
+	}
+	if info == nil {
+		return nil, fmt.Errorf("native SDK returned no service")
+	}
+	return info, nil
+}
+
 // ImageLoad imports images from a local archive into the cache and returns
 // a handle per imported reference. tags apply extra references to the first
 // image in the archive.
@@ -5981,9 +6211,39 @@ func RuntimeSetup(ctx context.Context, operation, configJSON, optionsJSON string
 	defer C.free(unsafe.Pointer(op))
 	defer C.free(unsafe.Pointer(config))
 	defer C.free(unsafe.Pointer(options))
-	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_runtime_setup(cancelID, op, config, options, buf, bufLen)
+	return runtimeSetupOutput(ctx, operation, func(size int) (string, error) {
+		return callBuf(ctx, size, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+			return C.call_msb_runtime_setup(cancelID, op, config, options, buf, bufLen)
+		})
 	})
+}
+
+func runtimeSetupOutput(ctx context.Context, operation string, invoke func(int) (string, error)) (string, error) {
+	for size := defaultBufSize; ; {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		output, err := invoke(size)
+		// Only diagnosis is read-only. Retrying install, ensure or recovery after an
+		// undersized response could repeat an already-completed mutation.
+		var native *Error
+		if operation != "diagnose_storage" || !errors.As(err, &native) || native.Kind != KindBufferTooSmall {
+			return output, err
+		}
+		var needed, available int
+		if _, parseErr := fmt.Sscanf(native.Message, "output buffer too small: need %d, have %d", &needed, &available); parseErr != nil || needed <= size || available != size {
+			return "", err
+		}
+		if needed > storageDiagnosisMaxBufSize || size == storageDiagnosisMaxBufSize {
+			return "", &Error{
+				Kind:    KindBufferTooSmall,
+				Message: "storage diagnosis exceeds the 32 MiB response limit; inspect smaller named subsets",
+			}
+		}
+		// Grow geometrically even if a concurrently changing inventory requests only
+		// one extra byte each time. The cap bounds both allocation and retry count.
+		size = min(storageDiagnosisMaxBufSize, max(needed, size*2))
+	}
 }
 
 // Jobs invokes the optional managed-job ABI without changing existing library requirements.

@@ -3,7 +3,7 @@
 //! Unlike [`SandboxFsOps`](crate::sandbox::fs::SandboxFsOps) which goes through the
 //! agent protocol, [`VolumeFs`] reads + writes a volume's bytes directly. For
 //! the local backend that is capability-scoped access to `volumes_dir/<name>/`; for
-//! cloud it routes through msb-cloud HTTP.
+//! cloud it routes through the cloud HTTP API.
 //!
 //! `VolumeFs` is a single type per D6.4 — no public variants. It borrows the
 //! parent volume's `Arc<dyn Backend>` + name and dispatches through the
@@ -368,11 +368,13 @@ pub(crate) mod local {
 
     use bytes::Bytes;
     use cap_std::fs::Metadata;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     use crate::{
         MicrosandboxError, MicrosandboxResult,
         backend::LocalBackend,
         sandbox::fs::{FsEntry, FsEntryKind, FsMetadata},
+        volume,
     };
 
     use super::{VolumeFsReadStream, VolumeFsWriteSink, rooted::RootedVolumeFs};
@@ -384,7 +386,16 @@ pub(crate) mod local {
         name: &str,
         operation: impl FnOnce(RootedVolumeFs) -> MicrosandboxResult<T> + Send + 'static,
     ) -> MicrosandboxResult<T> {
-        crate::volume::validate_volume_name(name)?;
+        volume::validate_volume_name(name)?;
+        let pools = local.db().await?;
+        if let Some(volume) = crate::db::entity::volume::Entity::find()
+            .filter(crate::db::entity::volume::Column::Name.eq(name))
+            .one(pools.read())
+            .await?
+        {
+            local.ensure_volume_available(volume.id, None).await?;
+        }
+
         let root_path = local.volume_path(name);
         tokio::task::spawn_blocking(move || operation(RootedVolumeFs::open(&root_path)?))
             .await

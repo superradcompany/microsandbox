@@ -165,6 +165,28 @@ fn test_lseek_end() {
 }
 
 #[test]
+fn test_lseek_linux_sparse_whence() {
+    let sb = TestSandbox::new();
+    let path = sb.host_create_file("seek-data.txt", &[b'x'; 8192]);
+    File::open(path).unwrap().sync_all().unwrap();
+    let entry = sb.lookup_root("seek-data.txt").unwrap();
+    let handle = sb.fuse_open(entry.inode, 0).unwrap();
+
+    // FUSE carries Linux constants even on macOS, where DATA and HOLE are reversed.
+    let data = sb.fs.lseek(sb.ctx(), entry.inode, handle, 0, 3).unwrap();
+    let hole = sb.fs.lseek(sb.ctx(), entry.inode, handle, 0, 4).unwrap();
+    assert_eq!(data, 0);
+    assert_eq!(hole, 8192);
+
+    // Seeking data at EOF must still return Linux ENXIO on every host.
+    TestSandbox::assert_errno(sb.fs.lseek(sb.ctx(), entry.inode, handle, 8192, 3), 6);
+    TestSandbox::assert_errno(
+        sb.fs.lseek(sb.ctx(), entry.inode, handle, 0, 99),
+        LINUX_EINVAL,
+    );
+}
+
+#[test]
 fn test_lseek_init_rejected() {
     let sb = TestSandbox::new();
     let result = sb

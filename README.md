@@ -172,14 +172,12 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 > msb image rm python       # Remove an image
 > ```
 
-#### <img height="14" src="https://octicons-col.vercel.app/file-code/A770EF">&nbsp;&nbsp;Configuration File
+#### <img height="14" src="https://octicons-col.vercel.app/file-code/A770EF">&nbsp;&nbsp;Sandboxfile
 
-> ```sh
-> msb run --conf sandbox.yaml -- octocat
-> ```
+> Save the sandbox settings in a YAML file named `Sandboxfile`.
 >
 > ```yaml
-> # sandbox.yaml
+> # Sandboxfile
 > image: python:3.12
 > memory: 64M
 > network:
@@ -197,6 +195,10 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >     with urllib.request.urlopen(request) as response:
 >         print(response.read().decode())
 >     PY
+> ```
+>
+> ```sh
+> msb run --file Sandboxfile -- octocat
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
@@ -404,7 +406,6 @@ Practical ways to put microsandbox to work:
 
 #### <img height="14" src="https://octicons-col.vercel.app/hubot/A770EF">&nbsp;&nbsp;Agent frameworks & runtimes
 
-> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[Eve](https://eve.dev/docs/sandbox/microsandbox) by Vercel**: Agent framework that ships microsandbox as a sandbox backend.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/organization/A770EF"> **[Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart) by U.S. GSA**: From zero to a running AI coding agent with USAi in minutes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist**: Elixir agentic engine, and cacheable actions that run in fresh sandboxes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/link/A770EF"> **[langchain-microsandbox](https://github.com/kenwoodjw/langchain-microsandbox) by kenwoodjw**: Microsandbox integration for LangChain Deep Agents.<br />

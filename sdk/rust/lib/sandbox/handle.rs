@@ -21,7 +21,7 @@ use crate::{
     error::Operation,
 };
 
-#[cfg(feature = "local")]
+#[cfg(any(feature = "local", feature = "cloud"))]
 use super::SandboxModificationBuilder;
 use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult};
 
@@ -265,7 +265,7 @@ impl SandboxHandle {
     }
 
     /// The serialized sandbox configuration as stored in the database (local)
-    /// or returned by msb-cloud (cloud). Use [`config()`](Self::config) for a
+    /// or returned by the cloud API (cloud). Use [`config()`](Self::config) for a
     /// deserialized [`SandboxConfig`].
     pub fn config_json(&self) -> &str {
         match &self.inner {
@@ -319,9 +319,10 @@ impl SandboxHandle {
     /// The builder fetches a fresh handle during [`dry_run`](SandboxModificationBuilder::dry_run)
     /// so planning uses current status and persisted config rather than this
     /// handle's possibly stale snapshot.
-    #[cfg(feature = "local")]
+    #[cfg(any(feature = "local", feature = "cloud"))]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+            .bound_to(self.identity())
     }
 
     /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.
@@ -384,8 +385,7 @@ impl SandboxHandle {
     /// - Local: the database row's `updated_at` (modification time of the
     ///   persisted record).
     /// - Cloud: the most recent of `stopped_at` / `started_at` / `created_at`
-    ///   from the msb-cloud response. msb-cloud has no dedicated
-    ///   `updated_at` column, so this is synthesised on the client.
+    ///   from the API response. This timestamp is computed on the client.
     pub fn updated_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         match &self.inner {
             SandboxHandleInner::Local(s) => s.updated_at,
@@ -469,6 +469,12 @@ impl SandboxHandle {
     /// Boots the VM using the persisted configuration and pinned rootfs state
     /// for local; routes through `POST /v1/sandboxes/by-name/:name/start` for
     /// cloud. The handle remains usable if start fails.
+    ///
+    /// On a Cloud sandbox, a start is refused with
+    /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
+    /// secret change to it is being saved, or while its result is not yet known after
+    /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
+    /// this usually clears within seconds. Start again after a short wait.
     pub async fn start(&self) -> MicrosandboxResult<Sandbox> {
         self.backend
             .sandboxes()
@@ -479,6 +485,12 @@ impl SandboxHandle {
     /// Start this sandbox in detached/background mode.
     ///
     /// The handle remains usable if start fails.
+    ///
+    /// On a Cloud sandbox, a start is refused with
+    /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
+    /// secret change to it is being saved, or while its result is not yet known after
+    /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
+    /// this usually clears within seconds. Start again after a short wait.
     pub async fn start_detached(&self) -> MicrosandboxResult<Sandbox> {
         self.backend
             .sandboxes()

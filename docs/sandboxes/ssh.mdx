@@ -107,6 +107,8 @@ puts output.fetch("stdout")
 ```
 </CodeGroup>
 
+SDK SSH exec preserves reported exit codes. If the sandbox reports abnormal termination without identifying the signal, the SDK-hosted SSH server reports status `1`. When an SSH server sends a standard signal name, SDK clients return `128 +` the Linux signal number, such as `137` for `SIGKILL`; unknown signal names return `128`. Neither `1` nor `137` proves that the command ran out of memory. An exec channel that closes without an exit status or signal returns an error.
+
 ### Interactive attach
 
 SDK clients can attach the local terminal to an SSH shell. This requires a real terminal.

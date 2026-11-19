@@ -1797,9 +1797,10 @@ async fn load_many_single_legacy_archive_preserves_single_load_compatibility() {
     let archive = tmp.path().join("legacy.tar");
     write_v066_archive(&archive, "sha256-0123456789abcdef", b"legacy disk");
     microsandbox::with_backend(backend, async {
-        let batch = Snapshot::load_many(&[archive.clone()], batch_group_options("batch"))
-            .await
-            .unwrap();
+        let batch =
+            Snapshot::load_many(std::slice::from_ref(&archive), batch_group_options("batch"))
+                .await
+                .unwrap();
         let single = Snapshot::load_with_options(&archive, batch_group_options("single"))
             .await
             .unwrap();

@@ -1,6 +1,10 @@
-use microsandbox::{Operation, UnsupportedReason};
+use std::time::Duration;
+
+use microsandbox::{ChangeState, Operation, ServiceError, UnsupportedReason};
 use pyo3::prelude::*;
 use pyo3::{PyErr, Python};
+
+use crate::helpers::str_enum_member;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -63,6 +67,29 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             };
         }
 
+        if let Service { slug, error } = &err {
+            // Keep the reason, retry delay and change state as typed attributes.
+            let (reason, retry_after, raw_code, raw_status, raw_message) = service_reason(error);
+            let changed = change_state_value(error.changed());
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let kwargs = pyo3::types::PyDict::new(py);
+                kwargs.set_item("slug", slug)?;
+                kwargs.set_item("reason", reason)?;
+                kwargs.set_item("retry_after", retry_after.map(|wait| wait.as_secs_f64()))?;
+                kwargs.set_item("changed", changed)?;
+                kwargs.set_item("raw_code", raw_code)?;
+                kwargs.set_item("raw_status", raw_status)?;
+                kwargs.set_item("raw_message", raw_message)?;
+                errors_mod
+                    .getattr("ServiceError")?
+                    .call((err.to_string(),), Some(&kwargs))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
         // Unsupported gets a Python-idiom message (`sandbox.kill()` instead of
         // `Sandbox::kill`) plus structured `operation` / `hint` attributes.
         if let Unsupported { op, reason } = &err {
@@ -100,6 +127,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             }
             NoDefaultCommand => ("NoDefaultCommandError", err.to_string()),
             CloudHttp { .. } => ("CloudHttpError", err.to_string()),
+            ModificationNotConfirmed { .. } => ("ModificationNotConfirmedError", err.to_string()),
             SandboxNotFound(_) => ("SandboxNotFoundError", err.to_string()),
             SandboxAlreadyExists(_) => ("SandboxAlreadyExistsError", err.to_string()),
             SandboxReplaced { .. } => ("SandboxReplacedError", err.to_string()),
@@ -112,6 +140,8 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             ImageNotFound(_) => ("ImageNotFoundError", err.to_string()),
             ImageInUse(_) => ("ImageInUseError", err.to_string()),
             VolumeNotFound(_) => ("VolumeNotFoundError", err.to_string()),
+            ServiceNotFound(_) => ("ServiceNotFoundError", err.to_string()),
+            ServiceAlreadyExists(_) => ("ServiceAlreadyExistsError", err.to_string()),
             Io(_) => ("IoError", err.to_string()),
             MetricsDisabled(_) => ("MetricsDisabledError", err.to_string()),
             MetricsUnavailable(_) => ("MetricsUnavailableError", err.to_string()),
@@ -132,6 +162,62 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         }
     })
+}
+
+/// Convert a Service change error and attach its change state to the Python exception.
+pub fn to_py_change_err(err: microsandbox::MicrosandboxError) -> PyErr {
+    let changed = change_state_value(err.changed());
+    let py_err = to_py_err(err);
+
+    Python::attach(|py| {
+        if let Ok(changed) = str_enum_member(py, "ChangeState", changed) {
+            // A failed setattr leaves `changed` None, which callers treat as not a change error.
+            let _ = py_err.value(py).setattr("changed", changed);
+        }
+    });
+
+    py_err
+}
+
+fn service_reason(
+    error: &ServiceError,
+) -> (
+    &'static str,
+    Option<Duration>,
+    Option<&str>,
+    Option<u16>,
+    Option<&str>,
+) {
+    match error {
+        ServiceError::QuotaExceeded => ("service_quota_exceeded", None, None, None, None),
+        ServiceError::SandboxLimitExceeded => {
+            ("sandbox_service_limit_exceeded", None, None, None, None)
+        }
+        ServiceError::Conflict => ("service_conflict", None, None, None, None),
+        ServiceError::Detached => ("service_detached", None, None, None, None),
+        ServiceError::TargetUnreachable { retry_after } => {
+            ("target_unreachable", *retry_after, None, None, None)
+        }
+        ServiceError::TargetNotRunning => ("sandbox_not_running", None, None, None, None),
+        ServiceError::ChangesPaused { retry_after } => {
+            ("service_changes_paused", *retry_after, None, None, None)
+        }
+        ServiceError::OutcomeUnknown => ("outcome_unknown", None, None, None, None),
+        ServiceError::Other {
+            code,
+            status,
+            message,
+        } => ("other", None, Some(code), Some(*status), Some(message)),
+        // `ServiceError` is non-exhaustive; `changed` still reports a newer reason correctly.
+        _ => ("other", None, None, None, None),
+    }
+}
+
+fn change_state_value(changed: ChangeState) -> &'static str {
+    match changed {
+        ChangeState::Unchanged => "unchanged",
+        ChangeState::Unknown => "unknown",
+    }
 }
 
 /// Render an [`Operation`] as the Python API it corresponds to:
@@ -174,4 +260,65 @@ fn camel_to_snake(name: &str) -> String {
         }
     }
     out
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Make `microsandbox.errors` importable from the source tree without the
+    /// native module: an empty `microsandbox` package over the source dir.
+    fn import_source_errors(py: Python<'_>) {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/microsandbox");
+        let package = pyo3::types::PyModule::new(py, "microsandbox").unwrap();
+        package.setattr("__path__", vec![dir]).unwrap();
+        py.import("sys")
+            .unwrap()
+            .getattr("modules")
+            .unwrap()
+            .set_item("microsandbox", package)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_unconfirmed_modification_keeps_its_class_and_message() {
+        Python::initialize();
+        Python::attach(|py| {
+            import_source_errors(py);
+            let error = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+                cause: "the running sandbox does not hold the secret".to_string(),
+            };
+            let message = error.to_string();
+
+            let raised = to_py_err(error);
+            let class = py
+                .import("microsandbox.errors")
+                .unwrap()
+                .getattr("ModificationNotConfirmedError")
+                .unwrap();
+            assert!(raised.value(py).is_instance(&class).unwrap());
+            assert_eq!(raised.value(py).str().unwrap().to_string(), message);
+            assert_eq!(
+                raised
+                    .value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "modification-not-confirmed"
+            );
+        });
+    }
+
+    #[test]
+    fn sandbox_service_limit_has_a_public_reason() {
+        assert_eq!(
+            service_reason(&ServiceError::SandboxLimitExceeded),
+            ("sandbox_service_limit_exceeded", None, None, None, None)
+        );
+    }
 }

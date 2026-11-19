@@ -212,6 +212,19 @@ impl TcpSession {
         self.task.is_finished()
     }
 
+    /// Wrap an arbitrary producer task as a raw-bulk TCP session.
+    #[cfg(test)]
+    pub(crate) fn for_test(owner_id: u32, task: JoinHandle<()>) -> Self {
+        let (commands, _commands_rx) = mpsc::channel(TCP_COMMAND_CAPACITY);
+        Self {
+            owner_id,
+            commands,
+            bulk_control: None,
+            task,
+            bulk: true,
+        }
+    }
+
     /// Open a TCP stream from inside the guest and start relaying it.
     ///
     /// The OS connect runs inside the spawned task, not on the caller's serial

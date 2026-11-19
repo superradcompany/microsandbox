@@ -18,7 +18,7 @@ Aliases include `ls`, `ps`, `rm`, `cp`, and `mod`. See [SSH](/cli/ssh-commands),
 
 <Tooltip tip="The core run workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create a sandbox and run its image command. Arguments after `--` replace CMD but preserve ENTRYPOINT. Unnamed sandboxes are removed when the command finishes; named sandboxes persist.
+Create a sandbox and run its image command. Arguments after `--` replace CMD but preserve ENTRYPOINT. Unnamed sandboxes are removed when the command finishes; named sandboxes persist. Piped input is forwarded to the command; use `--no-stdin` to leave it for the calling script.
 
 <Accordion title="Examples">
 
@@ -108,7 +108,7 @@ Common flags:
 | `--secret-violation-action` | Set `block`, `block-and-log`, or `block-and-terminate` for blocked placeholders |
 | `--tmpfs` | Mount an in-memory filesystem |
 | `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, `--rm` | Patch the rootfs before boot |
-| `--conf` | Load a sparse [sandbox configuration](/cli/configuration). Repeatable |
+| `--file`, `--conf` | Load a [Sandboxfile](/cli/configuration). Repeat to layer configuration files in order |
 | `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, `--script-conf` | Load an unwrapped, concern-specific [scoped config](/cli/configuration#scoped-config-files). Repeatable |
 
 Use `msb run --help` for the full flag list.
@@ -492,13 +492,13 @@ msb restart -t 30 devbox
 ```
 </CodeGroup>
 
-`msb restart --force` kills immediately. Otherwise `--timeout` bounds graceful completion; expiry fails without killing or starting a replacement. Unlike standalone Stop, Restart retains its explicit default budget of ten seconds.
+`msb restart --force` kills immediately. Otherwise `--timeout` bounds graceful completion; expiry fails without killing or starting a replacement. Unlike standalone Stop, Restart always bounds the stop phase: without `--timeout` it waits up to ten seconds locally and six minutes on cloud.
 
 | Flag | Description |
 |------|-------------|
 | `--label` | Restart every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-f`, `--force` | Force terminate immediately before starting again. Pending writes may be lost |
-| `-t`, `--timeout` | Total graceful-completion budget in seconds; expiry fails without killing. Defaults to 10 |
+| `-t`, `--timeout` | Total graceful-completion budget in seconds; expiry fails without killing. Defaults to 10 locally, 360 on cloud |
 | `-q`, `--quiet` | Suppress progress output |
 
 <span id="msb-sandbox-wait" />
@@ -589,7 +589,7 @@ msb touch --label app=engine
 
 ## msb modify
 
-<Tooltip tip="Not yet available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 `msb mod` is a shorter alias for `msb modify`.
 
@@ -786,7 +786,7 @@ msb logs devbox --source all                # everything, chronologically merged
 | `--tail` | Show only the last N entries |
 | `--since` | Show entries at or after this time (RFC 3339 or relative `5m`/`2h`/`1d`) |
 | `--until` | Show entries strictly before this time (same formats) |
-| `-f`, `--follow` | Follow new entries |
+| `-f`, `--follow` | Follow new entries until the sandbox stops |
 | `--timestamps` | Prefix each line with the entry timestamp |
 | `--source` | Sources to include: `stdout`, `stderr`, `output`, `system`, `all`. Repeat or comma-separate. Default: `stdout,stderr,output` |
 | `--grep` | Client-side regex filter on the entry body |
@@ -870,7 +870,7 @@ msb ps --format json      # JSON output
 
 ## msb metrics
 
-<Tooltip tip="Not yet available on microsandbox cloud; instrument the workload with an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="msb metrics is local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Show live CPU, memory, disk, network, and optional upper disk metrics for running sandboxes.
 
@@ -996,7 +996,7 @@ Run `project-shell` from any folder to open it at `/workspace` inside the sandbo
 | `--no-pull` | Don't pull the image before installing |
 | `--tmp` | Create a fresh sandbox on every invocation and remove it on exit; host-mounted files persist |
 | `-l`, `--list` | List all installed sandbox commands |
-| `--conf` | Load an explicit sparse [sandbox configuration](/cli/configuration). Repeatable |
+| `--file`, `--conf` | Load a [Sandboxfile](/cli/configuration). Repeat to layer configuration files in order |
 | `--net-conf`<br />`--resource-conf`<br />`--runtime-conf`<br />`--fs-conf`<br />`--secret-conf`<br />`--script-conf` | Load an explicit [scoped config](/cli/configuration#scoped-config-files). Repeatable |
 
 ## msb uninstall
