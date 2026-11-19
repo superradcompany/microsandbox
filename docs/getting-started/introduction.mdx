@@ -6,7 +6,7 @@ icon: "house"
 
 microsandbox is a local-first microVM runtime for untrusted workloads: AI agents, user code, plugins, package installs, CI jobs, dev environments, scrapers, and automation.
 
-Each sandbox is a lightweight VM with its own Linux kernel, filesystem, and network boundary. Start one locally with the `msb` CLI or an SDK, or run it on [microsandbox cloud](/cloud/overview) with an API key. From there, what you do inside the sandbox is up to you.
+Each sandbox is a lightweight VM with its own Linux kernel, filesystem, and network boundary. Run it on your machine without a cloud account. When you need more compute, [connect to our managed cloud](/cloud/connect) and keep the same sandbox workflow. You can switch back whenever you want.
 
 It keeps the familiar workflow of OCI images and command execution, while moving risky work out of the host process.
 
@@ -30,7 +30,7 @@ msb run debian
 
 - **Hardware isolation.** Each sandbox is a VM, not a container namespace on the host kernel.
 - **Local runtime.** The SDK starts the sandbox process directly. No daemon, remote service, or infrastructure setup.
-- **Cloud when you want it.** The same SDK and CLI run sandboxes on [hosted infrastructure](/cloud/overview); an API key is the only change.
+- **Local to cloud and back.** Run locally by default, or switch connections to run on [our managed cloud](/cloud/overview). Keep the same SDK and sandbox code, and switch back whenever you need to.
 - **Fast startup.** Sandboxes are lightweight enough to create from application code.
 - **Docker-like inputs.** Use familiar OCI images from Docker Hub, GHCR, ECR, GCR, or another registry.
 - **Programmable controls.** Configure resources, volumes, secrets, networking, and lifecycle from the CLI or SDK.
@@ -61,12 +61,17 @@ msb run debian
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("hello")
+const sb = await Sandbox.builder("hello")
     .image("python")
     .create();
 
-const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
-console.log(output.stdout());
+try {
+    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+    console.log(output.stdout());
+} finally {
+    await sb.stop();
+    await Sandbox.remove("hello");
+}
 ```
 
 ```rust Rust
@@ -81,6 +86,7 @@ let output = sb.exec("python", ["-c", "print('Hello from a microVM!')"]).await?;
 println!("{}", output.stdout()?);
 
 sb.stop().await?;
+Sandbox::remove("hello").await?;
 ```
 
 ```python Python
@@ -92,6 +98,7 @@ output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
 print(output.stdout_text)
 
 await sb.stop()
+await Sandbox.remove("hello")
 ```
 
 ```go Go
@@ -99,7 +106,10 @@ sb, err := m.CreateSandbox(ctx, "hello", m.WithImage("python"))
 if err != nil {
     return err
 }
-defer sb.Stop(ctx)
+defer func() {
+    _ = sb.Stop(ctx)
+    _ = m.RemoveSandbox(ctx, "hello")
+}()
 
 out, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
 if err != nil {
@@ -115,6 +125,7 @@ Microsandbox::Sandbox.with("hello", image: "python") do |sb|
   output = sb.exec("python", ["-c", "print('Hello from a microVM!')"])
   puts output.stdout
 end
+Microsandbox::Sandbox.remove("hello")
 ```
 </CodeGroup>
 
@@ -125,8 +136,8 @@ end
     Install microsandbox and run your first sandbox.
   </Card>
 
-  <Card title="microsandbox cloud" icon="cloud" href="/cloud/overview">
-    Run the same sandboxes on hosted infrastructure.
+  <Card title="Managed Cloud" icon="cloud" href="/cloud/overview">
+    Explore cloud compute, pricing, and local-to-cloud workflows.
   </Card>
 
   <Card title="CLI overview" icon="terminal" href="/cli/overview">

@@ -1,4 +1,4 @@
-//! Backend-scoped storage observations and runtime-cache cleanup.
+//! Context-scoped storage observations and runtime-cache cleanup.
 //!
 //! Byte counts do not measure exclusive physical ownership.
 
@@ -9,8 +9,7 @@ mod usage;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(feature = "local")]
-pub use microsandbox_runtime::checkpoint::{
+pub use microsandbox_types::memory_cache::{
     MemoryCacheEntry, MemoryCacheKind, MemoryCacheReport, MemoryCacheState, MemoryPruneOptions,
 };
 pub use types::{Storage, StorageCategoryUsage, StorageItemUsage, StorageUsage};

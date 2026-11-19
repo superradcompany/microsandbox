@@ -51,19 +51,19 @@ pub(crate) const DEFAULT_BIND_QUOTA_MIB: u32 = DEFAULT_OCI_UPPER_SIZE_MIB;
 /// Default timeout given to the existing sandbox during a `.replace()`
 /// create before it is force-killed.
 ///
-/// Distinct from [`SandboxHandle::stop_with_timeout`]'s explicit deadline: this applies
+/// Distinct from [`SandboxRecord::stop_with_timeout`]'s explicit deadline: this applies
 /// to the builder's override-an-existing-sandbox flow, not the
 /// user-facing stop. Ordinary `stop()` waits without an implicit deadline or force-kill.
 ///
-/// [`SandboxHandle::stop_with_timeout`]: super::SandboxHandle::stop_with_timeout
+/// [`SandboxRecord::stop_with_timeout`]: super::SandboxRecord::stop_with_timeout
 pub const DEFAULT_REPLACE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // Compile-time defaults for `SandboxConfig` serde. Serde's `#[serde(default
 // = "fn")]` attribute can't take parameters, so these can't consult a
-// `LocalBackend`. They intentionally mirror `GlobalConfig::default()` /
+// `LocalContext`. They intentionally mirror `GlobalConfig::default()` /
 // `SandboxDefaults::default()` for the same fields, so DB-row
 // deserialization (and `sandbox_config_from_cloud`) are side-effect-free.
-// A `LocalBackend` with non-default sandbox defaults applies them through
+// A `LocalContext` with non-default sandbox defaults applies them through
 // `SandboxBuilder` at create time, not via serde.
 
 fn default_cpus() -> u8 {
@@ -130,6 +130,10 @@ pub(crate) enum SnapshotRestoreMode {
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 #[config_patch(serde_lossless)]
 pub struct SandboxConfig {
+    /// Process-local mode used only when creating a private, fixed recovery reader VM.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) storage_reader: Option<bool>,
     /// Protect the installed source while a local restore builder materializes child-owned files.
     #[cfg(feature = "local")]
     #[serde(skip)]
@@ -138,7 +142,7 @@ pub struct SandboxConfig {
     #[cfg(feature = "local")]
     #[serde(skip)]
     pub(crate) creation_progress: Option<tokio::sync::mpsc::WeakSender<crate::CreationProgress>>,
-    /// Backend-neutral sandbox task description shared across SDKs and services.
+    /// Context-neutral sandbox task description shared across SDKs and services.
     #[serde(flatten)]
     #[config_patch(nested)]
     pub spec: SandboxSpec,
@@ -1192,6 +1196,8 @@ impl Default for SandboxConfig {
                 ..Default::default()
             },
             registry_auth: None,
+            #[cfg(feature = "local")]
+            storage_reader: None,
             #[cfg(feature = "local")]
             creation_progress: None,
             #[cfg(feature = "local")]

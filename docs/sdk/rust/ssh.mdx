@@ -13,7 +13,6 @@ Requires the `ssh` feature. See [SSH](/sandboxes/ssh) for client sessions, serve
 microsandbox = { version = "0.5.8", features = ["ssh"] }
 ```
 
-
 ## Sandbox
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ssh()</span>
@@ -46,6 +45,8 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 <p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
 
 SSH operations for a sandbox.
+
+The idle SSH helper does not start a sandbox or take ownership of shutdown. Creating a client or prepared server endpoint starts or connects to the sandbox and keeps using that run. Commands and SFTP on that endpoint reuse the same run. After you release the original sandbox handles, the helper returns an error. Explicit stop can interrupt active sessions.
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">connect()</span>
 
@@ -160,7 +161,7 @@ Alias for [`connect_with`](#ssh-connect_with).
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">server()</span>
 
-<Tooltip tip="Serving with the convenience defaults is not available on microsandbox cloud; supply explicit host-key and authorized-key material, or use the SSH client."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Serving with the convenience defaults is not available on our managed cloud; supply explicit host-key and authorized-key material, or use the SSH client."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn server(&self) -> MicrosandboxResult<SshServer>
@@ -189,7 +190,7 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">prepare_server()</span>
 
-<Tooltip tip="Serving with the convenience defaults is not available on microsandbox cloud; supply explicit host-key and authorized-key material, or use the SSH client."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Serving with the convenience defaults is not available on our managed cloud; supply explicit host-key and authorized-key material, or use the SSH client."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn prepare_server(&self) -> MicrosandboxResult<SshServer>
@@ -208,7 +209,7 @@ Alias for [`server`](#ssh-server).
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">server_with()</span>
 
-<Tooltip tip="On microsandbox cloud, serving works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, serving works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn server_with(
@@ -250,7 +251,7 @@ Prepare a server endpoint with custom host-key, authorization, guest-user, SFTP,
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">prepare_server_with()</span>
 
-<Tooltip tip="On microsandbox cloud, serving works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, serving works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn prepare_server_with(
@@ -301,6 +302,8 @@ println!("exit {}: {}", out.status, String::from_utf8_lossy(&out.stdout));
 </Accordion>
 
 Run an SSH exec request and collect stdout, stderr, and the exit status. The command is run through the sandbox's configured shell (default `/bin/sh -c`). No PTY is requested.
+
+Returns an error if the channel closes without an exit status or signal. Known SSH signals produce `128 +` the Linux signal number; unknown signal names produce `128`.
 
 <p className="msb-label">Parameters</p>
 
@@ -384,7 +387,7 @@ Attach the local terminal to an interactive SSH shell. Requests a PTY sized to t
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">i32</span></div>
-    <div className="msb-param-desc">Shell exit code (128 if terminated by signal).</div>
+    <div className="msb-param-desc">Shell exit code. Known SSH signals return <code>128 +</code> the Linux signal number (for example, <code>143</code> for <code>TERM</code>); unknown signal names return <code>128</code>.</div>
   </div>
 </div>
 
@@ -423,7 +426,7 @@ Attach an interactive shell with custom terminal and detach-key options.
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">i32</span></div>
-    <div className="msb-param-desc">Shell exit code (128 if terminated by signal).</div>
+    <div className="msb-param-desc">Shell exit code. Known SSH signals return <code>128 +</code> the Linux signal number (for example, <code>143</code> for <code>TERM</code>); unknown signal names return <code>128</code>.</div>
   </div>
 </div>
 
@@ -529,7 +532,6 @@ Alias for [`serve`](#server-serve).
 
 Ordered duplex stream backed by this process's stdin and stdout. Implements `AsyncRead` and `AsyncWrite`.
 
-
 #### <span className="msb-recv">SshStdioStream::</span><span className="msb-hn">new()</span>
 
 ```rust
@@ -578,11 +580,9 @@ Default SSH listener port used by the CLI adapter when binding a sandbox SSH end
 
 ## SshClientOptionsBuilder
 
-
 <p className="msb-backref">Used by <a href="#ssh-connect_with">ssh.connect_with()</a></p>
 
 Builder for SSH client options. Defaults: user `root`, terminal from `$TERM` (falling back to `xterm`), SFTP enabled, and the global SSH inactivity timeout.
-
 
 #### <span className="msb-recv">client_options.</span><span className="msb-hn">user()</span>
 
@@ -634,11 +634,9 @@ Finalize the options.
 
 ## SshExecOptionsBuilder
 
-
 <p className="msb-backref">Used by <a href="#client-exec_with">client.exec_with()</a></p>
 
 Builder for SSH exec options.
-
 
 #### <span className="msb-recv">exec_options.</span><span className="msb-hn">tty()</span>
 
@@ -658,11 +656,9 @@ Finalize the options.
 
 ## SshAttachOptionsBuilder
 
-
 <p className="msb-backref">Used by <a href="#client-attach_with">client.attach_with()</a></p>
 
 Builder for interactive SSH attach options. Default terminal comes from `$TERM` (falling back to `xterm`); detach keys default to the standard sequence.
-
 
 #### <span className="msb-recv">attach_options.</span><span className="msb-hn">term()</span>
 
@@ -690,11 +686,9 @@ Finalize the options.
 
 ## SshServerOptionsBuilder
 
-
 <p className="msb-backref">Used by <a href="#ssh-server_with">ssh.server_with()</a></p>
 
 Builder for SSH server options. SFTP is enabled by default; the inactivity timeout inherits the global SSH setting; when no authorized keys are provided, the default authorized-keys file is loaded.
-
 
 #### <span className="msb-recv">server_options.</span><span className="msb-hn">host_key_path()</span>
 

@@ -23,7 +23,11 @@ The `public`, `private`, and `host` profiles already allow DNS through the gatew
 
 DNS over TLS uses TCP port `853` and needs its own allow rule. It also requires [TLS inspection](/networking/tls).
 
+The upstream DNS-over-TLS connection verifies the resolver's certificate and name against host trust. On Windows, it uses native chain validation, including retrieval of approved roots when Windows policy allows it. Other platforms load the host's native root certificates.
+
 DNS rebinding protection is separate from query access. microsandbox rejects private or reserved answers unless an explicit address rule allows them. An allow-by-default policy does not disable this protection. See [Network defenses](/security/network) for the full policy behavior.
+
+DNS rebinding protection is separate from query access. microsandbox rejects private or reserved answers unless an explicit address rule allows them. An allow-by-default policy does not disable this protection. Through the gateway, it also blocks unauthorized private reverse lookups and requires broad private-network access for `.local` discovery; allowing one private subnet is not enough. See [Network defenses](/security/network) for the full policy behavior.
 
 ## Blocking domains
 
@@ -88,7 +92,7 @@ msb create python --name safe-agent --net-default allow \
 
 ## Pinning nameservers
 
-<Tooltip tip="Custom nameservers are not available on microsandbox cloud. Cloud sandboxes use platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Custom nameservers are not available on our managed cloud. Cloud sandboxes use platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 By default, microsandbox uses the host's resolver list. Set `nameservers` when you need specific resolvers.
 
@@ -181,9 +185,13 @@ microsandbox records the IP addresses returned for each domain. A domain rule ma
 
 microsandbox uses the lowest TTL across the relevant addresses and alias chain in each DNS answer, with a one-second minimum, for all addresses in that answer. For example, addresses with TTLs of 30 and 120 seconds both get a 30-second lifetime. Later answers retain earlier addresses until they expire and extend only the addresses they contain, so rotating CDN answers do not invalidate connections using an earlier answer.
 
+After expiry, a TLS reconnect can use SNI to re-resolve the hostname. It succeeds only when the fresh, policy-filtered answer still contains the chosen IP and the network rules allow the connection. Without SNI, a live binding is required.
+
 Each sandbox retains up to 16,384 hostname/address bindings in total, with at most 1,024 per hostname shared across IPv4 and IPv6. An address shared by two domains counts twice. If a DNS answer would exceed either limit, microsandbox returns `SERVFAIL` without adding any of that answer's addresses or removing existing bindings. Answers containing only existing bindings can still refresh them; expired bindings free space for new answers.
 
-An application that connects directly to a hard-coded IP does not match a domain rule. Use an IP or CIDR rule for that traffic.
+Expired bindings are discarded. Revalidation keeps the chosen IP, waits at most ten seconds, and does not require a prior guest lookup.
+
+An application that connects directly to a hard-coded IP without an allowed SNI name does not match a domain rule. Use an IP or CIDR rule for that traffic.
 
 ## Reference
 

@@ -109,7 +109,9 @@ impl LocalObjectStore {
     /// Open or create a local object store rooted at `root`.
     pub fn open(root: impl Into<PathBuf>) -> ImageResult<Self> {
         let root = root.into();
-        std::fs::create_dir_all(root.join("objects").join("sha256"))?;
+        microsandbox_utils::private_file::create_private_dir_all(
+            &root.join("objects").join("sha256"),
+        )?;
         Ok(Self {
             root,
             ownership: Arc::new(StoreOwnership::default()),
@@ -126,12 +128,9 @@ impl LocalObjectStore {
             return Ok(id);
         }
         let parent = path.parent().expect("object path has a parent");
-        std::fs::create_dir_all(parent)?;
+        microsandbox_utils::private_file::create_private_dir_all(parent)?;
         let temporary = parent.join(format!(".{}.{}.tmp", id.hex(), rand::random::<u64>()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -169,11 +168,15 @@ impl LocalObjectStore {
             return Ok(target);
         }
         let parent = target.parent().expect("closure object has a parent");
-        std::fs::create_dir_all(parent)?;
+        microsandbox_utils::private_file::create_private_dir_all(parent)?;
         match std::fs::hard_link(&source, &target) {
             Ok(()) => {}
             Err(_) => {
-                std::fs::copy(&source, &target)?;
+                let mut source_file = File::open(&source)?;
+                let mut target_file = microsandbox_utils::private_file::create_new(&target)?;
+                std::io::copy(&mut source_file, &mut target_file)?;
+                target_file.sync_all()?;
+                drop(target_file);
                 // `FlushFileBuffers`, used by `sync_all` on Windows, requires a handle opened
                 // with write access even though the immutable bytes are already complete.
                 let sync_result = OpenOptions::new()
@@ -250,13 +253,10 @@ impl CaptureObjectBatch {
             return Ok(id);
         }
         let parent = path.parent().expect("object parent");
-        std::fs::create_dir_all(parent)?;
+        microsandbox_utils::private_file::create_private_dir_all(parent)?;
         let temporary = parent.join(format!(".{}.{}.tmp", id.hex(), rand::random::<u64>()));
         let result = (|| -> ImageResult<AdmittedObject> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
+            let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
@@ -290,7 +290,7 @@ impl CaptureObjectBatch {
             .join(&encoded[..2])
             .join(encoded);
         let parent = target.parent().expect("closure object parent");
-        std::fs::create_dir_all(parent)?;
+        microsandbox_utils::private_file::create_private_dir_all(parent)?;
         if target.exists() {
             // Existing targets are not automatically part of this batch's ownership. Retain
             // the checked public behavior, except for the exact already-admitted inode.
@@ -585,10 +585,7 @@ fn read_object_at(file: &File, bytes: &mut [u8], offset: u64) -> std::io::Result
 }
 
 fn copy_admitted_object(object: &AdmittedObject, source: &File, target: &Path) -> ImageResult<()> {
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)?;
+    let mut destination = microsandbox_utils::private_file::create_new(target)?;
     let result = (|| -> ImageResult<()> {
         let mut buffer = vec![0; 1024 * 1024];
         let mut offset = 0;
@@ -635,22 +632,36 @@ fn sync_directories_through(path: &Path, stop: &Path) -> ImageResult<()> {
 
 /// Compute a sparse-aware fixed-leaf Merkle root without reading unallocated holes.
 pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
+    sparse_file_integrity_handle(&File::open(path)?)
+}
+
+/// Compute the same content root on a pinned file, without resolving its pathname again.
+/// Uses a cloned descriptor; callers sharing its seek position must serialize reads.
+pub fn sparse_file_integrity_handle(file: &File) -> ImageResult<SparseFileIntegrity> {
     let started = std::time::Instant::now();
-    let mut file = File::open(path)?;
+    let mut reader = file.try_clone()?;
     let logical_size = file.metadata()?.len();
     let logical_leaves = logical_size.div_ceil(FILE_MERKLE_LEAF_SIZE as u64).max(1);
     let tree_leaves = logical_leaves.next_power_of_two();
     let tree_height = tree_leaves.trailing_zeros();
     let zero_roots = zero_subtree_roots(tree_height);
-    let allocation_map = microsandbox_utils::extent::ExtentMap::scan_file(&file)?;
-    let ranges = allocated_leaf_ranges(allocation_map.as_ref(), logical_size, logical_leaves);
     let mut accumulator = MerkleAccumulator::new(tree_height);
     let mut cursor = 0u64;
     let mut buffer = vec![0u8; FILE_MERKLE_LEAF_SIZE];
     let mut read_bytes = 0u64;
     let mut read_leaves = 0u64;
 
-    for (start, end) in ranges {
+    // A leaf can span several disjoint allocated extents. Read it exactly once, without
+    // retaining either the allocation map or a second range list proportional to fragmentation.
+    let mut hash_range = |offset: u64, length: u64| -> std::io::Result<()> {
+        let start = (offset / FILE_MERKLE_LEAF_SIZE as u64).max(cursor);
+        let end = offset
+            .saturating_add(length)
+            .div_ceil(FILE_MERKLE_LEAF_SIZE as u64)
+            .min(logical_leaves);
+        if start >= end {
+            return Ok(());
+        }
         push_zero_range(&mut accumulator, &zero_roots, cursor, start);
         for leaf in start..end {
             let offset = leaf * FILE_MERKLE_LEAF_SIZE as u64;
@@ -658,13 +669,17 @@ pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
                 .saturating_sub(offset)
                 .min(FILE_MERKLE_LEAF_SIZE as u64) as usize;
             buffer.fill(0);
-            file.seek(SeekFrom::Start(offset))?;
-            file.read_exact(&mut buffer[..readable])?;
+            reader.seek(SeekFrom::Start(offset))?;
+            reader.read_exact(&mut buffer[..readable])?;
             read_bytes += readable as u64;
             read_leaves += 1;
             accumulator.push_subtree(0, hash_leaf(&buffer));
         }
         cursor = end;
+        Ok(())
+    };
+    if !microsandbox_utils::extent::visit_allocated_ranges(file, &mut hash_range)? {
+        hash_range(0, logical_size)?;
     }
     push_zero_range(&mut accumulator, &zero_roots, cursor, tree_leaves);
 
@@ -679,37 +694,6 @@ pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
         root: format!("blake3:{}", root.finalize().to_hex()),
         logical_size,
     })
-}
-
-fn allocated_leaf_ranges(
-    map: Option<&microsandbox_utils::extent::ExtentMap>,
-    logical_size: u64,
-    logical_leaves: u64,
-) -> Vec<(u64, u64)> {
-    if logical_size == 0 {
-        return Vec::new();
-    }
-    let Some(map) = map else {
-        return vec![(0, logical_leaves)];
-    };
-    let mut ranges: Vec<(u64, u64)> = Vec::new();
-    for (offset, length) in &map.extents {
-        let start = offset / FILE_MERKLE_LEAF_SIZE as u64;
-        let end = offset
-            .saturating_add(*length)
-            .div_ceil(FILE_MERKLE_LEAF_SIZE as u64)
-            .min(logical_leaves);
-        if end <= start {
-            continue;
-        }
-        match ranges.last_mut() {
-            Some((_, previous_end)) if start <= *previous_end => {
-                *previous_end = (*previous_end).max(end);
-            }
-            _ => ranges.push((start, end)),
-        }
-    }
-    ranges
 }
 
 fn zero_subtree_roots(height: u32) -> Vec<[u8; 32]> {
@@ -761,6 +745,64 @@ fn hash_parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_objects_and_new_storage_directories_are_private() {
+        for host_umask in [0o000, 0o022, 0o077] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("checkpoint_store_umask_child")
+                .arg("--nocapture")
+                .env("MSB_TEST_CHECKPOINT_STORE_UMASK", format!("{host_umask:o}"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "host umask {host_umask:03o}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_store_umask_child() {
+        let Ok(value) = std::env::var("MSB_TEST_CHECKPOINT_STORE_UMASK") else {
+            return;
+        };
+        let host_umask = u32::from_str_radix(&value, 8).unwrap();
+        let previous_umask = unsafe { libc::umask(host_umask as libc::mode_t) };
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("private-store");
+        let store = LocalObjectStore::open(&root).unwrap();
+        let id = store.put_bytes(b"private checkpoint bytes").unwrap();
+
+        for path in [
+            root.clone(),
+            root.join("objects"),
+            root.join("objects/sha256"),
+            store.object_path(&id).parent().unwrap().to_path_buf(),
+        ] {
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(store.object_path(&id))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        unsafe { libc::umask(previous_umask) };
+    }
 
     #[test]
     fn capture_batch_reuses_owned_objects_and_syncs_each_directory_once() {
@@ -1105,6 +1147,46 @@ mod tests {
             .link_into(&first, &directory.path().join("checkpoint"))
             .unwrap();
         assert_eq!(std::fs::read(linked).unwrap(), b"same bytes");
+    }
+
+    #[test]
+    fn pinned_integrity_matches_dense_bytes_across_fragmented_partial_leaves() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fragmented.raw");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        microsandbox_utils::extent::mark_sparse(&file).unwrap();
+        let mut dense = vec![0; 5 * FILE_MERKLE_LEAF_SIZE + 17];
+        file.set_len(dense.len() as u64).unwrap();
+        // Multiple allocations inside one leaf, an all-hole leaf, and a non-aligned tail.
+        for (i, offset) in [
+            1,
+            16_384,
+            FILE_MERKLE_LEAF_SIZE - 1,
+            3 * FILE_MERKLE_LEAF_SIZE + 3,
+            dense.len() - 1,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            dense[offset] = (i + 1) as u8;
+            file.seek(SeekFrom::Start(offset as u64)).unwrap();
+            file.write_all(&dense[offset..=offset]).unwrap();
+        }
+        file.sync_all().unwrap();
+        let expected_path = directory.path().join("dense.raw");
+        std::fs::write(&expected_path, &dense).unwrap();
+        let expected = sparse_file_integrity(&expected_path).unwrap();
+        assert_eq!(sparse_file_integrity_handle(&file).unwrap(), expected);
+        // Replacing the namespace entry cannot redirect a hash over an already-pinned FD.
+        std::fs::rename(&path, directory.path().join("original.raw")).unwrap();
+        std::fs::write(&path, vec![9; dense.len()]).unwrap();
+        assert_ne!(sparse_file_integrity(&path).unwrap(), expected);
+        assert_eq!(sparse_file_integrity_handle(&file).unwrap(), expected);
     }
 
     #[test]

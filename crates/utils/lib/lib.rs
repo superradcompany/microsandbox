@@ -4,6 +4,7 @@ pub mod copy;
 pub mod extent;
 pub mod format;
 pub mod log_text;
+pub mod private_file;
 pub mod process;
 pub mod process_lock;
 pub mod secret;
@@ -247,20 +248,20 @@ pub fn http_client() -> ureq::Agent {
 /// Returns true when a user-provided text value should be interpreted as a
 /// local filesystem path rather than a named resource or OCI reference.
 pub fn looks_like_local_path_text(s: &str) -> bool {
-    if s == "." || s == ".." || s.starts_with('/') || s.starts_with("./") || s.starts_with("../") {
-        return true;
-    }
+    let portable =
+        s == "." || s == ".." || s.starts_with('/') || s.starts_with("./") || s.starts_with("../");
 
     #[cfg(windows)]
     {
-        s.starts_with(".\\")
+        portable
+            || s.starts_with(".\\")
             || s.starts_with("..\\")
             || s.starts_with('\\')
             || is_windows_drive_path_text(s)
     }
     #[cfg(not(windows))]
     {
-        false
+        portable
     }
 }
 

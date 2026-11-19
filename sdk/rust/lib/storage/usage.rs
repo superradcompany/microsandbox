@@ -15,7 +15,14 @@ impl Storage {
     pub async fn prune(
         options: &super::MemoryPruneOptions,
     ) -> MicrosandboxResult<super::MemoryCacheReport> {
-        let backend = crate::backend::default_backend();
+        Self::prune_with_context(crate::context::configured_context().as_ref(), options).await
+    }
+
+    #[cfg(feature = "local")]
+    async fn prune_with_context(
+        backend: &dyn crate::Context,
+        options: &super::MemoryPruneOptions,
+    ) -> MicrosandboxResult<super::MemoryCacheReport> {
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::StoragePrune))?;
@@ -25,7 +32,7 @@ impl Storage {
     /// Revalidate and prune unused runtime RAM in an explicitly selected local backend.
     #[cfg(feature = "local")]
     pub async fn prune_local(
-        local: &crate::LocalBackend,
+        local: &crate::LocalContext,
         options: &super::MemoryPruneOptions,
     ) -> MicrosandboxResult<super::MemoryCacheReport> {
         let root = local.cache_dir().join("memory");
@@ -40,9 +47,12 @@ impl Storage {
 
     /// Observe storage through the selected backend. Remote accounting is explicitly unsupported.
     pub async fn usage() -> MicrosandboxResult<StorageUsage> {
+        Self::usage_with_context(crate::context::configured_context().as_ref()).await
+    }
+
+    async fn usage_with_context(backend: &dyn crate::Context) -> MicrosandboxResult<StorageUsage> {
         #[cfg(feature = "local")]
         {
-            let backend = crate::backend::default_backend();
             let local = backend
                 .as_local()
                 .ok_or_else(|| MicrosandboxError::local_only(Operation::StorageUsage))?;
@@ -57,7 +67,7 @@ impl Storage {
     /// Bind-mounted host trees and unindexed external artifacts are excluded. Directory scans
     /// never follow symlinks. Missing managed roots count as empty; inaccessible roots are unknown.
     #[cfg(feature = "local")]
-    pub async fn usage_local(local: &crate::LocalBackend) -> MicrosandboxResult<StorageUsage> {
+    pub async fn usage_local(local: &crate::LocalContext) -> MicrosandboxResult<StorageUsage> {
         local_usage::usage(local).await
     }
 
@@ -94,7 +104,7 @@ mod local_usage {
     use sea_orm::EntityTrait;
 
     use crate::db::entity::{image_ref, sandbox, snapshot, volume};
-    use crate::{LocalBackend, MicrosandboxError, MicrosandboxResult};
+    use crate::{LocalContext, MicrosandboxError, MicrosandboxResult};
 
     use super::super::{StorageCategoryUsage, StorageItemUsage, StorageUsage};
 
@@ -114,7 +124,7 @@ mod local_usage {
     // Functions
     //--------------------------------------------------------------------------------------------------
 
-    pub(super) async fn usage(local: &LocalBackend) -> MicrosandboxResult<StorageUsage> {
+    pub(super) async fn usage(local: &LocalContext) -> MicrosandboxResult<StorageUsage> {
         let catalog = local.read_current_catalog().await?;
         let db = match &catalog {
             Some(catalog) => &catalog.read,
@@ -128,7 +138,7 @@ mod local_usage {
 
         let cache_root = local.cache_dir();
         let snapshot_root = local.snapshots_dir();
-        let snapshot_journals = crate::backend::local::snapshot::deletion::recovery_parents(local);
+        let snapshot_journals = crate::context::local::snapshot::deletion::recovery_parents(local);
         let sandbox_root = local.sandboxes_dir();
         let volume_root = local.volumes_dir();
 
@@ -534,7 +544,6 @@ mod local_usage {
             let home = tempfile::tempdir().unwrap();
             let local = crate::test_support::local_backend_builder(home.path())
                 .build()
-                .await
                 .unwrap();
             let cache = microsandbox_image::GlobalCache::new(&local.cache_dir()).unwrap();
             let journal = local.cache_dir().join(".image-deletions/delete-test");
@@ -702,18 +711,20 @@ mod local_usage {
         async fn selected_backend_controls_roots_without_creating_missing_storage() {
             let temporary = tempfile::tempdir().unwrap();
             let cache = temporary.path().join("custom-cache");
-            let local = LocalBackend::builder()
+            let local = LocalContext::builder()
                 .home(temporary.path())
                 .config_path(temporary.path().join("config.toml"))
                 .cache_dir(&cache)
                 .build()
-                .await
                 .unwrap();
             std::fs::create_dir_all(cache.join("layers")).unwrap();
             std::fs::write(cache.join("layers/fixture"), [1; 17]).unwrap();
-            let report = crate::with_backend(local, crate::Storage::usage())
-                .await
-                .unwrap();
+            let report = async {
+                let destination: std::sync::Arc<dyn crate::Context> = (local).into();
+                crate::Storage::usage_with_context(destination.as_ref()).await
+            }
+            .await
+            .unwrap();
             assert_eq!(report.images.logical_bytes, Some(17));
             assert_eq!(report.images.count, Some(0));
             assert!(!cache.join("memory").exists());
@@ -734,8 +745,9 @@ mod local_usage {
                 let home = tempfile::tempdir().unwrap();
                 let local = crate::test_support::local_backend_builder(home.path())
                     .build()
-                    .await
                     .unwrap();
+                // Initialize the catalog before deliberately removing discovery permissions.
+                local.db().await.unwrap();
                 std::fs::create_dir_all(local.cache_dir().join("layers")).unwrap();
                 std::fs::write(local.cache_dir().join("layers/fixture"), b"image bytes").unwrap();
                 let directory = if deny_registry {
@@ -750,7 +762,7 @@ mod local_usage {
 
                 drop(local);
                 let local = crate::test_support::local_backend_builder(home.path())
-                    .build_lazy()
+                    .build()
                     .unwrap();
                 let result = crate::Storage::usage_local(&local).await;
                 std::fs::set_permissions(&directory, permissions).unwrap();
@@ -768,13 +780,17 @@ mod local_usage {
         #[cfg(feature = "cloud")]
         #[tokio::test]
         async fn remote_storage_operations_fail_without_touching_local_cache() {
-            let cloud = crate::CloudBackend::builder()
-                .url("https://example.invalid")
-                .api_key("storage-test-no-network")
-                .build()
-                .unwrap();
-            crate::with_backend(cloud, async {
-                let error = crate::Storage::usage().await.unwrap_err();
+            let cloud = crate::test_support::cloud_backend(
+                "https://example.invalid",
+                "storage-test-no-network",
+            )
+            .unwrap();
+            async {
+                let destination: std::sync::Arc<dyn crate::Context> = (cloud).into();
+
+                let error = crate::Storage::usage_with_context(destination.as_ref())
+                    .await
+                    .unwrap_err();
                 assert!(matches!(
                     error,
                     MicrosandboxError::Unsupported {
@@ -782,9 +798,10 @@ mod local_usage {
                         ..
                     }
                 ));
-                let error = crate::Storage::prune(&Default::default())
-                    .await
-                    .unwrap_err();
+                let error =
+                    crate::Storage::prune_with_context(destination.as_ref(), &Default::default())
+                        .await
+                        .unwrap_err();
                 assert!(matches!(
                     error,
                     MicrosandboxError::Unsupported {
@@ -792,7 +809,7 @@ mod local_usage {
                         ..
                     }
                 ));
-            })
+            }
             .await;
         }
     }

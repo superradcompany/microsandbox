@@ -1,7 +1,7 @@
 //! Local authorization records for reconnecting external bind mounts.
 
 #[cfg(feature = "runner")]
-use std::{collections::BTreeMap, fs::OpenOptions, io::Write};
+use std::{collections::BTreeMap, io::Write};
 use std::{io::Read, path::Path};
 
 use serde::{Deserialize, Serialize};
@@ -74,10 +74,7 @@ pub(crate) fn bindings(
                 .ok_or("runtime has no host-only parent")?;
             let temporary =
                 sandbox_dir.join(format!(".external-mounts.{}.tmp", std::process::id()));
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
+            let mut file = microsandbox_utils::private_file::create_new(&temporary)
                 .map_err(|e| e.to_string())?;
             file.write_all(&serde_json::to_vec(&record).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;

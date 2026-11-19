@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Sandbox } from "../dist/index.js";
 import { msbPath } from "../dist/internal/resolve-binary.js";
 import type { PullProgress, SecretModifySpec } from "../dist/index.js";
 
-const SANDBOX_NAME = "sdk-smoke-test";
+const SANDBOX_NAME = `sdk-smoke-${randomUUID()}`;
 
 
 async function waitForSandboxMetrics(sb: Sandbox) {
@@ -40,7 +41,6 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
       .label("setup_db", "one").label("setupDb", "two")
       .script("setup_db", "echo one").script("setupDb", "echo two")
       .network(n => n.secretEnvSimple("SDK_SECRET_TOKEN", "dummy-private-value", "example.com"))
-      .replace()
       .create();
   });
 
@@ -55,7 +55,8 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     expect(out.stdout()).toBe("$MSB_SDK_SECRET_TOKEN");
     expect(out.stdout()).not.toContain("dummy-private-value");
     const handle = await Sandbox.get(SANDBOX_NAME);
-    for (const config of [await sb.config(), handle.config()]) {
+    for (const observation of [await sb.config(), await handle.config()]) {
+      const config = observation.spec;
       expect(config.labels).toEqual({ setup_db: "one", setupDb: "two" });
       expect(config.runtime.scripts).toEqual({ setup_db: "echo one", setupDb: "echo two" });
     }
@@ -445,7 +446,7 @@ describe.skipIf(!msbPath())("listWith by labels", () => {
 
     const web = handles.find((h) => h.name === webName);
     expect(web).toBeDefined();
-    await expect(web!.refresh()).resolves.toMatchObject({ name: webName });
+    await expect(web!.info()).resolves.toMatchObject({ name: webName });
   });
 
   it("AND-matches multiple labels", async () => {

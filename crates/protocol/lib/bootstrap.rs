@@ -17,6 +17,9 @@ use crate::exec::ExecRlimit;
 /// starts. The surrounding protocol envelope supplies the schema generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestBootstrap {
+    /// Assemble the read-only OCI view in a dedicated recovery VM after data mounts are ready.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub storage_preview_oci: bool,
     /// The host saves startup failures before acknowledging or terminating the guest.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub init_failure_ack: bool,
@@ -329,6 +332,7 @@ mod tests {
     #[test]
     fn guest_bootstrap_round_trips_transport_sensitive_values() {
         let bootstrap = GuestBootstrap {
+            storage_preview_oci: false,
             exec_limits: None,
             init_failure_ack: true,
             block_root: Some(BootstrapBlockRoot::OciErofs {

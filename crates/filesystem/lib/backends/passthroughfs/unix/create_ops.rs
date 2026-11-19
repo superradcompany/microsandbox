@@ -21,11 +21,13 @@
 use std::{
     ffi::CStr,
     io,
-    os::fd::FromRawFd,
+    os::fd::{AsRawFd, FromRawFd},
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
-use super::host_mode::{OWNER_FLOOR_DIR, OWNER_FLOOR_FILE, fchmod_at_mirror, fchmod_mirror};
+use super::host_mode::{
+    OWNER_FLOOR_DIR, OWNER_FLOOR_FILE, fchmod_at_with_owner_floor, fchmod_with_owner_floor,
+};
 use super::{PassthroughFs, inode};
 use crate::{
     Context, Entry, Extensions, OpenOptions,
@@ -75,6 +77,15 @@ pub(crate) fn do_create(
 
     let mut open_flags = inode::translate_open_flags(flags as i32);
     open_flags |= libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+    let requested_exclusive = open_flags & libc::O_EXCL != 0;
+
+    // Match OPEN's writeback descriptor policy before the first open.
+    if fs.writeback.load(Ordering::Relaxed) {
+        if open_flags & libc::O_ACCMODE == libc::O_WRONLY {
+            open_flags = (open_flags & !libc::O_ACCMODE) | libc::O_RDWR;
+        }
+        open_flags &= !libc::O_APPEND;
+    }
 
     // With overlay, default to conservative 0o600 and let `Mirror` widen via
     // `fchmod` after creation. Without overlay (`Off`), use the guest's request
@@ -86,45 +97,71 @@ pub(crate) fn do_create(
         (file_mode | OWNER_FLOOR_FILE) as libc::c_uint
     };
 
-    let fd = unsafe {
+    // CREATE may race a guest request that publishes the same name. Try an
+    // exclusive create first so a host umask cannot make an existing file look
+    // like a newly created one that needs its mode repaired.
+    let create_fd = unsafe {
         libc::openat(
             parent_fd.raw(),
             name.as_ptr(),
-            open_flags,
+            open_flags | libc::O_EXCL,
             host_initial_mode,
         )
     };
-    if fd < 0 {
-        return Err(platform::linux_error(io::Error::last_os_error()));
-    }
+    let (fd, created) = if create_fd >= 0 {
+        (create_fd, true)
+    } else {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::AlreadyExists || requested_exclusive {
+            return Err(platform::linux_error(error));
+        }
+
+        let existing_flags = open_flags & !(libc::O_CREAT | libc::O_EXCL);
+        let existing_fd = unsafe { libc::openat(parent_fd.raw(), name.as_ptr(), existing_flags) };
+        if existing_fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        (existing_fd, false)
+    };
 
     if fs.cfg.xattr_enabled() {
         // Mirror perm bits to the host before writing the overlay so that a
         // failed `fchmod` leaves no half-state.
-        if fs.cfg.mirror_host_permissions()
-            && let Err(e) = fchmod_mirror(fd, file_mode, platform::MODE_REG)
+        let mode_update = if fs.cfg.mirror_host_permissions() {
+            Some(file_mode)
+        } else if created {
+            Some(0)
+        } else {
+            None
+        };
+        if let Some(perms) = mode_update
+            && let Err(e) = fchmod_with_owner_floor(fd, perms, platform::MODE_REG)
         {
             unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+            if created {
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+            }
             return Err(e);
         }
 
         let full_mode = platform::MODE_REG | file_mode;
         if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, 0) {
             unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+            if created {
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+            }
             return Err(e);
         }
+    } else if created && let Err(error) = fchmod_with_owner_floor(fd, file_mode, platform::MODE_REG)
+    {
+        unsafe { libc::close(fd) };
+        unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+        return Err(error);
     }
 
-    // Close the fd we used for xattr, then do a proper lookup.
-    unsafe { libc::close(fd) };
-
-    let entry = inode::do_lookup(fs, parent, name)?;
-
-    // Reopen for the handle — strip O_CREAT since the file already exists.
-    // open_inode_fd adds O_CLOEXEC itself and rejects real host symlinks.
-    let open_fd = inode::open_inode_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
+    // Retain the original descriptor through registration and handle publication.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let open_fd = file.as_raw_fd();
 
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
@@ -143,7 +180,14 @@ pub(crate) fn do_create(
         }
     }
 
-    let file = unsafe { std::fs::File::from_raw_fd(open_fd) };
+    #[cfg(test)]
+    super::tests::BEFORE_CREATE_REGISTRATION.with(|hook| {
+        let callback = hook.borrow_mut().take();
+        if let Some(callback) = callback {
+            callback();
+        }
+    });
+    let entry = inode::register_created_fd(fs, parent, name, open_fd)?;
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(HandleData {
@@ -192,14 +236,22 @@ pub(crate) fn do_mkdir(
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
-    if fs.cfg.xattr_enabled() {
-        if fs.cfg.mirror_host_permissions()
-            && let Err(e) = fchmod_at_mirror(parent_fd.raw(), name, dir_mode, platform::MODE_DIR)
-        {
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), libc::AT_REMOVEDIR) };
-            return Err(e);
-        }
+    let host_mode_result = if fs.cfg.xattr_enabled() {
+        let host_mode = if fs.cfg.mirror_host_permissions() {
+            dir_mode
+        } else {
+            0
+        };
+        fchmod_at_with_owner_floor(parent_fd.raw(), name, host_mode, platform::MODE_DIR)
+    } else {
+        fchmod_at_with_owner_floor(parent_fd.raw(), name, dir_mode, platform::MODE_DIR)
+    };
+    if let Err(error) = host_mode_result {
+        unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), libc::AT_REMOVEDIR) };
+        return Err(error);
+    }
 
+    if fs.cfg.xattr_enabled() {
         let full_mode = platform::MODE_DIR | dir_mode;
         if let Err(e) =
             stat_override::set_override_at(parent_fd.raw(), name, ctx.uid, ctx.gid, full_mode, 0)
@@ -271,11 +323,19 @@ pub(crate) fn do_mknod(
         // in the overlay and have no meaningful host perm bits.
         if fs.cfg.mirror_host_permissions()
             && file_type == platform::MODE_REG
-            && let Err(e) = fchmod_mirror(fd, perm_mode, platform::MODE_REG)
+            && let Err(e) = fchmod_with_owner_floor(fd, perm_mode, platform::MODE_REG)
         {
             unsafe { libc::close(fd) };
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(e);
+        }
+
+        if (!fs.cfg.mirror_host_permissions() || file_type != platform::MODE_REG)
+            && let Err(error) = fchmod_with_owner_floor(fd, 0, platform::MODE_REG)
+        {
+            unsafe { libc::close(fd) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+            return Err(error);
         }
 
         // Store the requested type and permissions in xattr.
@@ -285,6 +345,10 @@ pub(crate) fn do_mknod(
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(e);
         }
+    } else if let Err(error) = fchmod_with_owner_floor(fd, perm_mode, platform::MODE_REG) {
+        unsafe { libc::close(fd) };
+        unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+        return Err(error);
     }
     unsafe { libc::close(fd) };
 

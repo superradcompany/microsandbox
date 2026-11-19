@@ -10,6 +10,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+use if_addrs::{IfAddr, get_if_addrs};
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_protocol::bootstrap::{
     BootstrapEnvVar, BootstrapIpv4, BootstrapIpv6, BootstrapNetwork,
@@ -28,6 +29,7 @@ use crate::netstack::{
     shared::{DEFAULT_QUEUE_CAPACITY, SharedState},
 };
 use crate::policy::{NetworkPolicy, NetworkProfile};
+use crate::ports::{BoundPublishedPorts, PublishedPortBindError};
 use crate::secrets::handle::SecretsHandle;
 
 //--------------------------------------------------------------------------------------------------
@@ -78,10 +80,14 @@ pub struct SmoltcpNetwork {
     secrets: SecretsHandle,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Default)]
 struct HostRoutes {
     ipv4: bool,
     ipv6: bool,
+    host_ipv4: Vec<Ipv4Addr>,
+    host_ipv4_networks: Vec<Ipv4Network>,
+    host_ipv6: Vec<Ipv6Addr>,
+    host_ipv6_networks: Vec<Ipv6Network>,
 }
 
 /// Errors that prevent the smoltcp network from being created safely.
@@ -140,7 +146,7 @@ pub struct TerminationHandle {
     shared: Arc<SharedState>,
 }
 
-/// Read-only view of aggregate network byte counters.
+/// Read-only view of aggregate network counters.
 #[derive(Clone)]
 pub struct MetricsHandle {
     shared: Arc<SharedState>,
@@ -163,10 +169,66 @@ struct NetworkActivationGate {
 
 impl HostRoutes {
     fn detect() -> Self {
-        Self {
+        let mut routes = Self {
             ipv4: host_has_ipv4_route(),
             ipv6: host_has_ipv6_route(),
+            ..Self::default()
+        };
+        let interfaces = match get_if_addrs() {
+            Ok(interfaces) => interfaces,
+            Err(_) => {
+                // Interface discovery is security-sensitive. If IPv6 routing
+                // exists but enumeration fails, fail closed for IPv6 policy
+                // classification rather than treating every destination as
+                // public.
+                if routes.ipv6 {
+                    routes.host_ipv6_networks.push(
+                        Ipv6Network::new(Ipv6Addr::UNSPECIFIED, 0)
+                            .expect("unspecified IPv6 /0 must be valid"),
+                    );
+                }
+                return routes;
+            }
+        };
+
+        for interface in interfaces {
+            match interface.addr {
+                IfAddr::V4(addr) => {
+                    routes.host_ipv4.push(addr.ip);
+                    if addr.prefixlen > 0
+                        && let Ok(network) = Ipv4Network::new(addr.ip, addr.prefixlen)
+                    {
+                        routes.host_ipv4_networks.push(network);
+                    }
+                }
+                IfAddr::V6(addr) => {
+                    routes.host_ipv6.push(addr.ip);
+                    // Most hosts advertise a /64 while cloud guests can expose
+                    // a /128 address with a wider on-link route. Use the
+                    // reported prefix when available and conservatively model
+                    // a /64 for that cloud form.
+                    let prefix_len = if addr.prefixlen == 128 {
+                        64
+                    } else {
+                        addr.prefixlen
+                    };
+                    if prefix_len > 0
+                        && let Ok(network) = Ipv6Network::new(addr.ip, prefix_len)
+                    {
+                        routes.host_ipv6_networks.push(network);
+                    }
+                }
+            }
         }
+
+        if routes.ipv6 && routes.host_ipv6_networks.is_empty() {
+            routes.host_ipv6_networks.push(
+                Ipv6Network::new(Ipv6Addr::UNSPECIFIED, 0)
+                    .expect("unspecified IPv6 /0 must be valid"),
+            );
+        }
+
+        routes
     }
 }
 
@@ -277,6 +339,13 @@ impl SmoltcpNetwork {
         // Packet queue capacity is independent of the optional connection cap:
         // a large cap must not allocate a correspondingly large packet queue.
         let shared = Arc::new(SharedState::new(DEFAULT_QUEUE_CAPACITY));
+        shared.set_host_networks(
+            host_routes.host_ipv4.clone(),
+            host_routes.host_ipv4_networks.clone(),
+            host_routes.host_ipv6.clone(),
+            host_routes.host_ipv6_networks.clone(),
+        );
+
         shared.set_http_config(config.http.clone());
         if let Some(prefix) = config
             .nat64_prefixes
@@ -382,11 +451,18 @@ impl SmoltcpNetwork {
         }
     }
 
-    /// Start the smoltcp poll thread.
+    /// Claim published host ports and start the smoltcp poll thread.
     ///
     /// Must be called before VM boot. Requires a tokio runtime handle for
     /// spawning proxy tasks, DNS resolution, and published port listeners.
-    pub fn start(&mut self, tokio_handle: tokio::runtime::Handle) {
+    ///
+    /// # Errors
+    ///
+    /// Fails if a published host port cannot be claimed. No poll thread starts in that case.
+    pub fn start(
+        &mut self,
+        tokio_handle: tokio::runtime::Handle,
+    ) -> Result<(), PublishedPortBindError> {
         let shared = self.shared.clone();
         let poll_config = PollLoopConfig {
             gateway_mac: self.gateway_mac,
@@ -401,12 +477,20 @@ impl SmoltcpNetwork {
         let platform_policy = self.platform_policy.clone();
         let dns_config = config.dns.clone();
         let tls_state = self.tls_state.clone();
-        let published_ports = config.ports.clone();
+        let tcp_accept_queue_size = config.tcp_accept_queue_size.unwrap_or_default();
+        let published_ports = BoundPublishedPorts::bind(
+            &config.ports,
+            tcp_accept_queue_size,
+            self.guest_ipv4,
+            self.guest_ipv6,
+            self.gateway_ipv4,
+            self.gateway_ipv6,
+            &tokio_handle,
+        )?;
         let strict = config.strict;
         let max_tcp_connections = config.max_tcp_connections.and_then(ConnectionLimit::cap);
         let max_udp_connections = config.max_udp_connections;
         let max_inbound_tcp_connections = config.max_inbound_tcp_connections;
-        let tcp_accept_queue_size = config.tcp_accept_queue_size.unwrap_or_default();
         let secrets = self.secrets.clone();
         let activation_gate = self.activation_gate.take();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
@@ -429,7 +513,6 @@ impl SmoltcpNetwork {
                         strict,
                         max_tcp_connections,
                         max_udp_connections,
-                        tcp_accept_queue_size,
                         max_inbound_tcp_connections,
                         tokio_handle,
                         secrets,
@@ -438,6 +521,8 @@ impl SmoltcpNetwork {
                 })
                 .expect("failed to spawn smoltcp poll thread"),
         );
+
+        Ok(())
     }
 
     /// Take the `NetBackend` for `VmBuilder::net()`. One-shot.
@@ -566,7 +651,7 @@ impl SmoltcpNetwork {
         }
     }
 
-    /// Create a handle for reading aggregate network byte counters.
+    /// Create a handle for reading aggregate network counters.
     pub fn metrics_handle(&self) -> MetricsHandle {
         MetricsHandle {
             shared: self.shared.clone(),
@@ -617,6 +702,21 @@ impl MetricsHandle {
     /// Total runtime -> guest bytes observed at the virtio-net boundary.
     pub fn rx_bytes(&self) -> u64 {
         self.shared.rx_bytes()
+    }
+
+    /// Published TCP connections rejected by the bounded admission queue.
+    pub fn inbound_tcp_rejected(&self) -> u64 {
+        self.shared.inbound_tcp_rejected()
+    }
+
+    /// Outbound TCP connections rejected because this sandbox reached its active cap.
+    pub fn outbound_tcp_rejected(&self) -> u64 {
+        self.shared.outbound_tcp_rejected()
+    }
+
+    /// Outbound UDP sessions evicted because this sandbox reached its session cap.
+    pub fn outbound_udp_evicted(&self) -> u64 {
+        self.shared.outbound_udp_evicted()
     }
 }
 
@@ -811,7 +911,11 @@ mod tests {
     }
 
     fn routes(ipv4: bool, ipv6: bool) -> HostRoutes {
-        HostRoutes { ipv4, ipv6 }
+        HostRoutes {
+            ipv4,
+            ipv6,
+            ..HostRoutes::default()
+        }
     }
 
     #[test]

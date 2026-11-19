@@ -6,7 +6,9 @@ keywords: ["microsandbox SDK", "Python SDK", "TypeScript SDK", "Rust SDK", "Go S
 icon: "play"
 ---
 
-The SDK runs microsandbox directly from your application. Running locally, creating a sandbox spawns a VM as a child process; there is no daemon to install and no server to connect to. With an API key set, the same SDK runs sandboxes on [microsandbox cloud](/cloud/overview) instead.
+Run microsandbox from your application. Locally, each sandbox runs as a child VM process; there is no daemon to install.
+
+The SDK uses your configured backend and defaults to local. Set `MSB_BACKEND=remote` and supply your API key to run the same code on [our managed cloud](/cloud/overview). Existing sandboxes keep their original destination. See [remote connections](/cloud/connect).
 
 ## Installation
 
@@ -32,26 +34,28 @@ gem install microsandbox
 ```
 </CodeGroup>
 
-<Accordion title="Provisioning the runtime separately">
-
-All five SDKs can use a separately provisioned runtime. See [Runtime setup](/sdk/setup#bring-your-own-runtime) for code tabs covering each SDK’s packaging and setup requirements.
-
-</Accordion>
+<Note>
+Local sandboxes need a runtime. See [runtime setup](/sdk/setup) for installation and packaging details. Remote connections need only an API key.
+</Note>
 
 ## Small example
 
-Create a sandbox from a container image, run a command, print the output, and stop it.
+Create a sandbox from a container image, run a command, print the output, and remove it.
 
 <CodeGroup>
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("hello")
+const sb = await Sandbox.builder("hello")
     .image("python")
     .create();
 
-const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
-console.log("Output:", output.stdout());
+try {
+    const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
+    console.log("Output:", output.stdout());
+} finally {
+    await sb.destroy();
+}
 ```
 
 ```rust Rust
@@ -69,7 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let output = sb.exec("python", ["-c", "print('Hello, World!')"]).await?;
     println!("{}", output.stdout()?);
 
-    sb.stop().await?;
+    sb.destroy().await?;
     Ok(())
 }
 ```
@@ -79,15 +83,12 @@ import asyncio
 from microsandbox import Sandbox
 
 async def main():
-    sb = await Sandbox.create(
-        "hello",
-        image="python",
-    )
-
-    output = await sb.exec("python", ["-c", "print('Hello, World!')"])
-    print("Output:", output.stdout_text)
-
-    await sb.stop()
+    sb = await Sandbox.create("hello", image="python")
+    try:
+        output = await sb.exec("python", ["-c", "print('Hello, World!')"])
+        print(output.stdout_text)
+    finally:
+        await sb.destroy()
 
 asyncio.run(main())
 ```
@@ -104,26 +105,33 @@ import (
 )
 
 func main() {
+    if err := run(); err != nil {
+        log.Fatal(err)
+    }
+}
+
+func run() error {
     ctx := context.Background()
 
     if _, err := m.EnsureRuntime(ctx, m.RuntimeConfig{}, m.InstallOptions{}); err != nil {
-        log.Fatal(err)
+        return err
     }
 
     sb, err := m.CreateSandbox(ctx, "hello", m.WithImage("python"))
     if err != nil {
-        log.Fatal(err)
+        return err
     }
     defer func() {
-        _ = sb.Stop(context.Background())
+        _ = sb.Destroy(context.Background())
         _ = sb.Close()
     }()
 
     out, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello, World!')"})
     if err != nil {
-        log.Fatal(err)
+        return err
     }
     fmt.Println("Output:", out.Stdout())
+    return nil
 }
 ```
 
@@ -136,9 +144,100 @@ Microsandbox::Sandbox.with("hello", image: "python") do |sandbox|
   output = sandbox.exec("python", ["-c", "print('Hello, World!')"])
   puts "Output: #{output.stdout}"
 end
+Microsandbox::Sandbox.remove("hello")
 ```
 
 </CodeGroup>
+
+## Connect remotely
+
+Set `MSB_API_KEY`, then use a `RemoteContext`. These examples inspect an existing sandbox named `worker`.
+
+<CodeGroup>
+```typescript TypeScript
+import { RemoteContext } from "microsandbox";
+
+const remote = RemoteContext.fromEnv();
+const sb = await remote.sandboxes.get("worker");
+console.log(await sb.status());
+```
+
+```rust Rust
+use microsandbox::{Context, RemoteContext};
+
+let remote = RemoteContext::from_env()?;
+let sb = remote.sandboxes().get("worker").await?;
+println!("{:?}", sb.status().await?);
+```
+
+```python Python
+from microsandbox import RemoteContext
+
+remote = RemoteContext.from_env()
+sb = await remote.sandboxes.get("worker")
+print(await sb.status())
+```
+
+```go Go
+remote, err := m.RemoteContextFromEnv()
+if err != nil {
+    return err
+}
+sb, err := remote.Sandboxes().Get(ctx, "worker")
+if err != nil {
+    return err
+}
+defer sb.Close()
+
+status, err := sb.Status(ctx)
+if err != nil {
+    return err
+}
+fmt.Println(status)
+```
+
+```ruby Ruby
+require "microsandbox"
+
+remote = Microsandbox::RemoteContext.from_env
+sb = remote.sandboxes.get("worker")
+puts sb.status
+```
+</CodeGroup>
+
+<Tip>
+Use `MSB_BACKEND` or an active profile to [switch between local and cloud](/cloud/connect#choose-at-startup) across SDKs and the CLI.
+</Tip>
+
+## Select a smaller distribution
+
+<Note>
+Smaller packages are unreleased and are not included in v0.7.15.
+</Note>
+
+TypeScript and Python offer separate local and remote packages:
+
+<CodeGroup>
+```bash TypeScript
+npm install @microsandbox/local
+# Or, for remote connections:
+npm install @microsandbox/remote
+```
+
+```bash Python
+pip install microsandbox-local
+# Or, for remote connections:
+pip install microsandbox-remote
+```
+</CodeGroup>
+
+Change the package you import; the same sandbox methods still work.
+
+See [distribution choices](/migrations/sdk-distributions) for imports, native-library setup, and options for every SDK.
+
+<Note>
+Smaller local packages need a [separately installed runtime](/sdk/setup#bring-your-own-runtime). Remote packages need no local runtime.
+</Note>
 
 ## Reference
 

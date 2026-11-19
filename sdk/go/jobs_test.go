@@ -10,7 +10,7 @@ func TestJobOutputPreservesBytesAndCursor(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"timestamp":1,"source":"stdout","data_base64":"/wAK","cursor":"job_1:1"}`), &entry); err != nil {
 		t.Fatal(err)
 	}
-	if string(entry.Data) != string([]byte{255, 0, 10}) || entry.Cursor != "job_1:1" {
+	if entry.Source != JobOutputStdout || string(entry.Data) != string([]byte{255, 0, 10}) || entry.Cursor != "job_1:1" {
 		t.Fatalf("bad output: %#v", entry)
 	}
 }

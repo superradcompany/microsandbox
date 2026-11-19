@@ -69,10 +69,8 @@ impl JsSandboxBuilder {
     /// Start building a sandbox. Names are limited to 128 UTF-8 bytes.
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
-        Self {
-            inner: Some(microsandbox::Sandbox::builder(name)),
-            outbound_proxy: None,
-        }
+        let builder = microsandbox::Sandbox::builder(name.clone());
+        Self::from_builder(name, builder)
     }
 
     /// Set the rootfs image source. Accepts an OCI reference or a host
@@ -741,20 +739,20 @@ impl JsSandboxBuilder {
     }
 
     /// Auto-stop after `secs` seconds.
-    #[napi(js_name = "maxDuration")]
+    #[napi(js_name = "maxDurationSeconds")]
     pub fn max_duration(&mut self, secs: f64) -> Result<&Self> {
         let secs = crate::numeric::safe_integer(secs, "secs")?;
         let prev = self.take_inner();
-        self.inner = Some(prev.max_duration(secs));
+        self.inner = Some(prev.max_duration(std::time::Duration::from_secs(secs)));
         Ok(self)
     }
 
     /// Auto-stop after `secs` seconds of inactivity.
-    #[napi(js_name = "idleTimeout")]
+    #[napi(js_name = "idleTimeoutSeconds")]
     pub fn idle_timeout(&mut self, secs: f64) -> Result<&Self> {
         let secs = crate::numeric::safe_integer(secs, "secs")?;
         let prev = self.take_inner();
-        self.inner = Some(prev.idle_timeout(secs));
+        self.inner = Some(prev.idle_timeout(std::time::Duration::from_secs(secs)));
         Ok(self)
     }
 
@@ -948,5 +946,17 @@ impl JsSandboxBuilder {
         self.inner
             .take()
             .expect("SandboxBuilder used after consumption")
+    }
+}
+
+impl JsSandboxBuilder {
+    pub(crate) fn from_builder(
+        _name: String,
+        builder: microsandbox::sandbox::SandboxBuilder,
+    ) -> Self {
+        Self {
+            inner: Some(builder),
+            outbound_proxy: None,
+        }
     }
 }

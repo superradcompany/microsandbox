@@ -7,6 +7,8 @@
 //!
 //!     cargo nextest run -p microsandbox --tests --run-ignored=only
 
+#![cfg(feature = "net")]
+
 use microsandbox::sandbox::HttpDenyResponseFormat;
 use microsandbox::{NetworkPolicy, Sandbox};
 use microsandbox_network::policy::Rule;

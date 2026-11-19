@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from contextlib import suppress
 
 import pytest
@@ -28,7 +27,7 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
 
     sandbox = await Sandbox.create(name, image=IMAGE, cpus=1, memory=512)
     try:
-        assert await sandbox.name == name
+        assert sandbox.name == name
         assert await sandbox.owns_lifecycle is True
         for method_name in (
             "stop",
@@ -55,9 +54,9 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
 
         handle = await Sandbox.get(name)
         assert handle.name == name
-        assert handle.status
-        assert handle.created_at is not None
-        assert json.loads(handle.config_json)
+        assert await handle.status() is SandboxStatus.RUNNING
+        assert (await handle.info())["created_at"] is not None
+        assert await handle.config()
 
         handle_ping = await handle.ping()
         assert handle_ping.name == name
@@ -87,9 +86,10 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
         assert handle_plan["sandbox"] == name
         assert handle_plan["applied"] is False
 
-        connected = await handle.connect()
+        await handle.ensure_running()
+        connected = handle
         try:
-            assert await connected.name == name
+            assert connected.name == name
             assert await connected.owns_lifecycle is False
             out = await connected.shell("printf 'connected\\n'")
             assert out.success is True
@@ -99,18 +99,17 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
                 await connected.detach()
 
         await sandbox.stop()
-        result = await handle.refresh()
-        assert result.status is SandboxStatus.STOPPED
+        assert await handle.status() is SandboxStatus.STOPPED
 
         with pytest.raises(SandboxNotRunningError):
             await handle.ping()
         with pytest.raises(SandboxNotRunningError):
-            await result.touch()
-        assert (await handle.refresh()).status is SandboxStatus.STOPPED
+            await handle.touch()
+        assert await handle.status() is SandboxStatus.STOPPED
 
         restarted = await Sandbox.start(name)
         try:
-            assert await restarted.name == name
+            assert restarted.name == name
             out = await restarted.shell("printf 'restarted\\n'")
             assert out.stdout_text == "restarted\n"
         finally:
@@ -134,7 +133,7 @@ async def test_replace_rejects_duplicate_then_replaces(sandbox_name):
 
         second = await Sandbox.create(name, image=IMAGE, cpus=1, memory=512, replace=True)
         try:
-            assert await second.name == name
+            assert second.name == name
             out = await second.shell("printf 'replacement\\n'")
             assert out.stdout_text == "replacement\n"
         finally:
@@ -153,9 +152,9 @@ async def test_list_with_labels(sandbox_factory, sandbox_name):
     job = await sandbox_factory(prefix="py-sdk-job", labels={"owner": owner, "tier": "job"})
     other = await sandbox_factory(prefix="py-sdk-other", labels={"owner": owner + "-else"})
 
-    web_name = await web.name
-    job_name = await job.name
-    other_name = await other.name
+    web_name = web.name
+    job_name = job.name
+    other_name = other.name
 
     # Single selector → both of this owner's sandboxes, not the other's.
     by_owner = {h.name for h in (await Sandbox.list_with(labels={"owner": owner})).sandboxes}

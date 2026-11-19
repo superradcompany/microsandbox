@@ -3,7 +3,7 @@
 use clap::Args;
 use console::style;
 use microsandbox::sandbox::{
-    DeploymentProfile, HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxStatus,
+    DeploymentProfile, HostPermissions, MountOptions, SandboxConfig, SandboxStatus,
     SecurityProfile, StatVirtualization, VolumeMount,
 };
 use serde::Serialize;
@@ -91,7 +91,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         return super::jobs::inspect(&args.name, job, args.format == Some(OutputFormat::Json))
             .await;
     }
-    let handle = Sandbox::get(&args.name).await?;
+    let handle = crate::commands::common::sandbox_record(&args.name).await?;
     let desired_config = handle.config().ok();
     let active_config = handle.active_config().ok().flatten();
     let pause_state = if matches!(

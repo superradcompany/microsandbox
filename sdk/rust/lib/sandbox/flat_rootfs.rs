@@ -6,6 +6,7 @@ use std::time::Instant;
 use microsandbox_types::FlatClone;
 use microsandbox_utils::copy::FastCopyStrategy;
 
+use crate::context::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -24,7 +25,7 @@ pub(crate) const FLAT_ROOTFS_FILENAME: &str = "rootfs.raw";
 /// Clone one immutable cached base into a private sparse disk and grow it offline.
 pub(crate) async fn create_private_flat_rootfs(
     base: PathBuf,
-    destination: PathBuf,
+    destination: &CreationStorage,
     target_mib: u32,
     clone: FlatClone,
 ) -> MicrosandboxResult<FlatClone> {
@@ -47,6 +48,7 @@ pub(crate) async fn create_private_flat_rootfs(
         )));
     }
 
+    let destination = destination.clone();
     tokio::task::spawn_blocking(move || {
         create_private_flat_rootfs_sync(&base, &destination, target_bytes, clone)
     })
@@ -58,7 +60,7 @@ pub(crate) async fn create_private_flat_rootfs(
 
 /// Grow a stopped sandbox's private flat root disk to the requested capacity.
 pub(crate) async fn grow_private_flat_rootfs(
-    path: PathBuf,
+    path: &CreationStorage,
     target_mib: u32,
 ) -> MicrosandboxResult<()> {
     let target_bytes = u64::from(target_mib) * BYTES_PER_MIB;
@@ -75,6 +77,7 @@ pub(crate) async fn grow_private_flat_rootfs(
         return Ok(());
     }
 
+    let path = path.clone();
     tokio::task::spawn_blocking(move || microsandbox_image::ext4::grow_image(&path, target_bytes))
         .await
         .map_err(|error| {
@@ -86,10 +89,11 @@ pub(crate) async fn grow_private_flat_rootfs(
 
 /// Materialize a patched complete OCI tree as one private flat root disk.
 pub(crate) async fn create_patched_flat_rootfs(
-    destination: PathBuf,
+    destination: &CreationStorage,
     tree: microsandbox_image::tree::FileTree,
     requested_mib: Option<u32>,
 ) -> MicrosandboxResult<u32> {
+    let destination = destination.clone();
     tokio::task::spawn_blocking(move || {
         if destination.exists() {
             return Err(MicrosandboxError::Custom(format!(
@@ -99,6 +103,9 @@ pub(crate) async fn create_patched_flat_rootfs(
         }
         let temporary = destination.with_extension("raw.part");
         let result = (|| {
+            // This candidate belongs to the sandbox, not the shared image cache.
+            #[cfg(unix)]
+            microsandbox_utils::private_file::create_new(&temporary)?;
             let artifact = microsandbox_image::ext4::materialize_ext4_rootfs(
                 &temporary,
                 tree,
@@ -196,6 +203,10 @@ fn create_private_flat_rootfs_sync(
                 FlatClone::Reflink
             }
         };
+        // Reflinks can copy the source's mode and ACL. Restrict only our unpublished
+        // private copy; the cached base retains its sharing policy.
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_file(&temp)?;
         let clone_us = clone_started_at.elapsed().as_micros();
         let base_apparent_bytes = std::fs::metadata(base)?.len();
         let grow_started_at = Instant::now();
@@ -268,15 +279,18 @@ mod tests {
 
         create_private_flat_rootfs(
             base.clone(),
-            destination.clone(),
+            &crate::context::local::creation::CreationStorage::for_test(destination.clone()),
             target_mib,
             FlatClone::Copy,
         )
         .await
         .unwrap();
 
+        #[cfg(unix)]
+        microsandbox_utils::private_file::verify(&std::fs::File::open(&destination).unwrap())
+            .unwrap();
         assert_eq!(
-            std::fs::metadata(destination).unwrap().len(),
+            std::fs::metadata(&destination).unwrap().len(),
             u64::from(target_mib) * BYTES_PER_MIB
         );
         assert_eq!(
@@ -294,7 +308,9 @@ mod tests {
 
         let error = create_private_flat_rootfs(
             base,
-            dir.path().join(FLAT_ROOTFS_FILENAME),
+            &crate::context::local::creation::CreationStorage::for_test(
+                dir.path().join(FLAT_ROOTFS_FILENAME),
+            ),
             1,
             FlatClone::Copy,
         )
@@ -331,13 +347,20 @@ mod tests {
         )
         .unwrap();
 
-        let target_mib = create_patched_flat_rootfs(destination.clone(), tree, None)
-            .await
-            .unwrap();
+        let target_mib = create_patched_flat_rootfs(
+            &crate::context::local::creation::CreationStorage::for_test(destination.clone()),
+            tree,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(destination.is_file());
+        #[cfg(unix)]
+        microsandbox_utils::private_file::verify(&std::fs::File::open(&destination).unwrap())
+            .unwrap();
         assert_eq!(
-            std::fs::metadata(destination).unwrap().len(),
+            std::fs::metadata(&destination).unwrap().len(),
             u64::from(target_mib) * BYTES_PER_MIB
         );
     }

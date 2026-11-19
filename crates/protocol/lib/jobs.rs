@@ -90,8 +90,9 @@ pub struct JobInfo {
     pub timed_out: bool,
 }
 
-/// Origin of one captured output record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Origin of one captured output record. Parse a source name using its wire spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum JobOutputSource {
     /// Command stdout.

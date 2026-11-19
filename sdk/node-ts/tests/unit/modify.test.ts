@@ -8,8 +8,7 @@ import {
   type ModifyOptions,
 } from "../../dist/modify.js";
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
-import type { NapiSandbox, NapiSandboxHandle } from "../../dist/internal/napi.js";
+import type { NapiSandbox } from "../../dist/internal/napi.js";
 
 describe("modifyOptionsToNapi", () => {
   it("returns undefined for omitted options", () => {
@@ -76,6 +75,17 @@ describe("modifyOptionsToNapi", () => {
     expect(napi?.secretsRemove).toEqual(["OLD"]);
   });
 
+  it("keeps repeated removals so the native planner refuses them", () => {
+    const napi = modifyOptionsToNapi({
+      secrets: { API_KEY: { value: "dummy" }, DB_PASS: {} },
+      secretsRemove: ["OLD", "OLD"],
+    });
+
+    // Configured secrets are keyed by name: one spec per name.
+    expect(Object.keys(napi?.secrets ?? {})).toEqual(["API_KEY", "DB_PASS"]);
+    expect(napi?.secretsRemove).toEqual(["OLD", "OLD"]);
+  });
+
   it("rejects unknown secret spec keys without echoing their values", () => {
     const opts = {
       secrets: { API_KEY: { value: "dummy-secret", allowedHost: ["api.example.com"] } },
@@ -124,7 +134,7 @@ describe("secret policy capability gate", () => {
     return {
       modify,
       sandbox: new Sandbox({ modify } as unknown as NapiSandbox, "api"),
-      handle: new SandboxHandle({ modify } as unknown as NapiSandboxHandle),
+      handle: new Sandbox({ modify } as unknown as NapiSandbox),
     };
   }
 

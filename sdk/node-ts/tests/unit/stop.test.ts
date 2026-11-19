@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../dist/internal/napi.js", () => ({ napi: {} }));
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
 import { StopTimeoutError } from "../../dist/errors.js";
 
 describe("graceful stop wrappers", () => {
@@ -18,7 +17,7 @@ describe("graceful stop wrappers", () => {
         kill: vi.fn(async () => {}),
       };
       const wrapper = kind === "sandbox"
-        ? new Sandbox(native as never, "fixture") : new SandboxHandle(native as never);
+        ? new Sandbox(native as never, "fixture") : new Sandbox(native as never);
       return { native, wrapper };
     }
 
@@ -46,5 +45,79 @@ describe("graceful stop wrappers", () => {
       }
       expect(native.stopWithTimeout).not.toHaveBeenCalled();
     });
+
+    it(`${kind} preserves the stop timeout validation message`, async () => {
+      const { native, wrapper } = fixture();
+
+      await expect(wrapper.stopWithTimeout(-1)).rejects.toThrow(
+        "stop timeout must be an integer from 0 to 4294967295 milliseconds",
+      );
+
+      expect(native.stopWithTimeout).not.toHaveBeenCalled();
+    });
+
+    it(`${kind} forwards the maximum stop timeout unchanged`, async () => {
+      const { native, wrapper } = fixture();
+
+      await expect(wrapper.stopWithTimeout(4294967295)).rejects.toBeInstanceOf(StopTimeoutError);
+
+      expect(native.stopWithTimeout).toHaveBeenCalledExactlyOnceWith(4294967295);
+      expect(native.kill).not.toHaveBeenCalled();
+    });
   }
+});
+
+describe("kill timeout wrappers", () => {
+  for (const kind of ["sandbox", "handle"] as const) {
+    function fixture() {
+      const native = {
+        id: "same-run", name: "fixture", backendKind: "local", ownsLifecycle: false,
+        status: "running", configJson: "{}",
+        killWithTimeout: vi.fn(async (_ms: number) => {}),
+      };
+      const wrapper = kind === "sandbox"
+        ? new Sandbox(native as never, "fixture") : new Sandbox(native as never);
+      return { native, wrapper };
+    }
+
+    it.each([-1, NaN, Infinity, 0.5, 4294967296])(`${kind} rejects %s before dispatch`, async (ms) => {
+      const { native, wrapper } = fixture();
+
+      const result = wrapper.killWithTimeout(ms);
+      await expect(result).rejects.toBeInstanceOf(RangeError);
+      await expect(result).rejects.toThrow(
+        "kill timeout must be an integer from 0 to 4294967295 milliseconds",
+      );
+
+      expect(native.killWithTimeout).not.toHaveBeenCalled();
+    });
+
+    it.each([0, 4294967295])(`${kind} forwards %s unchanged`, async (ms) => {
+      const { native, wrapper } = fixture();
+
+      await wrapper.killWithTimeout(ms);
+
+      expect(native.killWithTimeout).toHaveBeenCalledExactlyOnceWith(ms);
+    });
+  }
+});
+
+describe("live unified resource inspection", () => {
+  it("returns independent observations and propagates lookup failure", async () => {
+    const native = {
+      id: "original", name: "task", backendKind: "cloud",
+      infoJson: vi.fn()
+        .mockResolvedValueOnce(JSON.stringify({ id: "original", name: "task", status: "stopped", last_failure_message: null, created_at: "2026-11-16T00:00:00.123456789Z", updated_at: null }))
+        .mockResolvedValueOnce(JSON.stringify({ id: "original", name: "task", status: "running", last_failure_message: null, created_at: null, updated_at: null }))
+        .mockRejectedValueOnce(new Error("provider unavailable")),
+      ensureRunning: vi.fn(),
+    };
+    const sb = new Sandbox(native as never, "task");
+    const first = await sb.info();
+    expect(first.createdAt).toBe("2026-11-16T00:00:00.123456789Z");
+    expect(await sb.status()).toBe("running");
+    expect(first.status).toBe("stopped");
+    await expect(sb.info()).rejects.toThrow("provider unavailable");
+    expect(native.ensureRunning).not.toHaveBeenCalled();
+  });
 });

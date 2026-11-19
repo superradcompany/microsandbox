@@ -1,27 +1,23 @@
-//! Lightweight sandbox handle for metadata and signal-based lifecycle management.
-//!
-//! Per the SDK local-cloud parity plan (D6.4) `SandboxHandle` stays a single
-//! type regardless of backend. It carries an `Arc<dyn Backend>` plus a
-//! backend-private [`SandboxHandleInner`](crate::backend::SandboxHandleInner)
-//! enum. Users reach variant-specific data via [`SandboxHandle::local`] /
-//! [`SandboxHandle::cloud`].
+//! Provider observations used internally to construct and inspect unified resources.
+//! Application code uses `Sandbox`; records do not represent independent resource ownership.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(feature = "cloud")]
-use crate::backend::{CloudCreateSandboxResponse, SandboxCloudState};
+use crate::context::{CloudCreateSandboxResponse, SandboxRemoteState};
 #[cfg(feature = "local")]
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    backend::{
-        Backend, SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState,
+    context::{
+        Context, SandboxRecordCloudState, SandboxRecordInner, SandboxRecordLocalState,
         sandbox::SandboxIdentity,
     },
     error::Operation,
 };
 
-#[cfg(feature = "local")]
+#[cfg(any(feature = "local", feature = "cloud"))]
 use super::SandboxModificationBuilder;
 use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult};
 
@@ -30,15 +26,15 @@ use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult}
 //--------------------------------------------------------------------------------------------------
 
 /// Default timeout for the eager local agent connection made by
-/// [`SandboxHandle::connect`].
-pub const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// [`SandboxRecord::connect`].
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default graceful budget for explicit restart/destroy convergence options.
-/// [`SandboxHandle::stop`] itself has no built-in deadline.
-pub const DEFAULT_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// [`SandboxRecord::stop`] itself has no built-in deadline.
+pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default timeout for observing stopped state after force termination.
-pub const DEFAULT_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const DEFAULT_KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -50,7 +46,7 @@ pub struct RestartOptions {
     /// Force termination instead of requesting graceful shutdown.
     pub force: bool,
     /// Graceful-shutdown completion budget; expiry does not force termination.
-    pub timeout: std::time::Duration,
+    pub timeout: Duration,
     /// Start the replacement runtime in detached mode.
     pub detached: bool,
 }
@@ -61,7 +57,7 @@ pub struct DestroyOptions {
     /// Force termination instead of requesting graceful shutdown.
     pub force: bool,
     /// Graceful-shutdown completion budget; expiry does not force termination.
-    pub timeout: std::time::Duration,
+    pub timeout: Duration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,18 +77,12 @@ enum RestartAction {
     RejectPaused,
 }
 
-/// A lightweight handle to a sandbox.
-///
-/// Provides metadata access and signal-based lifecycle management (stop, kill,
-/// remove) without requiring a live agent bridge. Obtained via
-/// [`Sandbox::get`] or [`Sandbox::list`].
-///
-/// For full runtime capabilities (exec, shell, fs), call
-/// [`connect`](SandboxHandle::connect) when the sandbox is already running, or
-/// [`start`](SandboxHandle::start) to boot a stopped sandbox.
-pub struct SandboxHandle {
-    pub(super) backend: Arc<dyn Backend>,
-    inner: SandboxHandleInner,
+/// Provider observation used to construct a unified `Sandbox`.
+/// This implementation type is exposed only for provider and native ABI integration.
+#[doc(hidden)]
+pub struct SandboxRecord {
+    pub(super) backend: Arc<dyn Context>,
+    inner: SandboxRecordInner,
     name: String,
 }
 
@@ -100,18 +90,18 @@ pub struct SandboxHandle {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl SandboxHandle {
+impl SandboxRecord {
     /// Build a handle from a local sandbox DB row + active PID.
     #[cfg(feature = "local")]
     pub(crate) fn from_local_model(
-        backend: Arc<dyn Backend>,
+        backend: Arc<dyn Context>,
         model: sandbox_entity::Model,
         pid: Option<i32>,
     ) -> Self {
         let name = model.name.clone();
         Self {
             backend,
-            inner: SandboxHandleInner::Local(SandboxHandleLocalState {
+            inner: SandboxRecordInner::Local(SandboxRecordLocalState {
                 db_id: model.id,
                 status: model.status,
                 config_json: model.config,
@@ -132,15 +122,15 @@ impl SandboxHandle {
     /// `null`; it is not replaced with a fabricated SDK configuration.
     #[cfg(feature = "cloud")]
     pub(crate) fn from_cloud(
-        backend: Arc<dyn Backend>,
+        backend: Arc<dyn Context>,
         cloud: CloudCreateSandboxResponse,
     ) -> MicrosandboxResult<Self> {
-        let status = crate::backend::sandbox::cloud_status_to_sandbox_status(cloud.status);
+        let status = crate::context::sandbox::cloud_status_to_sandbox_status(cloud.status);
         let config_json = serde_json::to_string(&cloud.spec)?;
         let name = cloud.name.clone();
         Ok(Self {
             backend,
-            inner: SandboxHandleInner::Cloud(SandboxHandleCloudState {
+            inner: SandboxRecordInner::Cloud(SandboxRecordCloudState {
                 id: cloud.id,
                 org_id: cloud.org_id,
                 status,
@@ -173,7 +163,7 @@ impl SandboxHandle {
             super::validate_sandbox_name(&self.name)?;
             // Fence cooperative removal/recreation while checking this handle's identity and
             // scanning its path. A pre-scan refresh alone can measure a replacement sandbox.
-            let _transition = crate::LocalBackend::acquire_sandbox_transition_guard(
+            let _transition = crate::LocalContext::acquire_sandbox_transition_guard(
                 &local.config().run_dir(),
                 &self.name,
             )
@@ -196,37 +186,37 @@ impl SandboxHandle {
     /// removed and recreated under the same name.
     pub fn id(&self) -> SandboxId {
         match &self.inner {
-            SandboxHandleInner::Local(state) => SandboxId::local(state.db_id),
-            SandboxHandleInner::Cloud(state) => SandboxId::cloud(&state.id),
+            SandboxRecordInner::Local(state) => SandboxId::local(state.db_id),
+            SandboxRecordInner::Cloud(state) => SandboxId::cloud(&state.id),
         }
     }
 
-    /// Backend-private identity selector used by receiver lifecycle methods.
+    /// Context-private identity selector used by receiver lifecycle methods.
     pub(crate) fn identity(&self) -> SandboxIdentity {
         match &self.inner {
-            SandboxHandleInner::Local(state) => SandboxIdentity::Local(state.db_id),
-            SandboxHandleInner::Cloud(state) => SandboxIdentity::Cloud(state.id.clone()),
+            SandboxRecordInner::Local(state) => SandboxIdentity::Local(state.db_id),
+            SandboxRecordInner::Cloud(state) => SandboxIdentity::Cloud(state.id.clone()),
         }
     }
 
     /// Which backend variant this handle is bound to.
-    pub fn backend_kind(&self) -> crate::backend::BackendKind {
+    pub fn context_kind(&self) -> crate::context::ContextKind {
         self.backend.kind()
     }
 
     /// Local-only handle state. Returns `Some` for local-backed handles.
-    pub fn local(&self) -> Option<&SandboxHandleLocalState> {
+    pub fn local_state(&self) -> Option<&SandboxRecordLocalState> {
         match &self.inner {
-            SandboxHandleInner::Local(s) => Some(s),
-            SandboxHandleInner::Cloud(_) => None,
+            SandboxRecordInner::Local(s) => Some(s),
+            SandboxRecordInner::Cloud(_) => None,
         }
     }
 
     /// Cloud-only handle state. Returns `Some` for cloud-backed handles.
-    pub fn cloud(&self) -> Option<&SandboxHandleCloudState> {
+    pub fn remote_state(&self) -> Option<&SandboxRecordCloudState> {
         match &self.inner {
-            SandboxHandleInner::Cloud(s) => Some(s),
-            SandboxHandleInner::Local(_) => None,
+            SandboxRecordInner::Cloud(s) => Some(s),
+            SandboxRecordInner::Local(_) => None,
         }
     }
 
@@ -237,21 +227,12 @@ impl SandboxHandle {
     /// for a fresh reading. The `_snapshot` suffix is deliberate to avoid
     /// confusion with `Sandbox::status()` which is async + fetch-live.
     ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let handle = Sandbox::get("agent-1").await?;
-    /// // Cheap, in-memory; reflects state at handle-creation time.
-    /// let snap = handle.status_snapshot();
-    ///
-    /// // For a fresh reading, drive through the live Sandbox:
-    /// let sb = handle.start().await?;
-    /// let live = sb.status().await?;
-    /// ```
+    /// Resource callers should use `Sandbox::info` for an explicit observation
+    /// or `Sandbox::status` for a fresh status without starting the sandbox.
     pub fn status_snapshot(&self) -> SandboxStatus {
         match &self.inner {
-            SandboxHandleInner::Local(s) => s.status,
-            SandboxHandleInner::Cloud(s) => s.status,
+            SandboxRecordInner::Local(s) => s.status,
+            SandboxRecordInner::Cloud(s) => s.status,
         }
     }
 
@@ -259,18 +240,18 @@ impl SandboxHandle {
     /// for local handles (local errors flow through the typed error stack).
     pub fn last_failure_message_snapshot(&self) -> Option<String> {
         match &self.inner {
-            SandboxHandleInner::Cloud(s) => s.last_failure_message.clone(),
-            SandboxHandleInner::Local(_) => None,
+            SandboxRecordInner::Cloud(s) => s.last_failure_message.clone(),
+            SandboxRecordInner::Local(_) => None,
         }
     }
 
     /// The serialized sandbox configuration as stored in the database (local)
-    /// or returned by msb-cloud (cloud). Use [`config()`](Self::config) for a
+    /// or returned by the cloud API (cloud). Use [`config()`](Self::config) for a
     /// deserialized [`SandboxConfig`].
     pub fn config_json(&self) -> &str {
         match &self.inner {
-            SandboxHandleInner::Local(s) => &s.config_json,
-            SandboxHandleInner::Cloud(s) => &s.config_json,
+            SandboxRecordInner::Local(s) => &s.config_json,
+            SandboxRecordInner::Cloud(s) => &s.config_json,
         }
     }
 
@@ -281,8 +262,8 @@ impl SandboxHandle {
     /// older running sandboxes may return `None`.
     pub fn active_config_json(&self) -> Option<&str> {
         match &self.inner {
-            SandboxHandleInner::Local(s) => s.active_config_json.as_deref(),
-            SandboxHandleInner::Cloud(_) => None,
+            SandboxRecordInner::Local(s) => s.active_config_json.as_deref(),
+            SandboxRecordInner::Cloud(_) => None,
         }
     }
 
@@ -291,18 +272,18 @@ impl SandboxHandle {
     ///
     /// For local handles this deserializes the persisted [`SandboxConfig`].
     /// For cloud handles this returns an `Unsupported` error: the cloud wire
-    /// shape is [`CloudCreateSandboxRequest`](crate::backend::CloudCreateSandboxRequest),
+    /// shape is [`CloudCreateSandboxRequest`](crate::context::CloudCreateSandboxRequest),
     /// not `SandboxConfig`. Use [`config_json`](Self::config_json) to read the
     /// raw JSON, or [`cloud`](Self::cloud) to access the typed cloud state.
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         match &self.inner {
-            SandboxHandleInner::Local(s) => SandboxConfig::from_stored(
+            SandboxRecordInner::Local(s) => SandboxConfig::from_stored(
                 &s.config_json,
                 s.caller_config_overrides_json.as_deref(),
             ),
-            SandboxHandleInner::Cloud(_) => Err(MicrosandboxError::local_only(
-                Operation::SandboxHandleConfig,
-            )),
+            SandboxRecordInner::Cloud(_) => {
+                Err(MicrosandboxError::local_only(Operation::SandboxConfig))
+            }
         }
     }
 
@@ -319,9 +300,10 @@ impl SandboxHandle {
     /// The builder fetches a fresh handle during [`dry_run`](SandboxModificationBuilder::dry_run)
     /// so planning uses current status and persisted config rather than this
     /// handle's possibly stale snapshot.
-    #[cfg(feature = "local")]
+    #[cfg(any(feature = "local", feature = "cloud"))]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+            .bound_to(self.identity())
     }
 
     /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.
@@ -349,25 +331,25 @@ impl SandboxHandle {
     /// If the name now points at a replacement, this returns
     /// [`MicrosandboxError::SandboxReplaced`] instead of silently rebinding the
     /// receiver.
-    pub async fn refresh(&self) -> MicrosandboxResult<SandboxHandle> {
+    pub async fn refresh(&self) -> MicrosandboxResult<SandboxRecord> {
         let current = self
             .backend
-            .sandboxes()
+            .sandbox_ops()
             .get(self.backend.clone(), &self.name)
             .await?;
         self.ensure_same_identity(&current)?;
         Ok(current)
     }
 
-    fn ensure_same_identity(&self, current: &SandboxHandle) -> MicrosandboxResult<()> {
+    fn ensure_same_identity(&self, current: &SandboxRecord) -> MicrosandboxResult<()> {
         ensure_identity(&self.name, &self.identity(), current)
     }
 
     /// When this sandbox was first created, if recorded.
     pub fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         match &self.inner {
-            SandboxHandleInner::Local(s) => s.created_at,
-            SandboxHandleInner::Cloud(s) => s.created_at,
+            SandboxRecordInner::Local(s) => s.created_at,
+            SandboxRecordInner::Cloud(s) => s.created_at,
         }
     }
 
@@ -376,12 +358,11 @@ impl SandboxHandle {
     /// - Local: the database row's `updated_at` (modification time of the
     ///   persisted record).
     /// - Cloud: the most recent of `stopped_at` / `started_at` / `created_at`
-    ///   from the msb-cloud response. msb-cloud has no dedicated
-    ///   `updated_at` column, so this is synthesised on the client.
+    ///   from the API response. This timestamp is computed on the client.
     pub fn updated_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         match &self.inner {
-            SandboxHandleInner::Local(s) => s.updated_at,
-            SandboxHandleInner::Cloud(s) => s.stopped_at.or(s.started_at).or(s.created_at),
+            SandboxRecordInner::Local(s) => s.updated_at,
+            SandboxRecordInner::Cloud(s) => s.stopped_at.or(s.started_at).or(s.created_at),
         }
     }
 
@@ -394,7 +375,7 @@ impl SandboxHandle {
         opts: &crate::logs::LogOptions,
     ) -> MicrosandboxResult<Vec<crate::logs::LogEntry>> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .logs(self.backend.clone(), &self.name, opts)
             .await
     }
@@ -406,9 +387,9 @@ impl SandboxHandle {
     pub async fn log_stream(
         &self,
         opts: &crate::logs::LogStreamOptions,
-    ) -> MicrosandboxResult<crate::backend::sandbox::LogStream> {
+    ) -> MicrosandboxResult<crate::context::sandbox::LogStream> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .log_stream(self.backend.clone(), &self.name, opts)
             .await
     }
@@ -419,9 +400,9 @@ impl SandboxHandle {
     pub async fn follow_logs(
         &self,
         opts: &crate::logs::LogOptions,
-    ) -> MicrosandboxResult<crate::backend::sandbox::LogStream> {
+    ) -> MicrosandboxResult<crate::context::sandbox::LogStream> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .follow_logs(self.backend.clone(), &self.name, opts)
             .await
     }
@@ -430,8 +411,8 @@ impl SandboxHandle {
     #[cfg(feature = "local")]
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
         let local = self
-            .local()
-            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleMetrics))?;
+            .local_state()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxMetrics))?;
 
         if !matches!(
             local.status,
@@ -451,7 +432,7 @@ impl SandboxHandle {
         let local_backend = self
             .backend
             .as_local()
-            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleMetrics))?;
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxMetrics))?;
         let db = local_backend.db().await?.read();
         super::metrics::metrics_for_sandbox(db, local_backend, local.db_id, &config).await
     }
@@ -461,9 +442,15 @@ impl SandboxHandle {
     /// Boots the VM using the persisted configuration and pinned rootfs state
     /// for local; routes through `POST /v1/sandboxes/by-name/:name/start` for
     /// cloud. The handle remains usable if start fails.
+    ///
+    /// On a Cloud sandbox, a start is refused with
+    /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
+    /// secret change to it is being saved, or while its result is not yet known after
+    /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
+    /// this usually clears within seconds. Start again after a short wait.
     pub async fn start(&self) -> MicrosandboxResult<Sandbox> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .start_identified(self.backend.clone(), &self.name, self.identity())
             .await
     }
@@ -471,9 +458,15 @@ impl SandboxHandle {
     /// Start this sandbox in detached/background mode.
     ///
     /// The handle remains usable if start fails.
+    ///
+    /// On a Cloud sandbox, a start is refused with
+    /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
+    /// secret change to it is being saved, or while its result is not yet known after
+    /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
+    /// this usually clears within seconds. Start again after a short wait.
     pub async fn start_detached(&self) -> MicrosandboxResult<Sandbox> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .start_detached_identified(self.backend.clone(), &self.name, self.identity())
             .await
     }
@@ -532,7 +525,7 @@ impl SandboxHandle {
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -550,24 +543,21 @@ impl SandboxHandle {
     ///
     /// Cloud reconnect is lazy and does not open an agent WebSocket here, so
     /// this timeout applies only to local handles.
-    pub async fn connect_with_timeout(
-        &self,
-        timeout: std::time::Duration,
-    ) -> MicrosandboxResult<Sandbox> {
+    pub async fn connect_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<Sandbox> {
         match &self.inner {
             // Cloud agent routes are already keyed by the captured UUID, so
             // reconnecting cannot follow a reused name and needs no lookup.
-            SandboxHandleInner::Cloud(_) => self.connect_current_with_timeout(timeout).await,
-            SandboxHandleInner::Local(_) => {
+            SandboxRecordInner::Cloud(_) => self.connect_current_with_timeout(timeout).await,
+            SandboxRecordInner::Local(_) => {
                 let current = self.refresh().await?;
                 current.connect_current_with_timeout(timeout).await
             }
         }
     }
 
-    async fn connect_current_with_timeout(
+    pub(super) async fn connect_current_with_timeout(
         &self,
-        timeout: std::time::Duration,
+        timeout: Duration,
     ) -> MicrosandboxResult<Sandbox> {
         #[cfg(not(feature = "local"))]
         let _ = timeout;
@@ -585,10 +575,16 @@ impl SandboxHandle {
 
         match &self.inner {
             #[cfg(feature = "local")]
-            SandboxHandleInner::Local(local) => {
+            SandboxRecordInner::Local(local) => {
                 let local_backend = self.backend.as_local().ok_or_else(|| {
-                    MicrosandboxError::local_only(Operation::SandboxHandleConnect)
+                    MicrosandboxError::local_only(Operation::SandboxEnsureRunning)
                 })?;
+                let run_id = crate::LocalContext::load_latest_run(
+                    local_backend.db().await?.read(),
+                    local.db_id,
+                )
+                .await?
+                .map(|run| run.id);
                 let client = crate::sandbox::fs::agent::connect_agent_with_timeout(
                     local_backend,
                     &self.name,
@@ -599,6 +595,18 @@ impl SandboxHandle {
                 // handshake so concurrent name reuse cannot silently rebind
                 // this receiver to the replacement.
                 self.refresh().await?;
+                let after = crate::LocalContext::load_latest_run(
+                    local_backend.db().await?.read(),
+                    local.db_id,
+                )
+                .await?
+                .map(|run| run.id);
+                if run_id.is_none() || run_id != after {
+                    return Err(MicrosandboxError::SandboxNotRunning(format!(
+                        "runtime generation changed while connecting to '{}'",
+                        self.name,
+                    )));
+                }
                 let config = SandboxConfig::from_stored(
                     &local.config_json,
                     local.caller_config_overrides_json.as_deref(),
@@ -606,34 +614,37 @@ impl SandboxHandle {
 
                 Ok(Sandbox::from_local(
                     self.backend.clone(),
-                    crate::backend::SandboxLocalState {
+                    crate::context::SandboxLocalState {
                         db_id: local.db_id,
+                        run_id,
                         handle: None,
+                        cleanup: None,
+                        owned_run_id: None,
                         client: Arc::new(client),
                     },
                     config,
                 ))
             }
             #[cfg(not(feature = "local"))]
-            SandboxHandleInner::Local(_) => Err(MicrosandboxError::local_only(
-                Operation::SandboxHandleConnect,
+            SandboxRecordInner::Local(_) => Err(MicrosandboxError::local_only(
+                Operation::SandboxEnsureRunning,
             )),
-            SandboxHandleInner::Cloud(cloud) => {
+            SandboxRecordInner::Cloud(cloud) => {
                 #[cfg(not(feature = "cloud"))]
                 {
                     let _ = cloud;
                     Err(MicrosandboxError::cloud_only(
-                        Operation::SandboxHandleConnect,
+                        Operation::SandboxEnsureRunning,
                     ))
                 }
                 #[cfg(feature = "cloud")]
                 {
-                    // The cloud handle stores the optional curated spec exactly as
-                    // returned by the API. Decode it on reconnect, falling back to
-                    // SDK defaults when the server intentionally omitted it.
+                    // Decode execution settings from the inspection projection,
+                    // independently of redacted creation-only fields. Invalid
+                    // runtime settings must fail preparation rather than vanish.
                     let spec = serde_json::from_str(&cloud.config_json)?;
                     let config =
-                        crate::backend::sandbox::sandbox_config_from_cloud_spec(&self.name, spec);
+                        crate::context::sandbox::sandbox_config_from_cloud_spec(&self.name, spec)?;
                     let created_at = cloud.created_at.ok_or_else(|| {
                         MicrosandboxError::Runtime(format!(
                             "cloud sandbox {:?} is missing its creation timestamp",
@@ -643,7 +654,7 @@ impl SandboxHandle {
 
                     Ok(Sandbox::from_cloud_state(
                         self.backend.clone(),
-                        SandboxCloudState {
+                        SandboxRemoteState {
                             id: cloud.id.clone(),
                             org_id: cloud.org_id.clone(),
                             created_at,
@@ -689,10 +700,13 @@ impl SandboxHandle {
         name: &str,
     ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
         use super::super::snapshot::Snapshot;
-        let config = Snapshot::builder(name).from_sandbox(&self.name).build()?;
+        let config = Snapshot::ctx(self.backend.as_ref())
+            .builder(name)
+            .from_sandbox(&self.name)
+            .build()?;
         self.backend
-            .snapshots()
-            .create(self.backend.clone(), config)
+            .snapshot_ops()
+            .create_from(self.backend.clone(), config, &self.id())
             .await
     }
 
@@ -711,7 +725,7 @@ impl SandboxHandle {
 
     /// Graceful completion under one budget, without implicit force termination.
     /// Zero returns a timeout before dispatch; a delivered request may finish later.
-    pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+    pub async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()> {
         super::stop::stop(
             self.backend.clone(),
             &self.name,
@@ -731,7 +745,7 @@ impl SandboxHandle {
 
         current
             .backend
-            .sandboxes()
+            .sandbox_ops()
             .stop_identified(current.backend.clone(), &current.name, current.identity())
             .await
     }
@@ -750,13 +764,13 @@ impl SandboxHandle {
 
         current
             .backend
-            .sandboxes()
+            .sandbox_ops()
             .kill_identified(current.backend.clone(), &current.name, current.identity())
             .await
     }
 
     /// Force-kill the sandbox and wait up to `timeout` for stopped-state observation.
-    pub async fn kill_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+    pub async fn kill_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()> {
         let current = self.refresh().await?;
         if sandbox_status_is_terminal(current.status_snapshot()) {
             return Ok(());
@@ -784,7 +798,7 @@ impl SandboxHandle {
 
         current
             .backend
-            .sandboxes()
+            .sandbox_ops()
             .drain_identified(current.backend.clone(), &current.name, current.identity())
             .await
     }
@@ -796,13 +810,13 @@ impl SandboxHandle {
     pub async fn wait_for_status(
         &self,
         status: SandboxStatus,
-    ) -> MicrosandboxResult<SandboxHandle> {
+    ) -> MicrosandboxResult<SandboxRecord> {
         loop {
             let current = self.refresh().await?;
             if current.status_snapshot() == status {
                 return Ok(current);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -814,7 +828,7 @@ impl SandboxHandle {
     /// Restart this exact sandbox with explicit lifecycle options.
     pub async fn restart_with(&self, options: RestartOptions) -> MicrosandboxResult<Sandbox> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .restart_identified(self.backend.clone(), &self.name, self.identity(), options)
             .await
     }
@@ -869,7 +883,7 @@ impl SandboxHandle {
                 });
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -881,11 +895,11 @@ impl SandboxHandle {
     pub async fn remove(&self) -> MicrosandboxResult<()> {
         match &self.inner {
             #[cfg(feature = "local")]
-            SandboxHandleInner::Local(_) => {
+            SandboxRecordInner::Local(_) => {
                 let refreshed = self.refresh().await?;
                 let local = refreshed
-                    .local()
-                    .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleRemove))?;
+                    .local_state()
+                    .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxDestroy))?;
                 if matches!(
                     local.status,
                     SandboxStatus::Starting
@@ -902,24 +916,24 @@ impl SandboxHandle {
                 let local_backend = self
                     .backend
                     .as_local()
-                    .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleRemove))?;
+                    .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxDestroy))?;
 
                 super::remove_local_persisted_sandbox(local_backend, &self.name, local.db_id).await
             }
             #[cfg(not(feature = "local"))]
-            SandboxHandleInner::Local(_) => Err(MicrosandboxError::local_only(
-                Operation::SandboxHandleRemove,
-            )),
-            SandboxHandleInner::Cloud(_) => {
+            SandboxRecordInner::Local(_) => {
+                Err(MicrosandboxError::local_only(Operation::SandboxDestroy))
+            }
+            SandboxRecordInner::Cloud(_) => {
                 self.backend
-                    .sandboxes()
+                    .sandbox_ops()
                     .remove_identified(self.backend.clone(), &self.name, self.identity())
                     .await
             }
         }
     }
 
-    fn is_local_ephemeral(&self) -> bool {
+    pub(crate) fn is_local_ephemeral(&self) -> bool {
         is_local_ephemeral_handle(&self.inner)
     }
 }
@@ -948,17 +962,17 @@ impl Default for DestroyOptions {
 //--------------------------------------------------------------------------------------------------
 
 pub(crate) async fn get_identified_handle(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     identity: &SandboxIdentity,
-) -> MicrosandboxResult<SandboxHandle> {
-    let current = backend.sandboxes().get(backend.clone(), name).await?;
+) -> MicrosandboxResult<SandboxRecord> {
+    let current = backend.sandbox_ops().get(backend.clone(), name).await?;
     ensure_identity(name, identity, &current)?;
     Ok(current)
 }
 
 pub(crate) async fn restart_by_stop_and_start(
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     name: &str,
     identity: SandboxIdentity,
     options: RestartOptions,
@@ -968,7 +982,7 @@ pub(crate) async fn restart_by_stop_and_start(
         match restart_action(current.status_snapshot()) {
             RestartAction::Start => break current,
             RestartAction::Wait => {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
             RestartAction::StopThenStart => {
                 stop_for_convergence(&current, options.force, options.timeout).await?;
@@ -993,7 +1007,7 @@ pub(crate) async fn restart_by_stop_and_start(
 fn ensure_identity(
     name: &str,
     identity: &SandboxIdentity,
-    current: &SandboxHandle,
+    current: &SandboxRecord,
 ) -> MicrosandboxResult<()> {
     if *identity == current.identity() {
         return Ok(());
@@ -1010,8 +1024,8 @@ fn ensure_identity(
     })
 }
 
-fn is_local_ephemeral_handle(inner: &SandboxHandleInner) -> bool {
-    let SandboxHandleInner::Local(state) = inner else {
+fn is_local_ephemeral_handle(inner: &SandboxRecordInner) -> bool {
+    let SandboxRecordInner::Local(state) = inner else {
         return false;
     };
 
@@ -1055,9 +1069,9 @@ fn destroy_requires_stop(status: SandboxStatus) -> bool {
 }
 
 async fn stop_for_convergence(
-    handle: &SandboxHandle,
+    handle: &SandboxRecord,
     force: bool,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> MicrosandboxResult<()> {
     if force {
         handle.kill_with_timeout(timeout).await
@@ -1070,9 +1084,9 @@ async fn stop_for_convergence(
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl std::fmt::Debug for SandboxHandle {
+impl std::fmt::Debug for SandboxRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SandboxHandle")
+        f.debug_struct("SandboxRecord")
             .field("name", &self.name)
             .field("backend_kind", &self.backend.kind())
             .field("status", &self.status_snapshot())
@@ -1098,10 +1112,9 @@ mod storage_tests {
         let local = Arc::new(
             crate::test_support::local_backend_builder(home.path())
                 .build()
-                .await
                 .unwrap(),
         );
-        let backend: Arc<dyn Backend> = local.clone();
+        let backend: Arc<dyn Context> = local.clone();
         let db = local.db().await.unwrap();
         let original = sandbox_entity::Entity::insert(sandbox_entity::ActiveModel {
             name: Set("storage-owner".into()),
@@ -1119,13 +1132,13 @@ mod storage_tests {
             .await
             .unwrap()
             .unwrap();
-        let stale = SandboxHandle::from_local_model(backend.clone(), model, None);
+        let stale = SandboxRecord::from_local_model(backend.clone(), model, None);
         let directory = local.sandboxes_dir().join("storage-owner");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("disk"), [7; 11]).unwrap();
 
         // Simulate a cooperative replacement that already owns the name transition.
-        let transition = crate::LocalBackend::acquire_sandbox_transition_guard(
+        let transition = crate::LocalContext::acquire_sandbox_transition_guard(
             &local.config().run_dir(),
             "storage-owner",
         )
@@ -1164,7 +1177,7 @@ mod storage_tests {
             Err(MicrosandboxError::SandboxReplaced { .. })
         ));
         let current = backend
-            .sandboxes()
+            .sandbox_ops()
             .get(backend.clone(), "storage-owner")
             .await
             .unwrap();
@@ -1179,7 +1192,7 @@ mod storage_tests {
 #[cfg(all(test, feature = "cloud"))]
 mod tests {
     use super::*;
-    use crate::backend::{BackendKind, CloudSandboxStatus};
+    use crate::context::{CloudSandboxStatus, ContextKind};
 
     #[tokio::test]
     async fn cloud_connect_rebuilds_live_sandbox_without_http_request() {
@@ -1188,9 +1201,12 @@ mod tests {
         let sandbox = handle.connect().await.unwrap();
 
         assert_eq!(sandbox.name(), "cloud-connect-test");
-        assert_eq!(sandbox.backend_kind(), BackendKind::Cloud);
-        assert_eq!(sandbox.cloud().unwrap().id, "sandbox-id");
-        assert_eq!(sandbox.config().spec.name, "cloud-connect-test");
+        assert_eq!(sandbox.context_kind(), ContextKind::Remote);
+        assert_eq!(sandbox.remote_state().unwrap().id, "sandbox-id");
+        assert_eq!(
+            sandbox.prepared_runtime().unwrap().config.spec.name,
+            "cloud-connect-test"
+        );
     }
 
     #[tokio::test]
@@ -1292,16 +1308,16 @@ mod tests {
         assert!(destroy_requires_stop(SandboxStatus::Running));
     }
 
-    fn cloud_handle(status: CloudSandboxStatus) -> SandboxHandle {
+    fn cloud_handle(status: CloudSandboxStatus) -> SandboxRecord {
         cloud_handle_with_id(status, "sandbox-id")
     }
 
-    fn cloud_handle_with_id(status: CloudSandboxStatus, id: &str) -> SandboxHandle {
-        let backend: Arc<dyn Backend> = Arc::new(
+    fn cloud_handle_with_id(status: CloudSandboxStatus, id: &str) -> SandboxRecord {
+        let backend: Arc<dyn Context> = Arc::new(
             crate::test_support::cloud_backend("https://unused.invalid", "msb_test_connect")
                 .unwrap(),
         );
-        SandboxHandle::from_cloud(
+        SandboxRecord::from_cloud(
             backend,
             CloudCreateSandboxResponse {
                 id: id.into(),

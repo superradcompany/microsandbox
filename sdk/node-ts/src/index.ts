@@ -1,7 +1,5 @@
-import { remapKeysToCamel } from "./internal/config.js";
-import { deprecate } from "node:util";
-import { mapNapiError } from "./internal/error-mapping.js";
 import { napi } from "./internal/napi.js";
+import { nativeConstructor, optionsBinding } from "./internal/provider.js";
 
 // Low-level agent client (raw transport to agentd).
 export {
@@ -13,20 +11,13 @@ export {
   type AgentConnectOptions,
   type RawFrame,
 } from "./agent.js";
-export {
-  defaultBackendInfo,
-  defaultBackendKind,
-  setDefaultBackend,
-  withDefaultBackend,
-} from "./runtime.js";
-export type { BackendInfo, DefaultBackend } from "./runtime.js";
 export { SecretSource } from "./network-config.js";
 export type { OutboundProxy, SecretSubstitution } from "./network-config.js";
 export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox, SandboxListBuilder } from "./sandbox.js";
-export type { RestoreBuilder } from "./sandbox.js";
+export type { CommandArgs, RestoreBuilder } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
 /**
  * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is
@@ -45,6 +36,7 @@ export type {
   CpuPlacement,
   SandboxConfig,
   SandboxPage,
+  SandboxInfo,
   SandboxPingResult,
   SandboxTouchResult,
   ExternalMountWarning,
@@ -72,10 +64,9 @@ export type {
   SecretPlannedChange,
 } from "./modify.js";
 export {
-  SandboxHandle,
   type DestroyOptions,
   type RestartOptions,
-} from "./sandbox-handle.js";
+} from "./lifecycle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
 
 // SSH
@@ -92,7 +83,7 @@ export type {
 export { FsReadStream, FsWriteSink, SandboxFsOps } from "./fs.js";
 
 // Volumes
-export { Volume } from "./volume.js";
+export { Volume, type VolumeInfo, type VolumeKind } from "./volume.js";
 import { Volume as _Volume, type VolumeBuilder as _VBT } from "./volume.js";
 /**
  * Native fluent builder for a named volume. `new VolumeBuilder(name)`
@@ -105,12 +96,20 @@ export const VolumeBuilder = function VolumeBuilder(
   return _Volume.builder(name);
 } as unknown as new (name: string) => _VBT;
 export type VolumeBuilder = _VBT;
-export { VolumeHandle } from "./volume-handle.js";
 export {
   VolumeFs,
   VolumeFsReadStream,
   VolumeFsWriteSink,
 } from "./volume-fs.js";
+
+// Services
+export { Service, ServiceBuilder, ServiceListBuilder } from "./service.js";
+export type {
+  ServicePage,
+  ServiceStatus,
+  ServiceTarget,
+  ServiceUpdateOptions,
+} from "./service.js";
 
 // Snapshots
 export { Snapshot, SnapshotArchive } from "./snapshot.js";
@@ -127,7 +126,6 @@ export const SnapshotBuilder = function SnapshotBuilder(
   return _Snapshot.builder(name);
 } as unknown as new (name?: string) => _SnapBT;
 export type SnapshotBuilder = _SnapBT;
-export { SnapshotHandle } from "./snapshot-handle.js";
 export type {
   SaveOpts,
   LoadOpts,
@@ -173,242 +171,24 @@ export type {
 // Metrics streaming
 export { MetricsStream } from "./metrics-stream.js";
 
-// Native fluent builders. The classes themselves live in the napi-rs
-// binding (`native/index.cjs`); the TS layer just re-exports them so
-// `import { DnsBuilder } from "microsandbox"` keeps working.
-
-// Attach a JS-side `policy(NetworkPolicy)` method to the native
-// `NetworkBuilder.prototype` so callers can pass the plain
-// `NetworkPolicy` object produced by `NetworkPolicy.fromProfiles()` /
-// `.allowAll()` / `.none()` and the custom-rule
-// factories. Native exposes `policyJson(string)`; this shim
-// serializes once.
-// Wrap a class's prototype method so any thrown error gets remapped
-// to a typed `MicrosandboxError` subclass via the prefix the Rust
-// binding emits (`[InvalidConfig] ...`). Used on builders whose
-// `.build()` can throw a typed validation error.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function wrapMethodWithErrorMap(cls: any, method: string) {
-  const proto = cls.prototype;
-  const orig = proto[method];
-  if (typeof orig !== "function" || (orig as { __wrapped?: boolean }).__wrapped) {
-    return;
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const wrapped = function (this: unknown, ...args: any[]) {
-    try {
-      const result = orig.apply(this, args);
-      if (result && typeof result.then === "function") {
-        return result.catch((e: unknown) => {
-          throw mapNapiError(e);
-        });
-      }
-      return result;
-    } catch (e) {
-      throw mapNapiError(e);
-    }
-  };
-  (wrapped as { __wrapped?: boolean }).__wrapped = true;
-  proto[method] = wrapped;
-}
-
-wrapMethodWithErrorMap(napi.MountBuilder, "build");
-wrapMethodWithErrorMap(napi.SandboxBuilder, "create");
-wrapMethodWithErrorMap(napi.PatchBuilder, "build");
-wrapMethodWithErrorMap(napi.DnsBuilder, "build");
-wrapMethodWithErrorMap(napi.SecretBuilder, "build");
-wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
-
-// `SandboxBuilder.build()` natively returns the JSON-serialized config
-// (snake_case). Replace it with a TS-side wrapper that parses and
-// key-maps to camelCase so consumers get a plain JS object.
-{
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const proto: any = napi.SandboxBuilder.prototype;
-  if (!proto.__buildWrapped) {
-    const origBuild = proto.build;
-    proto.build = async function () {
-      let json: string;
-      try {
-        json = await origBuild.apply(this);
-      } catch (e) {
-        throw mapNapiError(e);
-      }
-      const config = remapKeysToCamel(JSON.parse(json));
-      // Preserve the deprecated read accessor on built configurations.
-      config.network.maxTcpConnections = config.network.maxConnections;
-      Object.defineProperty(config.network, "maxConnections", {
-        get: () => config.network.maxTcpConnections,
-        enumerable: false,
-      });
-      return config;
-    };
-    Object.defineProperty(proto, "__buildWrapped", {
-      value: true,
-      enumerable: false,
-      writable: false,
-      configurable: false,
-    });
-  }
-}
-
-// Hide native-only helper methods from enumeration so user-facing
-// iteration (`Object.keys`, `for...in`) sees only the documented
-// surface. The methods still work; they're just not advertised.
-function hideMethod(cls: { prototype: Record<string, unknown> }, name: string): void {
-  if (Object.prototype.hasOwnProperty.call(cls.prototype, name)) {
-    const value = cls.prototype[name];
-    Object.defineProperty(cls.prototype, name, {
-      value,
-      enumerable: false,
-      writable: true,
-      configurable: true,
-    });
-  }
-}
-hideMethod(napi.NetworkBuilder, "buildJson");
-hideMethod(napi.NetworkBuilder, "policyJson");
-hideMethod(napi.NetworkBuilder, "policyFromBuilder");
-hideMethod(napi.RestoreBuilder, "networkPolicyJson");
-hideMethod(napi.RestoreBuilder, "networkPolicyFromBuilder");
-hideMethod(napi.SandboxBuilder, "execWithBuilder");
-hideMethod(napi.SandboxBuilder, "execStreamWithBuilder");
-hideMethod(napi.SandboxBuilder, "attachWithBuilder");
-
-// `NetworkBuilder.build()` natively returns a JSON-serialized
-// `NetworkConfig` (snake_case from Rust serde). Wrap with parse +
-// camelCase remap so callers get a plain JS object.
-{
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const proto: any = napi.NetworkBuilder.prototype;
-  if (!proto.__buildWrapped) {
-    proto.build = function () {
-      let json: string;
-      try {
-        json = this.buildJson();
-      } catch (e) {
-        throw mapNapiError(e);
-      }
-      const config = remapKeysToCamel(JSON.parse(json));
-      // Preserve the deprecated read accessor on built configurations.
-      config.maxTcpConnections = config.maxConnections;
-      Object.defineProperty(config, "maxConnections", {
-        get: () => config.maxTcpConnections,
-        enumerable: false,
-      });
-      return config;
-    };
-    Object.defineProperty(proto, "__buildWrapped", {
-      value: true,
-      enumerable: false,
-      writable: false,
-      configurable: false,
-    });
-  }
-}
-
-{
-  // The TS-side `NetworkPolicy` object uses camelCase struct keys
-  // (`defaultEgress`, `defaultIngress`); the Rust struct expects
-  // snake_case. The TS-side `Destination` factory produces an
-  // *internally* tagged shape (`{kind: "group", group: "public"}`)
-  // while the Rust `Destination` enum is *externally* tagged
-  // (`{group: "public"}` or just `"any"`). Convert both before
-  // serializing.
-  const camelToSnake = (k: string): string =>
-    k.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase());
-  // The Rust enums are `serde(rename_all = "snake_case")`, while TS uses kebab-case.
-  const kebabToSnake = (s: string): string => s.replace(/-/g, "_");
-  // Detect a TS-side Destination object (carries `kind` discriminator
-  // produced by `Destination.any/cidr/domain/domainSuffix/group`) and
-  // rewrite it to the Rust externally-tagged form.
-  const isDestination = (v: unknown): v is { kind: string } & Record<string, unknown> => {
-    if (!v || typeof v !== "object" || Array.isArray(v)) return false;
-    const obj = v as Record<string, unknown>;
-    if (typeof obj.kind !== "string") return false;
-    return ["any", "cidr", "domain", "domainSuffix", "group"].includes(obj.kind);
-  };
-  const remapDestination = (
-    v: { kind: string } & Record<string, unknown>,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    deep: (x: any) => any,
-  ): unknown => {
-    const tag = camelToSnake(v.kind);
-    if (v.kind === "any") return tag; // unit variant -> bare string
-    // The data field name in the TS factory varies by variant: cidr →
-    // `cidr`, domain → `domain`, domainSuffix → `suffix`, group → `group`.
-    // Map each to its Rust externally-tagged data slot.
-    const dataField = v.kind === "domainSuffix" ? "suffix" : v.kind;
-    // Only `group` carries an enum string ("link-local" -> "link_local").
-    // The other strings must be preserved as-is.
-    const value =
-      v.kind === "group" && typeof v.group === "string"
-        ? kebabToSnake(v.group)
-        : deep(v[dataField]);
-    return { [tag]: value };
-  };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const remapKeys = (v: any): any => {
-    if (Array.isArray(v)) return v.map(remapKeys);
-    if (isDestination(v)) return remapDestination(v, remapKeys);
-    if (v && typeof v === "object") {
-      const out: Record<string, unknown> = {};
-      for (const [k, val] of Object.entries(v)) out[camelToSnake(k)] = remapKeys(val);
-      return out;
-    }
-    return v;
-  };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const proto: any = napi.NetworkBuilder.prototype;
-  if (!proto.policy) {
-    proto.policy = function (p: unknown) {
-      // If `p` is a `NetworkPolicyBuilder` instance, route through the
-      // dedicated native bridge to skip the JSON round-trip and to
-      // surface lazy parse/validation errors at this call site.
-      if (p instanceof napi.NetworkPolicyBuilder) {
-        this.policyFromBuilder(p);
-        return this;
-      }
-      this.policyJson(JSON.stringify(remapKeys(p)));
-      return this;
-    };
-  }
-  // Restore shares policy conversion, but never exposes the broad NetworkBuilder callback.
-  const restoreProto = napi.RestoreBuilder.prototype;
-  // Keep old fluent calls working, with Node's standard once-per-process warning.
-  restoreProto.forked = deprecate(function (this: import("./internal/napi.js").NapiRestoreBuilder) {
-    return this.cowMemory();
-  }, "RestoreBuilder.forked() is deprecated; use cowMemory() instead", "MSB_RESTORE_FORKED");
-  if (!restoreProto.networkPolicy) {
-    restoreProto.networkPolicy = function (p: unknown) {
-      if (p instanceof napi.NetworkPolicyBuilder) {
-        this.networkPolicyFromBuilder(p);
-      } else {
-        this.networkPolicyJson(JSON.stringify(remapKeys(p)));
-      }
-      return this;
-    };
-  }
-}
-
-export const DnsBuilder = napi.DnsBuilder;
-export const HttpBuilder = napi.HttpBuilder;
-export const TlsBuilder = napi.TlsBuilder;
-export const SecretBuilder = napi.SecretBuilder;
-export const NetworkBuilder = napi.NetworkBuilder;
-export const OutboundProxyBuilder = napi.OutboundProxyBuilder;
-export const HttpConnectProxyBuilder = napi.HttpConnectProxyBuilder;
-export const Socks4ProxyBuilder = napi.Socks4ProxyBuilder;
-export const Socks5ProxyBuilder = napi.Socks5ProxyBuilder;
-export const MountBuilder = napi.MountBuilder;
-export const PatchBuilder = napi.PatchBuilder;
-export const RegistryConfigBuilder = napi.RegistryConfigBuilder;
-export const ImageBuilder = napi.ImageBuilder;
-export const RootDiskBuilder = napi.RootDiskBuilder;
+export const DnsBuilder = nativeConstructor("DnsBuilder");
+export const HttpBuilder = nativeConstructor("HttpBuilder");
+export const TlsBuilder = nativeConstructor("TlsBuilder");
+export const SecretBuilder = nativeConstructor("SecretBuilder");
+export const NetworkBuilder = nativeConstructor("NetworkBuilder");
+export const OutboundProxyBuilder = nativeConstructor("OutboundProxyBuilder");
+export const HttpConnectProxyBuilder = nativeConstructor("HttpConnectProxyBuilder");
+export const Socks4ProxyBuilder = nativeConstructor("Socks4ProxyBuilder");
+export const Socks5ProxyBuilder = nativeConstructor("Socks5ProxyBuilder");
+export const MountBuilder = nativeConstructor("MountBuilder");
+export const PatchBuilder = nativeConstructor("PatchBuilder");
+export const RegistryConfigBuilder = nativeConstructor("RegistryConfigBuilder");
+export const ImageBuilder = nativeConstructor("ImageBuilder");
+export const RootDiskBuilder = nativeConstructor("RootDiskBuilder");
 export type RootDiskBuilder = NapiRootDiskBuilder;
-export const ExecOptionsBuilder = napi.ExecOptionsBuilder;
-export const InitOptionsBuilder = napi.InitOptionsBuilder;
-export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
+export const ExecOptionsBuilder = nativeConstructor("ExecOptionsBuilder");
+export const InitOptionsBuilder = nativeConstructor("InitOptionsBuilder");
+export const AttachOptionsBuilder = nativeConstructor("AttachOptionsBuilder");
 import type {
   NapiNetworkPolicyBuilder,
   NapiHttpConnectProxyBuilder,
@@ -423,11 +203,11 @@ export type OutboundProxyBuilder = NapiOutboundProxyBuilder;
 export type HttpConnectProxyBuilder = NapiHttpConnectProxyBuilder;
 export type Socks4ProxyBuilder = NapiSocks4ProxyBuilder;
 export type Socks5ProxyBuilder = NapiSocks5ProxyBuilder;
-export const NetworkPolicyBuilder = napi.NetworkPolicyBuilder;
+export const NetworkPolicyBuilder = nativeConstructor("NetworkPolicyBuilder");
 export type NetworkPolicyBuilder = NapiNetworkPolicyBuilder;
-export const RuleBuilder = napi.RuleBuilder;
+export const RuleBuilder = nativeConstructor("RuleBuilder");
 export type RuleBuilder = NapiRuleBuilder;
-export const RuleDestinationBuilder = napi.RuleDestinationBuilder;
+export const RuleDestinationBuilder = nativeConstructor("RuleDestinationBuilder");
 export type RuleDestinationBuilder = NapiRuleDestinationBuilder;
 import type {
   NapiInterfaceOverridesBuilder,
@@ -437,11 +217,11 @@ import type {
   NapiRateLimiterBuilder,
   NapiVolumeMount,
 } from "./internal/napi.js";
-export const InterfaceOverridesBuilder = napi.InterfaceOverridesBuilder;
+export const InterfaceOverridesBuilder = nativeConstructor("InterfaceOverridesBuilder");
 export type InterfaceOverridesBuilder = NapiInterfaceOverridesBuilder;
-export const NetworkRateLimiterBuilder = napi.NetworkRateLimiterBuilder;
+export const NetworkRateLimiterBuilder = nativeConstructor("NetworkRateLimiterBuilder");
 export type NetworkRateLimiterBuilder = NapiNetworkRateLimiterBuilder;
-export const RateLimiterBuilder = napi.RateLimiterBuilder;
+export const RateLimiterBuilder = nativeConstructor("RateLimiterBuilder");
 export type RateLimiterBuilder = NapiRateLimiterBuilder;
 export type PullProgressEvent = NapiPullProgressEvent;
 export type PullProgressStream = NapiPullProgressStream;
@@ -462,6 +242,19 @@ export function setRuntimeLibkrunfwPath(path: string): void {
 
 // Errors
 export {
+  AgentClientError,
+  BootStartError,
+  ExecFailedError,
+  InvalidCursorError,
+  MissedRotationError,
+  NetworkBuilderError,
+  SnapshotAlreadyExistsError,
+  SnapshotImageMissingError,
+  SnapshotIntegrityError,
+  SnapshotMigrationError,
+  SnapshotNotFoundError,
+  SnapshotSandboxRunningError,
+  WindowsHostSetupError,
   CustomError,
   CloudHttpError,
   DatabaseError,
@@ -479,6 +272,7 @@ export {
   MetricsDisabledError,
   MetricsUnavailableError,
   MicrosandboxError,
+  ModificationNotConfirmedError,
   NixError,
   PatchFailedError,
   ProtocolError,
@@ -492,6 +286,9 @@ export {
   SandboxStopTimedOutError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  ServiceAlreadyExistsError,
+  ServiceError,
+  ServiceNotFoundError,
   SnapshotSourceRecoveryError,
   TerminalError,
   UnsupportedOperationError,
@@ -500,8 +297,11 @@ export {
   VolumeNotFoundError,
 } from "./errors.js";
 export type {
+  ChangeState,
   MicrosandboxErrorCode,
   PublishedSnapshotArtifact,
+  ServiceErrorDetails,
+  ServiceErrorReason,
   SnapshotSourceRecoveryDetails,
 } from "./errors.js";
 
@@ -623,7 +423,7 @@ export const NetworkPolicy = {
    * Start building a `NetworkPolicy` via the native fluent builder.
    * Equivalent to `new NetworkPolicyBuilder()`.
    */
-  builder: (): NapiNetworkPolicyBuilder => new napi.NetworkPolicyBuilder(),
+  builder: (): NapiNetworkPolicyBuilder => new (optionsBinding().NetworkPolicyBuilder)(),
 };
 export type NetworkPolicy = _Types.NetworkPolicy;
 
@@ -634,4 +434,14 @@ export const Rule = _Factories.Rule;
 export type Rule = _Types.Rule;
 
 export { Job, JobAttachment, JobError, JobLogStream, JobListBuilder, JobAttachOptionsBuilder } from "./jobs.js";
-export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState } from "./jobs.js";
+export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState, JobOutputSource } from "./jobs.js";
+
+export { diagnoseStorage } from "./storage-diagnosis.js";
+export type { StorageSelection, StorageDiagnosticStatus, StorageCandidate, StorageInspection, StorageSandboxDiagnosis, StorageDiagnosis } from "./storage-diagnosis.js";
+
+export type { StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection } from "./storage-recovery.js";
+
+export { Context, LocalContext, RemoteContext, LocalContextBuilder, RemoteContextBuilder, Sandboxes, Volumes, Snapshots } from "./context.js";
+export type { ComputeType, LocalContextOptions, RemoteContextOptions } from "./context.js";
+
+export type { SandboxConfigInspection, SandboxRuntimeInspection, RemoteSandboxInspection, LocalSandboxInspection, RemoteMountInspection, RemoteSecretInspection } from "./config-inspection.js";
