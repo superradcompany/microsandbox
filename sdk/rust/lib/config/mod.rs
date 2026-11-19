@@ -520,14 +520,11 @@ impl GlobalConfig {
     /// Operator resolvers to send to the runtime for a sandbox with `profile`.
     ///
     /// `None` when the sandbox is `single-tenant` or the built-in resolvers apply.
-    pub(crate) fn multi_tenant_nameservers(
-        &self,
-        profile: DeploymentProfile,
-    ) -> Option<Vec<IpAddr>> {
+    pub(crate) fn multi_tenant_nameservers(&self, profile: DeploymentProfile) -> Option<&[IpAddr]> {
         if profile != DeploymentProfile::MultiTenant {
             return None;
         }
-        self.network.multi_tenant_nameservers.clone()
+        self.network.multi_tenant_nameservers.as_deref()
     }
 
     /// Virtio-fs backend state budget per device, in bytes.

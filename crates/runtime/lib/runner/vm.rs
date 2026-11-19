@@ -7,8 +7,6 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
-#[cfg(feature = "net")]
-use std::net::IpAddr;
 use std::num::NonZero;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
@@ -411,11 +409,6 @@ pub struct VmConfig {
     /// Host-runtime isolation profile enforced by the network backend.
     #[cfg(feature = "net")]
     pub deployment_profile: DeploymentProfile,
-
-    /// Operator-selected upstream DNS resolvers for multi-tenant deployments.
-    /// `None` selects the built-in public resolvers.
-    #[cfg(feature = "net")]
-    pub multi_tenant_nameservers: Option<Vec<IpAddr>>,
 
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
@@ -2705,13 +2698,9 @@ fn build_vm(
             .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
         let rate_limiters = to_krun_network_rate_limiters(vm.network.config());
 
-        let mut network = SmoltcpNetwork::new(
-            vm.network.clone(),
-            vm.sandbox_slot,
-            vm.deployment_profile,
-            vm.multi_tenant_nameservers.as_deref(),
-        )
-        .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
+        let mut network =
+            SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot, vm.deployment_profile)
+                .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
         if let Some(restore) = &vm.checkpoint_restore {
             let gateway = restore.network_gateway_mac.ok_or_else(|| {
                 RuntimeError::Custom(
@@ -4426,8 +4415,6 @@ mod tests {
             network: Default::default(),
             #[cfg(feature = "net")]
             deployment_profile: Default::default(),
-            #[cfg(feature = "net")]
-            multi_tenant_nameservers: None,
             #[cfg(feature = "net")]
             sandbox_slot: 1,
             checkpoint_restore: None,

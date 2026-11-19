@@ -2333,7 +2333,8 @@ fn machine_cli_args(
         #[cfg(feature = "net")]
         multi_tenant_nameservers: local
             .config()
-            .multi_tenant_nameservers(config.spec.deployment_profile),
+            .multi_tenant_nameservers(config.spec.deployment_profile)
+            .map(<[_]>::to_vec),
         bootstrap: guest_bootstrap(config),
         ..Default::default()
     };
