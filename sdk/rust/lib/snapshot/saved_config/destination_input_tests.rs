@@ -143,7 +143,7 @@ fn destination_inputs_keep_deferred_command_bindings_without_claiming_readiness(
 }
 
 #[test]
-fn destination_inputs_unknown_command_fields_are_guarded_at_the_actual_consumer() {
+fn destination_inputs_require_complete_command_fields_before_launch() {
     for field in ["env", "cmd", "entrypoint", "workdir", "shell", "user"] {
         let mut source = active();
         source["runtime"] = json!({});
@@ -158,17 +158,11 @@ fn destination_inputs_unknown_command_fields_are_guarded_at_the_actual_consumer(
                 BTreeMap::new(),
             )
             .and_then(SavedConfigurationPlan::into_destination_inputs);
-            if starts_command {
-                let error = result.unwrap_err().to_string();
-                assert!(error.contains("SCFG_UNKNOWN"), "{field}: {error}");
-            } else {
-                let inputs = result.unwrap();
-                assert!(!inputs.plan().context().starts_command);
-                assert!(
-                    inputs.plan().runtime().command_defaults().is_err(),
-                    "{field}"
-                );
-            }
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("SCFG_UNKNOWN") && error.contains(field),
+                "{field}: {error}"
+            );
         }
     }
 }

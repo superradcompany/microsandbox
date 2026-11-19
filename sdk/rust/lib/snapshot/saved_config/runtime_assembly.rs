@@ -59,9 +59,7 @@ impl RuntimeConfigurationPlan {
             .guest_clock
             .require_available("runtime.guest_clock")?;
         self.inputs.scripts.require_available("runtime.scripts")?;
-        if context.starts_command {
-            self.require_command_defaults()?;
-        }
+        self.check_command_defaults(context.starts_command)?;
         let init = if context.full_resume {
             None // Captured PID 1 is authoritative; never replay the cold-boot choice.
         } else {
@@ -87,7 +85,7 @@ impl RuntimeConfigurationPlan {
     /// A later explicit command override must reselect/reprepare from retained references;
     /// this cannot silently bypass missing bindings by using older image defaults.
     pub fn command_defaults(&self) -> MicrosandboxResult<PreparedCommandDefaults> {
-        self.require_command_defaults()?;
+        self.check_command_defaults(true)?;
         Ok(PreparedCommandDefaults {
             runtime: self.runtime.clone(),
             env: self.env.clone(),
@@ -101,17 +99,27 @@ impl RuntimeConfigurationPlan {
         Ok(self.cold_boot_init.clone())
     }
 
-    fn require_command_defaults(&self) -> MicrosandboxResult<()> {
+    fn check_command_defaults(&self, starts_command: bool) -> MicrosandboxResult<()> {
         // Assembly checks readiness without cloning potentially large command/environment
         // values merely to discard them; both access paths use exactly the same guard.
         self.inputs
             .entrypoint
-            .require_available("runtime.entrypoint")?;
-        self.inputs.cmd.require_available("runtime.cmd")?;
-        self.inputs.env.require_available("runtime.env")?;
-        self.inputs.workdir.require_available("runtime.workdir")?;
-        self.inputs.shell.require_available("runtime.shell")?;
-        self.inputs.user.require_available("runtime.user")?;
+            .check_command_field("runtime.entrypoint", starts_command)?;
+        self.inputs
+            .cmd
+            .check_command_field("runtime.cmd", starts_command)?;
+        self.inputs
+            .env
+            .check_command_field("runtime.env", starts_command)?;
+        self.inputs
+            .workdir
+            .check_command_field("runtime.workdir", starts_command)?;
+        self.inputs
+            .shell
+            .check_command_field("runtime.shell", starts_command)?;
+        self.inputs
+            .user
+            .check_command_field("runtime.user", starts_command)?;
         Ok(())
     }
 }

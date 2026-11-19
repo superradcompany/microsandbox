@@ -142,6 +142,19 @@ impl RuntimeInputPlan {
 }
 
 impl<T> PreparedRuntimeValue<T> {
+    /// Known logical bindings may wait for an actual exec. An entirely unknown field
+    /// cannot be guarded by binding ID and must be replaced or cleared before launch.
+    pub(super) fn check_command_field(
+        &self,
+        field: &'static str,
+        starts_command: bool,
+    ) -> MicrosandboxResult<()> {
+        if !starts_command && matches!(self, Self::Deferred(_)) {
+            return Ok(());
+        }
+        self.require_available(field)
+    }
+
     /// Refuse unknown or unresolved input before a consumer reads its value. Default and
     /// omitted states remain explicit so the assembler can apply their different semantics.
     pub fn require_available(&self, field: &'static str) -> MicrosandboxResult<()> {

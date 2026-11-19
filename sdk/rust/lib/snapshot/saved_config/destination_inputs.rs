@@ -31,9 +31,8 @@ impl SavedDestinationInputs {
         Self { config, plan }
     }
 
-    /// Native inputs only. When this operation starts no command, unavailable future command
-    /// defaults are still guarded by `plan().runtime().command_defaults()`. An empty native
-    /// field must never be treated as resolution of a retained unknown or binding requirement.
+    /// Native inputs only. Known bindings for a future command remain on the destination
+    /// and must be enforced by its runtime. Whole unknown command fields fail preparation.
     pub fn spec_inputs(&self) -> &SandboxSpec {
         &self.config.spec
     }
