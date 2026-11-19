@@ -13,9 +13,9 @@ With a [working local installation](/enterprise/prepare-environment), connect a 
 </Frame>
 
 <Note>
-  Managed configuration can enforce registry settings and the outbound proxy. DNS, network rules, certificate trust for guests, and published ports are currently [per-sandbox settings](/cli/configuration#network), also available through the SDKs.
+  Managed configuration can set registry settings, the outbound proxy, and [host DNS resolvers](/configuration#dns). Network rules, certificate trust for guests, and published ports are [per-sandbox settings](/cli/configuration#network), also available through the SDKs.
 
-  An enforced `multi-tenant` [deployment profile](/networking/overview#deployment-profiles) removes custom DNS, blocks private-network access, and disables host CA import and published ports.
+  An enforced `multi-tenant` [deployment profile](/networking/overview#deployment-profiles) uses operator-controlled DNS, blocks private-network access, and disables host CA import and published ports.
 </Note>
 
 ## Route sandbox traffic
@@ -67,7 +67,7 @@ Use CLI and SDK releases that support the selected proxy protocol. Older release
 
 ## Configure corporate DNS
 
-The sandbox's DNS forwarder runs on the host. By default, it uses host DNS. Set explicit nameservers when private company names need particular resolvers.
+The sandbox's DNS forwarder runs on the host. In single-tenant mode, it uses host DNS by default. Set explicit nameservers when private company names need particular resolvers.
 
 Replace the two resolver addresses, service IP, and hostname below with your company's values. Cache the Alpine image first:
 

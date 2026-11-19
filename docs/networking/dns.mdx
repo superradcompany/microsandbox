@@ -94,7 +94,7 @@ msb create python --name safe-agent --net-default allow \
 
 <Tooltip tip="Custom nameservers are not available on our managed cloud. Cloud sandboxes use platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-By default, microsandbox uses the host's resolver list. Set `nameservers` when you need specific resolvers.
+Single-tenant sandboxes use the operator's [`dns.nameservers`](/configuration#dns) or the host's system DNS by default. Set `nameservers` on a sandbox to override that default. Multi-tenant sandboxes use the operator's resolvers or the public defaults.
 
 Nameservers can be IP addresses, hostnames, or either form with a port. microsandbox resolves hostnames once when the sandbox starts.
 

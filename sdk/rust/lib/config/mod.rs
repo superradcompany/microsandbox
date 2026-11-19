@@ -14,8 +14,8 @@
 //! one resolved `msb` binary).
 
 pub(crate) mod backend;
+mod dns;
 pub(crate) mod layers;
-mod network;
 mod persistence;
 mod registry;
 
@@ -45,7 +45,7 @@ use std::path::Path;
 
 pub(crate) mod runtime_paths;
 
-pub use network::{HostNetworkConfig, HostNetworkConfigPatch};
+pub use dns::{HostDnsConfig, HostDnsConfigPatch};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -212,9 +212,9 @@ pub struct GlobalConfig {
     #[config_patch(nested)]
     pub snapshots: SnapshotsConfig,
 
-    /// Host-owned network settings.
+    /// Host-owned DNS settings.
     #[config_patch(nested)]
-    pub network: HostNetworkConfig,
+    pub dns: HostDnsConfig,
 }
 
 /// Compatibility alias for the backend-owned global configuration.
@@ -911,7 +911,7 @@ mod tests {
             "ssh": {"inactivity_timeout_secs": 45},
             "metrics": {"capacity": 128},
             "snapshots": {"max_filesystem_state_mib": 64},
-            "network": {"multi_tenant_nameservers": ["9.9.9.9", "2620:fe::fe"]}
+            "dns": {"nameservers": ["9.9.9.9", "2620:fe::fe"]}
         });
         let mut previous = expected.clone();
         previous["allowed_backends"] = serde_json::json!(["local", "cloud"]);

@@ -475,25 +475,25 @@ When reading snapshots, allow enough space for each device's saved state. The re
 
 Before raising it, consider memory use, especially when restoring imported snapshots. Raise it only for snapshots you trust.
 
-## `network`
+## `dns`
 
-<Tooltip tip="Local runtime placement only; microsandbox cloud applies its own network settings."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Local runtime placement only; microsandbox cloud applies its own DNS settings."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `multi_tenant_nameservers` | `null` | DNS resolvers for [`multi-tenant`](#deployment_profile) sandboxes. Set a nonempty list of IP addresses. The runtime queries them on port 53. |
+Set `dns.nameservers` to a list of resolver IP addresses. The runtime queries them on port 53.
 
 ```json
 {
-  "network": {
-    "multi_tenant_nameservers": ["9.9.9.9", "149.112.112.112"]
+  "deployment_profile": "multi-tenant",
+  "dns": {
+    "nameservers": ["9.9.9.9", "149.112.112.112"]
   }
 }
 ```
 
-Choose resolvers that cannot answer private infrastructure names. Restart running sandboxes after changing the list.
+- **Single-tenant:** A sandbox's own nameserver list takes precedence. If neither list contains any addresses, the runtime uses host DNS.
+- **Multi-tenant:** The operator's list takes precedence over any sandbox list. Choose resolvers that cannot answer private infrastructure names. An omitted, null, or empty list uses `1.1.1.1` and `1.0.0.1` on supporting runtimes. Older runtimes use host DNS and require an upgrade to accept an explicit operator list.
 
-An explicit list requires runtime support. With `null` or no setting, supporting runtimes use `1.1.1.1` and `1.0.0.1`. Older runtimes use host DNS.
+Restart running sandboxes after changing the list.
 
 ## `profiles`
 

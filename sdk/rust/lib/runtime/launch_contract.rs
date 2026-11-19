@@ -894,7 +894,7 @@ pub(crate) async fn validate_multi_tenant_nameservers(
     global: &GlobalConfig,
 ) -> MicrosandboxResult<()> {
     if global
-        .network
+        .dns
         .multi_tenant_nameservers(config.spec.deployment_profile)
         .is_none()
     {
@@ -910,9 +910,7 @@ pub(crate) async fn validate_multi_tenant_nameservers(
     if !supported {
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
-            crate::error::UnsupportedReason::NotAvailable(upgrade_required(
-                "network.multi_tenant_nameservers",
-            )),
+            crate::error::UnsupportedReason::NotAvailable(upgrade_required("dns.nameservers")),
         ));
     }
     Ok(())
@@ -1831,20 +1829,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = SandboxConfig::default();
         let mut global = GlobalConfig::default();
-        global.network.multi_tenant_nameservers = Some(vec!["9.9.9.9".parse().unwrap()]);
-        // Single-tenant sandboxes never send the setting, so they must avoid probing.
+        global.dns.nameservers = Some(vec!["9.9.9.9".parse().unwrap()]);
+        // Single-tenant overrides use the existing sandbox DNS launch fields.
         validate_multi_tenant_nameservers(&dir.path().join("no-probe"), &config, &global)
             .await
             .unwrap();
         config.spec.deployment_profile = microsandbox_types::DeploymentProfile::MultiTenant;
-        // The built-in resolvers need no capability either.
-        validate_multi_tenant_nameservers(
-            &dir.path().join("no-probe"),
-            &config,
-            &GlobalConfig::default(),
-        )
-        .await
-        .unwrap();
+        for nameservers in [None, Some(vec![])] {
+            let defaults = GlobalConfig {
+                dns: crate::config::HostDnsConfig { nameservers },
+                ..Default::default()
+            };
+            validate_multi_tenant_nameservers(&dir.path().join("no-probe"), &config, &defaults)
+                .await
+                .unwrap();
+        }
 
         for response in [
             "exit 1",
@@ -1857,11 +1856,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
-            assert!(
-                error
-                    .to_string()
-                    .contains("network.multi_tenant_nameservers")
-            );
+            assert!(error.to_string().contains("dns.nameservers"));
         }
         let path = script(
             dir.path(),
