@@ -178,6 +178,8 @@ User-supplied OCI writable uppers (`RootfsSource::Oci` with `RootDisk::DiskImage
 
 On Linux, stop and kill also pin the departing runtime with a process pidfd, validating its inherited lifecycle descriptor before following it. This waits for the whole thread group rather than treating a zombie leader or lifecycle-lock release as completed disk teardown, and does not wait on a later sandbox's attachment to the same external disk. It does not reap the SDK's child or change descriptor handoff. This path requires `pidfd_open` (Linux 5.3 or later) and permission to inspect the runtime's `/proc` descriptors; unsupported or denied probes return an error rather than silently claiming completion. Already-exited or stale PIDs without the matching inherited lifecycle descriptor retain the existing lifecycle/resource reconciliation path.
 
+Linux SDK child collection uses pidfd notifications and `try_wait()`, with polling when pidfds are unavailable. Detached resources are observed while retained and after release; unfinished collection transfers to one process-wide reaper thread when the Tokio runtime shuts down. Collection never terminates a detached VM and preserves the owned child's exit status for later waits. These SDK-internal changes do not alter launch descriptors, watchdog acknowledgements, runtime/agent protocols, storage, or older-runtime compatibility. A live but undriven current-thread runtime can delay its async observers until driven or shut down.
+
 On macOS, stop and kill observe the departing process through a `kqueue` exit registration, checking its process birth identity and existing lifecycle descriptor. Exit notification follows file-table teardown, unlike lifecycle-lock release alone. If registration races an already-exiting process, birth-identified `kern.proc.pid` observation waits for zombie/disappearance rather than treating a failed process lookup as completed cleanup. Observation does not reap the child, unlock its disks, or wait for a subsequent disk owner. Inspection failures remain errors. This changes host-side completion timing only; launch descriptors, lock paths, agent messages, and persisted state are unchanged in both SDK/runtime directions. It cannot release lock copies retained by an older SDK process.
 
 Sources: [`crates/runtime/lib/client/launch.rs`](crates/runtime/lib/client/launch.rs), [`crates/runtime/lib/runner/vm.rs`](crates/runtime/lib/runner/vm.rs), [`sdk/rust/lib/runtime/spawn.rs`](sdk/rust/lib/runtime/spawn.rs), and [`crates/cli/lib/machine_cmd.rs`](crates/cli/lib/machine_cmd.rs).
@@ -650,3 +652,13 @@ still validates paired IDs and rejects owners on non-directory mounts. Earlier
 server deployments might ignore these optional fields; there are no self-hosted
 deployments in the user's supported fleet and this is an approved server-support
 requirement. Local runtime capability checks are unchanged.
+
+## Local kill and drain process identity
+
+On Linux and macOS, kill and drain require evidence that the recorded PID belongs to the selected sandbox runtime. Linux sends signals through a captured pidfd. macOS verifies lifecycle ownership and process birth identity before signaling; Darwin’s PID-based syscall still leaves a narrow check-to-signal race.
+
+Denied process inspection does not establish that a run is stale. Reconciliation requires a free lifecycle guard, no possibly live runtime socket, and free owned-disk guards; ambiguous ownership returns an error and preserves the active run. No public API, runtime protocol, or persisted-format change is required. Replacement and fresh-start recovery are separate from this change.
+
+## Concurrent catalog sidecar teardown
+
+Catalog hardening retries up to 16 complete inspections when SQLite sidecar teardown exposes an unlinked inode or the path changes during inspection. Every attempt repeats the ownership, link and permission checks; symlinks, hardlinks and untrusted access remain rejected. Continued churn returns an error. No SQLite schema, migration guard, lock protocol or runtime format changes.
