@@ -12,7 +12,7 @@ use microsandbox::storage::{
 };
 use microsandbox_utils::format::format_bytes;
 
-use crate::ui;
+use crate::ui::{self, OutputFormat};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -22,8 +22,8 @@ use crate::ui;
 #[derive(Debug, Args)]
 pub struct DfArgs {
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 
     /// Include object paths, retention reasons, and accounting details.
     #[arg(long)]
@@ -53,8 +53,8 @@ pub struct PruneArgs {
     pub quiet: bool,
 
     /// Output a structured report (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -64,7 +64,7 @@ pub struct PruneArgs {
 /// Show a point-in-time aggregate storage observation for the selected local backend.
 pub async fn run_df(args: DfArgs) -> anyhow::Result<()> {
     let usage = Storage::usage().await?;
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&usage)?);
     } else {
         print!("{}", render_usage(&usage, args.verbose));
@@ -113,7 +113,7 @@ pub async fn run_prune(args: PruneArgs) -> anyhow::Result<()> {
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {
-            if args.format.as_deref() == Some("json") {
+            if args.format == Some(OutputFormat::Json) {
                 let mut report = serde_json::to_value(&preview)?;
                 report["cancelled"] = true.into();
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -203,7 +203,7 @@ fn render_usage(usage: &StorageUsage, verbose: bool) -> String {
 
 fn print_prune_report(args: &PruneArgs, report: &MemoryCacheReport) -> anyhow::Result<()> {
     let errors = has_errors(report);
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(report)?);
     } else {
         if !args.quiet {

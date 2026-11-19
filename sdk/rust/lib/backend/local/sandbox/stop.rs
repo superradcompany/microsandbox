@@ -82,6 +82,19 @@ impl LocalBackend {
         id: i32,
         ephemeral: bool,
     ) -> MicrosandboxResult<()> {
+        self.stop_complete_generation(name, id, ephemeral, None)
+            .await
+    }
+
+    /// A repair prompt authorizes only the observed runtime generation. Check it after
+    /// acquiring transition ownership, before sending shutdown to the local control socket.
+    pub(crate) async fn stop_complete_generation(
+        &self,
+        name: &str,
+        id: i32,
+        ephemeral: bool,
+        expected_run: Option<i32>,
+    ) -> MicrosandboxResult<()> {
         let run_dir = self.config().run_dir();
         let transition = Self::acquire_sandbox_transition_guard(&run_dir, name).await?;
         let (model, _) = match self.sandbox_handle_state_owned(name, Some(id), true).await {
@@ -105,6 +118,18 @@ impl LocalBackend {
         };
         let run = self.latest_stop_run(id).await?;
         let run_id = run.as_ref().map(|run| run.id);
+        if let Some(expected) = expected_run {
+            if run_id != Some(expected) || !model.status.has_active_runtime_state() {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "the selected runtime generation changed; inspect its storage blockers again"
+                        .into(),
+                ));
+            }
+            if model.ephemeral {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "stopping this ephemeral sandbox could remove its storage; preserve its data before stopping it separately".into()));
+            }
+        }
         #[cfg(windows)]
         let owner = run
             .as_ref()

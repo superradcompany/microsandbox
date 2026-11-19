@@ -6,6 +6,8 @@ use clap::Args;
 use microsandbox::Sandbox;
 use microsandbox::jobs::{Job, JobEvent, JobId};
 
+use crate::ui::OutputFormat;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -25,8 +27,8 @@ pub struct JobsArgs {
     #[arg(long)]
     pub cursor: Option<String>,
     /// Output format.
-    #[arg(long, value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 /// Select exactly one sandbox-scoped job.
@@ -86,7 +88,7 @@ pub async fn list(args: JobsArgs) -> anyhow::Result<()> {
             }
         })
         .await?;
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&page)?);
     } else {
         println!("{:<36}  {:<10}  COMMAND", "JOB", "STATE");

@@ -9,9 +9,11 @@ icon: "boxes-stacked"
 
 microsandbox cannot read Docker's private local image store directly. First, build the image with Docker:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker build -t my-image:latest .
 ```
+</CodeGroup>
 
 Stream the image into microsandbox's local image store:
 
@@ -29,21 +31,27 @@ Remove-Item my-image.tar
 
 You can now run it like any other image:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb run my-image:latest
 ```
+</CodeGroup>
 
 You can also save to a file first:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker save -o my-image.tar my-image:latest
 ```
+</CodeGroup>
 
 Load the saved archive:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb load --input my-image.tar
 ```
+</CodeGroup>
 
 If the archive has no useful tag, or you want a different local alias, pass one:
 
@@ -61,9 +69,11 @@ Remove-Item my-image.tar
 
 Run it by its new local name:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb run app:local
 ```
+</CodeGroup>
 
 `msb load` is the short top-level form of `msb image load`.
 
@@ -78,9 +88,11 @@ Use a local registry when you want registry-like push/pull behavior, or when mul
 
 Run a local OCI registry on port 5050:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker run -d -p 5050:5000 --name registry registry:2
 ```
+</CodeGroup>
 
 <Tip>
   Port 5000 is used by AirPlay on macOS. This guide uses port 5050 to avoid conflicts.
@@ -92,21 +104,27 @@ docker run -d -p 5050:5000 --name registry registry:2
 
 Build your Docker image and tag it for the local registry:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker build -t localhost:5050/my-image:latest .
 ```
+</CodeGroup>
 
 If you already have an existing image, re-tag it:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker tag my-image:latest localhost:5050/my-image:latest
 ```
+</CodeGroup>
 
 Push to the local registry:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker push localhost:5050/my-image:latest
 ```
+</CodeGroup>
 
 </Step>
 
@@ -114,9 +132,11 @@ docker push localhost:5050/my-image:latest
 
 Since the local registry runs over plain HTTP, use the `--insecure` flag:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb pull localhost:5050/my-image:latest --insecure
 ```
+</CodeGroup>
 
 </Step>
 

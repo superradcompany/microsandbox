@@ -462,7 +462,7 @@ impl Job {
         })?;
         Ok(JobLogEntry {
             timestamp: output.timestamp,
-            source: output.source,
+            source: output.source.to_string(),
             data: data.into(),
             cursor: self.cursor(output.sequence),
         })

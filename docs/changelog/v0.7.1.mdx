@@ -36,3 +36,22 @@ Moving from v0.6? Follow the [v0.7 migration guide](/migrations/v0.7), targeting
 - Paused sandboxes need a prior flush when capture requires one. `required` fails for stopped or crashed sandboxes.
 - Restart older runtimes before live disk capture. Go needs a policy-aware native library; Rust callers constructing `SnapshotSpec` must add `guest_flush`.
 - Catalog upgrades still require stopping running sandboxes in this version. [v0.7.2](/changelog/v0.7.2) removes that restriction.
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/appcypher">
+      <img src="https://avatars.githubusercontent.com/u/20358651?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@appcypher</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/toksdotdev">
+      <img src="https://avatars.githubusercontent.com/u/11903253?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@toksdotdev</span>
+    </a>
+  </li>
+</ul>

@@ -27,6 +27,7 @@ $repo = 'OWNER/REPOSITORY'
 
 Add this file to the repository's default branch. Replace the final step with the commands you want the runner to execute.
 
+<CodeGroup>
 ```yaml .github/workflows/microsandbox-runner.yml
 name: Microsandbox runner
 
@@ -46,6 +47,7 @@ jobs:
           persist-credentials: false
       - run: test -f README.md && uname -a
 ```
+</CodeGroup>
 
 ## Run one job
 
@@ -53,9 +55,11 @@ jobs:
   <Step title="Queue the workflow">
     The job waits until the temporary runner connects.
 
-    ```sh
+    <CodeGroup>
+    ```sh Shell
     gh workflow run microsandbox-runner.yml --repo "$repo"
     ```
+    </CodeGroup>
   </Step>
 
   <Step title="Create the runner VM">

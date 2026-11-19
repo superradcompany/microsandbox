@@ -81,9 +81,49 @@ class SandboxStatus(StrEnum):
     PAUSED = "paused"
 
 
+class ServiceStatus(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    DETACHED = "detached"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceTarget:
+    """The sandbox and port that receive a Service's requests."""
+
+    sandbox: str
+    port: int
+
+
 class BackendKind(StrEnum):
     LOCAL = "local"
     CLOUD = "cloud"
+
+
+class ServiceErrorReason(StrEnum):
+    """Why a Service change did not complete.
+
+    ``OTHER`` is an unrecognized reason; ``ServiceError.raw_code`` keeps its raw code,
+    and ``ServiceError.changed`` still reports the outcome.
+    """
+
+    SERVICE_QUOTA_EXCEEDED = "service_quota_exceeded"
+    SANDBOX_SERVICE_LIMIT_EXCEEDED = "sandbox_service_limit_exceeded"
+    SERVICE_CONFLICT = "service_conflict"
+    SERVICE_DETACHED = "service_detached"
+    TARGET_UNREACHABLE = "target_unreachable"
+    SANDBOX_NOT_RUNNING = "sandbox_not_running"
+    SERVICE_CHANGES_PAUSED = "service_changes_paused"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    OTHER = "other"
+
+
+class ChangeState(StrEnum):
+    """Whether a failed Service change may have been applied."""
+
+    UNCHANGED = "unchanged"
+    UNKNOWN = "unknown"
 
 
 class ModificationPolicy(StrEnum):
@@ -1657,10 +1697,14 @@ class OutboundProxy:
     def __post_init__(self) -> None:
         if self.protocol != "socks4" and self.user_id is not None:
             raise ValueError("user_id is only supported for SOCKS4 proxies")
-        if self.protocol != "socks5" and (self.username is not None or self.password is not None):
-            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        if self.protocol == "socks4" and (self.username is not None or self.password is not None):
+            raise ValueError("credentials are only supported for SOCKS5 and HTTP CONNECT proxies")
         if (self.username is None) != (self.password is None):
-            raise ValueError("SOCKS5 username and password must be provided together")
+            if self.protocol == "socks5":
+                raise ValueError("SOCKS5 username and password must be provided together")
+            raise ValueError(
+                "HTTP CONNECT username and password must be provided together"
+            )
 
     @classmethod
     def http_connect(cls, address: str) -> OutboundProxy:
@@ -1678,9 +1722,16 @@ class OutboundProxy:
         return cls(protocol="socks5", address=address)
 
     def credentials(self, username: str, password: SecretSource) -> OutboundProxy:
-        """Set username authentication and a host-side password source."""
-        if self.protocol != "socks5":
-            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        """Set username authentication and a host-side password source.
+
+        Supported for SOCKS5 and HTTP CONNECT proxies. HTTP CONNECT permits an
+        empty username for token-only authentication. The values are stored as
+        given: the backend validates them when the sandbox configuration is
+        built, where an HTTP CONNECT username containing ``:`` or control
+        characters is rejected.
+        """
+        if self.protocol == "socks4":
+            raise ValueError("credentials are only supported for SOCKS5 and HTTP CONNECT proxies")
         return OutboundProxy(
             protocol=self.protocol,
             address=self.address,

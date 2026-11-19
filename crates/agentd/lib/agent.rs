@@ -29,12 +29,13 @@ use microsandbox_protocol::core::{
     WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
     WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_BYTES,
     WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFailure, WorkloadFailureDisposition, WorkloadFreeze,
-    WorkloadFrozen, WorkloadThaw, WorkloadThawed, WorkloadTransportCredit,
+    WorkloadFrozen, WorkloadThaw, WorkloadThawMode, WorkloadThawed, WorkloadTransportCredit,
     WorkloadTransportPosition,
 };
 use microsandbox_protocol::exec::{
-    ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
-    ExecStderr, ExecStdin, ExecStdinError, ExecStdout,
+    ExecExited, ExecFailed, ExecFailureKind, ExecOutputAck, ExecRequest, ExecResize, ExecSignal,
+    ExecStarted, ExecStderr, ExecStdin, ExecStdinAck, ExecStdinError, ExecStdout,
+    MAX_EXEC_CONTROL_BYTES,
 };
 use microsandbox_protocol::fs::{FS_CHUNK_SIZE, FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
@@ -43,9 +44,8 @@ use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFaile
 use microsandbox_protocol::transport::{
     BULK_BINDING_SIZE, BulkTransportReady, CLIENT_INCARNATION_SIZE, ClientIncarnation,
     IncarnatedBulkFrame, RelayClientConnected, RelayClientDisconnectedAck, RelayLeaseReady,
-    decode_bulk_ack, encode_bulk_hello, encode_relay_client_disconnected_ack,
-    relay_client_id_range, relay_client_slot, try_decode_incarnated_bulk_from_bytes,
-    try_decode_relay_client_connected_from_bytes,
+    decode_bulk_ack, encode_bulk_hello, encode_relay_client_disconnected_ack, relay_client_slot,
+    try_decode_incarnated_bulk_from_bytes, try_decode_relay_client_connected_from_bytes,
     try_decode_relay_client_disconnected_ack_from_bytes,
     validate_relay_client_range as canonical_relay_client_range,
 };
@@ -56,8 +56,9 @@ use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::process::ProcessManager;
 use crate::serial::{AGENT_BULK_PORT_NAME, AGENT_PORT_NAME, InputCharge, InputLane, InputWindow};
 use crate::session::{
-    BulkOutputCommand, ExecSession, RawActivity, RawSessionCompletion, RawSessionOutput,
-    SessionOutput, SessionOutputEnvelope, SessionOutputSender, resolve_default_user,
+    BulkCleanup, BulkFlowKey, BulkOutputCommand, ExecSession, RawActivity, RawSessionCompletion,
+    RawSessionOutput, SessionOutput, SessionOutputEnvelope, SessionOutputSender,
+    resolve_default_user,
 };
 use crate::tcp::TcpSession;
 use crate::workload::{WorkloadLatch, WorkloadLatchError};
@@ -249,17 +250,20 @@ struct BulkWriteFlow {
     deficit: usize,
 }
 
-/// Deferred acknowledgement after the scheduler has discarded already-queued producer output.
+/// Shared cleanup state cached by the dedicated bulk scheduler.
+#[derive(Default)]
+struct BulkCleanupCache {
+    epoch: Option<u64>,
+    live: HashSet<ClientIncarnation>,
+}
+
+/// Acknowledgement after the scheduler has applied a lifecycle command.
 enum BulkOutputCleanup {
     Park {
         completion: tokio::sync::oneshot::Sender<u64>,
         wire_bytes: u64,
     },
-    Flow(tokio::sync::oneshot::Sender<()>),
-    Incarnation {
-        incarnation: ClientIncarnation,
-        completion: tokio::sync::oneshot::Sender<()>,
-    },
+    Ack(tokio::sync::oneshot::Sender<()>),
 }
 
 #[derive(Default)]
@@ -368,7 +372,8 @@ impl ActivityTracker {
 impl BulkInputState {
     fn new(file: File) -> AgentdResult<Self> {
         Ok(Self {
-            port: AsyncFd::new(file)?,
+            // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+            port: unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?,
             read_buf: vec![0u8; BULK_SERIAL_READ_BUF_SIZE],
             input: BytesMut::new(),
         })
@@ -490,7 +495,8 @@ pub async fn run(
     set_nonblocking(port_fd)?;
 
     // A single AsyncFd tracks both readable and writable readiness.
-    let async_port = AsyncFd::new(port_file)?;
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(port_file) }.map_err(std::io::Error::from)?;
 
     // A combined port carries full raw records; a dual-port control stream does not. Size the
     // allocation from the selected topology so combined throughput does not pay four reads per
@@ -516,6 +522,9 @@ pub async fn run(
     // Channel for session output events.
     let (mut session_tx, mut session_rx, bulk_session_rx, bulk_command_rx) =
         SessionOutputSender::split_channel();
+    let bulk_cleanup = session_tx.bulk_cleanup().ok_or_else(|| {
+        AgentdError::ExecSession("dedicated bulk cleanup state was not initialized".into())
+    })?;
 
     // Heartbeat/activity state.
     let mut activity = ActivityTracker::new();
@@ -552,6 +561,7 @@ pub async fn run(
             // the runtime over the guest consoles, so the runtime injects this capability later.
             local_transport: None,
             workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+            exec_limits: config.exec_limits,
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -559,13 +569,17 @@ pub async fn run(
         .map_err(|e| AgentdError::ExecSession(format!("encode ready frame: {e}")))?;
     flush_write_buf(&async_port, &mut serial_out_buf).await?;
 
-    let (mut combined_bulk_rx, mut bulk_input, mut bulk_failure_rx, mut bulk_activity_rx) =
+    let (mut combined_bulk_rx, mut bulk_input, mut bulk_writer, mut bulk_activity_rx) =
         match bulk_port {
             Some(port) => {
                 let input = BulkInputState::new(port.file.try_clone()?)?;
-                let (failure_rx, activity_rx) =
-                    spawn_bulk_writer_task(port.file, bulk_session_rx, bulk_command_rx);
-                (None, Some(input), Some(failure_rx), Some(activity_rx))
+                let (writer, activity_rx) = spawn_bulk_writer_task(
+                    port.file,
+                    bulk_session_rx,
+                    bulk_command_rx,
+                    bulk_cleanup,
+                );
+                (None, Some(input), Some(writer), Some(activity_rx))
             }
             None => {
                 session_tx.disable_bulk_scheduler();
@@ -666,7 +680,7 @@ pub async fn run(
                 }
 
                 if !inherited && let Some(session) = state.sessions.get_mut(&id) {
-                    encode_exec_stdin_credit(id, session, &mut serial_out_buf)?;
+                    encode_exec_stdin_ack(id, session, &mut serial_out_buf)?;
                     flush_write_buf(&async_port, &mut serial_out_buf).await?;
                 }
             }
@@ -681,7 +695,12 @@ pub async fn run(
                 return Err(AgentdError::ExecSession(error));
             }
 
-            Some(error) = recv_optional(&mut bulk_failure_rx) => {
+            result = wait_optional_bulk_writer(&mut bulk_writer) => {
+                let error = match result {
+                    Ok(Ok(())) => "dedicated bulk scheduler stopped without an error".to_string(),
+                    Ok(Err(error)) => error.to_string(),
+                    Err(error) => format!("dedicated bulk scheduler task failed: {error}"),
+                };
                 if state.output_parked {
                     return Err(AgentdError::ExecSession(format!(
                         "dedicated bulk transport failed while frozen: {error}"
@@ -925,7 +944,7 @@ pub async fn run(
                                     let _charge = state.input_window.admit(
                                         InputLane::Control, input_before - serial_in_buf.len(),
                                     )?;
-                                    establish_relay_client(&mut state, connected)?;
+                                    establish_relay_client(&mut state, connected, &session_tx)?;
                                     continue;
                                 }
                                 let Some(frame) = codec::try_decode_frame_from_bytes(&mut serial_in_buf)
@@ -1007,6 +1026,20 @@ pub async fn run(
                                     };
                                     Some(state.input_window.admit(lane, wire_bytes)?)
                                 };
+                                if msg.t.is_exec_control() && wire_bytes > MAX_EXEC_CONTROL_BYTES {
+                                    let out_before = serial_out_buf.len();
+                                    encode_core_error_if_supported(
+                                        &msg,
+                                        msg.id,
+                                        CoreErrorKind::InvalidPayload,
+                                        "execution control message exceeds 4 KiB".into(),
+                                        Some(msg.t.as_str().to_string()),
+                                        &mut serial_out_buf,
+                                    )?;
+                                    record_encoded_guest_messages(&serial_out_buf, out_before, &mut activity);
+                                    publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                                    continue;
+                                }
                                 if msg.flags != msg.t.flags() {
                                     let out_before = serial_out_buf.len();
                                     encode_core_error_if_supported(
@@ -1056,6 +1089,10 @@ pub async fn run(
                                 publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
                             }
 
+                            // Coalesce input acknowledgements across this decoded batch.
+                            for (&id, session) in &mut state.sessions {
+                                encode_exec_stdin_ack(id, session, &mut serial_out_buf)?;
+                            }
                             // Flush any outgoing messages.
                             if !serial_out_buf.is_empty() {
                                 flush_write_buf(&async_port, &mut serial_out_buf).await?;
@@ -1121,6 +1158,8 @@ pub async fn run(
                         activity.add_exec_output_bytes(len);
                     }
                     SessionOutput::Exited(code) => {
+                        let code = state.sessions.get_mut(&id).and_then(|session| session.finish(code));
+                        let Some(code) = code else { continue; };
                         let msg = Message::with_payload(MessageType::ExecExited, id, &ExecExited { code })
                             .map_err(|e| AgentdError::ExecSession(format!("encode exited: {e}")))?;
                         codec::encode_to_buf(&msg, &mut serial_out_buf)
@@ -1183,21 +1222,21 @@ fn spawn_bulk_writer_task(
     writer_file: File,
     output_rx: tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
     command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
+    cleanup: BulkCleanup,
 ) -> (
-    tokio::sync::mpsc::Receiver<String>,
+    tokio::task::JoinHandle<AgentdResult<()>>,
     tokio::sync::mpsc::Receiver<RawActivity>,
 ) {
-    let (failure_tx, failure_rx) = tokio::sync::mpsc::channel(1);
     let (activity_tx, activity_rx) = tokio::sync::mpsc::channel(128);
+    let writer = tokio::spawn(bulk_writer_task(
+        writer_file,
+        output_rx,
+        command_rx,
+        cleanup,
+        activity_tx,
+    ));
 
-    tokio::spawn(async move {
-        if let Err(error) = bulk_writer_task(writer_file, output_rx, command_rx, activity_tx).await
-        {
-            let _ = failure_tx.send(error.to_string()).await;
-        }
-    });
-
-    (failure_rx, activity_rx)
+    (writer, activity_rx)
 }
 
 /// Select the primary port's read working set from whether bulk has its own physical lane.
@@ -1231,73 +1270,79 @@ async fn recv_optional<T>(receiver: &mut Option<tokio::sync::mpsc::Receiver<T>>)
     }
 }
 
+/// Wait for an optional dedicated scheduler without making combined mode spin.
+async fn wait_optional_bulk_writer(
+    writer: &mut Option<tokio::task::JoinHandle<AgentdResult<()>>>,
+) -> Result<AgentdResult<()>, tokio::task::JoinError> {
+    let Some(writer) = writer.as_mut() else {
+        return std::future::pending().await;
+    };
+    writer.await
+}
+
 /// Schedule guest-to-host records fairly by correlation before writing the bulk port.
 async fn bulk_writer_task(
     file: File,
     mut output_rx: tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
     mut command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
+    cleanup: BulkCleanup,
     activity_tx: tokio::sync::mpsc::Sender<RawActivity>,
 ) -> AgentdResult<()> {
-    let async_port = AsyncFd::new(file)?;
+    let _close_guard = cleanup.close_guard();
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?;
     let mut generation = 0;
-    let mut flows = HashMap::<(ClientIncarnation, u32), BulkWriteFlow>::new();
-    let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
-    let mut retired = HashMap::<ClientIncarnation, Vec<u64>>::new();
-    let mut retiring_incarnations = HashSet::<ClientIncarnation>::new();
+    let mut flows = HashMap::<BulkFlowKey, BulkWriteFlow>::new();
+    let mut active = VecDeque::<BulkFlowKey>::new();
     let mut pending_activity = RawActivity::default();
     let mut transport = BulkOutputPosition::default();
+    let mut selected_envelope = None;
+    let mut cleanup_cache = BulkCleanupCache::default();
 
     loop {
-        let mut cleanups = Vec::new();
-        tokio::select! {
-            biased;
-            Some(command) = command_rx.recv() => {
-                cleanups.push(apply_bulk_output_command(
-                    command,
-                    &mut generation,
-                    &mut flows,
-                    &mut active,
-                    &mut retired,
-                    &mut retiring_incarnations,
-                    &mut transport,
-                )?);
-            }
-            Some(envelope) = output_rx.recv(), if !transport.parked => {
-                enqueue_bulk_output(
-                    envelope,
-                    generation,
-                    &mut flows,
-                    &mut active,
-                    &retired,
-                    &retiring_incarnations,
-                )?;
-            }
-            else => break,
-        }
-        while let Ok(command) = command_rx.try_recv() {
-            cleanups.push(apply_bulk_output_command(
-                command,
+        apply_pending_bulk_output_commands(
+            &mut command_rx,
+            &mut generation,
+            &mut flows,
+            &mut active,
+            &cleanup,
+            &mut transport,
+        );
+
+        // Commands retain priority over ordinary output. Restore may replace the ownership epoch,
+        // and shared cancellations must purge old flows before any replacement is admitted.
+        reconcile_bulk_output(
+            &cleanup,
+            &mut cleanup_cache,
+            &mut output_rx,
+            selected_envelope.take(),
+            generation,
+            &mut flows,
+            &mut active,
+        )?;
+
+        while !transport.parked && !active.is_empty() {
+            apply_pending_bulk_output_commands(
+                &mut command_rx,
                 &mut generation,
                 &mut flows,
                 &mut active,
-                &mut retired,
-                &mut retiring_incarnations,
+                &cleanup,
                 &mut transport,
-            )?);
-        }
-        while let Ok(envelope) = output_rx.try_recv() {
-            enqueue_bulk_output(
-                envelope,
+            );
+            reconcile_bulk_output(
+                &cleanup,
+                &mut cleanup_cache,
+                &mut output_rx,
+                None,
                 generation,
                 &mut flows,
                 &mut active,
-                &retired,
-                &retiring_incarnations,
             )?;
-        }
-        complete_bulk_output_cleanups(cleanups, &mut retired, &mut retiring_incarnations);
+            if transport.parked || active.is_empty() {
+                break;
+            }
 
-        while !transport.parked && !active.is_empty() {
             let round_len = active.len();
             let quantum = if round_len == 1 {
                 BULK_SCHEDULER_MAX_BURST
@@ -1308,13 +1353,16 @@ async fn bulk_writer_task(
                 if transport.parked || active.is_empty() {
                     break;
                 }
-                let key = active.pop_front().expect("active flow exists");
-                if let Some(flow) = flows.get_mut(&key) {
-                    flow.deficit = flow
-                        .deficit
-                        .saturating_add(quantum)
-                        .min(BULK_SCHEDULER_MAX_BURST);
-                }
+                let Some(key) = active.pop_front() else {
+                    break;
+                };
+                let Some(flow) = flows.get_mut(&key) else {
+                    continue;
+                };
+                flow.deficit = flow
+                    .deficit
+                    .saturating_add(quantum)
+                    .min(BULK_SCHEDULER_MAX_BURST);
 
                 let mut burst = 0usize;
                 loop {
@@ -1333,24 +1381,47 @@ async fn bulk_writer_task(
                         break;
                     }
 
-                    let envelope = {
-                        let flow = flows.get_mut(&key).expect("scheduled flow exists");
-                        let envelope = flow.queue.pop_front().expect("scheduled record exists");
-                        flow.queued_bytes = flow.queued_bytes.saturating_sub(next_len);
-                        flow.deficit = flow.deficit.saturating_sub(next_len);
-                        envelope
+                    let Some(flow) = flows.get_mut(&key) else {
+                        break;
                     };
+                    let Some(envelope) = flow.queue.pop_front() else {
+                        break;
+                    };
+                    flow.queued_bytes = flow.queued_bytes.saturating_sub(next_len);
+                    flow.deficit = flow.deficit.saturating_sub(next_len);
                     let incarnation = envelope.incarnation.ok_or_else(|| {
                         AgentdError::ExecSession(
                             "dedicated bulk output is missing client incarnation".into(),
                         )
                     })?;
                     let SessionOutput::Bulk(output) = envelope.output else {
-                        unreachable!("bulk scheduler accepted a non-bulk event");
+                        return Err(AgentdError::ExecSession(
+                            "non-bulk event entered dedicated bulk scheduler".into(),
+                        ));
                     };
+                    if !cleanup.start_write(incarnation) {
+                        reconcile_bulk_output(
+                            &cleanup,
+                            &mut cleanup_cache,
+                            &mut output_rx,
+                            None,
+                            generation,
+                            &mut flows,
+                            &mut active,
+                        )?;
+                        break;
+                    }
+
                     let output_activity = output.activity;
-                    write_incarnated_bulk_record_async_fd(&async_port, incarnation, &output.record)
-                        .await?;
+                    let write_result = write_incarnated_bulk_record_async_fd(
+                        &async_port,
+                        incarnation,
+                        &output.record,
+                    )
+                    .await;
+                    cleanup.finish_write(incarnation);
+                    write_result?;
+
                     transport.wire_bytes = transport
                         .wire_bytes
                         .checked_add(bulk_wire_bytes(&output.record, true) as u64)
@@ -1374,35 +1445,27 @@ async fn bulk_writer_task(
                         publish_bulk_activity(&activity_tx, &mut pending_activity)?;
                     }
                     burst = burst.saturating_add(next_len);
-                    // Lifecycle commands cut only between complete wire records. In particular,
-                    // never wait for the rest of this flow's burst before acknowledging Park.
-                    let mut cleanups = Vec::new();
-                    while let Ok(command) = command_rx.try_recv() {
-                        cleanups.push(apply_bulk_output_command(
-                            command,
-                            &mut generation,
-                            &mut flows,
-                            &mut active,
-                            &mut retired,
-                            &mut retiring_incarnations,
-                            &mut transport,
-                        )?);
-                    }
-                    while let Ok(envelope) = output_rx.try_recv() {
-                        enqueue_bulk_output(
-                            envelope,
-                            generation,
-                            &mut flows,
-                            &mut active,
-                            &retired,
-                            &retiring_incarnations,
-                        )?;
-                    }
-                    complete_bulk_output_cleanups(
-                        cleanups,
-                        &mut retired,
-                        &mut retiring_incarnations,
+
+                    // Lifecycle commands and shared cleanup cut only between complete records. In
+                    // particular, never wait for the rest of this flow's burst before acknowledging
+                    // Park.
+                    apply_pending_bulk_output_commands(
+                        &mut command_rx,
+                        &mut generation,
+                        &mut flows,
+                        &mut active,
+                        &cleanup,
+                        &mut transport,
                     );
+                    reconcile_bulk_output(
+                        &cleanup,
+                        &mut cleanup_cache,
+                        &mut output_rx,
+                        None,
+                        generation,
+                        &mut flows,
+                        &mut active,
+                    )?;
                     if transport.parked {
                         break;
                     }
@@ -1415,37 +1478,56 @@ async fn bulk_writer_task(
                 }
             }
 
-            let mut cleanups = Vec::new();
-            while let Ok(command) = command_rx.try_recv() {
-                cleanups.push(apply_bulk_output_command(
+            tokio::task::yield_now().await;
+        }
+
+        if active.is_empty() && pending_activity.guest_messages != 0 {
+            publish_bulk_activity(&activity_tx, &mut pending_activity)?;
+        }
+
+        let output_closed = output_rx.is_closed() && output_rx.is_empty();
+        let commands_closed = command_rx.is_closed() && command_rx.is_empty();
+        if output_closed && commands_closed && (transport.parked || active.is_empty()) {
+            break;
+        }
+
+        tokio::select! {
+            biased;
+            _ = cleanup.notified() => {}
+            Some(command) = command_rx.recv() => {
+                let completion = apply_bulk_output_command(
                     command,
                     &mut generation,
                     &mut flows,
                     &mut active,
-                    &mut retired,
-                    &mut retiring_incarnations,
+                    &cleanup,
                     &mut transport,
-                )?);
+                );
+                complete_bulk_output_cleanup(completion);
             }
-            while let Ok(envelope) = output_rx.try_recv() {
-                enqueue_bulk_output(
-                    envelope,
-                    generation,
-                    &mut flows,
-                    &mut active,
-                    &retired,
-                    &retiring_incarnations,
-                )?;
+            envelope = output_rx.recv(), if !transport.parked && !output_closed => {
+                selected_envelope = envelope;
             }
-            complete_bulk_output_cleanups(cleanups, &mut retired, &mut retiring_incarnations);
-            if active.is_empty() && pending_activity.guest_messages != 0 {
-                publish_bulk_activity(&activity_tx, &mut pending_activity)?;
-            }
-            tokio::task::yield_now().await;
         }
     }
 
     Ok(())
+}
+
+/// Apply every lifecycle command already queued at a complete-record boundary.
+fn apply_pending_bulk_output_commands(
+    command_rx: &mut tokio::sync::mpsc::Receiver<BulkOutputCommand>,
+    generation: &mut u64,
+    flows: &mut HashMap<BulkFlowKey, BulkWriteFlow>,
+    active: &mut VecDeque<BulkFlowKey>,
+    cleanup: &BulkCleanup,
+    transport: &mut BulkOutputPosition,
+) {
+    while let Ok(command) = command_rx.try_recv() {
+        let completion =
+            apply_bulk_output_command(command, generation, flows, active, cleanup, transport);
+        complete_bulk_output_cleanup(completion);
+    }
 }
 
 /// Activity must never prevent a restore command from reaching the scheduler.
@@ -1468,23 +1550,22 @@ fn publish_bulk_activity(
 fn apply_bulk_output_command(
     command: BulkOutputCommand,
     generation: &mut u64,
-    flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
-    active: &mut VecDeque<(ClientIncarnation, u32)>,
-    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
-    retiring_incarnations: &mut HashSet<ClientIncarnation>,
+    flows: &mut HashMap<BulkFlowKey, BulkWriteFlow>,
+    active: &mut VecDeque<BulkFlowKey>,
+    cleanup: &BulkCleanup,
     transport: &mut BulkOutputPosition,
-) -> AgentdResult<BulkOutputCleanup> {
+) -> BulkOutputCleanup {
     match command {
         BulkOutputCommand::Park { completion } => {
             transport.parked = true;
-            Ok(BulkOutputCleanup::Park {
+            BulkOutputCleanup::Park {
                 completion,
                 wire_bytes: transport.wire_bytes,
-            })
+            }
         }
         BulkOutputCommand::Resume { completion } => {
             transport.parked = false;
-            Ok(BulkOutputCleanup::Flow(completion))
+            BulkOutputCleanup::Ack(completion)
         }
         BulkOutputCommand::Restore {
             generation: next,
@@ -1493,72 +1574,63 @@ fn apply_bulk_output_command(
             *generation = next;
             flows.clear();
             active.clear();
-            retired.clear();
-            retiring_incarnations.clear();
-            Ok(BulkOutputCleanup::Flow(completion))
-        }
-        BulkOutputCommand::DropFlow {
-            incarnation,
-            id,
-            completion,
-        } => {
-            let key = (incarnation, id);
-            flows.remove(&key);
-            active.retain(|active_key| *active_key != key);
-            retire_bulk_output(retired, incarnation, id)?;
-            Ok(BulkOutputCleanup::Flow(completion))
-        }
-        BulkOutputCommand::DropIncarnation {
-            incarnation,
-            completion,
-        } => {
-            flows.retain(|(owner, _), _| *owner != incarnation);
-            active.retain(|(owner, _)| *owner != incarnation);
-            retiring_incarnations.insert(incarnation);
-            Ok(BulkOutputCleanup::Incarnation {
-                incarnation,
-                completion,
-            })
+            cleanup.restore();
+            BulkOutputCleanup::Ack(completion)
         }
     }
 }
 
-/// Complete lifecycle cuts only after the data receiver has been drained through its tombstones.
-fn complete_bulk_output_cleanups(
-    cleanups: Vec<BulkOutputCleanup>,
-    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
-    retiring_incarnations: &mut HashSet<ClientIncarnation>,
-) {
-    for cleanup in cleanups {
-        match cleanup {
-            BulkOutputCleanup::Park {
-                completion,
-                wire_bytes,
-            } => {
-                let _ = completion.send(wire_bytes);
-            }
-            BulkOutputCleanup::Flow(completion) => {
-                let _ = completion.send(());
-            }
-            BulkOutputCleanup::Incarnation {
-                incarnation,
-                completion,
-            } => {
-                retired.remove(&incarnation);
-                retiring_incarnations.remove(&incarnation);
-                let _ = completion.send(());
-            }
+/// Complete a lifecycle cut after its scheduler state has been applied.
+fn complete_bulk_output_cleanup(cleanup: BulkOutputCleanup) {
+    match cleanup {
+        BulkOutputCleanup::Park {
+            completion,
+            wire_bytes,
+        } => {
+            let _ = completion.send(wire_bytes);
+        }
+        BulkOutputCleanup::Ack(completion) => {
+            let _ = completion.send(());
         }
     }
+}
+
+/// Purge released ownership before admitting any newly queued record.
+fn reconcile_bulk_output(
+    cleanup: &BulkCleanup,
+    cache: &mut BulkCleanupCache,
+    output_rx: &mut tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
+    selected: Option<SessionOutputEnvelope>,
+    generation: u64,
+    flows: &mut HashMap<BulkFlowKey, BulkWriteFlow>,
+    active: &mut VecDeque<BulkFlowKey>,
+) -> AgentdResult<()> {
+    let cancelled = if let Some(snapshot) = cleanup.snapshot_if_changed(cache.epoch) {
+        flows.retain(|key, _| snapshot.live.contains(&key.0) && !snapshot.cancelled.contains(key));
+        active.retain(|key| flows.contains_key(key));
+        cache.epoch = Some(snapshot.changed);
+        cache.live = snapshot.live;
+        snapshot.cancelled
+    } else {
+        HashSet::new()
+    };
+
+    if let Some(envelope) = selected {
+        enqueue_bulk_output(envelope, generation, flows, active, &cancelled, &cache.live)?;
+    }
+    while let Ok(envelope) = output_rx.try_recv() {
+        enqueue_bulk_output(envelope, generation, flows, active, &cancelled, &cache.live)?;
+    }
+    Ok(())
 }
 
 fn enqueue_bulk_output(
     envelope: SessionOutputEnvelope,
     generation: u64,
-    flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
-    active: &mut VecDeque<(ClientIncarnation, u32)>,
-    retired: &HashMap<ClientIncarnation, Vec<u64>>,
-    retiring_incarnations: &HashSet<ClientIncarnation>,
+    flows: &mut HashMap<BulkFlowKey, BulkWriteFlow>,
+    active: &mut VecDeque<BulkFlowKey>,
+    cancelled: &HashSet<BulkFlowKey>,
+    live: &HashSet<ClientIncarnation>,
 ) -> AgentdResult<()> {
     if envelope.generation != generation {
         return Ok(());
@@ -1580,11 +1652,9 @@ fn enqueue_bulk_output(
     }
 
     let key = (incarnation, id);
-    if retiring_incarnations.contains(&incarnation)
-        || bulk_output_is_retired(retired, incarnation, id)
-    {
-        // A producer can race cancellation after the lifecycle command overtakes the data queue.
-        // Retaining the owner-scoped tombstone makes that late record release its permit here.
+    if !live.contains(&incarnation) || cancelled.contains(&key) {
+        // The current-thread runtime guarantees that records from an aborted producer are already
+        // in output_rx before its synchronous cancellation is published.
         return Ok(());
     }
     if !flows.contains_key(&key) {
@@ -2176,9 +2246,9 @@ fn cancel_bulk_correlation(
 ) {
     let owner_tx = session_tx.with_incarnation(client_incarnation_for_id(state, id));
     // Stop every producer before publishing the scheduler cut. Any send that completed before
-    // teardown is already bounded in the scheduler input queue; an in-progress send is cancelled
-    // with its producer task and cannot appear after the cleanup acknowledgement.
-    match kind {
+    // teardown is already in the scheduler input queue, where the next reconcile purges it; an
+    // in-progress send is cancelled with its producer task and never enqueues.
+    let producer_was_live = match kind {
         BulkKind::Filesystem => {
             state.write_sessions.remove(&id);
             if let Some(worker) = state.bulk_write_workers.remove(&id) {
@@ -2186,18 +2256,22 @@ fn cancel_bulk_correlation(
             }
             if let Some(session) = state.read_sessions.remove(&id) {
                 session.abort();
+                true
+            } else {
+                false
             }
         }
         BulkKind::Tcp => {
             if let Some(session) = state.tcp_sessions.remove(&id) {
                 session.close();
+                true
+            } else {
+                false
             }
         }
-    }
+    };
     clear_bulk_receive_state(state, id);
-    if let Err(error) = owner_tx.drop_bulk_flow(id) {
-        eprintln!("agentd: failed to purge cancelled bulk output id={id}: {error}");
-    }
+    owner_tx.drop_bulk_flow(id, producer_was_live);
 }
 
 fn cancel_all_bulk_correlations(
@@ -2263,46 +2337,6 @@ fn client_incarnation_for_id(state: &AgentState, id: u32) -> Option<ClientIncarn
     relay_client_slot(id).and_then(|slot| state.client_incarnations.get(&slot).copied())
 }
 
-fn bulk_output_retired_bit(id: u32) -> Option<(usize, u64)> {
-    let slot = relay_client_slot(id)?;
-    let (id_start, _) = relay_client_id_range(slot)?;
-    let local = usize::try_from(id.checked_sub(id_start)?).ok()?;
-    Some((
-        local / u64::BITS as usize,
-        1u64 << (local % u64::BITS as usize),
-    ))
-}
-
-fn bulk_output_is_retired(
-    retired: &HashMap<ClientIncarnation, Vec<u64>>,
-    incarnation: ClientIncarnation,
-    id: u32,
-) -> bool {
-    let Some((word, mask)) = bulk_output_retired_bit(id) else {
-        return false;
-    };
-    retired
-        .get(&incarnation)
-        .and_then(|bitmap| bitmap.get(word))
-        .is_some_and(|bits| bits & mask != 0)
-}
-
-fn retire_bulk_output(
-    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
-    incarnation: ClientIncarnation,
-    id: u32,
-) -> AgentdResult<()> {
-    let (word, mask) = bulk_output_retired_bit(id).ok_or_else(|| {
-        AgentdError::ExecSession(format!("cannot retire unassigned bulk correlation {id}"))
-    })?;
-    let bitmap = retired.entry(incarnation).or_default();
-    if bitmap.len() <= word {
-        bitmap.resize(word + 1, 0);
-    }
-    bitmap[word] |= mask;
-    Ok(())
-}
-
 /// Accept current ownership, silently reject stale ownership, and fail cross-client spoofing.
 fn validate_bulk_client_incarnation(
     state: &AgentState,
@@ -2348,6 +2382,7 @@ fn validate_relay_client_range(id_start: u32, id_end_exclusive: u32) -> AgentdRe
 fn establish_relay_client(
     state: &mut AgentState,
     connected: RelayClientConnected,
+    session_tx: &SessionOutputSender,
 ) -> AgentdResult<()> {
     let slot = validate_relay_client_range(connected.id_start, connected.id_end_exclusive)?;
     if connected.incarnation == [0; CLIENT_INCARNATION_SIZE] {
@@ -2367,6 +2402,7 @@ fn establish_relay_client(
     state
         .client_incarnations
         .insert(slot, connected.incarnation);
+    session_tx.connect_bulk_incarnation(connected.incarnation);
     Ok(())
 }
 
@@ -2389,9 +2425,7 @@ fn disconnect_relay_client(
     }
     cleanup_relay_client_range(state, disconnected.id_start, disconnected.id_end_exclusive);
     let scheduler_cleanup = match disconnected.incarnation {
-        Some(incarnation) => session_tx
-            .drop_bulk_incarnation(incarnation)
-            .map_err(|error| AgentdError::ExecSession(error.into()))?,
+        Some(incarnation) => session_tx.drop_bulk_incarnation(incarnation),
         None => None,
     };
     Ok((true, scheduler_cleanup))
@@ -2436,9 +2470,14 @@ async fn restore_client_state(
         .extend(
             std::mem::take(&mut state.sessions)
                 .into_iter()
-                .map(|(id, mut session)| {
+                .filter_map(|(id, mut session)| {
                     session.detach_stdin();
-                    ((generation, id), session)
+                    // Completed readers already emitted their exit event. Once the old client
+                    // is detached, unread output must not keep their execution slots alive.
+                    if session.take_completed_exit().is_some() {
+                        return None;
+                    }
+                    Some(((generation, id), session))
                 }),
         );
     state.client_incarnations.clear();
@@ -2732,7 +2771,7 @@ async fn handle_message_with_charge(
                 || (!workload.is_frozen()
                     && state.aborted_transport_attempt.as_deref() == Some(&request.attempt_id))
             {
-                if request.mode != microsandbox_protocol::core::WorkloadThawMode::Continue {
+                if request.mode != WorkloadThawMode::Continue {
                     encode_workload_error(
                         &msg,
                         &request.attempt_id,
@@ -2767,7 +2806,7 @@ async fn handle_message_with_charge(
                 codec::encode_to_buf(&reply, out_buf)?;
                 return Ok(());
             }
-            if request.mode == microsandbox_protocol::core::WorkloadThawMode::Restore
+            if request.mode == WorkloadThawMode::Restore
                 && state.restored_attempt.as_deref() != Some(&request.attempt_id)
             {
                 if let Err(error) = workload.require_frozen_attempt(&request.attempt_id) {
@@ -2810,6 +2849,25 @@ async fn handle_message_with_charge(
             let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
                 return Ok(());
             };
+            // Released peers do not acknowledge execution output. Preserve their legacy path.
+            let policy = (msg.v >= 10).then_some(config.exec_limits).flatten();
+            if let Some(policy) = policy
+                && state.sessions.len() + state.detached_sessions.len()
+                    >= policy.max_executions as usize
+            {
+                encode_exec_failed(
+                    msg.id,
+                    ExecFailed {
+                        kind: ExecFailureKind::ResourceLimit,
+                        errno: None,
+                        errno_name: None,
+                        message: "active execution limit reached".into(),
+                        stage: Some("execution_admission".into()),
+                    },
+                    out_buf,
+                )?;
+                return Ok(());
+            }
             if req.cwd.is_none() {
                 req.cwd = config.default_cwd().map(str::to_string);
             }
@@ -2852,6 +2910,7 @@ async fn handle_message_with_charge(
                 config.user.as_deref(),
                 config.security_profile,
                 workload_placement,
+                policy,
             ) {
                 Ok(session) => {
                     let reply = Message::with_payload(
@@ -2895,25 +2954,34 @@ async fn handle_message_with_charge(
             let Some(stdin) = decode_payload_or_core_error::<ExecStdin>(&msg, out_buf)? else {
                 return Ok(());
             };
-            if let Some(session) = state.sessions.get_mut(&msg.id) {
-                if let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take()) {
-                    encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
-                }
-                encode_exec_stdin_credit(msg.id, session, out_buf)?;
+            if let Some(session) = state.sessions.get_mut(&msg.id)
+                && let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take())
+            {
+                encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
             }
         }
 
-        MessageType::ExecOutputCredit => {
-            let Some(credit) = decode_payload_or_core_error::<
-                microsandbox_protocol::exec::ExecOutputCredit,
-            >(&msg, out_buf)?
-            else {
+        MessageType::ExecOutputAck => {
+            let Some(ack) = decode_payload_or_core_error::<ExecOutputAck>(&msg, out_buf)? else {
                 return Ok(());
             };
             if let Some(session) = state.sessions.get(&msg.id)
-                && let Err(error) = session.acknowledge_output(credit.consumed)
+                && let Err(error) = session.acknowledge_output(ack.consumed)
             {
-                eprintln!("rejected exec output credit for {}: {error}", msg.id);
+                eprintln!(
+                    "rejected exec output acknowledgement for {}: {error}",
+                    msg.id
+                );
+            }
+            if let Some(code) = state
+                .sessions
+                .get_mut(&msg.id)
+                .and_then(ExecSession::take_completed_exit)
+            {
+                let reply =
+                    Message::with_payload(MessageType::ExecExited, msg.id, &ExecExited { code })?;
+                codec::encode_to_buf(&reply, out_buf)?;
+                state.sessions.remove(&msg.id);
             }
         }
 
@@ -3099,7 +3167,9 @@ async fn handle_message_with_charge(
                     .write_data_charged(data.data, input_charge.take())
                     .await
                 {
-                    state.tcp_sessions.remove(&msg.id);
+                    if let Some(session) = state.tcp_sessions.remove(&msg.id) {
+                        session.close();
+                    }
                     clear_bulk_receive_state(state, msg.id);
                     encode_tcp_failed(msg.id, e, out_buf)?;
                 } else {
@@ -3117,7 +3187,9 @@ async fn handle_message_with_charge(
             if let Some(session) = state.tcp_sessions.get(&msg.id)
                 && let Err(e) = session.close_write_charged(input_charge.take()).await
             {
-                state.tcp_sessions.remove(&msg.id);
+                if let Some(session) = state.tcp_sessions.remove(&msg.id) {
+                    session.close();
+                }
                 clear_bulk_receive_state(state, msg.id);
                 encode_tcp_failed(msg.id, e, out_buf)?;
             }
@@ -3152,9 +3224,10 @@ async fn handle_message_with_charge(
                 disconnect_relay_client(state, disconnected, &session_tx)?;
             if removed && let Some(disconnect_ack) = disconnect_ack {
                 if let Some(cleanup) = scheduler_cleanup {
-                    // Keep the single-vCPU control actor available while the bulk actor reaches
-                    // its cleanup cut. The acknowledgement is emitted through the ordinary
-                    // control queue only after matching queued records release their permits.
+                    // Keep the single-vCPU control actor available while the bulk actor finishes
+                    // this owner's in-flight record, if any. Its queued records are never written
+                    // after this point, so the acknowledgement goes through the ordinary control
+                    // queue as soon as no record of the owner is on the port.
                     let output_tx = session_tx.clone();
                     tokio::spawn(async move {
                         if cleanup.await.is_ok() {
@@ -3438,17 +3511,14 @@ fn poll_pending_stdin(
     Poll::Pending
 }
 
-fn encode_exec_stdin_credit(
+fn encode_exec_stdin_ack(
     id: u32,
     session: &mut ExecSession,
     out_buf: &mut Vec<u8>,
 ) -> AgentdResult<()> {
-    if let Some(consumed) = session.take_stdin_credit() {
-        let message = Message::with_payload(
-            MessageType::ExecStdinCredit,
-            id,
-            &microsandbox_protocol::exec::ExecStdinCredit { consumed },
-        )?;
+    if let Some(consumed) = session.take_stdin_ack() {
+        let message =
+            Message::with_payload(MessageType::ExecStdinAck, id, &ExecStdinAck { consumed })?;
         codec::encode_to_buf(&message, out_buf)?;
     }
     Ok(())
@@ -3839,8 +3909,8 @@ fn errno_name(code: i32) -> Option<String> {
 }
 
 fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
-    // Check if the request already specifies PATH.
-    if let Some(entry) = req.env.iter_mut().find(|e| e.starts_with("PATH=")) {
+    // Entries apply in order, so the child sees the request's last PATH.
+    if let Some(entry) = req.env.iter_mut().rfind(|e| e.starts_with("PATH=")) {
         let existing = &entry["PATH=".len()..];
         *entry = format!("PATH={}", scripts_path(Some(existing)));
     } else {
@@ -4196,7 +4266,7 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 
     // Foreign init owns both shutdown duration and filesystem teardown. No timer or
     // fallback signal may convert this graceful request into forced termination.
-    crate::handoff::signal_init_shutdown()
+    crate::handoff::request_init_shutdown()
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -4206,8 +4276,230 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::OwnedFd;
+
     use bytes::Bytes;
-    use microsandbox_protocol::message::PROTOCOL_VERSION;
+    use microsandbox_protocol::transport::relay_client_id_range;
+    use microsandbox_protocol::{exec::ExecLimits, message::PROTOCOL_VERSION};
+    use tokio::io::AsyncReadExt;
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    async fn test_timeout<F: Future>(future: F) -> F::Output {
+        time::timeout(Duration::from_secs(5), future)
+            .await
+            .expect("test operation timed out")
+    }
+
+    struct MessageTestContext {
+        state: AgentState,
+    }
+
+    impl MessageTestContext {
+        fn new() -> Self {
+            Self {
+                state: AgentState::default(),
+            }
+        }
+
+        async fn handle(&mut self, message: Message, sender: &mut SessionOutputSender) {
+            let mut activity = ActivityTracker::new();
+            let config = AgentdConfig {
+                exec_limits: None,
+                user: None,
+                security_profile: Default::default(),
+                default_cwd: None,
+                default_env: Vec::new(),
+            };
+            let mut workload = WorkloadLatch::unavailable("test process has no workload cgroup");
+            let heartbeat = heartbeat::HeartbeatControl::default();
+            let mut output = Vec::new();
+            test_timeout(handle_message(
+                message,
+                &mut self.state,
+                &mut activity,
+                sender,
+                &mut output,
+                &config,
+                &mut workload,
+                &heartbeat,
+            ))
+            .await
+            .unwrap();
+        }
+
+        fn connect(
+            &mut self,
+            sender: &SessionOutputSender,
+            slot: u32,
+            incarnation: ClientIncarnation,
+        ) -> RelayClientConnected {
+            let (id_start, id_end_exclusive) = relay_client_id_range(slot).unwrap();
+            let connected = RelayClientConnected {
+                id_start,
+                id_end_exclusive,
+                incarnation,
+            };
+            establish_relay_client(&mut self.state, connected, sender).unwrap();
+
+            connected
+        }
+
+        async fn cancel(&mut self, sender: &mut SessionOutputSender, id: u32) {
+            self.handle(
+                Message::with_payload(
+                    MessageType::BulkCancel,
+                    id,
+                    &BulkCancel {
+                        kind: BulkKind::Filesystem,
+                        reason: BulkCancelReason::TransportFailure,
+                        message: "cancelled".into(),
+                    },
+                )
+                .unwrap(),
+                sender,
+            )
+            .await;
+        }
+
+        async fn disconnect(
+            &mut self,
+            sender: &mut SessionOutputSender,
+            client: &RelayClientConnected,
+        ) {
+            self.handle(
+                Message::with_payload(
+                    MessageType::RelayClientDisconnected,
+                    0,
+                    &RelayClientDisconnected {
+                        id_start: client.id_start,
+                        id_end_exclusive: client.id_end_exclusive,
+                        incarnation: Some(client.incarnation),
+                    },
+                )
+                .unwrap(),
+                sender,
+            )
+            .await;
+        }
+    }
+
+    fn bulk_test_socket(send_buffer: Option<libc::c_int>) -> (File, tokio::net::UnixStream) {
+        let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        reader.set_nonblocking(true).unwrap();
+        if let Some(send_buffer) = send_buffer {
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        writer.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        (&send_buffer as *const libc::c_int).cast(),
+                        std::mem::size_of_val(&send_buffer) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+        }
+
+        (
+            File::from(OwnedFd::from(writer)),
+            tokio::net::UnixStream::from_std(reader).unwrap(),
+        )
+    }
+
+    fn start_bulk_test_scheduler(
+        send_buffer: Option<libc::c_int>,
+    ) -> (
+        SessionOutputSender,
+        BulkCleanup,
+        tokio::net::UnixStream,
+        tokio::task::JoinHandle<AgentdResult<()>>,
+        tokio::sync::mpsc::Receiver<RawActivity>,
+    ) {
+        let (file, reader) = bulk_test_socket(send_buffer);
+        let (sender, _control, bulk, commands) = SessionOutputSender::split_channel();
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::channel(8);
+        let writer = tokio::spawn(bulk_writer_task(
+            file,
+            bulk,
+            commands,
+            cleanup.clone(),
+            activity_tx,
+        ));
+
+        (sender, cleanup, reader, writer, activity_rx)
+    }
+
+    async fn queue_bulk_record(
+        sender: &SessionOutputSender,
+        incarnation: ClientIncarnation,
+        id: u32,
+        offset: u64,
+        payload: Bytes,
+        activity: RawActivity,
+    ) -> BulkRecord {
+        let record = BulkRecord {
+            id,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::GuestToHost,
+            offset,
+            payload,
+        };
+        let queued = test_timeout(sender.with_incarnation(Some(incarnation)).send(
+            id,
+            SessionOutput::Bulk(crate::session::BulkSessionOutput::new(
+                record.clone(),
+                activity,
+            )),
+        ))
+        .await;
+        assert!(queued);
+
+        record
+    }
+
+    async fn queue_bulk(
+        sender: &SessionOutputSender,
+        incarnation: ClientIncarnation,
+        id: u32,
+        payload: Bytes,
+    ) -> BulkRecord {
+        queue_bulk_record(sender, incarnation, id, 0, payload, RawActivity::default()).await
+    }
+
+    fn reconcile_all_bulk(
+        cleanup: &BulkCleanup,
+        bulk: &mut tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
+        flows: &mut HashMap<BulkFlowKey, BulkWriteFlow>,
+        active: &mut VecDeque<BulkFlowKey>,
+    ) {
+        let mut cache = BulkCleanupCache::default();
+        reconcile_bulk_output(cleanup, &mut cache, bulk, None, 0, flows, active).unwrap();
+    }
+
+    fn decode_disconnect_ack(envelope: SessionOutputEnvelope) -> RelayClientDisconnectedAck {
+        let SessionOutput::Raw(raw) = envelope.output else {
+            panic!("disconnect acknowledgement was not raw output");
+        };
+        let mut frame = BytesMut::from(raw.frame.as_slice());
+        let acknowledgement = try_decode_relay_client_disconnected_ack_from_bytes(&mut frame)
+            .unwrap()
+            .unwrap();
+        assert!(frame.is_empty());
+
+        acknowledgement
+    }
+
+    async fn receive_disconnect_ack(
+        control: &mut tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
+    ) -> RelayClientDisconnectedAck {
+        let envelope = test_timeout(control.recv())
+            .await
+            .expect("control output closed before disconnect acknowledgement");
+        decode_disconnect_ack(envelope)
+    }
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_message(
@@ -4305,11 +4597,12 @@ mod tests {
 
     #[tokio::test]
     async fn transport_cut_waits_for_decoded_prefix_and_abort_is_owned_and_repeatable() {
-        use microsandbox_protocol::core::WorkloadThawMode::{Continue, Restore};
+        use WorkloadThawMode::{Continue, Restore};
         let mut state = AgentState::default();
         let (mut sender, _output) = SessionOutputSender::channel();
         let mut activity = ActivityTracker::new();
         let config = AgentdConfig {
+            exec_limits: None,
             user: None,
             security_profile: Default::default(),
             default_cwd: None,
@@ -4435,6 +4728,7 @@ mod tests {
         let (mut sender, _output) = SessionOutputSender::channel();
         let mut activity = ActivityTracker::new();
         let config = AgentdConfig {
+            exec_limits: None,
             user: None,
             security_profile: Default::default(),
             default_cwd: None,
@@ -4582,6 +4876,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             let mut state = AgentState::default();
             let incarnation = [0x57; CLIENT_INCARNATION_SIZE];
+            let (mut sender, mut control, mut bulk, mut scheduler_commands) =
+                SessionOutputSender::split_channel();
             establish_relay_client(
                 &mut state,
                 RelayClientConnected {
@@ -4589,12 +4885,11 @@ mod tests {
                     id_end_exclusive: microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP,
                     incarnation,
                 },
+                &sender,
             )
             .unwrap();
             // Leave the dedicated scheduler's input queued: primary completion is allowed to
-            // overtake these bytes, but no late credit may send DropFlow to discard their tail.
-            let (mut sender, mut control, mut bulk, mut scheduler_commands) =
-                SessionOutputSender::split_channel();
+            // overtake these bytes, but no late credit may cancel the flow and discard its tail.
             let producer = sender.with_incarnation(Some(incarnation));
             let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             state.tcp_sessions.insert(
@@ -4672,6 +4967,7 @@ mod tests {
             };
             let mut activity = ActivityTracker::new();
             let config = AgentdConfig {
+                exec_limits: None,
                 user: None,
                 security_profile: Default::default(),
                 default_cwd: None,
@@ -4793,9 +5089,12 @@ mod tests {
         let file = File::from(OwnedFd::from(writer));
         let mut reader = tokio::net::UnixStream::from_std(reader).unwrap();
         let (sender, _control, bulk, commands) = SessionOutputSender::split_channel();
+        let cleanup = sender.bulk_cleanup().unwrap();
         let (activity, _activities) = tokio::sync::mpsc::channel(8);
-        let writer = tokio::spawn(bulk_writer_task(file, bulk, commands, activity));
-        let sender = sender.with_incarnation(Some([0x62; CLIENT_INCARNATION_SIZE]));
+        let writer = tokio::spawn(bulk_writer_task(file, bulk, commands, cleanup, activity));
+        let incarnation = [0x62; CLIENT_INCARNATION_SIZE];
+        sender.connect_bulk_incarnation(incarnation);
+        let sender = sender.with_incarnation(Some(incarnation));
         let first = BulkRecord {
             id: 1,
             kind: BulkKind::Filesystem,
@@ -4871,6 +5170,59 @@ mod tests {
         );
         writer.abort();
         let _ = writer.await;
+    }
+
+    #[tokio::test]
+    async fn dedicated_bulk_drr_preserves_small_flow_byte_share() {
+        let (file, mut reader) = bulk_test_socket(None);
+        let (sender, _control, bulk, commands) = SessionOutputSender::split_channel();
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let (activity, _activities) = tokio::sync::mpsc::channel(8);
+        let incarnation = [0x64; CLIENT_INCARNATION_SIZE];
+        sender.connect_bulk_incarnation(incarnation);
+        let sender = sender.with_incarnation(Some(incarnation));
+        let small_payload = 4 * 1024;
+        let large_payload = 1024 * 1024;
+
+        queue_bulk(&sender, incarnation, 1, Bytes::from(vec![1; small_payload])).await;
+        queue_bulk(&sender, incarnation, 2, Bytes::from(vec![2; large_payload])).await;
+        for index in 1..128 {
+            queue_bulk_record(
+                &sender,
+                incarnation,
+                1,
+                (index * small_payload) as u64,
+                Bytes::from(vec![1; small_payload]),
+                RawActivity::default(),
+            )
+            .await;
+        }
+
+        let writer = tokio::spawn(bulk_writer_task(file, bulk, commands, cleanup, activity));
+        let mut input = BytesMut::new();
+        let mut small_bytes = 0;
+        time::timeout(Duration::from_secs(10), async {
+            loop {
+                while let Some(frame) = try_decode_incarnated_bulk_from_bytes(&mut input).unwrap() {
+                    if frame.record.id == 2 {
+                        assert_eq!(frame.record.payload.len(), large_payload);
+                        return;
+                    }
+                    assert_eq!(frame.record.id, 1);
+                    small_bytes += frame.record.payload.len();
+                }
+                assert_ne!(reader.read_buf(&mut input).await.unwrap(), 0);
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            small_bytes >= large_payload / 4,
+            "small flow received only {small_bytes} bytes before the large flow wrote {large_payload}"
+        );
+        writer.abort();
+        test_timeout(writer).await.unwrap_err();
     }
 
     #[test]
@@ -5192,9 +5544,11 @@ mod tests {
 
         let (mut control_source, control) = UnixStream::pair().unwrap();
         control.set_nonblocking(true).unwrap();
-        let control = AsyncFd::new(control).unwrap();
+        // SAFETY: UnixStream owns a stable descriptor for the lifetime of AsyncFd.
+        let control = unsafe { AsyncFd::register(control) }.unwrap();
         let (pipe_reader, pipe_writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_NONBLOCK).unwrap();
-        let pipe_writer = AsyncFd::new(pipe_writer).unwrap();
+        // SAFETY: OwnedFd keeps the descriptor open and unchanged until AsyncFd drops it.
+        let pipe_writer = unsafe { AsyncFd::register(pipe_writer) }.unwrap();
         // Prime the reactor, then clear the pipe's cached writable event with a real EAGAIN.
         let mut writable = pipe_writer.writable().await.unwrap();
         loop {
@@ -5359,6 +5713,7 @@ mod tests {
         let old = [0x11; CLIENT_INCARNATION_SIZE];
         let new = [0x22; CLIENT_INCARNATION_SIZE];
         let mut state = AgentState::default();
+        let (session_tx, _session_rx) = SessionOutputSender::channel();
 
         establish_relay_client(
             &mut state,
@@ -5367,10 +5722,10 @@ mod tests {
                 id_end_exclusive,
                 incarnation: old,
             },
+            &session_tx,
         )
         .unwrap();
         state.bulk_received_offsets.insert(id_start, 4096);
-        let (session_tx, _session_rx) = SessionOutputSender::channel();
         let (removed, cleanup) = disconnect_relay_client(
             &mut state,
             RelayClientDisconnected {
@@ -5390,6 +5745,7 @@ mod tests {
                 id_end_exclusive,
                 incarnation: new,
             },
+            &session_tx,
         )
         .unwrap();
 
@@ -5406,6 +5762,7 @@ mod tests {
                 id_end_exclusive: other_end,
                 incarnation: [0x33; CLIENT_INCARNATION_SIZE],
             },
+            &session_tx,
         )
         .unwrap();
         assert!(validate_bulk_client_incarnation(&state, other_start, new).is_err());
@@ -5468,90 +5825,463 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_output_tombstone_discards_late_producer_record() {
-        let incarnation = [0x5a; CLIENT_INCARNATION_SIZE];
-        let (session_tx, _control_rx, mut bulk_rx, _command_rx) =
-            SessionOutputSender::split_channel();
-        let owner_tx = session_tx.with_incarnation(Some(incarnation));
-        let record = || BulkRecord {
-            id: 17,
-            kind: BulkKind::Filesystem,
-            flow: BulkFlow::GuestToHost,
-            offset: 0,
-            payload: bytes::Bytes::from_static(b"late"),
-        };
+    async fn bulk_cleanup_burst_preserves_all_disconnect_acknowledgements() {
+        let mut context = MessageTestContext::new();
+        let (mut sender, mut control, bulk, commands) = SessionOutputSender::split_channel();
+        let mut clients = Vec::new();
+
+        for slot in 0..4 {
+            let incarnation = [slot as u8 + 1; CLIENT_INCARNATION_SIZE];
+            clients.push(context.connect(&sender, slot, incarnation));
+        }
+
+        // More cleanup events than a bounded command queue could hold, all handled before the
+        // scheduler starts.
+        for client in &clients {
+            for offset in 0..60 {
+                context.cancel(&mut sender, client.id_start + offset).await;
+            }
+        }
+
+        for client in &clients {
+            context.disconnect(&mut sender, client).await;
+        }
+
+        let (file, _reader) = bulk_test_socket(None);
+        let (activity_tx, _activity_rx) = tokio::sync::mpsc::channel(8);
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let writer = tokio::spawn(bulk_writer_task(file, bulk, commands, cleanup, activity_tx));
+
+        for client in &clients {
+            assert_eq!(
+                receive_disconnect_ack(&mut control).await,
+                RelayClientDisconnectedAck {
+                    id_start: client.id_start,
+                    id_end_exclusive: client.id_end_exclusive,
+                    incarnation: client.incarnation,
+                }
+            );
+        }
+
+        // A cancellation arriving after its disconnect cannot duplicate that disconnect's ack.
+        let client = context.connect(&sender, 0, [0x20; CLIENT_INCARNATION_SIZE]);
+        context.disconnect(&mut sender, &client).await;
+        context.cancel(&mut sender, client.id_start).await;
+        assert_eq!(
+            receive_disconnect_ack(&mut control).await,
+            RelayClientDisconnectedAck {
+                id_start: client.id_start,
+                id_end_exclusive: client.id_end_exclusive,
+                incarnation: client.incarnation,
+            }
+        );
+        tokio::task::yield_now().await;
+        assert!(matches!(control.try_recv(), Err(TryRecvError::Empty)));
+
+        writer.abort();
+        test_timeout(writer).await.unwrap_err();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bulk_cleanup_wake_is_not_lost_during_a_blocked_write() {
+        let (sender, cleanup, mut reader, writer, _activity) =
+            start_bulk_test_scheduler(Some(4096));
+        let incarnation = [0x71; CLIENT_INCARNATION_SIZE];
+        sender.connect_bulk_incarnation(incarnation);
+        let owner = sender.with_incarnation(Some(incarnation));
+        let first = queue_bulk(
+            &sender,
+            incarnation,
+            1,
+            Bytes::from(vec![0x31; 1024 * 1024]),
+        )
+        .await;
+        let first_len = bulk_wire_bytes(&first, true);
+        queue_bulk_record(
+            &sender,
+            incarnation,
+            1,
+            first.payload.len() as u64,
+            Bytes::from_static(b"must be purged"),
+            RawActivity::default(),
+        )
+        .await;
+
+        let mut wire = vec![0; first_len];
+        test_timeout(reader.read_exact(&mut wire[..64]))
+            .await
+            .unwrap();
+        owner.drop_bulk_flow(1, true);
+        let mut disconnected = cleanup.drop_incarnation(incarnation);
         assert!(
-            owner_tx
-                .send(
-                    17,
-                    SessionOutput::Bulk(crate::session::BulkSessionOutput::new(
-                        record(),
-                        RawActivity::default(),
-                    )),
-                )
+            time::timeout(Duration::from_millis(20), &mut disconnected)
                 .await
+                .is_err()
         );
 
+        test_timeout(reader.read_exact(&mut wire[64..]))
+            .await
+            .unwrap();
+        let mut encoded = BytesMut::from(wire.as_slice());
+        let decoded = try_decode_incarnated_bulk_from_bytes(&mut encoded)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.incarnation, incarnation);
+        assert_eq!(decoded.record, first);
+        assert!(encoded.is_empty());
+        test_timeout(&mut disconnected).await.unwrap();
+        test_timeout(async {
+            while cleanup.pending_counts() != (0, 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert_eq!(cleanup.pending_counts(), (0, 0));
+        assert!(
+            time::timeout(Duration::from_millis(20), reader.read(&mut [0; 1]))
+                .await
+                .is_err(),
+            "cancelled trailing record reached the bulk port"
+        );
+
+        writer.abort();
+        test_timeout(writer).await.unwrap_err();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disconnect_waits_only_for_its_own_in_flight_write() {
+        let (sender, cleanup, mut reader, writer, _activity) =
+            start_bulk_test_scheduler(Some(4096));
+        let first_owner = [0x72; CLIENT_INCARNATION_SIZE];
+        let second_owner = [0x73; CLIENT_INCARNATION_SIZE];
+        sender.connect_bulk_incarnation(first_owner);
+        sender.connect_bulk_incarnation(second_owner);
+        let record = queue_bulk(
+            &sender,
+            first_owner,
+            1,
+            Bytes::from(vec![0x41; 1024 * 1024]),
+        )
+        .await;
+        let wire_len = bulk_wire_bytes(&record, true);
+
+        let mut wire = vec![0; wire_len];
+        test_timeout(reader.read_exact(&mut wire[..64]))
+            .await
+            .unwrap();
+        let mut first_disconnect = cleanup.drop_incarnation(first_owner);
+        let second_disconnect = cleanup.drop_incarnation(second_owner);
+        time::timeout(Duration::from_millis(20), second_disconnect)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            time::timeout(Duration::from_millis(20), &mut first_disconnect)
+                .await
+                .is_err()
+        );
+
+        test_timeout(reader.read_exact(&mut wire[64..]))
+            .await
+            .unwrap();
+        test_timeout(first_disconnect).await.unwrap();
+
+        writer.abort();
+        test_timeout(writer).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn cancelled_flow_is_purged_before_the_sixty_fifth_flow_is_admitted() {
+        let (sender, _control, mut bulk, _commands) = SessionOutputSender::split_channel();
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let incarnation = [0x74; CLIENT_INCARNATION_SIZE];
+        sender.connect_bulk_incarnation(incarnation);
+        let owner = sender.with_incarnation(Some(incarnation));
+        for id in 1..=BULK_SCHEDULER_MAX_FLOWS_PER_CLIENT {
+            let id = id as u32;
+            queue_bulk(
+                &sender,
+                incarnation,
+                id,
+                if id == 1 {
+                    Bytes::from(vec![0x61; 4096])
+                } else {
+                    Bytes::from_static(b"x")
+                },
+            )
+            .await;
+        }
+        let mut flows = HashMap::new();
+        let mut active = VecDeque::new();
+        reconcile_all_bulk(&cleanup, &mut bulk, &mut flows, &mut active);
+        assert_eq!(flows[&(incarnation, 1)].queued_bytes, 4096);
+        assert!(active.contains(&(incarnation, 1)));
+        assert_eq!(
+            cleanup.pending_counts(),
+            (0, BULK_SCHEDULER_MAX_FLOWS_PER_CLIENT)
+        );
+
+        owner.drop_bulk_flow(1, true);
+        let next_id = BULK_SCHEDULER_MAX_FLOWS_PER_CLIENT as u32 + 1;
+        queue_bulk(&sender, incarnation, next_id, Bytes::from_static(b"new")).await;
+        reconcile_all_bulk(&cleanup, &mut bulk, &mut flows, &mut active);
+
+        assert_eq!(flows.len(), BULK_SCHEDULER_MAX_FLOWS_PER_CLIENT);
+        assert!(!flows.contains_key(&(incarnation, 1)));
+        assert!(!active.contains(&(incarnation, 1)));
+        assert!(flows.contains_key(&(incarnation, next_id)));
+        assert_eq!(
+            cleanup.pending_counts(),
+            (0, BULK_SCHEDULER_MAX_FLOWS_PER_CLIENT)
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_and_duplicate_bulk_cancels_keep_shared_state_bounded() {
+        let (sender, _control, mut bulk, _commands) = SessionOutputSender::split_channel();
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let incarnation = [0x75; CLIENT_INCARNATION_SIZE];
+        sender.connect_bulk_incarnation(incarnation);
+        let owner = sender.with_incarnation(Some(incarnation));
+
+        for id in 1..=10_000 {
+            owner.drop_bulk_flow(id, false);
+            owner.drop_bulk_flow(u32::MAX - id, false);
+        }
+        assert_eq!(cleanup.pending_counts(), (0, 0));
+
+        queue_bulk(&sender, incarnation, 17, Bytes::from_static(b"pending")).await;
+        for _ in 0..10_000 {
+            owner.drop_bulk_flow(17, false);
+        }
+        assert_eq!(cleanup.pending_counts(), (1, 1));
+
+        let mut flows = HashMap::new();
+        let mut active = VecDeque::new();
+        reconcile_all_bulk(&cleanup, &mut bulk, &mut flows, &mut active);
+
+        assert_eq!(cleanup.pending_counts(), (0, 0));
+        assert!(flows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_fires_pending_disconnect_with_original_generation_and_route() {
+        let mut context = MessageTestContext::new();
+        let (mut sender, mut control, _bulk, mut commands) = SessionOutputSender::split_channel();
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let client = context.connect(&sender, 0, [0x84; CLIENT_INCARNATION_SIZE]);
+        assert!(cleanup.start_write(client.incarnation));
+
+        context.disconnect(&mut sender, &client).await;
+        assert!(matches!(control.try_recv(), Err(TryRecvError::Empty)));
+
+        let restore = tokio::spawn(async move {
+            sender.restore_generation().await.unwrap();
+            sender
+        });
+        let command = test_timeout(commands.recv()).await.unwrap();
         let mut generation = 0;
         let mut flows = HashMap::new();
         let mut active = VecDeque::new();
-        let mut retired = HashMap::new();
-        let mut retiring_incarnations = HashSet::new();
-        enqueue_bulk_output(
-            bulk_rx.recv().await.unwrap(),
-            0,
-            &mut flows,
-            &mut active,
-            &retired,
-            &retiring_incarnations,
-        )
-        .unwrap();
-        let (completion, mut completed) = tokio::sync::oneshot::channel();
-        let cleanup = apply_bulk_output_command(
-            BulkOutputCommand::DropFlow {
-                incarnation,
-                id: 17,
-                completion,
-            },
+        let completion = apply_bulk_output_command(
+            command,
             &mut generation,
             &mut flows,
             &mut active,
-            &mut retired,
-            &mut retiring_incarnations,
+            &cleanup,
             &mut BulkOutputPosition::default(),
-        )
-        .unwrap();
-        assert!(matches!(
-            completed.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ));
-        complete_bulk_output_cleanups(vec![cleanup], &mut retired, &mut retiring_incarnations);
-        assert_eq!(completed.try_recv(), Ok(()));
-
-        assert!(
-            owner_tx
-                .send(
-                    17,
-                    SessionOutput::Bulk(crate::session::BulkSessionOutput::new(
-                        record(),
-                        RawActivity::default(),
-                    )),
-                )
-                .await
         );
-        enqueue_bulk_output(
-            bulk_rx.recv().await.unwrap(),
-            0,
-            &mut flows,
-            &mut active,
-            &retired,
-            &retiring_incarnations,
-        )
-        .unwrap();
+        complete_bulk_output_cleanup(completion);
+        let restored = test_timeout(restore).await.unwrap();
+        assert_eq!(restored.generation(), 1);
 
-        assert!(flows.is_empty());
-        assert!(active.is_empty());
-        assert!(bulk_output_is_retired(&retired, incarnation, 17));
+        let envelope = test_timeout(control.recv()).await.unwrap();
+        assert_eq!(envelope.generation, 0);
+        assert_eq!(envelope.id, 0);
+        assert_eq!(envelope.incarnation, None);
+        assert_eq!(
+            decode_disconnect_ack(envelope),
+            RelayClientDisconnectedAck {
+                id_start: client.id_start,
+                id_end_exclusive: client.id_end_exclusive,
+                incarnation: client.incarnation,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_error_surfaces_and_fires_parked_disconnect() {
+        let (file, mut reader) = bulk_test_socket(None);
+        let (sender, _control, bulk, commands) = SessionOutputSender::split_channel();
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let parked_owner = [0x88; CLIENT_INCARNATION_SIZE];
+        let writing_owner = [0x89; CLIENT_INCARNATION_SIZE];
+        sender.connect_bulk_incarnation(parked_owner);
+        sender.connect_bulk_incarnation(writing_owner);
+        assert!(cleanup.start_write(parked_owner));
+        let parked = cleanup.drop_incarnation(parked_owner);
+        let record = queue_bulk_record(
+            &sender,
+            writing_owner,
+            1,
+            0,
+            Bytes::from_static(b"trigger activity publication"),
+            RawActivity::guest_message(),
+        )
+        .await;
+        let wire_len = bulk_wire_bytes(&record, true);
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::channel(1);
+        drop(activity_rx);
+        let writer = tokio::spawn(bulk_writer_task(
+            file,
+            bulk,
+            commands,
+            cleanup.clone(),
+            activity_tx,
+        ));
+        let mut wire = vec![0; wire_len];
+        test_timeout(reader.read_exact(&mut wire)).await.unwrap();
+
+        let error = test_timeout(writer).await.unwrap().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("dedicated bulk activity consumer stopped")
+        );
+        test_timeout(parked).await.unwrap();
+        test_timeout(cleanup.drop_incarnation(writing_owner))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_bulk_record_after_cancel_or_disconnect_is_discarded() {
+        for remove_incarnation in [false, true] {
+            let incarnation = [0x5a + u8::from(remove_incarnation); CLIENT_INCARNATION_SIZE];
+            let id = if remove_incarnation { 29 } else { 17 };
+            let (sender, _control, mut bulk, _commands) = SessionOutputSender::split_channel();
+            let cleanup = sender.bulk_cleanup().unwrap();
+            sender.connect_bulk_incarnation(incarnation);
+            let owner = sender.with_incarnation(Some(incarnation));
+            let mut flows = HashMap::new();
+            let mut active = VecDeque::new();
+
+            if remove_incarnation {
+                test_timeout(cleanup.drop_incarnation(incarnation))
+                    .await
+                    .unwrap();
+            } else {
+                queue_bulk(&sender, incarnation, id, Bytes::from_static(b"queued")).await;
+                reconcile_all_bulk(&cleanup, &mut bulk, &mut flows, &mut active);
+                assert!(flows.contains_key(&(incarnation, id)));
+            }
+
+            queue_bulk(&sender, incarnation, id, Bytes::from_static(b"late")).await;
+            if !remove_incarnation {
+                owner.drop_bulk_flow(id, true);
+            }
+            reconcile_all_bulk(&cleanup, &mut bulk, &mut flows, &mut active);
+
+            assert!(flows.is_empty());
+            assert!(active.is_empty());
+            assert_eq!(cleanup.pending_counts(), (0, 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_producer_blocked_in_send_before_it_enqueues() {
+        let incarnation = [0x6c; CLIENT_INCARNATION_SIZE];
+        let filler_id = 18;
+        let blocked_id = 17;
+        let (sender, _control, mut bulk, _commands) = SessionOutputSender::split_channel();
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let mut state = AgentState::default();
+        state
+            .client_incarnations
+            .insert(relay_client_slot(blocked_id).unwrap(), incarnation);
+        sender.connect_bulk_incarnation(incarnation);
+
+        for _ in 0..crate::session::SESSION_BULK_OUTPUT_ITEM_CAPACITY {
+            queue_bulk(
+                &sender,
+                incarnation,
+                filler_id,
+                Bytes::from_static(b"filler"),
+            )
+            .await;
+        }
+        let owner = sender.with_incarnation(Some(incarnation));
+        let producer = tokio::spawn(async move {
+            let record = BulkRecord {
+                id: blocked_id,
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::GuestToHost,
+                offset: 0,
+                payload: Bytes::from_static(b"blocked"),
+            };
+            let output = crate::session::BulkSessionOutput::new(record, RawActivity::default());
+            owner.send(blocked_id, SessionOutput::Bulk(output)).await;
+        });
+        state.tcp_sessions.insert(
+            blocked_id,
+            crate::tcp::TcpSession::for_test(blocked_id, producer),
+        );
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(cleanup.pending_counts(), (0, 2));
+
+        cancel_bulk_correlation(blocked_id, BulkKind::Tcp, &mut state, &sender);
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(cleanup.pending_counts(), (1, 1));
+
+        let mut flows = HashMap::new();
+        let mut active = VecDeque::new();
+        reconcile_all_bulk(&cleanup, &mut bulk, &mut flows, &mut active);
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        reconcile_all_bulk(&cleanup, &mut bulk, &mut flows, &mut active);
+
+        assert!(flows.contains_key(&(incarnation, filler_id)));
+        assert!(!flows.contains_key(&(incarnation, blocked_id)));
+        assert!(matches!(bulk.try_recv(), Err(TryRecvError::Empty)));
+        flows.clear();
+        assert_eq!(cleanup.pending_counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn rejected_cbor_tcp_input_on_bulk_session_aborts_its_producer() {
+        for eof in [false, true] {
+            let id = 23;
+            let mut context = MessageTestContext::new();
+            let (mut sender, _output) = SessionOutputSender::channel();
+            let (alive, stopped) = tokio::sync::oneshot::channel::<()>();
+            let producer = tokio::spawn(async move {
+                let _alive = alive;
+                std::future::pending::<()>().await;
+            });
+            context
+                .state
+                .tcp_sessions
+                .insert(id, crate::tcp::TcpSession::for_test(id, producer));
+            let message = if eof {
+                Message::with_payload(MessageType::TcpEof, id, &TcpEof {}).unwrap()
+            } else {
+                let data = TcpData {
+                    data: b"cbor".to_vec(),
+                };
+                Message::with_payload(MessageType::TcpData, id, &data).unwrap()
+            };
+
+            context.handle(message, &mut sender).await;
+
+            assert!(context.state.tcp_sessions.is_empty());
+            assert!(test_timeout(stopped).await.is_err());
+        }
     }
 
     #[test]
@@ -5695,13 +6425,12 @@ mod tests {
     }
     #[tokio::test]
     async fn restore_thaw_checks_ownership_is_idempotent_and_leaves_source_clients_alone() {
-        use microsandbox_protocol::core::WorkloadThawMode;
-
         let mut state = AgentState::default();
         let (mut sender, _output) = SessionOutputSender::channel();
         let mut activity = ActivityTracker::new();
         let heartbeat = heartbeat::HeartbeatControl::default();
         let config = AgentdConfig {
+            exec_limits: None,
             user: None,
             security_profile: Default::default(),
             default_cwd: None,
@@ -5709,7 +6438,7 @@ mod tests {
         };
         let mut workload = crate::workload::tests::fake_latch();
         let owner = [0x51; CLIENT_INCARNATION_SIZE];
-        let connect = |state: &mut AgentState| {
+        let connect = |state: &mut AgentState, sender: &SessionOutputSender| {
             establish_relay_client(
                 state,
                 RelayClientConnected {
@@ -5717,10 +6446,11 @@ mod tests {
                     id_end_exclusive: microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP,
                     incarnation: owner,
                 },
+                sender,
             )
             .unwrap();
         };
-        connect(&mut state);
+        connect(&mut state, &sender);
         workload.freeze("capture").unwrap();
 
         // Wrong attempts cannot detach a client's state. Source-side thaw must also preserve it.
@@ -5816,7 +6546,7 @@ mod tests {
                 assert_eq!(client_incarnation_for_id(&state, 1), retry.then_some(owner));
                 if !retry {
                     // A retry must not detach clients which connected after the first success.
-                    connect(&mut state);
+                    connect(&mut state, &sender);
                 }
             }
         }
@@ -5824,7 +6554,7 @@ mod tests {
 
     #[tokio::test]
     async fn saturated_stdin_allows_thaw_and_preserves_input_and_eof() {
-        use microsandbox_protocol::core::WorkloadThawMode::{Continue, Restore};
+        use WorkloadThawMode::{Continue, Restore};
 
         // SIGSTOP provides a deterministic blocked pipe/PTY without a privileged cgroup mount.
         // Thaw must complete before external consumer progress, then accepted data drains exactly
@@ -5852,6 +6582,7 @@ mod tests {
             let mut activity = ActivityTracker::new();
             let heartbeat = heartbeat::HeartbeatControl::default();
             let config = AgentdConfig {
+                exec_limits: None,
                 user: None,
                 security_profile: Default::default(),
                 default_cwd: None,
@@ -5860,7 +6591,6 @@ mod tests {
             let mut workload = crate::workload::tests::fake_latch();
             workload.freeze("stdin-cut").unwrap();
             let request = ExecRequest {
-                output_window: None,
                 cmd: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
@@ -5885,6 +6615,7 @@ mod tests {
                 sender.clone(),
                 None,
                 crate::config::SecurityProfile::Default,
+                None,
                 None,
             )
             .unwrap();
@@ -6049,6 +6780,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_releases_completed_sessions_with_unread_output() {
+        for tty in [false, true] {
+            let mut state = AgentState::default();
+            let (mut sender, mut output) = SessionOutputSender::channel();
+            let mut activity = ActivityTracker::new();
+            let heartbeat = heartbeat::HeartbeatControl::default();
+            let mut workload = WorkloadLatch::unavailable("test process has no workload cgroup");
+            let config = AgentdConfig {
+                exec_limits: Some(ExecLimits {
+                    max_executions: 1,
+                    ..Default::default()
+                }),
+                user: None,
+                security_profile: Default::default(),
+                default_cwd: None,
+                default_env: Vec::new(),
+            };
+            let request = ExecRequest {
+                cmd: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf retained".into()],
+                env: vec![],
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: vec![],
+            };
+            let mut encoded = Vec::new();
+            handle_message(
+                Message::with_payload(MessageType::ExecRequest, 1, &request).unwrap(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut encoded,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            let reply = decode_reply_skipping_credit(&mut BytesMut::from(encoded.as_slice()));
+            assert_eq!(reply.t, MessageType::ExecStarted, "{reply:?}");
+
+            // Consume the reader's real exit event, but leave its output unacknowledged.
+            time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let envelope = output.recv().await.unwrap();
+                    if let SessionOutput::Exited(code) = envelope.output {
+                        assert_eq!(state.sessions.get_mut(&1).unwrap().finish(code), None);
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+            restore_client_state(&mut state, &mut sender).await.unwrap();
+            encoded.clear();
+            handle_message(
+                Message::with_payload(MessageType::ExecRequest, 2, &request).unwrap(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut encoded,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                decode_reply_skipping_credit(&mut BytesMut::from(encoded.as_slice())).t,
+                MessageType::ExecStarted,
+                "completed inherited output leaked the only execution slot"
+            );
+            assert!(state.detached_sessions.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn restore_detaches_piped_and_pty_workloads_without_killing_or_reusing_output() {
         for tty in [false, true] {
             let mut state = AgentState::default();
@@ -6064,10 +6876,10 @@ mod tests {
                     id_end_exclusive: end,
                     incarnation: old_owner,
                 },
+                &sender,
             )
             .unwrap();
             let request = |script: &str| ExecRequest {
-                output_window: None,
                 cmd: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
                 env: vec![],
@@ -6084,6 +6896,7 @@ mod tests {
                 sender.with_incarnation(Some(old_owner)),
                 None,
                 crate::config::SecurityProfile::Default,
+                None,
                 None,
             )
             .unwrap();
@@ -6111,6 +6924,7 @@ mod tests {
                     id_end_exclusive: end,
                     incarnation: new_owner,
                 },
+                &sender,
             )
             .unwrap();
             let fresh = ExecSession::spawn(
@@ -6119,6 +6933,7 @@ mod tests {
                 sender.with_incarnation(Some(new_owner)),
                 None,
                 crate::config::SecurityProfile::Default,
+                None,
                 None,
             )
             .unwrap();
@@ -6292,7 +7107,10 @@ mod tests {
     #[tokio::test]
     async fn restore_bulk_cut_drops_queued_and_late_records_and_releases_capacity() {
         let (mut sender, _control, mut bulk, mut commands) = SessionOutputSender::split_channel();
-        let old = sender.with_incarnation(Some([0x41; CLIENT_INCARNATION_SIZE]));
+        let cleanup = sender.bulk_cleanup().unwrap();
+        let old_incarnation = [0x41; CLIENT_INCARNATION_SIZE];
+        sender.connect_bulk_incarnation(old_incarnation);
+        let old = sender.with_incarnation(Some(old_incarnation));
         let send = |sender: SessionOutputSender| async move {
             sender
                 .send(
@@ -6319,49 +7137,51 @@ mod tests {
         let mut generation = 0;
         let mut flows = HashMap::new();
         let mut active = VecDeque::new();
-        let mut retired = HashMap::new();
-        let mut retiring = HashSet::new();
-        let cleanup = apply_bulk_output_command(
+        let mut cleanup_cache = BulkCleanupCache::default();
+        let command_cleanup = apply_bulk_output_command(
             command,
             &mut generation,
             &mut flows,
             &mut active,
-            &mut retired,
-            &mut retiring,
+            &cleanup,
             &mut BulkOutputPosition::default(),
-        )
-        .unwrap();
-        enqueue_bulk_output(
-            bulk.recv().await.unwrap(),
+        );
+        reconcile_bulk_output(
+            &cleanup,
+            &mut cleanup_cache,
+            &mut bulk,
+            None,
             generation,
             &mut flows,
             &mut active,
-            &retired,
-            &retiring,
         )
         .unwrap();
         assert!(flows.is_empty());
-        complete_bulk_output_cleanups(vec![cleanup], &mut retired, &mut retiring);
+        complete_bulk_output_cleanup(command_cleanup);
         let fresh = reset.await.unwrap();
         assert!(send(old).await);
-        enqueue_bulk_output(
-            bulk.recv().await.unwrap(),
+        reconcile_bulk_output(
+            &cleanup,
+            &mut cleanup_cache,
+            &mut bulk,
+            None,
             generation,
             &mut flows,
             &mut active,
-            &retired,
-            &retiring,
         )
         .unwrap();
         assert!(flows.is_empty());
-        assert!(send(fresh.with_incarnation(Some([0x42; CLIENT_INCARNATION_SIZE]))).await);
-        enqueue_bulk_output(
-            bulk.recv().await.unwrap(),
+        let fresh_incarnation = [0x42; CLIENT_INCARNATION_SIZE];
+        fresh.connect_bulk_incarnation(fresh_incarnation);
+        assert!(send(fresh.with_incarnation(Some(fresh_incarnation))).await);
+        reconcile_bulk_output(
+            &cleanup,
+            &mut cleanup_cache,
+            &mut bulk,
+            None,
             generation,
             &mut flows,
             &mut active,
-            &retired,
-            &retiring,
         )
         .unwrap();
         assert_eq!(flows.len(), 1);
@@ -6382,5 +7202,28 @@ mod tests {
         publish_bulk_activity(&sender, &mut pending).unwrap();
         assert_eq!(receiver.try_recv().unwrap().fs_bytes, 17);
         assert_eq!(pending.fs_bytes, 0);
+    }
+
+    #[test]
+    fn scripts_dir_goes_on_the_last_path_entry() {
+        let mut req = ExecRequest {
+            cmd: "/bin/true".into(),
+            args: vec![],
+            env: vec!["PATH=/first".into(), "PATH=/last".into()],
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: vec![],
+        };
+        prepend_scripts_to_path(&mut req);
+        assert_eq!(
+            req.env,
+            vec![
+                "PATH=/first".to_string(),
+                format!("PATH={}:/last", microsandbox_protocol::SCRIPTS_PATH),
+            ]
+        );
     }
 }

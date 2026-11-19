@@ -17,9 +17,11 @@ This guide runs the `msb` CLI inside Docker and starts an Alpine microVM from th
 
 Pull the image, then run `msb doctor` inside it before starting a sandbox:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker pull ghcr.io/superradcompany/microsandbox:latest
 ```
+</CodeGroup>
 
 Run the preflight inside the container:
 
@@ -82,10 +84,12 @@ docker run --rm -it `
 
 At the Alpine prompt, verify the guest and exit:
 
-```sh
+<CodeGroup>
+```sh Shell
 uname -a
 exit
 ```
+</CodeGroup>
 
 </Step>
 
@@ -117,9 +121,11 @@ The command's output and exit code pass through both layers to the host.
 
 Without a volume, the outer container owns the microsandbox image cache and database. `--rm` deletes them with the container, so the next run downloads Alpine again. Mount a Docker volume when repeated runs should reuse that state:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker volume create microsandbox-data
 ```
+</CodeGroup>
 
 Mount it at microsandbox's data directory:
 
@@ -143,9 +149,11 @@ docker run --rm -it `
 
 The Docker volume preserves pulled images, stopped sandboxes, snapshots, and the microsandbox database. Remove it only when that state is no longer needed:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker volume rm microsandbox-data
 ```
+</CodeGroup>
 
 </Step>
 

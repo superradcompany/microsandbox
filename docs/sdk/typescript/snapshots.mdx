@@ -1,7 +1,7 @@
 ---
 title: Snapshots
 "og:title": TypeScript SDK Snapshots reference
-description: Create and restore sandbox snapshots with the TypeScript SDK.
+description: Create snapshots, fork sandboxes, and restore snapshots with the TypeScript SDK.
 keywords: ["TypeScript SDK", "TypeScript snapshots", "microsandbox snapshots"]
 ---
 
@@ -13,7 +13,11 @@ Use snapshot objects or references on cloud. Local operations also accept a grou
 
 ## Guest writeback
 
-Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.fork`, `source.forkMany`, and `source.pause` options. The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `"skip"` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
+Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.fork`, `source.forkMany`, and `source.pause` options.
+
+The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `"skip"` retains mandatory storage barriers.
+
+A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
 ## Snapshot
 
@@ -825,7 +829,7 @@ Local-only: capture disk, memory, and execution state. The source must be runnin
 guestFlush(policy: GuestFlush): this
 ```
 
-Select guest writeback before capture. `GuestFlush` is `"auto" | "required" | "skip"`; defaults to `"auto"`. See [guest writeback](#guest-writeback).
+Select the [guest writeback policy](/sandboxes/snapshots#guest-flushing) before capture. Defaults to `"auto"`. See [SDK usage](#guest-writeback).
 
 ---
 
@@ -867,6 +871,68 @@ and returns `this`.
 | `labels(Record<string, string>)` | `this` | Replace all labels in the copied manifest |
 | `recordIntegrity(boolean)` | `this` | Compute integrity when true, or omit it when false |
 | `save()` | `Promise<void>` | Write the configured archive |
+
+## Forking
+
+Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `SandboxHandle` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
+
+### fork()
+
+```typescript
+fork(name: string, options?: ForkOptions): Promise<Sandbox>
+```
+
+<Accordion title="Example">
+
+```typescript
+const child = await sandbox.fork("experiment");
+try {
+  console.log((await child.exec("python", ["-V"])).stdout);
+} finally {
+  await child.stop();
+}
+```
+
+</Accordion>
+
+Create one child from the current execution state.
+
+### forkMany()
+
+```typescript
+forkMany(names: string[], options?: ForkOptions): Promise<ForkOutcome[]>
+```
+
+<Accordion title="Example">
+
+```typescript
+const outcomes = await sandbox.forkMany(["alice", "bob"]);
+for (const outcome of outcomes) {
+  if (outcome.sandbox) {
+    await outcome.sandbox.stop();
+  } else {
+    console.error(outcome.name, outcome.error);
+  }
+}
+```
+
+</Accordion>
+
+Capture once for all names and return outcomes in input order. Each outcome has `name` and either a started `sandbox` or an `error`. Validation or capture errors reject the whole call; a child startup error leaves successful siblings running. Stop successful children when finished.
+
+### ForkOptions
+
+```typescript
+interface ForkOptions {
+  recordIntegrity?: boolean;
+  guestFlush?: GuestFlush;
+  volumes?: Record<string, (mount: NapiMountBuilder) => NapiMountBuilder>;
+}
+
+type GuestFlush = "auto" | "required" | "skip";
+```
+
+`recordIntegrity` records disk hashes. [`guestFlush`](#guest-writeback) defaults to `"auto"`. Each `volumes` key is a captured disk's guest path; its callback configures the replacement mount. Forks cannot add new block devices, and batch children cannot share a writable disk image. See [fork disk bindings](/sandboxes/snapshots#forking). `branch()`, `branchMany()`, and `BranchOutcome` remain deprecated aliases.
 
 ## RestoreBuilder
 

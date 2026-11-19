@@ -101,6 +101,44 @@ done:
 	}
 }
 
+// TestExecSinkEmptyWriteKeepsStdinOpen verifies that a zero-length Write is a
+// no-op, as io.Writer callers expect, and that only Close sends EOF.
+func TestExecSinkEmptyWriteKeepsStdinOpen(t *testing.T) {
+	sb := newTestSandbox(t)
+	ctx := integrationCtx(t)
+
+	h, err := sb.ShellStream(ctx, "cat", microsandbox.WithExecStdinPipe())
+	if err != nil {
+		t.Fatalf("ShellStream: %v", err)
+	}
+	defer h.Close()
+
+	sink := h.TakeStdin()
+	if sink == nil {
+		t.Fatal("TakeStdin: got nil with stdin pipe enabled")
+	}
+
+	for _, p := range []string{"aaaaa", "", "bbbbb"} {
+		if n, err := sink.Write([]byte(p)); n != len(p) || err != nil {
+			t.Fatalf("stdin Write(%q) = (%d, %v), want (%d, nil)", p, n, err, len(p))
+		}
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("stdin Close: %v", err)
+	}
+	if _, err := sink.Write([]byte("after EOF")); err == nil {
+		t.Fatal("Write after Close: got nil error")
+	}
+
+	out, err := h.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got := out.Stdout(); got != "aaaaabbbbb" {
+		t.Errorf("stdout: got %q want %q", got, "aaaaabbbbb")
+	}
+}
+
 // TestExecHandleTTYResize verifies that TTY allocation and resize remain
 // usable while another goroutine is blocked receiving process output.
 func TestExecHandleTTYResize(t *testing.T) {

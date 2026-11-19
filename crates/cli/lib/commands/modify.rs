@@ -10,7 +10,7 @@ use microsandbox::sandbox::{
 };
 
 use super::common;
-use crate::ui;
+use crate::ui::{self, OutputFormat};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -126,8 +126,8 @@ pub struct ModifyArgs {
     pub restart: bool,
 
     /// Output format.
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -136,7 +136,7 @@ pub struct ModifyArgs {
 
 /// Execute the `msb modify` command.
 pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
-    let json = args.format.as_deref() == Some("json");
+    let json = args.format == Some(OutputFormat::Json);
     let handle = Sandbox::get(&args.name).await?;
     if args.compact {
         let mut compact = handle.compact();

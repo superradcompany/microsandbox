@@ -11,7 +11,7 @@ use microsandbox::config::RegistryOptions;
 use microsandbox::image::Image;
 use microsandbox_image::{ImageArchiveFormat, ImageLoadOptions, Registry};
 
-use crate::ui;
+use crate::ui::{self, OutputFormat};
 
 use super::pull;
 
@@ -58,8 +58,8 @@ pub enum ImageCommands {
 #[derive(Debug, Args)]
 pub struct ImageListArgs {
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 
     /// Show only image references.
     #[arg(short, long)]
@@ -73,8 +73,8 @@ pub struct ImageInspectArgs {
     pub reference: String,
 
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 /// Arguments for `msb image load`.
@@ -146,8 +146,8 @@ pub struct ImagePruneArgs {
     pub yes: bool,
 
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -422,7 +422,7 @@ pub async fn run_list(args: ImageListArgs) -> anyhow::Result<()> {
     let local = crate::commands::common::local_backend_ref(&backend)?;
     let images = Image::list_local(local).await?;
 
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         let entries: Vec<serde_json::Value> = images
             .iter()
             .map(|img| {
@@ -483,7 +483,7 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
     let local = crate::commands::common::local_backend_ref(&backend)?;
     let detail = Image::inspect_local(local, &args.reference).await?;
 
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         let layers_json: Vec<serde_json::Value> = detail
             .layers
             .iter()
@@ -769,7 +769,7 @@ pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
 
     let report = Image::prune_local(local).await?;
 
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         let json = serde_json::json!({
             "image_refs_removed": report.image_refs_removed,
             "manifests_removed": report.manifests_removed,

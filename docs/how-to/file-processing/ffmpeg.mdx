@@ -17,6 +17,7 @@ Media parsers are a natural fit for disposable microVMs. This guide snapshots a 
 
 Create one script to prepare the reusable toolchain:
 
+<CodeGroup>
 ```sh prepare-ffmpeg.sh
 #!/bin/sh
 set -eu
@@ -31,9 +32,11 @@ chmod 0555 /input
 chmod 0700 /out
 ffmpeg -version | head -1
 ```
+</CodeGroup>
 
 Create the workload script that each worker will run:
 
+<CodeGroup>
 ```sh transcode-video.sh
 #!/bin/sh
 set -eu
@@ -61,6 +64,7 @@ ffprobe -v error \
   -of default=noprint_wrappers=1 \
   /out/output.mp4
 ```
+</CodeGroup>
 
 Install both scripts in the guest, then run the preparation script as the entrypoint:
 
@@ -86,15 +90,19 @@ msb run --name ffmpeg-base --replace `
 
 Capture the prepared toolchain:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap create ffmpeg-tools --sandbox ffmpeg-base --integrity
 ```
+</CodeGroup>
 
 Verify the snapshot before using it:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap verify ffmpeg-base:ffmpeg-tools
 ```
+</CodeGroup>
 
 </Step>
 
@@ -120,15 +128,19 @@ msb snap restore ffmpeg-base:ffmpeg-tools --name ffmpeg-worker `
 
 Copy the input into the running worker:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp ./input.mov ffmpeg-worker:/input/input.mov
 ```
+</CodeGroup>
 
 Make the copied input read-only:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec --user root ffmpeg-worker -- chmod 0444 /input/input.mov
 ```
+</CodeGroup>
 
 </Step>
 
@@ -185,9 +197,11 @@ New-Item -ItemType Directory -Path $env:FFMPEG_ARTIFACT_DIR | Out-Null
 
 Stop the worker before exporting its output:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb stop ffmpeg-worker
 ```
+</CodeGroup>
 
 Copy the result to the host:
 
@@ -245,9 +259,11 @@ Remove-Item prepare-ffmpeg.sh, transcode-video.sh
 
 Remove the reusable toolchain snapshot:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap rm ffmpeg-base:ffmpeg-tools
 ```
+</CodeGroup>
 
 The checked output remains in the artifact directory configured above until you remove it.
 

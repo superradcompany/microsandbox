@@ -43,9 +43,11 @@ Complete the provider and channel prompts. The `openclaw-data` volume retains th
 
 Verify the installed version before removing the setup sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec openclaw-setup -- openclaw --version
 ```
+</CodeGroup>
 
 The pinned package reports `OpenClaw 2026.7.1-2`.
 
@@ -105,9 +107,11 @@ msb run -d --name openclaw-gateway --replace `
 
 The gateway listens inside the guest on port 18789, while microsandbox exposes it only at `127.0.0.1:18789` on the host. Follow its output with:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb logs -f openclaw-gateway
 ```
+</CodeGroup>
 
 <Warning>
   `OPENCLAW_GATEWAY_TOKEN` is visible to the guest and to processes that can inspect the host command environment. Use the microsandbox [secrets workflow](/sandboxes/secrets) for production credentials. Do not change the host bind address to `0.0.0.0` without adding transport security and understanding the exposure.
@@ -119,15 +123,19 @@ msb logs -f openclaw-gateway
 
 Remove the setup and gateway sandboxes:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f openclaw-setup openclaw-gateway
 ```
+</CodeGroup>
 
 Remove persisted OpenClaw state only when you no longer need it:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb volume rm openclaw-data
 ```
+</CodeGroup>
 
 Clear the token from the host shell:
 

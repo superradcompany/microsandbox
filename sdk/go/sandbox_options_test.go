@@ -577,6 +577,22 @@ func TestFFIWireShape_RegistryAuth(t *testing.T) {
 	}
 }
 
+// Anonymous auth travels as a top-level field: libraries that predate it reject
+// unknown create options instead of falling back to ambient credentials.
+func TestFFIWireShape_RegistryAnonymous(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("ghcr.io/org/public"),
+		WithRegistryAuth(RegistryAuth{Username: "old", Password: "old"}),
+		WithRegistryAnonymous(),
+	)
+	if got["registry_anonymous"] != true {
+		t.Fatalf("registry_anonymous = %v", got["registry_anonymous"])
+	}
+	if _, present := got["registry_auth"]; present {
+		t.Fatalf("anonymous auth also sent registry_auth: %v", got["registry_auth"])
+	}
+}
+
 func TestFFIWireShape_RegistryOverrides(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("localhost:5050/img"),
@@ -1064,6 +1080,18 @@ func TestFFIWireShape_SOCKS5Credentials(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_HTTPConnectCredentials(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(HTTPConnectProxy("127.0.0.1:3128").Credentials("sandbox", SecretSourceEnv("HTTP_CONNECT_PASSWORD"))),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	passwordSource, ok := proxy["password_source"].(map[string]any)
+	if proxy["protocol"] != "http_connect" || proxy["username"] != "sandbox" || !ok || passwordSource["kind"] != "env" || passwordSource["var"] != "HTTP_CONNECT_PASSWORD" {
+		t.Fatalf("HTTP CONNECT proxy credentials = %#v", proxy)
+	}
+}
+
 // The Rust side relies on serde(default), so zero-valued Go scalar fields must
 // not reach the wire. Explicit optional values use pointers when zero is valid
 // on the wire for validation.
@@ -1072,14 +1100,23 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 
 	for _, key := range []string{
 		"image", "snapshot", "memory_mib", "cpus", "max_memory_mib", "max_cpus", "workdir", "shell",
-		"thp",
+		"thp", "nested_virt",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "vsock", "network", "secrets", "patches", "volumes",
-		"proxy", "init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
+		"proxy", "init", "registry_auth", "registry_anonymous", "registry_insecure", "registry_ca_certs", "root_disk",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)
 			t.Errorf("empty config emitted key %q; payload = %s", key, body)
+		}
+	}
+}
+
+func TestFFIWireShape_NestedVirt(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		got := marshalCreateOptions(t, WithNestedVirt(enabled))
+		if value, ok := got["nested_virt"].(bool); !ok || value != enabled {
+			t.Fatalf("nested_virt = %v, want %v", got["nested_virt"], enabled)
 		}
 	}
 }

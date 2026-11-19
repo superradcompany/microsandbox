@@ -20,20 +20,23 @@ This example uses a privileged container with broad node access. Use a dedicated
 
 On the worker, check that KVM is available:
 
-```bash
+<CodeGroup>
+```bash Shell
 ls -l /dev/kvm
 ```
+</CodeGroup>
 
 For local Kubernetes clusters, the Linux VM must expose KVM. macOS hypervisor support alone is not enough.
 
 ## Build the image
 
-Save these two files in an empty directory. The application asks a sandbox to uppercase a shared file.
+Save these two files in an empty directory. This complete application uses Python and asks a sandbox to uppercase a shared file. The same [bind-mount workflow](/sandboxes/volumes#bind-mounts) is available in TypeScript, Rust, and Go; Ruby does not expose mount configuration.
 
 <Accordion title="Required application files">
 
 Create `agent.py`:
 
+<CodeGroup>
 ```python agent.py
 import asyncio
 import os
@@ -65,11 +68,13 @@ async def main():
 
 asyncio.run(main())
 ```
+</CodeGroup>
 
 `Volume.bind()` shares `/workspace` from the application container with the guest.
 
 Add `Dockerfile`:
 
+<CodeGroup>
 ```dockerfile Dockerfile
 FROM python:3.12-slim-bookworm
 
@@ -84,6 +89,7 @@ COPY agent.py .
 
 CMD ["python", "agent.py"]
 ```
+</CodeGroup>
 
 The Python package includes the runtime and kernel firmware; the pod needs no Docker daemon.
 
@@ -91,10 +97,12 @@ The Python package includes the runtime and kernel firmware; the pod needs no Do
 
 Replace `REGISTRY/PROJECT` here and in the manifest, then build and push:
 
-```bash
+<CodeGroup>
+```bash Shell
 docker buildx build --platform linux/arm64 \
   -t REGISTRY/PROJECT/msb-agent:0.7.6 --push .
 ```
+</CodeGroup>
 
 For x86-64 workers, use `--platform linux/amd64` and `amd64` in the manifest below.
 
@@ -104,15 +112,18 @@ For private images, configure Kubernetes `imagePullSecrets` for the application 
 
 Replace `YOUR_KVM_NODE` with your worker name, then create a test namespace:
 
-```bash
+<CodeGroup>
+```bash Shell
 kubectl label node YOUR_KVM_NODE microsandbox.dev/kvm=true
 kubectl create namespace msb-example
 ```
+</CodeGroup>
 
 The label selects the worker; it does not enable KVM. The namespace must allow privileged pods and host device mounts.
 
 Save `pod.yaml` with your image reference:
 
+<CodeGroup>
 ```yaml pod.yaml
 apiVersion: v1
 kind: Pod
@@ -159,18 +170,21 @@ spec:
     - name: workspace
       emptyDir: {}
 ```
+</CodeGroup>
 
 The pod mounts the worker’s KVM device and uses temporary volumes for runtime data and shared files.
 
 Apply and wait for completion:
 
-```bash
+<CodeGroup>
+```bash Shell
 kubectl apply --dry-run=server -f pod.yaml
 kubectl apply -f pod.yaml
 kubectl -n msb-example wait --for=jsonpath='{.status.phase}'=Succeeded \
   pod/msb-agent --timeout=300s
 kubectl -n msb-example logs msb-agent
 ```
+</CodeGroup>
 
 The first image download may take longer than five minutes. If the pod fails, the wait command still waits for its timeout; press Ctrl-C and check [troubleshooting](#troubleshooting).
 
@@ -186,39 +200,47 @@ The application prints the guest’s output after removing the sandbox, then the
 
 Delete the test namespace and remove the worker label:
 
-```bash
+<CodeGroup>
+```bash Shell
 kubectl delete namespace msb-example
 kubectl label node YOUR_KVM_NODE microsandbox.dev/kvm-
 ```
+</CodeGroup>
 
 Remove the label only if you added it and no other workloads use it.
 
 ## Troubleshooting
 
-```bash
+<CodeGroup>
+```bash Shell
 kubectl -n msb-example get pod msb-agent -o wide
 kubectl -n msb-example describe pod msb-agent
 kubectl -n msb-example logs msb-agent
 ```
+</CodeGroup>
 
 <Accordion title="Check KVM access inside the pod">
 
 To run a diagnostic instead of the application, add this under the `agent`
 container in `pod.yaml`:
 
-```yaml
+<CodeGroup>
+```yaml YAML
 command: ["msb", "doctor"]
 ```
+</CodeGroup>
 
 Recreate the pod, wait for completion, and read the results:
 
-```bash
+<CodeGroup>
+```bash Shell
 kubectl -n msb-example delete pod msb-agent
 kubectl apply -f pod.yaml
 kubectl -n msb-example wait --for=jsonpath='{.status.containerStatuses[0].state.terminated}' \
   pod/msb-agent --timeout=300s
 kubectl -n msb-example logs msb-agent
 ```
+</CodeGroup>
 
 Check the KVM device and access results. Remove `command` and recreate the pod to run the application again.
 

@@ -632,7 +632,7 @@ fmt.Print(out.Stdout()) // "hello\n"
 
 </Accordion>
 
-Send data to the process stdin. Implements `io.Writer`. Uses `context.Background()` internally, there is no way to cancel a stuck write through this method alone.
+Send data to the process stdin. Implements `io.Writer`. The write completes once the guest accepts the data, so it waits while the command is slow to read; for a command that also produces output, read output concurrently to avoid blocking each other. Uses `context.Background()` internally, there is no way to cancel a stuck write through this method alone. An empty write does nothing. Call [`Close`](#sink-close) when done writing; in pipe mode it sends EOF.
 
 <p className="msb-label">Parameters</p>
 
@@ -889,7 +889,7 @@ Identifies what an [`ExecEvent`](#execevent) carries.
 type ExecFailure = ffi.ExecFailure
 ```
 
-Structured detail about a failed-to-start exec, populated on `ExecEventFailed` and `ExecEventStdinError`. See [Error Handling](/sdk/errors#spawn-time-exec-failures) for the kinds it carries (`not_found`, `permission_denied`, etc.) and how to branch on them.
+Structured detail about a failed-to-start exec, populated on `ExecEventFailed` and `ExecEventStdinError`. Failure kinds use the snake-case forms of the [failure-kind definitions](/sdk/rust/execution#execfailurekind). See [Error handling](/sdk/errors#spawn-time-exec-failures) for branching examples.
 
 | Field | Type | Description |
 |-------|------|-------------|

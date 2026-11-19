@@ -9,14 +9,13 @@ use serde::{Deserialize, Serialize};
 //--------------------------------------------------------------------------------------------------
 
 /// Window charge for each output chunk, bounding even very small writes.
-pub const EXEC_OUTPUT_EVENT_OVERHEAD: u32 = 256;
+pub use microsandbox_types::EXEC_OUTPUT_EVENT_OVERHEAD;
 
-/// Minimum output window; permits at least one full guest read plus its metadata.
-pub const MIN_EXEC_OUTPUT_WINDOW: u32 = 64 * 1024;
+/// Runtime-owned execution policy advertised in Ready.
+pub use microsandbox_types::ExecLimits;
 
-/// In-flight stdin bytes for an execution that negotiated output flow control.
-/// Keeping input bounded leaves the connection available for output credits.
-pub const EXEC_STDIN_WINDOW: u32 = 64 * 1024;
+/// Maximum encoded execution acknowledgement, signal or resize envelope.
+pub const MAX_EXEC_CONTROL_BYTES: usize = 4096;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -59,12 +58,6 @@ pub struct ExecRequest {
     /// POSIX resource limits to apply to the spawned process via `setrlimit()`.
     #[serde(default)]
     pub rlimits: Vec<ExecRlimit>,
-
-    /// Optional generation-10 output window, shared by stdout and stderr.
-    /// Each chunk costs its payload length plus `EXEC_OUTPUT_EVENT_OVERHEAD`.
-    /// Omission preserves unthrottled output for older SDKs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_window: Option<u32>,
 }
 
 /// A POSIX resource limit to apply to a spawned process.
@@ -227,18 +220,37 @@ pub struct ExecSignal {
     pub signal: i32,
 }
 
-/// Cumulative stdin bytes consumed by the child, for generation-10 flow control.
+/// Acknowledges cumulative bytes written into the child's stdin pipe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecStdinCredit {
+pub struct ExecStdinAck {
     /// Bytes written to the child's stdin since this execution started.
     pub consumed: u64,
 }
 
-/// Cumulative output credit returned after the SDK consumes queued chunks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecOutputCredit {
+/// Acknowledges cumulative output consumed by the SDK, including per-chunk overhead.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecOutputAck {
     /// Payload bytes plus per-chunk overhead consumed since this exec started.
     pub consumed: u64,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl ExecOutputAck {
+    /// Record one consumed output chunk, including its per-chunk overhead.
+    ///
+    /// Returns `None` on counter overflow without changing the acknowledgement.
+    pub fn consume(&mut self, payload_bytes: usize) -> Option<()> {
+        let charge = u64::try_from(payload_bytes)
+            .ok()?
+            .checked_add(u64::from(EXEC_OUTPUT_EVENT_OVERHEAD))?;
+
+        self.consumed = self.consumed.checked_add(charge)?;
+
+        Some(())
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -290,6 +302,12 @@ impl FromStr for ExecRlimit {
     }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::RlimitResource;
+
 #[cfg(test)]
 mod tests {
     use super::ExecRlimit;
@@ -324,9 +342,3 @@ mod tests {
         assert_eq!(err, "soft limit cannot exceed hard limit");
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub use microsandbox_types::RlimitResource;

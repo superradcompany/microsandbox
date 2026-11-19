@@ -32,6 +32,7 @@ type SandboxConfig struct {
 	MaxCPUs           uint8
 	CPUPlacement      CPUPlacement
 	PlacementProfile  string
+	NestedVirt        *bool
 	THP               THPPolicy
 	Workdir           string
 	Shell             string
@@ -60,6 +61,7 @@ type SandboxConfig struct {
 	MaxDuration        time.Duration
 	IdleTimeout        time.Duration
 	RegistryAuth       *RegistryAuth
+	registryAnonymous  bool
 	// RegistryInsecure pulls the image over plain HTTP instead of HTTPS.
 	RegistryInsecure bool
 	// RegistryCACerts holds PEM-encoded CA root certificates trusted when
@@ -153,6 +155,7 @@ type persistedResources struct {
 	MaxMemoryMiB     uint32       `json:"max_memory_mib"`
 	CPUPlacement     CPUPlacement `json:"cpu_placement"`
 	PlacementProfile string       `json:"placement_profile"`
+	NestedVirt       *bool        `json:"nested_virt"`
 	THP              THPPolicy    `json:"thp"`
 }
 
@@ -231,6 +234,7 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		CPUPlacement:      raw.cpuPlacement(),
 		PlacementProfile:  raw.placementProfile(),
 		THP:               raw.thp(),
+		NestedVirt:        raw.nestedVirt(),
 		Workdir:           runtime.Workdir,
 		Shell:             runtime.Shell,
 		SecurityProfile:   raw.SecurityProfile,
@@ -309,6 +313,13 @@ func (c persistedSandboxConfig) placementProfile() string {
 		return c.Resources.PlacementProfile
 	}
 	return c.PlacementProfile
+}
+
+func (c persistedSandboxConfig) nestedVirt() *bool {
+	if c.Resources != nil {
+		return c.Resources.NestedVirt
+	}
+	return nil
 }
 
 func (c persistedSandboxConfig) thp() THPPolicy {
@@ -733,6 +744,11 @@ func WithPlacementProfile(profile string) SandboxOption {
 	return func(o *SandboxConfig) { o.PlacementProfile = profile }
 }
 
+// WithNestedVirt enables or disables nested virtualization for local sandboxes.
+func WithNestedVirt(enabled bool) SandboxOption {
+	return func(o *SandboxConfig) { o.NestedVirt = &enabled }
+}
+
 // WithTHP selects the guest transparent huge-page policy applied at boot.
 func WithTHP(policy THPPolicy) SandboxOption {
 	return func(o *SandboxConfig) { o.THP = policy }
@@ -909,6 +925,16 @@ func WithRegistryAuth(auth RegistryAuth) SandboxOption {
 	return func(o *SandboxConfig) {
 		a := auth
 		o.RegistryAuth = &a
+		o.registryAnonymous = false
+	}
+}
+
+// WithRegistryAnonymous pulls without credentials, even when the OS keyring,
+// registry configuration or Docker's credential store has some for the registry.
+func WithRegistryAnonymous() SandboxOption {
+	return func(o *SandboxConfig) {
+		o.RegistryAuth = nil
+		o.registryAnonymous = true
 	}
 }
 
@@ -1143,13 +1169,13 @@ func SOCKS5Proxy(address string) *OutboundProxy {
 }
 
 // HTTPConnectProxy configures an HTTP proxy that opens outbound TCP tunnels
-// with CONNECT at address.
+// with CONNECT at address. Add Credentials for HTTP Basic authentication.
 func HTTPConnectProxy(address string) *OutboundProxy {
 	return &OutboundProxy{protocol: "http_connect", address: address}
 }
 
-// Credentials returns a copy configured with SOCKS5 username authentication
-// and a host-side password source.
+// Credentials returns a copy configured with SOCKS5 or HTTP CONNECT username
+// authentication and a host-side password source.
 func (p *OutboundProxy) Credentials(username string, password SecretSource) *OutboundProxy {
 	if p == nil {
 		return nil

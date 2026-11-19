@@ -17,6 +17,7 @@ Document parsers process complex, attacker-controlled file formats. This guide i
 
 Create one script to prepare the reusable toolchain:
 
+<CodeGroup>
 ```sh prepare-office.sh
 #!/bin/sh
 set -eu
@@ -33,9 +34,11 @@ chmod 0700 /out
 libreoffice --version
 pdftoppm -v
 ```
+</CodeGroup>
 
 Create the workload script that each worker will run:
 
+<CodeGroup>
 ```sh convert-document.sh
 #!/bin/sh
 set -eu
@@ -59,6 +62,7 @@ test -s /out/input.pdf
 test -s /out/preview.png
 stat -c "%n: %s bytes" /out/input.pdf /out/preview.png
 ```
+</CodeGroup>
 
 Install both scripts in the guest, then run the preparation script as the entrypoint:
 
@@ -84,15 +88,19 @@ msb run --name office-base --replace `
 
 Capture the prepared toolchain:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap create office-tools --sandbox office-base --integrity
 ```
+</CodeGroup>
 
 Verify the snapshot before using it:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap verify office-base:office-tools
 ```
+</CodeGroup>
 
 Bookworm currently downloads roughly 130 MB and adds about 440 MB to the guest for this toolchain; package updates can change those numbers. The snapshot lets later workers skip that installation.
 
@@ -122,15 +130,19 @@ msb snap restore office-base:office-tools --name document-worker `
 
 Copy the document into the running worker:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp ./input.docx document-worker:/input/input.docx
 ```
+</CodeGroup>
 
 Make the copied input read-only:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec --user root document-worker -- chmod 0444 /input/input.docx
 ```
+</CodeGroup>
 
 </Step>
 
@@ -187,9 +199,11 @@ New-Item -ItemType Directory -Path $env:OFFICE_ARTIFACT_DIR | Out-Null
 
 Stop the worker before exporting its output:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb stop document-worker
 ```
+</CodeGroup>
 
 Copy out only the generated artifacts:
 
@@ -252,9 +266,11 @@ Remove-Item prepare-office.sh, convert-document.sh
 
 Remove the reusable toolchain snapshot:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap rm office-base:office-tools
 ```
+</CodeGroup>
 
 The checked `output.pdf` and `preview.png` remain in the artifact directory configured above.
 

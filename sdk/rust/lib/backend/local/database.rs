@@ -55,6 +55,10 @@ impl LocalBackend {
             Err(error) => return Err(error.into()),
         }
 
+        // Usage and control lookups may open a legacy catalog before the normal writable
+        // connection path runs. Tighten the directory at this boundary as well.
+        microsandbox_db::pool::ensure_private_database_directory(&db_dir)?;
+
         // Use the same installation coordination as the slow path. In particular, a rolled
         // back database can look current while an incomplete downgrade still owns its files.
         let migration_lock = acquire_migration_lock(&db_dir).await?;
@@ -156,9 +160,7 @@ pub(super) async fn requires_initialization<C: ConnectionTrait>(
     {
         return Ok(prefix.len() < schema_metadata::BASELINE_0_6_0_MIGRATIONS.len());
     }
-    Err(MicrosandboxError::Runtime(
-        "database schema is newer than this msb binary or has an unknown migration prefix; refusing to change an unrecognized catalog".into(),
-    ))
+    Err(newer_schema_error("unrecognized migration history"))
 }
 
 pub(super) async fn upgrade(pools: &microsandbox_db::pool::DbPools) -> MicrosandboxResult<()> {
@@ -250,6 +252,17 @@ pub(super) async fn recover_abandoned_lease(
     Ok(())
 }
 
+/// Recovery guidance shared by every SDK/CLI schema admission path.
+pub(super) fn newer_schema_error(detail: &str) -> MicrosandboxError {
+    MicrosandboxError::Runtime(format!(
+        "This MSB_HOME has a newer or unrecognized database schema.\n\n\
+         Update your SDK and msb to a version that supports this database,\n\
+         or set MSB_HOME to a different directory to use a separate environment.\n\n\
+         Your existing sandboxes remain in the original MSB_HOME.\n\n\
+         Details: {detail}"
+    ))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -263,8 +276,9 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
+    use crate::config::layers::BackendConfig;
     use crate::runtime::launch_contract;
-    use crate::{SandboxConfig, test_support};
+    use crate::{BackendSelectionSource, LocalBackend, SandboxConfig, test_support};
 
     //--------------------------------------------------------------------------------------------------
     // Constants
@@ -340,7 +354,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(requires_initialization(&db).await.is_err());
+        let error = requires_initialization(&db).await.unwrap_err().to_string();
+        assert!(error.contains("schema.\n\nUpdate your SDK and msb"));
+        assert!(error.contains("set MSB_HOME to a different directory"));
+        assert!(error.contains("\n\nYour existing sandboxes remain in the original MSB_HOME."));
     }
 
     #[tokio::test]
@@ -499,22 +516,20 @@ mod tests {
         use std::sync::Arc;
 
         let home = std::env::var("MSB_CATALOG_TEST_HOME").expect("explicit disposable test home");
-        let local = Arc::new(crate::test_support::local_backend(
-            crate::config::GlobalConfig {
-                home: Some(std::path::PathBuf::from(&home)),
-                // This isolated backend does not read environment paths. Supply the
-                // released runtime pair selected by the previous fixture explicitly.
-                paths: crate::config::PathsConfig {
-                    msb: Some(std::env::var_os("MSB_PATH").expect("previous msb").into()),
-                    libkrunfw: Some(
-                        std::env::var_os("MSB_LIBKRUNFW_PATH")
-                            .expect("previous firmware")
-                            .into(),
-                    ),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
+        let local = Arc::new(LocalBackend::from_backend_config(
+            BackendConfig::new(
+                serde_json::from_value(serde_json::json!({
+                    "home": home,
+                    "paths": {
+                        "msb": std::env::var("MSB_PATH").expect("previous msb"),
+                        "libkrunfw": std::env::var("MSB_LIBKRUNFW_PATH").expect("previous firmware")
+                    }
+                }))
+                .unwrap(),
+                Default::default(),
+            ),
+            BackendSelectionSource::Programmatic,
+            None,
         ));
 
         let expected = launch_contract::resolve(
@@ -604,6 +619,33 @@ mod tests {
             assert_eq!(current_pid, pid, "upgrade must not restart the old VM");
             active.stop().await.unwrap();
             crate::Sandbox::remove("catalog-running").await.unwrap();
+            // Existing VMs remain usable after catalog migration. New launches
+            // fail the protected-state prerequisite before the nesting-policy check.
+            if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+                let rejected = crate::Sandbox::builder("catalog-unsupported")
+                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                    .create().await;
+                let error = match rejected {
+                    Ok(unexpected) => {
+                        unexpected.stop().await.unwrap();
+                        crate::Sandbox::remove("catalog-unsupported").await.unwrap();
+                        panic!("previous runtime accepted a launch without protected sandbox state");
+                    }
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    error.contains("upgrade required")
+                        && error.contains("does not advertise protected sandbox state"),
+                    "{error}"
+                );
+                assert!(matches!(crate::Sandbox::get("catalog-unsupported").await,
+                    Err(MicrosandboxError::SandboxNotFound(_))));
+                assert!(!local.config().sandboxes_dir().join("catalog-unsupported").exists());
+                let after = Migrator::get_applied_migrations(pools.write().inner()).await.unwrap();
+                assert_eq!(after.iter().map(|migration| migration.name()).collect::<Vec<_>>(), before.iter().map(|migration| migration.name()).collect::<Vec<_>>());
+                println!("previous runtime 0.6.{expected}: existing VM retained; new launch refused without a sandbox or schema change");
+                return;
+            }
             #[cfg(feature = "net")]
             {
                 // A newer SDK must not silently omit a security/resource

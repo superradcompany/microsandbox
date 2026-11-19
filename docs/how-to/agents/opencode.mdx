@@ -55,9 +55,11 @@ The first run downloads the package and may take a couple of minutes. OpenCode s
 
 After leaving OpenCode, return to the same sandbox and workspace with:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec -t opencode-demo -- opencode
 ```
+</CodeGroup>
 
 </Step>
 
@@ -65,9 +67,11 @@ msb exec -t opencode-demo -- opencode
 
 Exit the TUI, then run:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec opencode-demo -- opencode --version
 ```
+</CodeGroup>
 
 The pinned example prints `1.18.4`.
 
@@ -77,27 +81,35 @@ The pinned example prints `1.18.4`.
 
 With the default writable mount, changes are already in the host checkout. Review the diff from either side of the mount:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec opencode-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
 ```
+</CodeGroup>
 
 If you chose the isolated `--copy-dir` alternative, export a patch from the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec opencode-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/opencode.patch'
 ```
+</CodeGroup>
 
 Copy the patch to the host:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp opencode-demo:/tmp/opencode.patch ./opencode.patch
 ```
+</CodeGroup>
 
 Check that it applies cleanly before applying it:
 
-```sh
+<CodeGroup>
+```sh Shell
 git apply --check ./opencode.patch
 ```
+</CodeGroup>
 
 </Step>
 
@@ -105,9 +117,11 @@ git apply --check ./opencode.patch
 
 Remove the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f opencode-demo
 ```
+</CodeGroup>
 
 Removing the sandbox also removes its provider connections, sessions, and OpenCode configuration. Changes made through the default workspace mount remain in the host checkout. Never copy an agent's entire home directory back to the host.
 
@@ -142,9 +156,11 @@ msb install --tmp --name opencode-project `
 
 Then run this from a project folder on your host:
 
-```sh
+<CodeGroup>
+```sh Shell
 opencode-project
 ```
+</CodeGroup>
 
 `--tmp` creates a fresh sandbox for each session and removes it on exit. The `./` mount uses the folder you launch `opencode-project` from. Keep it relative; passing a full path during installation fixes the command to that folder.
 
@@ -154,9 +170,11 @@ Without `--tmp`, an installed command reuses the same sandbox and its original w
 
 To remove the host command:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb uninstall opencode-project
 ```
+</CodeGroup>
 
 The three named volumes remain until you [remove them explicitly](/cli/volume-commands#msb-volume-rm).
 

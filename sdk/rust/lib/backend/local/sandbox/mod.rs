@@ -39,8 +39,9 @@ use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
-use super::LocalBackend;
+use super::{LocalBackend, creation};
 use crate::MicrosandboxResult;
+use crate::backend::local::creation::CreationStorage;
 use crate::backend::{
     Backend,
     sandbox::{LogStream, MetricsStream, SandboxBackend, SandboxIdentity},
@@ -50,6 +51,7 @@ use crate::db::entity::{
 };
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::runtime::SpawnMode;
+use crate::runtime::protected_state::StoragePreparation;
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
     RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
@@ -109,6 +111,11 @@ impl LocalBackend {
                 model.status
             )));
         }
+
+        // Storage migration can capture legacy checkpoint aliases. Follow the same lock order
+        // as snapshot publication and removal before taking runtime ownership.
+        let _lineage_guard =
+            crate::snapshot::lineage::lock_source(&self.config().run_dir(), name).await?;
 
         // Unix transfers this lock into the child. Windows cannot transfer LockFileEx ownership,
         // so the parent proves the prior generation gone and releases its copy immediately before
@@ -191,7 +198,9 @@ impl LocalBackend {
             }
         }
 
-        let mut config: SandboxConfig = serde_json::from_str::<SandboxConfig>(&model.config)?;
+        creation::require_complete(write_db, model.id, name).await?;
+        let mut config =
+            SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())?;
         // Also cover starts after crashes or a stop performed by an older SDK. Lifecycle
         // ownership alone can become available during Linux's deferred disk/KVM teardown.
         // Observe only this sandbox's owned markers; actual shared-disk conflicts still fail
@@ -202,6 +211,12 @@ impl LocalBackend {
             Duration::from_secs(5),
         )
         .await?;
+
+        #[cfg(unix)]
+        microsandbox_runtime::maintenance::remove_bootstrap_trampoline(
+            &self.sandboxes_dir().join(name),
+        )?;
+
         // A failed or interrupted first restore is not a stopped ordinary VM. In particular,
         // its sealed base may be hard-linked to a snapshot and must never become a boot disk.
         Self::validate_completed_restore(&config)?;
@@ -245,10 +260,16 @@ impl LocalBackend {
         #[cfg(windows)]
         let lifecycle_guard = None;
 
-        match self
-            .create_sandbox_inner(config, model.id, mode, lifecycle_guard)
-            .await
-        {
+        let started = async {
+            let storage = CreationStorage::acquire(self, name)?;
+            self.prepare_sandbox_launch(&config, &storage, StoragePreparation::Existing)
+                .await?;
+            self.create_sandbox_inner(config, model.id, mode, lifecycle_guard)
+                .await
+        }
+        .await;
+
+        match started {
             Ok((local_state, returned_config)) => {
                 let mut sandbox =
                     Sandbox::from_local(backend.clone(), local_state, returned_config);
@@ -397,6 +418,18 @@ impl LocalBackend {
         };
 
         if all_dead {
+            #[cfg(unix)]
+            {
+                let _ownership = crate::runtime::acquire_sandbox_lifecycle_guard(
+                    &self.config().run_dir(),
+                    name,
+                    Duration::from_secs(5),
+                )
+                .await?;
+                microsandbox_runtime::maintenance::remove_bootstrap_trampoline(
+                    &self.sandboxes_dir().join(name),
+                )?;
+            }
             let db = self.db().await?.write();
             if let Err(e) = Self::update_sandbox_status(db, model.id, SandboxStatus::Stopped).await
             {
@@ -591,8 +624,7 @@ impl LocalBackend {
             let process = owner.process.as_ref().ok_or_else(|| {
                 crate::MicrosandboxError::Runtime("runtime exited before shutdown dispatch".into())
             })?;
-            let path =
-                crate::runtime::sandbox_agent_socket_path_candidates_for(self, name).remove(0);
+            let path = self.agent_socket_paths(name).remove(0);
             process
                 .connect_agent(&path, AGENT_SHUTDOWN_CONNECT_TIMEOUT)
                 .await?
@@ -833,7 +865,7 @@ impl LocalBackend {
                 || (sandbox.status == SandboxStatus::Starting && socket_roots.is_some())
             {
                 if let Some((run_dir, sandboxes_dir)) = socket_roots {
-                    crate::runtime::remove_sandbox_socket_artifacts_at(
+                    crate::runtime::remove_socket_artifacts_at(
                         run_dir,
                         sandboxes_dir,
                         &sandbox.name,
@@ -881,11 +913,7 @@ impl LocalBackend {
         }
 
         if let Some((run_dir, sandboxes_dir)) = socket_roots {
-            crate::runtime::remove_sandbox_socket_artifacts_at(
-                run_dir,
-                sandboxes_dir,
-                &sandbox.name,
-            )?;
+            crate::runtime::remove_socket_artifacts_at(run_dir, sandboxes_dir, &sandbox.name)?;
         }
         let (terminal_status, reason) = Self::stale_runtime_terminal_state(sandbox.status);
         Self::mark_sandbox_runtime_stale(
@@ -1680,8 +1708,7 @@ mod tests {
         .exec(pools.write())
         .await
         .unwrap();
-        let agent =
-            crate::runtime::sandbox_agent_socket_path_candidates_for(&backend, name).remove(0);
+        let agent = backend.agent_socket_paths(name).remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();

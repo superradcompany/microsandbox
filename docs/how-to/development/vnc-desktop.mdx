@@ -17,6 +17,7 @@ This guide runs the lightweight LXQt desktop with Breeze styling and opens QTerm
 
 Save the desktop setup and service lifecycle in a host-side script:
 
+<CodeGroup>
 ```sh start-desktop.sh
 #!/bin/sh
 set -eu
@@ -61,6 +62,7 @@ fi
 
 exec websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5901
 ```
+</CodeGroup>
 
 `--script-path` installs this file as the executable `start-desktop` command inside the guest.
 
@@ -90,9 +92,11 @@ msb run -d --name vnc-desktop --replace `
 
 Detached mode returns as soon as the VM starts, before the desktop packages are ready. The first install downloads about 183 MB, uses roughly 734 MB of guest disk, and can take a few minutes. Follow the installation, TigerVNC startup, and websockify output:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb logs -f vnc-desktop
 ```
+</CodeGroup>
 
 When websockify reports that it is listening, press `Ctrl+C` to stop following the log. The sandbox keeps running. Confirm that noVNC is serving HTTP:
 
@@ -129,9 +133,11 @@ curl.exe -sS http://127.0.0.1:6080/vnc.html | Select-Object -First 10
 
 Then inspect the VNC server log inside the guest:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec vnc-desktop -- sh -lc 'grep -E "Listening|created VNC server" /tmp/xvnc.log'
 ```
+</CodeGroup>
 
 <Warning>
   VNC authentication is disabled inside this VM. The host listener is therefore intentionally restricted to `127.0.0.1`. Do not publish port 6080 on a LAN or public interface without VNC authentication, TLS, and an authenticated reverse proxy.

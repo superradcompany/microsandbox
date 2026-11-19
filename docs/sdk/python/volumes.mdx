@@ -94,7 +94,7 @@ await Volume.create("docker-data", kind=VolumeKind.DISK, size_mib=20 * 1024)
 
 </Accordion>
 
-Create a new named volume. `VolumeKind.DIRECTORY` creates a host directory; `VolumeKind.DISK` creates a backing disk image and requires `size_mib`.
+Create a new named volume of the selected [`VolumeKind`](#volumekind). Disk volumes require `size_mib`.
 
 <p className="msb-label">Parameters</p>
 

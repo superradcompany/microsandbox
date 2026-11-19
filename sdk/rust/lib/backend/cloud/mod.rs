@@ -1,4 +1,4 @@
-//! Cloud backend implementation — talks to an msb-cloud control plane over HTTP.
+//! Cloud backend implementation — talks to the cloud API over HTTP.
 //!
 //! Holds the (url, api_key) tuple and a `reqwest::Client`. Lifecycle ops are
 //! plain HTTP; logs stream over SSE; exec, attach, and guest-fs ride the agent
@@ -7,13 +7,19 @@
 //! Construction requires an API key. Hosted-cloud callers use the default
 //! endpoint; `new`, environment configuration, and profiles can override it
 //! for development, self-hosted, and on-prem deployments.
-//! Auth is API-key-only — the same `msb_live_*` / `msb_test_*` tokens msb-cloud
-//! issues today. No OAuth or session credentials are honored here.
+//! Auth is API-key-only, using `msb_live_*` / `msb_test_*` tokens.
+//! No OAuth or session credentials are honored here.
 
 mod agent;
 mod http;
+mod modify;
+#[cfg(test)]
+mod named_volume_tests;
 pub(in crate::backend) mod sandbox;
+mod service;
 mod snapshot;
+#[cfg(test)]
+mod stop_tests;
 mod volume;
 mod ws_io;
 
@@ -54,11 +60,11 @@ fn default_user_agent() -> String {
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Cloud-runtime backend: talks to an msb-cloud control plane over HTTP.
+/// Cloud-runtime backend: talks to the cloud API over HTTP.
 ///
 /// Holds the deployment URL, API key, and captured user and managed settings.
 /// The `(url, api_key)` pair determines
-/// which org's view the backend sees: msb-cloud derives the org from the API
+/// which org's view the backend sees: the cloud API derives the org from the API
 /// key, so there is no per-call org argument.
 ///
 /// Constructors:
@@ -74,6 +80,8 @@ pub struct CloudBackend {
     url: String,
     api_key: String,
     http: reqwest::Client,
+    /// Client for Service changes, which must never resend a request.
+    service_http: reqwest::Client,
     config: Arc<BackendConfig>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
@@ -104,7 +112,7 @@ pub struct CloudBackendBuilder {
 impl CloudBackend {
     /// Construct a `CloudBackend` with an explicit URL and API key.
     ///
-    /// Primary constructor. Works identically for hosted msb-cloud, self-hosted
+    /// Primary constructor. Works identically for the hosted cloud API, self-hosted
     /// deployments, and on-prem installs — no constructor implies a specific
     /// deployment shape.
     pub fn new(url: impl Into<String>, api_key: impl Into<String>) -> MicrosandboxResult<Self> {
@@ -129,7 +137,7 @@ impl CloudBackend {
     /// Construct from a named SDK profile in `~/.microsandbox/config.json`.
     ///
     /// Profiles are local SDK sugar over the primary `(url, api_key)` constructor;
-    /// msb-cloud does not receive or interpret profile names.
+    /// the cloud API does not receive or interpret profile names.
     pub fn from_profile(name: &str) -> MicrosandboxResult<Self> {
         super::profile::cloud_backend_from_profile(name)
     }
@@ -139,7 +147,7 @@ impl CloudBackend {
         CloudBackendBuilder::default()
     }
 
-    /// Configured msb-cloud endpoint URL (no trailing slash).
+    /// Configured cloud API endpoint URL (no trailing slash).
     pub fn url(&self) -> &str {
         &self.url
     }
@@ -249,7 +257,7 @@ impl CloudBackendBuilder {
         self
     }
 
-    /// Set the msb-cloud endpoint URL.
+    /// Set the cloud API endpoint URL.
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
@@ -276,6 +284,12 @@ impl CloudBackendBuilder {
     /// Provide a fully custom `reqwest::Client`. When set, `request_timeout`
     /// and `user_agent` builder options are ignored — the supplied client owns
     /// its own configuration.
+    ///
+    /// Service create, update, enable, disable and remove also use this client,
+    /// so its retry and redirect policies decide whether a change request can be
+    /// resent or redirected. Build it with `.retry(reqwest::retry::never())` and
+    /// `.redirect(reqwest::redirect::Policy::none())` to keep each change to the
+    /// requested endpoint at most once.
     pub fn client(mut self, client: reqwest::Client) -> Self {
         self.custom_client = Some(client);
         self
@@ -286,6 +300,12 @@ impl CloudBackendBuilder {
     /// explicitly supplied URL is empty, the HTTP client fails to construct,
     /// or user or managed configuration cannot be loaded.
     pub fn build(self) -> MicrosandboxResult<CloudBackend> {
+        let config = match self.config {
+            Some(config) => config,
+            None => Arc::new(BackendConfig::load()?),
+        };
+
+        config.require_backend(super::BackendKind::Cloud, None)?;
         let url = self.url.as_deref().unwrap_or(DEFAULT_CLOUD_API_URL);
         let url = url.trim();
         if url.is_empty() {
@@ -308,8 +328,8 @@ impl CloudBackendBuilder {
         let url = url.trim_end_matches('/').to_string();
         let api_key = api_key.to_string();
 
-        let http = if let Some(client) = self.custom_client {
-            client
+        let (http, service_http) = if let Some(client) = self.custom_client {
+            (client.clone(), client)
         } else {
             let mut headers = HeaderMap::new();
             let bearer = format!("Bearer {api_key}");
@@ -326,26 +346,28 @@ impl CloudBackendBuilder {
                 })?,
             );
 
-            reqwest::Client::builder()
-                .timeout(self.request_timeout)
-                .default_headers(headers)
-                .build()
-                .map_err(|e| {
-                    MicrosandboxError::InvalidConfig(format!("failed to build HTTP client: {e}"))
-                })?
+            let build = |builder: reqwest::ClientBuilder| {
+                builder
+                    .timeout(self.request_timeout)
+                    .default_headers(headers.clone())
+                    .build()
+                    .map_err(|e| {
+                        MicrosandboxError::InvalidConfig(format!(
+                            "failed to build HTTP client: {e}"
+                        ))
+                    })
+            };
+            (
+                build(reqwest::Client::builder())?,
+                build(service::service_change_client_builder())?,
+            )
         };
-
-        let config = match self.config {
-            Some(config) => config,
-            None => Arc::new(BackendConfig::load()?),
-        };
-
-        config.resolved_config().exec.validate()?;
 
         Ok(CloudBackend {
             url,
             api_key,
             http,
+            service_http,
             config,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
@@ -402,6 +424,30 @@ mod tests {
 
     use super::*;
     use crate::backend::BackendKind;
+
+    #[test]
+    fn cloud_construction_rejects_policy_before_credentials_or_client_setup() {
+        for managed in [false, true] {
+            let restriction =
+                crate::config::GlobalConfigPatch::new().allowed_backends(vec![BackendKind::Local]);
+            let config = if managed {
+                BackendConfig::new(Default::default(), restriction)
+            } else {
+                BackendConfig::new(restriction, Default::default())
+            };
+            let error = CloudBackend::builder()
+                .url("not a URL")
+                .config_sources(config)
+                .build()
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cloud backend selected by programmatic is disabled")
+            );
+        }
+    }
 
     #[test]
     fn cloud_backend_keeps_captured_settings_until_replaced() {
@@ -555,41 +601,15 @@ mod tests {
     }
 
     #[test]
-    fn builder_validates_effective_exec_limit() {
-        for (user, managed, valid) in [
-            (serde_json::Value::Null, serde_json::json!({}), true),
-            (serde_json::json!(0), serde_json::json!({}), false),
-            (
-                serde_json::json!(0),
-                serde_json::json!({"exec":{"buffer_bytes":65536}}),
-                true,
-            ),
-            (
-                serde_json::json!(65536),
-                serde_json::json!({"exec":{"buffer_bytes":0}}),
-                false,
-            ),
-        ] {
-            let sources = BackendConfig::new(
-                serde_json::from_value(serde_json::json!({"exec":{"buffer_bytes":user}})).unwrap(),
-                serde_json::from_value(managed).unwrap(),
-            );
-            let result = CloudBackend::builder()
-                .url("https://example.com")
-                .api_key("test")
-                .config_sources(sources)
-                .build();
-            assert_eq!(result.is_ok(), valid);
-        }
-    }
-
-    #[test]
     fn builder_succeeds_with_url_and_key() {
         let b =
             crate::test_support::cloud_backend("https://msb.example.com", "msb_test_abc").unwrap();
         assert_eq!(b.kind(), BackendKind::Cloud);
         assert_eq!(b.url(), "https://msb.example.com");
-        assert_eq!(b.info().source, BackendSelectionSource::Programmatic);
+        assert_eq!(
+            b.info().unwrap().source,
+            BackendSelectionSource::Programmatic
+        );
     }
 
     #[test]
@@ -597,7 +617,7 @@ mod tests {
         let b =
             crate::test_support::cloud_backend("https://msb.example.com", "msb_test_super_secret")
                 .unwrap();
-        let json = serde_json::to_string(&b.info()).unwrap();
+        let json = serde_json::to_string(&b.info().unwrap()).unwrap();
 
         assert!(json.contains("https://msb.example.com"));
         assert!(!json.contains("msb_test_super_secret"));
@@ -652,7 +672,10 @@ mod tests {
         for (cloud, expected) in clouds {
             let cloud = cloud.unwrap();
             assert_eq!(cloud.url(), expected);
-            assert_eq!(cloud.info().source, BackendSelectionSource::Programmatic);
+            assert_eq!(
+                cloud.info().unwrap().source,
+                BackendSelectionSource::Programmatic
+            );
         }
     }
 

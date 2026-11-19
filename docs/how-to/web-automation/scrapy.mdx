@@ -17,6 +17,7 @@ Use [Playwright](/how-to/browser-automation/playwright) instead when content app
 
 <Step title="Create the spider">
 
+<CodeGroup>
 ```python books_spider.py
 import scrapy
 
@@ -43,6 +44,7 @@ class BooksSpider(scrapy.Spider):
         if next_page:
             yield response.follow(next_page, self.parse)
 ```
+</CodeGroup>
 
 </Step>
 
@@ -80,9 +82,11 @@ msb snap create scrapy-runtime `
 
 Verify the snapshot before using it:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap verify scrapy-base:scrapy-runtime
 ```
+</CodeGroup>
 
 The snapshot avoids reinstalling Scrapy for every crawl.
 
@@ -144,9 +148,11 @@ msb cp scrapy-books:/var/tmp/books.json .artifacts/books.json
 
 Inspect the number of collected records:
 
-```sh
+<CodeGroup>
+```sh Shell
 jq 'length' .artifacts/books.json
 ```
+</CodeGroup>
 
 Treat scraped values as untrusted data when rendering HTML, building shell commands, or exporting spreadsheets.
 
@@ -154,15 +160,19 @@ Treat scraped values as untrusted data when rendering HTML, building shell comma
 
 <Step title="Clean up">
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f scrapy-base scrapy-books
 ```
+</CodeGroup>
 
 Remove the reusable snapshot:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap rm scrapy-base:scrapy-runtime
 ```
+</CodeGroup>
 
 </Step>
 

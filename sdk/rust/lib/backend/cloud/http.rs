@@ -19,10 +19,12 @@ use super::{CloudBackend, sandbox::CloudCreateBody, volume::CloudVolume};
 use crate::backend::sandbox::LogStream;
 use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{LogCursor, LogEntry, LogOptions, LogSource, LogStreamOptions, LogStreamStart};
-use crate::sandbox::SandboxListBuilder;
+use crate::sandbox::{SandboxListBuilder, SandboxModificationPlan};
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
     CloudCreateSandboxResponse, CloudErrorBody, CloudMessageResponse, CloudPaginated,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlan,
+    CloudSandboxModificationPlanRequest,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -80,7 +82,7 @@ struct CloudSandboxWaitQuery {
 //--------------------------------------------------------------------------------------------------
 // Methods: Sandbox lifecycle
 //
-// HTTP dispatch for the SDK's sandbox lifecycle ops, hitting msb-cloud's
+// HTTP dispatch for the SDK's sandbox lifecycle ops, hitting the cloud API's
 // API-key-authenticated routes (`/v1/sandboxes/*` and `/v1/sandboxes/by-name/*`).
 //--------------------------------------------------------------------------------------------------
 
@@ -88,7 +90,7 @@ impl CloudBackend {
     /// `POST /v1/sandboxes` (optionally create, start, and wait for readiness).
     ///
     /// Pass `start=true` to atomically create-and-start in a single round-trip
-    /// — mirrors msb-cloud's create-and-start shorthand. The SDK also requests
+    /// — mirrors the cloud API's create-and-start shorthand. The SDK also requests
     /// the opt-in server-side readiness barrier so a successful high-level
     /// create has the same immediately-usable contract as the local backend.
     pub(in crate::backend) async fn create_sandbox(
@@ -214,6 +216,42 @@ impl CloudBackend {
         decode_json(resp, "POST /v1/sandboxes/:id/start").await
     }
 
+    /// `POST /v1/sandboxes/:id/plan`, a dry run whose body carries no secret value.
+    pub(in crate::backend) async fn post_modification_plan(
+        &self,
+        id: &str,
+        req: &CloudSandboxModificationPlanRequest,
+    ) -> MicrosandboxResult<SandboxModificationPlan> {
+        let url = format!("{}/v1/sandboxes/{}/plan", self.url, urlencoding(id));
+        let resp = self
+            .http
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/plan", e))?;
+        let plan: CloudSandboxModificationPlan =
+            decode_json(resp, "POST /v1/sandboxes/:id/plan").await?;
+        Ok(plan.into())
+    }
+
+    /// `PATCH /v1/sandboxes/:id`, sent once. The body is the only
+    /// place a secret value travels; the caller reads and classifies the outcome.
+    pub(in crate::backend) async fn patch_modification(
+        &self,
+        id: &str,
+        req: &CloudSandboxModificationApplyRequest,
+        timeout: Duration,
+    ) -> Result<Response, reqwest::Error> {
+        let url = format!("{}/v1/sandboxes/{}", self.url, urlencoding(id));
+        self.http
+            .patch(&url)
+            .json(req)
+            .timeout(timeout)
+            .send()
+            .await
+    }
+
     /// `POST /v1/sandboxes/by-name/:name/stop`.
     pub async fn stop_sandbox(&self, name: &str) -> MicrosandboxResult<CloudCreateSandboxResponse> {
         let url = format!(
@@ -248,7 +286,7 @@ impl CloudBackend {
     }
 
     /// `DELETE /v1/sandboxes/by-name/:name`. Returns the typed `MessageResponse`
-    /// msb-cloud emits.
+    /// returned by the API.
     pub async fn destroy_sandbox(&self, name: &str) -> MicrosandboxResult<CloudMessageResponse> {
         let url = format!("{}/v1/sandboxes/by-name/{}", self.url, urlencoding(name));
         let resp = self
@@ -277,7 +315,7 @@ impl CloudBackend {
 
     /// Stream logs from `GET /v1/sandboxes/:id/logs`.
     ///
-    /// msb-cloud exposes logs as Server-Sent Events keyed by sandbox UUID, so
+    /// The API exposes logs as Server-Sent Events keyed by sandbox UUID, so
     /// the SDK resolves the current name to a cloud sandbox first. The cloud
     /// endpoint is streaming-only and requires a running sandbox, so callers
     /// must set `follow: true`.
@@ -478,7 +516,7 @@ impl CloudBackend {
 //--------------------------------------------------------------------------------------------------
 
 /// Parse a JSON response into `T`, mapping HTTP errors to typed
-/// `MicrosandboxError` variants. Tries to decode msb-cloud's typed error body
+/// `MicrosandboxError` variants. Tries to decode the cloud API's typed error body
 /// for richer messages on 4xx/5xx.
 pub(super) async fn decode_json<T: serde::de::DeserializeOwned>(
     resp: Response,
@@ -521,7 +559,7 @@ pub(super) fn cloud_io_error(op: &str, e: reqwest::Error) -> MicrosandboxError {
     MicrosandboxError::Http(e)
 }
 
-fn cloud_http_error(
+pub(super) fn cloud_http_error(
     status: u16,
     body: Option<&CloudErrorBody>,
     raw_body: &str,
@@ -531,7 +569,13 @@ fn cloud_http_error(
     let summary = cloud_error_message(body)
         .or_else(|| (!raw_body.trim().is_empty()).then_some(raw_body.trim()))
         .unwrap_or("no response body");
-    let message = format!("{op}: {summary}");
+    let message = if status == 401 {
+        format!(
+            "{op}: {summary}. Check MSB_API_KEY or the selected cloud profile's credentials; create a replacement key at https://dashboard.microsandbox.dev if the key has expired or been revoked"
+        )
+    } else {
+        format!("{op}: {summary}")
+    };
 
     match code.as_deref() {
         Some("sandbox_not_found") => return MicrosandboxError::SandboxNotFound(message),
@@ -540,6 +584,10 @@ fn cloud_http_error(
             return MicrosandboxError::SnapshotNotFound(message);
         }
         Some("volume_not_found") => return MicrosandboxError::VolumeNotFound(message),
+        Some("service_not_found") => return MicrosandboxError::ServiceNotFound(message),
+        Some("service_already_exists") => {
+            return MicrosandboxError::ServiceAlreadyExists(message);
+        }
         Some("volume_file_not_found") => return MicrosandboxError::SandboxFsOps(message),
         Some("snapshot_name_already_exists") | Some("snapshot_already_exists") => {
             return MicrosandboxError::SnapshotAlreadyExists(message);
@@ -547,12 +595,21 @@ fn cloud_http_error(
         Some("name_already_exists") if op == "POST /v1/snapshots" => {
             return MicrosandboxError::SnapshotAlreadyExists(message);
         }
+        Some("name_already_exists") if op == "POST /v1/volumes" => {
+            return MicrosandboxError::VolumeAlreadyExists(message);
+        }
         Some("name_already_exists") => return MicrosandboxError::SandboxAlreadyExists(message),
         Some("invalid_request") | Some("invalid_sandbox_config") | Some("invalid_volume_path") => {
             return MicrosandboxError::InvalidConfig(message);
         }
         Some("orchestrator_unreachable") | Some("nomad_job_failed") => {
             return MicrosandboxError::Runtime(message);
+        }
+        Some(microsandbox_types::CLOUD_MODIFICATION_UNSUPPORTED) => {
+            return MicrosandboxError::unsupported(
+                Operation::SandboxModify,
+                UnsupportedReason::NotAvailable(message),
+            );
         }
         _ => {}
     }
@@ -563,6 +620,7 @@ fn cloud_http_error(
             MicrosandboxError::SnapshotNotFound(message)
         }
         404 if op.contains("/v1/volumes") => MicrosandboxError::VolumeNotFound(message),
+        404 if op.contains("/v1/services") => MicrosandboxError::ServiceNotFound(message),
         404 => MicrosandboxError::SandboxNotFound(message),
         409 if op == "POST /v1/sandboxes" => MicrosandboxError::SandboxAlreadyExists(message),
         409 if op == "POST /v1/volumes" => MicrosandboxError::VolumeAlreadyExists(message),
@@ -728,7 +786,7 @@ fn parse_cloud_log_source(source: &str) -> MicrosandboxResult<LogSource> {
     }
 }
 
-fn cloud_error_code(body: Option<&CloudErrorBody>) -> Option<&str> {
+pub(super) fn cloud_error_code(body: Option<&CloudErrorBody>) -> Option<&str> {
     body.and_then(|body| {
         body.error
             .as_ref()
@@ -737,7 +795,7 @@ fn cloud_error_code(body: Option<&CloudErrorBody>) -> Option<&str> {
     })
 }
 
-fn cloud_error_message(body: Option<&CloudErrorBody>) -> Option<&str> {
+pub(super) fn cloud_error_message(body: Option<&CloudErrorBody>) -> Option<&str> {
     body.and_then(|body| {
         body.error
             .as_ref()
@@ -771,6 +829,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unauthorized_errors_keep_their_type_and_explain_credential_recovery() {
+        let body: CloudErrorBody =
+            serde_json::from_str(r#"{"error":{"code":"unauthorized","message":"unauthorized"}}"#)
+                .unwrap();
+        let error = cloud_http_error(401, Some(&body), "", "GET /v1/sandboxes");
+        let MicrosandboxError::CloudHttp {
+            status,
+            code,
+            message,
+        } = error
+        else {
+            panic!("authentication error type changed")
+        };
+        assert_eq!(status, 401);
+        assert_eq!(code.as_deref(), Some("unauthorized"));
+        assert!(message.contains("MSB_API_KEY"));
+        assert!(message.contains("https://dashboard.microsandbox.dev"));
+        let forbidden = cloud_http_error(403, Some(&body), "", "GET /v1/sandboxes");
+        assert!(!forbidden.to_string().contains("replacement key"));
+    }
+
+    #[test]
     fn cloud_http_error_uses_nested_error_body() {
         let body: CloudErrorBody = serde_json::from_str(
             r#"{"error":{"code":"sandbox_not_found","message":"sandbox missing"}}"#,
@@ -792,6 +872,12 @@ mod tests {
         assert!(
             matches!(err, MicrosandboxError::SandboxAlreadyExists(msg) if msg.contains("name taken"))
         );
+
+        let err = cloud_http_error(409, Some(&body), "", "POST /v1/volumes");
+        assert!(matches!(
+            err,
+            MicrosandboxError::VolumeAlreadyExists(msg) if msg.contains("name taken")
+        ));
     }
 
     #[test]
@@ -833,6 +919,23 @@ mod tests {
         assert!(matches!(
             cloud_http_error(404, Some(&file), "", "volume filesystem request"),
             MicrosandboxError::SandboxFsOps(_)
+        ));
+    }
+
+    #[test]
+    fn cloud_http_error_maps_modification_unsupported() {
+        let unsupported: CloudErrorBody = serde_json::from_str(
+            r#"{"error":{"code":"modification_unsupported","message":"secrets: not supported"}}"#,
+        )
+        .unwrap();
+        let op = "PATCH /v1/sandboxes/:id";
+
+        assert!(matches!(
+            cloud_http_error(409, Some(&unsupported), "", op),
+            MicrosandboxError::Unsupported {
+                op: Operation::SandboxModify,
+                reason: UnsupportedReason::NotAvailable(message),
+            } if message == format!("{op}: secrets: not supported")
         ));
     }
 

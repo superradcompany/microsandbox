@@ -262,6 +262,8 @@ fn invalid(message: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_protocol::jobs::JobOutputSource;
+
     use super::*;
 
     #[test]
@@ -278,9 +280,9 @@ mod tests {
                 } else {
                     "YQ==".into()
                 };
-                let first = JobOutput::new(1, 1, "stdout".into(), data.clone());
+                let first = JobOutput::new(1, 1, JobOutputSource::Stdout, data.clone());
                 writer.append(&first).unwrap();
-                let second = JobOutput::new(2, 1, "stdout".into(), data);
+                let second = JobOutput::new(2, 1, JobOutputSource::Stdout, data);
                 let error = writer
                     .append_with(&second, |file, bytes| {
                         if partial {
@@ -293,7 +295,12 @@ mod tests {
                 // Recovery must not append to a partial JSON line or skip sequence two.
                 assert!(
                     writer
-                        .append(&JobOutput::new(3, 1, "stderr".into(), "Yg==".into()))
+                        .append(&JobOutput::new(
+                            3,
+                            1,
+                            JobOutputSource::Stderr,
+                            "Yg==".into()
+                        ))
                         .is_err()
                 );
                 let records = store.output(&id).unwrap();
@@ -313,8 +320,14 @@ mod tests {
         let path = store.root.join(id.as_str());
         private_directory(&path).unwrap();
         let mut writer = store.writer(&id).unwrap();
-        let record =
-            |sequence| JobOutput::new(sequence, 1, "stdout".into(), "YQ==".repeat(100 * 1024));
+        let record = |sequence| {
+            JobOutput::new(
+                sequence,
+                1,
+                JobOutputSource::Stdout,
+                "YQ==".repeat(100 * 1024),
+            )
+        };
         writer.append(&record(1)).unwrap();
         // An occupied rotation destination causes a real filesystem error on every platform.
         let blocker = path.join("output.previous.jsonl");
@@ -348,7 +361,7 @@ mod tests {
                 .append(&JobOutput::new(
                     sequence,
                     1,
-                    "stdout".into(),
+                    JobOutputSource::Stdout,
                     "/wAA".repeat(4 * 1024),
                 ))
                 .unwrap();

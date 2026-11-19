@@ -113,9 +113,11 @@ msb run -d --name hermes-gateway --replace `
 
 Port 8642 is published only on host loopback. Watch the supervised gateway start with:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb logs -f hermes-gateway
 ```
+</CodeGroup>
 
 <Warning>
   Do not expose the API or dashboard on a public interface without a supported authentication provider and TLS. Hermes refuses several unsafe configurations, but host-level port exposure is still your responsibility.
@@ -127,15 +129,19 @@ msb logs -f hermes-gateway
 
 Remove the setup, version-check, and gateway sandboxes:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f hermes-setup hermes-version hermes-gateway
 ```
+</CodeGroup>
 
 Remove persisted Hermes state only when you no longer need it:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb volume rm hermes-data
 ```
+</CodeGroup>
 
 Clear the API key from the host shell:
 

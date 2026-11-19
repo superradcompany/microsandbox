@@ -14,7 +14,6 @@
 //! one resolved `msb` binary).
 
 pub(crate) mod backend;
-mod execution;
 pub(crate) mod layers;
 mod persistence;
 mod registry;
@@ -36,7 +35,7 @@ use microsandbox_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::backend::Profile;
+use crate::backend::{BackendKind, Profile};
 #[cfg(feature = "local")]
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -44,8 +43,6 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 use std::path::Path;
 
 pub(crate) mod runtime_paths;
-
-pub use execution::{ExecConfig, ExecConfigPatch};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -147,6 +144,10 @@ static SDK_LIBKRUNFW_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 #[derive(Default, ConfigPatch)]
 #[config_patch(serde)]
 pub struct GlobalConfig {
+    /// Backends permitted on this device. `None` allows both; an empty list is invalid.
+    /// Managed values replace user restrictions, including an explicit null clear.
+    pub allowed_backends: Option<Vec<BackendKind>>,
+
     /// Profile selected when no backend or profile is explicitly requested.
     /// Empty or absent uses the local backend fallback.
     pub active_profile: Option<String>,
@@ -195,10 +196,6 @@ pub struct GlobalConfig {
     /// Registry authentication configuration.
     #[config_patch(nested)]
     pub registries: RegistriesConfig,
-
-    /// Unread execution-output buffering shared by CLI and SDK commands.
-    #[config_patch(nested)]
-    pub exec: ExecConfig,
 
     /// SSH session defaults.
     #[config_patch(nested)]
@@ -340,6 +337,10 @@ pub struct SandboxDefaults {
 
     /// Default guest transparent huge-page policy.
     pub thp: TransparentHugePagePolicy,
+
+    /// Explicit default nested virtualization policy. Omission uses the runtime default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nested_virt: Option<bool>,
 
     /// Default OCI rootfs settings.
     #[config_patch(nested)]
@@ -681,6 +682,7 @@ impl Default for SandboxDefaults {
             cpu_placement: CpuPlacement::Inherit,
             placement_profile: None,
             thp: TransparentHugePagePolicy::Madvise,
+            nested_virt: None,
             oci: OciSandboxDefaults::default(),
             shell: "/bin/sh".into(),
             workdir: None,
@@ -733,7 +735,9 @@ pub fn load_persisted_config_or_default() -> MicrosandboxResult<GlobalConfig> {
     Ok(GlobalConfigPatch::load()?.into_config())
 }
 
-/// Persist the provided local config to disk as pretty JSON.
+/// Persist every resolved local setting, including defaults, as pretty JSON.
+/// Use [`GlobalConfigPatch::load`] and [`GlobalConfigPatch::save`] to edit settings while
+/// preserving omitted fields.
 pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
     let patch: GlobalConfigPatch = serde_json::from_value(serde_json::to_value(config)?)?;
     patch.save()
@@ -800,12 +804,16 @@ fn resolve_default_home() -> PathBuf {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use backend::{BackendContext, ContextProfile};
 pub(crate) use registry::RegistrySettingsPatch;
 pub use registry::{
     RegistriesConfig, RegistriesConfigPatch, RegistryAuthEntry, RegistryConfig,
     RegistryCredentialStore, RegistryEntry, RegistryEntryPatch, RegistryOptions,
     delete_registry_keyring_auth, get_registry_keyring_auth, set_registry_keyring_auth,
 };
+
+pub(crate) use runtime_paths::sdk_packaged_msb_path;
+pub use runtime_paths::set_sdk_packaged_msb_path;
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -827,6 +835,7 @@ mod tests {
     #[test]
     fn test_saved_patch_preserves_values_across_all_sections() {
         let expected = serde_json::json!({
+            "allowed_backends": ["local", "cloud"],
             "active_profile": "work",
             "profiles": {"work": {
                 "backend": "cloud",
@@ -892,7 +901,6 @@ mod tests {
                     "insecure": true
                 }}
             },
-            "exec": {"buffer_bytes": 1048576},
             "ssh": {"inactivity_timeout_secs": 45},
             "metrics": {"capacity": 128},
             "snapshots": {"max_filesystem_state_mib": 64}
@@ -1469,10 +1477,3 @@ mod tests {
         assert!(result.unwrap().is_empty());
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub(crate) use runtime_paths::sdk_packaged_msb_path;
-pub use runtime_paths::set_sdk_packaged_msb_path;

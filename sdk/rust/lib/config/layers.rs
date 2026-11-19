@@ -9,9 +9,11 @@ use super::{
     GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PathsConfigPatch,
     persistence::ManagedConfig, registry::RegistrySettingsPatch,
 };
+use crate::backend::{BackendKind, BackendSelectionSource};
+use crate::sandbox::restore_resources::RestoreResources;
 #[cfg(feature = "ssh")]
 use crate::sandbox::ssh::SshTimeoutPatch;
-use crate::{MicrosandboxResult, SandboxConfigPatch};
+use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfigPatch};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -105,6 +107,7 @@ impl BackendConfig {
 
     /// Prepare local settings once, then validate and cache the complete result.
     /// Cloud profile lookup does not prepare local runtime paths or validate local defaults.
+    /// Runtime lookup and diagnostics also use this; callers enforce backend permission separately.
     pub(crate) fn prepare_for_local_backend(
         mut self,
         mut builder: GlobalConfigPatch,
@@ -148,9 +151,35 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
-        resolved.exec.validate()?;
-
         self.resolved = OnceLock::from(Arc::new(resolved));
+        self.validate_backend_policy()?;
+
+        Ok(self)
+    }
+
+    /// Apply operation settings to a local backend whose paths have already been captured.
+    /// Re-reading environment paths here could inspect a different home from the backend
+    /// that owns the operation. Only winning operation paths are anchored against this call.
+    #[cfg(feature = "local")]
+    pub(crate) fn apply_operation_patch(
+        mut self,
+        mut options: GlobalConfigPatch,
+    ) -> MicrosandboxResult<Self> {
+        let captured = self.resolved_config().clone();
+        super::runtime_paths::resolve_patch(&mut options, None, &self.managed)?;
+        self.defaults =
+            GlobalConfigPatch::from_present_fields((*captured).clone()).overlay(options);
+        let mut resolved = self.global_layers().build().into_config();
+        // Clearing an operation's home restores the backend's captured home, never the
+        // current process environment. Optional subordinate paths still derive from it.
+        if resolved.home.is_none() {
+            resolved.home = Some(captured.home());
+        }
+        super::runtime_paths::resolve(&mut resolved)?;
+        resolved.validate_sandbox_defaults()?;
+        resolved.validate_snapshots()?;
+        self.resolved = OnceLock::from(Arc::new(resolved));
+        self.validate_backend_policy()?;
         Ok(self)
     }
 
@@ -173,6 +202,117 @@ impl BackendConfig {
             .get_or_init(|| Arc::new(self.global_layers().build().into_config()))
     }
 
+    /// A helper owns a separate home and never inherits user sandbox defaults or credentials.
+    /// Keep the captured administrator policy and refuse it if it redirects a private path.
+    #[cfg(feature = "local")]
+    pub(crate) fn recovery_reader(
+        &self,
+        home: &Path,
+        runtime: &crate::setup::ResolvedRuntime,
+    ) -> MicrosandboxResult<Self> {
+        let mut config = GlobalConfig {
+            home: Some(home.to_owned()),
+            ..Default::default()
+        };
+        config.paths.msb = Some(runtime.msb_path.clone());
+        config.paths.libkrunfw = Some(runtime.libkrunfw_path.clone());
+        let reader = Self::new(
+            GlobalConfigPatch::from_present_fields(config),
+            self.managed.clone(),
+        );
+        let effective = reader.resolved_config();
+        reader.require_backend(
+            BackendKind::Local,
+            Some(BackendSelectionSource::Programmatic),
+        )?;
+        if effective.home() != home
+            || [
+                effective.cache_dir(),
+                effective.sandboxes_dir(),
+                effective.volumes_dir(),
+                effective.logs_dir(),
+                effective.secrets_dir(),
+                effective.snapshots_dir(),
+            ]
+            .iter()
+            .any(|path| {
+                !path.starts_with(home)
+                    || path
+                        .components()
+                        .any(|c| c == std::path::Component::ParentDir)
+            })
+            || effective.paths.msb.as_ref() != Some(&runtime.msb_path)
+            || effective.paths.libkrunfw.as_ref() != Some(&runtime.libkrunfw_path)
+        {
+            return Err(MicrosandboxError::Runtime(
+                "managed policy cannot provide a private recovery reader home and matched runtime"
+                    .into(),
+            ));
+        }
+        Ok(reader)
+    }
+
+    /// Reject malformed effective policy even when no backend is being constructed.
+    pub(crate) fn validate_backend_policy(&self) -> MicrosandboxResult<()> {
+        if self
+            .resolved_config()
+            .allowed_backends
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            return Err(self.backend_policy_error("allowed_backends must not be empty"));
+        }
+
+        Ok(())
+    }
+
+    /// Check permission independently of backend selection and credential resolution.
+    pub(crate) fn require_backend(
+        &self,
+        kind: BackendKind,
+        source: Option<BackendSelectionSource>,
+    ) -> MicrosandboxResult<()> {
+        self.validate_backend_policy()?;
+        if let Some(allowed) = &self.resolved_config().allowed_backends
+            && !allowed.contains(&kind)
+        {
+            let allowed = allowed
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = source
+                .unwrap_or(BackendSelectionSource::Programmatic)
+                .as_str();
+            return Err(self.backend_policy_error(&format!(
+                "{} backend selected by {source} is disabled; allowed backends: {allowed}",
+                kind.as_str(),
+            )));
+        }
+        Ok(())
+    }
+
+    fn backend_policy_error(&self, detail: &str) -> MicrosandboxError {
+        let (source, path, remedy) = if self.managed.allowed_backends.is_some() {
+            (
+                "managed config",
+                &self.managed_file,
+                "contact your administrator",
+            )
+        } else {
+            (
+                "user config",
+                &self.defaults_file,
+                "edit allowed_backends in your user config",
+            )
+        };
+        let path = path
+            .as_ref()
+            .map(|path| format!(" `{}`", path.display()))
+            .unwrap_or_default();
+        MicrosandboxError::InvalidConfig(format!("{detail} ({source}{path}); {remedy}"))
+    }
+
     /// Supply the stored settings with administrator overrides already included.
     pub(crate) fn global_layers(&self) -> ConfigLayers<GlobalConfigPatch> {
         ConfigLayers::new(self.defaults.clone(), self.managed.clone())
@@ -184,6 +324,15 @@ impl BackendConfig {
             SandboxConfigPatch::from_defaults(&self.defaults),
             SandboxConfigPatch::from_managed(&self.managed),
         )
+    }
+
+    /// Managed overrides must be enforceable on the captured guest; the managed
+    /// patch is private to this type, so the check lives behind this accessor.
+    pub(crate) fn validate_managed_against_snapshot(
+        &self,
+        restore: &RestoreResources,
+    ) -> MicrosandboxResult<()> {
+        restore.validate_settings(&SandboxConfigPatch::from_managed(&self.managed))
     }
 
     /// Supply registry settings and auth policy for the requested host.
@@ -271,6 +420,89 @@ mod tests {
     use microsandbox_types::{RootDisk, SandboxResourcesPatch, SandboxSpecPatch};
 
     #[test]
+    fn backend_policy_replaces_inherits_and_clears_without_rerouting() {
+        use serde_json::json;
+
+        for (user, managed, local, cloud) in [
+            (json!({}), json!({}), true, true),
+            (json!({"allowed_backends": null}), json!({}), true, true),
+            (
+                json!({"allowed_backends": ["local"]}),
+                json!({}),
+                true,
+                false,
+            ),
+            (
+                json!({"allowed_backends": ["cloud"]}),
+                json!({}),
+                false,
+                true,
+            ),
+            (
+                json!({"allowed_backends": ["local", "cloud"]}),
+                json!({}),
+                true,
+                true,
+            ),
+            (
+                json!({"allowed_backends": ["local"]}),
+                json!({"allowed_backends": ["cloud"]}),
+                false,
+                true,
+            ),
+            (
+                json!({"allowed_backends": []}),
+                json!({"allowed_backends": null}),
+                true,
+                true,
+            ),
+            (json!({"allowed_backends": []}), json!({}), false, false),
+            (json!({}), json!({"allowed_backends": []}), false, false),
+        ] {
+            let config = BackendConfig::new(
+                serde_json::from_value(user.clone()).unwrap(),
+                serde_json::from_value(managed.clone()).unwrap(),
+            );
+            for (kind, allowed) in [(BackendKind::Local, local), (BackendKind::Cloud, cloud)] {
+                assert_eq!(
+                    config.require_backend(kind, None).is_ok(),
+                    allowed,
+                    "user={user}, managed={managed}, kind={kind:?}"
+                );
+            }
+        }
+        assert!(
+            serde_json::from_value::<GlobalConfigPatch>(json!({"allowed_backends":["typo"]}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn policy_errors_explain_source_selection_and_recovery() {
+        for managed in [false, true] {
+            let patch = GlobalConfigPatch::new().allowed_backends(vec![BackendKind::Cloud]);
+            let config = if managed {
+                BackendConfig::new(Default::default(), patch)
+            } else {
+                BackendConfig::new(patch, Default::default())
+            };
+            let error = config
+                .require_backend(BackendKind::Local, Some(BackendSelectionSource::MsbBackend))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("local backend selected by MSB_BACKEND is disabled"));
+            assert!(error.contains("allowed backends: cloud"));
+            if managed {
+                assert!(error.contains("managed config"));
+                assert!(error.contains("contact your administrator"));
+            } else {
+                assert!(error.contains("user config"));
+                assert!(error.contains("edit allowed_backends"));
+            }
+        }
+    }
+
+    #[test]
     fn file_path_layers_keep_their_bases_and_managed_precedence() {
         let dir = tempfile::tempdir().unwrap();
         let user_dir = dir.path().join("user");
@@ -317,60 +549,6 @@ mod tests {
             ))
         );
         assert_eq!(std::fs::read(&user).unwrap(), before);
-    }
-
-    #[test]
-    fn exec_buffer_validates_after_managed_overrides() {
-        for (user, managed, expected) in [
-            ("{}", "{}", serde_json::Value::Null),
-            (
-                r#"{"exec":{"buffer_bytes":null}}"#,
-                "{}",
-                serde_json::Value::Null,
-            ),
-            (
-                r#"{"exec":{"buffer_bytes":65536}}"#,
-                "{}",
-                serde_json::json!(65536),
-            ),
-            (
-                r#"{"exec":{"buffer_bytes":0}}"#,
-                r#"{"exec":{"buffer_bytes":1048576}}"#,
-                serde_json::json!(1048576),
-            ),
-            (
-                r#"{"exec":{"buffer_bytes":1048576}}"#,
-                r#"{"exec":{"buffer_bytes":null}}"#,
-                serde_json::Value::Null,
-            ),
-            (
-                r#"{"exec":{"buffer_bytes":null}}"#,
-                r#"{"exec":{"buffer_bytes":65536}}"#,
-                serde_json::json!(65536),
-            ),
-        ] {
-            let layers = BackendConfig::new(
-                serde_json::from_str(user).unwrap(),
-                serde_json::from_str(managed).unwrap(),
-            )
-            .prepare_for_local_backend(Default::default())
-            .unwrap();
-            assert_eq!(
-                serde_json::to_value(&layers.resolved_config().exec).unwrap()["buffer_bytes"],
-                expected,
-                "user={user}, managed={managed}",
-            );
-        }
-
-        for limit in [0, 65535] {
-            let user =
-                serde_json::from_value(serde_json::json!({"exec":{"buffer_bytes":limit}})).unwrap();
-            assert!(
-                BackendConfig::new(user, Default::default())
-                    .prepare_for_local_backend(Default::default())
-                    .is_err()
-            );
-        }
     }
 
     #[test]
@@ -595,6 +773,80 @@ mod tests {
             Some(std::path::absolute("environment-agentd").unwrap().as_path())
         );
         assert_eq!(enforced.resolved_config().paths.agentd, None);
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn captured_operation_options_keep_managed_paths_and_source_provenance() {
+        let _guard = crate::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user/config.json");
+        let admin = dir.path().join("admin/managed.json");
+        std::fs::create_dir(user.parent().unwrap()).unwrap();
+        std::fs::create_dir(admin.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user,
+            r#"{"home":"./state","paths":{"snapshots":"./snapshots"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &admin,
+            r#"{"overrides":{"paths":{"logs":"./logs"},"allowed_backends":["local"]}}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Managed config validation checks its directories as well as the file; keep
+            // this precedence fixture valid even when the host has a group-writable umask.
+            for directory in [dir.path(), user.parent().unwrap(), admin.parent().unwrap()] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            std::fs::set_permissions(&admin, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let captured = BackendConfig::load_from(&user, Some(&admin))
+            .unwrap()
+            .prepare_for_local_backend(GlobalConfigPatch::new())
+            .unwrap();
+        let options = serde_json::from_value(serde_json::json!({
+            "home": null,
+            "paths": {"cache":"./operation-cache", "logs":"./ignored-operation-logs"},
+            "allowed_backends": ["cloud"]
+        }))
+        .unwrap();
+        let patched = captured.clone().apply_operation_patch(options).unwrap();
+        assert_eq!(
+            patched.resolved_config().home(),
+            user.parent().unwrap().join("state")
+        );
+        assert_eq!(
+            patched.resolved_config().snapshots_dir(),
+            user.parent().unwrap().join("snapshots")
+        );
+        assert_eq!(
+            patched.resolved_config().paths.cache,
+            Some(std::path::absolute("operation-cache").unwrap())
+        );
+        assert_eq!(
+            patched.resolved_config().paths.logs,
+            Some(admin.parent().unwrap().join("logs"))
+        );
+        patched.require_backend(BackendKind::Local, None).unwrap();
+        let error = patched
+            .require_backend(BackendKind::Cloud, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("managed config"));
+        assert!(error.contains(admin.to_str().unwrap()));
+        assert!(captured.resolved_config().paths.cache.is_none());
+        let overridden = captured
+            .apply_operation_patch(GlobalConfigPatch::new().home("./operation-home".into()))
+            .unwrap();
+        assert_eq!(
+            overridden.resolved_config().home(),
+            std::path::absolute("operation-home").unwrap()
+        );
     }
 
     #[test]

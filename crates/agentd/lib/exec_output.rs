@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use microsandbox_protocol::exec::{EXEC_OUTPUT_EVENT_OVERHEAD, MIN_EXEC_OUTPUT_WINDOW};
+use microsandbox_protocol::exec::EXEC_OUTPUT_EVENT_OVERHEAD;
 use tokio::sync::Semaphore;
 
 use crate::{AgentdError, AgentdResult};
@@ -15,15 +15,21 @@ use crate::{AgentdError, AgentdResult};
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
+/// Shared output allowance and cumulative acknowledgement state for one execution.
 pub(crate) struct OutputWindow {
+    /// Remaining output allowance in payload bytes plus per-chunk overhead.
     available: Semaphore,
+    /// Whether a restored session has lost its reader and may produce output without waiting.
     detached: AtomicBool,
+    /// Published and acknowledged charges, protected together against invalid acknowledgements.
     offsets: Mutex<Offsets>,
 }
 
 #[derive(Debug, Default)]
 struct Offsets {
+    /// Cumulative output charge reserved before publishing chunks.
     sent: u64,
+    /// Cumulative output charge acknowledged by the reader.
     consumed: u64,
 }
 
@@ -35,9 +41,9 @@ impl OutputWindow {
     pub(crate) fn new(bytes: Option<u32>) -> AgentdResult<Option<Arc<Self>>> {
         bytes
             .map(|bytes| {
-                if bytes < MIN_EXEC_OUTPUT_WINDOW {
+                if bytes <= EXEC_OUTPUT_EVENT_OVERHEAD {
                     return Err(AgentdError::ExecSession(format!(
-                        "exec output window must be at least {MIN_EXEC_OUTPUT_WINDOW} bytes"
+                        "exec output window must be greater than {EXEC_OUTPUT_EVENT_OVERHEAD} bytes"
                     )));
                 }
                 Ok(Arc::new(Self {
@@ -72,13 +78,18 @@ impl OutputWindow {
         let mut offsets = self.offsets.lock().unwrap();
         if consumed < offsets.consumed || consumed > offsets.sent {
             return Err(AgentdError::ExecSession(
-                "invalid exec output credit offset".into(),
+                "invalid exec output acknowledgement offset".into(),
             ));
         }
         let returned = consumed - offsets.consumed;
         offsets.consumed = consumed;
         self.available.add_permits(returned as usize);
         Ok(())
+    }
+
+    pub(crate) fn is_drained(&self) -> bool {
+        let offsets = self.offsets.lock().unwrap();
+        offsets.sent == offsets.consumed
     }
 
     /// Restored inherited sessions no longer have the original SDK reader.
@@ -99,15 +110,14 @@ impl OutputWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const TEST_OUTPUT_LIMIT: u32 = 64 * 1024;
 
     #[tokio::test]
-    async fn credit_is_bounded_and_cannot_be_replayed_or_forged() {
-        let window = OutputWindow::new(Some(MIN_EXEC_OUTPUT_WINDOW))
-            .unwrap()
-            .unwrap();
+    async fn acknowledgements_cannot_expand_capacity_or_be_replayed_or_forged() {
+        let window = OutputWindow::new(Some(TEST_OUTPUT_LIMIT)).unwrap().unwrap();
         assert!(
             window
-                .acquire(MIN_EXEC_OUTPUT_WINDOW as usize - EXEC_OUTPUT_EVENT_OVERHEAD as usize)
+                .acquire(TEST_OUTPUT_LIMIT as usize - EXEC_OUTPUT_EVENT_OVERHEAD as usize)
                 .await
         );
         let pending = window.acquire(1);
@@ -119,7 +129,7 @@ mod tests {
         );
         assert!(
             window
-                .acknowledge(u64::from(MIN_EXEC_OUTPUT_WINDOW) + 1)
+                .acknowledge(u64::from(TEST_OUTPUT_LIMIT) + 1)
                 .is_err()
         );
         assert_eq!(window.available.available_permits(), 0);

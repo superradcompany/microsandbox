@@ -25,7 +25,7 @@ jobs:
         with:
           toolchain: nightly
 
-      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
         with:
           tool: cargo-fuzz
 
@@ -43,11 +43,13 @@ jobs:
 
       - name: Fuzz unpack_archive (10 min budget)
         working-directory: sdk/rust
-        run: cargo +nightly fuzz run unpack_archive fuzz/corpus/unpack_archive fuzz/seeds/unpack_archive -- -max_total_time=600 -timeout=30
+        run: |
+          mkdir -p fuzz/corpus/unpack_archive
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu unpack_archive fuzz/corpus/unpack_archive fuzz/seeds/unpack_archive -- -max_total_time=600 -timeout=30
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-artifacts
           path: sdk/rust/fuzz/artifacts/

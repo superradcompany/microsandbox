@@ -33,7 +33,9 @@ Absolute host path to the volume's directory. By default volumes live under `~/.
 static getDefault(): Promise<VolumeHandle>
 ```
 
-Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
+Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`.
+
+The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
 
 <Accordion title="Example">
 

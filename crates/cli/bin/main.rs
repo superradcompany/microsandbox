@@ -10,7 +10,7 @@ use microsandbox_cli::{
     commands::{
         completion, context, image, install, pull, registry,
         sandbox::{self, SandboxCommands},
-        self_cmd,
+        self_cmd, service,
         snapshot::{self, SnapshotCommands},
         storage, uninstall, volume,
     },
@@ -38,6 +38,10 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         heading: "Storage",
         commands: &["df", "prune", "volume", "snapshot"],
+    },
+    CommandGroup {
+        heading: "Services",
+        commands: &["service"],
     },
     CommandGroup {
         heading: "Installation",
@@ -99,7 +103,7 @@ enum Commands {
     #[command(name = "__schema-baseline", hide = true)]
     SchemaBaseline(self_cmd::SchemaBaselineArgs),
 
-    /// Show the active backend and its selection source.
+    /// Inspect backend selection and manage saved profiles.
     #[command(visible_alias = "ctx")]
     Context(context::ContextArgs),
 
@@ -161,13 +165,16 @@ enum Commands {
     #[command(visible_alias = "snap")]
     Snapshot(snapshot::SnapshotArgs),
 
+    /// Manage public URLs for sandbox ports.
+    Service(service::ServiceArgs),
+
     /// Install a sandbox as a system command.
     Install(install::InstallArgs),
 
     /// Remove an installed sandbox command.
     Uninstall(uninstall::UninstallArgs),
 
-    /// Check local runtime and host virtualization prerequisites.
+    /// Check host setup, or inspect a named sandbox.
     Doctor(self_cmd::DoctorArgs),
 
     /// Update msb and libkrunfw to the latest release (alias for `self update`).
@@ -298,6 +305,8 @@ fn main() {
             println!(
                 "{}",
                 serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
+                    storage_reader: microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
+                    protected_guest_state: true,
                     protocols: vec![2, 1],
                     required_restore_backing: true,
                     tcp_accept_queue_size: true,
@@ -305,8 +314,13 @@ fn main() {
                     http_deny_message: cfg!(feature = "net"),
                     http_deny_json: cfg!(feature = "net"),
                     http_connect_proxy: cfg!(feature = "net"),
+                    http_connect_proxy_auth: cfg!(feature = "net"),
                     guest_clock: true,
                     fs_state_limit: true,
+                    nested_virt: Some(
+                        microsandbox_runtime::nested_virt_supported().unwrap_or(false)
+                    ),
+                    exec_limits: true,
                 })
                 .expect("serialize capabilities")
             );
@@ -328,7 +342,19 @@ fn main() {
             // runtime.log via setup_log_capture(), so disable ANSI —
             // color escapes have nowhere useful to render.
             log_args::init_tracing(sandbox_level, false);
-            if let Err(error) = microsandbox_filesystem::agentd::initialize_agentd_payload() {
+            if args.require_storage_reader {
+                // The capability belongs to the compiled host/guest pair. Never consult a
+                // configured agent override for a VM receiving private recovery captures.
+                if !microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER
+                    || microsandbox_filesystem::agentd::initialize_embedded_reader().is_err()
+                {
+                    eprintln!(
+                        "upgrade required: install a runtime with the embedded storage recovery reader"
+                    );
+                    std::process::exit(2);
+                }
+            } else if let Err(error) = microsandbox_filesystem::agentd::initialize_agentd_payload()
+            {
                 eprintln!("msb: failed to select agentd payload: {error}");
                 std::process::exit(1);
             }
@@ -503,6 +529,9 @@ fn format_command_help_line(
 /// `MicrosandboxError::ExecFailed`. Returns the appropriate exit
 /// code so callers don't conflate "rendered an error" with "1".
 fn render_anyhow_error(err: &anyhow::Error) -> i32 {
+    if let Some(diagnostic) = err.downcast_ref::<self_cmd::StorageDoctorExit>() {
+        return diagnostic.code;
+    }
     if err.chain().any(|cause| {
         cause
             .downcast_ref::<microsandbox_cli::ui::AlreadyRenderedError>()
@@ -668,7 +697,7 @@ fn run_async_command_anyhow(
         // runtime processes (`msb machine`) now, not the CLI; see
         // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
         // reaper here.
-        if !is_backend_independent_maintenance_command(&command) {
+        if !is_backend_independent_command(&command) {
             // Resolve once, fallibly, before backend-dependent dispatch. Unlike
             // the SDK's ambient convenience fallback, the CLI must not run a
             // sandbox operation locally after an invalid explicit cloud selection.
@@ -724,9 +753,10 @@ fn run_async_command_anyhow(
             Commands::Prune(args) => storage::run_prune(args).await,
             Commands::Volume(args) => volume::run(args).await,
             Commands::Snapshot(args) => snapshot::run(args).await,
+            Commands::Service(args) => service::run(args).await,
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
-            Commands::Doctor(args) => self_cmd::run_doctor(args),
+            Commands::Doctor(args) => self_cmd::run_doctor_command(args).await,
             Commands::Update(args) => self_cmd::run_update(args).await,
             Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
@@ -763,12 +793,13 @@ fn requires_current_catalog(command: &Commands) -> bool {
     }
 }
 
-/// Return whether a command manages the CLI installation rather than a backend.
+/// Return whether a command can run without constructing the selected backend.
 ///
 /// These commands are deliberately available even when backend configuration is
 /// invalid so users can diagnose, repair, downgrade, or uninstall that setup.
-fn is_backend_independent_maintenance_command(command: &Commands) -> bool {
+fn is_backend_independent_command(command: &Commands) -> bool {
     match command {
+        Commands::Context(args) => args.command.is_some(),
         Commands::SchemaBaseline(_)
         | Commands::Doctor(_)
         | Commands::Update(_)
@@ -786,6 +817,21 @@ mod command_tests {
     use super::*;
 
     #[test]
+    fn storage_reader_capability_matches_the_actual_embedded_protocol() {
+        let marker = microsandbox_protocol::storage_preview::HANDSHAKE.as_bytes();
+        let has_reader =
+            microsandbox_filesystem::agentd::embedded_agentd_payload().is_some_and(|agent| {
+                agent
+                    .as_bytes()
+                    .windows(marker.len())
+                    .any(|part| part == marker)
+            });
+        assert_eq!(
+            microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
+            has_reader
+        );
+    }
+    #[test]
     fn catalog_upgrade_leaves_stop_and_diagnostics_available() {
         for (arguments, expected) in [
             (vec!["msb", "sandbox", "create", "alpine"], true),
@@ -798,10 +844,40 @@ mod command_tests {
                 false,
             ),
             (vec!["msb", "doctor"], false),
+            (vec!["msb", "doctor", "app"], false),
+            (vec!["msb", "doctor", "--sandbox", "app"], false),
+            (vec!["msb", "self", "repair", "app"], false),
+            (vec!["msb", "self", "repair", "--sandbox", "app"], false),
             (vec!["msb", "context"], false),
         ] {
             let cli = Cli::try_parse_from(arguments).unwrap();
             assert_eq!(requires_current_catalog(&cli.command), expected);
+        }
+    }
+
+    #[test]
+    fn sandbox_repair_and_both_doctor_target_spellings_stay_backend_independent() {
+        for args in [
+            vec!["msb", "self", "repair"],
+            vec!["msb", "self", "repair", "app"],
+            vec!["msb", "self", "repair", "--sandbox", "app"],
+            vec!["msb", "doctor", "app"],
+            vec!["msb", "doctor", "--sandbox", "app"],
+            vec!["msb", "self", "doctor", "app"],
+            vec!["msb", "self", "doctor", "--sandbox", "app"],
+            vec!["msb", "doctor", "--all"],
+        ] {
+            let command = Cli::try_parse_from(args).unwrap().command;
+            assert!(is_backend_independent_command(&command));
+            assert!(!requires_current_catalog(&command));
+        }
+        for args in [
+            vec!["msb", "repair", "app"],
+            vec!["msb", "recover-storage", "app"],
+            vec!["msb", "sandbox", "recover-storage", "app"],
+            vec!["msb", "doctor", "--storage", "--sandbox", "app"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
         }
     }
 
@@ -833,7 +909,30 @@ mod command_tests {
     }
 
     #[test]
+    fn unconfirmed_modification_prints_display_and_exits_one() {
+        let error: anyhow::Error = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+            cause: "the running sandbox does not hold the secret".into(),
+        }
+        .into();
+
+        assert_eq!(render_anyhow_error(&error), 1);
+        assert_eq!(
+            error.to_string(),
+            "the change did not complete as asked: the running sandbox does not hold the secret"
+        );
+    }
+
+    #[test]
     fn maintenance_commands_do_not_require_backend_resolution() {
+        for arguments in [
+            vec!["msb", "context", "list"],
+            vec!["msb", "context", "use", "work"],
+            vec!["msb", "context", "reset"],
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(is_backend_independent_command(&cli.command));
+            assert!(!requires_current_catalog(&cli.command));
+        }
         let maintenance_commands = [
             Cli::try_parse_from(["msb", "doctor"]).unwrap().command,
             Cli::try_parse_from(["msb", "update"]).unwrap().command,
@@ -849,28 +948,26 @@ mod command_tests {
         ];
 
         for command in &maintenance_commands {
-            assert!(is_backend_independent_maintenance_command(command));
+            assert!(is_backend_independent_command(command));
         }
 
         let context = Cli::try_parse_from(["msb", "context"]).unwrap();
         let create = Cli::try_parse_from(["msb", "create", "alpine:3.19"]).unwrap();
-        assert!(!is_backend_independent_maintenance_command(
-            &context.command
-        ));
-        assert!(!is_backend_independent_maintenance_command(&create.command));
+        assert!(!is_backend_independent_command(&context.command));
+        assert!(!is_backend_independent_command(&create.command));
     }
 
     #[test]
     fn storage_commands_parse_and_use_backend_resolution() {
         let df = Cli::try_parse_from(["msb", "df", "--verbose"]).unwrap();
         assert!(matches!(df.command, Commands::Df(_)));
-        assert!(!is_backend_independent_maintenance_command(&df.command));
+        assert!(!is_backend_independent_command(&df.command));
         assert!(!requires_current_catalog(&df.command));
         assert!(Cli::try_parse_from(["msb", "df", "-q"]).is_err());
         let prune =
             Cli::try_parse_from(["msb", "prune", "--dry-run", "--older-than", "2h"]).unwrap();
         assert!(matches!(prune.command, Commands::Prune(_)));
-        assert!(!is_backend_independent_maintenance_command(&prune.command));
+        assert!(!is_backend_independent_command(&prune.command));
         assert!(!requires_current_catalog(&prune.command));
         let storage = TOP_LEVEL_COMMAND_GROUPS
             .iter()
@@ -878,6 +975,42 @@ mod command_tests {
             .unwrap();
         assert!(storage.commands.contains(&"df"));
         assert!(storage.commands.contains(&"prune"));
+    }
+
+    #[test]
+    fn service_commands_use_the_default_backend_without_the_catalog_gate() {
+        for arguments in [
+            vec![
+                "msb",
+                "service",
+                "create",
+                "my-app",
+                "--target",
+                "web-1:8080",
+            ],
+            vec![
+                "msb",
+                "service",
+                "update",
+                "my-app",
+                "--target",
+                "web-2:8080",
+            ],
+            vec!["msb", "service", "enable", "my-app"],
+            vec!["msb", "service", "disable", "my-app"],
+            vec!["msb", "service", "get", "my-app"],
+            vec!["msb", "service", "ls"],
+            vec!["msb", "service", "remove", "my-app"],
+        ] {
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            assert!(matches!(cli.command, Commands::Service(_)));
+            assert!(!is_backend_independent_command(&cli.command));
+            assert!(!requires_current_catalog(&cli.command));
+        }
+
+        let help = render_grouped_commands(&Cli::command(), &HelpStyles::detect());
+        let services = help.split("Services:").nth(1).unwrap();
+        assert!(services.lines().nth(1).unwrap().contains("service"));
     }
 
     #[test]
@@ -939,7 +1072,7 @@ mod command_tests {
             );
             let command = cli.command.into_canonical();
             assert!(requires_current_catalog(&command));
-            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(!is_backend_independent_command(&command));
             let Commands::Sandbox(sandbox::SandboxArgs {
                 command: sandbox::SandboxCommands::Restore(args),
             }) = command
@@ -1214,7 +1347,7 @@ mod sandbox_command_tests {
                 };
                 assert_eq!(args.name, "worker");
                 assert_eq!(args.timeout.as_deref(), Some("30s"));
-                assert_eq!(args.format.as_deref(), Some("json"));
+                assert_eq!(args.format, Some(microsandbox_cli::ui::OutputFormat::Json));
             }
         }
     }
@@ -1350,7 +1483,7 @@ mod sandbox_command_tests {
             assert!(cli.logs.debug);
             let command = cli.command.into_canonical();
             assert!(command.is_resident_control());
-            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(!is_backend_independent_command(&command));
         }
         for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
             for verb in ["pause", "resume"] {
@@ -1500,7 +1633,7 @@ mod sandbox_command_tests {
             assert!(cli.logs.debug);
             let command = cli.command.into_canonical();
             assert!(!command.is_resident_control());
-            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(!is_backend_independent_command(&command));
             assert!(matches!(
                 command,
                 Commands::Sandbox(sandbox::SandboxArgs {

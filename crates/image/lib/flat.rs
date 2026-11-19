@@ -6,7 +6,6 @@ use std::path::Path;
 
 use sha2::{Digest as Sha2Digest, Sha256};
 
-use crate::cache::lock::{flock_unlock, lock_exclusive, open_lock_file};
 use crate::erofs::{ErofsEntryKind, ErofsReader};
 use crate::ext4::{EXT4_ROOTFS_MATERIALIZER_ABI, Ext4RootfsOptions, materialize_ext4_rootfs};
 use crate::tree::{
@@ -25,27 +24,15 @@ const FLAT_REF_SCHEMA: u32 = 1;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Materialize and publish a flat rootfs from the image's cached EROFS layers.
-pub(crate) fn materialize_flat_rootfs(
+/// Materialize a flat rootfs while the caller holds its derivation lock.
+pub(crate) fn materialize_flat_rootfs_locked(
     cache: &GlobalCache,
     manifest_digest: &Digest,
     layer_diff_ids: &[Digest],
-    platform: &Platform,
     force: bool,
+    derivation_digest: Digest,
+    derivation_bytes: [u8; 32],
 ) -> ImageResult<FlatRootfsRef> {
-    let (derivation_digest, derivation_bytes) =
-        flat_derivation_digest(manifest_digest, layer_diff_ids, platform);
-    if !force
-        && let Some(reference) = read_matching_flat_ref(cache, manifest_digest, &derivation_digest)?
-    {
-        return Ok(reference);
-    }
-
-    let lock_file = open_lock_file(&cache.flat_lock_path(&derivation_digest))?;
-    lock_exclusive(&lock_file)?;
-    let _lock_guard = scopeguard::guard(lock_file, |file| {
-        let _ = flock_unlock(&file);
-    });
     if !force
         && let Some(reference) = read_matching_flat_ref(cache, manifest_digest, &derivation_digest)?
     {
@@ -150,7 +137,7 @@ fn read_matching_flat_ref(
     }))
 }
 
-fn flat_derivation_digest(
+pub(crate) fn flat_derivation_digest(
     manifest_digest: &Digest,
     layer_diff_ids: &[Digest],
     platform: &Platform,
@@ -299,12 +286,16 @@ mod tests {
         .unwrap();
         crate::erofs::write_erofs(&tree, &cache.layer_erofs_path(&diff_id)).unwrap();
 
-        let reference = materialize_flat_rootfs(
+        let platform = Platform::host_linux();
+        let (derivation_digest, derivation_bytes) =
+            flat_derivation_digest(&manifest, std::slice::from_ref(&diff_id), &platform);
+        let reference = materialize_flat_rootfs_locked(
             &cache,
             &manifest,
             &[diff_id],
-            &Platform::host_linux(),
             false,
+            derivation_digest,
+            derivation_bytes,
         )
         .unwrap();
         let artifact_digest: Digest = reference.artifact_digest.parse().unwrap();

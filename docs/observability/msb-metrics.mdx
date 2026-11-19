@@ -65,27 +65,24 @@ The collector reads the shared-memory registry directly:
 
 <Steps>
   <Step title="Start the collector">
-    <Tabs>
-      <Tab title="gRPC">
-        Use port `4317` for most local collectors and sidecars.
+    <CodeGroup>
+    ```sh gRPC
+    # Port 4317 is typical for local collectors and sidecars.
+    msb-metrics otel --endpoint=http://localhost:4317
+    ```
 
-        ```sh
-        msb-metrics otel --endpoint=http://localhost:4317
-        ```
-      </Tab>
-      <Tab title="HTTP">
-        Use a complete metrics endpoint, commonly on port `4318`.
-
-        ```sh
-        msb-metrics otel --endpoint=https://example.com/otlp/v1/metrics --protocol=http
-        ```
-      </Tab>
-    </Tabs>
+    ```sh HTTP
+    # Use a complete metrics endpoint, commonly on port 4318.
+    msb-metrics otel --endpoint=https://example.com/otlp/v1/metrics --protocol=http
+    ```
+    </CodeGroup>
   </Step>
   <Step title="Run a sandbox">
-    ```sh
+    <CodeGroup>
+    ```sh Shell
     msb run alpine
     ```
+    </CodeGroup>
   </Step>
   <Step title="Check your backend">
     Metrics appear after the next collection and export intervals.
@@ -133,6 +130,9 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | `disk.bytes_written` | `By` | Cumulative bytes written. |
 | `network.bytes_received` | `By` | Cumulative bytes from runtime to guest. |
 | `network.bytes_sent` | `By` | Cumulative bytes from guest to runtime. |
+| `network.inbound_tcp.rejected` | `{connection}` | Published TCP connections rejected when the admission queue is full or the wait expires. |
+| `network.outbound_tcp.rejected` | `{connection}` | Outbound TCP connection attempts rejected at the active connection limit. |
+| `network.outbound_udp.evicted` | `{session}` | Outbound UDP sessions evicted to enforce the session limit. |
 | `upper.used` | `By` | Used space on the OCI upper filesystem when reporting is available. |
 | `upper.free` | `By` | Available space on the OCI upper filesystem when reporting is available. |
 | `upper.host_allocated` | `By` | Host-allocated space for the writable upper image when observable. |
@@ -141,6 +141,10 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 During a resize, `memory.limit` follows memory as the guest adds or releases it. Usage can briefly be inaccurate or unavailable until guest statistics catch up. OTLP omits unavailable usage; stdout shows `N/A`. The limit is still reported.
 
 Sandboxes started by older runtimes report their boot allocation until restarted. Disk and network totals are cumulative gauges; use `rate()` in PromQL for throughput.
+
+TCP rejections have `reason="connection_limit"`; UDP evictions have
+`reason="session_limit"`. Use `increase()` to see recent counts.
+Older runtimes omit these metrics.
 
 ### Attributes
 
@@ -174,7 +178,8 @@ Prometheus replaces dots in OpenTelemetry names with underscores. For example,
 `user.id` becomes `user_id`, and `microsandbox.cpu.utilization` becomes
 `microsandbox_cpu_utilization`.
 
-```promql
+<CodeGroup>
+```promql promql
 # CPU by user
 sum by (user_id) (microsandbox_cpu_utilization)
 
@@ -184,6 +189,7 @@ microsandbox_cpu_utilization{user_id="alice"}
 # CPU by user in one tenant
 sum by (user_id) (microsandbox_cpu_utilization{tenant="acme"})
 ```
+</CodeGroup>
 
 ### Restarts and stops
 
@@ -213,13 +219,16 @@ All use the OTel scope `microsandbox-metrics-collector`.
 
 **Exports are flowing**
 
-```promql
+<CodeGroup>
+```promql promql
 rate(microsandbox_collector_exports_success_total[1m])
 ```
+</CodeGroup>
 
 **Export failure ratio**
 
-```promql
+<CodeGroup>
+```promql promql
 rate(microsandbox_collector_exports_failure_total[5m])
   /
 clamp_min(
@@ -228,12 +237,15 @@ clamp_min(
   1
 )
 ```
+</CodeGroup>
 
 **No successful export for five minutes**
 
-```promql
+<CodeGroup>
+```promql promql
 time() - microsandbox_collector_last_success_timestamp_seconds > 300
 ```
+</CodeGroup>
 
 ### Outages and retries
 

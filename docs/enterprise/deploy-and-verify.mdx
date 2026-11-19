@@ -82,10 +82,12 @@ The check below uses the [sample policy](/enterprise/managed-configuration#defin
 1. Sign in as an employee and open a fresh terminal. Confirm `msb context` selects a local backend.
 2. Create a sandbox with values that conflict with the sample policy:
 
-   ```bash
+   <CodeGroup>
+   ```bash Shell
    msb create alpine --name managed-check --cpus 1 --memory 512M
    msb inspect managed-check --format json
    ```
+   </CodeGroup>
 
 3. Confirm `config.resources.cpus` is `2` and `config.resources.memory_mib` is `1024`. Repeat with your employees' SDKs.
 4. Remove the test sandbox with `msb rm --force managed-check`.

@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use microsandbox::volume::{Volume, VolumeKind};
 use microsandbox_utils::format::format_bytes;
 
-use crate::ui;
+use crate::ui::{self, OutputFormat};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -63,8 +63,8 @@ pub struct VolumeCreateArgs {
 #[derive(Debug, Args)]
 pub struct VolumeListArgs {
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 
     /// Show only volume names.
     #[arg(short, long)]
@@ -141,7 +141,7 @@ async fn create(args: VolumeCreateArgs) -> anyhow::Result<()> {
 async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
     let volumes = Volume::list().await?;
 
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         let entries: Vec<serde_json::Value> = volumes
             .iter()
             .map(|v| {

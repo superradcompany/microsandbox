@@ -47,9 +47,11 @@ msb run --name playwright-shot --replace `
 
 Copy the artifact out of the stopped sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp playwright-shot:/root/example.png ./example.png
 ```
+</CodeGroup>
 
 The smoke test used for this guide produced a valid 15,909-byte PNG. Rendering can vary slightly between releases and hosts, so verify the file rather than asserting an exact byte count.
 
@@ -97,9 +99,11 @@ curl.exe http://127.0.0.1:3000/
 
 The server returns `Running` and logs its WebSocket endpoint:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb logs playwright-server
 ```
+</CodeGroup>
 
 Connect a matching Playwright client to `ws://127.0.0.1:3000/`. Keep the client and server versions aligned.
 
@@ -113,9 +117,11 @@ Connect a matching Playwright client to `ws://127.0.0.1:3000/`. Keep the client 
 
 Remove the sandboxes:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f playwright-shot playwright-server
 ```
+</CodeGroup>
 
 Delete the copied screenshot only if you no longer need it:
 

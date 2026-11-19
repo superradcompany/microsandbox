@@ -116,7 +116,15 @@ Limit active inbound TCP connections across published ports; `0` means unlimited
 
 `int \| None` · Default: `None` (1,024)
 
-How many not-yet-accepted connections each published TCP port's host listener queues, from 1 to 2,147,483,647. Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at its own `somaxconn` (4,096 by default on Linux, 128 on macOS). `Sandbox.restore(..., tcp_accept_queue_size=n)` applies it to the listeners a restored child publishes.
+How many not-yet-accepted connections each published TCP port's host listener queues, from 1 to 2,147,483,647.
+
+<Accordion title="Queue behavior and host limits">
+
+Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at its own `somaxconn` (4,096 by default on Linux, 128 on macOS).
+
+</Accordion>
+
+`Sandbox.restore(..., tcp_accept_queue_size=n)` applies it to the listeners a restored child publishes.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">nat64_prefixes</span>
 

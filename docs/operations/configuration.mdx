@@ -34,9 +34,7 @@ same value, the later layer wins.
       </Step>
 
       <Step title="Sandbox configuration files">
-        Root files are passed with `--conf`. Scoped files are passed with
-        `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`,
-        `--secret-conf`, or `--script-conf`.
+        Start with `--file Sandboxfile`. To layer more settings on top, pass another root file with `--file` or its alias `--conf`, or use a scoped flag such as `--net-conf` or `--resource-conf`.
 
         These files are used by the CLI only and are never auto-discovered.
         Every file must be named explicitly. Multiple files are applied from
@@ -83,11 +81,7 @@ same value, the later layer wins.
     </Steps>
 
     <Note>
-      Sandbox YAML is a CLI configuration surface. SDKs do not load
-      `sandbox.yaml`, root configuration files, or scoped configuration files.
-      Rust applications can use
-      [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) for a typed
-      sparse-overlay model instead.
+      The CLI loads YAML from a `Sandboxfile` or scoped configuration files. SDKs accept configuration through their APIs. See the [Rust configuration reference](/sdk/rust/configuration#sandbox-configuration-patches) for typed sparse patches.
     </Note>
   </Tab>
 </Tabs>

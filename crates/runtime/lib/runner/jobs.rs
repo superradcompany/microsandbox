@@ -5,21 +5,30 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use microsandbox_agent_client::{AgentClient, ExecController, TypedMessage};
-use microsandbox_protocol::exec::{
-    ExecExited, ExecFailed, ExecRequest, ExecResize, ExecStarted, ExecStderr, ExecStdin,
-    ExecStdinError, ExecStdout,
+use microsandbox_agent_client::AgentProtocol;
+use microsandbox_agent_client::stream::StreamSender;
+use microsandbox_agent_client::{
+    AgentClient, ExecController, OutputAcknowledgements, TypedMessage,
 };
+use microsandbox_protocol::exec::{
+    ExecExited, ExecFailed, ExecOutputAck, ExecRequest, ExecResize, ExecStarted, ExecStderr,
+    ExecStdin, ExecStdinAck, ExecStdinError, ExecStdout,
+};
+use microsandbox_protocol::exec_control::ExecControlDiscovery;
 use microsandbox_protocol::jobs::*;
 use microsandbox_protocol::message::MessageType;
+use microsandbox_protocol::wire::Envelope;
+use microsandbox_types::ExecLimits;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 
 use crate::jobs::{JobStore, StoredJob};
+use crate::relay::RelayIdleState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -39,6 +48,7 @@ const MAX_ADMISSIONS: usize = 65_536;
 pub(crate) struct JobManager {
     boot_id: String,
     agent_path: PathBuf,
+    relay_idle: Arc<RelayIdleState>,
     runtime: tokio::runtime::Handle,
     store: JobStore,
     entries: Mutex<BTreeMap<JobId, Entry>>,
@@ -72,9 +82,65 @@ enum Control {
     Signal(i32),
 }
 
+/// Chunked stdin writer for one managed job, honoring the guest's advertised limits.
+struct JobStdinWriter {
+    sender: StreamSender<AgentProtocol>,
+    limits: Option<ExecLimits>,
+    consumed: tokio::sync::watch::Receiver<u64>,
+    sent: Arc<AtomicU64>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl JobStdinWriter {
+    async fn send(&mut self, data: &[u8]) -> Result<(), String> {
+        let chunk_size = self
+            .limits
+            .map_or(JOB_CHUNK_BYTES, |limits| limits.stdin_chunk_size as usize);
+
+        for chunk in data.chunks(chunk_size) {
+            let end = self
+                .sent
+                .load(Ordering::Acquire)
+                .checked_add(chunk.len() as u64)
+                .ok_or("job stdin counter overflow")?;
+
+            if let Some(limits) = self.limits {
+                self.consumed
+                    .wait_for(|consumed| {
+                        end.saturating_sub(*consumed) <= u64::from(limits.input_limit)
+                    })
+                    .await
+                    .map_err(|_| "job stdin closed")?;
+            }
+
+            self.sent.store(end, Ordering::Release);
+            self.sender
+                .send(TypedMessage::new(
+                    MessageType::ExecStdin,
+                    &ExecStdin {
+                        data: chunk.to_vec(),
+                    },
+                ))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    async fn send_eof(&self) -> Result<(), String> {
+        self.sender
+            .send(TypedMessage::new(
+                MessageType::ExecStdin,
+                &ExecStdin { data: Vec::new() },
+            ))
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 impl Entry {
     fn retain_output(&mut self, record: JobOutput) {
@@ -113,6 +179,7 @@ impl JobManager {
         sandbox_directory: &Path,
         agent_path: &Path,
         runtime: tokio::runtime::Handle,
+        relay_idle: Arc<RelayIdleState>,
     ) -> Result<Arc<Self>, String> {
         let store = JobStore::new(sandbox_directory);
         let recovered = (|| -> Result<BTreeMap<JobId, Entry>, String> {
@@ -155,6 +222,7 @@ impl JobManager {
             initialization_error,
             boot_id,
             agent_path: agent_path.into(),
+            relay_idle,
             runtime,
             store,
             admitted: Mutex::new(entries.keys().cloned().collect()),
@@ -168,6 +236,15 @@ impl JobManager {
             .unwrap()
             .values()
             .any(|entry| entry.record.info.state.is_active())
+    }
+
+    /// An unexpired caller lease on an active job keeps its sandbox resident.
+    pub(crate) fn has_active_attachments(&self) -> bool {
+        let now = Instant::now();
+        self.entries.lock().unwrap().values().any(|entry| {
+            entry.record.info.state.is_active()
+                && entry.attachments.values().any(|lease| lease.expires > now)
+        })
     }
 
     /// Caller holds lifecycle admission, so Start cannot race a capture or resident pause.
@@ -684,11 +761,43 @@ impl JobManager {
             let controller = ExecController::from_ready_body(client.ready().ready_bytes())
                 .map_err(|error| error.to_string())?
                 .ok_or("guest lacks managed execution control support")?;
+            let ready = Envelope::decode(client.ready().ready_bytes())
+                .map_err(|error| error.to_string())?;
+            let capability = ready
+                .payload::<ExecControlDiscovery>()
+                .map_err(|error| error.to_string())?
+                .exec_control
+                .ok_or("relay did not advertise managed execution control")?;
+            let _managed_connection = self
+                .relay_idle
+                .register_managed_connection(capability.connection);
             let stream = client
                 .stream(TypedMessage::new(MessageType::ExecRequest, &command))
                 .await
                 .map_err(|e| e.to_string())?;
+
             let (sender, mut output) = stream.into_parts();
+            let policy = client.ready().agent.exec_limits;
+            let ack_sender = sender.clone();
+            let (input_ack, input_consumed) = tokio::sync::watch::channel(0_u64);
+            let input_sent = Arc::new(AtomicU64::new(0));
+            let writer_sent = input_sent.clone();
+            let mut output_ack = ExecOutputAck::default();
+            let acknowledgements = OutputAcknowledgements::default();
+            let output_consumed = acknowledgements.consumed.clone();
+            let ack_worker = tokio::spawn(acknowledgements.run(move |acknowledgement| {
+                let sender = ack_sender.clone();
+                async move {
+                    sender
+                        .send(TypedMessage::new(
+                            MessageType::ExecOutputAck,
+                            &acknowledgement,
+                        ))
+                        .await
+                }
+            }));
+
+            let mut ack_worker = tokio_util::task::AbortOnDropHandle::new(ack_worker);
             let (started_tx, started_rx) = tokio::sync::watch::channel(false);
             let mut control_started = started_rx.clone();
             let control_sender = sender.clone();
@@ -735,69 +844,55 @@ impl JobManager {
                 }
             });
             let _control_guard = tokio_util::task::AbortOnDropHandle::new(control_worker);
+
             // Input and output are independent: a blocked guest stdin must never stop output drain.
+            let mut stdin = JobStdinWriter {
+                sender,
+                limits: policy,
+                consumed: input_consumed,
+                sent: writer_sent,
+            };
+
             let input_worker = tokio::spawn(async move {
                 let mut started_rx = started_rx;
                 if started_rx.wait_for(|started| *started).await.is_err() {
                     return;
                 }
-                if let Some(bytes) = initial_input.as_ref() {
-                    for data in bytes.chunks(JOB_CHUNK_BYTES) {
-                        if sender
-                            .send(TypedMessage::new(
-                                MessageType::ExecStdin,
-                                &ExecStdin {
-                                    data: data.to_vec(),
-                                },
-                            ))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                }
-                if (no_stdin || initial_input.is_some())
-                    && sender
-                        .send(TypedMessage::new(
-                            MessageType::ExecStdin,
-                            &ExecStdin { data: Vec::new() },
-                        ))
-                        .await
-                        .is_err()
+                if let Some(bytes) = initial_input.as_ref()
+                    && stdin.send(bytes).await.is_err()
                 {
+                    return;
+                }
+                if (no_stdin || initial_input.is_some()) && stdin.send_eof().await.is_err() {
                     return;
                 }
                 while let Some(item) = input.recv().await {
                     let result = match item {
-                        Input::Data(data) => {
-                            sender
-                                .send(TypedMessage::new(
-                                    MessageType::ExecStdin,
-                                    &ExecStdin { data },
-                                ))
-                                .await
-                        }
-                        Input::Eof => {
-                            sender
-                                .send(TypedMessage::new(
-                                    MessageType::ExecStdin,
-                                    &ExecStdin { data: Vec::new() },
-                                ))
-                                .await
-                        }
+                        Input::Data(data) => stdin.send(&data).await,
+                        Input::Eof => stdin.send_eof().await,
                     };
                     if result.is_err() {
                         break;
                     }
                 }
             });
+
             // Dropping this guard cancels the input sender on every exit/error path.
             let _input_guard = tokio_util::task::AbortOnDropHandle::new(input_worker);
             let mut started_tx = Some(started_tx);
             let mut timeout_task = None;
             let mut stdin_failure_recorded = false;
-            while let Some(message) = output.recv().await.map_err(|e| e.to_string())? {
+
+            loop {
+                let message = tokio::select! {
+                    result = &mut ack_worker => {
+                        return Err(format!("job output acknowledgement: {result:?}"));
+                    }
+                    message = output.recv() => match message.map_err(|e| e.to_string())? {
+                        Some(message) => message,
+                        None => break,
+                    },
+                };
                 let mut captured = None;
                 match MessageType::from_wire_str(&message.t) {
                     Some(MessageType::ExecStarted) => {
@@ -838,12 +933,29 @@ impl JobManager {
                     }
                     Some(MessageType::ExecStdout) => {
                         let payload = message.payload::<ExecStdout>().map_err(|e| e.to_string())?;
-                        captured =
-                            Some((if command.tty { "output" } else { "stdout" }, payload.data));
+                        captured = Some((
+                            if command.tty {
+                                JobOutputSource::Output
+                            } else {
+                                JobOutputSource::Stdout
+                            },
+                            payload.data,
+                        ));
                     }
                     Some(MessageType::ExecStderr) => {
                         let payload = message.payload::<ExecStderr>().map_err(|e| e.to_string())?;
-                        captured = Some(("stderr", payload.data));
+                        captured = Some((JobOutputSource::Stderr, payload.data));
+                    }
+                    Some(MessageType::ExecStdinAck) if policy.is_some() => {
+                        let ack = message
+                            .payload::<ExecStdinAck>()
+                            .map_err(|e| e.to_string())?;
+                        if ack.consumed < *input_ack.borrow()
+                            || ack.consumed > input_sent.load(Ordering::Acquire)
+                        {
+                            return Err("invalid job stdin acknowledgement".into());
+                        }
+                        input_ack.send_replace(ack.consumed);
                     }
                     Some(MessageType::ExecStdinError) => {
                         let payload = message
@@ -857,7 +969,8 @@ impl JobManager {
                             stdin_failure_recorded = true;
                             self.update(&id, |info| info.stdin_closed = true);
                         }
-                        captured = Some(("stdin_error", payload.message.into_bytes()));
+                        captured =
+                            Some((JobOutputSource::StdinError, payload.message.into_bytes()));
                     }
                     Some(MessageType::ExecExited) => {
                         let exited = message.payload::<ExecExited>().map_err(|e| e.to_string())?;
@@ -885,12 +998,8 @@ impl JobManager {
                         let mut entries = self.entries.lock().unwrap();
                         let entry = entries.get_mut(&id).ok_or("active job disappeared")?;
                         entry.sequence += 1;
-                        let record = JobOutput::new(
-                            entry.sequence,
-                            now(),
-                            source.into(),
-                            STANDARD.encode(bytes),
-                        );
+                        let record =
+                            JobOutput::new(entry.sequence, now(), source, STANDARD.encode(bytes));
                         entry.retain_output(record.clone());
                         drop(entries);
                         // Only the runtime actor writes output. Slow attached readers never own this path.
@@ -900,6 +1009,13 @@ impl JobManager {
                             writer = None;
                             self.stop_output_capture(&id, record.sequence, &error);
                         }
+                    }
+
+                    if source.charged() && policy.is_some() {
+                        output_ack
+                            .consume(bytes.len())
+                            .ok_or("job output counter overflow")?;
+                        output_consumed.send_replace(output_ack.clone());
                     }
                 }
             }
@@ -927,9 +1043,9 @@ fn now() -> i64 {
 }
 
 fn output_memory_bytes(record: &JobOutput) -> usize {
-    // Tiny writes still allocate a record and two strings. Charge those allocations too,
+    // Tiny writes still allocate a record and a string. Charge those allocations too,
     // with room for the deque's spare slots, so payload size cannot hide unbounded overhead.
-    2 * std::mem::size_of::<JobOutput>() + record.source.capacity() + record.data_base64.capacity()
+    2 * std::mem::size_of::<JobOutput>() + record.data_base64.capacity()
 }
 
 fn truncate_diagnostic(value: &mut String, limit: usize) {
@@ -1005,6 +1121,7 @@ mod tests {
             directory,
             &directory.join("absent-agent.sock"),
             tokio::runtime::Handle::current(),
+            Arc::new(RelayIdleState::default()),
         )
         .unwrap()
     }
@@ -1038,6 +1155,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_unexpired_attachments_on_active_jobs_hold_lifecycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = manager(directory.path());
+        let id = id(1);
+        let record = StoredJob {
+            info: JobInfo::starting(id.clone(), "boot-one".into(), &command(), false, now()),
+            fingerprint: String::new(),
+        };
+        manager.entries.lock().unwrap().insert(
+            id.clone(),
+            Entry {
+                record,
+                output: VecDeque::new(),
+                output_bytes: 0,
+                capture_error: None,
+                sequence: 0,
+                input: None,
+                control: None,
+                resize: None,
+                attachments: BTreeMap::new(),
+            },
+        );
+        assert!(!manager.has_active_attachments());
+        let mut entries = manager.entries.lock().unwrap();
+        let entry = entries.get_mut(&id).unwrap();
+        entry.attachments.insert(
+            "caller".into(),
+            Attachment {
+                read_only: true,
+                expires: Instant::now() + Duration::from_secs(30),
+            },
+        );
+        drop(entries);
+        assert!(manager.has_active_attachments());
+        let mut entries = manager.entries.lock().unwrap();
+        let entry = entries.get_mut(&id).unwrap();
+        entry.attachments.get_mut("caller").unwrap().expires = Instant::now();
+        drop(entries);
+        assert!(!manager.has_active_attachments());
+    }
+
+    #[tokio::test]
     async fn capture_cutoff_survives_metadata_failure_and_terminal_updates() {
         let directory = tempfile::tempdir().unwrap();
         let manager = manager(directory.path());
@@ -1059,7 +1218,7 @@ mod tests {
             assert!(entry.input.is_some());
             assert!(entry.control.is_some());
             entry.sequence = 8;
-            entry.retain_output(JobOutput::new(8, 1, "stdout".into(), "YQ==".into()));
+            entry.retain_output(JobOutput::new(8, 1, JobOutputSource::Stdout, "YQ==".into()));
         }
         let JobResponse::Output { page } = request(
             &manager,
@@ -1102,12 +1261,13 @@ mod tests {
             entry.retain_output(JobOutput::new(
                 sequence,
                 1,
-                "stdout".into(),
+                JobOutputSource::Stdout,
                 STANDARD.encode(b"x"),
             ));
         }
         assert!(entry.output_bytes <= OUTPUT_BYTES);
-        assert!(entry.output.len() < 8192);
+        // Even empty payloads are charged the fixed record overhead, bounding the count.
+        assert!(entry.output.len() <= OUTPUT_BYTES / (2 * std::mem::size_of::<JobOutput>()));
         assert_eq!(
             entry.output_bytes,
             entry.output.iter().map(output_memory_bytes).sum::<usize>()
@@ -1320,6 +1480,7 @@ mod tests {
             directory.path(),
             &directory.path().join("other.sock"),
             tokio::runtime::Handle::current(),
+            Arc::new(RelayIdleState::default()),
         )
         .unwrap();
         assert!(!restored.active());

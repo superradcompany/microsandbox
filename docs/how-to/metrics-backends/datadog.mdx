@@ -22,7 +22,8 @@ metric translation, and shipping to Datadog's backend.
   <Step title="Enable OTLP on the Datadog Agent">
     Edit `datadog.yaml` to enable the OTLP receiver on standard ports:
 
-    ```yaml
+    <CodeGroup>
+    ```yaml YAML
     otlp_config:
       receiver:
         protocols:
@@ -31,14 +32,17 @@ metric translation, and shipping to Datadog's backend.
           http:
             endpoint: 0.0.0.0:4318
     ```
+    </CodeGroup>
 
     Restart the agent.
   </Step>
 
   <Step title="Point msb-metrics at the agent">
-    ```sh
+    <CodeGroup>
+    ```sh Shell
     msb-metrics otel --endpoint=http://localhost:4317
     ```
+    </CodeGroup>
   </Step>
 
   <Step title="Verify">

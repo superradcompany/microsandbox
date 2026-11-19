@@ -61,7 +61,7 @@ pub type LogStream = Pin<Box<dyn Stream<Item = MicrosandboxResult<LogEntry>> + S
 pub enum SandboxInner {
     /// Local libkrun-backed sandbox state.
     Local(SandboxLocalState),
-    /// Cloud msb-cloud-backed sandbox state.
+    /// Cloud API-backed sandbox state.
     Cloud(SandboxCloudState),
 }
 
@@ -76,13 +76,13 @@ pub struct SandboxLocalState {
     pub client: Arc<AgentClient>,
 }
 
-/// Cloud msb-cloud-backed sandbox state held inside [`SandboxInner::Cloud`].
+/// Cloud API-backed sandbox state held inside [`SandboxInner::Cloud`].
 pub struct SandboxCloudState {
     /// Server-side UUID (kept as a string to match the cloud wire format).
     pub id: String,
     /// Owning org's UUID.
     pub org_id: String,
-    /// Creation timestamp returned by msb-cloud.
+    /// Creation timestamp returned by the cloud API.
     pub created_at: DateTime<Utc>,
 }
 
@@ -90,7 +90,7 @@ pub struct SandboxCloudState {
 pub enum SandboxHandleInner {
     /// Local persisted sandbox handle.
     Local(SandboxHandleLocalState),
-    /// Cloud msb-cloud sandbox handle.
+    /// Cloud sandbox handle.
     Cloud(SandboxHandleCloudState),
 }
 
@@ -113,6 +113,9 @@ pub struct SandboxHandleLocalState {
     pub status: SandboxStatus,
     /// Serialized `SandboxConfig` as stored in the database.
     pub config_json: String,
+    /// JSON containing the caller's explicit settings and a fingerprint of `config_json`.
+    /// May be absent on older records or when no caller overrides were saved.
+    pub caller_config_overrides_json: Option<String>,
     /// Serialized `SandboxConfig` used by the active VM, when known.
     pub active_config_json: Option<String>,
     /// When this sandbox was first created, if recorded.
@@ -123,19 +126,19 @@ pub struct SandboxHandleLocalState {
     pub pid: Option<i32>,
 }
 
-/// Cloud handle state. Captures the snapshot msb-cloud returned at fetch time.
+/// Cloud handle state. Captures the snapshot the cloud API returned at fetch time.
 pub struct SandboxHandleCloudState {
     /// Server-side UUID.
     pub id: String,
     /// Owning org's UUID.
     pub org_id: String,
-    /// Lifecycle status mapped from msb-cloud's
+    /// Lifecycle status mapped from the cloud API's
     /// [`CloudSandboxStatus`](crate::CloudSandboxStatus).
     pub status: SandboxStatus,
     /// Serialized [`CloudCreateSandboxRequest`](crate::CloudCreateSandboxRequest)
-    /// returned by msb-cloud.
+    /// returned by the cloud API.
     pub config_json: String,
-    /// Creation timestamp returned by msb-cloud.
+    /// Creation timestamp returned by the cloud API.
     pub created_at: Option<DateTime<Utc>>,
     /// Last start timestamp, when known.
     pub started_at: Option<DateTime<Utc>>,

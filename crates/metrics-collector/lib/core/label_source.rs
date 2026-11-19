@@ -254,6 +254,7 @@ mod tests {
             id: Set(1),
             name: Set("s1".to_string()),
             config: Set(config.clone()),
+            caller_config_overrides: Set(None),
             active_config: Set(Some(config)),
             status: Set(sandbox::SandboxStatus::Running),
             network_slot: Set(None),
@@ -331,6 +332,7 @@ mod tests {
         sandbox::ActiveModel {
             id: Set(1),
             config: Set(config.clone()),
+            caller_config_overrides: Set(None),
             active_config: Set(Some(config)),
             ..Default::default()
         }

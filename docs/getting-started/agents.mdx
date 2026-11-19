@@ -16,9 +16,11 @@ The SDK and CLI give you full programmatic control, and there are two additional
 
 Works with Claude Code, Cursor, Codex, Gemini CLI, GitHub Copilot, and other agents that support the skills format.
 
-```bash
+<CodeGroup>
+```bash Shell
 npx skills add superradcompany/skills
 ```
+</CodeGroup>
 
 This installs a set of skill files into your project that the agent reads as context. No server process, no configuration, just files that describe how to use microsandbox.
 
@@ -80,7 +82,7 @@ claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
 }
 ```
 
-```json Open Code
+```json Open Code v1
 // .opencode.json
 {
   "mcpServers": {
@@ -88,6 +90,22 @@ claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json Open Code v2
+// ~/.config/opencode/opencode.json
+{
+  "mcp": {
+    "microsandbox": {
+      "type": "local",
+      "command": [ 
+        "npx",
+        "-y", 
+        "microsandbox-mcp"
+      ]
     }
   }
 }

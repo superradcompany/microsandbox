@@ -17,6 +17,7 @@ Package installation often costs more than sandbox boot. This guide installs Ope
 
 Create the worker verification script that the snapshot will carry into every worker:
 
+<CodeGroup>
 ```sh verify-worker.sh
 #!/bin/sh
 set -eu
@@ -30,9 +31,11 @@ git -c user.name=microsandbox \
 test -z "$(git remote)"
 opencode --version
 ```
+</CodeGroup>
 
 Create the preparation script that installs the baseline toolchain:
 
+<CodeGroup>
 ```sh prepare-worker.sh
 #!/bin/sh
 set -eu
@@ -45,6 +48,7 @@ mkdir -p /workspace/project
 chown -R node:node /workspace
 opencode --version
 ```
+</CodeGroup>
 
 <CodeGroup>
 ```sh macOS & Linux
@@ -88,9 +92,11 @@ msb snap create coding-agent-base `
 
 Verify the captured snapshot before using it:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap verify agent-base:coding-agent-base
 ```
+</CodeGroup>
 
 The snapshot captures the writable disk changes and pins the source image. This disk snapshot does not capture memory, running processes, network state, or environment variables. Owned storage is captured; external directory bindings require explicit destination choices. Integrity verification detects later changes to those captured bytes; it does not attest who built the snapshot or whether its packages are trustworthy.
 
@@ -220,9 +226,11 @@ Remove-Item prepare-worker.sh, verify-worker.sh
 
 Remove the reusable snapshot only when you no longer need it:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap rm agent-base:coding-agent-base
 ```
+</CodeGroup>
 
 </Step>
 
@@ -232,9 +240,11 @@ msb snap rm agent-base:coding-agent-base
 
 Installed snapshot members are immutable. To update packages, recreate `agent-base`, then capture a new member name and use its group-qualified selector for future workers:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap create coding-agent-base-v2 --sandbox agent-base --integrity
 msb snap verify agent-base:coding-agent-base-v2
 ```
+</CodeGroup>
 
 See [Snapshots](/sandboxes/snapshots) for archive, integrity, and portability details.

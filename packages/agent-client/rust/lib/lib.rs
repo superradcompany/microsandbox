@@ -14,7 +14,7 @@
 
 pub mod client;
 pub mod error;
-pub mod exec_control;
+pub mod exec;
 /// Internal Unix-local shared-memory transport used by the UDS adapter and runtime relay.
 ///
 /// The SDK connects through [`OptimizedAgentClient`] for automatic arena negotiation.
@@ -37,7 +37,8 @@ pub mod transports;
 
 pub use client::AgentClient;
 pub use error::{AgentClientError, AgentClientResult};
-pub use exec_control::ExecController;
+pub use exec::control::ExecController;
+pub use exec::output::OutputAcknowledgements;
 pub use message::{EncodedMessage, IntoOutboundMessage, OutboundMessage, TypedMessage};
 pub use microsandbox_protocol_client::{
     Client, ClientError, ClientResult, ConnectOptions, Connector, Delivery, ErrorKind, Request,

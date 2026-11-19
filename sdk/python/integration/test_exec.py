@@ -7,14 +7,7 @@ import signal
 
 import pytest
 
-from microsandbox import (
-    BackendKind,
-    ExecEventType,
-    ExecTimeoutError,
-    MicrosandboxError,
-    Stdin,
-    backend_scope,
-)
+from microsandbox import ExecEventType, ExecTimeoutError, MicrosandboxError, Stdin
 
 
 @pytest.mark.asyncio
@@ -205,6 +198,28 @@ async def test_stdin_modes_and_take_stdin_contract(sandbox_factory):
 
 
 @pytest.mark.asyncio
+async def test_empty_stdin_write_keeps_stdin_open(sandbox_factory):
+    sandbox = await sandbox_factory("py-sdk-stdin-empty")
+
+    piped = await sandbox.exec_stream("cat", stdin=Stdin.pipe())
+    sink = piped.take_stdin()
+    assert sink is not None
+
+    await sink.write(b"aaaaa")
+    await sink.write(b"")
+    await sink.write(b"bbbbb")
+    await sink.close()
+
+    await sink.write(b"")
+    with pytest.raises(MicrosandboxError, match="stdin closed"):
+        await sink.write(b"after EOF")
+
+    output = await piped.collect()
+    assert output.success is True
+    assert output.stdout_text == "aaaaabbbbb"
+
+
+@pytest.mark.asyncio
 async def test_rlimits_reject_raw_dicts(sandbox_factory):
     sandbox = await sandbox_factory("py-sdk-rlimit-types")
 
@@ -216,12 +231,8 @@ async def test_rlimits_reject_raw_dicts(sandbox_factory):
 
 
 @pytest.mark.asyncio
-async def test_exec_stream_backpressure_preserves_output(sandbox_factory, tmp_path, monkeypatch):
-    config = tmp_path / "config.json"
-    config.write_text('{"exec":{"buffer_bytes":65536}}')
-    monkeypatch.setenv("MSB_CONFIG_PATH", str(config))
-    with backend_scope(BackendKind.LOCAL):
-        sandbox = await sandbox_factory("py-sdk-backpressure")
+async def test_exec_stream_backpressure_preserves_output(sandbox_factory):
+    sandbox = await sandbox_factory("py-sdk-backpressure")
     command = (
         "head -c 16777216 /dev/zero; "
         "head -c 16777216 /dev/zero >&2; touch /tmp/output-complete"

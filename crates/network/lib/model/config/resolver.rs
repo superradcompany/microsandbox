@@ -4,7 +4,8 @@ use microsandbox_types::SecretSource;
 use zeroize::Zeroizing;
 
 use crate::proxy::{
-    OutboundProxy, OutboundProxyBuildError, ResolvedOutboundProxy, ResolvedSocks5Credentials,
+    OutboundProxy, OutboundProxyBuildError, ResolvedHttpConnectCredentials, ResolvedOutboundProxy,
+    ResolvedProxyCredentials, ResolvedSocks5Credentials,
 };
 
 use super::types::{NetworkConfig, ResolvedNetworkConfig};
@@ -106,9 +107,21 @@ impl NetworkConfig {
             }) => {
                 let password =
                     Self::resolve_source(resolver, "SOCKS5 proxy", credentials.password_source())?;
-                Some(ResolvedSocks5Credentials::new(
-                    credentials.username(),
-                    password.as_str(),
+                Some(ResolvedProxyCredentials::Socks5(
+                    ResolvedSocks5Credentials::new(credentials.username(), password.as_str()),
+                ))
+            }
+            Some(OutboundProxy::HttpConnect {
+                credentials: Some(credentials),
+                ..
+            }) => {
+                let password = Self::resolve_source(
+                    resolver,
+                    "HTTP CONNECT proxy",
+                    credentials.password_source(),
+                )?;
+                Some(ResolvedProxyCredentials::HttpConnect(
+                    ResolvedHttpConnectCredentials::new(credentials.username(), password.as_str()),
                 ))
             }
             _ => None,
@@ -188,10 +201,44 @@ mod tests {
         assert!(config.clone().resolve(&EnvNetworkSecretResolver).is_err());
 
         // SAFETY: this test owns a purpose-specific environment variable.
-        unsafe { std::env::set_var(PASSWORD_VAR, "password") };
+        unsafe { std::env::set_var(PASSWORD_VAR, "hunter2-socks5-sentinel") };
         let resolved = config.resolve(&EnvNetworkSecretResolver).unwrap();
         unsafe { std::env::remove_var(PASSWORD_VAR) };
 
-        assert!(format!("{resolved:?}").contains("[REDACTED]"));
+        let rendered = format!("{resolved:?}");
+        assert!(rendered.contains("[REDACTED]"), "password was not redacted");
+        assert!(
+            !rendered.contains("hunter2-socks5-sentinel"),
+            "password appeared in debug output"
+        );
+    }
+
+    #[test]
+    fn network_resolution_reads_authenticated_http_connect_credentials() {
+        const PASSWORD_VAR: &str = "MSB_NETWORK_CONFIG_RESOLVE_TEST_HTTP_CONNECT_PASSWORD";
+        let config = NetworkConfig {
+            outbound_proxy: Some(
+                OutboundProxyBuilder::new()
+                    .http_connect("127.0.0.1:3128")
+                    .credentials("sandbox", SecretSource::env(PASSWORD_VAR))
+                    .build()
+                    .unwrap(),
+            ),
+            ..Default::default()
+        };
+
+        assert!(config.clone().resolve(&EnvNetworkSecretResolver).is_err());
+
+        // SAFETY: this test owns a purpose-specific environment variable.
+        unsafe { std::env::set_var(PASSWORD_VAR, "hunter2-http-connect-sentinel") };
+        let resolved = config.resolve(&EnvNetworkSecretResolver).unwrap();
+        unsafe { std::env::remove_var(PASSWORD_VAR) };
+
+        let rendered = format!("{resolved:?}");
+        assert!(rendered.contains("[REDACTED]"), "password was not redacted");
+        assert!(
+            !rendered.contains("hunter2-http-connect-sentinel"),
+            "password appeared in debug output"
+        );
     }
 }

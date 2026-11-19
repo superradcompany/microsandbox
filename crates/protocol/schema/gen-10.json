@@ -152,11 +152,11 @@
     },
     {
       "introduced_in": 10,
-      "wire": "core.exec.output.credit"
+      "wire": "core.exec.output.ack"
     },
     {
       "introduced_in": 10,
-      "wire": "core.exec.stdin.credit"
+      "wire": "core.exec.stdin.ack"
     },
     {
       "introduced_in": 2,

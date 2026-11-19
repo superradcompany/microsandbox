@@ -552,7 +552,7 @@ impl ResolvedSandboxConfig {
 
         self.image.clone().ok_or_else(|| {
             anyhow::anyhow!(
-                "missing required sandbox field `image`; provide an image argument or set `image` in --conf"
+                "missing required sandbox field `image`; provide an image argument or set `image` in a file passed with --file"
             )
         })
     }
@@ -965,7 +965,7 @@ fn reject_scoped_wrapper(path: &Path, wrapper: &str, flag: &str) -> anyhow::Resu
         .is_some_and(|map| map.contains_key(wrapper))
     {
         anyhow::bail!(
-            "{}: {flag} expects the contents without a `{wrapper}:` wrapper; use --conf for a root-shaped file",
+            "{}: {flag} expects the contents without a `{wrapper}:` wrapper; use --file for a root-shaped file",
             path.display()
         );
     }
@@ -2692,6 +2692,21 @@ mounts:
     }
 
     #[test]
+    fn commented_yaml_loads_sandbox_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            "commented.yaml",
+            "# sandbox image\nimage: alpine # pinned by the caller\nmemory: 1G\n",
+        );
+
+        let input = load_root(&path).unwrap();
+
+        assert!(matches!(input.image, Some(ImageInput::String(image)) if image == "alpine"));
+        assert_eq!(input.memory.as_deref(), Some("1G"));
+    }
+
+    #[test]
     fn interpolation_supports_only_braced_environment_names() {
         assert_eq!(interpolate_string("plain").unwrap(), "plain");
         assert_eq!(interpolate_string("$PATH").unwrap(), "$PATH");
@@ -3001,7 +3016,7 @@ secrets:
 
         let error = resolve(&sources).unwrap_err().to_string();
         assert!(error.contains("without a `network:` wrapper"));
-        assert!(error.contains("use --conf"));
+        assert!(error.contains("use --file"));
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 ---
 title: Snapshots
 "og:title": Python SDK Snapshots reference
-description: Create and restore sandbox snapshots with the Python SDK.
+description: Create snapshots, fork sandboxes, and restore snapshots with the Python SDK.
 keywords: ["Python SDK", "Python snapshots", "microsandbox snapshots"]
 ---
 
@@ -13,7 +13,11 @@ Use snapshot objects or references on cloud. Local operations also accept a grou
 
 ## Guest writeback
 
-Pass `guest_flush=GuestFlush.REQUIRED` to `Snapshot.create`, `Snapshot.create_archive`, `source.fork`, `source.fork_many`, or `source.pause`. Import `GuestFlush` from `microsandbox`. The default `AUTO` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `SKIP` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
+Pass `guest_flush=GuestFlush.REQUIRED` to `Snapshot.create`, `Snapshot.create_archive`, `source.fork`, `source.fork_many`, or `source.pause`. Import `GuestFlush` from `microsandbox`.
+
+The default `AUTO` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `SKIP` retains mandatory storage barriers.
+
+A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
 ## Snapshot
 
@@ -704,6 +708,58 @@ print(snap.digest)
 
 ---
 
+
+## Forking
+
+Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `SandboxHandle` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
+
+### fork()
+
+```python
+async def fork(self, name: str, *, record_integrity: bool = False,
+               guest_flush: GuestFlush | None = None,
+               volumes: Mapping[str, MountConfig] | None = None) -> Sandbox: ...
+```
+
+<Accordion title="Example">
+
+```python
+child = await sb.fork("experiment")
+try:
+    result = await child.exec("python", ["-V"])
+    print(result.stdout_text)
+finally:
+    await child.stop()
+```
+
+</Accordion>
+
+Create one child from the current execution state.
+
+### fork_many()
+
+```python
+async def fork_many(self, names: list[str], *, record_integrity: bool = False,
+                    guest_flush: GuestFlush | None = None,
+                    volumes: Mapping[str, MountConfig] | None = None) -> list[ForkOutcome]: ...
+```
+
+<Accordion title="Example">
+
+```python
+outcomes = await sb.fork_many(["alice", "bob"])
+for outcome in outcomes:
+    if outcome.sandbox is not None:
+        await outcome.sandbox.stop()
+    else:
+        print(outcome.name, outcome.error)
+```
+
+</Accordion>
+
+Capture once for all names and return outcomes in input order. Each outcome has `name`, plus a started `sandbox` or an `error`; the other field is `None`. Validation or capture errors raise for the whole call; a child startup error leaves successful siblings running. Stop successful children when finished.
+
+`record_integrity` records disk hashes. `guest_flush` defaults to `GuestFlush.AUTO`; see [guest writeback](#guest-writeback) for policy details. `volumes` rebinds captured disks; forks cannot add new block devices, and batch children cannot share a writable disk image. See [fork disk bindings](/sandboxes/snapshots#forking). `branch()` and `branch_many()` remain deprecated aliases that emit `DeprecationWarning`; `BranchOutcome` aliases `ForkOutcome`.
 
 <span id="restore-a-sandbox" />
 

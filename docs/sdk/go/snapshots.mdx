@@ -1,7 +1,7 @@
 ---
 title: Snapshots
 "og:title": Go SDK Snapshots reference
-description: Create and restore sandbox snapshots with the Go SDK.
+description: Create snapshots, fork sandboxes, and restore snapshots with the Go SDK.
 keywords: ["Go SDK", "Go snapshots", "microsandbox snapshots"]
 ---
 
@@ -13,7 +13,11 @@ Use snapshot objects or references on cloud. Local operations also accept a grou
 
 ## Guest writeback
 
-Set `SnapshotCreateOptions.GuestFlush` to `msb.GuestFlushRequired`, pass `msb.WithForkGuestFlush(msb.GuestFlushRequired)` to `Fork`/`ForkMany`, or call `source.PauseWithGuestFlush(ctx, msb.GuestFlushRequired)`. The default `GuestFlushAuto` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `GuestFlushSkip` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
+Set `SnapshotCreateOptions.GuestFlush` to `msb.GuestFlushRequired`, pass `msb.WithForkGuestFlush(msb.GuestFlushRequired)` to `Fork`/`ForkMany`, or call `source.PauseWithGuestFlush(ctx, msb.GuestFlushRequired)`.
+
+The default `GuestFlushAuto` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `GuestFlushSkip` retains mandatory storage barriers.
+
+A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
 Disk capture, including `SandboxHandle.Snapshot`, requires a native library that supports guest-flush policies. Older libraries return an upgrade-required error, including for stopped disk captures. Full Auto capture and unrelated operations retain their compatibility.
 
@@ -840,6 +844,64 @@ func (h *SnapshotHandle) CreatedAt() time.Time
 ```
 
 Snapshot creation time, decoded from the index's Unix timestamp.
+
+## Forking
+
+Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `SandboxHandle` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
+
+### Fork
+
+```go
+func (s *Sandbox) Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error)
+```
+
+<Accordion title="Example">
+
+```go
+child, err := sb.Fork(ctx, "experiment")
+if err != nil {
+    return err
+}
+defer child.Close()
+defer child.Stop(context.Background())
+```
+
+</Accordion>
+
+Create one child from the current execution state.
+
+### ForkMany
+
+```go
+func (s *Sandbox) ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error)
+```
+
+<Accordion title="Example">
+
+```go
+outcomes, err := sb.ForkMany(ctx, []string{"alice", "bob"})
+if err != nil {
+    return err
+}
+for _, outcome := range outcomes {
+    if outcome.Error != nil {
+        log.Printf("%s: %v", outcome.Name, outcome.Error)
+        continue
+    }
+    defer outcome.Sandbox.Close()
+    if err := outcome.Sandbox.Stop(ctx); err != nil {
+        return err
+    }
+}
+```
+
+</Accordion>
+
+Capture once for all names and return outcomes in input order. Each outcome has `Name`, plus a started `Sandbox` or an `Error`; the other field is `nil`. Validation or capture errors return for the whole call; a child startup error leaves successful siblings running. Stop and close successful children when finished.
+
+Use `WithForkIntegrity()` to record disk hashes, `WithForkGuestFlush(GuestFlushRequired)` to request guest writeback, and `WithForkVolumes` to rebind captured disks. Forks cannot add new block devices, and batch children cannot share a writable disk image. See [fork disk bindings](/sandboxes/snapshots#forking).
+
+The `Branch` names remain deprecated aliases; use fork option functions in place of the removed `ForkOptions` and `BranchOptions` structs.
 
 <span id="restore-a-sandbox" />
 

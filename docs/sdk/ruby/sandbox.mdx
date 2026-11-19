@@ -239,6 +239,43 @@ Obtain persisted metadata without connecting to the guest agent.
   </div>
 </div>
 
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">recover_storage()</span>
+
+```ruby
+Microsandbox::Sandbox.recover_storage(
+  name, selections: {}, accept_selected_view: false,
+  legacy_writers_stopped: false
+) # => StorageRecovery
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage repair](/repairs/sandbox-storage) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>selections</code><span className="msb-type">Hash&lt;String, String&gt;</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with disk ID keys and candidate ID values. Omit or leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>accept_selected_view</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>legacy_writers_stopped</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originals_retained</code> (boolean) confirms the original disks were retained.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">list()</span>
 
 ```ruby
@@ -451,7 +488,7 @@ sandbox.status # => String
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Current lifecycle status, fetched from the backend.</div>
+    <div className="msb-param-desc">Current lifecycle status, fetched from the backend: <code>created</code>, <code>starting</code>, <code>running</code>, <code>draining</code>, <code>paused</code>, <code>stopped</code>, or <code>crashed</code>.</div>
   </div>
 </div>
 
@@ -548,6 +585,8 @@ Record activity to refresh the sandbox idle timer.
 </div>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
+
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```ruby
 sandbox.metrics # => SandboxMetrics
@@ -691,7 +730,7 @@ Opaque stable identity of the persisted sandbox. It remains unchanged across sto
 sandbox.wait_for_status(status) # => SandboxHandle
 ```
 
-Wait without a built-in timeout until this exact sandbox reaches one of `created`, `starting`, `running`, `draining`, `paused`, `stopped`, or `crashed`. Returns a refreshed metadata handle. Ruby's `Timeout.timeout` does not reliably interrupt the native wait. Use an SDK operation with an explicit timeout when you need a bounded shutdown.
+Wait without a built-in timeout until this exact sandbox reaches the requested [lifecycle status](#sandbox-status). Returns a refreshed metadata handle. Ruby's `Timeout.timeout` does not reliably interrupt the native wait. Use an SDK operation with an explicit timeout when you need a bounded shutdown.
 
 <p className="msb-label">Parameters</p>
 
@@ -1596,6 +1635,8 @@ Record activity to refresh the sandbox idle timer.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
 
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```ruby
 handle.metrics # => SandboxMetrics
 ```
@@ -2000,7 +2041,7 @@ end
 gem install microsandbox
 ```
 
-Ruby 3.3, 3.4, and 4.0 are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.85 or newer to build it locally.
+Ruby 3.3, 3.4, and 4.0 are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.89 or newer to build it locally.
 
 Blocking native calls release Ruby's global VM lock (GVL), allowing other Ruby threads to run.
 
@@ -2191,3 +2232,11 @@ stream.close # => nil
 ```
 
 Stop observing logs. This does not stop the job.
+
+## Nested virtualization
+
+`nested_virt: true | false` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```ruby
+sandbox = Microsandbox::Sandbox.create("nested", image: "alpine", nested_virt: true)
+```

@@ -870,7 +870,15 @@ Limit active inbound TCP connections across published ports; `0` means unlimited
 fn tcp_accept_queue_size(self, size: u32) -> Self
 ```
 
-Set how many not-yet-accepted connections each published TCP port's host listener queues. Default: `1024`. Accepts `1..=i32::MAX`; other values record [`BuildError::InvalidTcpAcceptQueueSize`](#builderror). Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at `net.core.somaxconn` on Linux (4,096 by default) or `kern.ipc.somaxconn` on macOS (128 by default). Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it.
+Set how many not-yet-accepted connections each published TCP port's host listener queues. Default: `1024`. Accepts `1..=i32::MAX`; other values record [`BuildError::InvalidTcpAcceptQueueSize`](#builderror).
+
+<Accordion title="Queue behavior and host limits">
+
+Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at `net.core.somaxconn` on Linux (4,096 by default) or `kern.ipc.somaxconn` on macOS (128 by default).
+
+</Accordion>
+
+Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it.
 
 `RestoreBuilder`, `ForkBuilder`, and `ForkManyBuilder` expose the same `tcp_accept_queue_size()` for the listeners a child publishes.
 
@@ -907,7 +915,7 @@ Set the runtime UDP relay session limit. Omission is unlimited in single-tenant 
 fn max_tcp_connections(self, max: usize) -> Self
 ```
 
-Limit the maximum number of concurrent TCP connections from the sandbox. When omitted, single-tenant mode is unlimited and multi-tenant mode defaults to 1,024. A positive value overrides the default; passing zero explicitly selects unlimited in either mode. Hosting services are responsible for restricting tenant overrides. See [deployment profiles](/networking/overview#deployment-profiles) for historical TCP limits and defaults.
+Limit the maximum number of concurrent TCP connections from the sandbox. When omitted, single-tenant mode is unlimited and multi-tenant mode defaults to 1,024. A positive value overrides the default; passing zero explicitly selects unlimited in either mode. Hosting services are responsible for restricting tenant overrides. See [deployment profiles](/networking/overview#connection-limits) for historical TCP limits and defaults.
 
 For dedicated snapshot restore, `RestoreBuilder::max_tcp_connections` and `RestoreBuilder::max_udp_connections` set the destination limits. `RestoreBuilder::max_connections` remains a deprecated TCP alias; the last TCP setter call wins.
 

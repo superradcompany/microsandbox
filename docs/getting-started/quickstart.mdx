@@ -43,9 +43,11 @@ Having trouble with a local installation? Choose your platform for setup checks 
   </a>
 </div>
 
+For release candidates or an exact version, see [Versions](/getting-started/versions).
+
 <Steps>
   <Step title="Install microsandbox">
-    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same installation also drives [microsandbox cloud](/cloud/overview) when an API key is set.
+    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. To run on cloud, set `MSB_BACKEND=cloud` and `MSB_API_KEY`, choose a cloud profile, or select cloud in code in supported SDKs. See [Local or cloud](/operations/backends).
 
     <CodeGroup>
     ```bash TypeScript
@@ -74,27 +76,38 @@ Having trouble with a local installation? Choose your platform for setup checks 
 
     Check local virtualization support with:
 
-    ```bash
+    <CodeGroup>
+    ```bash Shell
     msb doctor
     ```
+    </CodeGroup>
 
     For platform-specific setup notes, see [Linux troubleshooting](/troubleshooting/linux), [macOS troubleshooting](/troubleshooting/macos), or [Windows troubleshooting](/troubleshooting/windows).
   </Step>
 
   <Step title="Run code in a sandbox">
-    Create a sandbox, execute code inside it, and get the result back.
+    Create an ephemeral sandbox, execute code inside it, and stop it when finished. Ephemeral sandboxes are removed after stopping, so the example can reuse the same name.
 
     <CodeGroup>
+    ```bash CLI
+    msb run python -- python3 -c "print('Hello from a microVM!')"
+    ```
+
     ```typescript TypeScript
     import { Sandbox } from "microsandbox";
 
-    await using sb = await Sandbox.builder("hello")
+    const sb = await Sandbox.builder("hello")
         .image("python")
         .memory(512)
+        .ephemeral(true)
         .create();
 
-    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
-    console.log(output.stdout()); // Hello from a microVM!
+    try {
+        const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+        console.log(output.stdout()); // Hello from a microVM!
+    } finally {
+        await sb.stop();
+    }
     ```
 
     ```rust Rust
@@ -107,6 +120,7 @@ Having trouble with a local installation? Choose your platform for setup checks 
         let sb = Sandbox::builder("hello")
             .image("python")
             .memory(512)
+            .ephemeral(true)
             .create()
             .await?;
 
@@ -127,12 +141,14 @@ Having trouble with a local installation? Choose your platform for setup checks 
             "hello",
             image="python",
             memory=512,
+            ephemeral=True,
         )
 
-        output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
-        print(output.stdout_text)  # Hello from a microVM!
-
-        await sb.stop()
+        try:
+            output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
+            print(output.stdout_text)  # Hello from a microVM!
+        finally:
+            await sb.stop()
 
     asyncio.run(main())
     ```
@@ -141,11 +157,14 @@ Having trouble with a local installation? Choose your platform for setup checks 
     sb, err := m.CreateSandbox(ctx, "hello",
         m.WithImage("python"),
         m.WithMemory(512),
+        m.WithEphemeral(true),
     )
     if err != nil {
         return err
     }
-    defer sb.Stop(ctx)
+    defer func() {
+        _ = sb.Stop(ctx)
+    }()
 
     output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
     if err != nil {
@@ -159,19 +178,17 @@ Having trouble with a local installation? Choose your platform for setup checks 
 
     Microsandbox.install unless Microsandbox.installed?
 
-    Microsandbox::Sandbox.with("hello", image: "python", memory: 512) do |sandbox|
+    Microsandbox::Sandbox.with("hello", image: "python", memory: 512, ephemeral: true) do |sandbox|
       output = sandbox.exec("python", ["-c", "print('Hello from a microVM!')"])
       puts output.stdout
     end
     ```
 
-    ```bash CLI
-    msb run python -- python3 -c "print('Hello from a microVM!')"
-    ```
-
     </CodeGroup>
   </Step>
 </Steps>
+
+If you already ran an older version of this example and retained a sandbox named `hello`, remove it with `msb stop hello` followed by `msb rm hello` on the same backend, or choose another name. Stopping a persistent sandbox retains it for later restart.
 
 ## What just happened?
 

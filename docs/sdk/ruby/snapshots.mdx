@@ -4,7 +4,7 @@ title: Snapshots
 description: Capture and manage snapshots with the Ruby SDK.
 ---
 
-See [Snapshots](/sandboxes/snapshots) for capture behavior and compatibility. Ruby does not expose sandbox restore, forking, or full-capture options.
+See [Snapshots](/sandboxes/snapshots) for capture behavior and compatibility. Ruby does not expose sandbox restore or full-capture options. See [forking availability](#forking).
 
 ## SandboxHandle
 
@@ -485,3 +485,7 @@ Export through the backend retained by this handle. Archive export is local-only
     <div className="msb-param-desc">No return value.</div>
   </div>
 </div>
+
+## Forking
+
+The Ruby SDK does not currently expose single or batch sandbox forking. For supported APIs and examples, see [TypeScript](/sdk/typescript/snapshots#forking), [Rust](/sdk/rust/snapshots#forking), [Python](/sdk/python/snapshots#forking), or [Go](/sdk/go/snapshots#forking).

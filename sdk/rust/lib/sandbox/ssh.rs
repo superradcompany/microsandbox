@@ -32,7 +32,10 @@ use russh::client::Msg as ClientMsg;
 use russh::keys::{
     Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, decode_secret_key,
 };
-use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
+use russh::server::{
+    Auth, ChannelOpenHandle, Handle as SshServerHandle, Msg, PublicKeyOffer, Session,
+    VerifiedPublicKey,
+};
 use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -608,11 +611,15 @@ impl SshAttachOptionsBuilder {
 
 impl SshClient {
     /// Run an SSH exec request and collect stdout, stderr, and exit status.
+    ///
+    /// Returns an error if the channel closes without an exit status or signal.
     pub async fn exec(&self, command: impl Into<String>) -> MicrosandboxResult<SshOutput> {
         self.exec_with(command, |opts| opts).await
     }
 
     /// Run an SSH exec request with custom options.
+    ///
+    /// Returns an error if the channel closes without an exit status or signal.
     pub async fn exec_with(
         &self,
         command: impl Into<String>,
@@ -658,7 +665,7 @@ impl SshClient {
                         error_message
                     };
                     stderr.extend_from_slice(message.as_bytes());
-                    status = Some(128);
+                    status = Some(ssh_signal_exit_status(&signal_name));
                 }
                 ChannelMsg::Close => break,
                 ChannelMsg::Eof
@@ -681,8 +688,11 @@ impl SshClient {
             }
         }
 
+        let status = status
+            .ok_or_else(|| ssh_error("exec", "channel closed without an exit status or signal"))?;
+
         Ok(SshOutput {
-            status: status.unwrap_or(0),
+            status,
             stdout: Bytes::from(stdout),
             stderr: Bytes::from(stderr),
         })
@@ -777,8 +787,8 @@ impl SshClient {
                             ChannelMsg::ExitStatus { exit_status } => {
                                 exit_code = exit_status as i32;
                             }
-                            ChannelMsg::ExitSignal { .. } => {
-                                exit_code = 128;
+                            ChannelMsg::ExitSignal { signal_name, .. } => {
+                                exit_code = ssh_signal_exit_status(&signal_name);
                             }
                             ChannelMsg::Close => break,
                             _ => {}
@@ -833,7 +843,8 @@ impl SshClient {
                 .map_err(|e| MicrosandboxError::Terminal(format!("resolve tty path: {e}")))?;
             let tty_input = open_nonblocking_terminal_input(&tty_input_path)
                 .map_err(|e| MicrosandboxError::Terminal(format!("open tty input: {e}")))?;
-            let stdin_async = tokio::io::unix::AsyncFd::new(tty_input)
+            // SAFETY: The owned terminal file keeps its non-blocking descriptor open and unchanged.
+            let stdin_async = unsafe { tokio::io::unix::AsyncFd::register(tty_input) }
                 .map_err(|e| MicrosandboxError::Terminal(format!("async tty input: {e}")))?;
             let mut stdout = tokio::io::stdout();
             let mut sigwinch =
@@ -901,8 +912,8 @@ impl SshClient {
                             ChannelMsg::ExitStatus { exit_status } => {
                                 exit_code = exit_status as i32;
                             }
-                            ChannelMsg::ExitSignal { .. } => {
-                                exit_code = 128;
+                            ChannelMsg::ExitSignal { signal_name, .. } => {
+                                exit_code = ssh_signal_exit_status(&signal_name);
                             }
                             ChannelMsg::Close => break,
                             _ => {}
@@ -1284,11 +1295,7 @@ impl SshSession {
                         }
                     }
                     ExecEvent::Exited { code } => {
-                        let _ = session_handle
-                            .exit_status_request(channel, code.max(0) as u32)
-                            .await;
-                        let _ = session_handle.eof(channel).await;
-                        let _ = session_handle.close(channel).await;
+                        send_exec_exit(&session_handle, channel, code).await;
                         break;
                     }
                     ExecEvent::Failed(failed) => {
@@ -1502,9 +1509,9 @@ impl russh::server::Handler for SshSession {
     async fn auth_publickey_offered(
         &mut self,
         _user: &str,
-        public_key: &russh::keys::PublicKey,
+        offer: PublicKeyOffer<'_>,
     ) -> Result<Auth, Self::Error> {
-        if self.key_is_authorized(public_key) {
+        if self.key_is_authorized(offer.public_key) {
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())
@@ -1514,9 +1521,9 @@ impl russh::server::Handler for SshSession {
     async fn auth_publickey(
         &mut self,
         user: &str,
-        public_key: &russh::keys::PublicKey,
+        key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
-        if self.key_is_authorized(public_key) {
+        if self.key_is_authorized(key.public_key) {
             self.user = Some(user.to_string());
             Ok(Auth::Accept)
         } else {
@@ -2304,6 +2311,41 @@ impl AsyncWrite for SshStdioStream {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Complete an SSH command without turning an unknown abnormal guest exit into success.
+async fn send_exec_exit(session: &SshServerHandle, channel: ChannelId, code: i32) {
+    // Agentd reports -1 when it has no exit code: the process died by a signal it does not
+    // report, or its exit notification was lost. Use a generic failure rather than inventing
+    // a signal or OOM cause.
+    let status = u32::try_from(code).unwrap_or(1);
+    let _ = session.exit_status_request(channel, status).await;
+    let _ = session.eof(channel).await;
+    let _ = session.close(channel).await;
+}
+
+/// Convert the SSH signal names from RFC 4254 to conventional shell exit statuses.
+fn ssh_signal_exit_status(signal: &Sig) -> i32 {
+    // Sandboxes run Linux. Host libc signal numbers differ on macOS (notably USR1/USR2).
+    let number = match signal {
+        Sig::HUP => 1,
+        Sig::INT => 2,
+        Sig::QUIT => 3,
+        Sig::ILL => 4,
+        Sig::ABRT => 6,
+        Sig::FPE => 8,
+        Sig::KILL => 9,
+        Sig::USR1 => 10,
+        Sig::SEGV => 11,
+        Sig::Custom(name) if name == "USR2" => 12,
+        Sig::PIPE => 13,
+        Sig::ALRM => 14,
+        Sig::TERM => 15,
+        // Preserve failure for unrecognized extension signals without guessing their number.
+        Sig::Custom(_) => 0,
+    };
+
+    128 + number
+}
 
 /// Forward SSH input from Russh's independent channel stream.
 ///
@@ -3189,6 +3231,173 @@ fn ssh_error(context: &str, error: impl std::fmt::Display) -> MicrosandboxError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercise real SSH framing without a VM or a listening socket.
+    #[derive(Default)]
+    struct ExitTestServer {
+        channels: Vec<Channel<Msg>>,
+    }
+
+    impl russh::server::Handler for ExitTestServer {
+        type Error = anyhow::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+            // This test server is reachable only through an in-memory duplex stream.
+            Ok(Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: Channel<Msg>,
+            reply: ChannelOpenHandle,
+            _session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            self.channels.push(channel);
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            let command = std::str::from_utf8(data)?;
+            session.channel_success(channel)?;
+            session.data(channel, Bytes::from_static(b"stdout"))?;
+            session.extended_data(channel, 1, Bytes::from_static(b"stderr\n"))?;
+
+            if let Some(code) = command.strip_prefix("exit:") {
+                let code = code.parse()?;
+                let handle = session.handle();
+                tokio::spawn(async move { send_exec_exit(&handle, channel, code).await });
+                return Ok(());
+            }
+
+            if let Some(signal) = command.strip_prefix("signal:") {
+                session.exit_signal_request(
+                    channel,
+                    Sig::Custom(signal.to_owned()),
+                    false,
+                    "terminated",
+                    "",
+                )?;
+            } else {
+                assert_eq!(command, "missing");
+            }
+
+            session.eof(channel)?;
+            session.close(channel)?;
+            Ok(())
+        }
+    }
+
+    async fn exit_test_client() -> SshClient {
+        let key =
+            PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
+        let config = russh::server::Config {
+            keys: vec![key],
+            ..Default::default()
+        };
+        let (client_io, server_io) = tokio::io::duplex(SSH_IN_PROCESS_DUPLEX_CAPACITY);
+        let server_task = tokio::spawn(async move {
+            let session =
+                russh::server::run_stream(Arc::new(config), server_io, ExitTestServer::default())
+                    .await
+                    .map_err(|e| ssh_error("test server handshake", e))?;
+            session.await.map_err(|e| ssh_error("test server", e))
+        });
+        let mut handle = russh::client::connect_stream(
+            Arc::new(russh::client::Config::default()),
+            client_io,
+            SshClientHandler,
+        )
+        .await
+        .unwrap();
+        assert!(handle.authenticate_none("test").await.unwrap().success());
+
+        SshClient {
+            handle,
+            term: default_ssh_term(),
+            server_task: Some(server_task),
+            negotiated_version: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_preserves_normal_exits_and_rejects_abnormal_success() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let client = exit_test_client().await;
+
+            // Agentd emits -1 for signal termination or a lost exit notification, including
+            // older running guests. The adapter must preserve failure without a wire change.
+            for (guest_code, expected) in [(0, 0), (17, 17), (127, 127), (137, 137), (-1, 1)] {
+                let output = client.exec(format!("exit:{guest_code}")).await.unwrap();
+
+                assert_eq!(output.status, expected, "guest code {guest_code}");
+                assert_eq!(output.stdout.as_ref(), b"stdout");
+                assert_eq!(output.stderr.as_ref(), b"stderr\n");
+            }
+
+            client.close().await.unwrap();
+        })
+        .await
+        .expect("SSH exit round trips timed out");
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_preserves_signal_status_and_diagnostic() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let client = exit_test_client().await;
+
+            for (signal, expected) in [
+                ("HUP", 129),
+                ("INT", 130),
+                ("QUIT", 131),
+                ("ILL", 132),
+                ("ABRT", 134),
+                ("FPE", 136),
+                ("KILL", 137),
+                ("USR1", 138),
+                ("SEGV", 139),
+                ("USR2", 140),
+                ("PIPE", 141),
+                ("ALRM", 142),
+                ("TERM", 143),
+                ("unknown@example.com", 128),
+            ] {
+                let output = client.exec(format!("signal:{signal}")).await.unwrap();
+
+                assert_eq!(output.status, expected, "signal {signal}");
+                assert_eq!(output.stdout.as_ref(), b"stdout");
+                assert_eq!(output.stderr.as_ref(), b"stderr\nterminated");
+            }
+
+            client.close().await.unwrap();
+        })
+        .await
+        .expect("SSH signal round trips timed out");
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_requires_an_explicit_outcome() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let client = exit_test_client().await;
+
+            let error = client.exec("missing").await.unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("without an exit status or signal"),
+                "unexpected error: {error}"
+            );
+            client.close().await.unwrap();
+        })
+        .await
+        .expect("SSH missing-outcome round trip timed out");
+    }
 
     #[tokio::test]
     async fn persisted_ssh_keys_are_reused_with_private_permissions() {
