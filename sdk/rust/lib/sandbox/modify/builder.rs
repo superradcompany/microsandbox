@@ -24,7 +24,6 @@ use crate::size::Mebibytes;
 /// Modification result with exact resize identities when the selected runtime supports them.
 ///
 /// Existing [`SandboxModificationBuilder::apply`] retains its original plan result.
-#[cfg(feature = "local")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SandboxModificationResult {
     /// Existing modification plan and accepted resource statuses.
@@ -326,14 +325,16 @@ impl SandboxModificationBuilder {
 
     /// Apply once and retain identities for live resize operations on a local sandbox.
     /// Older runtimes use their supported setter once and return no operation identities.
-    #[cfg(feature = "local")]
     pub async fn apply_with_resize_tracking(self) -> MicrosandboxResult<SandboxModificationResult> {
-        if self.backend.as_local().is_none() {
-            return Err(crate::MicrosandboxError::local_only(
-                crate::error::Operation::SandboxModify,
-            ));
+        // Keep the binding API available in lean remote builds without applying
+        // an untracked cloud modification in place of the requested operation.
+        #[cfg(feature = "local")]
+        if self.backend.as_local().is_some() {
+            return local::apply(self, true).await;
         }
-        local::apply(self, true).await
+        Err(crate::MicrosandboxError::local_only(
+            crate::error::Operation::SandboxModify,
+        ))
     }
 
     /// The id of the Cloud sandbox this builder was taken from.
@@ -498,6 +499,19 @@ mod tests {
             "agent-1".to_owned(),
             crate::sandbox::SandboxConfig::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn tracked_resize_rejects_remote_without_applying_an_untracked_change() {
+        let sandbox = cloud_sandbox("http://127.0.0.1:1");
+        let result = sandbox.modify().cpus(2).apply_with_resize_tracking().await;
+        assert!(matches!(
+            result,
+            Err(MicrosandboxError::Unsupported {
+                op: Operation::SandboxModify,
+                reason: UnsupportedReason::LocalOnly,
+            })
+        ));
     }
 
     #[tokio::test]
