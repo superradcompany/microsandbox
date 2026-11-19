@@ -32,9 +32,27 @@ fn run_isolated(case: &str) {
     let home = builder.tempdir_in("/tmp").unwrap();
     #[cfg(target_os = "linux")]
     let home = builder.tempdir().unwrap();
+    // Resolve the installed runtime before selecting an empty per-case home. CI
+    // supplies a build directory; local invocations can keep their MSB_PATH.
+    let runtime = std::env::var_os("MSB_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            if let Some(directory) = std::env::var_os("MSB_TEST_RUNTIME_DIR") {
+                std::path::PathBuf::from(directory).join("msb")
+            } else {
+                std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME is required"))
+                    .join(".microsandbox/bin/msb")
+            }
+        });
+    assert!(
+        runtime.is_file(),
+        "missing test runtime: {}",
+        runtime.display()
+    );
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "isolated_vm", "--ignored", "--nocapture"])
         .env(CASE_ENV, case)
+        .env("MSB_PATH", runtime)
         .env("MSB_HOME", home.path())
         .env_remove("MSB_TEST_ISOLATE_HOME")
         .stdin(Stdio::null())
