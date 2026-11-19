@@ -261,6 +261,9 @@ async fn retirement_requires_proof_and_free_fences_then_allows_downgrade() {
         .unwrap();
     let lock =
         microsandbox_runtime::ipc::lifecycle_lock_path(&context.config().run_dir(), "retire");
+    let mut wrong_pid = run.clone();
+    wrong_pid.pid = Some(identity.pid + 1);
+    assert!(ProcessRecord::load(pools.read(), &wrong_pid).await.is_err());
     // Persist actual skewed timestamps. The kernel identity, not wall-clock
     // proximity or a terminal status, must remain authoritative on every read.
     for offset in [-3600, 0, 3600] {
@@ -356,9 +359,17 @@ async fn retirement_requires_proof_and_free_fences_then_allows_downgrade() {
     assert_eq!(retired.pid, None);
     assert_eq!(retired.started_at, run.started_at);
     assert_eq!(retired.status, run.status);
+    // A reader that started before retirement must observe completion without
+    // rejecting the changed PID or probing that stale PID again.
+    assert!(matches!(
+        LocalContext::recorded_runtime(pools.read(), Some(&run), &lock)
+            .await
+            .unwrap(),
+        RecordedRuntime::Dead
+    ));
     assert!(matches!(
         ProcessRecord::load(pools.read(), &retired).await.unwrap(),
-        LoadedProcessRecord::Missing
+        LoadedProcessRecord::Missing { .. }
     ));
     // Roll back with the sandbox and history intact, exercise the older named-column
     // contract, then upgrade again. Neither path invents process ownership.
@@ -375,7 +386,7 @@ async fn retirement_requires_proof_and_free_fences_then_allows_downgrade() {
     Migrator::up(pools.write().inner(), None).await.unwrap();
     assert!(matches!(
         ProcessRecord::load(pools.read(), &older).await.unwrap(),
-        LoadedProcessRecord::Missing
+        LoadedProcessRecord::Missing { .. }
     ));
     assert_eq!(
         context
@@ -444,7 +455,7 @@ async fn historical_retirement_preserves_other_live_and_future_records() {
     assert_eq!(old.pid, None);
     assert!(matches!(
         ProcessRecord::load(pools.read(), &old).await.unwrap(),
-        LoadedProcessRecord::Missing
+        LoadedProcessRecord::Missing { .. }
     ));
     assert!(matches!(
         ProcessRecord::load(pools.read(), &retained[0])

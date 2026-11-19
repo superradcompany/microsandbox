@@ -28,7 +28,7 @@ pub(super) struct ProcessRecord {
 }
 
 pub(super) enum LoadedProcessRecord {
-    Missing,
+    Missing { pid: Option<i32> },
     Known(ProcessRecord),
     Unsupported,
 }
@@ -78,25 +78,34 @@ impl ProcessRecord {
         db: &DbReadConnection,
         run: &run_entity::Model,
     ) -> MicrosandboxResult<LoadedProcessRecord> {
-        match Self::load_json(db, run).await? {
+        let (pid, json) = Self::load_row(db, run).await?;
+        match json {
             Some(json) => Self::decode(&json, run),
-            None => Ok(LoadedProcessRecord::Missing),
+            None => Ok(LoadedProcessRecord::Missing { pid }),
         }
     }
 
-    async fn load_json(
+    async fn load_row(
         db: &DbReadConnection,
         run: &run_entity::Model,
-    ) -> MicrosandboxResult<Option<String>> {
+    ) -> MicrosandboxResult<(Option<i32>, Option<String>)> {
         let row = db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Sqlite,
-                "SELECT process_identity FROM run WHERE id = ? AND sandbox_id = ? AND pid IS ?",
-                [run.id.into(), run.sandbox_id.into(), run.pid.into()],
+                "SELECT pid, process_identity FROM run WHERE id = ? AND sandbox_id = ?",
+                [run.id.into(), run.sandbox_id.into()],
             ))
             .await?
             .ok_or_else(|| invalid("run changed during identity lookup"))?;
-        Ok(row.try_get_by_index::<Option<String>>(0)?)
+        let pid = row.try_get_by_index::<Option<i32>>(0)?;
+        let json = row.try_get_by_index::<Option<String>>(1)?;
+        // Inspection may have captured the row just before guarded retirement.
+        // Accept only that atomic null/null transition, never a different PID or
+        // identity. Return the current PID so callers cannot revive the stale one.
+        if pid != run.pid && (pid.is_some() || json.is_some()) {
+            return Err(invalid("run changed during identity lookup"));
+        }
+        Ok((pid, json))
     }
 
     fn decode(json: &str, run: &run_entity::Model) -> MicrosandboxResult<LoadedProcessRecord> {
@@ -136,7 +145,7 @@ impl ProcessRecord {
             .all(pools.read())
             .await?;
         for run in runs {
-            let Some(json) = Self::load_json(pools.read(), &run).await? else {
+            let (_, Some(json)) = Self::load_row(pools.read(), &run).await? else {
                 continue;
             };
             let LoadedProcessRecord::Known(record) = Self::decode(&json, &run)? else {
