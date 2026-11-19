@@ -351,13 +351,13 @@ impl SharedState {
 
         let now = Instant::now();
         let mut index = self.resolved_hostnames.write();
-        let capacity = binding_capacity(&mut index, &key.hostname, now);
+        let capacity = Self::binding_capacity(&mut index, &key.hostname, now);
         if !index.try_extend(key.clone(), addrs.iter().copied(), ttl, now, capacity) {
             return false;
         }
 
         let mut recent = self.recent_hostnames.write();
-        let recent_capacity = binding_capacity(&mut recent, &key.hostname, now);
+        let recent_capacity = Self::binding_capacity(&mut recent, &key.hostname, now);
         let recent_ttl = ttl.saturating_add(self.revalidation_grace);
         let _ = recent.try_extend(key, addrs, recent_ttl, now, recent_capacity);
         true
@@ -406,7 +406,7 @@ impl SharedState {
         }
 
         let mut renewed = self.sni_renewed_hostnames.write();
-        let capacity = binding_capacity(&mut renewed, &key.hostname, now);
+        let capacity = Self::binding_capacity(&mut renewed, &key.hostname, now);
         renewed.try_extend(key, [addr], ttl, now, capacity)
     }
 
@@ -422,6 +422,33 @@ impl SharedState {
         self.sni_renewed_hostnames
             .read()
             .member_matches(&addr, Instant::now(), |key| key.hostname == hostname)
+    }
+
+    /// Total binding capacity for `try_extend` after evicting expired entries.
+    ///
+    /// Only new bindings consume slots, bounded by both the per-hostname and the
+    /// per-sandbox limit.
+    fn binding_capacity(
+        index: &mut TtlReverseIndex<ResolvedHostnameKey, IpAddr>,
+        hostname: &str,
+        now: Instant,
+    ) -> usize {
+        index.evict_expired(now);
+
+        let bindings_for = |family| {
+            index.member_count(&ResolvedHostnameKey {
+                hostname: hostname.to_owned(),
+                family,
+            })
+        };
+        let hostname_bindings =
+            bindings_for(ResolvedHostnameFamily::Ipv4) + bindings_for(ResolvedHostnameFamily::Ipv6);
+
+        let total_bindings = index.binding_count();
+        let hostname_slots = MAX_BINDINGS_PER_HOSTNAME.saturating_sub(hostname_bindings);
+        let sandbox_slots = MAX_RESOLVED_HOSTNAME_BINDINGS.saturating_sub(total_bindings);
+
+        total_bindings + hostname_slots.min(sandbox_slots)
     }
 
     /// Returns `true` when any resolved hostname for `addr` satisfies `predicate`.
@@ -566,33 +593,6 @@ impl Default for NetworkMetrics {
 
 pub(crate) fn normalize_hostname(domain: &str) -> String {
     domain.trim_end_matches('.').to_ascii_lowercase()
-}
-
-/// Total binding capacity for `try_extend` after evicting expired entries.
-///
-/// Only new bindings consume slots, bounded by both the per-hostname and the
-/// per-sandbox limit.
-fn binding_capacity(
-    index: &mut TtlReverseIndex<ResolvedHostnameKey, IpAddr>,
-    hostname: &str,
-    now: Instant,
-) -> usize {
-    index.evict_expired(now);
-
-    let bindings_for = |family| {
-        index.member_count(&ResolvedHostnameKey {
-            hostname: hostname.to_owned(),
-            family,
-        })
-    };
-    let hostname_bindings =
-        bindings_for(ResolvedHostnameFamily::Ipv4) + bindings_for(ResolvedHostnameFamily::Ipv6);
-
-    let total_bindings = index.binding_count();
-    let hostname_slots = MAX_BINDINGS_PER_HOSTNAME.saturating_sub(hostname_bindings);
-    let sandbox_slots = MAX_RESOLVED_HOSTNAME_BINDINGS.saturating_sub(total_bindings);
-
-    total_bindings + hostname_slots.min(sandbox_slots)
 }
 
 //--------------------------------------------------------------------------------------------------

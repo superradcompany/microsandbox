@@ -210,6 +210,10 @@ enum ChunkedPhase {
 struct SecretHostIdentity<'a> {
     guest_ip: IpAddr,
     shared: &'a SharedState,
+    /// Whether the host name came from TLS SNI, so an SNI revalidation of
+    /// that name may stand in for a live DNS binding. Plain-HTTP `Host`
+    /// values must not reuse a revalidation from a separate TLS connection.
+    tls_sni: bool,
 }
 
 /// Authority rule applied to inspected HTTP metadata.
@@ -548,7 +552,11 @@ impl SecretsHandler {
             config,
             sni,
             true,
-            Some(SecretHostIdentity { guest_ip, shared }),
+            Some(SecretHostIdentity {
+                guest_ip,
+                shared,
+                tls_sni: true,
+            }),
             Some(HttpAuthorityValidator::Sni(sni.to_string())),
             false,
         )
@@ -583,7 +591,11 @@ impl SecretsHandler {
             config,
             host,
             false,
-            Some(SecretHostIdentity { guest_ip, shared }),
+            Some(SecretHostIdentity {
+                guest_ip,
+                shared,
+                tls_sni: false,
+            }),
             Some(HttpAuthorityValidator::Sni(host.to_string())),
             false,
         )
@@ -600,6 +612,7 @@ impl SecretsHandler {
         let identity = (!host.is_empty()).then_some(SecretHostIdentity {
             guest_ip: guest_dst.ip(),
             shared: shared.as_ref(),
+            tls_sni: false,
         });
         Self::new_inner(
             config,
@@ -2353,7 +2366,7 @@ fn validate_authority(
                 authority_dst,
                 Protocol::Tcp,
                 shared,
-                HostnameSource::Sni(&hostname),
+                HostnameSource::HttpAuthority(&hostname),
             ) {
                 EgressEvaluation::Allow => Ok(()),
                 EgressEvaluation::Deny | EgressEvaluation::DeferUntilHostname => {
@@ -2715,13 +2728,13 @@ fn host_pattern_allowed(
         return true;
     };
 
-    // `pattern` already matched `sni`, so a revalidation of that exact name
-    // proves the same binding a DNS answer would.
+    // `pattern` already matched `sni`, so a revalidation of that exact TLS
+    // name proves the same binding a DNS answer would.
     host_alias_matches(pattern, sni, identity)
         || identity
             .shared
             .any_resolved_hostname(identity.guest_ip, |hostname| pattern.matches(hostname))
-        || identity.shared.sni_renewed_hostname(identity.guest_ip, sni)
+        || (identity.tls_sni && identity.shared.sni_renewed_hostname(identity.guest_ip, sni))
 }
 
 fn host_alias_matches(pattern: &HostPattern, sni: &str, identity: &SecretHostIdentity<'_>) -> bool {
@@ -3670,6 +3683,39 @@ mod tests {
             Arc::new(NetworkPolicy::allow_all()),
             shared,
         )
+    }
+
+    #[test]
+    fn sni_revalidation_proves_secret_identity_only_for_tls() {
+        let ip = Ipv4Addr::new(203, 0, 113, 10);
+        let shared = SharedState::new(16);
+        shared.cache_resolved_hostname(
+            "a.example",
+            ResolvedHostnameFamily::Ipv4,
+            [IpAddr::V4(ip)],
+            Duration::ZERO,
+        );
+        assert!(shared.renew_recent_resolved_hostname(
+            "a.example",
+            ResolvedHostnameFamily::Ipv4,
+            IpAddr::V4(ip),
+            Duration::from_secs(60),
+        ));
+        let mut secret = make_secret("$KEY", "real-secret", "a.example");
+        secret.require_tls_identity = false;
+        let config = make_config(vec![secret]);
+        let request = b"GET / HTTP/1.1\r\nHost: a.example\r\nAuth: $KEY\r\n\r\n";
+
+        let mut tls = SecretsHandler::new_tls_intercepted(&config, "a.example", ip.into(), &shared);
+        let substituted = tls.substitute(request).unwrap();
+        assert!(String::from_utf8_lossy(&substituted).contains("Auth: real-secret"));
+
+        // Plain HTTP to the same address must not borrow the TLS revalidation.
+        let mut plain = SecretsHandler::new_plain_http(&config, "a.example", ip.into(), &shared);
+        let leaked = plain
+            .substitute(request)
+            .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains("real-secret"));
+        assert!(!leaked);
     }
 
     #[test]

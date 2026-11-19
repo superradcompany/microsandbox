@@ -1896,6 +1896,16 @@ mod tests {
             EgressEvaluation::Deny,
             "the renewal covers only the revalidated name"
         );
+        assert_eq!(
+            policy.evaluate_egress_with_source(
+                SocketAddr::new(cached.into(), 80),
+                Protocol::Tcp,
+                &forwarder.shared,
+                HostnameSource::HttpAuthority("example.com"),
+            ),
+            EgressEvaluation::Deny,
+            "plain HTTP must not borrow a TLS revalidation"
+        );
 
         assert_eq!(resolve_via_gateway(&forwarder).await, None);
         assert_eq!(
