@@ -30,7 +30,10 @@
 //! a stale record retaining unused files until normal sandbox cleanup removes the dependency.
 
 mod cleanup;
+mod disk_editor;
+mod replacement;
 mod restore;
+mod root_growth;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -98,6 +101,12 @@ struct ResolvedOciImage {
     cached_metadata: Option<CachedImageMetadata>,
 }
 
+/// Only the OCI architecture is needed to check historical disk launches.
+#[derive(serde::Deserialize)]
+struct ImagePlatform<'a> {
+    architecture: Option<&'a str>,
+}
+
 /// Short-lived ownership of one sandbox name while persisted state or host resources change.
 ///
 /// The file handle owns a process-held lock. Closing it releases the lock on both Unix and
@@ -126,7 +135,49 @@ impl LocalContext {
         mode: SpawnMode,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<Sandbox> {
-        let mut builder = input.into();
+        let mut attempt = None;
+        let result = Box::pin(self.create_with_replacement(
+            backend,
+            input.into(),
+            mode,
+            progress,
+            &mut attempt,
+        ))
+        .await;
+        let Some(attempt) = attempt else {
+            return result;
+        };
+        let recovered = Box::pin(self.finish_replacement(&attempt)).await;
+        match (result, recovered) {
+            (Err(error), Ok(true)) => Err(MicrosandboxError::ReplacementStopped {
+                name: attempt.name,
+                original_id: attempt.original,
+                source: Box::new(error),
+            }),
+            (Err(error), Err(recovery)) => Err(MicrosandboxError::ReplacementRecoveryPending {
+                name: attempt.name,
+                original_id: attempt.original,
+                source: Box::new(error),
+                recovery: Box::new(recovery),
+            }),
+            (Ok(sandbox), Err(error)) => {
+                // The replacement has published. Reporting a launch failure here
+                // would invite callers to repeat an already successful mutation.
+                tracing::warn!(sandbox = %attempt.name, %error, "replacement published with original cleanup pending");
+                Ok(sandbox)
+            }
+            (result, Ok(_)) => result,
+        }
+    }
+
+    async fn create_with_replacement(
+        &self,
+        backend: Arc<dyn Context>,
+        mut builder: SandboxBuilder,
+        mode: SpawnMode,
+        progress: Option<PullProgressSender>,
+        attempt: &mut Option<replacement::Attempt>,
+    ) -> MicrosandboxResult<Sandbox> {
         let options = builder.prepare(backend.clone()).await?;
         tracing::Span::current().record(
             "sandbox_name",
@@ -233,11 +284,11 @@ impl LocalContext {
         launch_contract::validate_runtime_config(&config, self.config()).await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         // Installed sources and archives have separate materialization paths.
-        let installed_checkpoint_restore = config.checkpoint_restore.take();
-        let installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
+        let mut installed_checkpoint_restore = config.checkpoint_restore.take();
+        let mut installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
         let installed_file_virtual_size = config.snapshot_root_virtual_size.take();
 
-        let archive_stage = if let Some(archive) = config.snapshot_archive_source.clone() {
+        let mut archive_stage = if let Some(archive) = config.snapshot_archive_source.clone() {
             let stage = RestoreStaging::reserve(backend.clone(), self, &config).await?;
 
             let admitted = async {
@@ -296,6 +347,133 @@ impl LocalContext {
             None
         };
 
+        let direct_flat = matches!(
+            config.spec.image.oci_root_disk(),
+            Some(RootDisk::Flat { .. })
+        ) && config.branch_source.is_none()
+            && config.checkpoint_restore.is_none()
+            && (config.snapshot_upper_source.is_some()
+                || !config.snapshot_upper_layers.is_empty()
+                || !installed_file_sources.is_empty());
+        let edit_child =
+            (config.snapshot_disk_edits || direct_flat) && !config.spec.patches.is_empty();
+        if config.snapshot_root_growth_mib.is_some() || edit_child {
+            // The complete disk/filesystem rewrite must succeed before replacement can
+            // stop the old sandbox. The worker owns staging and source leases through
+            // caller cancellation; publication later moves the directory without copying.
+            let stage = match archive_stage.take() {
+                Some(stage) => stage,
+                None => RestoreStaging::reserve(backend.clone(), self, &config).await?,
+            };
+            let storage = stage.storage.clone();
+            let prepared = root_growth::prepare_owned(
+                config,
+                std::mem::take(&mut installed_file_sources),
+                installed_file_virtual_size,
+                installed_checkpoint_restore.take(),
+                stage,
+                storage,
+                self.config().fs_state_limit(),
+            )
+            .await?;
+            config = prepared.0;
+            archive_stage = Some(prepared.1);
+        }
+
+        let _prepared_snapshot_sources = config.snapshot_prepared_sources.take();
+
+        // Resolve the captured base while the old destination is still intact. In particular,
+        // an offline cache miss must not stop/delete a sandbox before returning an error.
+        // Keep the image's cache lease through the existing materialization/publication path.
+        // Branch capture resolves its source later, so leave that path's ordering unchanged.
+        let has_snapshot_image = config.snapshot_upper_source.is_some()
+            || config.checkpoint_restore.is_some()
+            || !config.snapshot_upper_layers.is_empty()
+            || installed_checkpoint_restore.is_some()
+            || !installed_file_sources.is_empty();
+        if resolved_image.is_none()
+            && has_snapshot_image
+            && config.branch_source.is_none()
+            && let RootfsSource::Oci(oci) = &config.spec.image
+        {
+            // Preserve option admission ahead of image/cache effects. Direct resolved
+            // snapshot inputs can bypass the public builder's reference-based check.
+            if !edit_child && !config.spec.patches.is_empty() {
+                let source = if config.snapshot_upper_source.is_some() {
+                    "from_snapshot"
+                } else {
+                    "full snapshot restore"
+                };
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "patches cannot be combined with {source}"
+                )));
+            }
+            let materialization = if matches!(oci.root_disk, Some(RootDisk::Flat { .. })) {
+                RootfsMaterialization::Flat
+            } else {
+                RootfsMaterialization::Layered
+            };
+            let registry = RegistryOptions {
+                auth: config.registry_auth.clone(),
+                insecure: config.insecure,
+                ca_certs: config.ca_certs.clone(),
+                ..Default::default()
+            };
+            let mut image = timing::measure(
+                &timing_name,
+                "image_resolution",
+                self.resolve_oci_image_for_create(
+                    &oci.reference,
+                    config.spec.pull_policy,
+                    registry,
+                    config.manifest_digest.as_deref(),
+                    materialization,
+                    progress.clone(),
+                ),
+            )
+            .await?;
+            // Read the selected platform config under the image lease, before a disk
+            // editor can boot or replacement can stop the existing destination.
+            if image.cached_metadata.is_none() {
+                let reference = image
+                    .metadata_reference
+                    .parse::<Reference>()
+                    .map_err(|e| MicrosandboxError::InvalidConfig(e.to_string()))?;
+                image.cached_metadata = image
+                    .cache_operation
+                    .read_image_metadata_async(&reference)
+                    .await?;
+            }
+            let metadata = image.cached_metadata.as_ref().ok_or_else(|| {
+                MicrosandboxError::ImageNotFound(image.metadata_reference.clone())
+            })?;
+            validate_snapshot_image_architecture(&metadata.raw_config_json)?;
+            resolved_image = Some(image);
+        }
+
+        if edit_child {
+            let runtime = crate::setup::resolve_runtime(self.config())?;
+            let image = resolved_image.take().ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(
+                    "snapshot edits require the captured OCI root".into(),
+                )
+            })?;
+            let stage = archive_stage
+                .take()
+                .expect("child preparation reserved staging");
+            let (prepared, edited_stage, image) = disk_editor::apply(
+                config,
+                stage,
+                runtime.msb_path,
+                runtime.libkrunfw_path,
+                image,
+            )
+            .await?;
+            config = prepared;
+            archive_stage = Some(edited_stage);
+            resolved_image = Some(image);
+        }
+
         // Transition ownership is deliberately separate from the runtime lifecycle lock: this
         // guard serializes database/storage mutation and launcher-to-runtime handoff, while the
         // lifecycle lock remains owned by the VM for its entire runtime generation.
@@ -305,13 +483,22 @@ impl LocalContext {
             Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name),
         )
         .await?;
+        Box::pin(self.recover_replacement(&config.spec.name, None)).await?;
         if config.replace_existing {
             self.remove_interrupted_create_for_replacement(db, &config)
                 .await?;
         }
 
         let preparation = CreationStorage::acquire(self, &config.spec.name)?;
-        Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
+        Self::prepare_create_target(
+            db,
+            &config,
+            &sandbox_dir,
+            &self.config().run_dir(),
+            Some(self),
+            attempt,
+        )
+        .await?;
         // Hold the existing lifecycle lock across reservation, capture and spawn. Recheck
         // under the lock so two creates cannot both own the same child staging directory.
         let lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
@@ -324,13 +511,17 @@ impl LocalContext {
 
         // Persist ownership before any deterministic sandbox path is created. An interrupted
         // insert can leave a row, but never untracked storage.
-        let reserved_config = config.clone_for_persistence();
+        let mut reserved_config = config.clone_for_persistence();
+        // Persistence strips the captured agent advertisement. Carry its selected policy
+        // to the reservation transaction separately from the legacy configuration JSON.
+        reserved_config.restored_exec_limits = config.retained_exec_limits();
         let reserved_config_json = serde_json::to_string(&reserved_config)?;
-        let sandbox_id = Self::insert_sandbox_record_impl(
+        let sandbox_id = Self::insert_with_replacement(
             db.write(),
             &reserved_config,
             SandboxStatus::Starting,
             true,
+            attempt.as_ref().and_then(|a| a.token.as_deref()),
         )
         .await?;
 
@@ -366,6 +557,7 @@ impl LocalContext {
                         &mut config,
                         &source,
                         preparation,
+                        sandbox_id,
                     )
                     .await?;
 
@@ -395,6 +587,29 @@ impl LocalContext {
                                 self.config().fs_state_limit(),
                             )
                             .await?;
+                            #[cfg(feature = "net")]
+                            {
+                                let tls = config.spec.network.tls.as_ref();
+                                // An explicit destination signer takes precedence and the
+                                // runtime checks it against the captured proxy fingerprint.
+                                if tls.is_none_or(|t| t.enabled && t.intercept_ca.cert_path.is_none()
+                                    && t.intercept_ca.key_path.is_none())
+                                {
+                                    let expected = microsandbox_image::checkpoint::ObjectId::new(&source.checkpoint_root)
+                                        .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
+                                    let checkpoint = microsandbox_image::checkpoint::CheckpointClosure::inspect_manifest(
+                                        &source.closure, Some(&expected),
+                                    ).map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
+                                    let artifact = source.closure.parent().ok_or_else(|| MicrosandboxError::SnapshotIntegrity("checkpoint has no artifact directory".into()))?;
+                                    if let Some(ca) = microsandbox_runtime::checkpoint::tls_receipt::restore(
+                                        &self.config().home(), sandbox_id, artifact, &checkpoint.resources, &source.checkpoint_root,
+                                    ).map_err(MicrosandboxError::Runtime)? {
+                                        let tls = config.spec.network.tls.get_or_insert_with(Default::default);
+                                        tls.enabled = true;
+                                        tls.intercept_ca = ca;
+                                    }
+                                }
+                            }
                             config.checkpoint_restore = Some(materialized.restore);
                             crate::snapshot::apply_additional_disks(
                                 &mut config,
@@ -874,6 +1089,22 @@ impl LocalContext {
                     },
                 )
                 .await?;
+                #[cfg(feature = "net")]
+                if !restoring
+                    && config.spec.network.enabled
+                    && let Some(tls) = config.spec.network.tls.as_mut()
+                    && tls.enabled
+                    && tls.intercept_ca.cert_path.is_none()
+                    && tls.intercept_ca.key_path.is_none()
+                {
+                    // Persist ordinary explicit CA paths so restarts (including
+                    // previous compatible runtimes) reopen exactly this identity.
+                    tls.intercept_ca = microsandbox_runtime::checkpoint::tls_identity::provision(
+                        &self.config().home(),
+                        sandbox_id,
+                    )
+                    .map_err(MicrosandboxError::Runtime)?;
+                }
                 Ok::<_, MicrosandboxError>((volumes, _branch_pin))
             })
             .await
@@ -937,6 +1168,9 @@ impl LocalContext {
             .checkpoint_restore
             .as_ref()
             .map(|restore| restore.closure.clone());
+        // Keep the large launch future out of this outer future's inline storage.
+        // Nested group restores can otherwise exhaust a default-sized thread stack
+        // in debug builds. Poll it here so ownership and cancellation stay unchanged.
         let created =
             Box::pin(self.create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard)))
                 .await;
@@ -971,7 +1205,7 @@ impl LocalContext {
         )
         .await
         {
-            sandbox.terminate_creation_owner().await;
+            let err = sandbox.creation_failure(err).await;
             return Err(creation_cleanup.finish_failure(err).await);
         }
 
@@ -994,7 +1228,7 @@ impl LocalContext {
         }
         .await;
         if let Err(error) = validated {
-            sandbox.terminate_creation_owner().await;
+            let error = sandbox.creation_failure(error).await;
             // A bounded termination attempt can expire before runtime ownership ends.
             // Keep the original failure, but never remove storage without the lifecycle lock.
             self.rollback_failed_startup(
@@ -1019,7 +1253,7 @@ impl LocalContext {
             )
             .await
             {
-                sandbox.terminate_creation_owner().await;
+                let error = sandbox.creation_failure(error).await;
                 return Err(creation_cleanup.finish_failure(error).await);
             }
             if let Err(error) = remove_dir_if_exists(&closure) {
@@ -1122,6 +1356,11 @@ impl LocalContext {
         } else {
             self.rollback_created_named_volumes(created_named_volumes)
                 .await?;
+            microsandbox_runtime::checkpoint::remove_sandbox_identity(
+                &self.config().home(),
+                sandbox_id,
+            )
+            .map_err(MicrosandboxError::Runtime)?;
             Self::delete_sandbox_record(write_db, sandbox_id).await?;
         }
         Ok(())
@@ -1543,13 +1782,16 @@ impl LocalContext {
         let original_ref: Reference = reference.parse().map_err(|e| {
             MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
         })?;
-        if let Some((pull_result, metadata)) = Registry::pull_snapshot_cached(
-            &cache,
-            &[pinned_ref.clone(), original_ref],
-            &manifest_digest,
-            materialization,
-        )
-        .await?
+        // Explicit Always revalidates the immutable registry reference even when
+        // metadata is cached. The other policies may restore entirely offline.
+        if pull_policy != PullPolicy::Always
+            && let Some((pull_result, metadata)) = Registry::pull_snapshot_cached(
+                &cache,
+                &[pinned_ref.clone(), original_ref],
+                &manifest_digest,
+                materialization,
+            )
+            .await?
         {
             Self::emit_cached_pull_progress(progress.as_ref(), reference, &metadata);
             return Ok(ResolvedOciImage {
@@ -1816,6 +2058,8 @@ impl LocalContext {
         config: &SandboxConfig,
         sandbox_dir: &Path,
         run_dir: &Path,
+        local: Option<&Self>,
+        attempt: &mut Option<replacement::Attempt>,
     ) -> MicrosandboxResult<()> {
         if !config.replace_existing {
             return Self::check_create_target(pools, &config.spec.name, sandbox_dir).await;
@@ -1834,6 +2078,16 @@ impl LocalContext {
                     sandbox_dir.display()
                 ))
             })?;
+            let _lineage =
+                crate::snapshot::lineage::lock_source(run_dir, &config.spec.name).await?;
+            *attempt = Some(replacement::Attempt {
+                name: config.spec.name.clone(),
+                original: model.id,
+                token: None,
+            });
+            if model.ephemeral {
+                replacement::retain_ephemeral(pools.write(), model.id).await?;
+            }
             let model = Self::reconcile_sandbox_runtime_state_owned(
                 pools,
                 model,
@@ -1846,12 +2100,15 @@ impl LocalContext {
                 SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
             );
             if active {
-                Self::stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout)
-                    .await?;
+                Self::stop_sandbox_for_replacement(
+                    pools,
+                    &model,
+                    config.replace_with_timeout,
+                    local,
+                )
+                .await?;
             }
 
-            let _lineage =
-                crate::snapshot::lineage::lock_source(run_dir, &config.spec.name).await?;
             let _guard = crate::runtime::acquire_sandbox_lifecycle_guard(
                 run_dir,
                 &config.spec.name,
@@ -1880,11 +2137,14 @@ impl LocalContext {
             }
 
             socket_paths.runtime.remove_artifacts()?;
-            remove_dir_if_exists(sandbox_dir)?;
-
-            sandbox_entity::Entity::delete_by_id(model.id)
-                .exec(pools.write())
-                .await?;
+            replacement::park(
+                pools.write(),
+                &config.spec.name,
+                model.id,
+                sandbox_dir,
+                attempt,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -1912,15 +2172,7 @@ impl LocalContext {
         run_dir: &Path,
         name: &str,
     ) -> MicrosandboxResult<SandboxTransitionGuard> {
-        let path = sandbox_transition_lock_path(run_dir, name);
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("transition lock has no parent: {}", path.display()),
-            )
-        })?;
-        tokio::fs::create_dir_all(parent).await?;
-        let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+        let file = open_transition_lock(run_dir, name).await?;
 
         // LockFileEx/flock is process-wide coordination, but the nonblocking form is a short
         // syscall. Polling it asynchronously avoids pinning one blocking-pool thread per waiter
@@ -1948,6 +2200,7 @@ impl LocalContext {
         pools: &DbPools,
         sandbox: &sandbox_entity::Model,
         grace: std::time::Duration,
+        local: Option<&Self>,
     ) -> MicrosandboxResult<()> {
         let run = Self::load_active_run(pools.read(), sandbox.id).await?;
         let pids: Vec<i32> = run
@@ -1960,10 +2213,33 @@ impl LocalContext {
         if !pids.is_empty() {
             // Polite phase: SIGTERM and wait up to `grace` for graceful exit.
             if !grace.is_zero() {
-                for pid in &pids {
-                    let _ = Self::terminate_pid_gracefully(*pid);
+                let deadline = tokio::time::Instant::now() + grace;
+                // The guest shutdown handler flushes dirty disks. Sending the host
+                // process SIGTERM first can discard an already returned guest write.
+                let requested = if let Some(local) = local
+                    && sandbox.status == SandboxStatus::Running
+                {
+                    matches!(
+                        tokio::time::timeout_at(
+                            deadline,
+                            local.request_agent_shutdown(&sandbox.name, sandbox.id)
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    )
+                } else {
+                    false
+                };
+                if !requested {
+                    for pid in &pids {
+                        let _ = Self::terminate_pid_gracefully(*pid);
+                    }
                 }
-                Self::wait_for_pids_to_exit(&pids, grace).await;
+                Self::wait_for_pids_to_exit(
+                    &pids,
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                )
+                .await;
             }
 
             // SIGKILL anything still alive, then prove every recorded owner
@@ -2142,7 +2418,8 @@ impl LocalContext {
         if !creation::pending(pools.write(), model.id).await? {
             return Ok(());
         }
-        Self::stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout).await?;
+        Self::stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout, None)
+            .await?;
         let _lineage =
             crate::snapshot::lineage::lock_source(&self.config().run_dir(), &model.name).await?;
         let _runtime = crate::runtime::acquire_sandbox_lifecycle_guard(
@@ -2187,6 +2464,16 @@ impl LocalContext {
         status: SandboxStatus,
         reserve: bool,
     ) -> MicrosandboxResult<i32> {
+        Self::insert_with_replacement(db, config, status, reserve, None).await
+    }
+
+    async fn insert_with_replacement(
+        db: &DbWriteConnection,
+        config: &SandboxConfig,
+        status: SandboxStatus,
+        reserve: bool,
+        token: Option<&str>,
+    ) -> MicrosandboxResult<i32> {
         let config_json = serde_json::to_string(config)?;
         let caller_config_overrides_json = config.caller_config_overrides_json(&config_json)?;
         let labels = config.spec.labels.clone();
@@ -2207,8 +2494,20 @@ impl LocalContext {
                     updated_at: Set(Some(now)),
                     ..Default::default()
                 };
+                if let Some(token) = token {
+                    let admitted = txn.execute_raw(Statement::from_sql_and_values(
+                        DatabaseBackend::Sqlite,
+                        "UPDATE sandbox_replacement SET admitting = 1 WHERE name = ? AND token = ? AND candidate IS NULL",
+                        [config.spec.name.as_str().into(), token.into()],
+                    )).await?;
+                    if admitted.rows_affected() != 1 {
+                        return Err(MicrosandboxError::Runtime("lost replacement admission before reservation".into()));
+                    }
+                }
                 let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
                 let sandbox_id = result.last_insert_id;
+                microsandbox_runtime::command_bindings::install(&txn, sandbox_id, &config.deferred_command_bindings).await?;
+                microsandbox_runtime::restored_exec_limits::install(&txn, sandbox_id, config.retained_exec_limits()).await?;
                 if reserve {
                     txn.execute_raw(Statement::from_sql_and_values(
                         DatabaseBackend::Sqlite,
@@ -2359,6 +2658,37 @@ impl LocalContext {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Historical file checkpoints can carry architecture only in the pinned OCI config.
+/// Without recognizable source evidence, preserve their existing launch behavior.
+fn validate_snapshot_image_architecture(raw_config: &str) -> MicrosandboxResult<()> {
+    let Ok(ImagePlatform {
+        architecture: Some(arch),
+    }) = serde_json::from_str(raw_config)
+    else {
+        return Ok(());
+    };
+    let source = match arch {
+        "amd64" | "x86_64" => "x86_64",
+        "arm64" | "aarch64" => "aarch64",
+        other
+            if matches!(
+                microsandbox_image::Arch::from(other),
+                microsandbox_image::Arch::Other(_)
+            ) =>
+        {
+            return Ok(());
+        }
+        other => other,
+    };
+    let host = std::env::consts::ARCH;
+    if source != host {
+        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+            "checkpoint architecture {source} cannot restore on {host}"
+        )));
+    }
+    Ok(())
+}
+
 /// Repoint only extracted child-owned paths after same-filesystem publication.
 /// Disk headers use relative basenames, so moving the whole directory preserves
 /// root and owned-volume chains without rewriting or copying their contents.
@@ -2420,6 +2750,18 @@ fn relay_readiness_timeout(
 }
 
 /// Derive a stable, filesystem-safe transition-lock path for one sandbox name.
+async fn open_transition_lock(run_dir: &Path, name: &str) -> MicrosandboxResult<File> {
+    let path = sandbox_transition_lock_path(run_dir, name);
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("transition lock has no parent: {}", path.display()),
+        )
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    Ok(microsandbox_utils::process_lock::open_lock_file(&path)?)
+}
+
 fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
     microsandbox_runtime::ipc::sandbox_transition_lock_path(run_dir, name)
 }
@@ -2733,6 +3075,35 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn snapshot_architecture_uses_only_known_oci_evidence() {
+        for config in [
+            "{}",
+            r#"{"architecture":null}"#,
+            r#"{"architecture":"unknown"}"#,
+        ] {
+            super::validate_snapshot_image_architecture(config).unwrap();
+        }
+        let host = std::env::consts::ARCH;
+        let native = microsandbox_image::Platform::host_linux().arch.to_string();
+        let foreign = if host == "x86_64" { "arm64" } else { "amd64" };
+        for name in [native.as_str(), host] {
+            super::validate_snapshot_image_architecture(
+                &serde_json::json!({"architecture": name}).to_string(),
+            )
+            .unwrap();
+        }
+        let error = super::validate_snapshot_image_architecture(
+            &serde_json::json!({"architecture": foreign}).to_string(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("cannot restore on {host}"))
+        );
     }
 
     #[test]
@@ -3234,6 +3605,158 @@ esac
         exercise_failed_startup_rollback(true, SandboxStatus::Running).await;
     }
 
+    #[tokio::test]
+    async fn deferred_command_reservation_installs_guard_atomically_and_deletes_it_with_destination()
+     {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("test.db")).await;
+        let db = pools.write();
+        let mut config = test_config("bound");
+        config
+            .deferred_command_bindings
+            .env
+            .insert("TOKEN".into(), "token".into());
+        let sandbox_id = LocalContext::insert_sandbox_record(db, &config)
+            .await
+            .unwrap();
+        let try_legacy_run = |id| {
+            run_entity::Entity::insert(run_entity::ActiveModel {
+                sandbox_id: Set(id),
+                status: Set(run_entity::RunStatus::Running),
+                ..Default::default()
+            })
+            .exec(db)
+        };
+        assert!(
+            try_legacy_run(sandbox_id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("outstanding command bindings")
+        );
+        let ordinary = LocalContext::insert_sandbox_record(db, &test_config("ordinary"))
+            .await
+            .unwrap();
+        assert!(try_legacy_run(ordinary).await.is_ok());
+        let persisted = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!persisted.config.contains("token"));
+        let guard_count = || {
+            db.query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT count(*) AS n FROM sandbox_command_bindings",
+            ))
+        };
+        assert_eq!(
+            guard_count()
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "n")
+                .unwrap(),
+            1
+        );
+        LocalContext::delete_sandbox_record(db, sandbox_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            guard_count()
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "n")
+                .unwrap(),
+            0
+        );
+
+        config
+            .deferred_command_bindings
+            .env
+            .insert("BAD=KEY".into(), "token".into());
+        assert!(
+            LocalContext::insert_sandbox_record(db, &config)
+                .await
+                .is_err()
+        );
+        assert!(
+            sandbox_entity::Entity::find()
+                .filter(sandbox_entity::Column::Name.eq("bound"))
+                .one(db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_execution_limits_guard_only_the_restored_sandbox() {
+        use microsandbox_types::ExecLimits;
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("limits.db")).await;
+        let db = pools.write();
+        let mut config = test_config("limited");
+        config.restored_exec_limits = Some(ExecLimits {
+            max_executions: 2,
+            ..Default::default()
+        });
+        let limited = LocalContext::insert_sandbox_record(db, &config)
+            .await
+            .unwrap();
+        let try_legacy_start = |id| {
+            run_entity::Entity::insert(run_entity::ActiveModel {
+                sandbox_id: Set(id),
+                status: Set(run_entity::RunStatus::Running),
+                ..Default::default()
+            })
+            .exec(db)
+        };
+        assert!(
+            try_legacy_start(limited)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("saved execution limits")
+        );
+
+        let mut ordinary = test_config("ordinary");
+        ordinary.restored_exec_limits = Some(ExecLimits::default());
+        let id = LocalContext::insert_sandbox_record(db, &ordinary)
+            .await
+            .unwrap();
+        try_legacy_start(id).await.unwrap();
+        LocalContext::delete_sandbox_record(db, limited)
+            .await
+            .unwrap();
+        let any_policy = db
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT 1 FROM sandbox_restored_exec_limits LIMIT 1",
+            ))
+            .await
+            .unwrap();
+        assert!(any_policy.is_none());
+
+        config.restored_exec_limits.as_mut().unwrap().max_executions = 0;
+        assert!(
+            LocalContext::insert_sandbox_record(db, &config)
+                .await
+                .is_err()
+        );
+        assert!(
+            sandbox_entity::Entity::find()
+                .filter(sandbox_entity::Column::Name.eq("limited"))
+                .one(db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     fn test_config(name: impl Into<String>) -> SandboxConfig {
         SandboxConfig {
             spec: microsandbox_types::SandboxSpec {
@@ -3295,6 +3818,113 @@ esac
         backend
             .validate_sandbox_name_for_runtime("sdk-socket-test")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_root_growth_policy_refuses_before_staging_or_replacement() {
+        // Keep policy admission ahead of the unrelated Unix socket path-length guard.
+        #[cfg(unix)]
+        let temp = tempfile::Builder::new()
+            .prefix("msb-growth-policy-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        #[cfg(not(unix))]
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::write(
+            home.join("managed.json"),
+            r#"{"overrides":{"sandbox_defaults":{"oci":{"root_disk":{"kind":"managed","size_mib":512}}}}}"#,
+        )
+        .unwrap();
+        // Managed policy is security-sensitive; do not depend on the host's umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(home.join("managed.json"), fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let backend = Arc::new(
+            crate::test_support::local_backend_builder(&home)
+                .build()
+                .unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_value(&backend.config().sandbox_defaults.oci.root_disk).unwrap()["size_mib"],
+            512
+        );
+        let pools = backend.db().await.unwrap();
+        let mut config = test_config_with_rootfs(
+            "protected",
+            RootfsSource::oci("example.invalid/saved:latest"),
+        );
+        let RootfsSource::Oci(image) = &mut config.spec.image else {
+            unreachable!()
+        };
+        image.root_disk = Some(crate::sandbox::RootDisk::managed(256));
+        config.spec.pull_policy = PullPolicy::Never;
+        let id = LocalContext::insert_sandbox_record_with_status(
+            pools.write(),
+            &config,
+            SandboxStatus::Stopped,
+        )
+        .await
+        .unwrap();
+        let original = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let directory = backend.sandboxes_dir().join("protected");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("keep"), b"existing destination").unwrap();
+
+        // The policy check must win before even opening a snapshot disk. An invalid
+        // sentinel makes accidental filesystem preparation fail with a different error.
+        let source = temp.path().join("sealed.raw");
+        fs::write(&source, b"sealed source must not be opened for growth").unwrap();
+        config.snapshot_parent = Some("captured".into());
+        config.snapshot_upper_layers = vec![microsandbox_runtime::launch::RootfsUpperLayerConfig {
+            path: source.clone(),
+            format: "raw".into(),
+        }];
+        config.snapshot_root_growth_mib = Some(1024);
+        config.replace_existing = true;
+        let error = match backend
+            .create_sandbox(backend.clone(), config, SpawnMode::Attached, None)
+            .await
+        {
+            Ok(_) => panic!("managed disk policy must reject conflicting growth"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("1024 MiB conflicts with managed root capacity 512 MiB"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            b"sealed source must not be opened for growth"
+        );
+        assert_eq!(
+            fs::read(directory.join("keep")).unwrap(),
+            b"existing destination"
+        );
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read_dir(backend.sandboxes_dir()).unwrap().count(),
+            1,
+            "policy refusal must not create a private staging directory"
+        );
     }
 
     #[tokio::test]
@@ -3933,9 +4563,16 @@ esac
         let config = test_config("existing");
 
         let run_dir = temp.path().join("run");
-        let err = LocalContext::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
-            .await
-            .unwrap_err();
+        let err = LocalContext::prepare_create_target(
+            &pools,
+            &config,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("already exists"));
     }
 
@@ -3951,9 +4588,16 @@ esac
         let winner = LocalContext::acquire_sandbox_transition_guard(&run_dir, "contended")
             .await
             .unwrap();
-        LocalContext::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
-            .await
-            .unwrap();
+        LocalContext::prepare_create_target(
+            &pools,
+            &config,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap();
         LocalContext::insert_sandbox_record(pools.write(), &config)
             .await
             .unwrap();
@@ -3985,6 +4629,8 @@ esac
                 &test_config("contended"),
                 &contender_sandbox_dir,
                 &contender_run_dir,
+                None,
+                &mut None,
             )
             .await
         });
@@ -4037,10 +4683,16 @@ esac
                 .await
                 .unwrap();
 
-            let error =
-                LocalContext::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
-                    .await
-                    .expect_err("replacement must preserve a live legacy runtime");
+            let error = LocalContext::prepare_create_target(
+                &pools,
+                &config,
+                &sandbox_dir,
+                &run_dir,
+                None,
+                &mut None,
+            )
+            .await
+            .expect_err("replacement must preserve a live legacy runtime");
             assert!(matches!(
                 error,
                 crate::MicrosandboxError::SandboxStillRunning(_)
@@ -4058,9 +4710,16 @@ esac
 
             drop(listener);
             fs::remove_file(&socket).unwrap();
-            LocalContext::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
-                .await
-                .unwrap();
+            LocalContext::prepare_create_target(
+                &pools,
+                &config,
+                &sandbox_dir,
+                &run_dir,
+                None,
+                &mut None,
+            )
+            .await
+            .unwrap();
             assert!(!sandbox_dir.exists());
             if let Some(id) = sandbox_id {
                 assert!(
@@ -4068,7 +4727,7 @@ esac
                         .one(pools.read())
                         .await
                         .unwrap()
-                        .is_none()
+                        .is_some_and(|row| row.name.starts_with(".msb-retained-"))
                 );
             }
         }
@@ -4110,9 +4769,16 @@ esac
             paths.publish_legacy_control_link(&paths.control).unwrap();
             paths
         };
-        LocalContext::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)
-            .await
-            .unwrap();
+        LocalContext::prepare_create_target(
+            &pools,
+            &forced,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap();
 
         assert!(!sandbox_dir.exists());
         #[cfg(unix)]
@@ -4130,7 +4796,7 @@ esac
                 .one(pools.write())
                 .await
                 .unwrap()
-                .is_none()
+                .is_some_and(|row| row.name.starts_with(".msb-retained-"))
         );
     }
 
@@ -4162,9 +4828,16 @@ esac
         forced.replace_existing = true;
 
         let run_dir = temp.path().join("run");
-        LocalContext::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)
-            .await
-            .unwrap();
+        LocalContext::prepare_create_target(
+            &pools,
+            &forced,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap();
 
         assert!(!sandbox_dir.exists());
         assert!(
@@ -4172,7 +4845,7 @@ esac
                 .one(pools.write())
                 .await
                 .unwrap()
-                .is_none()
+                .is_some_and(|row| row.name.starts_with(".msb-retained-"))
         );
     }
 
@@ -4211,9 +4884,16 @@ esac
         forced.replace_existing = true;
 
         let run_dir = temp.path().join("run");
-        LocalContext::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)
-            .await
-            .unwrap();
+        LocalContext::prepare_create_target(
+            &pools,
+            &forced,
+            &sandbox_dir,
+            &run_dir,
+            None,
+            &mut None,
+        )
+        .await
+        .unwrap();
 
         waiter.join().unwrap();
 
@@ -4224,7 +4904,7 @@ esac
                 .one(pools.write())
                 .await
                 .unwrap()
-                .is_none()
+                .is_some_and(|row| row.name.starts_with(".msb-retained-"))
         );
     }
 

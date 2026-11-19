@@ -47,6 +47,71 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             Err(_) => return pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         };
 
+        if let SnapshotRemovalRecovery { result, source } = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let result = crate::snapshot::PyCheckpointRemoveResult {
+                    inner: (**result).clone(),
+                };
+                errors_mod.getattr("SnapshotRemovalRecoveryError")?.call1((
+                    err.to_string(),
+                    result,
+                    source.to_string(),
+                ))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
+        if let SnapshotGroupRemovalRecovery { result, source } = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let result = crate::snapshot_group::PySnapshotRemoveResult {
+                    inner: (**result).clone(),
+                };
+                errors_mod
+                    .getattr("SnapshotGroupRemovalRecoveryError")?
+                    .call1((err.to_string(), result, source.to_string()))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
+        if let SnapshotVerification(report) = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let value = serde_json::to_value(report).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let report = crate::conversion::json_value_to_py(py, value)?;
+                errors_mod
+                    .getattr("SnapshotVerificationError")?
+                    .call1((err.to_string(), report))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
+        if let SnapshotImport(details) = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let payload = serde_json::to_string(details).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let details = py.import("json")?.call_method1("loads", (payload,))?;
+                let details = details.cast::<pyo3::types::PyDict>()?;
+                errors_mod
+                    .getattr("SnapshotImportError")?
+                    .call((err.to_string(),), Some(details))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
         if let SnapshotSourceRecovery(recovery) = &err {
             // Keep the structured recovery locator across the native boundary. The Python class
             // turns this internal payload into typed attributes; callers never parse the message.
@@ -65,6 +130,43 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
                 // The textual fallback still contains the saved artifact locator.
                 Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
             };
+        }
+
+        if let ResizeWait(details) = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let payload = serde_json::to_string(details).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let payload = py.import("json")?.call_method1("loads", (payload,))?;
+                let payload = payload.cast::<pyo3::types::PyDict>()?;
+                // Match ordinary resize results: Python callers receive enums, not JSON strings.
+                let status = serde_json::to_value(&details.status).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                payload.set_item("status", crate::sandbox::resize_statuses_to_py(py, status)?)?;
+                errors_mod
+                    .getattr("ResizeWaitError")?
+                    .call_method1("_from_native", (payload,))
+            })();
+            if let Ok(instance) = instance {
+                return PyErr::from_value(instance);
+            }
+        }
+
+        if let ResizeTimeout { status, .. } = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let status = serde_json::to_value(status).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let kwargs = pyo3::types::PyDict::new(py);
+                kwargs.set_item("status", crate::sandbox::resize_statuses_to_py(py, status)?)?;
+                errors_mod
+                    .getattr("ResizeTimeoutError")?
+                    .call((err.to_string(),), Some(&kwargs))
+            })();
+            if let Ok(instance) = instance {
+                return PyErr::from_value(instance);
+            }
         }
 
         if let Service { slug, error } = &err {
@@ -136,6 +238,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             SandboxStopTimedOut { .. } => ("SandboxStopTimedOutError", err.to_string()),
             ExecTimeout(_) => ("ExecTimeoutError", err.to_string()),
             StopTimeout { .. } => ("StopTimeoutError", err.to_string()),
+            ResizeTimeout { .. } => ("ResizeTimeoutError", err.to_string()),
             SandboxFsOps(_) => ("FilesystemError", err.to_string()),
             ImageNotFound(_) => ("ImageNotFoundError", err.to_string()),
             ImageInUse(_) => ("ImageInUseError", err.to_string()),

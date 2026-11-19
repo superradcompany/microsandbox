@@ -137,6 +137,12 @@ func (library *Library) releasePersistentPage(raw string) {
 	}
 }
 
+func (library *Library) newPersistentResource(c *Context, handle uint64, observation json.RawMessage) *PersistentResource {
+	resource := &PersistentResource{library: library, handle: handle, destination: c, Observation: observation}
+	runtime.SetFinalizer(resource, func(r *PersistentResource) { C.provider_call_msb_resource_release(library.table, C.uint64_t(r.handle)) })
+	return resource
+}
+
 func (library *Library) persistentResourcesFromJSON(c *Context, out string) ([]*PersistentResource, error) {
 	var page struct {
 		Resources []json.RawMessage `json:"resources"`
@@ -158,9 +164,7 @@ func (library *Library) persistentResourcesFromJSON(c *Context, out string) ([]*
 	}
 	resources := make([]*PersistentResource, len(handles))
 	for i, handle := range handles {
-		resource := &PersistentResource{library: library, handle: handle, destination: c, Observation: page.Resources[i]}
-		runtime.SetFinalizer(resource, func(r *PersistentResource) { C.provider_call_msb_resource_release(library.table, C.uint64_t(r.handle)) })
-		resources[i] = resource
+		resources[i] = library.newPersistentResource(c, handle, page.Resources[i])
 	}
 	return resources, nil
 }

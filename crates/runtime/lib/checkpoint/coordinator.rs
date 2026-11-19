@@ -17,17 +17,20 @@ use microsandbox_image::snapshot::{
     OwnedDirectoryPayload, OwnedMountSnapshot, OwnedVolumeCapture, OwnedVolumeData,
 };
 use microsandbox_protocol::bootstrap::GuestBootstrap;
+use microsandbox_protocol::control::ConfigurationCaptureReceipt;
 use microsandbox_protocol::core::{
-    CoreError, CoreErrorKind, Ready, WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen,
+    CoreError, CoreErrorKind, WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen,
     WorkloadThaw, WorkloadThawed, WorkloadTransportCredit, WorkloadTransportPosition,
 };
 use microsandbox_protocol::message::{Message, MessageType};
+use microsandbox_protocol::restore_transport::GuestReady;
 use msb_krun::{IncrementalCaptureDecision, MemoryCaptureOptions, MemoryCapturePlan};
 
 use super::additional_disk::RuntimeOwnedAdditionalDisk;
 use super::capture_pipeline::{MEMORY_OBJECT_PACK_SIZE, MemoryObjectSink};
 use super::disk::RuntimeOwnedRootDisk;
 use super::local_memory::{LocalMemoryCapture, LocalMemoryPin};
+use crate::retention::{ConfigurationCaptureContext, PreparedConfigurationReceipt};
 use crate::runner::workload_control::{InputGate, WorkloadControl};
 use crate::vm::VmConfig;
 
@@ -50,6 +53,14 @@ const EXTERNAL_WORKLOAD_FREEZE_TIMEOUT: Duration = Duration::from_secs(30);
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Host-owned device bindings established when this VM was built. Never use the
+/// guest-writable certificate mount as evidence of which key the proxy used.
+#[derive(Default)]
+pub(crate) struct CheckpointDeviceBindings {
+    pub(crate) directories: BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
+    pub(crate) intercept_ca_sha256: Option<String>,
+}
 
 /// Runtime-owned state needed to produce successive complete checkpoint generations.
 pub(crate) struct CheckpointCoordinator {
@@ -80,6 +91,7 @@ pub(crate) struct CheckpointCoordinator {
 /// Published checkpoint identity returned to the control executor.
 #[derive(Clone, Debug)]
 pub(crate) struct CheckpointResult {
+    pub(crate) configuration: Option<microsandbox_protocol::control::ConfigurationCaptureReceipt>,
     pub(crate) checkpoint_id: String,
     pub(crate) checkpoint_root: String,
     pub(crate) path: PathBuf,
@@ -136,6 +148,7 @@ struct PausedCaptureTimings {
 }
 
 struct FrozenWorkload {
+    resources: Option<microsandbox_protocol::resources::ObservedResources>,
     external_mounts_synced: bool,
     // An empty request also acknowledges success. Retain exactly what was requested
     // so a later paused capture cannot mistake that acknowledgement for a root flush.
@@ -143,7 +156,7 @@ struct FrozenWorkload {
     gate: InputGate,
     attempt_id: String,
     protocol_generation: u8,
-    ready: Ready,
+    ready: GuestReady,
     host_input: WorkloadTransportPosition,
     input_credit: WorkloadTransportCredit,
     guest_bulk_bytes: u64,
@@ -183,7 +196,7 @@ impl CheckpointCoordinator {
         }
         let required = guest_flush.is_some_and(|policy| policy.requires_writeback(false));
         let (workload, capture_unavailable) = match self
-            .freeze_workload(vm, attempt_id, required, false)
+            .freeze_workload(vm, attempt_id, required, false, false)
         {
             Ok(workload) => (Some(workload), None),
             Err(error) if error.freezer_unavailable && !required => (None, Some(error.to_string())),
@@ -371,7 +384,7 @@ impl CheckpointCoordinator {
         runtime: tokio::runtime::Handle,
         agent_sock: &Path,
         workload_control: Arc<WorkloadControl>,
-        owned_directories: BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
+        device_bindings: CheckpointDeviceBindings,
     ) -> Result<Self, String> {
         let host = super::layout::host_root(runtime_dir)?;
         let root = host.join("checkpoints");
@@ -438,7 +451,7 @@ impl CheckpointCoordinator {
                                 vm.sandbox_slot,
                             )
                         });
-                    Ok(BTreeMap::from([
+                    let mut binding = BTreeMap::from([
                         (
                             "guest_network".into(),
                             serde_json::to_string(network).map_err(|error| error.to_string())?,
@@ -447,7 +460,11 @@ impl CheckpointCoordinator {
                             "gateway_mac".into(),
                             serde_json::to_string(&gateway).map_err(|error| error.to_string())?,
                         ),
-                    ]))
+                    ]);
+                    if let Some(digest) = device_bindings.intercept_ca_sha256 {
+                        binding.insert("intercept_ca_sha256".into(), digest);
+                    }
+                    Ok(binding)
                 }
                 #[cfg(not(feature = "net"))]
                 {
@@ -466,7 +483,7 @@ impl CheckpointCoordinator {
             root_disk,
             additional_disks,
             owned_mounts,
-            owned_directories,
+            owned_directories: device_bindings.directories,
             unsupported_additional_disks,
             fs_resource_bindings,
             network_resource_binding,
@@ -511,6 +528,7 @@ impl CheckpointCoordinator {
         checkpoint_id: &str,
         user_pause: Option<&UserPause>,
         guest_flush: Option<microsandbox_types::GuestFlush>,
+        configuration: Option<&ConfigurationCaptureContext<'_>>,
     ) -> Result<crate::control::DiskCheckpointControlState, super::disk::RootDiskRolloverError>
     {
         use super::disk::RootDiskRolloverError as Failure;
@@ -540,7 +558,13 @@ impl CheckpointCoordinator {
             })?)
         } else {
             acquired_workload = self
-                .freeze_workload(vm, checkpoint_id, required, true)
+                .freeze_workload(
+                    vm,
+                    checkpoint_id,
+                    required,
+                    true,
+                    configuration.is_some_and(|ctx| ctx.observe_resources),
+                )
                 .map_err(|error| {
                     if error.keep_paused {
                         Failure::post_journal(error)
@@ -589,6 +613,13 @@ impl CheckpointCoordinator {
         // Keep every owned provider quiesced until all bytes are sealed. No RAM scan or
         // execution serialization is needed for this cold-boot storage artifact.
         let result: Result<_, Failure> = (|| {
+            let selected_configuration = configuration
+                .map(|context| {
+                    self.runtime
+                        .block_on(context.observe(vm, workload.and_then(|w| w.resources.as_ref())))
+                })
+                .transpose()
+                .map_err(Failure::pre_rebind)?;
             if !self.owned_directories.is_empty() {
                 microsandbox_utils::private_file::create_private_dir_all(&path.join("owned"))
                     .map_err(Failure::pre_rebind)?;
@@ -634,7 +665,15 @@ impl CheckpointCoordinator {
                     data,
                 });
             }
-            Ok((captured, owned_volumes))
+            let configuration_receipt = selected_configuration
+                .map(|observation| {
+                    let root = crate::retention::disk_configuration_root(&captured.manifest)?;
+                    self.runtime
+                        .block_on(observation.prepare(checkpoint_id, &root))
+                })
+                .transpose()
+                .map_err(Failure::pre_rebind)?;
+            Ok((captured, owned_volumes, configuration_receipt))
         })();
         for directory in self.owned_directories.values() {
             let _ = directory.cancel_capture();
@@ -650,11 +689,12 @@ impl CheckpointCoordinator {
         }
         let pause_us = paused_at.elapsed().as_micros();
         match result {
-            Ok((captured, owned_volumes)) => {
+            Ok((captured, owned_volumes, configuration_receipt)) => {
                 tracing::info!(target: "microsandbox_checkpoint_timing", operation = "capture_disk",
                     checkpoint_id, source_already_paused = user_pause.is_some(), pause_us,
                     total_us = started.elapsed().as_micros(), "disk-only checkpoint timing");
                 Ok(crate::control::DiskCheckpointControlState {
+                    configuration: configuration_receipt.map(|receipt| receipt.publish()),
                     checkpoint_id: checkpoint_id.into(),
                     path,
                     disk: captured.manifest,
@@ -671,6 +711,7 @@ impl CheckpointCoordinator {
     }
 
     /// Capture a same-epoch full checkpoint while preserving prior execution state.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn capture(
         &mut self,
         vm: &msb_krun::VmControl,
@@ -679,6 +720,7 @@ impl CheckpointCoordinator {
         user_pause: Option<&UserPause>,
         record_integrity: bool,
         guest_flush: Option<microsandbox_types::GuestFlush>,
+        configuration: Option<&ConfigurationCaptureContext<'_>>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         self.capture_to(
             vm,
@@ -689,6 +731,7 @@ impl CheckpointCoordinator {
             None,
             record_integrity,
             guest_flush,
+            configuration,
         )
     }
 
@@ -762,6 +805,7 @@ impl CheckpointCoordinator {
             memory_backing,
             record_integrity,
             guest_flush,
+            None,
         )
     }
 
@@ -777,6 +821,7 @@ impl CheckpointCoordinator {
         _memory_backing: Option<&std::fs::File>,
         record_integrity: bool,
         guest_flush: Option<microsandbox_types::GuestFlush>,
+        configuration: Option<&ConfigurationCaptureContext<'_>>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         // The backend owns execution-state support. Refuse unsupported captures
         // before preparing storage, flushing the guest, or pausing the source.
@@ -912,7 +957,13 @@ impl CheckpointCoordinator {
         let workload = match user_pause {
             Some(paused) => paused.workload.as_ref().expect("validated workload latch"),
             None => {
-                acquired_workload = match self.freeze_workload(vm, checkpoint_id, required, false) {
+                acquired_workload = match self.freeze_workload(
+                    vm,
+                    checkpoint_id,
+                    required,
+                    false,
+                    configuration.is_some_and(|ctx| ctx.observe_resources),
+                ) {
                     Ok(workload) => workload,
                     Err(error) => {
                         let _ = std::fs::remove_dir_all(&staging);
@@ -966,6 +1017,8 @@ impl CheckpointCoordinator {
             local_destination.is_some(),
             prepared_local_memory,
             record_integrity,
+            configuration,
+            workload.resources.as_ref(),
         );
         let paused_capture_us = paused_capture_started.elapsed().as_micros();
         for directory in self.owned_directories.values() {
@@ -1202,6 +1255,7 @@ impl CheckpointCoordinator {
         attempt_id: &str,
         required: bool,
         disk_only: bool,
+        observe_resources: bool,
     ) -> Result<FrozenWorkload, CheckpointFailure> {
         // These are the bundled guest's capabilities, not a newly connected SDK client's
         // generation. Internal lifecycle work must not join the FIFO it is about to gate.
@@ -1226,6 +1280,7 @@ impl CheckpointCoordinator {
             !external_mount_tags.is_empty(),
         );
         let mut workload = FrozenWorkload {
+            resources: None,
             external_mounts_synced: false,
             synced_mounts: BTreeSet::new(),
             gate,
@@ -1236,12 +1291,30 @@ impl CheckpointCoordinator {
             input_credit: WorkloadTransportCredit::default(),
             guest_bulk_bytes: 0,
         };
+        let query =
+            (observe_resources && workload.ready.freeze_resources_version == Some(1)).then(|| {
+                microsandbox_protocol::resources::ObserveResources {
+                    query_id: rand::random(),
+                }
+            });
         let request = WorkloadFreeze {
             external_mount_tags,
             attempt_id: attempt_id.to_string(),
             host_input,
         };
-        let message = match Message::with_payload(MessageType::WorkloadFreeze, 0, &request) {
+        let message = if let Some(query) = query.as_ref() {
+            Message::with_payload(
+                MessageType::WorkloadFreeze,
+                0,
+                &microsandbox_protocol::restore_transport::GuestFreeze {
+                    freeze: request,
+                    observe_resources: Some(query.clone()),
+                },
+            )
+        } else {
+            Message::with_payload(MessageType::WorkloadFreeze, 0, &request)
+        };
+        let message = match message {
             Ok(message) => message,
             Err(error) => {
                 // No lifecycle request has been admitted, so ordinary input can safely resume.
@@ -1270,6 +1343,15 @@ impl CheckpointCoordinator {
             return Err(error);
         }
         let result = reply.and_then(|reply| {
+            // Decode optional evidence separately so malformed observations do not discard
+            // a valid freeze/flush acknowledgement. Correlate it to this exact request.
+            let evidence = query.as_ref().and_then(|query| {
+                reply
+                    .payload::<microsandbox_protocol::restore_transport::FreezeResourceEvidence>()
+                    .ok()
+                    .and_then(|e| e.frozen_resources)
+                    .filter(|report| report.query_id == query.query_id)
+            });
             let frozen = validate_workload_reply::<WorkloadFrozen>(
                 reply,
                 MessageType::WorkloadFrozen,
@@ -1289,9 +1371,9 @@ impl CheckpointCoordinator {
                 .map_err(|_| {
                     "guest output did not reach the frozen transport boundary".to_string()
                 })??;
-            Ok(frozen)
+            Ok((frozen, evidence))
         });
-        let frozen = result.map_err(|error| {
+        let (frozen, evidence) = result.map_err(|error| {
             recover_failed_freeze(
                 attempt_id,
                 error,
@@ -1299,6 +1381,7 @@ impl CheckpointCoordinator {
                 || vm.pause().map(|_| ()).map_err(|error| error.to_string()),
             )
         })?;
+        workload.resources = evidence;
         workload.input_credit = frozen.input_credit;
         workload.external_mounts_synced = frozen.external_mounts_synced;
         if frozen.external_mounts_synced {
@@ -1375,7 +1458,13 @@ impl CheckpointCoordinator {
         local: bool,
         prepared_local_memory: Option<LocalMemoryCapture>,
         record_integrity: bool,
+        configuration: Option<&ConfigurationCaptureContext<'_>>,
+        frozen: Option<&microsandbox_protocol::resources::ObservedResources>,
     ) -> Result<PausedCapture, CheckpointFailure> {
+        let selected_configuration = configuration
+            .map(|context| self.runtime.block_on(context.observe(vm, frozen)))
+            .transpose()
+            .map_err(CheckpointFailure::resumable)?;
         let mut timings = PausedCaptureTimings::default();
         let batch = Arc::new(CaptureObjectBatch::new(
             self.store.clone(),
@@ -1696,6 +1785,7 @@ impl CheckpointCoordinator {
             };
             return Ok(PausedCapture {
                 result: CheckpointResult {
+                    configuration: None,
                     checkpoint_id: checkpoint_id.into(),
                     checkpoint_root: String::new(),
                     path: final_path.into(),
@@ -1862,14 +1952,37 @@ impl CheckpointCoordinator {
         timings.object_linked_bytes = object_stats.linked_bytes;
         timings.object_copied_bytes = object_stats.copied_bytes;
         timings.object_directory_syncs = object_stats.directory_syncs;
-        if let Err(error) = publish_root_last(staging, final_path, &checkpoint_bytes) {
-            let _ = vm.abandon_memory_capture(&memory_plan);
-            return Err(CheckpointFailure::resumable(error));
-        }
+        let configuration_receipt = match selected_configuration
+            .map(|observation| {
+                self.runtime.block_on(
+                    observation.prepare(checkpoint_id, &format!("full:{checkpoint_root}")),
+                )
+            })
+            .transpose()
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = vm.abandon_memory_capture(&memory_plan);
+                return Err(CheckpointFailure::resumable(error));
+            }
+        };
+        let configuration = match publish_root_last(
+            staging,
+            final_path,
+            &checkpoint_bytes,
+            configuration_receipt,
+        ) {
+            Ok(configuration) => configuration,
+            Err(error) => {
+                let _ = vm.abandon_memory_capture(&memory_plan);
+                return Err(CheckpointFailure::resumable(error));
+            }
+        };
         timings.checkpoint_publish_us = checkpoint_publish_started.elapsed().as_micros();
 
         Ok(PausedCapture {
             result: CheckpointResult {
+                configuration,
                 checkpoint_id: checkpoint_id.into(),
                 checkpoint_root: checkpoint_root.to_string(),
                 path: final_path.to_path_buf(),
@@ -2008,10 +2121,22 @@ impl FrozenWorkload {
                     "protocol_generation".into(),
                     self.protocol_generation.to_string(),
                 ),
-                ("agent_version".into(), self.ready.agent_version.clone()),
-                ("boot_time_ns".into(), self.ready.boot_time_ns.to_string()),
-                ("init_time_ns".into(), self.ready.init_time_ns.to_string()),
-                ("ready_time_ns".into(), self.ready.ready_time_ns.to_string()),
+                (
+                    "agent_version".into(),
+                    self.ready.public.agent_version.clone(),
+                ),
+                (
+                    "boot_time_ns".into(),
+                    self.ready.public.boot_time_ns.to_string(),
+                ),
+                (
+                    "init_time_ns".into(),
+                    self.ready.public.init_time_ns.to_string(),
+                ),
+                (
+                    "ready_time_ns".into(),
+                    self.ready.public.ready_time_ns.to_string(),
+                ),
                 // Restore the negotiated physical transport as well as the agent identity.
                 (
                     "ready".into(),
@@ -2421,7 +2546,25 @@ fn coalesce_extents(extents: Vec<MemoryExtent>) -> Vec<MemoryExtent> {
     output
 }
 
-fn publish_root_last(staging: &Path, final_path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn publish_root_last(
+    staging: &Path,
+    final_path: &Path,
+    bytes: &[u8],
+    receipt: Option<PreparedConfigurationReceipt>,
+) -> Result<Option<ConfigurationCaptureReceipt>, String> {
+    publish_root_last_with_sync(staging, final_path, bytes, receipt, sync_directory)
+}
+
+fn publish_root_last_with_sync(
+    staging: &Path,
+    final_path: &Path,
+    bytes: &[u8],
+    receipt: Option<PreparedConfigurationReceipt>,
+    sync: impl Fn(&Path) -> io::Result<()>,
+) -> Result<Option<ConfigurationCaptureReceipt>, String> {
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| "checkpoint path has no parent".to_string())?;
     let root = staging.join("checkpoint.json");
     let mut file =
         microsandbox_utils::private_file::create_new(&root).map_err(|error| error.to_string())?;
@@ -2431,14 +2574,15 @@ fn publish_root_last(staging: &Path, final_path: &Path, bytes: &[u8]) -> Result<
     // Windows cannot rename a directory while a child file remains open without delete sharing.
     // Close the durable root before atomically publishing its staging directory.
     drop(file);
-    sync_directory(staging).map_err(|error| error.to_string())?;
+    sync(staging).map_err(|error| error.to_string())?;
     std::fs::rename(staging, final_path).map_err(|error| error.to_string())?;
-    sync_directory(
-        final_path
-            .parent()
-            .ok_or_else(|| "checkpoint path has no parent".to_string())?,
-    )
-    .map_err(|error| error.to_string())
+    // Visibility transfers ownership before durability is confirmed. A parent-sync
+    // failure must not delete evidence still needed by the visible checkpoint.
+    let configuration = receipt.map(PreparedConfigurationReceipt::publish);
+    sync(parent).map_err(|error| {
+        format!("checkpoint is published but directory durability is uncertain: {error}")
+    })?;
+    Ok(configuration)
 }
 
 fn validate_checkpoint_id(id: &str) -> Result<(), String> {
@@ -2578,8 +2722,8 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         FrozenWorkload, MemoryObjectSink, PendingDeviceState, WorkloadControl, overlay_extents,
-        persist_device_states, publish_root_last, runtime_owned_fs_bindings,
-        validate_vm_generation_state, validate_workload_reply,
+        persist_device_states, publish_root_last, publish_root_last_with_sync,
+        runtime_owned_fs_bindings, validate_vm_generation_state, validate_workload_reply,
     };
     use std::collections::BTreeSet;
 
@@ -2650,12 +2794,13 @@ mod tests {
     fn flush_acknowledgement_proves_only_the_requested_filesystems() {
         let control = WorkloadControl::new();
         let mut workload = FrozenWorkload {
+            resources: None,
             external_mounts_synced: true,
             synced_mounts: BTreeSet::new(),
             gate: control.gate(),
             attempt_id: "flush-proof".into(),
             protocol_generation: 9,
-            ready: Ready::default(),
+            ready: Ready::default().into(),
             host_input: WorkloadTransportPosition::default(),
             input_credit: WorkloadTransportCredit::default(),
             guest_bulk_bytes: 0,
@@ -2926,7 +3071,7 @@ mod tests {
         let published = temp.path().join("checkpoint");
         microsandbox_utils::private_file::create_private_directory(&staging).unwrap();
 
-        publish_root_last(&staging, &published, b"checkpoint-root").unwrap();
+        publish_root_last(&staging, &published, b"checkpoint-root", None).unwrap();
 
         assert!(!staging.exists());
         assert_eq!(
@@ -2948,6 +3093,67 @@ mod tests {
                     & 0o777,
                 0o600
             );
+        }
+    }
+
+    #[test]
+    fn root_publication_keeps_receipt_only_after_successful_rename() {
+        for failure in ["staging-sync", "rename", "parent-sync"] {
+            let temp = tempfile::tempdir().unwrap();
+            let sandbox = temp.path().join("sandbox");
+            std::fs::create_dir(&sandbox).unwrap();
+            let staging = temp.path().join("checkpoint.staging");
+            let published = temp.path().join("checkpoint");
+            std::fs::create_dir(&staging).unwrap();
+            let receipt = crate::retention::PreparedConfigurationReceipt::prepare(
+                &sandbox,
+                "checkpoint",
+                "full:root",
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let receipt_path = sandbox.join("last-active/captures/checkpoint.json");
+            let original = std::fs::read(&receipt_path).unwrap();
+            if failure == "rename" {
+                std::fs::write(&published, "existing unrelated file").unwrap();
+            }
+            let error = publish_root_last_with_sync(
+                &staging,
+                &published,
+                b"checkpoint-root",
+                Some(receipt),
+                |path| {
+                    if (failure == "staging-sync" && path == staging)
+                        || (failure == "parent-sync" && path == temp.path())
+                    {
+                        Err(std::io::Error::other("injected directory sync failure"))
+                    } else {
+                        super::sync_directory(path)
+                    }
+                },
+            )
+            .unwrap_err();
+            if failure == "parent-sync" {
+                assert!(error.contains("published but directory durability is uncertain"));
+                assert!(!staging.exists());
+                assert_eq!(
+                    std::fs::read(published.join("checkpoint.json")).unwrap(),
+                    b"checkpoint-root"
+                );
+                assert_eq!(std::fs::read(receipt_path).unwrap(), original);
+            } else {
+                assert!(staging.is_dir());
+                assert!(!receipt_path.exists());
+                if failure == "rename" {
+                    assert_eq!(
+                        std::fs::read(published).unwrap(),
+                        b"existing unrelated file"
+                    );
+                }
+            }
         }
     }
 
@@ -3018,6 +3224,7 @@ mod tests {
     fn captured_agent_descriptor_retains_transport_debt() {
         let control = WorkloadControl::new();
         let workload = FrozenWorkload {
+            resources: None,
             external_mounts_synced: false,
             synced_mounts: BTreeSet::new(),
             gate: control.gate(),
@@ -3028,7 +3235,8 @@ mod tests {
                     microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION,
                 ),
                 ..Ready::default()
-            },
+            }
+            .into(),
             host_input: WorkloadTransportPosition {
                 control_bytes: 90_000_000,
                 control_frames: 4_000,

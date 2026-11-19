@@ -83,6 +83,12 @@ const INIT_SHUTDOWN_RETRIES: u32 = 50;
 /// returns `Ok(())`, after which the caller falls through to the
 /// runtime build and the agent loop.
 pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
+    do_handoff_observed(spec).map(|_| ())
+}
+
+/// Perform the same handoff and return the exact selected path in the agent child.
+/// The child can run before the parent's exec completes; this is selection evidence only.
+pub fn do_handoff_observed(spec: HandoffInit) -> AgentdResult<PathBuf> {
     let cmd = resolve_cmd(&spec.cmd)?;
     preflight(&cmd)?;
     if let Some(ref cwd) = spec.cwd {
@@ -128,7 +134,7 @@ pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
         ForkResult::Child => {
             isolate_child_from_init()?;
             redirect_child_stderr();
-            Ok(())
+            Ok(cmd)
         }
     }
 }

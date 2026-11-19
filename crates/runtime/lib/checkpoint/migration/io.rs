@@ -42,7 +42,7 @@ pub(super) struct EntryCache {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(super) fn directory(path: &Path) -> Result<File, String> {
+pub(in crate::checkpoint) fn directory(path: &Path) -> Result<File, String> {
     let absolute = std::path::absolute(path).map_err(|_| "cannot resolve storage directory")?;
     let parent = absolute.parent().ok_or("storage directory has no parent")?;
     let name = absolute
@@ -94,7 +94,7 @@ pub(super) fn subdirectory(root: &File, relative: &Path) -> Result<File, String>
     Ok(cursor)
 }
 
-pub(super) fn open(root: &File, relative: &Path) -> Result<File, String> {
+pub(in crate::checkpoint) fn open(root: &File, relative: &Path) -> Result<File, String> {
     let parts: Vec<_> = relative.components().collect();
     if parts.is_empty()
         || parts.len() > 12
@@ -336,7 +336,7 @@ pub(super) fn reject_link(metadata: &fs::Metadata) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn private_directory(path: &Path) -> Result<(), String> {
+pub(in crate::checkpoint) fn private_directory(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(_) => return verify_private_directory(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -356,7 +356,7 @@ pub(super) fn private_directory(path: &Path) -> Result<(), String> {
     verify_private_directory(path)
 }
 
-pub(super) fn publish(source: &Path, destination: &Path) -> Result<(), String> {
+pub(in crate::checkpoint) fn publish(source: &Path, destination: &Path) -> Result<(), String> {
     super::super::replace_file(source, destination)
         .map_err(|error| format!("publish migration storage: {error}"))?;
     #[cfg(unix)]
@@ -370,7 +370,7 @@ pub(super) fn publish(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn harden_created(path: &Path, directory: bool) -> Result<(), String> {
+pub(in crate::checkpoint) fn harden_created(path: &Path, directory: bool) -> Result<(), String> {
     #[cfg(unix)]
     let file = if directory {
         self::directory(path)?
@@ -404,7 +404,7 @@ pub(super) fn harden_created(path: &Path, directory: bool) -> Result<(), String>
         .map_err(|error| format!("protect new storage permissions: {error}"))
 }
 
-pub(super) fn verify_private_directory(path: &Path) -> Result<(), String> {
+pub(in crate::checkpoint) fn verify_private_directory(path: &Path) -> Result<(), String> {
     microsandbox_utils::private_file::verify(&directory(path)?)
         .map_err(|error| format!("migration storage permissions are not private: {error}"))
 }

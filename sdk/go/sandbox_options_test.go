@@ -89,7 +89,7 @@ func marshalRestoreOptions[T SnapshotSeed](t *testing.T, snapshot T) map[string]
 }
 
 func TestRestorePreservesTypedReference(t *testing.T) {
-	snapshot := &Snapshot{
+	snapshot := &Checkpoint{
 		reference:     "baseline",
 		referenceKind: "path",
 	}

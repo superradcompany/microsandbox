@@ -6,6 +6,47 @@ use microsandbox_image::checkpoint::ResourceDescriptor;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Historical artifacts have no CA evidence. For newer TLS captures, reject
+/// malformed digests instead of accidentally treating them as missing evidence.
+#[cfg(any(feature = "runner", feature = "net"))]
+pub(super) fn intercept_ca_requirement(
+    resources: &[ResourceDescriptor],
+) -> Result<Option<String>, String> {
+    let mut networks = resources
+        .iter()
+        .filter(|resource| resource.kind == "network");
+    let identity = networks
+        .next()
+        .and_then(|network| network.binding.get("intercept_ca_sha256"));
+    if networks.next().is_some() {
+        return Err("checkpoint contains more than one guest network resource".into());
+    }
+    if let Some(value) = identity
+        && (value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    {
+        return Err("invalid captured interception CA fingerprint".into());
+    }
+    Ok(identity.cloned())
+}
+
+#[cfg(any(feature = "runner", feature = "net"))]
+pub(super) fn validate_intercept_ca(
+    required: Option<&str>,
+    destination: Option<&str>,
+) -> Result<(), String> {
+    if let Some(fingerprint) = required
+        && destination != required
+    {
+        return Err(format!(
+            "full restore requires the captured TLS interception CA (SHA-256 {fingerprint}); the destination proxy has a different or missing signing identity"
+        ));
+    }
+    Ok(())
+}
+
 /// Read the gateway Ethernet identity retained by guest ARP/ND caches.
 ///
 /// A fresh proxy owns fresh host sockets, but must present the same virtual
@@ -54,6 +95,26 @@ mod tests {
                 .map(|value| BTreeMap::from([("gateway_mac".into(), value.into())]))
                 .unwrap_or_default(),
         }
+    }
+
+    #[cfg(any(feature = "runner", feature = "net"))]
+    #[test]
+    fn captured_tls_requires_the_actual_proxy_identity() {
+        let mut network = resource(None);
+        let fingerprint = "13".repeat(32);
+        assert_eq!(intercept_ca_requirement(&[network.clone()]).unwrap(), None);
+        assert!(validate_intercept_ca(None, None).is_ok());
+        network
+            .binding
+            .insert("intercept_ca_sha256".into(), fingerprint.clone());
+        let required = intercept_ca_requirement(&[network.clone()]).unwrap();
+        assert!(validate_intercept_ca(required.as_deref(), Some(&fingerprint)).is_ok());
+        assert!(validate_intercept_ca(required.as_deref(), None).is_err());
+        assert!(validate_intercept_ca(required.as_deref(), Some(&"23".repeat(32))).is_err());
+        network
+            .binding
+            .insert("intercept_ca_sha256".into(), "../different-ca".into());
+        assert!(intercept_ca_requirement(&[network]).is_err());
     }
 
     #[test]

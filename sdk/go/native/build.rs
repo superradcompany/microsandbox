@@ -25,9 +25,12 @@ fn main() {
     println!("cargo:rerun-if-changed=src/execution_result.rs");
     println!("cargo:rerun-if-changed=src/provider.rs");
     println!("cargo:rerun-if-changed=src/restore.rs");
+    println!("cargo:rerun-if-changed=src/snapshot_objects.rs");
     println!("cargo:rerun-if-changed=src/service.rs");
     println!("cargo:rerun-if-changed=src/setup.rs");
     println!("cargo:rerun-if-changed=src/storage.rs");
+    println!("cargo:rerun-if-changed=src/resize.rs");
+    println!("cargo:rerun-if-changed=src/resize_operations.rs");
     println!("cargo:rerun-if-changed=src/volume_fs.rs");
     println!("cargo:rerun-if-changed=src/context.rs");
     println!("cargo:rerun-if-changed=src/resource.rs");

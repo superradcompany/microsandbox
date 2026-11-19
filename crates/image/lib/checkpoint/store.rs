@@ -635,6 +635,11 @@ pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
     sparse_file_integrity_handle(&File::open(path)?)
 }
 
+/// Hash the already-open checkpoint payload.
+pub fn sparse_file_integrity_from_file(file: &mut File) -> ImageResult<SparseFileIntegrity> {
+    sparse_file_integrity_handle(file)
+}
+
 /// Compute the same content root on a pinned file, without resolving its pathname again.
 /// Uses a cloned descriptor; callers sharing its seek position must serialize reads.
 pub fn sparse_file_integrity_handle(file: &File) -> ImageResult<SparseFileIntegrity> {
