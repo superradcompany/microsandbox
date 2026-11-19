@@ -49,23 +49,40 @@ struct RemoteRuntimeInspection {
     env: Option<Vec<microsandbox_types::EnvVar>>,
 }
 
-/// Wire body for the cloud's create route: the shared sandbox spec, nested
-/// under `spec`, with the cloud-only create options beside it.
-#[derive(Debug, Clone, serde::Serialize)]
+/// Create request, retaining the flat contract unless compute selection requires
+/// the newer nested envelope. Both forms are accepted by the newer cloud API.
+#[derive(Debug, Clone)]
 pub(in crate::context) struct CloudCreateBody {
     /// The shared sandbox spec.
     pub spec: CloudCreateSandboxRequest,
     /// Requested globally-unique slug; the cloud assigns one when omitted.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
     /// Registry-credential selection for the image pull, derived from the
     /// config's [`RegistryAuth`]. Omitted (`None`) lets the cloud pick the
     /// stored credential configured for the image's registry host.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<CloudRegistrySelection>,
     /// Machine type for this creation; omitted to retain the server default.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub compute: Option<CloudCompute>,
+}
+
+/// Borrowed wire representation; no sandbox options are dropped or translated.
+#[derive(serde::Serialize)]
+struct CloudCreateWire<'a> {
+    #[serde(flatten)]
+    spec: CloudCreateSpec<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slug: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry: &'a Option<CloudRegistrySelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compute: &'a Option<CloudCompute>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum CloudCreateSpec<'a> {
+    Flat(&'a CloudCreateSandboxRequest),
+    Nested { spec: &'a CloudCreateSandboxRequest },
 }
 
 /// Wire shape of the cloud's registry-credential selection.
@@ -523,6 +540,29 @@ impl SandboxOps for RemoteContext {
                 Operation::SandboxMetricsStream,
             ))
         }))
+    }
+}
+
+impl serde::Serialize for CloudCreateBody {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Production APIs predating the nested envelope require the source fields
+        // at the top level. Explicit compute selection must stay nested: those
+        // APIs ignore unknown flat fields and could silently select the wrong tier.
+        let spec = if self.compute.is_some() {
+            CloudCreateSpec::Nested { spec: &self.spec }
+        } else {
+            CloudCreateSpec::Flat(&self.spec)
+        };
+        CloudCreateWire {
+            spec,
+            slug: &self.slug,
+            registry: &self.registry,
+            compute: &self.compute,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -1295,7 +1335,7 @@ mod tests {
             } else {
                 assert!(body.get("compute").is_none());
             }
-            let body = &body["spec"];
+            let body = if explicit_max { &body["spec"] } else { &body };
             assert_eq!(body["resources"]["vcpus"], 2, "entry {entry}");
             assert_eq!(body["resources"]["memory_mib"], 1024, "entry {entry}");
             assert_eq!(body["runtime"]["workdir"], "/managed", "entry {entry}");
@@ -1626,6 +1666,9 @@ mod tests {
                 let json = serde_json::to_value(request).unwrap();
                 assert_eq!(json["compute"], serde_json::json!({"type": expected}));
                 assert!(json["spec"].get("compute").is_none());
+                assert!(json["spec"].get("source").is_some());
+                assert!(json.get("source").is_none());
+                assert!(serde_json::from_value::<CloudCreateSandboxRequest>(json.clone()).is_err());
                 assert!(
                     serde_json::to_value(config)
                         .unwrap()
@@ -1637,7 +1680,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_create_body_serializes_create_options_beside_spec() {
+    fn cloud_create_body_preserves_flat_production_contract() {
         let mut config = base_cloud_config();
         config.slug = Some("brave-otter".into());
         config.registry_auth = Some(RegistryAuth::Anonymous);
@@ -1645,15 +1688,69 @@ mod tests {
         let req = CloudCreateBody::try_from(config).unwrap();
         let json = serde_json::to_value(&req).unwrap();
 
-        // The spec is nested under `spec`; the create options ride beside it.
+        // The deployed API requires source fields at the top level.
         // An anonymous registry_auth converts to the anonymous selection.
-        assert_eq!(json["spec"]["source"], "oci");
-        assert_eq!(json["spec"]["name"], "agent-1");
-        assert_eq!(json["spec"]["reference"], "python:3.12");
-        assert!(json["spec"].get("image").is_none());
-        assert!(json.get("source").is_none());
+        assert_eq!(json["source"], "oci");
+        assert_eq!(json["name"], "agent-1");
+        assert_eq!(json["reference"], "python:3.12");
+        assert!(json.get("image").is_none());
+        assert!(json.get("spec").is_none());
         assert_eq!(json["slug"], "brave-otter");
         assert_eq!(json["registry"]["mode"], "anonymous");
+
+        // Verify every sandbox option survives the envelope change, including
+        // fields not explicitly asserted above (network, mounts and lifecycle).
+        let mut spec = json;
+        spec.as_object_mut().unwrap().remove("slug");
+        spec.as_object_mut().unwrap().remove("registry");
+        assert_eq!(spec, serde_json::to_value(&req.spec).unwrap());
+        let decoded: CloudCreateSandboxRequest = serde_json::from_value(spec.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), spec);
+    }
+
+    #[tokio::test]
+    async fn cloud_release_smoke_sends_flat_create_body() {
+        use crate::test_support::fake_server::{FakeServer, respond};
+
+        let server = FakeServer::start(respond(201, None, CLOUD_SANDBOX_RESPONSE_FIXTURE)).await;
+        let backend = server.backend();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            backend
+                .sandboxes()
+                .builder("release-smoke-123-1")
+                .image("mirror.gcr.io/library/alpine:3.20")
+                .cpus(1)
+                .memory(512)
+                .ephemeral(true)
+                .max_duration(Duration::from_secs(600))
+                .idle_timeout(Duration::from_secs(120))
+                .create(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Exercise the HTTP path used by all language bindings, not only the
+        // serializer. Pin the same settings as the production release smoke.
+        let request = server.only_request();
+        assert_eq!(request.method, "POST");
+        assert_eq!(
+            request.target,
+            "/v1/sandboxes?start=true&wait_for=running&wait_timeout=90"
+        );
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert!(body.get("spec").is_none());
+        assert!(body.get("compute").is_none());
+        assert_eq!(body["source"], "oci");
+        assert_eq!(body["name"], "release-smoke-123-1");
+        assert_eq!(body["reference"], "mirror.gcr.io/library/alpine:3.20");
+        assert_eq!(body["resources"]["vcpus"], 1);
+        assert_eq!(body["resources"]["memory_mib"], 512);
+        assert_eq!(body["lifecycle"]["ephemeral"], true);
+        assert_eq!(body["lifecycle"]["max_duration_secs"], 600);
+        assert_eq!(body["lifecycle"]["idle_timeout_secs"], 120);
+        serde_json::from_value::<CloudCreateSandboxRequest>(body.clone()).unwrap();
     }
 
     #[test]
@@ -1678,7 +1775,6 @@ mod tests {
                 if id == "00000000-0000-0000-0000-000000000003"
         ));
         let json = serde_json::to_value(req).unwrap();
-        let json = &json["spec"];
         assert_eq!(json["source"], "disk_snapshot");
         assert!(json.get("image").is_none());
         assert!(json.get("patches").is_none());
@@ -1757,7 +1853,6 @@ mod tests {
 
         let request = CloudCreateBody::try_from(config).unwrap();
         let json = serde_json::to_value(request).unwrap();
-        let json = &json["spec"];
         assert_eq!(json["source"], "disk_snapshot");
         assert_eq!(json["resources"]["vcpus"], 2);
         assert_eq!(json["resources"]["memory_mib"], 1024);
@@ -1795,8 +1890,8 @@ mod tests {
                 .await
                 .unwrap();
             let body = serde_json::to_value(request).unwrap();
-            assert_eq!(body["spec"]["source"], source);
-            assert_eq!(body["spec"]["path"], path);
+            assert_eq!(body["source"], source);
+            assert_eq!(body["path"], path);
             match config.spec.image {
                 RootfsSource::Bind { path: retained, .. }
                 | RootfsSource::DiskImage { path: retained, .. } => {
@@ -2106,8 +2201,8 @@ mod tests {
 
         let request = CloudCreateBody::try_from(config).unwrap();
         let body = serde_json::to_value(request).unwrap();
-        assert_eq!(body["spec"]["mounts"][0]["options"]["override_uid"], 1000);
-        assert_eq!(body["spec"]["mounts"][0]["options"]["override_gid"], 1000);
+        assert_eq!(body["mounts"][0]["options"]["override_uid"], 1000);
+        assert_eq!(body["mounts"][0]["options"]["override_gid"], 1000);
     }
 
     #[test]
