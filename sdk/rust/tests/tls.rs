@@ -10,6 +10,8 @@
 //! `~/.microsandbox` so they can run in parallel without sharing the sqlite
 //! db, image cache, or sandbox namespace.
 
+#![cfg(feature = "net")]
+
 use std::sync::Arc;
 use std::time::Duration;
 
