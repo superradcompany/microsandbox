@@ -828,6 +828,8 @@ Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second 
   </div>
 </div>
 
+For a running Cloud sandbox, positive restart timeouts are rounded up to whole seconds and cannot exceed 60 seconds. Larger values fail before the restart request is sent.
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">destroy()</span>
 
 ```ruby

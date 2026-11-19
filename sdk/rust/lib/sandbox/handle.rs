@@ -48,6 +48,8 @@ pub struct RestartOptions {
     /// Force termination instead of requesting graceful shutdown.
     pub force: bool,
     /// Graceful-shutdown completion budget; expiry does not force termination.
+    /// Running Cloud restarts round positive budgets up to whole seconds and
+    /// reject budgets above 60 seconds before dispatching the restart request.
     pub timeout: Duration,
     /// Start the replacement runtime in detached mode.
     pub detached: bool,

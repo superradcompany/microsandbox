@@ -37,6 +37,9 @@ use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 /// reconciliation before reporting that a Cloud stop timed out.
 const DEFAULT_CLOUD_STOP_TIMEOUT: Duration = Duration::from_secs(360);
 
+/// Maximum stop budget accepted by the Cloud restart route, in whole seconds.
+const MAX_CLOUD_RESTART_TIMEOUT_SECS: u64 = 60;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -279,6 +282,12 @@ impl RemoteContext {
             .timeout
             .as_secs()
             .saturating_add(u64::from(options.timeout.subsec_nanos() > 0));
+        if timeout_secs > MAX_CLOUD_RESTART_TIMEOUT_SECS {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "Cloud restart timeout cannot exceed {MAX_CLOUD_RESTART_TIMEOUT_SECS} seconds"
+            )));
+        }
+
         let id = cloud_identity(identity.clone())?;
         let cloud = self
             .restart_sandbox_by_id(&id, options.force, timeout_secs)
@@ -1535,6 +1544,27 @@ mod tests {
                 },
                 "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=true&timeout=3 HTTP/1.1",
             ),
+            (
+                RestartOptions {
+                    timeout: Duration::from_nanos(1),
+                    ..RestartOptions::default()
+                },
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=false&timeout=1 HTTP/1.1",
+            ),
+            (
+                RestartOptions {
+                    timeout: Duration::from_millis(59_001),
+                    ..RestartOptions::default()
+                },
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=false&timeout=60 HTTP/1.1",
+            ),
+            (
+                RestartOptions {
+                    timeout: Duration::from_secs(60),
+                    ..RestartOptions::default()
+                },
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=false&timeout=60 HTTP/1.1",
+            ),
         ];
 
         for (options, expected_restart) in cases {
@@ -1733,6 +1763,47 @@ mod tests {
             server.finish().await,
             ["GET /v1/sandboxes/by-name/agent-1 HTTP/1.1"]
         );
+    }
+
+    #[tokio::test]
+    async fn cloud_restart_rejects_timeout_above_server_limit_before_dispatch() {
+        for timeout in [
+            Duration::from_secs(60) + Duration::from_nanos(1),
+            Duration::from_secs(61),
+            Duration::MAX,
+        ] {
+            for force in [false, true] {
+                let server = ScriptedCloud::start(vec![(
+                    200,
+                    cloud_response_json(CloudSandboxStatus::Running),
+                )])
+                .await;
+                let handle = server.handle(CloudSandboxStatus::Running);
+
+                let error = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    handle.restart_with(RestartOptions {
+                        timeout,
+                        force,
+                        ..RestartOptions::default()
+                    }),
+                )
+                .await
+                .expect("invalid timeout must fail before sending a restart request")
+                .err()
+                .expect("restart must fail");
+
+                assert!(
+                    matches!(error, MicrosandboxError::InvalidConfig(ref message)
+                        if message == "Cloud restart timeout cannot exceed 60 seconds"),
+                    "{error:?}"
+                );
+                assert_eq!(
+                    server.finish().await,
+                    ["GET /v1/sandboxes/by-name/agent-1 HTTP/1.1"]
+                );
+            }
+        }
     }
 
     #[tokio::test]
