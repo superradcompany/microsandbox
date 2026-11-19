@@ -1,5 +1,7 @@
 //! Real-guest coverage for header restrictions and persisted policy updates.
 
+#![cfg(feature = "net")]
+
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
