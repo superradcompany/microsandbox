@@ -35,7 +35,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
     await remove_snapshot(snapshot_selector)
 
     base = await Sandbox.create(
-        base_name, image=Image.oci(IMAGE, root_disk=256), cpus=1, memory=512, replace=True
+        base_name, image=Image.oci(IMAGE, root_disk=256), cpus=1, memory=512
     )
     fork = None
     copied_group = None

@@ -119,6 +119,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::ResizeWait(_) => "resize_wait",
             MicrosandboxError::NoDefaultCommand => error_kind::NO_DEFAULT_COMMAND,
             MicrosandboxError::InvalidConfig(_)
+            | MicrosandboxError::InvalidWorkdir { .. }
             | MicrosandboxError::MissingRestoreBindings { .. } => error_kind::INVALID_CONFIG,
             MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
             MicrosandboxError::ImageNotFound(_) => error_kind::IMAGE_NOT_FOUND,
