@@ -113,7 +113,15 @@ async fn scenario(backend: &dyn Context, home: &Path, full: bool) {
                 .err()
                 .expect("full resume must refuse boot overrides");
             assert!(error.to_string().contains("disk-only"), "{option}: {error}");
-            assert!(Sandbox::list().await.unwrap().sandboxes.is_empty());
+            assert!(
+                backend
+                    .sandboxes()
+                    .list()
+                    .await
+                    .unwrap()
+                    .sandboxes
+                    .is_empty()
+            );
         }
     }
     eprintln!("launch qualification: source removed, launching archive sets");
@@ -132,14 +140,10 @@ async fn scenario(backend: &dyn Context, home: &Path, full: bool) {
             .await
             .unwrap();
         assert_eq!(
-            backend
-                .sandbox_ops()
-                .get(backend.clone_shared(), child.name())
-                .await
-                .unwrap()
-                .config()
-                .unwrap()
-                .resumed_from_full_snapshot(),
+            child
+                .launch_info()
+                .expect("created sandbox retains its launch outcome")
+                .resumed_from_full_snapshot,
             full
         );
         if full {
@@ -170,14 +174,10 @@ async fn scenario(backend: &dyn Context, home: &Path, full: bool) {
     std::fs::remove_file(tip_archive).unwrap();
     let child = backend.sandboxes().create(config).boxed().await.unwrap();
     assert_eq!(
-        backend
-            .sandbox_ops()
-            .get(backend.clone_shared(), child.name())
-            .await
-            .unwrap()
-            .config()
-            .unwrap()
-            .resumed_from_full_snapshot(),
+        child
+            .launch_info()
+            .expect("created sandbox retains its launch outcome")
+            .resumed_from_full_snapshot,
         full
     );
     if full {

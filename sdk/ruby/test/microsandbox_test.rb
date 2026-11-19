@@ -203,8 +203,8 @@ class MicrosandboxTest < Test::Unit::TestCase
   end
 
   def test_snapshot_head_read_rejects_member_selectors
-    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Snapshot.group_head("app:previous") }
-    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Snapshot.local.group_head("app:previous") }
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Checkpoint.group_head("app:previous") }
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Checkpoint.local.group_head("app:previous") }
   end
 
   def test_snapshot_source_recovery_error_attributes_default_to_nil

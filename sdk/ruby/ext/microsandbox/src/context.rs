@@ -89,7 +89,9 @@ impl RubyContext {
         }
     }
     fn snapshots(&self) -> RubySnapshots {
-        RubySnapshots { inner: self.inner.clone() }
+        RubySnapshots {
+            inner: self.inner.clone(),
+        }
     }
     fn checkpoints(&self) -> RubyCheckpoints {
         RubyCheckpoints {
@@ -179,13 +181,23 @@ impl RubyVolumes {
 }
 
 impl RubySnapshots {
-    fn load(ruby: &Ruby, this: &Self, args: &[Value]) -> Result<crate::snapshot_group::RubySnapshotImportResult, Error> {
+    fn load(
+        ruby: &Ruby,
+        this: &Self,
+        args: &[Value],
+    ) -> Result<crate::snapshot_group::RubySnapshotImportResult, Error> {
         crate::snapshot_group::load_in(ruby, this.inner.snapshots(), args)
     }
 
-    fn get(ruby: &Ruby, this: &Self, name: String) -> Result<crate::snapshot_group::RubyGroup, Error> {
+    fn get(
+        ruby: &Ruby,
+        this: &Self,
+        name: String,
+    ) -> Result<crate::snapshot_group::RubyGroup, Error> {
         let groups = this.inner.snapshots();
-        Ok(crate::snapshot_group::RubyGroup { inner: crate::run(ruby, async move { groups.get(&name).await })? })
+        Ok(crate::snapshot_group::RubyGroup {
+            inner: crate::run(ruby, async move { groups.get(&name).await })?,
+        })
     }
 
     fn list(ruby: &Ruby, this: &Self) -> Result<magnus::RArray, Error> {
@@ -198,9 +210,15 @@ impl RubySnapshots {
         Ok(result)
     }
 
-    fn open(ruby: &Ruby, this: &Self, path: String) -> Result<crate::snapshot_group::RubyGroup, Error> {
+    fn open(
+        ruby: &Ruby,
+        this: &Self,
+        path: String,
+    ) -> Result<crate::snapshot_group::RubyGroup, Error> {
         let future = this.inner.snapshots().open(path);
-        Ok(crate::snapshot_group::RubyGroup { inner: crate::run(ruby, future)? })
+        Ok(crate::snapshot_group::RubyGroup {
+            inner: crate::run(ruby, future)?,
+        })
     }
 }
 
@@ -363,9 +381,13 @@ fn sandbox_ctx(context: &RubyContext) -> RubySandboxes {
 fn volume_ctx(context: &RubyContext) -> RubyVolumes {
     context.volumes()
 }
-fn group_ctx(context: &RubyContext) -> RubySnapshots { context.snapshots() }
+fn group_ctx(context: &RubyContext) -> RubySnapshots {
+    context.snapshots()
+}
 fn group_context(this: &crate::snapshot_group::RubyGroup) -> RubyContext {
-    RubyContext { inner: this.inner.context().clone_shared() }
+    RubyContext {
+        inner: this.inner.context().clone_shared(),
+    }
 }
 fn snapshot_ctx(context: &RubyContext) -> RubyCheckpoints {
     context.checkpoints()
@@ -425,7 +447,10 @@ pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     collection.define_method("builder", method!(RubyCheckpoints::builder, 1))?;
     collection.define_method("open", method!(RubyCheckpoints::open, -1))?;
     collection.define_method("group_head", method!(RubyCheckpoints::group_head, 1))?;
-    collection.define_method("set_group_head", method!(RubyCheckpoints::set_group_head, 2))?;
+    collection.define_method(
+        "set_group_head",
+        method!(RubyCheckpoints::set_group_head, 2),
+    )?;
     collection.define_method("get", method!(RubyCheckpoints::get, -1))?;
     collection.define_method("list", method!(RubyCheckpoints::list, -1))?;
     collection.define_method("remove", method!(RubyCheckpoints::remove, -1))?;

@@ -1,20 +1,17 @@
 //! Source-bound group histories and operation-owned capture results for Ruby.
 
-
 use magnus::{
     Error, RArray, RHash, RModule, Ruby, Value, function, method, prelude::*, scan_args::scan_args,
     typed_data,
 };
-use microsandbox_core::snapshot::{
-    SnapshotVerifyCoverage, UpperVerifyStatus,
-};
+use microsandbox_core::snapshot::{SnapshotVerifyCoverage, UpperVerifyStatus};
 use microsandbox_core::{
-    ContextKind, CheckpointCaptureResult, Snapshot, SnapshotCaptureOptions, SnapshotCreateResult,
+    CheckpointCaptureResult, ContextKind, Snapshot, SnapshotCaptureOptions, SnapshotCreateResult,
 };
 
 use super::{
-    RubySandbox, RubySnapshot, argument_error, current_ruby,
-    keyword, reject_unknown_keywords, run, string_map, symbol,
+    RubySandbox, RubySnapshot, argument_error, current_ruby, keyword, reject_unknown_keywords, run,
+    string_map, symbol,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -111,7 +108,11 @@ impl RubyGroup {
     }
 
     fn load(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshotImportResult, Error> {
-        load_in(ruby, microsandbox_core::configured_context().snapshots(), args)
+        load_in(
+            ruby,
+            microsandbox_core::configured_context().snapshots(),
+            args,
+        )
     }
 
     fn open(ruby: &Ruby, path: String) -> Result<Self, Error> {
@@ -194,7 +195,6 @@ impl RubyGroup {
 }
 
 impl RubySnapshot {
-
     pub(super) fn verify(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
         let checkpoint = this.inner.clone();
         let report = run(ruby, async move { checkpoint.verify().await })?;
@@ -477,24 +477,29 @@ pub(super) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn load_in(ruby: &Ruby, groups: microsandbox_core::Snapshots, args: &[Value]) -> Result<RubySnapshotImportResult, Error> {
-        let parsed = scan_args::<(String, Vec<String>), (), (), (), RHash, ()>(args)?;
-        let (group, files) = parsed.required;
-        let keywords = parsed.keywords;
-        reject_unknown_keywords(ruby, keywords, &["dest", "base", "set_head"])?;
-        let options = microsandbox_core::snapshot::LoadOpts {
-            group: None,
-            dest: keyword::<String>(keywords, "dest")?.map(Into::into),
-            base: keyword(keywords, "base")?,
-            set_head: keyword::<bool>(keywords, "set_head")?.unwrap_or(false),
-        };
-        let files = files
-            .into_iter()
-            .map(std::path::PathBuf::from)
-            .collect::<Vec<_>>();
-        let prepared = groups.prepare_import(files, options)
-            .map_err(|error| super::core_error(ruby, error))?;
-        Ok(RubySnapshotImportResult {
-            inner: run(ruby, prepared.group(group))?,
-        })
+pub(super) fn load_in(
+    ruby: &Ruby,
+    groups: microsandbox_core::Snapshots,
+    args: &[Value],
+) -> Result<RubySnapshotImportResult, Error> {
+    let parsed = scan_args::<(String, Vec<String>), (), (), (), RHash, ()>(args)?;
+    let (group, files) = parsed.required;
+    let keywords = parsed.keywords;
+    reject_unknown_keywords(ruby, keywords, &["dest", "base", "set_head"])?;
+    let options = microsandbox_core::snapshot::LoadOpts {
+        group: None,
+        dest: keyword::<String>(keywords, "dest")?.map(Into::into),
+        base: keyword(keywords, "base")?,
+        set_head: keyword::<bool>(keywords, "set_head")?.unwrap_or(false),
+    };
+    let files = files
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
+    let prepared = groups
+        .prepare_import(files, options)
+        .map_err(|error| super::core_error(ruby, error))?;
+    Ok(RubySnapshotImportResult {
+        inner: run(ruby, prepared.group(group))?,
+    })
 }

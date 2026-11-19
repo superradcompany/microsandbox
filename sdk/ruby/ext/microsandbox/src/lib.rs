@@ -1,5 +1,5 @@
-mod core_error;
 mod context;
+mod core_error;
 mod jobs;
 mod services;
 mod snapshot_group;
@@ -25,8 +25,7 @@ use magnus::{
 };
 use microsandbox_core::{
     AgentClientError, ChangeState, ContextKind, MicrosandboxError, MicrosandboxResult, Operation,
-    ServiceError,
-    UnsupportedReason,
+    ServiceError, UnsupportedReason,
     image::{Image, ImageHandle},
     logs::{LogEntry, LogOptions, LogSource},
     sandbox::{
@@ -35,7 +34,7 @@ use microsandbox_core::{
         SandboxBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxStatus,
         SandboxStopResult, SandboxTouchResult, SecretSource,
     },
-    snapshot::{SaveOpts, Checkpoint as Snapshot},
+    snapshot::{Checkpoint as Snapshot, SaveOpts},
     volume::Volume,
 };
 
