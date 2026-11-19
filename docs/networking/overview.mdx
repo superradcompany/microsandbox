@@ -110,7 +110,7 @@ msb create python --name shared-worker --deployment-profile multi-tenant
 
 In `multi-tenant` mode, traffic must pass both the platform's public-network policy and the sandbox's policy. Custom DNS servers and interface overrides are removed; host CA import and published ports are disabled. The sandbox cannot relax these restrictions.
 
-DNS lookups in `multi-tenant` mode go to `1.1.1.1` and `1.0.0.1`, never to the host's own resolvers. An operator can choose other resolvers with [`network.multi_tenant_nameservers`](/configuration#network).
+The sandbox DNS gateway uses public resolvers by default on supporting runtimes. Older runtimes use host DNS when no list is configured. Operators can choose resolvers with [`network.multi_tenant_nameservers`](/configuration#network).
 
 An operator can set `deployment_profile` in `~/.microsandbox/config.json` or on `LocalBackend`. This overrides the sandbox's choice on create and restart. Managed cloud requests do not carry a deployment profile; the hosting driver selects it.
 

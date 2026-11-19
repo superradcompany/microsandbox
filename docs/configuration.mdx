@@ -117,9 +117,6 @@ Use an absolute path to keep a location elsewhere. Programmatic SDK paths and en
   "snapshots": {
     "max_filesystem_state_mib": 4
   },
-  "network": {
-    "multi_tenant_nameservers": ["9.9.9.9", "149.112.112.112"]
-  },
   "active_profile": "prod",
   "profiles": {
     "prod": {
@@ -484,9 +481,19 @@ Before raising it, consider memory use, especially when restoring imported snaps
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `multi_tenant_nameservers` | `null` | Upstream DNS resolvers for [`multi-tenant`](#deployment_profile) sandboxes, as a list of IP addresses queried on port 53. `null` uses `1.1.1.1` and `1.0.0.1`. An empty list is invalid. Ignored for `single-tenant` sandboxes. |
+| `multi_tenant_nameservers` | `null` | DNS resolvers for [`multi-tenant`](#deployment_profile) sandboxes. Set a nonempty list of IP addresses. The runtime queries them on port 53. |
 
-`multi-tenant` sandboxes never use the host's own resolvers, which may answer for private names. Choose resolvers that only answer public names. Sandboxes cannot override this setting. Restart running sandboxes to apply a change. An older runtime that cannot apply this setting refuses to start the sandbox.
+```json
+{
+  "network": {
+    "multi_tenant_nameservers": ["9.9.9.9", "149.112.112.112"]
+  }
+}
+```
+
+Choose resolvers that cannot answer private infrastructure names. Restart running sandboxes after changing the list.
+
+An explicit list requires runtime support. With `null` or no setting, supporting runtimes use `1.1.1.1` and `1.0.0.1`. Older runtimes use host DNS.
 
 ## `profiles`
 
