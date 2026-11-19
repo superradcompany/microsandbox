@@ -75,16 +75,16 @@ async def test_explicit_scope_and_missing_native_export(monkeypatch: pytest.Monk
         await diagnose_storage(["app"])
 
 
-async def test_native_cloud_selection_never_falls_back_to_local(tmp_path, monkeypatch):
-    from microsandbox import BackendKind, backend_scope
+async def test_explicit_remote_context_does_not_redirect_local_diagnostics(tmp_path, monkeypatch):
+    from microsandbox import IoError, RemoteContext
 
     home = tmp_path / "absent-home"
     monkeypatch.setenv("MSB_CONFIG_PATH", str(tmp_path / "absent-config.json"))
-    with (
-        backend_scope(BackendKind.CLOUD, url="http://127.0.0.1:9", api_key="unused"),
-        pytest.raises(Exception, match="local-only"),
-    ):
+    remote = RemoteContext(url="http://127.0.0.1:9", api_key="unused")
+    # The absent catalog is an I/O error, never a remote request or implicit catalog creation.
+    with pytest.raises(IoError):
         await diagnose_storage(["app"], config=RuntimeConfig(home=str(home)))
+    assert remote.kind == "remote"
     assert not home.exists()
 
 

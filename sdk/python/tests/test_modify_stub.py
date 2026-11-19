@@ -64,7 +64,7 @@ def test_secret_modify_spec_keys() -> None:
 
 def test_sandbox_modify_stub_signature() -> None:
     tree = _stub_tree()
-    for class_name in ("Sandbox", "SandboxHandle"):
+    for class_name in ("Sandbox",):
         method = _class_method(tree, class_name, "modify")
         kwargs = [arg.arg for arg in method.args.kwonlyargs]
         assert kwargs == EXPECTED_KWARGS

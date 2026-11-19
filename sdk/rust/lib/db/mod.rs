@@ -1,6 +1,6 @@
 //! Shared database type re-exports for the SDK.
 //!
-//! The actual `DbPools` instance is owned by [`LocalBackend`](crate::backend::LocalBackend)
+//! The actual `DbPools` instance is owned by [`LocalContext`](crate::context::LocalContext)
 //! per D6.7. Catalog migrations normalize saved configurations before use.
 
 #[cfg(feature = "local")]

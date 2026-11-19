@@ -3,9 +3,8 @@ import { Snapshot } from "../../dist/snapshot.js";
 import { napi } from "../../dist/internal/napi.js";
 
 vi.mock("../../dist/internal/napi.js", () => ({
-  napi: { Snapshot: { loadWithOptions: vi.fn(), loadMany: vi.fn(), groupHead: vi.fn() } },
+  napi: { Snapshot: { loadWithOptions: vi.fn(), loadMany: vi.fn(), readGroupHead: vi.fn(), setGroupHead: vi.fn() } },
 }));
-import { SnapshotHandle } from "../../dist/snapshot-handle.js";
 
 function projectedSnapshot(
   overrides: Record<string, unknown> = {},
@@ -42,7 +41,7 @@ function projectedSnapshot(
     }),
     ...overrides,
   };
-  return new Snapshot(inner as never);
+  return new Snapshot({ ...inner, metadata: async () => inner } as never);
 }
 
 describe("Snapshot native projections", () => {
@@ -74,12 +73,15 @@ describe("Snapshot native projections", () => {
     expect(handle.headUpdate).toEqual(headUpdate);
   });
 
-  it("forwards a member selector for explicit head selection", async () => {
-    vi.mocked(napi.Snapshot.groupHead).mockResolvedValue({
+  it("uses distinct native operations for reading and setting the head", async () => {
+    vi.mocked(napi.Snapshot.readGroupHead).mockResolvedValue(null);
+    expect(await Snapshot.groupHead("work")).toBeNull();
+    expect(napi.Snapshot.setGroupHead).not.toHaveBeenCalled();
+    vi.mocked(napi.Snapshot.setGroupHead).mockResolvedValue({
       group: "work", previous: "snapshot-2", head: "snapshot-1", reason: "selected", changed: true,
     });
-    expect(await Snapshot.groupHead("work:baseline")).toMatchObject({ reason: "selected", changed: true });
-    expect(napi.Snapshot.groupHead).toHaveBeenCalledWith("work:baseline");
+    expect(await Snapshot.setGroupHead("work", "snapshot-1")).toMatchObject({ reason: "selected", changed: true });
+    expect(napi.Snapshot.setGroupHead).toHaveBeenCalledWith("work", "snapshot-1");
   });
 
   it("loads a batch once and preserves input-order handles and headless outcomes", async () => {
@@ -109,7 +111,7 @@ describe("Snapshot native projections", () => {
     expect(snapshot.reference).toBe("/snapshots/example");
     expect(snapshot.referenceKind).toBe("path");
 
-    const handle = new SnapshotHandle({
+    const handle = new Snapshot({
       reference: "snapshot-id",
       referenceKind: "id",
       digest: `sha256:${"a".repeat(64)}`,
@@ -132,8 +134,8 @@ describe("Snapshot native projections", () => {
     expect(handle.referenceKind).toBe("id");
   });
 
-  it("returns complete file and checkpoint states", () => {
-    expect(projectedSnapshot().state).toMatchObject({
+  it("returns complete file and checkpoint states", async () => {
+    expect(await projectedSnapshot().state()).toMatchObject({
       kind: "file",
       format: "raw",
       fstype: "ext4",
@@ -153,31 +155,20 @@ describe("Snapshot native projections", () => {
       checkpointId: "checkpoint-1",
       checkpointManifestDigest: `sha256:${"d".repeat(64)}`,
     });
-    expect(checkpoint.state).toEqual({
+    expect(await checkpoint.state()).toEqual({
       kind: "checkpoint",
       checkpointId: "checkpoint-1",
       manifest: `sha256:${"d".repeat(64)}`,
     });
   });
 
-  it("rejects incomplete or unknown state projections", () => {
-    expect(() => projectedSnapshot({ sizeBytes: null }).state).toThrow(
-      "missing file-state sizeBytes",
-    );
-    expect(
-      () =>
-        projectedSnapshot({
-          stateKind: "checkpoint",
-          checkpointId: null,
-          checkpointManifestDigest: `sha256:${"d".repeat(64)}`,
-        }).state,
-    ).toThrow("missing checkpointId");
-    expect(() => projectedSnapshot({ stateKind: "future" }).state).toThrow(
-      "unknown stateKind future",
-    );
+  it("rejects incomplete or unknown state projections", async () => {
+    await expect(projectedSnapshot({ sizeBytes: null }).state()).rejects.toThrow("missing file-state sizeBytes");
+    await expect(projectedSnapshot({ stateKind: "checkpoint", checkpointId: null }).state()).rejects.toThrow("missing checkpointId");
+    await expect(projectedSnapshot({ stateKind: "future" }).state()).rejects.toThrow("unknown stateKind future");
   });
 
-  it("preserves all Merkle descriptor parameters", () => {
+  it("preserves all Merkle descriptor parameters", async () => {
     const root = `blake3:${"d".repeat(64)}`;
     const snapshot = projectedSnapshot({
       upperIntegrityAlgorithm: "msb-file-merkle-blake3-v1",
@@ -186,7 +177,7 @@ describe("Snapshot native projections", () => {
       upperIntegrityLeafSize: 65536,
     });
 
-    expect(snapshot.state).toMatchObject({
+    expect(await snapshot.state()).toMatchObject({
       kind: "file",
       upper: {
         integrity: {
@@ -243,7 +234,7 @@ describe("Snapshot native projections", () => {
       }),
     });
 
-    expect(snapshot.state).toMatchObject({
+    expect(await snapshot.state()).toMatchObject({
       kind: "file",
       upper: { integrity: null },
     });
@@ -281,7 +272,7 @@ describe("Snapshot native projections", () => {
     });
 
     const saveHandle = vi.fn().mockResolvedValue(undefined);
-    const handle = new SnapshotHandle({
+    const handle = new Snapshot({
       reference: "snapshot-id",
       referenceKind: "id",
       digest: `sha256:${"a".repeat(64)}`,
@@ -330,12 +321,12 @@ describe("Snapshot native projections", () => {
 describe("legacy snapshot paths", () => {
   it.each(["id", "path"])("rejects remote %s references", (referenceKind) => {
     expect(() => projectedSnapshot({ referenceKind }).path).toThrow("no local filesystem path");
-    const handle = new SnapshotHandle({ reference: "/remote/snapshot", referenceKind, createdAt: 0 } as never);
+    const handle = new Snapshot({ reference: "/remote/snapshot", referenceKind, createdAt: 0 } as never);
     expect(() => handle.path).toThrow("no local filesystem path");
   });
   it("preserves local paths on snapshots and listed handles", () => {
     expect(projectedSnapshot({ path: "/local/snapshot" }).path).toBe("/local/snapshot");
-    const handle = new SnapshotHandle({ path: "/local/snapshot", reference: "/local/snapshot", referenceKind: "path", createdAt: 0 } as never);
+    const handle = new Snapshot({ path: "/local/snapshot", reference: "/local/snapshot", referenceKind: "path", createdAt: 0 } as never);
     expect(handle.path).toBe("/local/snapshot");
   });
 });

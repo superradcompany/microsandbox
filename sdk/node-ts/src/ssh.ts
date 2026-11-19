@@ -1,5 +1,5 @@
 import type {
-  NapiSandbox,
+  NapiSandboxSshOps,
   NapiSshAttachOptions,
   NapiSshClient,
   NapiSshClientOptions,
@@ -45,23 +45,23 @@ export interface SshServerOptions {
 
 export class SandboxSshOps {
   /** @internal */
-  private readonly inner: NapiSandbox;
+  private readonly inner: NapiSandboxSshOps;
 
   /** @internal */
-  constructor(inner: NapiSandbox) {
+  constructor(inner: NapiSandboxSshOps) {
     this.inner = inner;
   }
 
   async openClient(opts?: SshClientOptions): Promise<SshClient> {
     const raw = await withMappedErrors(() =>
-      this.inner.sshConnect(sshClientOptionsToNapi(opts)),
+      this.inner.openClient(sshClientOptionsToNapi(opts)),
     );
     return new SshClient(raw);
   }
 
   async prepareServer(opts?: SshServerOptions): Promise<SshServer> {
     const raw = await withMappedErrors(() =>
-      this.inner.sshServer(sshServerOptionsToNapi(opts)),
+      this.inner.prepareServer(sshServerOptionsToNapi(opts)),
     );
     return new SshServer(raw);
   }

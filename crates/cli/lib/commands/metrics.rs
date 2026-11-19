@@ -15,7 +15,7 @@ use anyhow::{anyhow, bail};
 use chrono::Utc;
 use clap::Args;
 use console::style;
-use microsandbox::backend::LocalBackend;
+use microsandbox::context::LocalContext;
 use microsandbox::sandbox::{
     SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics_reports_local,
     sandbox_metrics_report_local,
@@ -156,7 +156,7 @@ pub async fn run(args: MetricsArgs) -> anyhow::Result<()> {
 
 /// Collect reports for the named sandbox (any state) or all sandboxes.
 async fn collect_reports(
-    local: &LocalBackend,
+    local: &LocalContext,
     args: &MetricsArgs,
 ) -> anyhow::Result<Vec<SandboxMetricsReport>> {
     match args.name.as_deref() {
@@ -175,7 +175,7 @@ async fn collect_reports(
 //--------------------------------------------------------------------------------------------------
 
 async fn watch_loop(
-    local: &LocalBackend,
+    local: &LocalContext,
     args: &MetricsArgs,
     interval: Duration,
 ) -> anyhow::Result<()> {
@@ -197,7 +197,7 @@ async fn watch_loop(
 }
 
 async fn watch_frames(
-    local: &LocalBackend,
+    local: &LocalContext,
     args: &MetricsArgs,
     interval: Duration,
     term: &console::Term,
@@ -235,7 +235,7 @@ async fn watch_frames(
 }
 
 async fn follow_loop(
-    local: &LocalBackend,
+    local: &LocalContext,
     args: &MetricsArgs,
     interval: Duration,
 ) -> anyhow::Result<()> {

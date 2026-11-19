@@ -63,7 +63,7 @@ same value, the later layer wins.
       </Step>
 
       <Step title="Global sandbox defaults">
-        Local and cloud backends automatically load `sandbox_defaults` from
+        Local and remote contexts automatically load `sandbox_defaults` from
         `~/.microsandbox/config.json`, subject to backend support.
 
         [Global sandbox defaults reference](/configuration#sandbox_defaults)
@@ -112,9 +112,9 @@ Some settings resolve outside the sandbox precedence rules above.
   weakened by a sandbox file, CLI flag, or SDK option.
 </Warning>
 
-Local or cloud selection resolves across explicit SDK selection, environment
-variables, profiles, and the local default. See the
-[selection precedence](/operations/backends#precedence).
+The CLI chooses a local or remote connection from environment variables,
+profiles, and the local default. See [selection precedence](/cloud/connect#precedence).
+Unqualified SDK calls follow the same backend and profile settings as the CLI, with local as the fallback. Explicit resource selectors override that choice and respect managed restrictions.
 
 Registry authentication resolves across explicit secret names, environment
 variables, and the operating-system keyring. See the

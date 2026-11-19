@@ -1,7 +1,7 @@
 //! Inspect backend selection and manage saved profiles without exposing credentials.
 
 use clap::{Args, Subcommand};
-use microsandbox::{BackendInfo, config::BackendContext};
+use microsandbox::{ContextInfo, config::BackendContext};
 
 use crate::ui::{self, OutputFormat};
 
@@ -82,7 +82,7 @@ pub fn run(args: ContextArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let info = microsandbox::default_backend_info()?;
+    let info = crate::commands::common::selected_context()?.info()?;
     if args.format == Some(OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&info)?);
         return Ok(());
@@ -122,7 +122,7 @@ fn render_profiles(context: &BackendContext) -> ui::Table {
     table
 }
 
-fn render_human(info: &BackendInfo) -> ui::Table {
+fn render_human(info: &ContextInfo) -> ui::Table {
     let mut table = ui::Table::new(&["FIELD", "VALUE"]);
     table.add_row(vec!["Backend".into(), info.kind.as_str().into()]);
     if let Some(api_url) = &info.api_url {
@@ -143,15 +143,15 @@ fn render_human(info: &BackendInfo) -> ui::Table {
 
 #[cfg(test)]
 mod tests {
-    use microsandbox::{BackendKind, BackendSelectionSource};
+    use microsandbox::{ContextKind, ContextSelectionSource};
 
     use super::*;
 
-    fn cloud_info() -> BackendInfo {
-        BackendInfo {
-            kind: BackendKind::Cloud,
+    fn cloud_info() -> ContextInfo {
+        ContextInfo {
+            kind: ContextKind::Remote,
             api_url: Some("https://api.microsandbox.dev".into()),
-            source: BackendSelectionSource::MsbApiKey,
+            source: ContextSelectionSource::MsbApiKey,
             profile: None,
         }
     }
@@ -160,7 +160,7 @@ mod tests {
     fn human_context_uses_existing_table_style() {
         let rendered = render_human(&cloud_info()).render();
         assert!(rendered.contains("Backend"));
-        assert!(rendered.contains("cloud"));
+        assert!(rendered.contains("remote"));
         assert!(rendered.contains("https://api.microsandbox.dev"));
         assert!(rendered.contains("MSB_API_KEY"));
         assert!(!rendered.contains("msb_ak_"));
@@ -171,7 +171,7 @@ mod tests {
         let rendered = serde_json::to_string(&cloud_info()).unwrap();
         assert_eq!(
             rendered,
-            r#"{"kind":"cloud","api_url":"https://api.microsandbox.dev","source":"MSB_API_KEY"}"#
+            r#"{"kind":"remote","api_url":"https://api.microsandbox.dev","source":"MSB_API_KEY"}"#
         );
         assert!(!rendered.contains("msb_ak_"));
     }

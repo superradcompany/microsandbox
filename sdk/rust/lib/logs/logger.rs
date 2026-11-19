@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use super::watch::LogRegistration;
 use super::{LogEntry, LogOptions, LogSnapshot, LogStreamOptions};
 use crate::MicrosandboxResult;
-use crate::backend::sandbox::LogStream;
+use crate::context::sandbox::LogStream;
 
 //--------------------------------------------------------------------------------------------------
 // SandboxLogger
