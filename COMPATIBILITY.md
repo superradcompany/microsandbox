@@ -918,6 +918,12 @@ Local snapshot launch checks the architecture recorded in a memory checkpoint or
 
 Disk snapshots captured with confirmed last-active guest-clock policy now use the existing clock descriptor extension. A recorded `off` survives group and archive restores unless the destination explicitly overrides it. Sync, historical descriptors and captures without clock evidence retain the existing fallback. Earlier readers without the required clock extension refuse a newly recorded off policy.
 
+## Local kill and drain process identity
+
+On Linux and macOS, kill and drain require evidence that the recorded PID belongs to the selected sandbox runtime. Linux sends signals through a captured pidfd. macOS verifies lifecycle ownership and process birth identity before signaling; Darwin’s PID-based syscall still leaves a narrow check-to-signal race.
+
+Denied process inspection does not establish that a run is stale. Reconciliation requires a free lifecycle guard, no possibly live runtime socket, and free owned-disk guards; ambiguous ownership returns an error and preserves the active run. No public API, runtime protocol, or persisted-format change is required. Replacement and fresh-start recovery are separate from this change.
+
 ## Concurrent catalog sidecar teardown
 
 Catalog hardening retries up to 16 complete inspections when SQLite sidecar teardown exposes an unlinked inode or the path changes during inspection. Every attempt repeats the ownership, link and permission checks; symlinks, hardlinks and untrusted access remain rejected. Continued churn returns an error. No SQLite schema, migration guard, lock protocol or runtime format changes.
