@@ -125,6 +125,72 @@ async fn archive_targets_preserve_names_and_descriptor_identity_through_import_e
 }
 
 #[tokio::test]
+async fn saved_configuration_survives_archive_transfer_and_refuses_lossy_legacy_export() {
+    use microsandbox_types::snapshot::saved_config::{SAVED_CONFIG_EXTENSION, SavedSandboxConfig};
+
+    let temp = tempfile::tempdir().unwrap();
+    let local = crate::test_support::local_backend_builder(temp.path().join("home"))
+        .build()
+        .unwrap();
+    let config: SavedSandboxConfig = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "active": {"runtime": {"workdir": {"state": "value", "origin": "configured",
+            "value": "/srv"}}},
+        "bindings": {},
+        "provenance": {"producer_version": "0.8.0",
+            "active_generation": {"state": "unknown", "reason": "not_observed"}}
+    }))
+    .unwrap();
+    let manifest = grouped_archive_manifest(820, None)
+        .with_saved_configuration(&config)
+        .unwrap();
+    let source = temp.path().join("artifact");
+    write_grouped_archive_fixture(&source, &manifest);
+    let archive = temp.path().join("saved.msb");
+    save_snapshot(
+        &local,
+        source.to_str().unwrap(),
+        &archive,
+        SaveOpts::default(),
+    )
+    .await
+    .unwrap();
+    let loaded = load_snapshot(&local, &archive, Some(&temp.path().join("received")))
+        .await
+        .unwrap();
+    let artifact =
+        super::super::store::open_snapshot_leased(&local, loaded.path().to_str().unwrap())
+            .await
+            .unwrap();
+    assert_eq!(
+        artifact.manifest().digest().unwrap(),
+        manifest.digest().unwrap()
+    );
+    assert!(artifact.manifest().saved_configuration().unwrap().as_ref() == Some(&config));
+
+    super::super::verify::verify_snapshot(&artifact, 1024 * 1024)
+        .await
+        .unwrap();
+    // A compatibility export must never turn a required default into an optional hint.
+    // Check an existing destination so a late failure cannot silently destroy a backup.
+    let backup = temp.path().join("historical.msb");
+    std::fs::write(&backup, b"previous backup").unwrap();
+    let error = save_snapshot(
+        &local,
+        loaded.path().to_str().unwrap(),
+        &backup,
+        SaveOpts::default().compatibility(ArchiveCompatibility::V0_7_8),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains(SAVED_CONFIG_EXTENSION),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&backup).unwrap(), b"previous backup");
+}
+
+#[tokio::test]
 async fn historical_archive_refuses_unrepresentable_clock_before_touching_output() {
     let temp = tempfile::tempdir().unwrap();
     let local = crate::test_support::local_backend_builder(temp.path().join("home"))

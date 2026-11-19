@@ -100,22 +100,45 @@ impl MerkleAccumulator {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Saved configuration is inline descriptor metadata. Verify its schema and agreement
+/// with the descriptor here, without resolving a binding or authorizing a sandbox launch.
+fn validate_verification_requirements(
+    manifest: &crate::snapshot::Manifest,
+) -> MicrosandboxResult<()> {
+    use microsandbox_types::snapshot::saved_config::{
+        SAVED_CONFIG_EXTENSION, SAVED_CONFIG_SCHEMA_VERSION,
+    };
+
+    let mut unsupported = manifest.unsupported_requires();
+    let saved_version = manifest
+        .extensions
+        .get(SAVED_CONFIG_EXTENSION)
+        .and_then(|value| value.get("schema_version"))
+        .and_then(serde_json::Value::as_u64);
+    // A later version may reference additional payloads. Keep the existing unsupported
+    // result until this verifier understands how to cover them.
+    if saved_version.is_none_or(|version| version == u64::from(SAVED_CONFIG_SCHEMA_VERSION)) {
+        manifest.saved_configuration()?;
+        unsupported.retain(|key| *key != SAVED_CONFIG_EXTENSION);
+    }
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    // An unrecognized extension may add payloads outside the known verification plan.
+    Err(MicrosandboxError::Unsupported {
+        op: crate::Operation::SnapshotOps,
+        reason: crate::error::UnsupportedReason::NotAvailable(format!(
+            "unknown required extensions: {}",
+            unsupported.join(", ")
+        )),
+    })
+}
+
 pub(super) async fn verify_snapshot(
     snap: &Snapshot,
     fs_state_limit: usize,
 ) -> MicrosandboxResult<SnapshotVerifyReport> {
-    let unsupported = snap.manifest().unsupported_requires();
-    if !unsupported.is_empty() {
-        // Unknown required extensions may describe additional payloads. Authenticating the
-        // known fields cannot establish coverage of requirements this reader cannot interpret.
-        return Err(MicrosandboxError::Unsupported {
-            op: crate::error::Operation::SnapshotOps,
-            reason: crate::error::UnsupportedReason::NotAvailable(format!(
-                "unknown required extensions: {}",
-                unsupported.join(", ")
-            )),
-        });
-    }
+    validate_verification_requirements(snap.manifest())?;
     let mut unrecorded = BTreeSet::new();
     if matches!(snap.manifest().state, SnapshotState::File(_)) {
         let owned = snap.manifest().owned_volumes()?;

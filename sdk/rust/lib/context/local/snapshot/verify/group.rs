@@ -241,16 +241,7 @@ fn verify_members(
 }
 
 fn prepare(artifact: &Snapshot, fs_state_limit: usize) -> MicrosandboxResult<MemberPlan> {
-    let unsupported = artifact.manifest().unsupported_requires();
-    if !unsupported.is_empty() {
-        return Err(MicrosandboxError::Unsupported {
-            op: crate::Operation::SnapshotOps,
-            reason: crate::error::UnsupportedReason::NotAvailable(format!(
-                "unknown required extensions: {}",
-                unsupported.join(", ")
-            )),
-        });
-    }
+    super::validate_verification_requirements(artifact.manifest())?;
     match &artifact.manifest().state {
         SnapshotState::Checkpoint(state) => {
             let expected = ObjectId::new(&state.checkpoint_root)?;
