@@ -8,6 +8,7 @@ import sys
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Literal, TypeAlias, TypedDict
 
 # --------------------------------------------------------------------------------------------------
@@ -81,6 +82,22 @@ class SandboxStatus(StrEnum):
     PAUSED = "paused"
 
 
+class SandboxInfo(TypedDict):
+    """A fresh backend observation; timestamps are timezone-aware UTC datetimes."""
+
+    id: str
+    name: str
+    status: SandboxStatus
+    last_failure_message: str | None
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+class ComputeType(StrEnum):
+    STANDARD = "standard"
+    SHARED = "shared"
+
+
 class ServiceStatus(StrEnum):
     ENABLED = "enabled"
     DISABLED = "disabled"
@@ -96,9 +113,9 @@ class ServiceTarget:
     port: int
 
 
-class BackendKind(StrEnum):
+class ContextKind(StrEnum):
     LOCAL = "local"
-    CLOUD = "cloud"
+    REMOTE = "remote"
 
 
 class ServiceErrorReason(StrEnum):
@@ -292,9 +309,26 @@ class DiskImageFormat(StrEnum):
     RAW = "raw"
     VMDK = "vmdk"
 
+
 class VolumeKind(StrEnum):
     DIRECTORY = "dir"
     DISK = "disk"
+
+
+class VolumeInfo(TypedDict):
+    """A fresh volume observation. Missing measurements remain None."""
+
+    id: str
+    name: str
+    kind: VolumeKind
+    is_default: bool
+    quota_mib: int | None
+    used_bytes: int | None
+    capacity_bytes: int | None
+    disk_format: str | None
+    disk_fstype: str | None
+    labels: dict[str, str]
+    created_at: str | None
 
 
 class NamedVolumeMode(StrEnum):
@@ -552,7 +586,7 @@ class ExecOptions(TypedDict, total=False):
     cwd: str
     user: str
     env: Mapping[str, str]
-    timeout: float
+    timeout: float | timedelta
     stdin: Stdin | bytes
     stdin_data: bytes
     tty: bool

@@ -15,6 +15,12 @@ use crate::types::{
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Idle SSH facade that resolves its original receiver when work begins.
+#[napi(js_name = "SandboxSshOps")]
+pub struct JsSandboxSshOps {
+    inner: microsandbox::sandbox::SandboxSshOps,
+}
+
 /// Native in-process SSH client session.
 #[napi(js_name = "SshClient")]
 pub struct JsSshClient {
@@ -31,6 +37,39 @@ pub struct JsSftpClient {
 #[napi(js_name = "SshServer")]
 pub struct JsSshServer {
     inner: Arc<Mutex<Option<microsandbox::sandbox::SshServer>>>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: SandboxSshOps
+//--------------------------------------------------------------------------------------------------
+
+impl JsSandboxSshOps {
+    pub(crate) fn new(inner: microsandbox::sandbox::SandboxSshOps) -> Self {
+        Self { inner }
+    }
+}
+
+#[napi]
+impl JsSandboxSshOps {
+    #[napi]
+    pub async fn open_client(&self, options: Option<SshClientOptions>) -> Result<JsSshClient> {
+        let client = self
+            .inner
+            .connect_with(|builder| apply_client_options(options, builder))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSshClient::from_rust(client))
+    }
+
+    #[napi]
+    pub async fn prepare_server(&self, options: Option<SshServerOptions>) -> Result<JsSshServer> {
+        let server = self
+            .inner
+            .server_with(|builder| apply_server_options(options, builder))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSshServer::from_rust(server))
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

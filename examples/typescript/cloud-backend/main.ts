@@ -1,31 +1,9 @@
-import {
-  Sandbox,
-  defaultBackendKind,
-} from "microsandbox";
-
-function configureCloudBackend() {
-  if (defaultBackendKind() !== "cloud") {
-    throw new Error(
-      "set MSB_BACKEND=cloud with MSB_API_KEY, or select a cloud profile",
-    );
-  }
-}
-
-async function waitUntilStopped(name: string) {
-  for (let i = 0; i < 30; i += 1) {
-    const handle = await Sandbox.get(name);
-    if (handle.status === "stopped") return;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  throw new Error(`sandbox ${name} did not stop within 30s`);
-}
-
-configureCloudBackend();
+import { Sandbox } from "microsandbox";
 
 const name = `typescript-cloud-${Math.floor(Date.now() / 1000)}`;
 console.log(`creating ${name} on the cloud backend`);
 
-const sandbox = await Sandbox.builder(name)
+const sandbox = await Sandbox.remote().builder(name)
   .image("alpine:3.19")
   .cpus(1)
   .memory(512)
@@ -34,7 +12,7 @@ const sandbox = await Sandbox.builder(name)
     "-lc",
     "for i in 1 2 3; do echo typescript-cloud-$i; sleep 1; done",
   ])
-  .maxDuration(60)
+  .maxDurationSeconds(60)
   .create();
 
 try {
@@ -60,9 +38,7 @@ try {
     await stream[Symbol.asyncDispose]();
   }
 } finally {
-  await sandbox.stop();
-  await waitUntilStopped(name);
-  await Sandbox.remove(name);
+  await sandbox.destroy();
   console.log(`removed ${name}`);
 }
 

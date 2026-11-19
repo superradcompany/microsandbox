@@ -37,14 +37,19 @@ jobs:
           shellcheck scripts/ci/install-apt-packages.sh
           python3 -m unittest discover -s scripts/ci -p test_apt_fallback.py -v
 
-      - name: Install release dependencies with the primary hosts blocked
+      - name: Install release dependencies with an unreachable primary
         shell: bash
         run: |
-          # Exercise real APT, Ubuntu signing keys and both mirror layouts.
-          # Restore the runner's hosts file even when the test fails.
-          sudo cp /etc/hosts "$RUNNER_TEMP/apt-test-hosts"
-          trap 'sudo cp "$RUNNER_TEMP/apt-test-hosts" /etc/hosts' EXIT
-          echo '127.0.0.1 azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com ports.ubuntu.com' | sudo tee -a /etc/hosts
+          # Regional runners choose different primary mirrors. Give the first
+          # apt-get a loopback source while keeping the runner's real sources
+          # available for the installer's fallback rewrite and signature checks.
+          primary=$(mktemp --suffix=.list)
+          apt_config=$(sudo mktemp /etc/apt/apt.conf.d/99msb-fallback-XXXXXXXX)
+          trap 'sudo rm -f -- "$apt_config" "$primary"' EXIT
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://127.0.0.1:9/ubuntu $VERSION_CODENAME main" > "$primary"
+          chmod 644 "$primary"
+          printf 'Dir::Etc::sourcelist "%s";\nDir::Etc::sourceparts "-";\n' "$primary" | sudo tee "$apt_config"
           bash scripts/ci/install-apt-packages.sh musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools | tee "$RUNNER_TEMP/apt-fallback.log"
           grep -F 'Using Ubuntu fallback mirror' "$RUNNER_TEMP/apt-fallback.log"
           musl-gcc --version

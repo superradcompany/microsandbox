@@ -6,7 +6,12 @@ require_relative "../lib/microsandbox"
 
 class ServicesTest < Test::Unit::TestCase
   def setup
-    Microsandbox.use_local_backend!
+    @previous_env = %w[MSB_BACKEND MSB_API_KEY MSB_API_URL].to_h { |key| [key, ENV[key]] }
+    ENV["MSB_BACKEND"] = "local"
+  end
+
+  def teardown
+    ENV.update(@previous_env)
   end
 
   def test_service_surface_is_registered
@@ -97,11 +102,12 @@ class ServicesTest < Test::Unit::TestCase
         client.close
       end
     end
-    Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:#{server.local_address.ip_port}")
+    ENV.update("MSB_BACKEND" => "remote", "MSB_API_KEY" => "test-key",
+               "MSB_API_URL" => "http://127.0.0.1:#{server.local_address.ip_port}")
     target = Microsandbox::ServiceTarget.new("web", 8080)
     service = Microsandbox::Service.create("ruby-service", target: target)
 
-    Microsandbox.use_local_backend!
+    ENV["MSB_BACKEND"] = "local"
 
     omitted = assert_raise(ArgumentError) { service.update }
     assert_match(/missing keyword: :target/, omitted.message)

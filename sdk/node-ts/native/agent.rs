@@ -66,14 +66,23 @@ impl AgentClient {
         name: String,
         opts: Option<AgentConnectOptions>,
     ) -> Result<AgentClient> {
-        let bridge = match timeout_from_options(opts) {
-            Some(timeout) => AgentBridge::connect_sandbox_with_timeout(&name, timeout).await,
-            None => AgentBridge::connect_sandbox(&name).await,
+        #[cfg(not(feature = "local"))]
+        {
+            Err(crate::error::to_napi_error(
+                microsandbox::MicrosandboxError::local_only(microsandbox::Operation::AgentConnect),
+            ))
         }
-        .map_err(to_napi_error_agent)?;
-        Ok(AgentClient {
-            inner: Arc::new(bridge),
-        })
+        #[cfg(feature = "local")]
+        {
+            let bridge = match timeout_from_options(opts) {
+                Some(timeout) => AgentBridge::connect_sandbox_with_timeout(&name, timeout).await,
+                None => AgentBridge::connect_sandbox(&name).await,
+            }
+            .map_err(to_napi_error_agent)?;
+            Ok(AgentClient {
+                inner: Arc::new(bridge),
+            })
+        }
     }
 
     /// Connect to an agentd relay socket by path.
@@ -97,8 +106,18 @@ impl AgentClient {
     /// bytes.
     #[napi(js_name = "socketPath")]
     pub fn socket_path(name: String) -> Result<String> {
-        let path = microsandbox::agent::AgentClient::socket_path(&name).map_err(to_napi_error)?;
-        Ok(path.to_string_lossy().into_owned())
+        #[cfg(not(feature = "local"))]
+        {
+            Err(crate::error::to_napi_error(
+                microsandbox::MicrosandboxError::local_only(microsandbox::Operation::AgentConnect),
+            ))
+        }
+        #[cfg(feature = "local")]
+        {
+            let path =
+                microsandbox::agent::AgentClient::socket_path(&name).map_err(to_napi_error)?;
+            Ok(path.to_string_lossy().into_owned())
+        }
     }
 
     /// Send one frame and await a single response frame.

@@ -11,20 +11,19 @@ const FIXTURES = fileURLToPath(
 
 it("passes Service results and change outcomes through from the native SDK", () => {
   const home = mkdtempSync(join(tmpdir(), "msb-service-native-"));
-  // A fresh process isolates the process-global backend; every request goes to a local fake.
+  // Give the native SDK a private profile file and a synthetic credential at process startup.
   const env: NodeJS.ProcessEnv = {
     ...process.env, MSB_HOME: home, MSB_CONFIG_PATH: join(home, "config.json"),
-    SERVICE_FIXTURES: FIXTURES,
+    SERVICE_FIXTURES: FIXTURES, MSB_API_KEY: "test",
   };
   delete env.MSB_PROFILE;
   delete env.MSB_BACKEND;
   const script = `
     import assert from "node:assert/strict";
-    import { readFileSync } from "node:fs";
+    import { readFileSync, writeFileSync } from "node:fs";
     import { createServer } from "node:http";
     import { join } from "node:path";
     import { Service } from "./dist/service.js";
-    import { setDefaultBackend } from "./dist/runtime.js";
     import {
       InvalidConfigError, ServiceError, ServiceNotFoundError, UnsupportedError,
     } from "./dist/errors.js";
@@ -47,9 +46,19 @@ it("passes Service results and change outcomes through from the native SDK", () 
       });
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    setDefaultBackend({
-      kind: "cloud", url: "http://127.0.0.1:" + server.address().port, apiKey: "test",
-    });
+    // The native resolver rereads profiles. Bun's JS environment changes do not
+    // reliably propagate to native getenv after startup.
+    const profiles = {
+      remote: {
+        kind: "remote", url: "http://127.0.0.1:" + server.address().port,
+        api_key_ref: "env:MSB_API_KEY",
+      },
+      local: { kind: "local" },
+    };
+    const select = (activeProfile) => writeFileSync(
+      process.env.MSB_CONFIG_PATH, JSON.stringify({ active_profile: activeProfile, profiles }),
+    );
+    select("remote");
 
     const svc = await Service.builder("shop").target("web-1", 8080).create();
     assert.equal(svc.url, "https://shop.<domain>");
@@ -93,7 +102,7 @@ it("passes Service results and change outcomes through from the native SDK", () 
       }
     });
 
-    setDefaultBackend("local");
+    select("local");
     const retained = await svc.enable().catch((error) => error);
     assert(retained instanceof ServiceError, String(retained));
     await assert.rejects(Service.get("shop"), UnsupportedError);

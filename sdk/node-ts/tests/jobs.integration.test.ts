@@ -3,7 +3,7 @@ import { Sandbox, JobError, type Job, type JobAttachment } from "../dist/index.j
 
 describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("managed jobs on a disposable VM", () => {
   it("preserves ownership and binary I/O across detach, and cancels an idle log stream", async () => {
-    const sb = await (await Sandbox.get(process.env.MSB_JOB_TEST_SANDBOX!)).connect();
+    const sb = await Sandbox.getRunning(process.env.MSB_JOB_TEST_SANDBOX!);
     const jobs: Job[] = [];
     const attachments: JobAttachment[] = [];
     try {
@@ -23,6 +23,10 @@ describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("man
       expect((await found.wait()).success).toBe(true);
       await second.detach();
       expect(Buffer.concat((await found.logs()).map(x => x.data))).toEqual(Buffer.concat([Buffer.from([255, 0, 10]), Buffer.from("reattached\n")]));
+      const stdout = await found.logs({ sources: ["stdout"] });
+      expect(stdout.length).toBeGreaterThan(0);
+      expect(stdout.every(entry => entry.source === "stdout")).toBe(true);
+      expect(await found.logs({ sources: ["stderr"] })).toEqual([]);
       let cursor: string | null = null;
       for (;;) {
         const page = await sb.listJobsWith(b => cursor ? b.all().cursor(cursor) : b.all());
@@ -46,9 +50,9 @@ describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("man
     }
   }, 20_000);
   it("enforces streaming deadlines without polling output", async () => {
-    const sb = await (await Sandbox.get(process.env.MSB_JOB_TEST_SANDBOX!)).connect();
+    const sb = await Sandbox.getRunning(process.env.MSB_JOB_TEST_SANDBOX!);
     for (const tty of [false, true]) {
-      const handle = await sb.execStreamWith("sleep", b => b.args(["30"]).tty(tty).timeout(500));
+      const handle = await sb.execStreamWith("sleep", b => b.args(["30"]).tty(tty).timeoutMilliseconds(500));
       try {
         await new Promise(resolve => setTimeout(resolve, 1000));
         await expect(handle.collect()).rejects.toMatchObject({ name: "ExecTimeoutError" });
@@ -56,7 +60,7 @@ describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("man
         await handle.kill().catch(() => {});
       }
     }
-    const fast = await sb.execStreamWith("echo", b => b.args(["ok"]).timeout(5000));
+    const fast = await sb.execStreamWith("echo", b => b.args(["ok"]).timeoutMilliseconds(5000));
     expect((await fast.collect()).stdout()).toBe("ok\n");
   }, 20_000);
 });

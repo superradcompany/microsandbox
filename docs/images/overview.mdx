@@ -115,7 +115,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 ### Registry TLS
 
-<Tooltip tip="Plain-HTTP registries and custom CA certificates are not supported on microsandbox cloud; images are pulled from HTTPS registries only."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Plain-HTTP registries and custom CA certificates are not supported on managed cloud; images are pulled from HTTPS registries only."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 By default, microsandbox connects to registries over HTTPS using system CA roots. You can customize this per-registry in `~/.microsandbox/config.json`.
 
@@ -151,7 +151,7 @@ For registries using self-signed or internal CA certificates, point `ca_certs` t
 ```
 </CodeGroup>
 
-microsandbox adds these certificates to the default system roots, so public registries continue to work normally. You can also supply the same roots per-sandbox through the SDK: `caCerts` in TypeScript, `ca_certs` in Rust, `registry_ca_certs` in Python, and `WithRegistryCACerts` / `WithRegistryCACertsPath` in Go.
+microsandbox adds these certificates to the default system roots, so public registries continue to work normally. You can also supply registry certificates for an individual sandbox; see your [SDK reference](/sdk/overview#reference).
 
 #### Combined configuration
 
@@ -212,7 +212,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 ### Image storage
 
-<Tooltip tip="Image-cache commands are local-only. On microsandbox cloud, specify an OCI image on create and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Image-cache commands are local-only. On managed cloud, specify an OCI image on create and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Images are cached in the global microsandbox home directory:
 
@@ -235,7 +235,9 @@ Use `msb image prune` to remove cached images that are not used by any sandbox o
 
 ## Disk images
 
-<Tooltip tip="Booting from a disk image references a file on the caller host and is local-only. On microsandbox cloud, publish the filesystem as an OCI image instead."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 In addition to OCI container images, microsandbox can boot a sandbox directly from a disk image file. The guest gets raw block device access, and its kernel mounts the filesystem from the device directly.
 
