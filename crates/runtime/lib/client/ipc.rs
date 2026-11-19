@@ -952,22 +952,9 @@ async fn endpoint_answers(path: &Path) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    // These are local runtime paths. Keep metadata inspection on Tokio's
-    // blocking pool so a slow filesystem cannot stall an async worker. The
-    // caller's deadline treats a queued or slow inspection conservatively as
-    // potentially live.
-    // Keep inspection errors distinct from connection errors for diagnostics.
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(_) => {}
-        Err(error)
-            if error.kind() == ErrorKind::NotFound
-                || matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) =>
-        {
-            return Ok(false);
-        }
-        Err(error) => return Err(endpoint_error("inspect", path, error)),
-    }
-
+    // connect already distinguishes missing/malformed paths from live sockets.
+    // A preliminary async stat only queues blocking-pool work and can exhaust
+    // the deadline under load even when every endpoint is absent.
     loop {
         match tokio::net::UnixStream::connect(path).await {
             Ok(_) => return Ok(true),
@@ -1128,7 +1115,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn endpoint_probe_does_not_depend_on_the_filesystem_worker_pool() {
+    fn absent_endpoints_do_not_wait_for_the_blocking_pool() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let paths = SandboxSocketPaths::new(home.path(), home.path(), "worker");
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1143,33 +1130,12 @@ mod tests {
             let _ = wait.recv();
         });
         started.recv().unwrap();
-
-        // A queued metadata check must not stall the async worker. Until the
-        // blocking pool is available, the probe conservatively retains the
-        // start rather than declaring the endpoint absent.
-        let started = Instant::now();
-        let blocked = runtime.block_on(paths.may_be_live());
-        let elapsed = started.elapsed();
-
-        std::fs::create_dir_all(paths.fallback_agent.parent().unwrap()).unwrap();
-        let listener = std::os::unix::net::UnixListener::bind(&paths.fallback_agent).unwrap();
-
+        // A busy filesystem pool must not turn an absent endpoint into a live
+        // owner. Release the blocker before asserting so failures cannot hang.
+        let result = runtime.block_on(paths.may_be_live());
         release.send(()).unwrap();
         runtime.block_on(blocker).unwrap();
-        assert!(
-            blocked.unwrap(),
-            "uncertain endpoint state must be retained"
-        );
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "probe exceeded its budget"
-        );
-        let live = runtime.block_on(paths.may_be_live());
-        assert!(live.unwrap(), "a live listener was missed");
-        listener.set_nonblocking(true).unwrap();
-        listener
-            .accept()
-            .expect("the probe must actually reach the listener");
+        assert!(!result.unwrap());
     }
 
     #[cfg(target_os = "linux")]
@@ -1190,9 +1156,16 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::WouldBlock,
         );
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(1), paths.may_be_live()).await;
-        assert!(result.unwrap().unwrap());
+        // Keep the conservative 50 ms deadline independently specified in the
+        // test. Saturating a real listener must still retain uncertain owners.
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        assert!(paths.may_be_live().await.unwrap());
+        // Tokio rounds timer deadlines to millisecond ticks. Depending on the
+        // clock's alignment, the 50 ms deadline can fire on the next 1 ms tick.
+        let budget = Duration::from_millis(50);
+        assert!((budget..=budget + Duration::from_millis(1)).contains(&started.elapsed()));
+        tokio::time::resume();
         assert!(path.exists());
         // Free one slot while the next probe is retrying. Verify a new connection
         // actually arrives, so a timeout cannot masquerade as a successful retry.
