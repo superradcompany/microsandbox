@@ -21,6 +21,8 @@ pub struct ResourceConfigurationPlan {
     resources: SandboxResources,
     selection: ResourceDefaultSelection,
     requires_full_compatibility: bool,
+    destination_cpu: bool,
+    destination_memory: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -31,6 +33,11 @@ impl ResourceConfigurationPlan {
     /// Inspect unavailable observations without rewriting them as requested allocations.
     pub fn selection(&self) -> &ResourceDefaultSelection {
         &self.selection
+    }
+
+    /// True for each unavailable disk-boot allocation that used destination defaults.
+    pub fn destination_allocation(&self) -> (bool, bool) {
+        (self.destination_cpu, self.destination_memory)
     }
 
     /// Full resume still requires captured THP/guest-policy, backing and host compatibility.
@@ -82,7 +89,12 @@ pub fn prepare_resource_configuration(
     mode: SnapshotConfigMode,
     restore_mode: ResourceRestoreMode<'_>,
 ) -> MicrosandboxResult<ResourceConfigurationPlan> {
-    let selection = select_resource_defaults(saved, explicit, clears, mode, restore_mode)?;
+    let mut selection = select_resource_defaults(saved, explicit, clears, mode, restore_mode)?;
+    // Only current allocation may fall back. A missing ceiling or THP policy still
+    // requires resolution, and a selected fallback must fit any known ceiling.
+    let disk = matches!(restore_mode, ResourceRestoreMode::Disk);
+    let destination_cpu = disk && selection.unknown_fields.remove("resources.cpus");
+    let destination_memory = disk && selection.unknown_fields.remove("resources.memory_mib");
     let builtin = SandboxResources::default();
     let mut resources = builtin.clone();
     lower.clone().apply_to(&mut resources);
@@ -136,6 +148,8 @@ pub fn prepare_resource_configuration(
     Ok(ResourceConfigurationPlan {
         resources,
         selection,
+        destination_cpu,
+        destination_memory,
         requires_full_compatibility: matches!(restore_mode, ResourceRestoreMode::Full(_)),
     })
 }

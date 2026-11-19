@@ -217,7 +217,7 @@ fn destination_inputs_refuse_each_unknown_immediate_family_without_mutating_sour
         ("runtime", "guest_clock"),
         ("runtime", "scripts"),
         ("runtime", "init"),
-        ("resources", "cpus"),
+        ("resources", "thp"),
         ("execution", "rlimits"),
         ("network", "dns"),
         ("storage", "mounts"),

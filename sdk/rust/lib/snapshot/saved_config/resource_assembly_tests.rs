@@ -146,7 +146,7 @@ fn clears_reset_lower_defaults_before_explicit_destination_values_apply() {
 }
 
 #[test]
-fn unknown_observations_never_borrow_lower_requested_capacity() {
+fn unknown_cpu_fallback_respects_the_ceiling_and_explicit_override() {
     let source = SavedResourcesConfig {
         cpus: Some(SavedValue::Unknown {
             reason: SavedUnknownReason::Converging,
@@ -154,14 +154,7 @@ fn unknown_observations_never_borrow_lower_requested_capacity() {
         ..Default::default()
     };
     let lower = SandboxResourcesPatch::new().cpus(8).max_cpus(2);
-    let unresolved = plan(&source, &lower, &SandboxResourcesPatch::new(), &[]).unwrap();
-    assert!(
-        unresolved
-            .resources()
-            .unwrap_err()
-            .to_string()
-            .contains("SCFG_UNKNOWN")
-    );
+    assert!(plan(&source, &lower, &SandboxResourcesPatch::new(), &[]).is_err());
     let resolved = plan(&source, &lower, &SandboxResourcesPatch::new().cpus(2), &[])
         .unwrap()
         .resources()
@@ -296,4 +289,33 @@ fn fresh_disk_uses_destination_defaults_and_does_not_mutate_the_source() {
         (2, 2, 512, 512)
     );
     assert_eq!(source, before);
+}
+
+#[test]
+fn disk_boot_with_unknown_current_allocation_uses_and_reports_only_destination_defaults() {
+    let unknown = SavedUnknownReason::NotObserved;
+    let saved = SavedResourcesConfig {
+        cpus: Some(SavedValue::Unknown { reason: unknown }),
+        memory_mib: Some(SavedValue::Unknown { reason: unknown }),
+        max_cpus: known(4),
+        max_memory_mib: known(1024),
+        ..Default::default()
+    };
+    let lower = SandboxResourcesPatch::new().cpus(2).memory_mib(384);
+    let defaulted = plan(&saved, &lower, &SandboxResourcesPatch::new(), &[]).unwrap();
+    let config = defaulted.resources().unwrap();
+    assert_eq!((config.cpus, config.memory_mib), (2, 384));
+    assert_eq!(defaulted.destination_allocation(), (true, true));
+    let changed = plan(&saved, &lower, &SandboxResourcesPatch::new().cpus(3), &[]).unwrap();
+    assert_eq!(changed.destination_allocation(), (false, true));
+    assert_eq!(changed.resources().unwrap().cpus, 3);
+    assert!(
+        plan(
+            &saved,
+            &SandboxResourcesPatch::new().cpus(8),
+            &SandboxResourcesPatch::new(),
+            &[]
+        )
+        .is_err()
+    );
 }

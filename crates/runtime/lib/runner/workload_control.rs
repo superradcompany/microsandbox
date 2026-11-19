@@ -550,6 +550,7 @@ mod tests {
         control.install_ready(
             9,
             GuestReady {
+                applied_security_profile: None,
                 restore_tcp_reset_version: None,
                 freeze_resources_version: None,
                 public: Ready::default(),

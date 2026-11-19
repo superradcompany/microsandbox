@@ -14,6 +14,9 @@ use crate::init_observation::{InitObservation, ObservedReady};
 pub struct GuestReady {
     #[serde(flatten)]
     pub public: Ready,
+    /// Guest execution profile used by the agent. Older guests leave this unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_security_profile: Option<crate::bootstrap::BootstrapSecurityProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_tcp_reset_version: Option<u8>,
     /// Private freeze requests may ask for a capacity observation at the acknowledged cut.
@@ -26,8 +29,10 @@ pub struct GuestReady {
 /// Private extension to the existing freeze envelope. Only a capable guest receives the query.
 #[derive(Serialize, Deserialize)]
 pub struct GuestFreeze {
+    /// Original lifecycle request, including its attempt identity and flush policy.
     #[serde(flatten)]
     pub freeze: crate::core::WorkloadFreeze,
+    /// Optional correlated CPU and memory query, sampled while the workload is frozen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observe_resources: Option<crate::resources::ObserveResources>,
 }
@@ -36,13 +41,17 @@ pub struct GuestFreeze {
 /// ordinary freeze acknowledgement and its transport/flush guarantees intact.
 #[derive(Default, Deserialize)]
 pub struct FreezeResourceEvidence {
+    /// Absent when capacity could not be observed at this freeze. The freeze itself remains valid.
     pub frozen_resources: Option<crate::resources::ObservedResources>,
 }
 
+/// Guest acknowledgement with optional observations from the same freeze.
 #[derive(Serialize)]
 pub struct GuestFrozen {
+    /// Original acknowledgement, including transport credits and the output boundary.
     #[serde(flatten)]
     pub frozen: crate::core::WorkloadFrozen,
+    /// Present only when the guest answered the negotiated capacity query.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frozen_resources: Option<crate::resources::ObservedResources>,
 }
@@ -85,6 +94,7 @@ impl From<Ready> for GuestReady {
     fn from(public: Ready) -> Self {
         Self {
             public,
+            applied_security_profile: None,
             restore_tcp_reset_version: None,
             freeze_resources_version: None,
             init_observation: None,
@@ -111,7 +121,9 @@ mod tests {
         ciborium::into_writer(&legacy, &mut wire).unwrap();
         let decoded: GuestReady = ciborium::from_reader(wire.as_slice()).unwrap();
         assert_eq!(decoded.restore_tcp_reset_version, None);
+        assert_eq!(decoded.applied_security_profile, None);
         let capable = GuestReady {
+            applied_security_profile: Some(crate::bootstrap::BootstrapSecurityProfile::Restricted),
             public: legacy,
             restore_tcp_reset_version: Some(1),
             freeze_resources_version: Some(1),
@@ -121,6 +133,11 @@ mod tests {
         ciborium::into_writer(&capable, &mut wire).unwrap();
         let decoded: Ready = ciborium::from_reader(wire.as_slice()).unwrap();
         assert_eq!(decoded.boot_time_ns, 27);
+        let observed: GuestReady = ciborium::from_reader(wire.as_slice()).unwrap();
+        assert_eq!(
+            observed.applied_security_profile,
+            capable.applied_security_profile
+        );
     }
 
     #[test]

@@ -9313,6 +9313,7 @@ mod tests {
             external_mount_reports: Vec::new(),
             protocol_generation: microsandbox_protocol::message::PROTOCOL_VERSION,
             ready: GuestReady {
+                applied_security_profile: None,
                 init_observation: None,
                 restore_tcp_reset_version: Some(1),
                 freeze_resources_version: None,

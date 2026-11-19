@@ -575,6 +575,14 @@ pub async fn run(
                 workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
                 exec_limits: config.exec_limits,
             },
+            applied_security_profile: Some(match config.security_profile {
+                crate::config::SecurityProfile::Default => {
+                    microsandbox_protocol::bootstrap::BootstrapSecurityProfile::Default
+                }
+                crate::config::SecurityProfile::Restricted => {
+                    microsandbox_protocol::bootstrap::BootstrapSecurityProfile::Restricted
+                }
+            }),
             init_observation: boot_console.init_observation,
             restore_tcp_reset_version: crate::network_reset::supported().then_some(1),
             freeze_resources_version: Some(1),
