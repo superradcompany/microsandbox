@@ -837,8 +837,8 @@ The Ruby SDK does not currently expose single or batch sandbox forking. For supp
 ## Checkpoint.local / Checkpoint.remote
 
 ```ruby
-Microsandbox::Checkpoint.local  # => Snapshots
-Microsandbox::Checkpoint.remote # => Snapshots
+Microsandbox::Checkpoint.local  # => Microsandbox::Checkpoints
+Microsandbox::Checkpoint.remote # => Microsandbox::Checkpoints
 ```
 
 Select before creation/lookup/listing; the collection retains its destination. Remote selection captures environment credentials and raises on invalid configuration. Neither selector changes an existing resource or global default. See [selector examples](/operations/backends#resource-selectors).

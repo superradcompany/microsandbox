@@ -286,7 +286,7 @@ A failed capture can still have published its requested artifact before source r
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">local()</span>
 
 ```rust
-fn local() -> Snapshots
+fn local() -> Checkpoints
 ```
 
 Select the default-local destination. Requires the local feature. Does not consult remote selection variables. See [selector examples](/operations/backends#resource-selectors).
@@ -294,7 +294,7 @@ Select the default-local destination. Requires the local feature. Does not consu
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">remote()</span>
 
 ```rust
-fn remote() -> MicrosandboxResult<Snapshots>
+fn remote() -> MicrosandboxResult<Checkpoints>
 ```
 
 Capture remote environment credentials and endpoint without network I/O. Requires the cloud feature. Missing credentials fail; existing resources keep their destination. See [selector examples](/operations/backends#resource-selectors).
@@ -553,21 +553,23 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
   </div>
 </div>
 
-#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">remove()</span>
+<span id="snapshotremove" />
+
+#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">remove_by_reference()</span>
 
 ```rust
-async fn remove(path_or_name: &str, force: bool) -> MicrosandboxResult<()>
+async fn remove_by_reference(path_or_name: &str, force: bool) -> MicrosandboxResult<()>
 ```
 
 <Accordion title="Example">
 
 ```rust
-Checkpoint::remove("api:baseline", false).await?;
+Checkpoint::remove_by_reference("api:baseline", false).await?;
 ```
 
 </Accordion>
 
-Remove a snapshot artifact by group selector, unambiguous ID or digest, or path, along with its index row. Refuses if the snapshot has indexed children unless `force` is set. A group's head cannot be removed while other members remain, even with `force`; select another head first.
+Remove a snapshot artifact by group selector, unambiguous ID or digest, or path, along with its index row. Refuses if the snapshot has indexed children unless `force` is set. When you remove the head, its surviving same-group parent becomes the new head. If it has no such parent, the group has no selected head.
 
 <p className="msb-label">Parameters</p>
 
@@ -591,9 +593,7 @@ async fn remove_ref(
 ) -> MicrosandboxResult<()>
 ```
 
-Remove a snapshot using an explicit backend-neutral reference. Prefer this
-over [`remove()`](#snapshotremove) when the value came from
-`Checkpoint::reference()` or `Checkpoint::reference()`.
+Use a typed reference obtained from `checkpoint.reference()`. For a path or name, use [`remove_by_reference()`](#snapshotremove).
 
 #### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">reindex()</span>
 
@@ -643,11 +643,13 @@ on backends without a rebuildable artifact index.
 
 ---
 
-#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">save()</span>
+<span id="snapshotsave" />
+
+#### <span className="msb-recv">Checkpoint::</span><span className="msb-hn">save_by_reference()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
-async fn save(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()>
+async fn save_by_reference(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()>
 ```
 
 Bundle a snapshot into a `.msb` archive (or plain `.tar`) at `out`. Recorded payload integrity is preserved but not executed implicitly; call [`verify()`](#snap-verify) when an independent content scan is part of your workflow. See [`SaveOpts`](#saveopts) to also include ancestors and the OCI image cache.
@@ -675,7 +677,7 @@ Bundle a snapshot into a `.msb` archive (or plain `.tar`) at `out`. Recorded pay
 use microsandbox::snapshot::SaveOpts;
 use std::path::Path;
 
-Checkpoint::save(
+Checkpoint::save_by_reference(
     "api:baseline",
     Path::new("/tmp/baseline.msb"),
     SaveOpts { with_parents: true, with_image: true, ..Default::default() },
@@ -1054,6 +1056,119 @@ fn created_at(&self) -> chrono::NaiveDateTime
 
 Checkpoint creation time, parsed from the manifest.
 
+<span id="save-an-exact-checkpoint" />
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">save()</span>
+
+```rust
+async fn save(&self, out: impl AsRef<Path>) -> MicrosandboxResult<()>
+```
+
+<Accordion title="Example">
+
+```rust
+checkpoint.save("ready.msb").await?;
+checkpoint.save_with("portable.msb", |save| save.with_parents().with_image()).await?;
+```
+
+</Accordion>
+
+The receiver selects one immutable checkpoint. Use the group’s optional head or exact-member lookup first; saving a group’s whole history is not implied. The no-options call writes a compressed `.msb` archive. `save_to` retains its explicit options form for compatibility. See the [archive compatibility option](#saveopts) before sending output to an older reader.
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">save_with()</span>
+
+```rust
+async fn save_with(
+    &self,
+    out: impl AsRef<Path>,
+    configure: impl FnOnce(SaveOpts) -> SaveOpts,
+) -> MicrosandboxResult<()>
+```
+
+Configure archive options for this exact checkpoint. See [SaveOpts](#saveopts).
+
+<span id="exact-checkpoint-removal" />
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">remove()</span>
+
+```rust
+async fn remove(&self) -> MicrosandboxResult<CheckpointRemoveResult>
+```
+
+To migrate `Snapshot::remove(reference, force)`, use `Checkpoint::remove_by_reference(reference, force)`. When you already hold the checkpoint, `checkpoint.remove()` returns its removal result and `checkpoint.destroy(force)` returns success or failure.
+
+<Accordion title="Example">
+
+```rust
+let removed = checkpoint.remove().await?;
+let forced = checkpoint.remove_with(|options| options.force()).await?;
+```
+
+</Accordion>
+
+These are alternative calls, not successive removals of the same checkpoint. The instance method removes the retained checkpoint identity, refuses a replacement at the same address, and returns `CheckpointRemoveResult` with `id`, optional `head_update`, and `warnings`. The head outcome belongs to this operation; later head edits do not change it. Removing the head selects its surviving same-group parent or clears selection. Removing another member reports an unchanged head. Standalone artifacts have no head outcome.
+
+Force permits removal despite indexed children, but never bypasses reader protection. A repeated removal reports a missing checkpoint rather than fabricating another successful result. Backends or native libraries without exact-removal reporting return unsupported instead of falling back to deletion by name.
+
+If removal commits but catalog cleanup fails, the call returns `MicrosandboxError::SnapshotRemovalRecovery { result, source }`. Its result is authoritative: removal already happened. Recover the affected storage before retrying cleanup; do not assume an error means the checkpoint still exists.
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">remove_with()</span>
+
+```rust
+async fn remove_with(
+    &self,
+    configure: impl FnOnce(CheckpointRemoveOptions) -> CheckpointRemoveOptions,
+) -> MicrosandboxResult<CheckpointRemoveResult>
+```
+
+Configure exact removal with `CheckpointRemoveOptions`. Force never bypasses active-reader protection.
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox()</span>
+
+```rust
+async fn spawn_sandbox(&self) -> MicrosandboxResult<Sandbox>
+```
+
+Resume this checkpoint in a new sandbox. A later head change leaves this selection intact. Disk checkpoints boot a fresh VM.
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with()</span>
+
+```rust
+async fn spawn_sandbox_with(
+    &self,
+    configure: impl FnOnce(RestoreBuilder) -> RestoreBuilder,
+) -> MicrosandboxResult<Sandbox>
+```
+
+Configure the destination using the [restore options](#restorebuilder). The receiver selects the source checkpoint.
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with_progress()</span>
+
+```rust
+async fn spawn_sandbox_with_progress(
+    &self,
+) -> MicrosandboxResult<(
+    CreationProgressHandle,
+    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+)>
+```
+
+On a local provider, receive progress events and await the result task for the sandbox or creation error.
+
+#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with_progress_with()</span>
+
+```rust
+async fn spawn_sandbox_with_progress_with(
+    &self,
+    configure: impl FnOnce(RestoreBuilder) -> RestoreBuilder,
+) -> MicrosandboxResult<(
+    CreationProgressHandle,
+    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+)>
+```
+
+Configure the destination and receive local creation progress. Await the result task even if you skip the events.
+
 ## SnapshotBuilder
 
 Builder for a [`SnapshotConfig`](#snapshotconfig). Obtained via [`Checkpoint::builder(name)`](#snapshotbuilder). A source sandbox is required ([`from_sandbox`](#from_sandbox)); the other setters are optional. Every setter returns `Self`, so calls chain.
@@ -1219,122 +1334,6 @@ data while replacing explicit-snapshot metadata in a new archive.
 | `labels(BTreeMap<String, String>)` | `Self` | Replace all labels in the copied manifest |
 | `record_integrity(bool)` | `Self` | Compute integrity when true, or omit it when false |
 | `save()` | `MicrosandboxResult<Manifest>` | Write the archive and return its manifest |
-
-<span id="save-an-exact-checkpoint" />
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">save()</span>
-
-```rust
-async fn save(&self, out: impl AsRef<Path>) -> MicrosandboxResult<()>
-```
-
-<Accordion title="Example">
-
-```rust
-checkpoint.save("ready.msb").await?;
-checkpoint.save_with("portable.msb", |save| save.with_parents().with_image()).await?;
-```
-
-</Accordion>
-
-The receiver selects one immutable checkpoint. Use the group’s optional head or exact-member lookup first; saving a group’s whole history is not implied. The no-options call writes a compressed `.msb` archive. `save_to` retains its explicit options form for compatibility. See the archive compatibility option below before sending output to an older reader.
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">save_with()</span>
-
-```rust
-async fn save_with(
-    &self,
-    out: impl AsRef<Path>,
-    configure: impl FnOnce(SaveOpts) -> SaveOpts,
-) -> MicrosandboxResult<()>
-```
-
-Configure archive options for this exact checkpoint. See [SaveOpts](#saveopts).
-
-<span id="exact-checkpoint-removal" />
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">remove()</span>
-
-```rust
-async fn remove(&self) -> MicrosandboxResult<CheckpointRemoveResult>
-```
-
-Migration: static Rust `Snapshot::remove(reference, force)` becomes `Checkpoint::remove_by_reference(reference, force)`. Use the instance method below for exact identity and a removal result. Legacy `Checkpoint::remove(force)` retains its unit-returning contract.
-
-<Accordion title="Example">
-
-```rust
-let removed = checkpoint.remove().await?;
-let forced = checkpoint.remove_with(|options| options.force()).await?;
-```
-
-</Accordion>
-
-These are alternative calls, not successive removals of the same checkpoint. The instance method removes the retained checkpoint identity, refuses a replacement at the same address, and returns `CheckpointRemoveResult` with `id`, optional `head_update`, and `warnings`. The head outcome belongs to this operation; later head edits do not change it. Removing the head selects its surviving same-group parent or clears selection. Removing another member reports an unchanged head. Standalone artifacts have no head outcome.
-
-Force permits removal despite indexed children, but never bypasses reader protection. A repeated removal reports a missing checkpoint rather than fabricating another successful result. Backends or native libraries without exact-removal reporting return unsupported instead of falling back to deletion by name.
-
-If removal commits but catalog cleanup fails, the call returns `MicrosandboxError::SnapshotRemovalRecovery { result, source }`. Its result is authoritative: removal already happened. Recover the affected storage before retrying cleanup; do not assume an error means the checkpoint still exists.
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">remove_with()</span>
-
-```rust
-async fn remove_with(
-    &self,
-    configure: impl FnOnce(CheckpointRemoveOptions) -> CheckpointRemoveOptions,
-) -> MicrosandboxResult<CheckpointRemoveResult>
-```
-
-Configure exact removal with `CheckpointRemoveOptions`. Force never bypasses active-reader protection.
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox()</span>
-
-```rust
-async fn spawn_sandbox(&self) -> MicrosandboxResult<Sandbox>
-```
-
-Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with()</span>
-
-```rust
-async fn spawn_sandbox_with(
-    &self,
-    configure: impl FnOnce(RestoreBuilder) -> RestoreBuilder,
-) -> MicrosandboxResult<Sandbox>
-```
-
-Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with_progress()</span>
-
-```rust
-async fn spawn_sandbox_with_progress(
-    &self,
-) -> MicrosandboxResult<(
-    CreationProgressHandle,
-    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
-)>
-```
-
-Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
-
-#### <span className="msb-recv">checkpoint.</span><span className="msb-hn">spawn_sandbox_with_progress_with()</span>
-
-```rust
-async fn spawn_sandbox_with_progress_with(
-    &self,
-    configure: impl FnOnce(RestoreBuilder) -> RestoreBuilder,
-) -> MicrosandboxResult<(
-    CreationProgressHandle,
-    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
-)>
-```
-
-Spawn from this exact retained checkpoint, even if group head changes. Full checkpoints resume by default; disk checkpoints boot fresh. The destination callback cannot change source selection. Progress variants are local-only and return a progress handle plus a result task; await the task to observe completion. See [destination options](#restorebuilder).
-
-
-
 
 ## Forking
 
