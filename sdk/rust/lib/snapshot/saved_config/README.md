@@ -302,3 +302,9 @@ A bind mount that inherited its source host's default budget records the observe
 ## Restored execution limits
 
 A full restore with nondefault guest execution limits installs those five limits on the new sandbox. The destination runtime reads the policy on every start and requires the guest to confirm it before accepting commands. An older CLI can start that destination using a capable runtime. An older runtime receives an upgrade error on start. Ordinary sandboxes and restored sandboxes with built-in limits can still start on otherwise compatible runtimes. Removing the destination removes its policy.
+
+## Capacity at checkpoint capture
+
+A runtime and client can negotiate CPU and memory evidence for their private capture receipt. A guest advertising freeze-time observation samples the CPU and memory drivers while the workload is frozen. The host matches the reply to that freeze request and compares each sample with the corresponding VM device while the VM is paused. CPU requires agreement on the exact online and enforced count. Memory requires the same address range and agreement on plugged, requested and onlined capacity. The recorded MiB value includes boot memory. CPU and memory can converge independently.
+
+An ordinary pause, a stopped capture, a capture without a guest flush or an older peer can leave this evidence absent. An optional guest read has a 100 ms budget with at most one outstanding worker. A late read cannot supply evidence for another cut. Missing evidence stays unknown and the normal checkpoint operation can complete.

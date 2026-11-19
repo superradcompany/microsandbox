@@ -16,8 +16,35 @@ pub struct GuestReady {
     pub public: Ready,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_tcp_reset_version: Option<u8>,
+    /// Private freeze requests may ask for a capacity observation at the acknowledged cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeze_resources_version: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init_observation: Option<InitObservation>,
+}
+
+/// Private extension to the existing freeze envelope. Only a capable guest receives the query.
+#[derive(Serialize, Deserialize)]
+pub struct GuestFreeze {
+    #[serde(flatten)]
+    pub freeze: crate::core::WorkloadFreeze,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observe_resources: Option<crate::resources::ObserveResources>,
+}
+
+/// An independent decoder lets a missing or unreadable optional observation leave the
+/// ordinary freeze acknowledgement and its transport/flush guarantees intact.
+#[derive(Default, Deserialize)]
+pub struct FreezeResourceEvidence {
+    pub frozen_resources: Option<crate::resources::ObservedResources>,
+}
+
+#[derive(Serialize)]
+pub struct GuestFrozen {
+    #[serde(flatten)]
+    pub frozen: crate::core::WorkloadFrozen,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen_resources: Option<crate::resources::ObservedResources>,
 }
 
 /// The distinct mode makes an unsupported guest reject a misdirected request
@@ -59,6 +86,7 @@ impl From<Ready> for GuestReady {
         Self {
             public,
             restore_tcp_reset_version: None,
+            freeze_resources_version: None,
             init_observation: None,
         }
     }
@@ -86,6 +114,7 @@ mod tests {
         let capable = GuestReady {
             public: legacy,
             restore_tcp_reset_version: Some(1),
+            freeze_resources_version: Some(1),
             init_observation: Some(InitObservation::Builtin),
         };
         wire.clear();

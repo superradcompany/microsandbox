@@ -113,6 +113,7 @@ export class CreateCheckpoint extends GenerationTwoRequest<CheckpointResult> {
   readonly value: CheckpointCreate;
   get requiresConfigurationBlockCapacity(): boolean { return this.value.retain_configuration_block_capacity === true; }
   get requiresConfigurationExecLimits(): boolean { return this.value.retain_configuration_exec_limits === true; }
+  get requiresConfigurationFreezeResources(): boolean { return this.value.retain_configuration_freeze_resources === true; }
   get requiresConfigurationStorage(): boolean { return this.value.retain_configuration_storage === true; }
   get requiresConfigurationCapture(): boolean { return this.value.retain_configuration === true; }
   constructor(value: CheckpointCreate) {
@@ -122,13 +123,14 @@ export class CreateCheckpoint extends GenerationTwoRequest<CheckpointResult> {
     this.value = {
       ...(value.retain_configuration_block_capacity === undefined ? {} : { retain_configuration_block_capacity: bool(value.retain_configuration_block_capacity) }),
       ...(value.retain_configuration_exec_limits === undefined ? {} : { retain_configuration_exec_limits: bool(value.retain_configuration_exec_limits) }),
+      ...(value.retain_configuration_freeze_resources === undefined ? {} : { retain_configuration_freeze_resources: bool(value.retain_configuration_freeze_resources) }),
       ...(value.retain_configuration_storage === undefined ? {} : { retain_configuration_storage: bool(value.retain_configuration_storage) }),
       ...(value.retain_configuration === undefined ? {} : { retain_configuration: bool(value.retain_configuration) }),
       ...(value.guest_flush === undefined ? {} : { guest_flush: guestFlush(value.guest_flush) }),
       record_integrity: bool(value.record_integrity), checkpoint_id: text(value.checkpoint_id), intent,
     };
     // Freeze the new contract only; legacy callers retain their existing prepared-value API.
-    if (value.retain_configuration_block_capacity !== undefined || value.retain_configuration_exec_limits !== undefined || value.retain_configuration !== undefined || value.retain_configuration_storage !== undefined) Object.freeze(this.value);
+    if (value.retain_configuration_block_capacity !== undefined || value.retain_configuration_exec_limits !== undefined || value.retain_configuration_freeze_resources !== undefined || value.retain_configuration !== undefined || value.retain_configuration_storage !== undefined) Object.freeze(this.value);
   }
   message(): EncodedMessage { return encodedMessage("control.checkpoint.create", encodeRecord(compact(this.value))); }
   decode(frame: InboundFrame): CheckpointResult {
@@ -153,6 +155,7 @@ export class CreateDiskCheckpoint extends GenerationTwoRequest<DiskCheckpointSta
   readonly value: DiskCheckpointCreate;
   get requiresConfigurationBlockCapacity(): boolean { return this.value.retain_configuration_block_capacity === true; }
   get requiresConfigurationExecLimits(): boolean { return this.value.retain_configuration_exec_limits === true; }
+  get requiresConfigurationFreezeResources(): boolean { return this.value.retain_configuration_freeze_resources === true; }
   get requiresConfigurationStorage(): boolean { return this.value.retain_configuration_storage === true; }
   get requiresConfigurationCapture(): boolean { return this.value.retain_configuration === true; }
   constructor(value: DiskCheckpointCreate) {
@@ -160,13 +163,14 @@ export class CreateDiskCheckpoint extends GenerationTwoRequest<DiskCheckpointSta
     this.value = {
       ...(value.retain_configuration_block_capacity === undefined ? {} : { retain_configuration_block_capacity: bool(value.retain_configuration_block_capacity) }),
       ...(value.retain_configuration_exec_limits === undefined ? {} : { retain_configuration_exec_limits: bool(value.retain_configuration_exec_limits) }),
+      ...(value.retain_configuration_freeze_resources === undefined ? {} : { retain_configuration_freeze_resources: bool(value.retain_configuration_freeze_resources) }),
       ...(value.retain_configuration_storage === undefined ? {} : { retain_configuration_storage: bool(value.retain_configuration_storage) }),
       ...(value.retain_configuration === undefined ? {} : { retain_configuration: bool(value.retain_configuration) }),
       ...(value.guest_flush === undefined ? {} : { guest_flush: guestFlush(value.guest_flush) }),
       checkpoint_id: text(value.checkpoint_id),
     };
     // Freeze the new contract only; legacy callers retain their existing prepared-value API.
-    if (value.retain_configuration_block_capacity !== undefined || value.retain_configuration_exec_limits !== undefined || value.retain_configuration !== undefined || value.retain_configuration_storage !== undefined) Object.freeze(this.value);
+    if (value.retain_configuration_block_capacity !== undefined || value.retain_configuration_exec_limits !== undefined || value.retain_configuration_freeze_resources !== undefined || value.retain_configuration !== undefined || value.retain_configuration_storage !== undefined) Object.freeze(this.value);
   }
   message(): EncodedMessage { return encodedMessage("control.disk.checkpoint.create", encodeRecord(compact(this.value))); }
   decode(frame: InboundFrame): DiskCheckpointState {

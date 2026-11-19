@@ -57,6 +57,10 @@ pub trait CompatibleControlRequest: Request<ControlProtocol, Error = ControlClie
     fn requires_configuration_exec_limits(&self) -> bool {
         false
     }
+    /// Whether the caller requested guest resource evidence from the checkpoint freeze.
+    fn requires_configuration_freeze_resources(&self) -> bool {
+        false
+    }
 
     /// First framed-control generation that defines this operation.
     fn min_generation(&self) -> u8;

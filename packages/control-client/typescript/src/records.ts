@@ -32,6 +32,7 @@ export type RuntimeCapabilities = Capabilities & {
   configuration_capture?: boolean;
   configuration_block_capacity?: boolean;
   configuration_exec_limits?: boolean;
+  configuration_freeze_resources?: boolean;
   configuration_storage?: boolean;
   guest_flush_policy?: boolean; optional_disk_integrity?: boolean; branch_create?: boolean;
   branch_memfd?: boolean; pause_resume?: boolean; disk_compact?: boolean;
@@ -59,6 +60,7 @@ export type ConfigurationCaptureReceipt = { sha256: string };
 export type CheckpointCreate = {
   retain_configuration_block_capacity?: boolean;
   retain_configuration_exec_limits?: boolean;
+  retain_configuration_freeze_resources?: boolean;
   retain_configuration_storage?: boolean;
   retain_configuration?: boolean;
   guest_flush?: GuestFlush; record_integrity: boolean; checkpoint_id: string;
@@ -70,7 +72,7 @@ export type CheckpointState = {
   memory_logical_bytes: bigint; memory_emitted_bytes: bigint;
 };
 export type CheckpointResult = { checkpoint?: CheckpointState; recovery_error?: string };
-export type DiskCheckpointCreate = { retain_configuration_block_capacity?: boolean; retain_configuration_exec_limits?: boolean; retain_configuration_storage?: boolean; retain_configuration?: boolean; guest_flush?: GuestFlush; checkpoint_id: string };
+export type DiskCheckpointCreate = { retain_configuration_block_capacity?: boolean; retain_configuration_exec_limits?: boolean; retain_configuration_freeze_resources?: boolean; retain_configuration_storage?: boolean; retain_configuration?: boolean; guest_flush?: GuestFlush; checkpoint_id: string };
 export type DiskCheckpointState = {
   configuration?: ConfigurationCaptureReceipt;
   checkpoint_id: string; path: string; disk: unknown; owned_volumes: readonly unknown[];
@@ -173,6 +175,7 @@ export function decodeRuntimeCapabilities(bytes: Uint8Array): RuntimeCapabilitie
     configuration_capture: optional("configuration_capture"),
     configuration_block_capacity: optional("configuration_block_capacity"),
     configuration_exec_limits: optional("configuration_exec_limits"),
+    configuration_freeze_resources: optional("configuration_freeze_resources"),
     configuration_storage: optional("configuration_storage"),
     root_disk_grow: optional("root_disk_grow"), guest_flush_policy: optional("guest_flush_policy"),
     optional_disk_integrity: optional("optional_disk_integrity"), branch_create: optional("branch_create"),

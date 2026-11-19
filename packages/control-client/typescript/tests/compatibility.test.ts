@@ -526,7 +526,7 @@ it("storage capture refuses old JSON receipt peers without dispatch", async () =
   }
 });
 
-it("execution-limit capture negotiates separately and leaves old operations usable", async () => {
+it.each(["exec_limits", "freeze_resources"] as const)("%s capture negotiates separately and leaves old operations usable", async (field) => {
   const { CreateDiskCheckpoint } = await import("../src/index.js");
   for (const supported of [false, true]) {
     let captures = 0, probes = 0;
@@ -541,7 +541,7 @@ it("execution-limit capture negotiates separately and leaves old operations usab
         transport.feed(packet(0, "control.welcome", { protocol: "msb.control", generation: 2, max_frame_size: 4096, max_in_flight: 4 }));
       } else if (envelope.t === "control.capabilities") {
         probes++;
-        send(transport, id, "control.capabilities.result", { ...caps, configuration_capture: true, configuration_exec_limits: supported });
+        send(transport, id, "control.capabilities.result", { ...caps, configuration_capture: true, [`configuration_${field}`]: supported });
       } else if (envelope.t === "control.disk.checkpoint.create") {
         captures++;
         send(transport, id, "control.disk.checkpoint.result", { checkpoint_id: "capture", path: "/capture", disk: {}, configuration: { sha256: "a".repeat(64) } });
@@ -550,7 +550,7 @@ it("execution-limit capture negotiates separately and leaves old operations usab
       } else throw new Error("unexpected operation");
     }));
     const client = await ControlConnection.connectConnector(dialer);
-    const result = client.requestTyped(new CreateDiskCheckpoint({ checkpoint_id: "capture", retain_configuration: true, retain_configuration_exec_limits: true }));
+    const result = client.requestTyped(new CreateDiskCheckpoint({ checkpoint_id: "capture", retain_configuration: true, [`retain_configuration_${field}`]: true }));
     if (supported) expect((await result).configuration).toEqual({ sha256: "a".repeat(64) });
     else await expect(result).rejects.toMatchObject({ code: "unsupported_operation", delivery: "not_sent" });
     expect(probes).toBe(1); expect(captures).toBe(supported ? 1 : 0);
@@ -560,15 +560,15 @@ it("execution-limit capture negotiates separately and leaves old operations usab
 });
 
 
-it("execution-limit capture refuses old JSON receipt peers without dispatch", async () => {
+it.each(["exec_limits", "freeze_resources"] as const)("%s capture refuses old JSON receipt peers without dispatch", async (field) => {
   const { CreateDiskCheckpoint } = await import("../src/index.js");
-  const advertised = JSON.stringify({ ok: true, capabilities: { ...caps, configuration_capture: true, configuration_exec_limits: true } });
+  const advertised = JSON.stringify({ ok: true, capabilities: { ...caps, configuration_capture: true, [`configuration_${field}`]: true } });
   for (const verified of [false, true]) {
     const writes: string[] = [];
     const dialer = jsonDialer([advertised, JSON.stringify({ ok: true, capabilities: { ...caps, configuration_capture: true } })], line => writes.push(line));
     const verifier: VerifiedControlConnector = { connect: context => dialer.connect(context), async verifySession() {} };
     const client = verified ? await ControlConnection.connectVerifiedConnector(verifier) : await ControlConnection.connectConnector(dialer);
-    await expect(client.requestTyped(new CreateDiskCheckpoint({ checkpoint_id: "capture", retain_configuration: true, retain_configuration_exec_limits: true })))
+    await expect(client.requestTyped(new CreateDiskCheckpoint({ checkpoint_id: "capture", retain_configuration: true, [`retain_configuration_${field}`]: true })))
       .rejects.toMatchObject({ code: "unsupported_operation", delivery: "not_sent" });
     expect(writes).toHaveLength(verified ? 2 : 1);
     expect(writes.every(line => JSON.parse(line).op === "capabilities")).toBe(true);

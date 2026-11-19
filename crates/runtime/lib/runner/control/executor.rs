@@ -651,6 +651,7 @@ impl RuntimeControlExecutor {
                 retain_configuration,
                 retain_configuration_block_capacity,
                 retain_configuration_exec_limits,
+                retain_configuration_freeze_resources,
                 retain_configuration_storage,
                 checkpoint_id,
                 guest_flush,
@@ -664,7 +665,8 @@ impl RuntimeControlExecutor {
                     );
                 }
                 if (retain_configuration_storage == Some(true)
-                    || retain_configuration_exec_limits == Some(true))
+                    || retain_configuration_exec_limits == Some(true)
+                    || retain_configuration_freeze_resources == Some(true))
                     && retain_configuration != Some(true)
                 {
                     return control_error(
@@ -692,6 +694,7 @@ impl RuntimeControlExecutor {
                                     .and_then(|(_, ready)| ready.public.exec_limits)
                             })
                             .flatten(),
+                        retain_configuration_freeze_resources == Some(true),
                     )
                 });
                 match state.checkpoint.capture_disk(
@@ -869,6 +872,7 @@ impl RuntimeControlExecutor {
                 retain_configuration,
                 retain_configuration_block_capacity,
                 retain_configuration_exec_limits,
+                retain_configuration_freeze_resources,
                 retain_configuration_storage,
                 guest_flush,
                 checkpoint_id,
@@ -884,7 +888,8 @@ impl RuntimeControlExecutor {
                     );
                 }
                 if (retain_configuration_storage == Some(true)
-                    || retain_configuration_exec_limits == Some(true))
+                    || retain_configuration_exec_limits == Some(true)
+                    || retain_configuration_freeze_resources == Some(true))
                     && retain_configuration != Some(true)
                 {
                     return control_error(
@@ -912,6 +917,7 @@ impl RuntimeControlExecutor {
                                     .and_then(|(_, ready)| ready.public.exec_limits)
                             })
                             .flatten(),
+                        retain_configuration_freeze_resources == Some(true),
                     )
                 });
                 match state.checkpoint.capture(
@@ -1107,6 +1113,7 @@ impl RuntimeControlExecutor {
                     configuration_capture: true,
                     configuration_block_capacity: true,
                     configuration_exec_limits: true,
+                    configuration_freeze_resources: true,
                     configuration_storage: true,
                     cpu_resize: self.vm.cpu_resize_supported(),
                     memory_resize: self.vm.memory_resize_supported(),

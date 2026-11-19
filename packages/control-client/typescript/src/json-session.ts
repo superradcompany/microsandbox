@@ -30,8 +30,9 @@ export class JsonSession {
     // requests cannot cause network I/O. Legacy batches have no framed-size cap.
     const configurationBlockCapacity = (request.op === "checkpoint_create" || request.op === "disk_checkpoint_create") && request.retain_configuration_block_capacity === true;
     const configurationExecLimits = (request.op === "checkpoint_create" || request.op === "disk_checkpoint_create") && request.retain_configuration_exec_limits === true;
+    const configurationFreezeResources = (request.op === "checkpoint_create" || request.op === "disk_checkpoint_create") && request.retain_configuration_freeze_resources === true;
     const configurationStorage = (request.op === "checkpoint_create" || request.op === "disk_checkpoint_create") && request.retain_configuration_storage === true;
-    const configurationCapture = configurationBlockCapacity || configurationExecLimits || configurationStorage || (request.op === "checkpoint_create" || request.op === "disk_checkpoint_create") && request.retain_configuration === true;
+    const configurationCapture = configurationBlockCapacity || configurationExecLimits || configurationFreezeResources || configurationStorage || (request.op === "checkpoint_create" || request.op === "disk_checkpoint_create") && request.retain_configuration === true;
     // Discovery and mutation use different sockets: pin their runtime identity independently.
     if (configurationCapture && !this.dialer.verifier) throw new ClientError("unsupported_operation");
     const line = encodeJsonRequest(request);
@@ -44,7 +45,7 @@ export class JsonSession {
         try {
           const discovered = await this.discover(setup);
           mode = discovered.mode;
-          if (configurationCapture && (!discovered.capabilities.configuration_capture || (configurationStorage && !discovered.capabilities.configuration_storage) || (configurationBlockCapacity && !discovered.capabilities.configuration_block_capacity) || (configurationExecLimits && !discovered.capabilities.configuration_exec_limits))) throw new ClientError("unsupported_operation");
+          if (configurationCapture && (!discovered.capabilities.configuration_capture || (configurationStorage && !discovered.capabilities.configuration_storage) || (configurationBlockCapacity && !discovered.capabilities.configuration_block_capacity) || (configurationExecLimits && !discovered.capabilities.configuration_exec_limits) || (configurationFreezeResources && !discovered.capabilities.configuration_freeze_resources))) throw new ClientError("unsupported_operation");
         }
         catch (error) {
           // Discovery is read-only. Its lost reply says nothing about admission

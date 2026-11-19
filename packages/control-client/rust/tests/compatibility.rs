@@ -912,6 +912,7 @@ async fn retained_capture_requires_verified_json_ownership_and_fresh_capability(
             retain_configuration: Some(true),
             retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: None,
+            retain_configuration_freeze_resources: None,
             retain_configuration_storage: None,
             guest_flush: None,
             record_integrity: false,
@@ -958,6 +959,7 @@ async fn verified_json_retained_capture_preserves_receipt_and_sends_once() {
         retain_configuration: Some(true),
         retain_configuration_block_capacity: None,
         retain_configuration_exec_limits: None,
+        retain_configuration_freeze_resources: None,
         retain_configuration_storage: None,
         guest_flush: None,
         record_integrity: false,
@@ -1027,6 +1029,7 @@ async fn retained_capture_probes_the_actual_framed_peer_before_mutation() {
             retain_configuration: Some(true),
             retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: None,
+            retain_configuration_freeze_resources: None,
             retain_configuration_storage: None,
             guest_flush: None,
             record_integrity: false,
@@ -1087,6 +1090,7 @@ async fn retained_capture_generation_one_uses_verified_json_before_any_framed_pr
         retain_configuration: Some(true),
         retain_configuration_block_capacity: None,
         retain_configuration_exec_limits: None,
+        retain_configuration_freeze_resources: None,
         retain_configuration_storage: None,
         guest_flush: None,
         checkpoint_id: "retained".into(),
@@ -1122,6 +1126,7 @@ async fn retained_capture_probe_timeout_is_not_a_sent_mutation() {
         retain_configuration: Some(true),
         retain_configuration_block_capacity: None,
         retain_configuration_exec_limits: None,
+        retain_configuration_freeze_resources: None,
         retain_configuration_storage: None,
         guest_flush: None,
         checkpoint_id: "retained".into(),
@@ -1196,6 +1201,7 @@ async fn storage_capture_requires_its_own_fresh_capability_and_preserves_old_ope
             retain_configuration: Some(true),
             retain_configuration_block_capacity: block.then_some(true),
             retain_configuration_exec_limits: None,
+            retain_configuration_freeze_resources: None,
             retain_configuration_storage: Some(true),
             guest_flush: None,
             record_integrity: false,
@@ -1258,6 +1264,7 @@ async fn storage_capture_refuses_old_json_receipts_before_dispatch() {
             retain_configuration: Some(true),
             retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: None,
+            retain_configuration_freeze_resources: None,
             retain_configuration_storage: Some(true),
             guest_flush: None,
             record_integrity: false,
@@ -1284,8 +1291,8 @@ async fn storage_capture_refuses_old_json_receipts_before_dispatch() {
 }
 
 #[tokio::test]
-async fn exec_limit_capture_requires_its_own_fresh_capability_and_preserves_old_operations() {
-    for supported in [false, true] {
+async fn optional_capture_requires_its_own_fresh_capability_and_preserves_old_operations() {
+    for (freeze, supported) in [(true, true), (true, false), (false, true), (false, false)] {
         let (connector, mut peers) = QueueConnector::new(2);
         let mut framed = peers.pop().unwrap();
         let discovery = peers.pop().unwrap();
@@ -1297,7 +1304,7 @@ async fn exec_limit_capture_requires_its_own_fresh_capability_and_preserves_old_
                 Envelope::decode(&raw.body).unwrap().t,
                 "control.capabilities"
             );
-            let payload = serde_json::json!({"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true,"configuration_exec_limits":supported});
+            let payload = serde_json::json!({"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true,"configuration_exec_limits":!freeze && supported,"configuration_freeze_resources":freeze && supported});
             let response = Envelope::new(2, "control.capabilities.result", &payload)
                 .unwrap()
                 .frame(raw.id, 1)
@@ -1311,7 +1318,14 @@ async fn exec_limit_capture_requires_its_own_fresh_capability_and_preserves_old_
                 assert_eq!(envelope.t, "control.checkpoint.create");
                 let request: CheckpointCreate = envelope.payload().unwrap();
                 assert_eq!(request.retain_configuration, Some(true));
-                assert_eq!(request.retain_configuration_exec_limits, Some(true));
+                assert_eq!(
+                    request.retain_configuration_exec_limits,
+                    (!freeze).then_some(true)
+                );
+                assert_eq!(
+                    request.retain_configuration_freeze_resources,
+                    freeze.then_some(true)
+                );
                 let payload = serde_json::json!({"checkpoint":{"checkpoint_id":"retained","checkpoint_root":"root","path":"/private/capture","memory_mode":"full","memory_logical_bytes":0,"memory_emitted_bytes":0,"configuration":{"sha256":"receipt-digest"}}});
                 codec::write_raw_frame(
                     &mut framed,
@@ -1336,7 +1350,8 @@ async fn exec_limit_capture_requires_its_own_fresh_capability_and_preserves_old_
         let request = CreateCheckpoint(CheckpointCreate {
             retain_configuration: Some(true),
             retain_configuration_block_capacity: None,
-            retain_configuration_exec_limits: Some(true),
+            retain_configuration_exec_limits: (!freeze).then_some(true),
+            retain_configuration_freeze_resources: freeze.then_some(true),
             retain_configuration_storage: None,
             guest_flush: None,
             record_integrity: false,
@@ -1399,6 +1414,7 @@ async fn exec_limit_capture_refuses_old_json_receipts_before_dispatch() {
             retain_configuration: Some(true),
             retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: Some(true),
+            retain_configuration_freeze_resources: None,
             retain_configuration_storage: None,
             guest_flush: None,
             record_integrity: false,

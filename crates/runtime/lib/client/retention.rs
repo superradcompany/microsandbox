@@ -1021,7 +1021,9 @@ mod tests {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use capture::{CapturedConfiguration, disk_configuration_root};
+pub use capture::{
+    CapturedConfiguration, FrozenAllocation, FrozenCapacity, disk_configuration_root,
+};
 #[cfg(feature = "runner")]
 pub(crate) use capture::{ConfigurationCaptureContext, PreparedConfigurationReceipt};
 pub use init::read_retained_init;

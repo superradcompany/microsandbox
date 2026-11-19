@@ -46,6 +46,9 @@ pub struct RuntimeCapabilities {
     /// Optional private receipt evidence for effective guest execution limits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub configuration_exec_limits: bool,
+    /// Negotiated observation of guest capacity at the checkpoint freeze.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub configuration_freeze_resources: bool,
     /// Optional private receipt evidence for mounted filesystem kind and quota.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub configuration_storage: bool,
@@ -111,6 +114,9 @@ pub struct CheckpointCreate {
     /// Request execution-limit evidence only after capability negotiation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain_configuration_exec_limits: Option<bool>,
+    /// Negotiated observation of guest capacity at the checkpoint freeze.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_configuration_freeze_resources: Option<bool>,
     /// Request storage evidence only after capability negotiation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain_configuration_storage: Option<bool>,
@@ -177,6 +183,9 @@ pub struct DiskCheckpointCreate {
     /// Request execution-limit evidence only after capability negotiation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain_configuration_exec_limits: Option<bool>,
+    /// Negotiated observation of guest capacity at the checkpoint freeze.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_configuration_freeze_resources: Option<bool>,
     /// Request storage evidence only after capability negotiation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain_configuration_storage: Option<bool>,

@@ -148,6 +148,7 @@ struct PausedCaptureTimings {
 }
 
 struct FrozenWorkload {
+    resources: Option<microsandbox_protocol::resources::ObservedResources>,
     external_mounts_synced: bool,
     // An empty request also acknowledges success. Retain exactly what was requested
     // so a later paused capture cannot mistake that acknowledgement for a root flush.
@@ -195,7 +196,7 @@ impl CheckpointCoordinator {
         }
         let required = guest_flush.is_some_and(|policy| policy.requires_writeback(false));
         let (workload, capture_unavailable) = match self
-            .freeze_workload(vm, attempt_id, required, false)
+            .freeze_workload(vm, attempt_id, required, false, false)
         {
             Ok(workload) => (Some(workload), None),
             Err(error) if error.freezer_unavailable && !required => (None, Some(error.to_string())),
@@ -557,7 +558,13 @@ impl CheckpointCoordinator {
             })?)
         } else {
             acquired_workload = self
-                .freeze_workload(vm, checkpoint_id, required, true)
+                .freeze_workload(
+                    vm,
+                    checkpoint_id,
+                    required,
+                    true,
+                    configuration.is_some_and(|ctx| ctx.observe_resources),
+                )
                 .map_err(|error| {
                     if error.keep_paused {
                         Failure::post_journal(error)
@@ -607,7 +614,10 @@ impl CheckpointCoordinator {
         // execution serialization is needed for this cold-boot storage artifact.
         let result: Result<_, Failure> = (|| {
             let selected_configuration = configuration
-                .map(|context| self.runtime.block_on(context.observe(vm)))
+                .map(|context| {
+                    self.runtime
+                        .block_on(context.observe(vm, workload.and_then(|w| w.resources.as_ref())))
+                })
                 .transpose()
                 .map_err(Failure::pre_rebind)?;
             if !self.owned_directories.is_empty() {
@@ -947,7 +957,13 @@ impl CheckpointCoordinator {
         let workload = match user_pause {
             Some(paused) => paused.workload.as_ref().expect("validated workload latch"),
             None => {
-                acquired_workload = match self.freeze_workload(vm, checkpoint_id, required, false) {
+                acquired_workload = match self.freeze_workload(
+                    vm,
+                    checkpoint_id,
+                    required,
+                    false,
+                    configuration.is_some_and(|ctx| ctx.observe_resources),
+                ) {
                     Ok(workload) => workload,
                     Err(error) => {
                         let _ = std::fs::remove_dir_all(&staging);
@@ -1002,6 +1018,7 @@ impl CheckpointCoordinator {
             prepared_local_memory,
             record_integrity,
             configuration,
+            workload.resources.as_ref(),
         );
         let paused_capture_us = paused_capture_started.elapsed().as_micros();
         for directory in self.owned_directories.values() {
@@ -1238,6 +1255,7 @@ impl CheckpointCoordinator {
         attempt_id: &str,
         required: bool,
         disk_only: bool,
+        observe_resources: bool,
     ) -> Result<FrozenWorkload, CheckpointFailure> {
         // These are the bundled guest's capabilities, not a newly connected SDK client's
         // generation. Internal lifecycle work must not join the FIFO it is about to gate.
@@ -1262,6 +1280,7 @@ impl CheckpointCoordinator {
             !external_mount_tags.is_empty(),
         );
         let mut workload = FrozenWorkload {
+            resources: None,
             external_mounts_synced: false,
             synced_mounts: BTreeSet::new(),
             gate,
@@ -1272,12 +1291,30 @@ impl CheckpointCoordinator {
             input_credit: WorkloadTransportCredit::default(),
             guest_bulk_bytes: 0,
         };
+        let query =
+            (observe_resources && workload.ready.freeze_resources_version == Some(1)).then(|| {
+                microsandbox_protocol::resources::ObserveResources {
+                    query_id: rand::random(),
+                }
+            });
         let request = WorkloadFreeze {
             external_mount_tags,
             attempt_id: attempt_id.to_string(),
             host_input,
         };
-        let message = match Message::with_payload(MessageType::WorkloadFreeze, 0, &request) {
+        let message = if let Some(query) = query.as_ref() {
+            Message::with_payload(
+                MessageType::WorkloadFreeze,
+                0,
+                &microsandbox_protocol::restore_transport::GuestFreeze {
+                    freeze: request,
+                    observe_resources: Some(query.clone()),
+                },
+            )
+        } else {
+            Message::with_payload(MessageType::WorkloadFreeze, 0, &request)
+        };
+        let message = match message {
             Ok(message) => message,
             Err(error) => {
                 // No lifecycle request has been admitted, so ordinary input can safely resume.
@@ -1306,6 +1343,15 @@ impl CheckpointCoordinator {
             return Err(error);
         }
         let result = reply.and_then(|reply| {
+            // Decode optional evidence separately so malformed observations do not discard
+            // a valid freeze/flush acknowledgement. Correlate it to this exact request.
+            let evidence = query.as_ref().and_then(|query| {
+                reply
+                    .payload::<microsandbox_protocol::restore_transport::FreezeResourceEvidence>()
+                    .ok()
+                    .and_then(|e| e.frozen_resources)
+                    .filter(|report| report.query_id == query.query_id)
+            });
             let frozen = validate_workload_reply::<WorkloadFrozen>(
                 reply,
                 MessageType::WorkloadFrozen,
@@ -1325,9 +1371,9 @@ impl CheckpointCoordinator {
                 .map_err(|_| {
                     "guest output did not reach the frozen transport boundary".to_string()
                 })??;
-            Ok(frozen)
+            Ok((frozen, evidence))
         });
-        let frozen = result.map_err(|error| {
+        let (frozen, evidence) = result.map_err(|error| {
             recover_failed_freeze(
                 attempt_id,
                 error,
@@ -1335,6 +1381,7 @@ impl CheckpointCoordinator {
                 || vm.pause().map(|_| ()).map_err(|error| error.to_string()),
             )
         })?;
+        workload.resources = evidence;
         workload.input_credit = frozen.input_credit;
         workload.external_mounts_synced = frozen.external_mounts_synced;
         if frozen.external_mounts_synced {
@@ -1412,9 +1459,10 @@ impl CheckpointCoordinator {
         prepared_local_memory: Option<LocalMemoryCapture>,
         record_integrity: bool,
         configuration: Option<&ConfigurationCaptureContext<'_>>,
+        frozen: Option<&microsandbox_protocol::resources::ObservedResources>,
     ) -> Result<PausedCapture, CheckpointFailure> {
         let selected_configuration = configuration
-            .map(|context| self.runtime.block_on(context.observe(vm)))
+            .map(|context| self.runtime.block_on(context.observe(vm, frozen)))
             .transpose()
             .map_err(CheckpointFailure::resumable)?;
         let mut timings = PausedCaptureTimings::default();
@@ -2746,6 +2794,7 @@ mod tests {
     fn flush_acknowledgement_proves_only_the_requested_filesystems() {
         let control = WorkloadControl::new();
         let mut workload = FrozenWorkload {
+            resources: None,
             external_mounts_synced: true,
             synced_mounts: BTreeSet::new(),
             gate: control.gate(),
@@ -3175,6 +3224,7 @@ mod tests {
     fn captured_agent_descriptor_retains_transport_debt() {
         let control = WorkloadControl::new();
         let workload = FrozenWorkload {
+            resources: None,
             external_mounts_synced: false,
             synced_mounts: BTreeSet::new(),
             gate: control.gate(),

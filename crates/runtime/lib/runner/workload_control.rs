@@ -551,6 +551,7 @@ mod tests {
             9,
             GuestReady {
                 restore_tcp_reset_version: None,
+                freeze_resources_version: None,
                 public: Ready::default(),
                 init_observation: Some(InitObservation::Builtin),
             },

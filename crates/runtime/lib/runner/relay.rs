@@ -9315,6 +9315,7 @@ mod tests {
             ready: GuestReady {
                 init_observation: None,
                 restore_tcp_reset_version: Some(1),
+                freeze_resources_version: None,
                 public: Ready {
                     boot_time_ns: 11,
                     init_time_ns: 22,

@@ -157,6 +157,7 @@ impl JsonControlClient {
                 request.requires_configuration_storage(),
                 request.requires_configuration_block_capacity(),
                 request.requires_configuration_exec_limits(),
+                request.requires_configuration_freeze_resources(),
             )
             .await?;
         request.decode_compatibility_json(response)
@@ -178,10 +179,11 @@ impl JsonControlClient {
         request: Zeroizing<Vec<u8>>,
         options: RequestOptions,
     ) -> ControlClientResult<JsonReply> {
-        self.operation_bytes_checked(request, options, false, false, false, false)
+        self.operation_bytes_checked(request, options, false, false, false, false, false)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn operation_bytes_checked(
         &self,
         request: Zeroizing<Vec<u8>>,
@@ -190,11 +192,13 @@ impl JsonControlClient {
         configuration_storage: bool,
         configuration_block_capacity: bool,
         configuration_exec_limits: bool,
+        configuration_freeze_resources: bool,
     ) -> ControlClientResult<JsonReply> {
         let configuration_capture = configuration_capture
             || configuration_storage
             || configuration_block_capacity
-            || configuration_exec_limits;
+            || configuration_exec_limits
+            || configuration_freeze_resources;
         // JSON uses separate discovery and mutation sockets. Only independently verified runtime
         // ownership can prevent a replacement peer from silently ignoring a new request field.
         if configuration_capture && !self.dialer.verified() {
@@ -223,7 +227,9 @@ impl JsonControlClient {
                             || (configuration_block_capacity
                                 && !capabilities.configuration_block_capacity)
                             || (configuration_exec_limits
-                                && !capabilities.configuration_exec_limits))
+                                && !capabilities.configuration_exec_limits)
+                            || (configuration_freeze_resources
+                                && !capabilities.configuration_freeze_resources))
                     {
                         return Err(ClientError::new(ErrorKind::UnsupportedOperation).into());
                     }

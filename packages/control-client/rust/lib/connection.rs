@@ -267,6 +267,7 @@ impl ControlConnection {
                     || request.requires_configuration_storage()
                     || request.requires_configuration_block_capacity()
                     || request.requires_configuration_exec_limits()
+                    || request.requires_configuration_freeze_resources()
                 {
                     // Query this exact framed peer, not only the earlier JSON discovery socket.
                     // A replaced endpoint must not make an old peer silently ignore a new field.
@@ -296,6 +297,8 @@ impl ControlConnection {
                             && !capabilities.configuration_block_capacity)
                         || (request.requires_configuration_exec_limits()
                             && !capabilities.configuration_exec_limits)
+                        || (request.requires_configuration_freeze_resources()
+                            && !capabilities.configuration_freeze_resources)
                     {
                         return Err(ClientError::new(ErrorKind::UnsupportedOperation).into());
                     }

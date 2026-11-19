@@ -22,6 +22,21 @@ const MAX_RECORD_BYTES: u64 = 512;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Sample only while the freeze is held. A stalled sysfs read cannot hold up a thaw
+/// or accumulate workers on later captures; its permit lives until the actual read ends.
+pub(crate) async fn observe_frozen(query: ObserveResources) -> Option<ObservedResources> {
+    static WORKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let permit = WORKER.try_acquire().ok()?;
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        observe_at(Path::new(DEVICE_ROOT), query)
+    });
+    tokio::time::timeout(std::time::Duration::from_millis(100), task)
+        .await
+        .ok()?
+        .ok()
+}
+
 pub(crate) fn observe(request: ResourceObservationRequest) -> ResourceObservationReport {
     let resources = observe_at(Path::new(DEVICE_ROOT), request.query);
     let memory_pressure = if request.include_memory_pressure {

@@ -37,6 +37,29 @@ const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Confirmed active capacity. Each resource can converge or be unavailable independently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrozenAllocation<T> {
+    /// Host and guest agreed at the freeze.
+    Observed(T),
+    /// Hotplug or guest onlining had not finished at the cut.
+    Converging,
+    /// Complete, consistent device evidence was unavailable.
+    #[default]
+    NotObserved,
+}
+
+/// Independent host-confirmed observations for the paused VM.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenCapacity {
+    /// Number of online, enforced guest CPUs.
+    pub cpus: FrozenAllocation<std::num::NonZeroU8>,
+    /// Boot plus onlined device memory, in integral MiB.
+    pub memory_mib: FrozenAllocation<std::num::NonZeroU32>,
+}
+
 /// Borrowed executor authority, used only after the checkpoint coordinator pauses the VM.
 #[cfg(feature = "runner")]
 pub(crate) struct ConfigurationCaptureContext<'a> {
@@ -46,6 +69,7 @@ pub(crate) struct ConfigurationCaptureContext<'a> {
     storage: Option<&'a MountedStorageEvidence>,
     block_mounts: Option<&'a std::collections::BTreeMap<String, String>>,
     exec_limits: Option<ExecLimits>,
+    pub(crate) observe_resources: bool,
 }
 
 #[cfg(feature = "runner")]
@@ -56,6 +80,7 @@ pub(crate) struct ConfigurationCaptureObservation<'a> {
     init: Option<InitObservation>,
     storage: Option<MountedStorageEvidence>,
     exec_limits: Option<ExecLimits>,
+    capacity: Option<FrozenCapacity>,
 }
 
 /// Host-private evidence from the checkpoint's paused configuration boundary.
@@ -83,6 +108,8 @@ pub struct CapturedConfiguration {
         deserialize_with = "deserialize_exec_limits"
     )]
     exec_limits: Option<ExecLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capacity: Option<FrozenCapacity>,
 }
 
 /// Remove an unpublished receipt on error; only checkpoint publication transfers ownership.
@@ -106,6 +133,7 @@ impl<'a> ConfigurationCaptureContext<'a> {
         storage: Option<&'a MountedStorageEvidence>,
         block_mounts: Option<&'a std::collections::BTreeMap<String, String>>,
         exec_limits: Option<ExecLimits>,
+        observe_resources: bool,
     ) -> Self {
         Self {
             journal,
@@ -113,6 +141,7 @@ impl<'a> ConfigurationCaptureContext<'a> {
             runtime_script_root,
             storage,
             block_mounts,
+            observe_resources,
             exec_limits,
         }
     }
@@ -120,6 +149,7 @@ impl<'a> ConfigurationCaptureContext<'a> {
     pub(crate) async fn observe(
         &self,
         vm: &msb_krun::VmControl,
+        frozen: Option<&microsandbox_protocol::resources::ObservedResources>,
     ) -> io::Result<ConfigurationCaptureObservation<'a>> {
         let selected = self.journal.select_live_configuration(self.db).await?;
         let scripts = ScriptBackingObservation::observe(
@@ -164,6 +194,9 @@ impl<'a> ConfigurationCaptureContext<'a> {
         Ok(ConfigurationCaptureObservation {
             storage,
             exec_limits: self.exec_limits,
+            capacity: frozen
+                .filter(|_| self.observe_resources)
+                .map(|guest| frozen_capacity(vm, guest)),
             init,
             scripts,
             sandbox_directory,
@@ -198,11 +231,17 @@ impl ConfigurationCaptureObservation<'_> {
             self.init,
             self.storage,
             self.exec_limits,
+            self.capacity,
         )
     }
 }
 
 impl CapturedConfiguration {
+    /// Negotiated evidence from the same freeze as the checkpoint.
+    pub fn capacity(&self) -> Option<FrozenCapacity> {
+        self.capacity
+    }
+
     /// Effective guest limits observed for this capture; absent evidence remains unknown.
     pub fn exec_limits(&self) -> Option<ExecLimits> {
         self.exec_limits
@@ -339,6 +378,7 @@ impl PreparedConfigurationReceipt {
             init,
             storage,
             None,
+            None,
         )
     }
 
@@ -354,6 +394,7 @@ impl PreparedConfigurationReceipt {
         init: Option<InitObservation>,
         storage: Option<MountedStorageEvidence>,
         exec_limits: Option<ExecLimits>,
+        capacity: Option<FrozenCapacity>,
     ) -> io::Result<Self> {
         if let Some(storage) = &storage {
             storage.validate()?;
@@ -377,11 +418,16 @@ impl PreparedConfigurationReceipt {
             init,
             storage,
             exec_limits,
+            capacity,
         };
         let mut bytes = serde_json::to_vec(&record)
             .map_err(|_| invalid("could not encode configuration capture"))?;
         // Optional observations must not make an otherwise fitting capture fail. Omission
         // means unknown, never an empty inventory or permission to infer storage settings.
+        if bytes.len() as u64 > MAX_CAPTURE_BYTES && record.capacity.take().is_some() {
+            bytes = serde_json::to_vec(&record)
+                .map_err(|_| invalid("could not encode configuration capture"))?;
+        }
         if bytes.len() as u64 > MAX_CAPTURE_BYTES && record.exec_limits.take().is_some() {
             bytes = serde_json::to_vec(&record)
                 .map_err(|_| invalid("could not encode configuration capture"))?;
@@ -453,7 +499,77 @@ impl Drop for PreparedConfigurationReceipt {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-// Validate the evidence shape before using the legacy defaultable execution-policy type.
+/// Guest counters alone do not establish that the VMM enforced the same capacity.
+#[cfg(feature = "runner")]
+fn frozen_capacity(
+    vm: &msb_krun::VmControl,
+    report: &microsandbox_protocol::resources::ObservedResources,
+) -> FrozenCapacity {
+    use microsandbox_protocol::resources::{ObservationUnavailable, ResourceObservation};
+    let mut capacity = FrozenCapacity::default();
+    match (&report.cpu, vm.cpu_state()) {
+        (ResourceObservation::Available { value }, Some(host))
+            if value.is_valid() && value.possible == host.possible =>
+        {
+            capacity.cpus = if value.exact
+                && value.requested_online == host.requested_online
+                && value.actual_online == host.actual_online
+                && value.actual_online == host.enforced
+            {
+                u8::try_from(value.actual_online)
+                    .ok()
+                    .and_then(std::num::NonZeroU8::new)
+                    .map(FrozenAllocation::Observed)
+                    .unwrap_or_default()
+            } else {
+                FrozenAllocation::Converging
+            };
+        }
+        (
+            ResourceObservation::Unavailable {
+                reason: ObservationUnavailable::Busy,
+            },
+            _,
+        ) => capacity.cpus = FrozenAllocation::Converging,
+        _ => {}
+    }
+    match (&report.memory, vm.memory_device_state()) {
+        (ResourceObservation::Available { value }, Some(host))
+            if value.is_valid()
+                && value.address == host.address
+                && value.region_size == host.region_size
+                && host.boot_size.checked_add(host.region_size).is_some()
+                && host.requested_size <= host.region_size
+                && host.plugged_size <= host.region_size =>
+        {
+            capacity.memory_mib = if value.all_online
+                && value.requested_size == host.requested_size
+                && value.plugged_size == host.plugged_size
+                && host.requested_size == host.plugged_size
+            {
+                host.boot_size
+                    .checked_add(host.plugged_size)
+                    .filter(|n| n.is_multiple_of(1 << 20))
+                    .and_then(|n| u32::try_from(n >> 20).ok())
+                    .and_then(std::num::NonZeroU32::new)
+                    .map(FrozenAllocation::Observed)
+                    .unwrap_or_default()
+            } else {
+                FrozenAllocation::Converging
+            };
+        }
+        (
+            ResourceObservation::Unavailable {
+                reason: ObservationUnavailable::Busy,
+            },
+            _,
+        ) => capacity.memory_mib = FrozenAllocation::Converging,
+        _ => {}
+    }
+    capacity
+}
+
+// Validate all fields before decoding the original defaultable execution-policy type.
 fn deserialize_exec_limits<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<ExecLimits>, D::Error> {
@@ -557,6 +673,7 @@ mod tests {
             init: None,
             storage: None,
             exec_limits: None,
+            capacity: None,
         };
         let available = MAX_CAPTURE_BYTES as usize - serde_json::to_vec(&base).unwrap().len();
         source.source = Some(serde_json::Value::String("x".repeat(available)));
@@ -570,6 +687,7 @@ mod tests {
             None,
             Some(MountedStorageEvidence::default()),
             Some(ExecLimits::default()),
+            None,
         )
         .unwrap()
         .publish();
@@ -599,6 +717,7 @@ mod tests {
             Some(InitObservation::Builtin),
             Some(MountedStorageEvidence::default()),
             Some(ExecLimits::default()),
+            None,
         )
         .unwrap()
         .publish();
@@ -667,6 +786,7 @@ mod tests {
                 None,
                 None,
                 requested.then_some(limits),
+                None,
             )
             .unwrap()
             .publish();

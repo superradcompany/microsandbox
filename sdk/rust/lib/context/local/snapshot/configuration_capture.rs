@@ -45,6 +45,7 @@ pub(crate) struct CapturedSandboxConfiguration {
     init: Option<InitObservation>,
     storage: Option<microsandbox_runtime::retention::MountedStorageEvidence>,
     exec_limits: Option<microsandbox_types::ExecLimits>,
+    capacity: Option<microsandbox_runtime::retention::FrozenCapacity>,
 }
 
 /// No Debug or serialization: the eventual receipt can contain private local configuration.
@@ -54,6 +55,7 @@ pub(crate) struct ExpectedConfigurationCapture {
     storage_requested: bool,
     exec_limits_requested: bool,
     block_capacity_requested: bool,
+    freeze_resources_requested: bool,
 }
 
 /// Retains lifecycle ownership and exact evidence through a stopped disk cut.
@@ -91,6 +93,7 @@ impl CapturedSandboxConfiguration {
             init,
             storage: None,
             exec_limits: None,
+            capacity: None,
         };
         if let Some(origin) = &captured.configuration.command_provenance
             && (!origin.matches(&captured.configuration.spec.runtime.cmd)
@@ -209,6 +212,11 @@ impl CapturedSandboxConfiguration {
             .ok_or_else(|| invalid("capture has no recorded source"))?;
         let source =
             RuntimeCaptureSource::from_recorded(raw, self.init.as_ref(), self.scripts.as_ref())?;
+        // Resource evidence is owned by the same immutable receipt. Neither the requested
+        // target nor a sample supplied later by the SDK can describe this freeze.
+        let capacity = self.capacity.unwrap_or_default();
+        request.resources.cpus = frozen_value(capacity.cpus, std::num::NonZeroU8::get);
+        request.resources.memory_mib = frozen_value(capacity.memory_mib, std::num::NonZeroU32::get);
         let storage = source.project_observed_storage(
             self.mounted_storage(),
             request.manifest,
@@ -362,6 +370,7 @@ impl ExpectedConfigurationCapture {
             block_capacity_requested: session.capabilities().configuration_storage
                 && session.capabilities().configuration_block_capacity,
             exec_limits_requested: session.capabilities().configuration_exec_limits,
+            freeze_resources_requested: session.capabilities().configuration_freeze_resources,
         }))
     }
 
@@ -399,6 +408,12 @@ impl ExpectedConfigurationCapture {
                 "runtime execution-limit evidence did not match capture negotiation",
             ));
         }
+        let capacity = captured.capacity();
+        if !self.freeze_resources_requested && capacity.is_some() {
+            return Err(invalid(
+                "unrequested frozen capacity in configuration receipt",
+            ));
+        }
         let exec_limits = captured.exec_limits();
         let storage = captured.storage().cloned();
         let init = captured.init().cloned();
@@ -425,6 +440,7 @@ impl ExpectedConfigurationCapture {
         if let Some(configuration) = &mut configuration {
             configuration.storage = storage;
             configuration.exec_limits = exec_limits;
+            configuration.capacity = capacity;
         }
         Ok(configuration)
     }
@@ -555,6 +571,25 @@ fn decode_configuration(
         .map_err(|_| invalid("invalid captured sandbox configuration"))
 }
 
+fn frozen_value<T, V>(
+    value: microsandbox_runtime::retention::FrozenAllocation<T>,
+    get: impl FnOnce(T) -> V,
+) -> SavedValue<V> {
+    use microsandbox_runtime::retention::FrozenAllocation;
+    match value {
+        FrozenAllocation::Observed(value) => SavedValue::Value {
+            value: get(value),
+            origin: SavedOrigin::Observed,
+        },
+        FrozenAllocation::Converging => SavedValue::Unknown {
+            reason: SavedUnknownReason::Converging,
+        },
+        FrozenAllocation::NotObserved => SavedValue::Unknown {
+            reason: SavedUnknownReason::NotObserved,
+        },
+    }
+}
+
 fn invalid(message: &str) -> MicrosandboxError {
     MicrosandboxError::SnapshotIntegrity(message.into())
 }
@@ -612,7 +647,7 @@ mod tests {
             value: &serde_json::Value,
             storage_requested: bool,
         ) -> MicrosandboxResult<Option<CapturedSandboxConfiguration>> {
-            self.read_with_evidence(value, storage_requested, false)
+            self.read_with_evidence(value, storage_requested, false, false)
         }
 
         fn read_with_evidence(
@@ -620,6 +655,7 @@ mod tests {
             value: &serde_json::Value,
             storage_requested: bool,
             exec_limits_requested: bool,
+            freeze_resources_requested: bool,
         ) -> MicrosandboxResult<Option<CapturedSandboxConfiguration>> {
             let bytes = serde_json::to_vec(value).unwrap();
             std::fs::write(
@@ -637,6 +673,7 @@ mod tests {
                 owner,
                 storage_requested,
                 block_capacity_requested: false,
+                freeze_resources_requested,
                 exec_limits_requested,
             }
             .read(
@@ -647,6 +684,45 @@ mod tests {
                 }),
             )
         }
+    }
+
+    #[test]
+    fn frozen_capacity_requires_negotiation_and_preserves_independent_observations() {
+        use microsandbox_runtime::retention::FrozenAllocation;
+        let fixture = Fixture::new();
+        let mut record = fixture.value.clone();
+        record["capacity"] = serde_json::json!({"cpus":{"observed":2},"memory_mib":"converging"});
+        assert!(fixture.read(&record).is_err());
+        let captured = fixture
+            .read_with_evidence(&record, false, false, true)
+            .unwrap()
+            .unwrap();
+        let capacity = captured.capacity.unwrap();
+        assert_eq!(
+            capacity.cpus,
+            FrozenAllocation::Observed(std::num::NonZeroU8::new(2).unwrap())
+        );
+        assert_eq!(capacity.memory_mib, FrozenAllocation::Converging);
+        for invalid in [
+            serde_json::json!({"observed":0}),
+            serde_json::json!({"observed":256}),
+            serde_json::json!("configured"),
+        ] {
+            record["capacity"]["cpus"] = invalid;
+            assert!(
+                fixture
+                    .read_with_evidence(&record, false, false, true)
+                    .is_err()
+            );
+        }
+        assert!(
+            fixture
+                .read_with_evidence(&fixture.value, false, false, true)
+                .unwrap()
+                .unwrap()
+                .capacity
+                .is_none()
+        );
     }
 
     #[test]
@@ -661,7 +737,7 @@ mod tests {
         assert!(fixture.read(&extended).is_err());
         assert_eq!(
             fixture
-                .read_with_evidence(&extended, false, true)
+                .read_with_evidence(&extended, false, true, false)
                 .unwrap()
                 .unwrap()
                 .execution_limits(),
@@ -669,7 +745,7 @@ mod tests {
         );
         assert!(
             fixture
-                .read_with_evidence(&fixture.value, false, true)
+                .read_with_evidence(&fixture.value, false, true, false)
                 .unwrap()
                 .unwrap()
                 .execution_limits()
@@ -1037,6 +1113,7 @@ mod tests {
             owner: fixture.owner,
             storage_requested: false,
             block_capacity_requested: false,
+            freeze_resources_requested: false,
             exec_limits_requested: false,
         }
         .read("capture_one", "full:root", None)

@@ -577,6 +577,7 @@ pub async fn run(
             },
             init_observation: boot_console.init_observation,
             restore_tcp_reset_version: crate::network_reset::supported().then_some(1),
+            freeze_resources_version: Some(1),
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -2654,10 +2655,14 @@ async fn handle_message_with_charge(
         }
 
         MessageType::WorkloadFreeze => {
-            let Some(request) = decode_payload_or_core_error::<WorkloadFreeze>(&msg, out_buf)?
+            let Some(request) = decode_payload_or_core_error::<
+                microsandbox_protocol::restore_transport::GuestFreeze,
+            >(&msg, out_buf)?
             else {
                 return Ok(());
             };
+            let query = request.observe_resources;
+            let request = request.freeze;
             let position = state.input_window.position();
             if state.pending_freeze.as_ref().is_some_and(|pending| {
                 pending
@@ -2771,16 +2776,27 @@ async fn handle_message_with_charge(
                         } else {
                             false
                         };
-                        let reply = Message::with_payload(
-                            MessageType::WorkloadFrozen,
-                            msg.id,
-                            &WorkloadFrozen {
-                                attempt_id: request.attempt_id,
-                                guest_bulk_bytes_target: state.frozen_guest_bulk_bytes,
-                                input_credit: state.input_window.credit()?,
-                                external_mounts_synced,
-                            },
-                        )
+                        // The workload is parked and guest writeback has reached this cut.
+                        // Missing or slow optional evidence must not fail the checkpoint.
+                        let frozen = WorkloadFrozen {
+                            attempt_id: request.attempt_id,
+                            guest_bulk_bytes_target: state.frozen_guest_bulk_bytes,
+                            input_credit: state.input_window.credit()?,
+                            external_mounts_synced,
+                        };
+                        let reply = if let Some(query) = query {
+                            let frozen_resources = crate::resources::observe_frozen(query).await;
+                            Message::with_payload(
+                                MessageType::WorkloadFrozen,
+                                msg.id,
+                                &microsandbox_protocol::restore_transport::GuestFrozen {
+                                    frozen,
+                                    frozen_resources,
+                                },
+                            )
+                        } else {
+                            Message::with_payload(MessageType::WorkloadFrozen, msg.id, &frozen)
+                        }
                         .map_err(|error| {
                             AgentdError::ExecSession(format!(
                                 "encode workload-frozen response: {error}"

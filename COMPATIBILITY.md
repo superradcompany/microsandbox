@@ -925,3 +925,7 @@ Catalog hardening retries up to 16 complete inspections when SQLite sidecar tear
 ### Restarting a snapshot with execution limits
 
 A snapshot destination with a retained nondefault execution policy needs a runtime advertising `restored_exec_limits`. Initial creation checks this before replacing an existing sandbox. A later start on an older runtime fails with `saved execution limits require a runtime that can enforce them`. Use a capable runtime to restart it, including with an older SDK. The catalog remains readable and other sandboxes can start. Removing the destination removes its execution policy.
+
+### Checkpoint CPU and memory observations
+
+New clients and runtimes negotiate `configuration_freeze_resources` before requesting private capacity evidence. The host sends the original freeze payload to a guest without the observation capability. An older client receives its original receipt shape. Missing observations allow the checkpoint to succeed and leave the corresponding resource unknown. The observation is private to capture and does not change the public Ready type, guest protocol generation, snapshot format or metrics layout.

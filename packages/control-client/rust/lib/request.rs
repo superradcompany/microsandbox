@@ -385,12 +385,13 @@ impl Request<ControlProtocol> for GetPauseState {
 }
 
 macro_rules! compatible_v2 {
-    ($request:ty, $json:expr, $decode:expr $(, $configuration:expr, $storage:expr, $block:expr, $exec_limits:expr)?) => {
+    ($request:ty, $json:expr, $decode:expr $(, $configuration:expr, $storage:expr, $block:expr, $exec_limits:expr, $freeze:expr)?) => {
         impl CompatibleControlRequest for $request {
             $(fn requires_configuration_capture(&self) -> bool { ($configuration)(self) }
               fn requires_configuration_storage(&self) -> bool { ($storage)(self) }
               fn requires_configuration_block_capacity(&self) -> bool { ($block)(self) }
-              fn requires_configuration_exec_limits(&self) -> bool { ($exec_limits)(self) })?
+              fn requires_configuration_exec_limits(&self) -> bool { ($exec_limits)(self) }
+              fn requires_configuration_freeze_resources(&self) -> bool { ($freeze)(self) })?
             fn min_generation(&self) -> u8 {
                 2
             }
@@ -443,6 +444,9 @@ compatible_v2!(
         if let Some(limits) = request.0.retain_configuration_exec_limits {
             value["retain_configuration_exec_limits"] = limits.into();
         }
+        if let Some(freeze) = request.0.retain_configuration_freeze_resources {
+            value["retain_configuration_freeze_resources"] = freeze.into();
+        }
         if let Some(storage) = request.0.retain_configuration_storage {
             value["retain_configuration_storage"] = storage.into();
         }
@@ -452,7 +456,8 @@ compatible_v2!(
     |request: &CreateCheckpoint| request.0.retain_configuration == Some(true),
     |request: &CreateCheckpoint| request.0.retain_configuration_storage == Some(true),
     |request: &CreateCheckpoint| request.0.retain_configuration_block_capacity == Some(true),
-    |request: &CreateCheckpoint| request.0.retain_configuration_exec_limits == Some(true)
+    |request: &CreateCheckpoint| request.0.retain_configuration_exec_limits == Some(true),
+    |request: &CreateCheckpoint| request.0.retain_configuration_freeze_resources == Some(true)
 );
 compatible_v2!(
     CreateDiskCheckpoint,
@@ -471,6 +476,9 @@ compatible_v2!(
         if let Some(limits) = request.0.retain_configuration_exec_limits {
             value["retain_configuration_exec_limits"] = limits.into();
         }
+        if let Some(freeze) = request.0.retain_configuration_freeze_resources {
+            value["retain_configuration_freeze_resources"] = freeze.into();
+        }
         if let Some(storage) = request.0.retain_configuration_storage {
             value["retain_configuration_storage"] = storage.into();
         }
@@ -480,7 +488,8 @@ compatible_v2!(
     |request: &CreateDiskCheckpoint| request.0.retain_configuration == Some(true),
     |request: &CreateDiskCheckpoint| request.0.retain_configuration_storage == Some(true),
     |request: &CreateDiskCheckpoint| request.0.retain_configuration_block_capacity == Some(true),
-    |request: &CreateDiskCheckpoint| request.0.retain_configuration_exec_limits == Some(true)
+    |request: &CreateDiskCheckpoint| request.0.retain_configuration_exec_limits == Some(true),
+    |request: &CreateDiskCheckpoint| request.0.retain_configuration_freeze_resources == Some(true)
 );
 compatible_v2!(
     CreateBranch,

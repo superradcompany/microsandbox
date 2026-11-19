@@ -174,6 +174,9 @@ impl ControlSession {
             retain_configuration_exec_limits: (retain_configuration
                 && capabilities.configuration_exec_limits)
                 .then_some(true),
+            retain_configuration_freeze_resources: (retain_configuration
+                && capabilities.configuration_freeze_resources)
+                .then_some(true),
             retain_configuration_storage: (retain_configuration
                 && capabilities.configuration_storage)
                 .then_some(true),
@@ -215,6 +218,9 @@ impl ControlSession {
                 .then_some(true),
             retain_configuration_exec_limits: (retain_configuration
                 && capabilities.configuration_exec_limits)
+                .then_some(true),
+            retain_configuration_freeze_resources: (retain_configuration
+                && capabilities.configuration_freeze_resources)
                 .then_some(true),
             retain_configuration_storage: (retain_configuration
                 && capabilities.configuration_storage)
