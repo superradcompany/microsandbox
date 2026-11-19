@@ -57,9 +57,7 @@ func TestGroupImportRetainsCallerDirectory(t *testing.T) {
 	}
 }
 
-func TestCaptureDirectoryRemainsAnchoredAfterChdir(t *testing.T) {
-	root := t.TempDir()
-	t.Chdir(root)
+func TestCaptureDirectoryAnchorsRelativeInput(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +70,6 @@ func TestCaptureDirectoryRemainsAnchoredAfterChdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(t.TempDir())
 	if got != cwd+string(os.PathSeparator)+input {
 		t.Fatalf("capture directory changed: %q", got)
 	}

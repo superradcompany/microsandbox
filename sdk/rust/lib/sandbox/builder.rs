@@ -2107,15 +2107,17 @@ impl SandboxBuilder {
 
         inspection.spec.resources = Default::default();
         inspection.apply_to(&mut config);
-        let mut caller = self.config.clone();
-        if !self.explicit_env_replacement && caller.spec.replaces_env() {
-            let entries = caller.spec.get_env().cloned().unwrap_or_default();
-            caller.spec = caller.spec.clear_env();
+        // finish_config persists this same patch for build-then-create. Removing the
+        // fresh-image sentinel only from an inspection copy would turn it back into
+        // a caller-requested environment replacement on the next build.
+        if !self.explicit_env_replacement && self.config.spec.replaces_env() {
+            let entries = self.config.spec.get_env().cloned().unwrap_or_default();
+            self.config.spec.clear_env_mut();
             if !entries.is_empty() {
-                caller.spec = caller.spec.env(entries);
+                self.config.spec.env_mut(entries);
             }
         }
-        config.caller_config_overrides = Some(Box::new(caller));
+        config.caller_config_overrides = Some(Box::new(self.config.clone()));
         config.snapshot_reference = snapshot_ref.clone();
         if snapshot_ref.is_some() || has_paths {
             config.clear_prepared_restore();
