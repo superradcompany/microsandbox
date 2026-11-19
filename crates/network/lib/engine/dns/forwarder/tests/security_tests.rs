@@ -1,10 +1,12 @@
 //! Wire-level regressions for host-network information exposed through gateway DNS.
 
+use std::io;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use hickory_net::proto::rr::rdata::{AAAA, NS, PTR};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, UdpSocket};
 
 use super::*;
 
@@ -29,9 +31,8 @@ fn reply(query: &Message, answers: Vec<Record>) -> Message {
 async fn resolver(
     answer: impl Fn(&Message) -> Message + Send + Sync + 'static,
 ) -> (SocketAddr, Arc<AtomicUsize>) {
-    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (udp, tcp) = bind_resolver_sockets().await.unwrap();
     let address = udp.local_addr().unwrap();
-    let tcp = tokio::net::TcpListener::bind(address).await.unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
     let answer = Arc::new(answer);
     let udp_answer = answer.clone();
@@ -69,6 +70,20 @@ async fn resolver(
         }
     });
     (address, hits)
+}
+
+async fn bind_resolver_sockets() -> io::Result<(UdpSocket, TcpListener)> {
+    // UDP and TCP allocate ports independently. Keep the UDP reservation while
+    // trying TCP, and choose a fresh pair if that port is already used by TCP.
+    for attempt in 0..16 {
+        let udp = UdpSocket::bind("127.0.0.1:0").await?;
+        match TcpListener::bind(udp.local_addr()?).await {
+            Ok(tcp) => return Ok((udp, tcp)),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempt < 15 => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final bind attempt returns its error")
 }
 
 async fn protected_forwarder(upstream: SocketAddr) -> Arc<DnsForwarder> {
