@@ -1,10 +1,10 @@
 ---
 title: Configuration
 "og:title": Ruby SDK Configuration reference
-description: Select a backend and configure the local runtime with the Ruby SDK.
+description: Configure local or remote connections and runtime settings with the Ruby SDK.
 ---
 
-See [Runtime setup](/sdk/setup) and [Cloud](/cloud/overview) for setup examples.
+See [Runtime setup](/sdk/setup) and [managed cloud](/cloud/overview) for setup examples.
 
 ## Microsandbox
 
@@ -55,37 +55,7 @@ Install the local runtime using the global configuration.
   </div>
 </div>
 
-#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">default_backend_kind</span>
 
-```ruby
-Microsandbox.default_backend_kind # => String
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Current backend: local or cloud.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">use_local_backend!()</span>
-
-```ruby
-Microsandbox.use_local_backend! # => nil
-```
-
-Select the local backend for subsequent operations.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">nil</span></div>
-    <div className="msb-param-desc">No return value.</div>
-  </div>
-</div>
 
 #### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">set_runtime_msb_path()</span>
 
@@ -139,66 +109,61 @@ Override the process-wide libkrunfw path. Set it before creating local sandboxes
   </div>
 </div>
 
-#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">use_cloud_backend!()</span>
+
+
+## LocalContext
+
+#### new
 
 ```ruby
-Microsandbox.use_cloud_backend!(api_key, url: nil) # => nil
+Microsandbox::LocalContext.new(home: nil, config_path: nil) # => LocalContext
 ```
 
-<Accordion title="Example">
+Capture a local destination. Construction does not start a VM. Collections and resources retain these settings.
+
+## RemoteContext
+
+#### new
 
 ```ruby
-Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
+Microsandbox::RemoteContext.new(url: nil, api_key: nil, profile: nil, request_timeout_ms: nil, user_agent: nil, compute_type: nil) # => RemoteContext
 ```
 
-</Accordion>
+Capture a remote API destination using explicit credentials or a named profile. `request_timeout_ms` must be a nonnegative integer. `compute_type` accepts `"standard"` or `"shared"` for new sandboxes; omission uses the server default. See [compute types](/cloud/pricing#choose-a-compute-type).
 
-Select the cloud backend for subsequent operations.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>api_key</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Cloud API key.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>url</code><span className="msb-type">String | nil</span></div>
-    <div className="msb-param-desc">Optional API URL; nil uses the default cloud endpoint.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">nil</span></div>
-    <div className="msb-param-desc">No return value.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">use_cloud_profile!()</span>
+#### with_url
 
 ```ruby
-Microsandbox.use_cloud_profile!(name) # => nil
+Microsandbox::RemoteContext.with_url(url, api_key, request_timeout_ms: nil, user_agent: nil, compute_type: nil) # => RemoteContext
 ```
 
-Select a named cloud profile.
+Select an explicit compatible remote endpoint. An empty URL is invalid. Key-only `new(api_key: ...)` uses `MSB_API_URL` or the hosted endpoint.
 
-<p className="msb-label">Parameters</p>
+#### with
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Configured cloud profile name.</div>
-  </div>
-</div>
+```ruby
+remote.with(url: nil, api_key: nil, request_timeout_ms: nil, user_agent: nil, compute_type: nil) # => RemoteContext
+```
 
-<p className="msb-label">Returns</p>
+Return an independent context using keyword overrides. Nil retains the captured value. Profiles, environment and configuration files are not read again; existing resources keep their destination. Empty URLs/keys and invalid timeouts fail. See [derivation examples](/cloud/connect#deriving-a-remote-context).
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">nil</span></div>
-    <div className="msb-param-desc">No return value.</div>
-  </div>
-</div>
+#### from_env / from_profile
+
+```ruby
+Microsandbox::RemoteContext.from_env # => RemoteContext
+Microsandbox::RemoteContext.from_profile(name) # => RemoteContext
+```
+
+`from_env` reads `MSB_API_KEY` and optional `MSB_API_URL`. Existing contexts and resources keep their destination.
+
+## Context
+
+#### sandboxes / volumes / snapshots
+
+```ruby
+context.sandboxes # => Sandboxes
+context.volumes   # => Volumes
+context.snapshots # => Snapshots
+```
+
+Return collections bound to this destination. See [context usage](/cloud/connect#sdk-contexts).

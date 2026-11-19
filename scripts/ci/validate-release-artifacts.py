@@ -161,18 +161,35 @@ def validate_node_files(root: Path, errors: list[str]) -> list[Path]:
 
 def validate_wheels(root: Path, errors: list[str]) -> list[Path]:
     wheels = sorted(root.glob("*.whl")) if root.is_dir() else []
-    if len(wheels) != len(WHEEL_PLATFORMS):
-        errors.append(f"expected {len(WHEEL_PLATFORMS)} wheels, found {len(wheels)}")
-
-    for platform, pattern in WHEEL_PLATFORMS.items():
-        matches = [wheel for wheel in wheels if pattern.search(wheel.name)]
-        if len(matches) != 1:
-            names = ", ".join(wheel.name for wheel in matches) or "none"
-            errors.append(f"expected one {platform} wheel, found: {names}")
-        elif not platform.startswith("windows-"):
-            validate_wheel_executable(matches[0], errors)
+    expected = 3 * len(WHEEL_PLATFORMS) + 1
+    if len(wheels) != expected:
+        errors.append(f"expected {expected} full/core/local/remote wheels, found {len(wheels)}")
+    core = [wheel for wheel in wheels if wheel.name.startswith("microsandbox_core-") and wheel.name.endswith("-py3-none-any.whl")]
+    if len(core) != 1:
+        errors.append("expected one pure Python core wheel")
+    for provider in ("microsandbox", "microsandbox_local", "microsandbox_remote"):
+        selected = [wheel for wheel in wheels if wheel.name.startswith(provider + "-")]
+        for platform, pattern in WHEEL_PLATFORMS.items():
+            matches = [wheel for wheel in selected if pattern.search(wheel.name)]
+            if len(matches) != 1:
+                errors.append(f"expected one {provider}/{platform} wheel, found {len(matches)}")
+            elif provider == "microsandbox" and not platform.startswith("windows-"):
+                validate_wheel_executable(matches[0], errors)
     for wheel in wheels:
         require_nonempty(wheel, errors)
+        try:
+            with zipfile.ZipFile(wheel) as archive:
+                names = archive.namelist()
+                is_core = wheel in core
+                is_lean = wheel.name.startswith(("microsandbox_local-", "microsandbox_remote-"))
+                if is_core or is_lean:
+                    if any("/_bundled/" in name or name.endswith("/msb") or name.endswith("/msb.exe") or "libkrunfw" in name for name in names):
+                        errors.append(f"runtime payload in lean wheel: {wheel.name}")
+                if is_core and any(name.endswith((".so", ".pyd", ".dll", ".dylib")) for name in names):
+                    errors.append(f"native payload in core wheel: {wheel.name}")
+        except zipfile.BadZipFile:
+            errors.append(f"invalid wheel archive: {wheel.name}")
+
     return wheels
 
 

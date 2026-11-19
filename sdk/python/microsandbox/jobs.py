@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
-JobState = Literal["starting", "running", "exited", "failed", "lost"]
+from .types import StrEnum
+
+
+class JobState(StrEnum):
+    STARTING = "starting"
+    RUNNING = "running"
+    EXITED = "exited"
+    FAILED = "failed"
+    LOST = "lost"
+
+
+class JobOutputSource(StrEnum):
+    STDOUT = "stdout"
+    STDERR = "stderr"
+    OUTPUT = "output"
+    STDIN_ERROR = "stdin_error"
 
 
 @dataclass(frozen=True)
@@ -43,19 +58,36 @@ class JobExit:
 @dataclass(frozen=True)
 class JobLogEntry:
     timestamp: int
-    source: str
+    source: JobOutputSource
     data: bytes
     cursor: str
 
 
 @dataclass(frozen=True)
-class JobEvent:
-    type: Literal["output", "gap", "completed"]
-    value: JobLogEntry | JobInfo | dict[str, str]
+class JobOutputEvent:
+    value: JobLogEntry
+    type: Literal["output"] = field(default="output", init=False)
+
+
+@dataclass(frozen=True)
+class JobGapEvent:
+    value: dict[str, str]
+    type: Literal["gap"] = field(default="gap", init=False)
+
+
+@dataclass(frozen=True)
+class JobCompletedEvent:
+    value: JobInfo
+    type: Literal["completed"] = field(default="completed", init=False)
+
+
+JobEvent = JobOutputEvent | JobGapEvent | JobCompletedEvent
 
 
 def _decode_info(value: dict) -> JobInfo:
-    return JobInfo(**{key: value[key] for key in JobInfo.__dataclass_fields__})
+    fields = {key: value[key] for key in JobInfo.__dataclass_fields__}
+    fields["state"] = JobState(fields["state"])
+    return JobInfo(**fields)
 
 
 def _decode_page(value: dict) -> JobPage:
@@ -69,7 +101,7 @@ def _decode_exit(value: dict) -> JobExit:
 def _decode_log(value: dict) -> JobLogEntry:
     return JobLogEntry(
         value["timestamp"],
-        value["source"],
+        JobOutputSource(value["source"]),
         base64.b64decode(value["data_base64"], validate=True),
         value["cursor"],
     )
@@ -83,7 +115,9 @@ def _decode_event(value: dict) -> JobEvent:
     kind = value["type"]
     payload = value["value"]
     if kind == "output":
-        payload = _decode_log(payload)
-    elif kind == "completed":
-        payload = _decode_info(payload)
-    return JobEvent(kind, payload)
+        return JobOutputEvent(_decode_log(payload))
+    if kind == "completed":
+        return JobCompletedEvent(_decode_info(payload))
+    if kind == "gap":
+        return JobGapEvent(payload)
+    raise ValueError(f"Unknown job event {kind!r}")

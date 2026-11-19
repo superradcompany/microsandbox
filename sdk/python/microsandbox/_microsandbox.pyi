@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
+from datetime import timedelta
 from typing import Any, Literal
 
-from microsandbox.jobs import JobEvent, JobExit, JobInfo, JobLogEntry, JobPage
+from microsandbox.inspection import SandboxConfigInspection
+from microsandbox.jobs import JobEvent, JobExit, JobInfo, JobLogEntry, JobOutputSource, JobPage
 from microsandbox.types import (
-    BackendKind,
+    ContextKind,
+    CpuPlacement,
+    DeploymentProfile,
     DiskCompactionResult,
     DiskImageFormat,
     ExecEventType,
@@ -28,6 +33,7 @@ from microsandbox.types import (
     NamedVolumeMode,
     Network,
     NetworkPolicy,
+    OutboundProxy,
     PatchConfig,
     PortBinding,
     PortEndpoint,
@@ -36,6 +42,7 @@ from microsandbox.types import (
     RegistryAuth,
     Rlimit,
     RootDiskConfig,
+    SandboxInfo,
     SandboxModificationPlan,
     SandboxStatus,
     SecretEntry,
@@ -43,12 +50,14 @@ from microsandbox.types import (
     SecurityProfile,
     ServiceStatus,
     ServiceTarget,
+    Size,
     SnapshotFormat,
     SnapshotScope,
     SnapshotStateKind,
     StatVirtualization,
     Stdin,
     ViolationAction,
+    VolumeInfo,
     VolumeKind,
     VsockRoute,
 )
@@ -74,13 +83,13 @@ class PyAgentClient:
     async def connect_sandbox(
         name: str,
         *,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
     ) -> PyAgentClient: ...
     @staticmethod
     async def connect(
         path: str,
         *,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
     ) -> PyAgentClient: ...
     @staticmethod
     def socket_path(name: str) -> str: ...
@@ -94,7 +103,7 @@ class PyAgentClient:
 
 class SandboxPage:
     @property
-    def sandboxes(self) -> list[SandboxHandle]: ...
+    def sandboxes(self) -> list[Sandbox]: ...
     @property
     def next_cursor(self) -> str | None: ...
 
@@ -107,6 +116,19 @@ class StorageRecovery:
     def originals_retained(self) -> bool: ...
 
 class Sandbox:
+    @staticmethod
+    def local() -> Sandboxes: ...
+    @staticmethod
+    def remote() -> Sandboxes: ...
+    @property
+    def context_kind(self) -> ContextKind: ...
+    async def snapshot(self, name: str) -> Snapshot: ...
+    async def storage_usage(self) -> StorageItemUsage: ...
+    @staticmethod
+    def ctx(context: Context) -> Sandboxes: ...
+    @property
+    def context(self) -> Context: ...
+
     """Sandbox lifecycle API.
 
     Sandbox names are limited to 128 UTF-8 bytes.
@@ -114,32 +136,31 @@ class Sandbox:
 
     @staticmethod
     async def recover_storage(
-        name: str, *, selections: Mapping[str, str] | None = None,
+        name: str,
+        *,
+        selections: Mapping[str, str] | None = None,
         accept_selected_view: bool = False,
         legacy_writers_stopped: bool = False,
     ) -> StorageRecovery: ...
-
     async def get_job(self, id: str) -> Job: ...
     async def list_jobs(
         self, *, all: bool = False, limit: int = 50, cursor: str | None = None
     ) -> JobPage: ...
-
-
     @staticmethod
     async def restore(
-        snapshot: Snapshot | SnapshotHandle | str | os.PathLike[str],
+        snapshot: Snapshot | str | os.PathLike[str],
         *,
         name: str,
         cpus: int | None = None,
-        memory: int | None = None,
+        memory: int | Size | None = None,
         network_policy: NetworkPolicy | None = None,
         max_connections: int | None = None,
         max_tcp_connections: int | None = None,
         max_udp_connections: int | None = None,
         disable_network: bool = False,
         security: SecurityProfile | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         cow_memory: bool = False,
         forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
@@ -158,19 +179,19 @@ class Sandbox:
     ) -> Sandbox: ...
     @staticmethod
     def restore_with_progress(
-        snapshot: Snapshot | SnapshotHandle | str | os.PathLike[str],
+        snapshot: Snapshot | str | os.PathLike[str],
         *,
         name: str,
         cpus: int | None = None,
-        memory: int | None = None,
+        memory: int | Size | None = None,
         network_policy: NetworkPolicy | None = None,
         max_connections: int | None = None,
         max_tcp_connections: int | None = None,
         max_udp_connections: int | None = None,
         disable_network: bool = False,
         security: SecurityProfile | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         cow_memory: bool = False,
         forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
@@ -192,23 +213,27 @@ class Sandbox:
         name: str,
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
-        memory: int | None = None,
+        memory: int | Size | None = None,
         cpus: int | None = None,
-        max_memory: int | None = None,
+        max_memory: int | Size | None = None,
         max_cpus: int | None = None,
+        cpu_placement: CpuPlacement | Literal["inherit", "auto", "spread", "compact"] | None = None,
+        placement_profile: str | None = None,
+        thp: Literal["always", "madvise", "never"] | None = None,
         nested_virt: bool | None = None,
         workdir: str | None = None,
         shell: str | None = None,
         security: SecurityProfile | None = None,
+        deployment_profile: DeploymentProfile | None = None,
         hostname: str | None = None,
         user: str | None = None,
         entrypoint: Sequence[str] | None = None,
         cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
-        replace_with_timeout: float | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         ephemeral: bool = False,
         env: Mapping[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -224,6 +249,7 @@ class Sandbox:
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         intercept_tls: bool = False,
+        proxy: OutboundProxy | None = None,
         secrets: Sequence[SecretEntry] | None = None,
         secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
@@ -233,23 +259,27 @@ class Sandbox:
         name: str,
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
-        memory: int | None = None,
+        memory: int | Size | None = None,
         cpus: int | None = None,
-        max_memory: int | None = None,
+        max_memory: int | Size | None = None,
         max_cpus: int | None = None,
+        cpu_placement: CpuPlacement | Literal["inherit", "auto", "spread", "compact"] | None = None,
+        placement_profile: str | None = None,
+        thp: Literal["always", "madvise", "never"] | None = None,
         nested_virt: bool | None = None,
         workdir: str | None = None,
         shell: str | None = None,
         security: SecurityProfile | None = None,
+        deployment_profile: DeploymentProfile | None = None,
         hostname: str | None = None,
         user: str | None = None,
         entrypoint: Sequence[str] | None = None,
         cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
-        replace_with_timeout: float | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         ephemeral: bool = False,
         env: Mapping[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -265,6 +295,7 @@ class Sandbox:
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         intercept_tls: bool = False,
+        proxy: OutboundProxy | None = None,
         secrets: Sequence[SecretEntry] | None = None,
         secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
@@ -272,7 +303,14 @@ class Sandbox:
     @staticmethod
     async def start(name: str, *, detached: bool = False) -> Sandbox: ...
     @staticmethod
-    async def get(name: str) -> SandboxHandle: ...
+    async def get(name: str) -> Sandbox: ...
+    @staticmethod
+    async def get_running(name: str) -> Sandbox: ...
+    async def ensure_running(self) -> None: ...
+    async def info(self) -> SandboxInfo: ...
+    async def status(self) -> SandboxStatus: ...
+    async def last_failure_message(self) -> str | None: ...
+    async def config(self) -> SandboxConfigInspection: ...
     @staticmethod
     async def list() -> SandboxPage: ...
     @staticmethod
@@ -289,23 +327,27 @@ class Sandbox:
         name: str,
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
-        memory: int | None = None,
+        memory: int | Size | None = None,
         cpus: int | None = None,
-        max_memory: int | None = None,
+        max_memory: int | Size | None = None,
         max_cpus: int | None = None,
+        cpu_placement: CpuPlacement | Literal["inherit", "auto", "spread", "compact"] | None = None,
+        placement_profile: str | None = None,
+        thp: Literal["always", "madvise", "never"] | None = None,
         nested_virt: bool | None = None,
         workdir: str | None = None,
         shell: str | None = None,
         security: SecurityProfile | None = None,
+        deployment_profile: DeploymentProfile | None = None,
         hostname: str | None = None,
         user: str | None = None,
         entrypoint: Sequence[str] | None = None,
         cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
-        replace_with_timeout: float | None = None,
-        max_duration: float | None = None,
-        idle_timeout: float | None = None,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
         ephemeral: bool = False,
         env: Mapping[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -314,21 +356,22 @@ class Sandbox:
         log_level: LogLevel | None = None,
         registry_auth: RegistryAuth | None = None,
         registry_insecure: bool = False,
-        registry_ca_certs: list[bytes | bytearray | str | os.PathLike[str]] | None = None,
+        registry_ca_certs: builtins.list[bytes | bytearray | str | os.PathLike[str]] | None = None,
         volumes: Mapping[str, MountConfig] | None = None,
         patches: Sequence[PatchConfig] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         intercept_tls: bool = False,
+        proxy: OutboundProxy | None = None,
         secrets: Sequence[SecretEntry] | None = None,
         secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
     ) -> PullSession: ...
     @property
-    def name(self) -> Awaitable[str]: ...
+    def name(self) -> str: ...
     @property
-    def id(self) -> Awaitable[str]: ...
+    def id(self) -> str: ...
     @property
     def owns_lifecycle(self) -> Awaitable[bool]: ...
     @property
@@ -339,10 +382,10 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def exec_default_stream(
         self,
@@ -350,49 +393,49 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     async def exec(
         self,
         cmd: str,
-        args: list[str] | ExecOptions | None = None,
+        args: builtins.list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def exec_detached(
         self,
         cmd: str,
-        args: list[str] | ExecOptions | None = None,
+        args: builtins.list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> Job: ...
     async def exec_stream(
         self,
         cmd: str,
-        args: list[str] | ExecOptions | None = None,
+        args: builtins.list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     async def shell(
         self,
@@ -401,10 +444,10 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def shell_stream(
         self,
@@ -413,10 +456,10 @@ class Sandbox:
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
-        rlimits: list[Rlimit] | None = None,
+        rlimits: builtins.list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     def ssh(self) -> SandboxSshOps: ...
     async def attach_default(
@@ -430,7 +473,7 @@ class Sandbox:
     async def attach(
         self,
         cmd: str,
-        args: list[str] | None = None,
+        args: builtins.list[str] | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
@@ -454,16 +497,16 @@ class Sandbox:
         *,
         cpus: int | None = None,
         max_cpus: int | None = None,
-        memory: int | None = None,
-        max_memory: int | None = None,
+        memory: int | Size | None = None,
+        max_memory: int | Size | None = None,
         root_disk_size: int | None = None,
         env: Mapping[str, str] | None = None,
-        env_rm: list[str] | None = None,
+        env_rm: builtins.list[str] | None = None,
         labels: Mapping[str, str] | None = None,
-        labels_rm: list[str] | None = None,
+        labels_rm: builtins.list[str] | None = None,
         workdir: str | None = None,
         secrets: Mapping[str, SecretModifySpec] | None = None,
-        secrets_rm: list[str] | None = None,
+        secrets_rm: builtins.list[str] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
         ports_rm: Sequence[PortEndpoint] | None = None,
         policy: ModificationPolicy | None = None,
@@ -475,56 +518,70 @@ class Sandbox:
         tail: int | None = None,
         since_ms: float | None = None,
         until_ms: float | None = None,
-        sources: list[LogReadSource] | None = None,
-    ) -> list[LogEntry]: ...
+        sources: builtins.list[LogReadSource] | None = None,
+    ) -> builtins.list[LogEntry]: ...
     async def log_stream(
         self,
-        sources: list[LogReadSource] | None = None,
+        sources: builtins.list[LogReadSource] | None = None,
         since_ms: float | None = None,
         from_cursor: str | None = None,
         until_ms: float | None = None,
         follow: bool = False,
     ) -> LogStream: ...
-    async def restore_warnings(self) -> list[ExternalMountWarning]: ...
-    async def stop(self, timeout: float | None = None) -> None: ...
-    async def stop_with_timeout(self, timeout: float) -> None: ...
+    async def restore_warnings(self) -> builtins.list[ExternalMountWarning]: ...
+    async def stop(self, timeout: float | timedelta | None = None) -> None: ...
+    async def stop_with_timeout(self, timeout: float | timedelta) -> None: ...
     async def fork(
-        self, name: str, *, record_integrity: bool = False,
+        self,
+        name: str,
+        *,
+        record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
         volumes: Mapping[str, MountConfig] | None = None,
     ) -> Sandbox: ...
     # Deprecated: use fork.
     async def branch(
-        self, name: str, *, record_integrity: bool = False,
+        self,
+        name: str,
+        *,
+        record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
         volumes: Mapping[str, MountConfig] | None = None,
     ) -> Sandbox: ...
     async def fork_many(
-        self, names: list[str], *, record_integrity: bool = False,
+        self,
+        names: builtins.list[str],
+        *,
+        record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
         volumes: Mapping[str, MountConfig] | None = None,
-    ) -> list[ForkOutcome]: ...
+    ) -> builtins.list[ForkOutcome]: ...
     # Deprecated: use fork_many.
     async def branch_many(
-        self, names: list[str], *, record_integrity: bool = False,
+        self,
+        names: builtins.list[str],
+        *,
+        record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
         volumes: Mapping[str, MountConfig] | None = None,
-    ) -> list[ForkOutcome]: ...
+    ) -> builtins.list[ForkOutcome]: ...
     async def pause(self, *, guest_flush: GuestFlush | None = None) -> None: ...
     async def resume(self) -> None: ...
     async def request_stop(self) -> None: ...
-    async def kill(self, timeout: float | None = None) -> None: ...
+    async def kill(self, timeout: float | timedelta | None = None) -> None: ...
     async def request_kill(self) -> None: ...
     async def request_drain(self) -> None: ...
-    async def wait_for_status(self, status: SandboxStatus) -> SandboxHandle: ...
+    async def wait_for_status(self, status: SandboxStatus) -> None: ...
     async def restart(
         self,
         *,
         force: bool = False,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
         detached: bool = False,
     ) -> Sandbox: ...
-    async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None: ...
+    async def destroy(
+        self, *, force: bool = False, timeout: float | timedelta | None = None
+    ) -> None: ...
     async def wait_until_stopped(self) -> SandboxStopResult: ...
     async def detach(self) -> None: ...
     async def __aenter__(self) -> Sandbox: ...
@@ -557,125 +614,6 @@ class SandboxTouchResult:
     def name(self) -> str: ...
     @property
     def activity_seq(self) -> int: ...
-
-class SandboxHandle:
-    """Lightweight sandbox metadata handle.
-
-    Sandbox names are limited to 128 UTF-8 bytes.
-    """
-
-    async def get_job(self, id: str) -> Job: ...
-    async def list_jobs(
-        self, *, all: bool = False, limit: int = 50, cursor: str | None = None
-    ) -> JobPage: ...
-
-
-    @property
-    def name(self) -> str: ...
-    @property
-    def id(self) -> str: ...
-    @property
-    def status(self) -> SandboxStatus: ...
-    @property
-    def config_json(self) -> str: ...
-    @property
-    def created_at(self) -> float | None: ...
-    @property
-    def updated_at(self) -> float | None: ...
-    async def metrics(self) -> SandboxMetrics: ...
-    async def storage_usage(self) -> StorageItemUsage: ...
-    async def ping(self) -> SandboxPingResult: ...
-    async def touch(self) -> SandboxTouchResult: ...
-    async def compact(
-        self,
-        *,
-        layers: int | None = None,
-        dry_run: bool = False,
-        disk: str | None = None,
-        root_disk_only: bool = False,
-    ) -> DiskCompactionResult: ...
-    async def modify(
-        self,
-        *,
-        cpus: int | None = None,
-        max_cpus: int | None = None,
-        memory: int | None = None,
-        max_memory: int | None = None,
-        root_disk_size: int | None = None,
-        env: Mapping[str, str] | None = None,
-        env_rm: list[str] | None = None,
-        labels: Mapping[str, str] | None = None,
-        labels_rm: list[str] | None = None,
-        workdir: str | None = None,
-        secrets: Mapping[str, SecretModifySpec] | None = None,
-        secrets_rm: list[str] | None = None,
-        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
-        ports_rm: Sequence[PortEndpoint] | None = None,
-        policy: ModificationPolicy | None = None,
-        dry_run: bool = False,
-    ) -> SandboxModificationPlan: ...
-    async def logs(
-        self,
-        tail: int | None = None,
-        since_ms: float | None = None,
-        until_ms: float | None = None,
-        sources: list[LogReadSource] | None = None,
-    ) -> list[LogEntry]: ...
-    async def log_stream(
-        self,
-        sources: list[LogReadSource] | None = None,
-        since_ms: float | None = None,
-        from_cursor: str | None = None,
-        until_ms: float | None = None,
-        follow: bool = False,
-    ) -> LogStream: ...
-    async def start(self, *, detached: bool = False) -> Sandbox: ...
-    def config(self) -> dict[str, Any]: ...
-    async def refresh(self) -> SandboxHandle: ...
-    async def connect(self, timeout: float | None = None) -> Sandbox: ...
-    async def connect_or_start(self, *, detached: bool = False) -> Sandbox: ...
-    async def stop(self, timeout: float | None = None) -> None: ...
-    async def stop_with_timeout(self, timeout: float) -> None: ...
-    async def fork(
-        self, name: str, *, record_integrity: bool = False,
-        guest_flush: GuestFlush | None = None,
-        volumes: Mapping[str, MountConfig] | None = None,
-    ) -> Sandbox: ...
-    # Deprecated: use fork.
-    async def branch(
-        self, name: str, *, record_integrity: bool = False,
-        guest_flush: GuestFlush | None = None,
-        volumes: Mapping[str, MountConfig] | None = None,
-    ) -> Sandbox: ...
-    async def fork_many(
-        self, names: list[str], *, record_integrity: bool = False,
-        guest_flush: GuestFlush | None = None,
-        volumes: Mapping[str, MountConfig] | None = None,
-    ) -> list[ForkOutcome]: ...
-    # Deprecated: use fork_many.
-    async def branch_many(
-        self, names: list[str], *, record_integrity: bool = False,
-        guest_flush: GuestFlush | None = None,
-        volumes: Mapping[str, MountConfig] | None = None,
-    ) -> list[ForkOutcome]: ...
-    async def pause(self, *, guest_flush: GuestFlush | None = None) -> None: ...
-    async def resume(self) -> None: ...
-    async def request_stop(self) -> None: ...
-    async def kill(self, timeout: float | None = None) -> None: ...
-    async def request_kill(self) -> None: ...
-    async def request_drain(self) -> None: ...
-    async def wait_for_status(self, status: SandboxStatus) -> SandboxHandle: ...
-    async def restart(
-        self,
-        *,
-        force: bool = False,
-        timeout: float | None = None,
-        detached: bool = False,
-    ) -> Sandbox: ...
-    async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None: ...
-    async def wait_until_stopped(self) -> SandboxStopResult: ...
-    async def remove(self) -> None: ...
-    async def snapshot(self, name: str) -> Snapshot: ...
 
 class ExecOutput:
     @property
@@ -721,7 +659,7 @@ class SandboxSshOps:
         user: str = "root",
         term: str | None = None,
         sftp: bool = True,
-        inactivity_timeout: float | None = None,
+        inactivity_timeout: float | timedelta | None = None,
     ) -> SshClient: ...
     async def prepare_server(
         self,
@@ -730,7 +668,7 @@ class SandboxSshOps:
         authorized_keys_path: str | os.PathLike[str] | None = None,
         user: str | None = None,
         sftp: bool = True,
-        inactivity_timeout: float | None = None,
+        inactivity_timeout: float | timedelta | None = None,
     ) -> SshServer: ...
 
 class SshOutput:
@@ -855,6 +793,14 @@ class LogStream:
 
 class Volume:
     @staticmethod
+    def local() -> Volumes: ...
+    @staticmethod
+    def remote() -> Volumes: ...
+    @staticmethod
+    def ctx(context: Context) -> Volumes: ...
+    @property
+    def context(self) -> Context: ...
+    @staticmethod
     async def create(
         name: str,
         *,
@@ -864,11 +810,11 @@ class Volume:
         labels: dict[str, str] | None = None,
     ) -> Volume: ...
     @staticmethod
-    async def get(name: str) -> VolumeHandle: ...
+    async def get(name: str) -> Volume: ...
     @staticmethod
-    async def get_default() -> VolumeHandle: ...
+    async def get_default() -> Volume: ...
     @staticmethod
-    async def list() -> list[VolumeHandle]: ...
+    async def list() -> list[Volume]: ...
     @staticmethod
     async def remove(name: str) -> None: ...
     @staticmethod
@@ -940,31 +886,22 @@ class Volume:
     def name(self) -> str: ...
     @property
     def path(self) -> str: ...
-
-class VolumeHandle:
     @property
-    def name(self) -> str: ...
+    def id(self) -> str: ...
     @property
     def is_default(self) -> bool: ...
     @property
     def kind(self) -> VolumeKind: ...
     @property
-    def quota_mib(self) -> int | None: ...
-    @property
-    def used_bytes(self) -> int: ...
-    @property
-    def capacity_bytes(self) -> int | None: ...
-    @property
     def disk_format(self) -> DiskImageFormat | None: ...
     @property
     def disk_fstype(self) -> str | None: ...
     @property
-    def labels(self) -> dict[str, str]: ...
-    @property
     def created_at(self) -> float | None: ...
     @property
     def fs(self) -> VolumeFs: ...
-    async def remove(self) -> None: ...
+    async def info(self) -> VolumeInfo: ...
+    async def destroy(self) -> None: ...
 
 class Service:
     @staticmethod
@@ -1028,7 +965,9 @@ class Storage:
     async def usage() -> StorageUsage: ...
     @staticmethod
     async def prune(
-        *, dry_run: bool = False, older_than_seconds: int | None = None,
+        *,
+        dry_run: bool = False,
+        older_than_seconds: int | None = None,
     ) -> MemoryCacheReport:
         """Revalidate ownership before removing unused RAM; None applies no age filter."""
         ...
@@ -1091,9 +1030,17 @@ class MemoryCacheEntry:
     @property
     def allocated_bytes(self) -> int | None: ...
     @property
-    def state(self) -> Literal[
-        "reclaimable", "in_use", "pending_handoff", "too_young",
-        "missing_handoff_lock", "changed", "removed", "error",
+    def state(
+        self,
+    ) -> Literal[
+        "reclaimable",
+        "in_use",
+        "pending_handoff",
+        "too_young",
+        "missing_handoff_lock",
+        "changed",
+        "removed",
+        "error",
     ]: ...
     @property
     def error(self) -> str | None: ...
@@ -1135,7 +1082,7 @@ class Image:
     @staticmethod
     async def prune() -> ImagePruneReport: ...
     @staticmethod
-    async def load(input_path: str, *, tag: str | None = None) -> list[ImageHandle]: ...
+    async def load(input_path: str, *, tag: str | None = None) -> builtins.list[ImageHandle]: ...
     @staticmethod
     async def save(
         reference: str | Sequence[str],
@@ -1229,6 +1176,14 @@ class ExternalMountWarning:
     def stale_inodes(self) -> list[int]: ...
 
 class Snapshot:
+    @staticmethod
+    def local() -> Snapshots: ...
+    @staticmethod
+    def remote() -> Snapshots: ...
+    @staticmethod
+    def ctx(context: Context) -> Snapshots: ...
+    @property
+    def context(self) -> Context: ...
     async def storage_usage(self) -> StorageItemUsage: ...
     @staticmethod
     async def create(
@@ -1260,9 +1215,9 @@ class Snapshot:
     @staticmethod
     async def open(path_or_name: str) -> Snapshot: ...
     @staticmethod
-    async def get(name_or_digest: str) -> SnapshotHandle: ...
+    async def get(name_or_digest: str) -> Snapshot: ...
     @staticmethod
-    async def list() -> list[SnapshotHandle]: ...
+    async def list() -> list[Snapshot]: ...
     @staticmethod
     async def remove(path_or_name: str, *, force: bool = False) -> None: ...
     @staticmethod
@@ -1286,7 +1241,7 @@ class Snapshot:
         base: str | None = None,
         group: str | None = None,
         set_head: bool = False,
-    ) -> SnapshotHandle: ...
+    ) -> Snapshot: ...
     @staticmethod
     async def load_many(
         archives: Sequence[str | os.PathLike[str]],
@@ -1295,9 +1250,11 @@ class Snapshot:
         base: str | None = None,
         group: str | None = None,
         set_head: bool = False,
-    ) -> list[SnapshotHandle]: ...
+    ) -> builtins.list[Snapshot]: ...
     @staticmethod
-    async def group_head(selector: str) -> dict[str, str | bool | None]: ...
+    async def group_head(group: str) -> str | None: ...
+    @staticmethod
+    async def set_group_head(group: str, id: str) -> dict[str, str | bool | None]: ...
     @property
     def head_update(self) -> dict[str, str | bool | None] | None: ...
     @property
@@ -1316,16 +1273,14 @@ class Snapshot:
     def size_bytes(self) -> int | None: ...
     @property
     def image_ref(self) -> str: ...
-    @property
-    def image_manifest_digest(self) -> str: ...
+    async def image_manifest_digest(self) -> str: ...
     @property
     def state_kind(self) -> SnapshotStateKind: ...
     @property
     def format(self) -> SnapshotFormat | None: ...
     @property
     def fstype(self) -> str | None: ...
-    @property
-    def checkpoint_id(self) -> str | None: ...
+    async def checkpoint_id(self) -> str | None: ...
     @property
     def checkpoint_manifest_digest(self) -> str | None: ...
     @property
@@ -1334,12 +1289,10 @@ class Snapshot:
     def scope(self) -> SnapshotScope: ...
     @property
     def created_at(self) -> str: ...
-    @property
-    def labels(self) -> dict[str, str]: ...
-    @property
-    def source_sandbox(self) -> str | None: ...
+    async def labels(self) -> dict[str, str]: ...
+    async def source_sandbox(self) -> str | None: ...
     @staticmethod
-    async def list_dir(dir: str | os.PathLike[str]) -> list[Snapshot]: ...
+    async def list_dir(dir: str | os.PathLike[str]) -> builtins.list[Snapshot]: ...
     async def save_to(
         self,
         out: str | os.PathLike[str],
@@ -1352,6 +1305,23 @@ class Snapshot:
     ) -> None: ...
     def copy_to(self, output_archive_path: str | os.PathLike[str]) -> SnapshotCopyBuilder: ...
     async def verify(self) -> dict[str, Any]: ...
+    @property
+    def name(self) -> str | None: ...
+    @property
+    def group(self) -> str | None: ...
+    @property
+    def parent_digest(self) -> str | None: ...
+    @property
+    def locality(self) -> str: ...
+    @property
+    def availability(self) -> str: ...
+    @property
+    def migration_state(self) -> str: ...
+    @property
+    def migration_error_code(self) -> str | None: ...
+    async def manifest(self) -> dict[str, Any]: ...
+    async def state(self) -> dict[str, Any]: ...
+    async def destroy(self, *, force: bool = False) -> None: ...
 
 class SnapshotArchive:
     @property
@@ -1365,65 +1335,6 @@ class SnapshotCopyBuilder:
     def labels(self, labels: dict[str, str]) -> SnapshotCopyBuilder: ...
     def record_integrity(self, enabled: bool) -> SnapshotCopyBuilder: ...
     async def save(self) -> None: ...
-
-class SnapshotHandle:
-    async def storage_usage(self) -> StorageItemUsage: ...
-    @property
-    def group(self) -> str | None: ...
-    @property
-    def head_update(self) -> dict[str, str | bool | None] | None: ...
-    @property
-    def id(self) -> str: ...
-    @property
-    def digest(self) -> str: ...
-    @property
-    def name(self) -> str | None: ...
-    @property
-    def parent_digest(self) -> str | None: ...
-    @property
-    def scope(self) -> SnapshotScope: ...
-    @property
-    def image_ref(self) -> str: ...
-    @property
-    def state_kind(self) -> SnapshotStateKind: ...
-    @property
-    def format(self) -> SnapshotFormat | None: ...
-    @property
-    def fstype(self) -> str | None: ...
-    @property
-    def checkpoint_manifest_digest(self) -> str | None: ...
-    @property
-    def size_bytes(self) -> int | None: ...
-    @property
-    def locality(self) -> str: ...
-    @property
-    def availability(self) -> str: ...
-    @property
-    def migration_state(self) -> str: ...
-    @property
-    def migration_error_code(self) -> str | None: ...
-    @property
-    def created_at(self) -> float: ...
-    @property
-    def reference(self) -> str: ...
-    @property
-    def path(self) -> str:
-        """Deprecated: use reference. Raises UnsupportedError for remote snapshots."""
-        ...
-    @property
-    def reference_kind(self) -> Literal["id", "path"]: ...
-    async def open(self) -> Snapshot: ...
-    async def remove(self, *, force: bool = False) -> None: ...
-    async def save_to(
-        self,
-        out: str | os.PathLike[str],
-        *,
-        with_parents: bool = False,
-        with_image: bool = False,
-        plain_tar: bool = False,
-        since: str | None = None,
-        last_layers: int | None = None,
-    ) -> None: ...
 
 class PullSession:
     def cancel(self) -> None: ...
@@ -1459,21 +1370,6 @@ async def install_runtime(config_json: str, options_json: str) -> str: ...
 async def ensure_runtime(config_json: str, options_json: str) -> str: ...
 def resolve_runtime(config_json: str) -> str: ...
 def is_runtime_installed(config_json: str) -> bool: ...
-def set_default_backend(
-    kind: BackendKind,
-    *,
-    url: str | None = None,
-    api_key: str | None = None,
-    profile: str | None = None,
-) -> None: ...
-def backend_scope(
-    kind: BackendKind,
-    *,
-    url: str | None = None,
-    api_key: str | None = None,
-    profile: str | None = None,
-) -> Any: ...
-def default_backend_kind() -> BackendKind: ...
 def resolved_msb_path() -> str: ...
 def resolved_cli_msb_path() -> str: ...
 def set_runtime_msb_path(path: str) -> None: ...
@@ -1501,7 +1397,8 @@ class Job:
         tail: int | None = None,
         since: int | None = None,
         until: int | None = None,
-        sources: list[str] | None = None,
+        sources: Sequence[JobOutputSource | Literal["stdout", "stderr", "output", "stdin_error"]]
+        | None = None,
         from_cursor: str | None = None,
     ) -> list[JobLogEntry]: ...
     async def log_stream(
@@ -1510,7 +1407,8 @@ class Job:
         tail: int | None = None,
         since: int | None = None,
         until: int | None = None,
-        sources: list[str] | None = None,
+        sources: Sequence[JobOutputSource | Literal["stdout", "stderr", "output", "stdin_error"]]
+        | None = None,
         from_cursor: str | None = None,
         follow: bool = False,
     ) -> JobLogStream: ...
@@ -1520,7 +1418,8 @@ class Job:
         tail: int | None = None,
         since: int | None = None,
         until: int | None = None,
-        sources: list[str] | None = None,
+        sources: Sequence[JobOutputSource | Literal["stdout", "stderr", "output", "stdin_error"]]
+        | None = None,
         from_cursor: str | None = None,
     ) -> JobLogStream: ...
 
@@ -1538,3 +1437,212 @@ class JobLogStream:
     async def __anext__(self) -> JobLogEntry: ...
 
 async def diagnose_storage(config_json: str, selection_json: str) -> str: ...
+
+class Context:
+    def __new__(cls, options_json: str, base: Context | None = None) -> Context: ...
+    @property
+    def kind(self) -> ContextKind: ...
+    @property
+    def sandboxes(self) -> Sandboxes: ...
+    @property
+    def volumes(self) -> Volumes: ...
+    @property
+    def snapshots(self) -> Snapshots: ...
+
+class Sandboxes:
+    async def restore(
+        self, snapshot: Snapshot | str | os.PathLike[str], *, name: str, **kwargs: Any
+    ) -> Sandbox: ...
+    def restore_with_progress(
+        self, snapshot: Snapshot | str | os.PathLike[str], *, name: str, **kwargs: Any
+    ) -> PullSession: ...
+    def create_with_progress(
+        self,
+        name: str,
+        *,
+        image: str | os.PathLike[str] | ImageSource | None = None,
+        memory: int | Size | None = None,
+        cpus: int | None = None,
+        max_memory: int | Size | None = None,
+        max_cpus: int | None = None,
+        cpu_placement: CpuPlacement | Literal["inherit", "auto", "spread", "compact"] | None = None,
+        placement_profile: str | None = None,
+        thp: Literal["always", "madvise", "never"] | None = None,
+        nested_virt: bool | None = None,
+        workdir: str | None = None,
+        shell: str | None = None,
+        security: SecurityProfile | None = None,
+        deployment_profile: DeploymentProfile | None = None,
+        hostname: str | None = None,
+        user: str | None = None,
+        entrypoint: Sequence[str] | None = None,
+        cmd: Sequence[str] | None = None,
+        init: str | InitConfig | InitOptions | None = None,
+        replace: bool = False,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
+        ephemeral: bool = False,
+        env: Mapping[str, str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        scripts: Mapping[str, str] | None = None,
+        pull_policy: PullPolicy | None = None,
+        log_level: LogLevel | None = None,
+        registry_auth: RegistryAuth | None = None,
+        registry_insecure: bool = False,
+        registry_ca_certs: builtins.list[bytes | bytearray | str | os.PathLike[str]] | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
+        patches: Sequence[PatchConfig] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
+        network: Network | None = None,
+        intercept_tls: bool = False,
+        proxy: OutboundProxy | None = None,
+        secrets: Sequence[SecretEntry] | None = None,
+        secret_violation_action: ViolationAction | None = None,
+        detached: bool = False,
+    ) -> PullSession: ...
+    @property
+    def context(self) -> Context: ...
+    async def create(
+        self,
+        name: str,
+        *,
+        image: str | os.PathLike[str] | ImageSource | None = None,
+        memory: int | Size | None = None,
+        cpus: int | None = None,
+        max_memory: int | Size | None = None,
+        max_cpus: int | None = None,
+        cpu_placement: CpuPlacement | Literal["inherit", "auto", "spread", "compact"] | None = None,
+        placement_profile: str | None = None,
+        thp: Literal["always", "madvise", "never"] | None = None,
+        nested_virt: bool | None = None,
+        workdir: str | None = None,
+        shell: str | None = None,
+        security: SecurityProfile | None = None,
+        deployment_profile: DeploymentProfile | None = None,
+        hostname: str | None = None,
+        user: str | None = None,
+        entrypoint: Sequence[str] | None = None,
+        cmd: Sequence[str] | None = None,
+        init: str | InitConfig | InitOptions | None = None,
+        replace: bool = False,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
+        ephemeral: bool = False,
+        env: Mapping[str, str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        scripts: Mapping[str, str] | None = None,
+        pull_policy: PullPolicy | None = None,
+        log_level: LogLevel | None = None,
+        registry_auth: RegistryAuth | None = None,
+        registry_insecure: bool = False,
+        registry_ca_certs: list[bytes | bytearray | str | os.PathLike[str]] | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
+        patches: Sequence[PatchConfig] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
+        network: Network | None = None,
+        intercept_tls: bool = False,
+        proxy: OutboundProxy | None = None,
+        secrets: Sequence[SecretEntry] | None = None,
+        secret_violation_action: ViolationAction | None = None,
+        detached: bool = False,
+    ) -> Sandbox: ...
+    async def connect_or_create(
+        self,
+        name: str,
+        *,
+        image: str | os.PathLike[str] | ImageSource | None = None,
+        memory: int | Size | None = None,
+        cpus: int | None = None,
+        max_memory: int | Size | None = None,
+        max_cpus: int | None = None,
+        cpu_placement: CpuPlacement | Literal["inherit", "auto", "spread", "compact"] | None = None,
+        placement_profile: str | None = None,
+        thp: Literal["always", "madvise", "never"] | None = None,
+        nested_virt: bool | None = None,
+        workdir: str | None = None,
+        shell: str | None = None,
+        security: SecurityProfile | None = None,
+        deployment_profile: DeploymentProfile | None = None,
+        hostname: str | None = None,
+        user: str | None = None,
+        entrypoint: Sequence[str] | None = None,
+        cmd: Sequence[str] | None = None,
+        init: str | InitConfig | InitOptions | None = None,
+        replace: bool = False,
+        replace_with_timeout: float | timedelta | None = None,
+        max_duration: float | timedelta | None = None,
+        idle_timeout: float | timedelta | None = None,
+        ephemeral: bool = False,
+        env: Mapping[str, str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        scripts: Mapping[str, str] | None = None,
+        pull_policy: PullPolicy | None = None,
+        log_level: LogLevel | None = None,
+        registry_auth: RegistryAuth | None = None,
+        registry_insecure: bool = False,
+        registry_ca_certs: list[bytes | bytearray | str | os.PathLike[str]] | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
+        patches: Sequence[PatchConfig] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
+        network: Network | None = None,
+        intercept_tls: bool = False,
+        proxy: OutboundProxy | None = None,
+        secrets: Sequence[SecretEntry] | None = None,
+        secret_violation_action: ViolationAction | None = None,
+        detached: bool = False,
+    ) -> Sandbox: ...
+    async def get(self, name: str) -> Sandbox: ...
+    async def get_running(self, name: str) -> Sandbox: ...
+    async def start(self, name: str, *, detached: bool = False) -> Sandbox: ...
+    async def list(
+        self,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> SandboxPage: ...
+    async def remove(self, name: str) -> None: ...
+
+class Volumes:
+    @property
+    def context(self) -> Context: ...
+    async def create(
+        self,
+        name: str,
+        *,
+        kind: VolumeKind | None = None,
+        size_mib: int | None = None,
+        quota_mib: int | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> Volume: ...
+    async def get(self, name: str) -> Volume: ...
+    async def get_default(self) -> Volume: ...
+    async def list(self) -> list[Volume]: ...
+    async def remove(self, name: str) -> None: ...
+
+class Snapshots:
+    async def group_head(self, group: str) -> str | None: ...
+    async def set_group_head(self, group: str, id: str) -> dict[str, str | bool | None]: ...
+    @property
+    def context(self) -> Context: ...
+    async def create(
+        self,
+        name: str = "",
+        *,
+        from_sandbox: str,
+        group: str | None = None,
+        dest_dir: str | os.PathLike[str] | None = None,
+        labels: dict[str, str] | None = None,
+        force: bool = False,
+        record_integrity: bool = False,
+        full: bool = False,
+        guest_flush: GuestFlush | None = None,
+    ) -> Snapshot: ...
+    async def get(self, reference: str) -> Snapshot: ...
+    async def list(self) -> list[Snapshot]: ...
+    async def remove(self, reference: str, *, force: bool = False) -> None: ...

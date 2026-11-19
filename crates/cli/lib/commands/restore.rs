@@ -1,11 +1,11 @@
 //! Restore a snapshot into a detached sandbox with explicit host resource bindings.
 
 use clap::Args;
+#[cfg(test)]
+use microsandbox::Sandbox;
 use microsandbox::{
     MicrosandboxError, RestoreKind,
-    sandbox::{
-        ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
-    },
+    sandbox::{ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, SecurityProfile},
 };
 
 #[cfg(feature = "net")]
@@ -163,10 +163,14 @@ impl RestoreControlArgs {
             builder = builder.guest_clock(policy);
         }
         if let Some(duration) = &self.max_duration {
-            builder = builder.max_duration(super::common::parse_duration_secs(duration)?);
+            builder = builder.max_duration(std::time::Duration::from_secs(
+                super::common::parse_duration_secs(duration)?,
+            ));
         }
         if let Some(duration) = &self.idle_timeout {
-            builder = builder.idle_timeout(super::common::parse_duration_secs(duration)?);
+            builder = builder.idle_timeout(std::time::Duration::from_secs(
+                super::common::parse_duration_secs(duration)?,
+            ));
         }
         #[cfg(feature = "net")]
         {
@@ -213,7 +217,10 @@ pub async fn run(
     args: RestoreArgs,
     log_level: Option<microsandbox::LogLevel>,
 ) -> anyhow::Result<()> {
-    let mut builder = Sandbox::restore(&args.snapshot).name(&args.name);
+    let mut builder = crate::commands::common::selected_context()?
+        .sandboxes()
+        .restore(&args.snapshot)
+        .name(&args.name);
     if let Some(level) = log_level {
         builder = builder.log_level(level);
     }
@@ -258,7 +265,7 @@ pub async fn run(
         }
     };
     display_restore_warnings(&sandbox).await;
-    sandbox.detach().await;
+    sandbox.detach().await?;
     Ok(())
 }
 

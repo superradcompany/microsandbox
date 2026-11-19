@@ -1067,7 +1067,17 @@ mod tests {
             listener.set_nonblocking(true).unwrap();
             listener.accept().unwrap();
             drop(listener);
-            assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());
+            // A parallel fork can briefly retain the listening descriptor until exec.
+            // Wait for the kernel to report refusal before testing the stale path.
+            let closed = std::time::Instant::now();
+            while probe_without_advancing_clock(&probe_paths).await.unwrap() {
+                assert!(
+                    closed.elapsed() < Duration::from_secs(5),
+                    "closed runtime endpoint still accepts connections: {}",
+                    path.display()
+                );
+                tokio::task::yield_now().await;
+            }
             std::fs::remove_file(&path).unwrap();
             std::fs::write(&path, b"stale artifact").unwrap();
             assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());

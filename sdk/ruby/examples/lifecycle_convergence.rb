@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 # Live lifecycle convergence and identity-safety example.
+# Explicit preparation measures readiness and concurrent convergence.
+# Ordinary shell/exec examples should rely on automatic preparation.
 
 require "json"
 require "microsandbox"
@@ -59,18 +61,18 @@ run_concurrency_checks = lambda do
 
   raced.first.stop
   handles = candidates.map { Microsandbox::Sandbox.get(race_name) }
-  connected = measure.call("concurrent_connect_or_start") do
-    handles.map { |handle| Thread.new { handle.connect_or_start } }.map(&:value)
+  connected = measure.call("concurrent_ensure_running") do
+    handles.map { |handle| Thread.new { handle.ensure_running; handle } }.map(&:value)
   end
-  raise "concurrent connect_or_start callers selected different identities" unless connected.all? { |sandbox| sandbox.id == race_id }
+  raise "concurrent ensure_running callers selected different identities" unless connected.all? { |sandbox| sandbox.id == race_id }
   raise "start race lost persisted configuration" unless read_marker.call(connected.first) == marker
 
   connected.first.stop
-  detached = measure.call("connect_or_start_detached") do
-    handles.first.connect_or_start(detached: true)
+  detached = measure.call("start_detached") do
+    Microsandbox::Sandbox.start(race_name, detached: true)
   end
   unless detached.id == race_id && !detached.owns_lifecycle?
-    raise "detached connect_or_start changed identity or took lifecycle ownership"
+    raise "detached ensure_running changed identity or took lifecycle ownership"
   end
 
   forced = measure.call("restart_force") do
@@ -119,8 +121,8 @@ begin
   raise "existing configuration did not win" unless read_marker.call(reused) == "original"
 
   handle = Microsandbox::Sandbox.get(name)
-  connected = measure.call("connect_or_start") { handle.connect_or_start }
-  raise "connect_or_start changed the persisted identity" unless connected.id == original_id
+  connected = measure.call("ensure_running") { handle.ensure_running; handle }
+  raise "ensure_running changed the persisted identity" unless connected.id == original_id
 
   measure.call("wait_for_running") { connected.wait_for_status("running") }
   measure.call("exec") do

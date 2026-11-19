@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal};
 
 use anyhow::Context;
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, StorageRecovery, StorageRecoveryOptions};
+use microsandbox::sandbox::{StorageRecovery, StorageRecoveryOptions};
 use microsandbox::setup::{
     self, StorageDiagnosticReason, StorageDiagnosticStatus, StorageSelection,
 };
@@ -85,7 +85,8 @@ async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
 
     // Keep the read-only inventory ahead of backend initialization. A stopped row can
     // precede actual process teardown; the SDK takes locks and checks again before capture.
-    let report = setup::diagnose_storage(
+    let report = setup::diagnose_storage_in(
+        crate::commands::common::selected_context()?.as_ref(),
         Default::default(),
         StorageSelection::Named(vec![name.clone()]),
     )
@@ -110,7 +111,12 @@ async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
     {
         return blocked(&item, 3, json, "Repair needs a complete diagnosis.");
     }
-    let blockers = setup::storage_repair_blockers(Default::default(), &name).await?;
+    let blockers = setup::storage_repair_blockers_in(
+        crate::commands::common::selected_context()?.as_ref(),
+        Default::default(),
+        &name,
+    )
+    .await?;
     if let Some(blocker) = blockers.first() {
         return blocked(
             &item,
@@ -149,7 +155,9 @@ async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
             println!("Storage for '{}' is already ready.", terminal_text(&name));
             return Ok(());
         }
-        let result = Sandbox::recover_storage(&name, StorageRecoveryOptions::default()).await?;
+        let result =
+            microsandbox::Sandbox::recover_storage(&name, StorageRecoveryOptions::default())
+                .await?;
         return done(result, json);
     }
     if item.status == StorageDiagnosticStatus::RecoveryRequired {
@@ -171,7 +179,10 @@ async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
         );
     }
 
-    let result = Sandbox::recover_storage(&name, StorageRecoveryOptions::default()).await?;
+    let result = crate::commands::common::selected_context()?
+        .sandboxes()
+        .recover_storage(&name, StorageRecoveryOptions::default())
+        .await?;
     done(result, json)
 }
 

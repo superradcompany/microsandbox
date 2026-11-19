@@ -18,6 +18,8 @@
 //!
 //!     cargo nextest run -p microsandbox --test log_registry_e2e --run-ignored=only
 
+#![cfg(feature = "local")]
+
 use std::time::Duration;
 
 use futures::StreamExt;

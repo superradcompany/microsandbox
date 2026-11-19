@@ -1,0 +1,382 @@
+---
+title: "Connect"
+sidebarTitle: "Connect"
+description: "Switch from local sandboxes to our managed cloud in one command"
+icon: "cloud-arrow-up"
+---
+
+Run agents and workloads on your machine by default. Need more compute? Switch to [our managed cloud](/cloud/overview) by setting the backend for the CLI and SDKs. Keep the same sandbox code, and switch back just as easily.
+
+## Start locally
+
+Microsandbox runs locally by default, without a cloud account or daemon:
+
+```bash
+msb run python -- python -V
+```
+
+With no backend configured, SDK calls also run locally without an API key.
+
+<span id="connect-remotely" />
+
+## Switch to cloud
+
+<span id="sdk-contexts" />
+
+Get an API key from the [dashboard](https://dashboard.microsandbox.dev/access/api-keys) and set it in your environment:
+
+```bash
+export MSB_API_KEY="msb_..."
+```
+
+Select cloud for CLI commands and SDK calls:
+
+```bash
+export MSB_BACKEND=remote
+```
+
+Run the same code with either destination:
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const sb = await Sandbox.builder("task")
+  .image("python")
+  .create();
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("task")
+    .image("python")
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create("task", image="python")
+```
+
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "task", microsandbox.WithImage("python"))
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+require "microsandbox"
+
+sb = Microsandbox::Sandbox.create("task", image: "python")
+```
+
+```bash CLI
+msb create python --name task
+```
+</CodeGroup>
+
+<span id="choose-at-startup" />
+
+New builders and lookups use the configured destination. Use an explicit [resource selector](#resource-selectors) to override it for one workflow. Existing builders and resources keep their original connection.
+
+## Switch back
+
+Select local execution again:
+
+```bash
+export MSB_BACKEND=local
+```
+
+<Accordion title="Connection settings">
+`MSB_BACKEND=remote` switches unqualified SDK calls and CLI commands to remote. `MSB_API_KEY` supplies credentials; setting it alone does not switch where commands run. `cloud` remains an alias for `remote`. Set `MSB_API_URL` to use another API, or save a [profile](#profiles) for later commands.
+</Accordion>
+
+<span id="connect-from-an-sdk" />
+<span id="connect-the-cli" />
+<span id="cli-environment" />
+
+<span id="profiles" />
+
+## Save a connection
+
+Save a connection as a profile to use it again. Profiles live in `~/.microsandbox/config.json`.
+
+<Accordion title="Add profiles to config.json">
+```json
+{
+  "profiles": {
+    "work": {
+      "kind": "remote",
+      "api_key_ref": "env:MSB_API_KEY"
+    },
+    "local": {
+      "kind": "local"
+    }
+  }
+}
+```
+
+Set `url` on a remote profile for a self-hosted API. See the [profiles schema](/configuration#profiles) for all fields and credential sources. Readers accept the previous `backend` and `cloud` spellings; older SDKs may reject profiles rewritten with `kind` and `remote`.
+</Accordion>
+
+### View and switch
+
+```bash
+msb context list       # List saved profiles
+msb context use work   # Use a profile for subsequent CLI commands
+msb context           # Show the current connection, without the key
+msb context reset     # Clear the saved preference
+```
+
+For one command, use `MSB_PROFILE`:
+
+```bash
+MSB_PROFILE=work msb ls
+```
+
+### Load a profile in code
+
+New SDK calls honor the active profile. To use a different named profile explicitly:
+
+<CodeGroup>
+```typescript TypeScript
+const remote = RemoteContext.fromProfile("work");
+```
+
+```rust Rust
+let remote = RemoteContext::from_profile("work")?;
+```
+
+```python Python
+remote = RemoteContext.from_profile("work")
+```
+
+```go Go
+remote, err := m.RemoteContextFromProfile("work")
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+remote = Microsandbox::RemoteContext.from_profile("work")
+```
+</CodeGroup>
+
+## More options
+
+### Another endpoint
+
+The default endpoint is `https://api.microsandbox.dev`. Set an explicit URL to use another compatible API; an empty URL is an error.
+
+Explicit `http://` endpoints are supported for deployments that manage transport protection separately, such as local development or an encrypted tunnel. HTTP itself does not encrypt the API key, request body or response. Use HTTPS when you need the SDK connection to provide transport encryption and server-certificate verification.
+
+<Accordion title="Set another endpoint">
+<CodeGroup>
+```typescript TypeScript
+const remote = RemoteContext.withUrl("https://sandbox.example.com", apiKey);
+```
+
+```rust Rust
+let remote = RemoteContext::with_url("https://sandbox.example.com", api_key)?;
+```
+
+```python Python
+remote = RemoteContext.with_url("https://sandbox.example.com", api_key)
+```
+
+```go Go
+remote, err := m.NewRemoteContextWithURL("https://sandbox.example.com", apiKey)
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+remote = Microsandbox::RemoteContext.with_url("https://sandbox.example.com", api_key)
+```
+</CodeGroup>
+</Accordion>
+
+Explicit remote context options take precedence over `MSB_API_KEY` and `MSB_API_URL` independently. A key is required. The URL defaults to `https://api.microsandbox.dev`.
+
+<span id="remote-endpoints" />
+
+<span id="compute-type" />
+
+For Standard and Shared options, see [compute types](/cloud/pricing#choose-a-compute-type).
+
+<span id="deriving-a-remote-context" />
+<Accordion title="Change a remote context">
+
+Create a copy of a context to change its endpoint, credentials, or options. Settings you leave out stay the same. Existing resources keep their original connection. Copying a context does not reload profiles or configuration.
+
+<CodeGroup>
+```typescript TypeScript
+import { RemoteContext } from "microsandbox";
+
+const remote = RemoteContext.fromEnv();
+const other = remote.toBuilder()
+  .url("https://other-provider.example")
+  .apiKey(process.env.OTHER_API_KEY!)
+  .build();
+```
+
+```rust Rust
+use microsandbox::RemoteContext;
+
+let remote = RemoteContext::from_env()?;
+let other = remote.to_builder()
+    .url("https://other-provider.example")
+    .api_key(std::env::var("OTHER_API_KEY")?)
+    .build()?;
+```
+
+```python Python
+import os
+from microsandbox import RemoteContext
+
+remote = RemoteContext.from_env()
+other = remote.replace(
+    url="https://other-provider.example",
+    api_key=os.environ["OTHER_API_KEY"],
+)
+```
+
+```go Go
+import (
+    "os"
+    m "github.com/superradcompany/microsandbox/sdk/go"
+)
+
+remote, err := m.RemoteContextFromEnv()
+if err != nil {
+    return err
+}
+other, err := remote.WithOptions(
+    m.WithRemoteURL("https://other-provider.example"),
+    m.WithRemoteAPIKey(os.Getenv("OTHER_API_KEY")),
+)
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+require "microsandbox"
+
+remote = Microsandbox::RemoteContext.from_env
+other = remote.with(
+  url: "https://other-provider.example",
+  api_key: ENV.fetch("OTHER_API_KEY")
+)
+```
+</CodeGroup>
+
+Empty URLs and keys are errors. Changing a connection does not contact the server.
+
+</Accordion>
+
+<Accordion title="HTTP settings">
+Request timeouts and user agents can be set when constructing or deriving a context. See the SDK references for options and validation. Custom HTTP client behavior is documented in the [Rust configuration reference](/sdk/rust/configuration#to_builder).
+</Accordion>
+
+<span id="cli-profiles" />
+<span id="precedence" />
+<span id="explicit-cli-selection" />
+<Accordion title="Which CLI setting wins?">
+CLI selection uses this order:
+
+1. Explicit `--local` or `--remote` on a supported resource command
+2. Managed `active_profile`
+3. `MSB_BACKEND=local|remote`
+4. `MSB_PROFILE`
+5. Saved `active_profile`
+6. Local runtime
+
+Explicit flags override a managed active profile but still enforce `allowed_backends`.
+
+`--remote` uses `MSB_API_KEY` and optional `MSB_API_URL` (otherwise the hosted default), not the credentials or URL of the saved profile. Missing environment credentials are an error. `--local` selects the local context. These flags apply to the current command and do not save a new profile preference.
+
+Environment and managed settings can override `msb context use`; the command warns when they do. `reset` clears only the saved preference. Missing credentials or a blocked connection cause an error. The command will not run locally instead.
+
+A managed `active_profile` of `null` or `""` clears saved and environment-selected profiles, while preserving `MSB_BACKEND`. To enforce local execution, choose a named managed local profile. Managed profile entries replace same-named user entries.
+</Accordion>
+
+<Accordion title="Allow only local or remote execution">
+Set `allowed_backends` to `["local"]`, `["remote"]`, or `["local", "remote"]` in user configuration or managed overrides. `cloud` remains an input alias for `remote`. Both are allowed by default; an empty list is invalid. `null` removes the restriction, and managed values replace user values.
+
+This controls where execution is allowed. It does not switch the current connection. Changes apply to newly created contexts. See [managed configuration](/enterprise/managed-configuration).
+</Accordion>
+
+See [context commands](/cli/management#msb-context) for JSON output and troubleshooting.
+
+## Check your connection
+
+`msb context` shows where CLI commands run. To check an object’s connection in code, see your [SDK reference](/sdk/overview#reference).
+
+See [configuration](/operations/configuration) for defaults and [cloud limitations](/cloud/limitations) for feature differences.
+
+
+## Resource selectors
+
+For explicit selection before creation, lookup or listing, use the resource's `local()` or `remote()` selector. Sandbox, Volume and Snapshot return their existing plural collection types. Unqualified calls follow configuration and fall back to local. Explicit selectors override the configured destination and respect managed backend restrictions.
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox, Volume } from "microsandbox";
+
+const sb = await Sandbox.remote().get("worker");
+const volumes = await Volume.remote().list();
+const local = Sandbox.local();
+```
+
+```rust Rust
+use microsandbox::{Sandbox, Volume};
+
+let sb = Sandbox::remote()?.get("worker").await?;
+let volumes = Volume::remote()?.list().await?;
+let local = Sandbox::local();
+```
+
+```python Python
+from microsandbox import Sandbox, Volume
+
+sb = await Sandbox.remote().get("worker")
+volumes = await Volume.remote().list()
+local = Sandbox.local()
+```
+
+```go Go
+import msb "github.com/superradcompany/microsandbox/sdk/go"
+
+sandboxes, err := msb.SandboxRemote()
+if err != nil { return err }
+sb, err := sandboxes.Get(ctx, "worker")
+if err != nil { return err }
+volumes, err := msb.VolumeRemote()
+if err != nil { return err }
+local, err := msb.SandboxLocal()
+if err != nil { return err }
+```
+
+```ruby Ruby
+require "microsandbox"
+
+sb = Microsandbox::Sandbox.remote.get("worker")
+volumes = Microsandbox::Volume.remote.list
+local = Microsandbox::Sandbox.local
+```
+</CodeGroup>
+
+Remote selectors capture `MSB_API_KEY` and optional `MSB_API_URL` at the call, ignoring ambient backend/profile selection. Construction performs no remote lookup; validation or missing-provider errors happen before a usable remote collection is returned. Existing collections, deferred builders and resources keep captured credentials after environment changes. Go's local selectors also return an error because context/provider construction can fail. Rust selectors are gated by the corresponding local/cloud feature. Bindings require the corresponding installed provider and never fall back to the other destination.
+
+Use `Resource.ctx(context)` or context collections when selecting a named profile, a different account or custom local configuration. Instance resources remain bound to their original destination. Rust `local_state()` / `remote_state()` expose retained backend-specific state; they do not perform live inspection.
+
+### Agent connection timeouts
+
+Agent connection timeout errors identify the phase that exhausted the connection deadline: `identity` is the sandbox lookup, `websocket` covers connection establishment and upgrade, and `handshake` is the guest-agent protocol handshake. The deadline covers the whole attempt. A timeout does not retry the command or change TLS verification; retain the phase when reporting an intermittent connection failure.
