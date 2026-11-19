@@ -87,6 +87,17 @@ func TestProviderCoexistenceNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sb.Close()
+	// Call the actual lean library: workspace feature unification must not
+	// hide missing resize exports or turn unsupported observation into success.
+	for name, observe := range map[string]func() error{
+		"status":     func() error { _, err := sb.ResizeStatus(ctx); return err },
+		"operations": func() error { _, err := sb.ResizeOperations(ctx); return err },
+		"wait":       func() error { _, err := sb.WaitUntilResized(ctx); return err },
+	} {
+		if err := observe(); !IsKind(err, ErrUnsupportedOperation) {
+			t.Fatalf("remote resize %s: expected unsupported, got %v", name, err)
+		}
+	}
 	if sb.ID() != "cloud:remote-id" || sb.Context().Kind() != ContextRemote {
 		t.Fatalf("resource lost destination: id=%q kind=%q", sb.ID(), sb.Context().Kind())
 	}
