@@ -151,7 +151,7 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
-        resolved.validate_network()?;
+        resolved.network.validate()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         self.validate_backend_policy()?;
 
@@ -179,7 +179,7 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
-        resolved.validate_network()?;
+        resolved.network.validate()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         self.validate_backend_policy()?;
         Ok(self)

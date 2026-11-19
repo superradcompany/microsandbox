@@ -894,6 +894,7 @@ pub(crate) async fn validate_multi_tenant_nameservers(
     global: &GlobalConfig,
 ) -> MicrosandboxResult<()> {
     if global
+        .network
         .multi_tenant_nameservers(config.spec.deployment_profile)
         .is_none()
     {
