@@ -5121,10 +5121,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let sparse = directory.path().join("sparse.raw");
         let allocated = directory.path().join("allocated.raw");
-        std::fs::File::create(&sparse)
-            .unwrap()
-            .set_len(4 * 1024 * 1024)
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&sparse)
             .unwrap();
+        extent::mark_sparse(&file).unwrap();
+        file.set_len(4 * 1024 * 1024).unwrap();
         std::fs::write(&allocated, vec![0; 4 * 1024 * 1024]).unwrap();
         let mut fingerprints = HashMap::new();
 
@@ -5143,7 +5147,13 @@ mod tests {
     async fn shared_layer_fingerprint_handles_large_holes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("large-hole.raw");
-        let file = std::fs::File::create(&path).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        extent::mark_sparse(&file).unwrap();
         let logical_size = 64 * 1024 * 1024 * 1024;
         file.set_len(logical_size).unwrap();
         let Some(map) = ExtentMap::scan_file(&file).unwrap() else {
