@@ -172,9 +172,9 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::RuntimeIncomplete(_) => "RuntimeIncomplete",
         #[cfg(feature = "local")]
         MicrosandboxError::Database(_) => "Database",
-        MicrosandboxError::InvalidConfig(_) | MicrosandboxError::MissingRestoreBindings { .. } => {
-            "InvalidConfig"
-        }
+        MicrosandboxError::InvalidConfig(_)
+        | MicrosandboxError::InvalidWorkdir { .. }
+        | MicrosandboxError::MissingRestoreBindings { .. } => "InvalidConfig",
         MicrosandboxError::NoDefaultCommand => "NoDefaultCommand",
         MicrosandboxError::SandboxNotFound(_) => "SandboxNotFound",
         MicrosandboxError::SandboxAlreadyExists(_) => "SandboxAlreadyExists",

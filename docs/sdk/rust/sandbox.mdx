@@ -1881,6 +1881,8 @@ fn workdir(self, path: impl Into<String>) -> Self
 
 Set the default working directory for all commands.
 
+A local create checks the path in the guest. When the guest rejects it, create returns `MicrosandboxError::InvalidWorkdir` with a `WorkdirProblem`: `NotADirectory`, or `StatFailed` with the guest's reason. When the check gets no answer, create returns `InvalidConfig`.
+
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">

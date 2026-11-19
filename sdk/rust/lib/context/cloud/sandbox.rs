@@ -2,8 +2,7 @@
 //! plus the conversions between the SDK's [`SandboxConfig`] and the cloud's
 //! create wire shape.
 
-use crate::context::sandbox::SandboxRecordPage;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,20 +11,20 @@ use futures::future::BoxFuture;
 use super::{RemoteContext, snapshot::cloud_reference};
 use crate::context::{
     Context,
-    sandbox::{LogStream, MetricsStream, SandboxIdentity, SandboxOps},
+    sandbox::{LogStream, MetricsStream, SandboxIdentity, SandboxOps, SandboxRecordPage},
 };
 use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
-    RootfsSource, Sandbox, SandboxBuilder, SandboxConfig, SandboxListBuilder, SandboxRecord,
-    SandboxStatus,
+    OciRootfsSource, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig, SandboxListBuilder,
+    SandboxRecord, SandboxSpec, SandboxStatus,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
     CloudCompute, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus,
-    NamedVolumeMode, NetworkSpec, RootDisk, SandboxRuntimeOptions, TlsConfig, VolumeKind,
-    VolumeMount,
+    CloudSecretSource, CloudSecretValue, CloudSecretsConfig, NamedVolumeMode, NetworkSpec,
+    RootDisk, SandboxRuntimeOptions, TlsConfig, VolumeKind, VolumeMount,
 };
 use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
@@ -86,6 +85,32 @@ pub(in crate::context) enum CloudRegistrySelection {
         /// Registry password or access token.
         password: String,
     },
+}
+
+/// Fields used by SDK operations from the sandbox's spec as returned by the API.
+///
+/// Declared here rather than reusing the shared spec types so decoding stays
+/// lenient: no strict enums, and any field may be missing.
+#[derive(Debug, serde::Deserialize)]
+struct CloudSpecProjection {
+    image: Option<String>,
+    resources: Option<CloudSpecResourcesProjection>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    lifecycle: Option<CloudSpecLifecycleProjection>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CloudSpecResourcesProjection {
+    vcpus: Option<u8>,
+    memory_mib: Option<u32>,
+    disk_size_mib: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CloudSpecLifecycleProjection {
+    max_duration_secs: Option<u64>,
+    idle_timeout_secs: Option<u64>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -198,7 +223,8 @@ impl RemoteContext {
         // Validate the whole request before provisioning anything. Only the default
         // ensure-exists behavior is resolved here; the wire and retained config use
         // plain named mounts, while the local backend keeps its inline-create path.
-        let (mut request, config) = cloud_create_body_and_config(config)?;
+        let (mut request, config) =
+            cloud_create_body_and_config(config, super::modify::resolve_env)?;
         request.compute = self
             .inner
             .compute_type
@@ -619,13 +645,65 @@ fn cloud_identity(identity: SandboxIdentity) -> MicrosandboxResult<String> {
 
 fn cloud_create_body_and_config(
     mut config: SandboxConfig,
+    resolve_env: impl FnMut(&str) -> Option<CloudSecretValue>,
 ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
     // Build the request first to preserve cloud-specific error precedence,
     // then apply the same successful canonicalization to the config retained
     // by Sandbox::config().
-    let request = CloudCreateBody::try_from(config.clone())?;
+    let mut request = CloudCreateBody::try_from(config.clone())?;
+    resolve_secret_sources(
+        request.spec.sandbox_spec_mut().network.secrets.as_mut(),
+        resolve_env,
+    )?;
     crate::sandbox::validate_volume_mounts(&mut config.spec.mounts)?;
     Ok((request, config))
+}
+
+/// Env references are read from the caller's environment when the sandbox is
+/// created, while the sandbox config keeps the reference. A source wins over
+/// a value set on the same secret, as it does on a local create.
+fn resolve_secret_sources(
+    spec_secrets: Option<&mut CloudSecretsConfig>,
+    mut resolve_env: impl FnMut(&str) -> Option<CloudSecretValue>,
+) -> MicrosandboxResult<()> {
+    let Some(spec_secrets) = spec_secrets else {
+        return Ok(());
+    };
+
+    for entry in &mut spec_secrets.entries {
+        let Some(source) = &entry.source else {
+            continue;
+        };
+
+        match source {
+            CloudSecretSource::Env { var } => {
+                let var = var.clone();
+                let value = resolve_env(&var).ok_or_else(|| {
+                    MicrosandboxError::InvalidConfig(format!(
+                        "invalid secret configuration: secret {}: host environment variable {var} is not set",
+                        entry.env_var
+                    ))
+                })?;
+                if value.expose().is_empty() {
+                    return Err(MicrosandboxError::InvalidConfig(format!(
+                        "invalid secret configuration: secret {}: host environment variable {var} is empty",
+                        entry.env_var
+                    )));
+                }
+
+                entry.value = value.expose().to_owned();
+                entry.source = None;
+            }
+            CloudSecretSource::Store { .. } => {
+                return Err(MicrosandboxError::Custom(format!(
+                    "invalid secret configuration: secret {}: store-backed secret sources are not supported yet",
+                    entry.env_var
+                )));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Validate the root filesystem before converting a normal cloud create. The
@@ -885,8 +963,7 @@ fn ensure_cloud_sandbox_ready(cloud: &CloudCreateSandboxResponse) -> Microsandbo
     }
 }
 
-/// Build the best available runtime config for a sandbox the SDK did not
-/// create itself.
+/// Build the runtime config from the sandbox's spec as returned by the API.
 ///
 /// The provider may omit `spec` or return a curated shape. Runtime settings
 /// are decoded independently from creation metadata; malformed settings fail
@@ -897,7 +974,7 @@ fn sandbox_config_from_cloud(
     sandbox_config_from_cloud_spec(&cloud.name, cloud.spec.clone())
 }
 
-/// Decode the server-owned spec projection carried by a cloud handle.
+/// Decode the sandbox's spec as returned by the API for SDK operations.
 ///
 /// This internal session config is not the public live configuration result.
 /// Preserve execution settings even when a redacted projection cannot supply
@@ -908,18 +985,27 @@ pub(crate) fn sandbox_config_from_cloud_spec(
 ) -> MicrosandboxResult<SandboxConfig> {
     // Validate the fields consumed by execution independently. In particular,
     // malformed runtime settings are not permission to run with other defaults.
+    let spec_projection = spec
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<CloudSpecProjection>(value.clone()).ok());
     let runtime = spec
         .as_ref()
         .map(|value| serde_json::from_value::<RemoteRuntimeInspection>(value.clone()))
         .transpose()?;
-    let mut config = spec
+    let complete_spec = spec
         .and_then(|value| serde_json::from_value::<CloudCreateSandboxRequest>(value).ok())
-        .and_then(|request| crate::sandbox::SandboxSpec::try_from(request).ok())
-        .map(|spec| SandboxConfig {
-            spec,
-            ..Default::default()
-        })
-        .unwrap_or_default();
+        .and_then(|request| SandboxSpec::try_from(request).ok());
+    let sandbox_spec = complete_spec.unwrap_or_else(|| {
+        let mut spec = SandboxSpec::default();
+        if let Some(projection) = spec_projection {
+            apply_cloud_metadata_projection(&mut spec, projection);
+        }
+        spec
+    });
+    let mut config = SandboxConfig {
+        spec: sandbox_spec,
+        ..Default::default()
+    };
 
     if let Some(runtime) = runtime {
         if let Some(options) = runtime.runtime {
@@ -936,6 +1022,39 @@ pub(crate) fn sandbox_config_from_cloud_spec(
     Ok(config)
 }
 
+/// Copy the settings SDK operations use from the API spec into an SDK spec.
+fn apply_cloud_metadata_projection(spec: &mut SandboxSpec, projection: CloudSpecProjection) {
+    if let Some(image) = projection.image {
+        let root_disk = projection
+            .resources
+            .as_ref()
+            .and_then(|resources| resources.disk_size_mib)
+            .map(RootDisk::managed);
+        spec.image = RootfsSource::Oci(OciRootfsSource {
+            reference: image,
+            root_disk,
+        });
+    }
+
+    if let Some(resources) = projection.resources {
+        if let Some(vcpus) = resources.vcpus {
+            spec.resources.cpus = vcpus;
+            spec.resources.max_cpus = vcpus;
+        }
+        if let Some(memory_mib) = resources.memory_mib {
+            spec.resources.memory_mib = memory_mib;
+            spec.resources.max_memory_mib = memory_mib;
+        }
+    }
+
+    spec.labels = projection.labels;
+
+    if let Some(lifecycle) = projection.lifecycle {
+        spec.lifecycle.max_duration_secs = lifecycle.max_duration_secs;
+        spec.lifecycle.idle_timeout_secs = lifecycle.idle_timeout_secs;
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -947,8 +1066,11 @@ mod tests {
 
     use microsandbox_types::{
         CloudSecretsConfig, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode,
-        SecretsConfig, StatVirtualization, VolumeKind, VolumeMount,
+        SecretSource, SecretsConfig, StatVirtualization, VolumeKind, VolumeMount,
     };
+
+    #[cfg(feature = "net")]
+    use zeroize::Zeroizing;
 
     use super::*;
     use crate::ComputeType;
@@ -957,7 +1079,76 @@ mod tests {
     use crate::snapshot::SnapshotReference;
     use crate::test_support;
     use microsandbox_types::CloudSnapshotLocation;
-    use microsandbox_types::HttpDenyResponseFormat;
+    use microsandbox_types::{HttpDenyResponseFormat, SandboxLogLevel};
+    use tokio::net::TcpListener;
+
+    use super::super::ws_io::WsByteStream;
+
+    const CLOUD_SANDBOX_RESPONSE_FIXTURE: &str = r#"
+{
+  "id": "00000000-0000-0000-0000-0000000000a1",
+  "org_id": "00000000-0000-0000-0000-0000000000b1",
+  "name": "spec-decode",
+  "slug": "spec-decode-abc123",
+  "status": "running",
+  "compute": {
+    "type": "standard"
+  },
+  "status_reason": null,
+  "ephemeral": false,
+  "created_at": "2026-11-18T03:10:37.559567Z",
+  "last_failure_message": null,
+  "temporarily_unavailable_since": null,
+  "automatic_recovery_ends_at": null,
+  "started_at": "2026-11-18T03:10:37.559567Z",
+  "stopped_at": null,
+  "spec": {
+    "image": "alpine:3.20",
+    "resources": {
+      "vcpus": 1,
+      "memory_mib": 512,
+      "disk_size_mib": 4096
+    },
+    "runtime": {
+      "workdir": "/tmp",
+      "shell": "/bin/ash",
+      "scripts": {},
+      "entrypoint": [
+        "/bin/sh",
+        "-c"
+      ],
+      "cmd": [
+        "printf attached"
+      ],
+      "hostname": null,
+      "user": "nobody",
+      "log_level": null,
+      "metrics_sample_interval_ms": 1000,
+      "disable_metrics_sample": false
+    },
+    "env": [
+      {
+        "key": "FOO",
+        "value": "bar"
+      }
+    ],
+    "labels": {},
+    "rlimits": [],
+    "lifecycle": {
+      "ephemeral": false,
+      "max_duration_secs": 900,
+      "idle_timeout_secs": null
+    },
+    "mounts": [],
+    "network": {
+      "enabled": true,
+      "ports": [],
+      "trust_host_cas": false,
+      "secret_violation_action": "block-and-log"
+    }
+  }
+}
+"#;
 
     #[test]
     fn cloud_default_stop_timeout_covers_checkpoint_convergence() {
@@ -982,7 +1173,7 @@ mod tests {
             ]
             .map(|(cpus, memory, explicit_max)| (entry, cpus, memory, explicit_max))
         }) {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -1152,7 +1343,7 @@ mod tests {
     #[cfg(feature = "net")]
     #[tokio::test]
     async fn http_deny_response_is_rejected_before_cloud_http() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let backend = RemoteContext::builder()
             .url(format!("http://{}", listener.local_addr().unwrap()))
             .api_key("test-key")
@@ -1376,7 +1567,7 @@ mod tests {
             },
         ];
 
-        let (request, config) = cloud_create_body_and_config(config).unwrap();
+        let (request, config) = cloud_create_body_and_config(config, |_| None).unwrap();
         let retained = config
             .spec
             .mounts
@@ -1977,6 +2168,145 @@ mod tests {
     }
 
     #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_resolves_env_secret_only_in_request() {
+        let config = cloud_config_with_secret_source(SecretSource::Env {
+            var: "API_KEY_VAR".into(),
+        })
+        .await;
+        let mut resolved_vars = Vec::new();
+
+        let (request, retained) = cloud_create_body_and_config(config, |var| {
+            resolved_vars.push(var.to_owned());
+            Some(CloudSecretValue::new("material"))
+        })
+        .unwrap();
+
+        let sent = &request
+            .spec
+            .sandbox_spec()
+            .network
+            .secrets
+            .as_ref()
+            .unwrap()
+            .entries[0];
+        assert_eq!(sent.value, "material");
+        assert!(sent.source.is_none());
+        assert_eq!(resolved_vars, vec!["API_KEY_VAR"]);
+
+        let retained = &retained.spec.network.secrets.as_ref().unwrap().secrets[0];
+        assert!(retained.value.is_empty());
+        assert!(matches!(
+            retained.source.as_ref(),
+            Some(SecretSource::Env { var }) if var == "API_KEY_VAR"
+        ));
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_env_secret_source_wins_over_value() {
+        let mut config = cloud_config_with_secret_source(SecretSource::Env {
+            var: "API_KEY_VAR".into(),
+        })
+        .await;
+        config.spec.network.secrets.as_mut().unwrap().secrets[0].value =
+            Zeroizing::new("inline".into());
+
+        let (request, _) =
+            cloud_create_body_and_config(config, |_| Some(CloudSecretValue::new("material")))
+                .unwrap();
+
+        let sent = &request
+            .spec
+            .sandbox_spec()
+            .network
+            .secrets
+            .as_ref()
+            .unwrap()
+            .entries[0];
+        assert_eq!(sent.value, "material");
+        assert!(sent.source.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_store_secret_source_with_value_is_refused() {
+        let mut config = cloud_config_with_secret_source(SecretSource::Store {
+            reference: "vault-key".into(),
+        })
+        .await;
+        config.spec.network.secrets.as_mut().unwrap().secrets[0].value =
+            Zeroizing::new("inline".into());
+
+        let error = cloud_create_body_and_config(config, |_| {
+            panic!("store source must not call the environment resolver")
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("store-backed secret sources are not supported yet")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_rejects_missing_or_empty_env_secret() {
+        for (resolved, expected) in [
+            (None, "is not set"),
+            (Some(CloudSecretValue::new("")), "is empty"),
+        ] {
+            let config = cloud_config_with_secret_source(SecretSource::Env {
+                var: "API_KEY_VAR".into(),
+            })
+            .await;
+
+            let error = cloud_create_body_and_config(config, |_| resolved.clone()).unwrap_err();
+
+            assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
+            let message = error.to_string();
+            assert!(message.contains("API_KEY_VAR"));
+            assert!(message.contains(expected));
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_rejects_store_secret_source() {
+        let config = cloud_config_with_secret_source(SecretSource::Store {
+            reference: "vault-key".into(),
+        })
+        .await;
+
+        let error = cloud_create_body_and_config(config, |_| {
+            panic!("store source must not call the environment resolver")
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("store-backed secret sources are not supported yet")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    async fn cloud_config_with_secret_source(source: SecretSource) -> SandboxConfig {
+        SandboxBuilder::new("agent-1")
+            .image("python:3.12")
+            .secret(|secret| {
+                secret
+                    .env("API_KEY")
+                    .source(source)
+                    .allow("api.example.com")
+            })
+            .build()
+            .await
+            .unwrap()
+    }
+
+    #[cfg(feature = "net")]
     #[test]
     fn cloud_create_request_rejects_published_ports() {
         let mut config = base_cloud_config();
@@ -2056,7 +2386,7 @@ mod tests {
         spec.runtime.entrypoint = Some(vec!["python".into(), "-u".into()]);
         spec.runtime.hostname = Some("worker".into());
         spec.runtime.user = Some("appuser".into());
-        spec.runtime.log_level = Some(microsandbox_types::SandboxLogLevel::Debug);
+        spec.runtime.log_level = Some(SandboxLogLevel::Debug);
         spec.runtime
             .scripts
             .insert("setup".into(), "echo hi".into());
@@ -2099,16 +2429,112 @@ mod tests {
         );
         assert_eq!(config.spec.runtime.hostname, None);
         assert_eq!(config.spec.runtime.user.as_deref(), Some("appuser"));
-        assert_eq!(
-            config.spec.runtime.log_level,
-            Some(microsandbox_types::SandboxLogLevel::Debug),
-        );
+        assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Debug),);
         assert_eq!(
             config.spec.runtime.scripts.get("setup"),
             Some(&"echo hi".to_string())
         );
         assert_eq!(config.spec.lifecycle.max_duration_secs, Some(3600));
         assert_eq!(config.spec.lifecycle.idle_timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn sandbox_config_from_cloud_keeps_supported_fields_and_ignores_others() {
+        let mut cloud = cloud_response(CloudSandboxStatus::Running);
+        cloud.spec = Some(serde_json::json!({
+            "image": "python:3.12",
+            "resources": {
+                "vcpus": 4,
+                "memory_mib": 2048,
+                "disk_size_mib": 8192
+            },
+            "runtime": {
+                "workdir": "/app",
+                "shell": "/bin/bash",
+                "scripts": { "setup": "echo hi" },
+                "entrypoint": ["python", "-u"],
+                "cmd": ["main.py"],
+                "hostname": "ignored-hostname",
+                "user": "appuser",
+                "log_level": "debug"
+            },
+            "env": [{ "key": "A", "value": "B" }],
+            "labels": { "tier": "test" },
+            "lifecycle": {
+                "max_duration_secs": 3600,
+                "idle_timeout_secs": 600
+            }
+        }));
+
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
+
+        assert_eq!(config.spec.name, "agent-1");
+        assert!(
+            matches!(config.spec.image, RootfsSource::Oci(ref s) if s.reference == "python:3.12")
+        );
+        assert_eq!(config.spec.resources.cpus, 4);
+        assert_eq!(config.spec.resources.max_cpus, 4);
+        assert_eq!(config.spec.resources.memory_mib, 2048);
+        assert_eq!(config.spec.resources.max_memory_mib, 2048);
+        assert_eq!(
+            config.spec.env,
+            vec![EnvVar::new("A", "B")],
+            "env round-trip"
+        );
+        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/app"));
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["python".to_string(), "-u".to_string()])
+        );
+        assert_eq!(config.spec.runtime.cmd, Some(vec!["main.py".to_string()]));
+        assert_eq!(
+            config.spec.runtime.hostname.as_deref(),
+            Some("ignored-hostname")
+        );
+        assert_eq!(config.spec.runtime.user.as_deref(), Some("appuser"));
+        assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Debug));
+        assert_eq!(
+            config.spec.runtime.scripts.get("setup"),
+            Some(&"echo hi".to_string())
+        );
+        assert_eq!(config.spec.lifecycle.max_duration_secs, Some(3600));
+        assert_eq!(config.spec.lifecycle.idle_timeout_secs, Some(600));
+        assert_eq!(
+            config.spec.labels.get("tier").map(String::as_str),
+            Some("test")
+        );
+    }
+
+    #[test]
+    fn sandbox_config_from_cloud_decodes_api_spec_projection() {
+        let cloud: CloudCreateSandboxResponse =
+            serde_json::from_str(CLOUD_SANDBOX_RESPONSE_FIXTURE).unwrap();
+
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
+
+        assert_eq!(config.spec.name, "spec-decode");
+        assert!(matches!(
+            config.spec.image,
+            RootfsSource::Oci(ref image)
+                if image.reference == "alpine:3.20"
+                    && image.root_disk == Some(RootDisk::managed(4096))
+        ));
+        assert_eq!(config.spec.resources.cpus, 1);
+        assert_eq!(config.spec.resources.memory_mib, 512);
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["/bin/sh".to_string(), "-c".to_string()])
+        );
+        assert_eq!(
+            config.spec.runtime.cmd,
+            Some(vec!["printf attached".to_string()])
+        );
+        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/tmp"));
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/ash"));
+        assert_eq!(config.spec.runtime.user.as_deref(), Some("nobody"));
+        assert_eq!(config.spec.env, vec![EnvVar::new("FOO", "bar")]);
+        assert_eq!(config.spec.lifecycle.max_duration_secs, Some(900));
     }
 
     #[test]
@@ -2188,7 +2614,139 @@ mod tests {
         let config = sandbox_config_from_cloud(&cloud).unwrap();
 
         assert_eq!(config.spec.name, cloud.name);
+        assert!(matches!(
+            config.spec.image,
+            RootfsSource::Oci(ref image) if image.reference == "alpine:3.19"
+        ));
+        assert_eq!(config.spec.resources.cpus, 1);
         assert_eq!(config.spec.runtime.shell, None);
+    }
+
+    #[tokio::test]
+    async fn reconnect_exec_uses_spec_returned_by_cloud_api() {
+        use microsandbox_protocol::{
+            codec,
+            core::Ready,
+            exec::{ExecExited, ExecRequest, ExecStarted},
+            message::{Message, MessageType},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+
+            while requests.len() < 2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut peeked = [0; 4096];
+                let request_len = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let request_len = stream.peek(&mut peeked).await.unwrap();
+                        if peeked[..request_len].contains(&b'\n') {
+                            break request_len;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                let request_line = std::str::from_utf8(&peeked[..request_len])
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap();
+
+                if request_line == "GET /v1/sandboxes/by-name/spec-decode HTTP/1.1"
+                    || request_line
+                        == "GET /v1/sandboxes/00000000-0000-0000-0000-0000000000a1 HTTP/1.1"
+                {
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        request.push(stream.read_u8().await.unwrap());
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        CLOUD_SANDBOX_RESPONSE_FIXTURE.len(),
+                        CLOUD_SANDBOX_RESPONSE_FIXTURE
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    continue;
+                }
+
+                assert_eq!(
+                    request_line,
+                    "GET /v1/sandboxes/00000000-0000-0000-0000-0000000000a1/agent HTTP/1.1"
+                );
+                let websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut io = WsByteStream::new(websocket);
+                io.write_all(&1u32.to_be_bytes()).await.unwrap();
+                io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+                let ready =
+                    Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+                codec::write_message(&mut io, &ready).await.unwrap();
+
+                let message = codec::read_message(&mut io).await.unwrap();
+                assert_eq!(message.t, MessageType::ExecRequest);
+                let request = message.payload::<ExecRequest>().unwrap();
+                let started = Message::with_payload(
+                    MessageType::ExecStarted,
+                    message.id,
+                    &ExecStarted { pid: 17 },
+                )
+                .unwrap();
+                codec::write_message(&mut io, &started).await.unwrap();
+                let exited = Message::with_payload(
+                    MessageType::ExecExited,
+                    message.id,
+                    &ExecExited { code: 0 },
+                )
+                .unwrap();
+                codec::write_message(&mut io, &exited).await.unwrap();
+                requests.push(request);
+
+                // Hold the connection until the client closes it. Closing with unread
+                // client frames resets the socket, which can discard the exit event
+                // before the client reads it.
+                let mut unread = Vec::new();
+                let _ = io.read_to_end(&mut unread).await;
+            }
+
+            requests
+        });
+
+        let backend =
+            crate::test_support::cloud_backend(format!("http://{address}"), "test-key").unwrap();
+        let operation = async {
+            let sandbox = backend.sandboxes().get("spec-decode").await?;
+            let default_output = sandbox.exec_default().await?;
+            let shell_output = sandbox.shell("pwd").await?;
+            Ok::<_, MicrosandboxError>((default_output.status(), shell_output.status()))
+        };
+        let (default_status, shell_status) =
+            tokio::time::timeout(Duration::from_secs(10), operation)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(default_status.code, 0);
+        assert_eq!(shell_status.code, 0);
+
+        let requests = tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].cmd, "/bin/sh");
+        assert_eq!(
+            requests[0].args,
+            ["-c".to_string(), "printf attached".to_string()]
+        );
+        assert_eq!(requests[0].cwd.as_deref(), Some("/tmp"));
+        assert_eq!(requests[0].user.as_deref(), Some("nobody"));
+        assert!(requests[0].env.iter().any(|value| value == "FOO=bar"));
+        assert_eq!(requests[1].cmd, "/bin/ash");
+        assert_eq!(requests[1].args, ["-c".to_string(), "pwd".to_string()]);
+        assert_eq!(requests[1].cwd.as_deref(), Some("/tmp"));
     }
 
     #[test]

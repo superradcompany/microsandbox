@@ -69,13 +69,13 @@ use crate::runtime::launch_contract;
 use crate::runtime::protected_state::StoragePreparation;
 use crate::runtime::{ProcessHandle, SpawnMode};
 use crate::sandbox::{
-    FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig,
-    SandboxStatus, apply_patches, build_flat_tree, build_upper_tree, config::SnapshotRestoreMode,
-    remove_dir_if_exists, validate_env, validate_hostname, validate_labels, validate_sandbox_name,
-    validate_volume_mounts,
+    FsEntryKind, FsMetadata, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxBuilder,
+    SandboxConfig, SandboxFsOps, SandboxStatus, apply_patches, build_flat_tree, build_upper_tree,
+    config::SnapshotRestoreMode, remove_dir_if_exists, validate_env, validate_hostname,
+    validate_labels, validate_sandbox_name, validate_volume_mounts,
 };
 use crate::timing::{self, TARGET};
-use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{MicrosandboxError, MicrosandboxResult, WorkdirProblem};
 use cleanup::CreationCleanup;
 
 //--------------------------------------------------------------------------------------------------
@@ -1219,19 +1219,10 @@ impl LocalContext {
 
             // Accept a workdir only after proving it is a directory in the ready guest.
             if let Some(workdir) = &sandbox.prepared_runtime()?.config.spec.runtime.workdir {
-                let metadata = crate::sandbox::SandboxFsOps::stat_prepared(&sandbox, workdir)
-                    .await
-                    .map_err(|cause| {
-                        // A fast-exiting startup command can close the transport during stat.
-                        MicrosandboxError::InvalidConfig(format!(
-                            "could not validate workdir in guest {workdir:?}: {cause}"
-                        ))
-                    })?;
-                if metadata.kind != FsEntryKind::Directory {
-                    return Err(MicrosandboxError::InvalidConfig(format!(
-                        "workdir is not a directory in guest: {workdir}"
-                    )));
-                }
+                check_workdir(
+                    workdir,
+                    SandboxFsOps::stat_prepared(&sandbox, workdir).await,
+                )?;
             }
             Ok::<_, MicrosandboxError>(())
         }
@@ -2775,6 +2766,31 @@ fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
     microsandbox_runtime::ipc::sandbox_transition_lock_path(run_dir, name)
 }
 
+fn check_workdir(
+    path: &str,
+    answer: MicrosandboxResult<Result<FsMetadata, String>>,
+) -> MicrosandboxResult<()> {
+    match answer {
+        Err(error) => {
+            // A fast-exiting startup command can close the transport during stat.
+            Err(MicrosandboxError::InvalidConfig(format!(
+                "could not validate workdir in guest {path:?}: {error}"
+            )))
+        }
+        Ok(Err(message)) => Err(MicrosandboxError::InvalidWorkdir {
+            path: path.to_owned(),
+            problem: WorkdirProblem::StatFailed { message },
+        }),
+        Ok(Ok(metadata)) if metadata.kind != FsEntryKind::Directory => {
+            Err(MicrosandboxError::InvalidWorkdir {
+                path: path.to_owned(),
+                problem: WorkdirProblem::NotADirectory,
+            })
+        }
+        Ok(Ok(_)) => Ok(()),
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -2799,17 +2815,19 @@ mod tests {
     use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use super::{sandbox_entity, sandbox_label_entity};
+    use super::{check_workdir, sandbox_entity, sandbox_label_entity};
+    use crate::AgentClientError;
     use crate::context::local::creation::{self, CreationStorage};
     use crate::context::{Context, LocalContext};
     use crate::db::entity::{sandbox, volume};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
-        HostPermissions, MAX_HOSTNAME_BYTES, MountOptions, OciRootfsSource, PullPolicy,
-        RootfsSource, SandboxBuilder, SandboxConfig, SandboxListBuilder, SandboxStatus,
-        StatVirtualization, VolumeMount,
+        FsEntryKind, FsMetadata, HostPermissions, MAX_HOSTNAME_BYTES, MountOptions,
+        OciRootfsSource, PullPolicy, RootfsSource, SandboxBuilder, SandboxConfig,
+        SandboxListBuilder, SandboxStatus, StatVirtualization, VolumeMount,
     };
     use crate::snapshot::SnapshotReference;
+    use crate::{MicrosandboxError, WorkdirProblem};
 
     //--------------------------------------------------------------------------------------------------
     // Types
@@ -2872,6 +2890,68 @@ mod tests {
     //--------------------------------------------------------------------------------------------------
     // Tests
     //--------------------------------------------------------------------------------------------------
+
+    #[test]
+    fn check_workdir_classifies_guest_answers() {
+        let metadata = |kind| FsMetadata {
+            kind,
+            size: 0,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            readonly: false,
+            accessed: None,
+            modified: None,
+            created: None,
+        };
+        let path = "/work";
+
+        let missing = check_workdir(
+            path,
+            Ok(Err("stat: No such file or directory (os error 2)".into())),
+        );
+        assert!(matches!(
+            &missing,
+            Err(MicrosandboxError::InvalidWorkdir {
+                path: error_path,
+                problem: WorkdirProblem::StatFailed { message },
+            }) if error_path == path && message == "stat: No such file or directory (os error 2)"
+        ));
+        assert_eq!(
+            missing.unwrap_err().to_string(),
+            "invalid config: could not validate workdir in guest \"/work\": sandbox fs error: stat: No such file or directory (os error 2)"
+        );
+
+        let file = check_workdir(path, Ok(Ok(metadata(FsEntryKind::File))));
+        assert!(matches!(
+            &file,
+            Err(MicrosandboxError::InvalidWorkdir {
+                path: error_path,
+                problem: WorkdirProblem::NotADirectory,
+            }) if error_path == path
+        ));
+        assert_eq!(
+            file.unwrap_err().to_string(),
+            "invalid config: workdir is not a directory in guest: /work"
+        );
+
+        let closed = check_workdir(
+            path,
+            Err(MicrosandboxError::AgentClient(AgentClientError::Closed)),
+        );
+        assert!(matches!(
+            &closed,
+            Err(MicrosandboxError::InvalidConfig(message))
+                if message == "could not validate workdir in guest \"/work\": agent client error: client closed"
+        ));
+        assert_eq!(
+            closed.unwrap_err().to_string(),
+            "invalid config: could not validate workdir in guest \"/work\": agent client error: client closed"
+        );
+
+        let directory = check_workdir(path, Ok(Ok(metadata(FsEntryKind::Directory))));
+        assert!(directory.is_ok());
+    }
 
     #[tokio::test]
     async fn starting_sandbox_owns_image_before_runtime_launch() {
