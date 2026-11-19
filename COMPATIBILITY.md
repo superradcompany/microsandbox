@@ -662,3 +662,7 @@ requirement. Local runtime capability checks are unchanged.
 On Linux and macOS, kill and drain require evidence that the recorded PID belongs to the selected sandbox runtime. Linux sends signals through a captured pidfd. macOS verifies lifecycle ownership and process birth identity before signaling; Darwin’s PID-based syscall still leaves a narrow check-to-signal race.
 
 Denied process inspection does not establish that a run is stale. Reconciliation requires proof of process exit or recorded identity mismatch as well as a free lifecycle guard, no possibly live runtime socket, and free owned-disk guards. Free guards alone do not establish that an unverified PID is stale. Ambiguous ownership returns an error and preserves the run. New Unix launches record SDK-owned identity in the nullable run.process_identity column; existing schema guards and downgrade refusal remain in force. Runtime protocols are unchanged. Replacement and fresh-start recovery use the same proof requirement.
+
+## Concurrent catalog sidecar teardown
+
+Catalog hardening retries up to 16 complete inspections when SQLite sidecar teardown exposes an unlinked inode or the path changes during inspection. Every attempt repeats the ownership, link and permission checks; symlinks, hardlinks and untrusted access remain rejected. Continued churn returns an error. No SQLite schema, migration guard, lock protocol or runtime format changes.
