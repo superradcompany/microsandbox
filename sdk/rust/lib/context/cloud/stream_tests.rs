@@ -3,12 +3,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures::{StreamExt, stream};
+use reqwest::Method;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::task::AbortOnDropHandle;
 
-use super::RemoteContext;
+use super::{RemoteContext, http::FileTransfer};
 use crate::config::layers::BackendConfig;
 use crate::logs::{LogCursor, LogStreamOptions};
 use crate::volume::VolumeFs;
@@ -355,6 +357,8 @@ async fn volume_upload_keeps_accepting_past_request_timeout() {
         });
 
         let mut sink = fs.write_stream("/file").await.unwrap();
+        // The connection deadline must stop while the caller prepares data.
+        tokio::time::sleep(REQUEST_TIMEOUT * 2).await;
         for index in 0..16u8 {
             sink.write([index]).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -506,4 +510,47 @@ async fn volume_upload_sends_a_large_chunk_intact() {
     })
     .await
     .expect("large volume upload test timed out");
+}
+
+#[tokio::test]
+async fn volume_upload_times_out_during_tls_handshake() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = backend(format!("https://{}", listener.local_addr().unwrap()));
+        // Use a derived timeout to ensure this deadline belongs to the request,
+        // even when contexts share their underlying connection pool.
+        let backend = backend
+            .to_builder()
+            .request_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let server = AbortOnDropHandle::new(tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut header = [0; 5];
+            connection.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], 22, "expected a TLS handshake record");
+            // Accept TCP but never answer ClientHello. The HTTP client cannot
+            // poll the pending upload body until this handshake completes.
+            let mut remaining = Vec::new();
+            let _ = connection.read_to_end(&mut remaining).await;
+        }));
+
+        let error = backend
+            .volume_file_request(
+                Method::PUT,
+                VOLUME_ID,
+                "/content",
+                &[],
+                None,
+                FileTransfer::Upload(stream::pending().boxed()),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("volume write stalled"), "{error}");
+        server.await.unwrap();
+    })
+    .await
+    .expect("upload connection test timed out");
 }

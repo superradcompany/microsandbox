@@ -593,9 +593,9 @@ impl RemoteContext {
                     }
                 }));
                 let (body_done_tx, body_done_rx) = oneshot::channel();
-                // Set while the client holds a piece it has not finished sending,
-                // so time spent waiting for the caller's next chunk is not counted.
-                let (sending_tx, sending_rx) = watch::channel(None);
+                // Start the deadline before connection setup. The body suspends it
+                // while waiting for the caller, then restarts it for each piece.
+                let (sending_tx, sending_rx) = watch::channel(Some(Instant::now()));
                 let wrapped = stream::unfold(
                     (piece_rx, Some(body_done_tx), sending_tx),
                     |(mut piece_rx, mut body_done_tx, sending_tx)| async move {
@@ -652,8 +652,8 @@ impl RemoteContext {
 // Functions: HTTP helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Resolve once the HTTP client has held a body piece for `timeout`. Never
-/// resolves after the body is gone; the reply timeout covers that part.
+/// Bound connection setup and each body piece held by the HTTP client.
+/// Caller delays suspend this deadline; the reply timeout covers a finished body.
 async fn upload_stall(mut sending: watch::Receiver<Option<Instant>>, timeout: Duration) {
     loop {
         let since = *sending.borrow_and_update();
