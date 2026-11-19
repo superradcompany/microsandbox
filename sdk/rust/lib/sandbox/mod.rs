@@ -243,11 +243,10 @@ pub(crate) use external_mounts::{
     external_bind_guest_paths, require_guest_mounts, require_recorded_mounts,
     resolve_external_mounts,
 };
-#[cfg(feature = "local")]
 pub use microsandbox_protocol::resize::{
     ResizeObservation, ResizeOperation, ResizeOutcome, ResizeTarget, ResizeTracking,
 };
-#[cfg(feature = "local")]
+#[cfg(any(feature = "local", feature = "cloud"))]
 pub use modify::SandboxModificationResult;
 #[cfg(any(feature = "local", feature = "cloud"))]
 pub use modify::{
@@ -257,6 +256,8 @@ pub use modify::{
     SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind, SecretModificationPatch,
     SecretPatchBuilder, SecretPlannedChange, SecretSource,
 };
+#[cfg(not(feature = "local"))]
+pub use remote_only::DEFAULT_RESIZE_READ_TIMEOUT;
 #[cfg(feature = "local")]
 pub use resize::DEFAULT_RESIZE_READ_TIMEOUT;
 #[cfg(feature = "ssh")]
@@ -1169,9 +1170,8 @@ pub(crate) fn build_exec_request(
         cmd,
         args,
         env,
-        cwd: cwd
-            .or_else(|| config.spec.runtime.workdir.clone())
-            .or_else(|| Some("/".to_string())),
+        // With no workdir known here, the sandbox's own default applies.
+        cwd: cwd.or_else(|| config.spec.runtime.workdir.clone()),
         user: user.or_else(|| config.spec.runtime.user.clone()),
         tty,
         rows,
@@ -1876,5 +1876,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!sandbox_dir.exists());
+    }
+
+    #[test]
+    fn exec_request_leaves_cwd_to_the_sandbox_when_no_workdir_is_known() {
+        let request = |config: &super::SandboxConfig, cwd: Option<&str>| {
+            super::build_exec_request(
+                config,
+                "pwd".into(),
+                Vec::new(),
+                cwd.map(str::to_string),
+                None,
+                &[],
+                &[],
+                false,
+                24,
+                80,
+            )
+            .cwd
+        };
+        let mut config = super::SandboxConfig::default();
+        assert_eq!(request(&config, None), None);
+        assert_eq!(request(&config, Some("/tmp")).as_deref(), Some("/tmp"));
+
+        config.spec.runtime.workdir = Some("/app".into());
+        assert_eq!(request(&config, None).as_deref(), Some("/app"));
+        assert_eq!(request(&config, Some("/tmp")).as_deref(), Some("/tmp"));
     }
 }

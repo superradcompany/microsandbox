@@ -322,7 +322,6 @@ impl Snapshot {
     }
 
     /// Spawn the selected head with default destination options and progress.
-    #[cfg(feature = "local")]
     pub async fn spawn_sandbox_with_progress(
         &self,
     ) -> MicrosandboxResult<(
@@ -334,7 +333,6 @@ impl Snapshot {
     }
 
     /// Select the head once and report preparation and activation progress for that member.
-    #[cfg(feature = "local")]
     pub async fn spawn_sandbox_with_progress_with(
         &self,
         configure: impl FnOnce(crate::sandbox::RestoreBuilder) -> crate::sandbox::RestoreBuilder,
@@ -467,7 +465,6 @@ impl Checkpoint {
     }
 
     /// Spawn this member with default destination options and progress.
-    #[cfg(feature = "local")]
     pub async fn spawn_sandbox_with_progress(
         &self,
     ) -> MicrosandboxResult<(
@@ -479,7 +476,6 @@ impl Checkpoint {
     }
 
     /// Spawn this member with preparation and activation progress on its owning backend.
-    #[cfg(feature = "local")]
     pub async fn spawn_sandbox_with_progress_with(
         &self,
         configure: impl FnOnce(crate::sandbox::RestoreBuilder) -> crate::sandbox::RestoreBuilder,
