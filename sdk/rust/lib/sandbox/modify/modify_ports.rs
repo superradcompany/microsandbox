@@ -290,8 +290,8 @@ mod tests {
 
     use super::super::{LiveControl, SandboxModificationBuilder, build_plan};
     use super::*;
-    use crate::LocalBackend;
-    use crate::backend::Backend;
+    use crate::LocalContext;
+    use crate::context::Context;
     use crate::db::entity::sandbox;
     use crate::sandbox::{ModificationDisposition, PublishedPortKey};
 
@@ -428,13 +428,12 @@ mod tests {
     #[tokio::test]
     async fn port_apply_persists_updates_and_conflicts_leave_config_unchanged() {
         let temp = tempfile::tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let mut config = SandboxConfig::default();
@@ -469,7 +468,7 @@ mod tests {
         );
         assert!(request.clone().apply().await.is_err());
         let handle = backend
-            .sandboxes()
+            .sandbox_ops()
             .get(backend.clone(), "ports")
             .await
             .unwrap();
@@ -479,7 +478,7 @@ mod tests {
 
         request.apply().await.unwrap();
         let handle = backend
-            .sandboxes()
+            .sandbox_ops()
             .get(backend.clone(), "ports")
             .await
             .unwrap();
@@ -493,7 +492,7 @@ mod tests {
             .await
             .unwrap();
         let handle = backend
-            .sandboxes()
+            .sandbox_ops()
             .get(backend.clone(), "ports")
             .await
             .unwrap();
@@ -511,7 +510,7 @@ mod tests {
             .await
             .unwrap();
         let handle = backend
-            .sandboxes()
+            .sandbox_ops()
             .get(backend.clone(), "ports")
             .await
             .unwrap();

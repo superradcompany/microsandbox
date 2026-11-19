@@ -9,7 +9,6 @@ vi.mock("../../dist/internal/napi.js", () => ({
   },
 }));
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
 
 const child = { id: "child-id", name: "child", backendKind: "local", ownsLifecycle: false };
 const volumes = { "/data": (m: never) => (m as { disk(host: string): never }).disk("/images/seed.img") };
@@ -22,7 +21,7 @@ function source(kind: "sandbox" | "handle") {
     forkMany: vi.fn(async () => [{ name: "a", sandbox: child }]),
   };
   const wrapper = kind === "sandbox"
-    ? new Sandbox(native as never, "source") : new SandboxHandle(native as never);
+    ? new Sandbox(native as never, "source") : new Sandbox(native as never);
   return { native, wrapper };
 }
 

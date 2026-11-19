@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use microsandbox::{
     Sandbox,
-    jobs::{JobEvent, JobLogOptions, JobReplay, JobState},
+    jobs::{JobEvent, JobLogOptions, JobOutputSource, JobReplay, JobState},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -19,7 +19,7 @@ use microsandbox::{
 #[ignore = "requires a running disposable VM and MSB_JOB_TEST_SANDBOX"]
 async fn managed_job_control_survives_resident_pause() -> Result<(), Box<dyn std::error::Error>> {
     let name = std::env::var("MSB_JOB_TEST_SANDBOX")?;
-    let sandbox = Sandbox::get(&name).await?.connect().await?;
+    let sandbox = Sandbox::get(&name).await?;
     let job = sandbox
         .exec_detached("cat", std::iter::empty::<String>())
         .await?;
@@ -75,7 +75,7 @@ async fn managed_job_control_survives_resident_pause() -> Result<(), Box<dyn std
 #[ignore = "requires a running disposable VM and MSB_JOB_TEST_SANDBOX"]
 async fn managed_job_lifetime_io_and_deadlines() -> Result<(), Box<dyn std::error::Error>> {
     let name = std::env::var("MSB_JOB_TEST_SANDBOX")?;
-    let sandbox = Sandbox::get(&name).await?.connect().await?;
+    let sandbox = Sandbox::get(&name).await?;
     let job = sandbox
         .exec_detached("cat", std::iter::empty::<String>())
         .await?;
@@ -199,6 +199,11 @@ async fn managed_job_lifetime_io_and_deadlines() -> Result<(), Box<dyn std::erro
     assert!(
         tty_output
             .iter()
+            .all(|entry| entry.source == JobOutputSource::Output)
+    );
+    assert!(
+        tty_output
+            .iter()
             .any(|entry| String::from_utf8_lossy(&entry.data).contains("tty-marker"))
     );
 
@@ -233,10 +238,7 @@ async fn managed_job_lifetime_io_and_deadlines() -> Result<(), Box<dyn std::erro
 async fn managed_job_options_logs_and_validation() -> Result<(), Box<dyn std::error::Error>> {
     use microsandbox::sandbox::RlimitResource;
 
-    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?)
-        .await?
-        .connect()
-        .await?;
+    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?).await?;
     let job = sandbox
         .exec_detached_with("sh", |b| {
             b.args([
@@ -259,17 +261,27 @@ async fn managed_job_options_logs_and_validation() -> Result<(), Box<dyn std::er
     assert!(!serde_json::to_string(&info)?.contains("private-value"));
     let stdout = job
         .logs(&JobLogOptions {
-            sources: vec!["stdout".into()],
+            sources: vec![JobOutputSource::Stdout],
             ..Default::default()
         })
         .await?;
+    assert!(
+        stdout
+            .iter()
+            .all(|entry| entry.source == JobOutputSource::Stdout)
+    );
     assert_eq!(output_bytes(&stdout), b"/tmp\n65534\nprivate-value\n128\n");
     let stderr = job
         .logs(&JobLogOptions {
-            sources: vec!["stderr".into()],
+            sources: vec![JobOutputSource::Stderr],
             ..Default::default()
         })
         .await?;
+    assert!(
+        stderr
+            .iter()
+            .all(|entry| entry.source == JobOutputSource::Stderr)
+    );
     assert_eq!(output_bytes(&stderr), b"err\n");
     let logs = job.logs(&JobLogOptions::default()).await?;
     let last = logs.last().unwrap();
@@ -389,10 +401,7 @@ async fn managed_job_options_logs_and_validation() -> Result<(), Box<dyn std::er
 #[ignore = "requires a running disposable VM and MSB_JOB_TEST_SANDBOX"]
 async fn managed_job_input_backpressure_and_lease_heartbeat()
 -> Result<(), Box<dyn std::error::Error>> {
-    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?)
-        .await?
-        .connect()
-        .await?;
+    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?).await?;
     let counter = sandbox.exec_detached("wc", ["-c"]).await?;
     let attachment = counter.attach().await?;
     attachment.write_stdin([]).await?;
@@ -490,10 +499,7 @@ async fn managed_job_input_backpressure_and_lease_heartbeat()
 #[tokio::test]
 #[ignore = "requires an otherwise idle disposable VM; run with --test-threads=1"]
 async fn managed_job_bounds_rotation_and_pagination() -> Result<(), Box<dyn std::error::Error>> {
-    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?)
-        .await?
-        .connect()
-        .await?;
+    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?).await?;
     assert!(
         sandbox.list_jobs().await?.items.is_empty(),
         "resource test requires no other active jobs"
@@ -638,10 +644,7 @@ async fn managed_job_bounds_rotation_and_pagination() -> Result<(), Box<dyn std:
 #[tokio::test]
 #[ignore = "requires a running disposable VM and MSB_JOB_TEST_SANDBOX"]
 async fn managed_job_z_blocked_input_signal() -> Result<(), Box<dyn std::error::Error>> {
-    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?)
-        .await?
-        .connect()
-        .await?;
+    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?).await?;
     // Saturating guest stdin must never block the independent signal/control worker.
     for tty in [false, true] {
         let blocked = sandbox
@@ -704,10 +707,7 @@ async fn managed_job_z_blocked_input_signal() -> Result<(), Box<dyn std::error::
 #[tokio::test]
 #[ignore = "requires a running disposable VM and MSB_JOB_TEST_SANDBOX"]
 async fn managed_job_z_blocked_input_timeout() -> Result<(), Box<dyn std::error::Error>> {
-    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?)
-        .await?
-        .connect()
-        .await?;
+    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?).await?;
     let job = sandbox
         .exec_detached_with("sleep", |b| b.args(["120"]).timeout(Duration::from_secs(3)))
         .await?;
@@ -736,10 +736,7 @@ async fn managed_job_z_blocked_input_timeout() -> Result<(), Box<dyn std::error:
 #[tokio::test]
 #[ignore = "requires a running disposable VM and MSB_JOB_TEST_SANDBOX"]
 async fn exec_control_creation_backpressure_and_pause() -> Result<(), Box<dyn std::error::Error>> {
-    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?)
-        .await?
-        .connect()
-        .await?;
+    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?).await?;
     let mut early = sandbox
         .exec_stream_with("sleep", |e| e.args(["120"]).stdin_pipe())
         .await?;
@@ -891,7 +888,7 @@ async fn exec_control_creation_backpressure_and_pause() -> Result<(), Box<dyn st
 async fn managed_job_zz_saturated_shutdown() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(std::env::var("MSB_JOB_TEST_RESTART")?, "1");
     let name = std::env::var("MSB_JOB_TEST_SANDBOX")?;
-    let sandbox = Sandbox::get(&name).await?.connect().await?;
+    let sandbox = Sandbox::get(&name).await?;
     sandbox
         .exec("sh", ["-c", "echo persisted >/tmp/control-stop-marker"])
         .await?;
@@ -911,7 +908,7 @@ async fn managed_job_zz_saturated_shutdown() -> Result<(), Box<dyn std::error::E
     sandbox.stop_with_timeout(Duration::from_secs(15)).await?;
     drop(writer);
     drop(sandbox);
-    let restarted = Sandbox::get(&name).await?.start().await?;
+    let restarted = Sandbox::start(&name).await?;
     assert_eq!(
         restarted
             .exec("cat", ["/tmp/control-stop-marker"])
@@ -945,10 +942,7 @@ fn output_bytes(entries: &[microsandbox::jobs::JobLogEntry]) -> Vec<u8> {
 async fn exec_stream_deadlines() -> Result<(), Box<dyn std::error::Error>> {
     use microsandbox::{ExecEvent, MicrosandboxError};
 
-    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?)
-        .await?
-        .connect()
-        .await?;
+    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?).await?;
     let duration = Duration::from_millis(500);
     for tty in [false, true] {
         let mut stream = sandbox

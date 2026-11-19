@@ -72,8 +72,8 @@ use super::protected_state::{self, StoragePreparation};
 #[cfg(windows)]
 use super::sockets::ensure_agent_pipe_unclaimed;
 use super::sockets::remove_socket_artifacts_at;
-use crate::backend::local::creation::CreationStorage;
-use crate::backend::local::volume::ResolvedNamedVolume;
+use crate::context::local::creation::CreationStorage;
+use crate::context::local::volume::ResolvedNamedVolume;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
 #[cfg(windows)]
@@ -83,8 +83,8 @@ use crate::runtime::launch_contract;
 use crate::sandbox::SecurityProfile;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    backend::LocalBackend,
     config::{BlockWritebackConfig, RuntimeConfig},
+    context::LocalContext,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
         DiskImageFormat, HostPermissions, MountOptions, RootfsSource, SandboxConfig,
@@ -181,7 +181,7 @@ pub enum SpawnMode {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl LocalBackend {
+impl LocalContext {
     /// Complete filesystem preparation while its storage owner is still held.
     pub(crate) async fn prepare_sandbox_launch(
         &self,
@@ -990,9 +990,9 @@ impl Drop for StdioInheritGuard {
 
 /// Spawn a sandbox through the supplied local backend.
 ///
-/// Delegates to [`LocalBackend::spawn_sandbox`].
+/// Delegates to [`LocalContext::spawn_sandbox`].
 pub async fn spawn_sandbox(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &SandboxConfig,
     sandbox_id: i32,
     mode: SpawnMode,
@@ -1321,7 +1321,7 @@ async fn prepare_oci_upper(
 }
 
 fn reserve_metrics_slot(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &SandboxConfig,
     sandbox_id: i32,
 ) -> Option<MetricsReservation> {
@@ -2208,7 +2208,7 @@ pub(crate) fn guest_mount_tag(guest_path: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn machine_cli_args(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &SandboxConfig,
     sandbox_id: i32,
     #[cfg(feature = "net")] network_slot: NetworkSlot,
@@ -2797,8 +2797,8 @@ mod tests {
     use crate::db::entity::volume as volume_entity;
     use crate::{
         LogLevel,
-        backend::LocalBackend,
         config::{BlockWritebackConfig, RuntimeConfig},
+        context::LocalContext,
         sandbox::{
             DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, RlimitResource,
             RootfsSource, SandboxBuilder, SandboxConfig, StatVirtualization, VolumeMount,
@@ -2806,7 +2806,7 @@ mod tests {
         volume::VolumeKind,
     };
     use crate::{
-        SandboxConfigPatch, backend::BackendSelectionSource, config::layers::BackendConfig,
+        SandboxConfigPatch, config::layers::BackendConfig, context::ContextSelectionSource,
     };
 
     #[test]
@@ -3494,12 +3494,12 @@ mod tests {
 
     /// Use isolated configuration for pure `machine_cli_args` rendering tests.
     /// The database remains unopened.
-    fn test_local_backend() -> LocalBackend {
-        LocalBackend::from_backend_config(
+    fn test_local_backend() -> LocalContext {
+        LocalContext::from_backend_config(
             BackendConfig::new(Default::default(), Default::default())
                 .prepare_for_local_backend(Default::default())
                 .unwrap(),
-            BackendSelectionSource::Programmatic,
+            ContextSelectionSource::Programmatic,
             None,
         )
     }
@@ -4458,7 +4458,7 @@ mod tests {
 
         super::prepare_oci_upper(
             &config,
-            &crate::backend::local::creation::CreationStorage::for_test(temp.path()),
+            &crate::context::local::creation::CreationStorage::for_test(temp.path()),
         )
         .await
         .unwrap();
@@ -4516,7 +4516,7 @@ mod tests {
 
         let error = super::prepare_oci_upper(
             &config,
-            &crate::backend::local::creation::CreationStorage::for_test(temp.path()),
+            &crate::context::local::creation::CreationStorage::for_test(temp.path()),
         )
         .await
         .unwrap_err();
@@ -5026,12 +5026,11 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_named_volumes_recovers_disk_metadata_from_store() {
         let temp = tempdir().unwrap();
-        let local = LocalBackend::builder()
+        let local = LocalContext::builder()
             .config_path(temp.path().join("config.json"))
             .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
-            .await
             .unwrap();
         let pools = local.db().await.unwrap();
         volume_entity::ActiveModel {

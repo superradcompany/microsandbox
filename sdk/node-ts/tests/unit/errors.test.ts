@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentClientError,
+  BootStartError,
+  ExecFailedError,
+  InvalidCursorError,
+  MissedRotationError,
+  NetworkBuilderError,
+  SnapshotAlreadyExistsError,
+  SnapshotImageMissingError,
+  SnapshotIntegrityError,
+  SnapshotMigrationError,
+  SnapshotNotFoundError,
+  SnapshotSandboxRunningError,
+  WindowsHostSetupError,
   ExecTimeoutError,
   StopTimeoutError,
   ImageNotFoundError,
@@ -17,6 +30,27 @@ import {
 import { mapNapiError } from "../../dist/internal/error-mapping.js";
 
 describe("mapNapiError", () => {
+  it.each([
+    ["AgentClient", "agentClient", AgentClientError],
+    ["BootStart", "bootStart", BootStartError],
+    ["ExecFailed", "execFailed", ExecFailedError],
+    ["InvalidCursor", "invalidCursor", InvalidCursorError],
+    ["MissedRotation", "missedRotation", MissedRotationError],
+    ["NetworkBuilder", "networkBuilder", NetworkBuilderError],
+    ["SnapshotAlreadyExists", "snapshotAlreadyExists", SnapshotAlreadyExistsError],
+    ["SnapshotImageMissing", "snapshotImageMissing", SnapshotImageMissingError],
+    ["SnapshotIntegrity", "snapshotIntegrity", SnapshotIntegrityError],
+    ["SnapshotMigration", "snapshotMigration", SnapshotMigrationError],
+    ["SnapshotNotFound", "snapshotNotFound", SnapshotNotFoundError],
+    ["SnapshotSandboxRunning", "snapshotSandboxRunning", SnapshotSandboxRunningError],
+    ["WindowsHostSetup", "windowsHostSetup", WindowsHostSetupError],
+  ] as const)("preserves native %s errors", (tag, code, ctor) => {
+    const cause = new Error(`[${tag}] detail`);
+    const error = mapNapiError(cause);
+    expect(error).toBeInstanceOf(ctor);
+    expect(error).toMatchObject({ code, message: "detail", cause });
+  });
+
   it("preserves graceful stop timeout as a distinct error", () => {
     const raw = new Error('[StopTimeout] sandbox "busy" timed out; no kill was requested');
     const mapped = mapNapiError(raw);

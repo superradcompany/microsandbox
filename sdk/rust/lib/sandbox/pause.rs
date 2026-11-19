@@ -3,12 +3,12 @@
 use microsandbox_control_client::{GetPauseState, PauseRuntime, ResumeRuntime};
 use microsandbox_runtime::control::ControlRequest;
 
-use crate::backend::sandbox::SandboxIdentity;
-use crate::backend::{Backend, LocalBackend};
+use crate::context::sandbox::SandboxIdentity;
+use crate::context::{Context, LocalContext};
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Sandbox, SandboxHandle, SandboxPauseState};
+use super::{Sandbox, SandboxPauseState, SandboxRecord};
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -38,18 +38,31 @@ impl Sandbox {
     /// Keep database/runtime reconciliation, but skip the pause observation used by ordinary
     /// `get`/`list`: that observation is already stale by the time the mutation executes.
     #[doc(hidden)]
-    pub async fn get_for_control(name: &str) -> MicrosandboxResult<SandboxHandle> {
-        let backend = crate::backend::default_backend();
+    pub async fn get_for_control(name: &str) -> MicrosandboxResult<SandboxRecord> {
+        return crate::context::configured_context()
+            .sandboxes()
+            .get_for_control(name)
+            .await;
+    }
+}
+
+impl crate::Sandboxes {
+    /// Internal CLI lookup without an unnecessary pause-state observation.
+    #[doc(hidden)]
+    pub async fn get_for_control(&self, name: &str) -> MicrosandboxResult<SandboxRecord> {
+        let backend = self.context.clone();
         if let Some(local) = backend.as_local() {
             let (model, pid) = match local.try_control_handle_state(name).await? {
                 Some(target) => target,
                 None => local.sandbox_handle_state(name, None).await?,
             };
-            return Ok(SandboxHandle::from_local_model(backend, model, pid));
+            return Ok(SandboxRecord::from_local_model(backend, model, pid));
         }
-        backend.sandboxes().get(backend.clone(), name).await
+        backend.sandbox_ops().get(backend.clone(), name).await
     }
+}
 
+impl Sandbox {
     /// Suspend this resident VM without creating a snapshot or releasing RAM.
     pub async fn pause(&self) -> MicrosandboxResult<()> {
         lifecycle(
@@ -86,7 +99,7 @@ impl Sandbox {
     }
 }
 
-impl SandboxHandle {
+impl SandboxRecord {
     /// Pause with an explicit guest writeback policy without connecting to the guest.
     pub async fn pause_with_guest_flush(
         &self,
@@ -146,7 +159,7 @@ impl SandboxHandle {
 
 /// Overlay resident suspension on database lifecycle without persisting a stale pause on crash.
 pub(crate) async fn projected_status(
-    local: &LocalBackend,
+    local: &LocalContext,
     name: &str,
     status: super::SandboxStatus,
 ) -> super::SandboxStatus {
@@ -173,7 +186,7 @@ pub(crate) async fn projected_status(
 async fn lifecycle(
     name: &str,
     identity: SandboxIdentity,
-    backend: &dyn Backend,
+    backend: &dyn Context,
     request: ControlRequest,
 ) -> MicrosandboxResult<SandboxPauseState> {
     let operation = if matches!(request, ControlRequest::Resume) {
@@ -188,7 +201,7 @@ async fn lifecycle(
         return Err(MicrosandboxError::local_only(operation));
     };
     let _transition =
-        LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), name).await?;
+        LocalContext::acquire_sandbox_transition_guard(&local.config().run_dir(), name).await?;
     let run = local.control_run_identity(name, expected_id).await?;
     let session = local.control_session_for_run(name, run).await?;
     if matches!(request, ControlRequest::PauseWithGuestFlush { .. }) {
@@ -256,9 +269,8 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     use super::*;
-    use crate::backend::with_backend;
 
-    async fn seed_run(local: &LocalBackend, name: &str) -> i32 {
+    async fn seed_run(local: &LocalContext, name: &str) -> i32 {
         use crate::db::entity::{run, sandbox};
         let db = local.db().await.unwrap();
         let id = sandbox::Entity::insert(sandbox::ActiveModel {
@@ -289,15 +301,13 @@ mod tests {
         // macOS's per-user TMPDIR may already consume most of the Unix socket path limit.
         let ambient_home = tempfile::tempdir_in("/tmp").unwrap();
         let bound_home = tempfile::tempdir_in("/tmp").unwrap();
-        let ambient: Arc<dyn Backend> = Arc::new(
+        let ambient: Arc<dyn Context> = Arc::new(
             crate::test_support::local_backend_builder(ambient_home.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let bound = crate::test_support::local_backend_builder(bound_home.path())
             .build()
-            .await
             .unwrap();
         let id = seed_run(&bound, "same-name").await;
         let agent = bound.agent_socket_paths("same-name").remove(0);
@@ -331,7 +341,9 @@ mod tests {
                     .unwrap();
             }
         });
-        with_backend(ambient, async {
+        async {
+            let _unrelated_context: std::sync::Arc<dyn crate::Context> = ambient;
+
             assert_eq!(
                 projected_status(&bound, "same-name", super::super::SandboxStatus::Running).await,
                 super::super::SandboxStatus::Paused
@@ -347,7 +359,7 @@ mod tests {
                 .unwrap()
                 .paused
             );
-        })
+        }
         .await;
         server.await.unwrap();
     }
@@ -396,7 +408,6 @@ mod tests {
             let home = tempfile::tempdir_in("/tmp").unwrap();
             let backend = crate::test_support::local_backend_builder(home.path())
                 .build()
-                .await
                 .unwrap();
             let id = seed_run(&backend, "source").await;
             let agent = backend.agent_socket_paths("source").remove(0);
@@ -448,7 +459,6 @@ mod tests {
         let backend = Arc::new(
             crate::test_support::local_backend_builder(home.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let old_id = seed_run(&backend, "reused").await;
@@ -457,7 +467,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let stale = SandboxHandle::from_local_model(
+        let stale = SandboxRecord::from_local_model(
             backend.clone(),
             model,
             Some(std::process::id() as i32),
@@ -489,9 +499,12 @@ mod tests {
         config.spec.name = "reused".into();
         let live = Sandbox::from_local(
             backend.clone(),
-            crate::backend::SandboxLocalState {
+            crate::context::SandboxLocalState {
                 db_id: old_id,
+                run_id: None,
                 handle: None,
+                cleanup: None,
+                owned_run_id: None,
                 client: Arc::new(client),
             },
             config,
@@ -538,7 +551,6 @@ mod tests {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         let agent = backend.agent_socket_paths("source").remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);

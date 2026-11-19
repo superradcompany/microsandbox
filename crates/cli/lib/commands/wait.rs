@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, SandboxStatus, SandboxStopResult};
+use microsandbox::sandbox::{SandboxStatus, SandboxStopResult};
 
 use crate::ui::OutputFormat;
 
@@ -46,7 +46,7 @@ pub async fn run(args: WaitArgs) -> anyhow::Result<()> {
         .await;
     }
     let wait = async {
-        let handle = Sandbox::get(&args.name).await?;
+        let handle = crate::commands::common::sandbox_record(&args.name).await?;
         anyhow::Ok(handle.wait_until_stopped().await?)
     };
     let result = if let Some(timeout) = args.timeout.as_deref() {

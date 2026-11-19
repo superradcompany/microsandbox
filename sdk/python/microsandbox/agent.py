@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import TypedDict
 
 from microsandbox._microsandbox import PyAgentClient as _PyAgentClient
@@ -81,7 +82,7 @@ class AgentClient:
         cls,
         name: str,
         *,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
     ) -> AgentClient:
         """Connect to a running sandbox by name.
 
@@ -94,7 +95,7 @@ class AgentClient:
         cls,
         path: str,
         *,
-        timeout: float | None = None,
+        timeout: float | timedelta | None = None,
     ) -> AgentClient:
         return cls(await _PyAgentClient.connect(path, timeout=timeout))
 

@@ -1,0 +1,108 @@
+---
+title: Pricing
+description: Compare Standard and Shared rates and understand compute and storage charges
+icon: microchip
+---
+
+Running microsandbox locally has no managed cloud usage charges. On our managed cloud, you pay for sandbox CPU, memory, and storage.
+
+## Standard or Shared
+
+| Type | Best for | CPU performance |
+|---|---|---|
+| Standard | Builds, tests, and other sustained CPU work | Dedicated CPU capacity |
+| Shared | Development environments, agents waiting on APIs, and occasional commands | CPU capacity shared with other sandboxes; performance can vary |
+
+Memory stays fully reserved on both types. Shared costs less for CPU and memory; root disk rates are the same.
+
+<Note>
+Shared requires access on your account and available Shared capacity. Check availability before choosing it for your application.
+</Note>
+
+## Resource rates
+
+| Resource | Standard | Shared |
+|---|---|---|
+| CPU, per vCPU-hour | \$0.048 | \$0.007 |
+| Memory, per GiB-hour | \$0.003 | \$0.000375 |
+| Root disk, per GiB-hour | \$0.0000625 | \$0.0000625 |
+
+Persistent volumes cost **\$0.15/GiB-month** and snapshots cost **\$0.08/GiB-month**, separately from the sandbox's root disk. Prices are in USD, before taxes and usage credits.
+
+See the [pricing page and calculator](https://microsandbox.dev/pricing) for plan details and estimates. Your dashboard shows the rates assigned to your account.
+
+<span id="example-one-running-sandbox" />
+
+## Example cost
+
+For **4 vCPU, 8 GiB RAM, and 64 GiB root disk**:
+
+| Resource | Standard per hour | Shared per hour |
+|---|---|---|
+| CPU | \$0.192 | \$0.028 |
+| Memory | \$0.024 | \$0.003 |
+| Root disk | \$0.004 | \$0.004 |
+| **Total** | **\$0.22** | **\$0.035** |
+
+This covers one hour of running time, before credits and taxes. Volumes, snapshots, and any time the root disk is kept after stopping are additional.
+
+## Choose a compute type
+
+Set the type on your remote context. It applies to new sandboxes and snapshot restores through that context. Existing sandboxes keep their type. If you omit the option, our managed cloud uses Standard.
+
+<CodeGroup>
+```typescript TypeScript
+import { RemoteContext } from "microsandbox";
+
+const remote = RemoteContext.builder()
+  .computeType("shared")
+  .build();
+```
+
+```rust Rust
+use microsandbox::{ComputeType, RemoteContext};
+
+let remote = RemoteContext::builder()
+    .compute_type(ComputeType::Shared)
+    .build()?;
+```
+
+```python Python
+from microsandbox import RemoteContext
+
+remote = RemoteContext(compute_type="shared")
+```
+
+```go Go
+remote, err := microsandbox.NewRemoteContextWithOptions(microsandbox.WithRemoteComputeType(microsandbox.ComputeShared))
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+remote = Microsandbox::RemoteContext.new(compute_type: "shared")
+```
+</CodeGroup>
+
+Choose Standard explicitly if you want to keep that choice regardless of the server default.
+
+<span id="monthly-plans-and-credit" />
+
+## Plans and credit
+
+Builder costs **\$20/month**, including **\$20 of usage credit**. Teams costs **\$200/month**, including **\$200 of usage credit**. Credit applies across compute, root disks, volumes, and snapshots. Usage above the included credit is billed separately; unused monthly credit does not roll over.
+
+Standard and Shared are compute choices within a plan. You can use both without changing your subscription.
+
+<span id="what-happens-when-you-stop-a-sandbox" />
+
+## Stopped sandboxes
+
+CPU and memory charges stop when the sandbox stops. A retained root disk keeps billing until it is deleted. Volumes and snapshots also keep billing while you store them, even when no sandbox is running.
+
+Stop sandboxes when you do not need compute. Remove sandboxes, volumes, and snapshots when you no longer need their data. See [destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for what sandbox cleanup deletes and what it preserves.
+
+## Track your spending
+
+Use the [dashboard](https://dashboard.microsandbox.dev/billing) to view usage and billing. Estimates help you plan; invoices show the final charges.

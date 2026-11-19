@@ -358,10 +358,12 @@ jobs:
           python3 scripts/smoke/cli/runtime-discovery.py \
             --msb build/msb --libkrunfw build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
 
-      - name: Smoke test cloud backend in msb
+      - name: Smoke test remote context and legacy cloud selector in msb
         run: |
-          MSB_BACKEND=cloud MSB_API_KEY=msb_test_ci build/msb context --format json |
-            python3 -c 'import json, sys; assert json.load(sys.stdin)["kind"] == "cloud"'
+          for backend in remote cloud; do
+            MSB_BACKEND="$backend" MSB_API_KEY=msb_test_ci build/msb context --format json |
+              python3 -c 'import json, sys; assert json.load(sys.stdin)["kind"] == "remote"'
+          done
 
       # Upload immediately. All KVM lanes can begin while independent quality
       # and cross-platform checks continue in parallel.
@@ -655,7 +657,7 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           foreach ($filter in @(
             'image::cleanup::tests',
-            'backend::local::snapshot::store::tests',
+            'context::local::snapshot::store::tests',
             'external_import_alias_has_one_row_and_preserves_distinct_copies',
             'import_requires_durable_ownership_and_recovers_failed_completion',
             'storage::usage::local_usage::tests',
@@ -957,6 +959,8 @@ jobs:
 
       - name: Check Rust SDK feature surfaces
         run: |
+          cargo +stable check -p microsandbox --no-default-features --features cloud --tests
+          cargo +stable check -p microsandbox --no-default-features --features cloud,net --tests
           cargo +stable test -p microsandbox --no-default-features --features cloud,net --test api_compat
           cargo +stable check -p microsandbox --no-default-features --features local,net
           cargo +stable check -p microsandbox-runtime --no-default-features --features client,net
@@ -1044,6 +1048,7 @@ jobs:
             sdk/node-ts/package.json
             sdk/node-ts/package-lock.json
             sdk/node-ts/scripts/prune-platform-optional-deps.mjs
+            sdk/node-ts/scripts/stage-distribution.mjs
             sdk/node-ts/tests/
             sdk/node-ts/tsconfig.json
             sdk/node-ts/vitest.config.ts
@@ -1805,7 +1810,7 @@ jobs:
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
+            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^context::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^context::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
             --test-threads 2
 
       - name: Managed-job integration fixtures

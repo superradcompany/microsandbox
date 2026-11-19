@@ -1,11 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use microsandbox::sandbox::FsEntry as RustFsEntry;
 use microsandbox::sandbox::FsEntryKind as RustFsEntryKind;
 use microsandbox::sandbox::FsMetadata as RustFsMetadata;
+use microsandbox::volume::Volume;
 use microsandbox::volume::fs::{VolumeFsReadStream, VolumeFsWriteSink};
-use microsandbox::volume::{Volume, VolumeHandle};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::Mutex;
@@ -22,21 +21,10 @@ pub struct JsVolume {
     inner: Arc<Volume>,
 }
 
-#[napi(js_name = "VolumeHandle")]
-pub struct JsVolumeHandle {
-    inner: VolumeHandle,
-}
-
 #[napi(js_name = "VolumeFs")]
 pub struct JsVolumeFs {
-    inner: JsVolumeFsInner,
-}
-
-enum JsVolumeFsInner {
-    Volume(Arc<Volume>),
-    // Keep the enum compact: VolumeHandle owns backend state and is
-    // substantially larger than the Arc-backed Volume variant.
-    Handle(Box<VolumeHandle>),
+    // Keep the same resource identity alive for every deferred filesystem operation.
+    inner: Arc<Volume>,
 }
 
 #[napi(async_iterator, js_name = "VolumeFsReadStream")]
@@ -55,27 +43,78 @@ pub struct JsVolumeFsWriteSink {
 
 #[napi]
 impl JsVolume {
+    /// Return the retained destination without selecting a new one.
     #[napi]
-    pub async fn get(name: String) -> Result<JsVolumeHandle> {
+    pub fn context(&self) -> Result<crate::context::JsContext> {
+        Ok(crate::context::JsContext {
+            inner: self.inner.context().clone_shared(),
+        })
+    }
+
+    #[napi]
+    pub async fn get(name: String) -> Result<JsVolume> {
         let handle = Volume::get(&name).await.map_err(to_napi_error)?;
-        Ok(JsVolumeHandle { inner: handle })
+        Ok(Self::from_rust(handle))
     }
 
     #[napi(js_name = "getDefault")]
-    pub async fn get_default() -> Result<JsVolumeHandle> {
+    pub async fn get_default() -> Result<JsVolume> {
         let handle = Volume::get_default().await.map_err(to_napi_error)?;
-        Ok(JsVolumeHandle { inner: handle })
+        Ok(Self::from_rust(handle))
     }
 
     #[napi]
-    pub async fn list() -> Result<Vec<VolumeInfo>> {
+    pub async fn list() -> Result<Vec<JsVolume>> {
         let handles = Volume::list().await.map_err(to_napi_error)?;
-        Ok(handles.iter().map(volume_handle_to_info).collect())
+        Ok(handles.into_iter().map(Self::from_rust).collect())
     }
 
     #[napi(js_name = "remove")]
     pub async fn remove_static(name: String) -> Result<()> {
         Volume::remove(&name).await.map_err(to_napi_error)
+    }
+
+    /// Stable identity within the retained destination; no I/O.
+    #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.inner.id().to_string()
+    }
+
+    #[napi(getter, js_name = "isDefault")]
+    pub fn is_default(&self) -> bool {
+        self.inner.is_default()
+    }
+
+    #[napi(getter)]
+    pub fn kind(&self) -> String {
+        self.inner.kind().as_str().to_string()
+    }
+
+    #[napi(getter)]
+    pub fn disk_format(&self) -> Option<String> {
+        self.inner.disk_format().map(str::to_string)
+    }
+
+    #[napi(getter)]
+    pub fn disk_fstype(&self) -> Option<String> {
+        self.inner.disk_fstype().map(str::to_string)
+    }
+
+    #[napi(getter)]
+    pub fn created_at(&self) -> Option<f64> {
+        opt_datetime_to_ms(&self.inner.created_at())
+    }
+
+    /// Return one fresh provider observation without cached fallback.
+    #[napi]
+    pub async fn info(&self) -> Result<String> {
+        let info = self.inner.info().await.map_err(to_napi_error)?;
+        serde_json::to_string(&info).map_err(|error| to_napi_error(error.into()))
+    }
+
+    #[napi]
+    pub async fn destroy(&self) -> Result<()> {
+        self.inner.destroy().await.map_err(to_napi_error)
     }
 
     #[napi(getter)]
@@ -97,7 +136,7 @@ impl JsVolume {
     #[napi]
     pub fn fs(&self) -> JsVolumeFs {
         JsVolumeFs {
-            inner: JsVolumeFsInner::Volume(self.inner.clone()),
+            inner: self.inner.clone(),
         }
     }
 }
@@ -110,84 +149,9 @@ impl JsVolume {
 }
 
 #[napi]
-impl JsVolumeHandle {
-    #[napi(getter)]
-    pub fn name(&self) -> String {
-        self.inner.name().to_string()
-    }
-
-    #[napi(getter, js_name = "isDefault")]
-    pub fn is_default(&self) -> bool {
-        self.inner.is_default()
-    }
-
-    #[napi(getter)]
-    pub fn quota_mib(&self) -> Option<u32> {
-        self.inner.quota_mib()
-    }
-
-    #[napi(getter)]
-    pub fn kind(&self) -> String {
-        self.inner.kind().as_str().to_string()
-    }
-
-    #[napi(getter)]
-    pub fn used_bytes(&self) -> f64 {
-        self.inner.used_bytes() as f64
-    }
-
-    #[napi(getter)]
-    pub fn capacity_bytes(&self) -> Option<f64> {
-        self.inner.capacity_bytes().map(|v| v as f64)
-    }
-
-    #[napi(getter)]
-    pub fn disk_format(&self) -> Option<String> {
-        self.inner.disk_format().map(str::to_string)
-    }
-
-    #[napi(getter)]
-    pub fn disk_fstype(&self) -> Option<String> {
-        self.inner.disk_fstype().map(str::to_string)
-    }
-
-    #[napi(getter)]
-    pub fn labels(&self) -> HashMap<String, String> {
-        self.inner
-            .labels()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
-    }
-
-    #[napi(getter)]
-    pub fn created_at(&self) -> Option<f64> {
-        opt_datetime_to_ms(&self.inner.created_at())
-    }
-
-    #[napi]
-    pub async fn remove(&self) -> Result<()> {
-        self.inner.remove().await.map_err(to_napi_error)
-    }
-
-    /// Direct filesystem operations through this volume's bound backend.
-    #[napi]
-    pub fn fs(&self) -> JsVolumeFs {
-        JsVolumeFs {
-            inner: JsVolumeFsInner::Handle(Box::new(self.inner.clone())),
-        }
-    }
-}
-
-#[napi]
 impl JsVolumeFs {
     fn make(&self) -> microsandbox::volume::VolumeFs<'_> {
-        // VolumeFs only borrows the wrapped Volume/VolumeHandle for the
-        // duration of the FFI call, while the wrapper owns that parent object.
-        match &self.inner {
-            JsVolumeFsInner::Volume(volume) => volume.fs(),
-            JsVolumeFsInner::Handle(handle) => handle.fs(),
-        }
+        self.inner.fs()
     }
 
     #[napi]
@@ -337,25 +301,6 @@ impl JsVolumeFsWriteSink {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
-
-fn volume_handle_to_info(handle: &VolumeHandle) -> VolumeInfo {
-    VolumeInfo {
-        name: handle.name().to_string(),
-        is_default: handle.is_default(),
-        kind: handle.kind().as_str().to_string(),
-        quota_mib: handle.quota_mib(),
-        used_bytes: handle.used_bytes() as f64,
-        capacity_bytes: handle.capacity_bytes().map(|bytes| bytes as f64),
-        disk_format: handle.disk_format().map(str::to_string),
-        disk_fstype: handle.disk_fstype().map(str::to_string),
-        labels: handle
-            .labels()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-        created_at: opt_datetime_to_ms(&handle.created_at()),
-    }
-}
 
 fn fs_entry_kind_str(kind: &RustFsEntryKind) -> &'static str {
     match kind {

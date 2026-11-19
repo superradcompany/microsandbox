@@ -119,12 +119,10 @@ async fn create_sandbox(name: &str, memory: u32) -> Sandbox {
 
 /// Open a new agent client. Each client has its own bulk allowance.
 async fn connect(name: &str) -> Sandbox {
-    timeout(STEP_TIMEOUT, async {
-        Sandbox::get(name).await?.connect().await
-    })
-    .await
-    .expect("connecting to the sandbox stalled")
-    .expect("connecting to the sandbox failed")
+    timeout(STEP_TIMEOUT, Sandbox::get_running(name))
+        .await
+        .expect("connecting to the sandbox stalled")
+        .expect("connecting to the sandbox failed")
 }
 
 async fn open_read(client: &Sandbox, path: &str) -> MicrosandboxResult<FsReadStream> {
@@ -135,7 +133,7 @@ async fn open_read(client: &Sandbox, path: &str) -> MicrosandboxResult<FsReadStr
     };
     let handle = with_timeout(fs.open_file(path, options)).await?;
 
-    let stream = with_timeout(fs.read_handle_stream(handle, 0, None)).await;
+    let stream = with_timeout(fs.read_handle_stream(&handle, 0, None)).await;
     if stream.is_err() {
         let _ = with_timeout(fs.close_handle(handle)).await;
     }
@@ -152,7 +150,7 @@ async fn open_write(client: &Sandbox, path: &str) -> MicrosandboxResult<FsWriteS
     };
     let handle = with_timeout(fs.open_file(path, options)).await?;
 
-    let sink = with_timeout(fs.write_handle_stream(handle, 0, None)).await;
+    let sink = with_timeout(fs.write_handle_stream(&handle, 0, None)).await;
     if sink.is_err() {
         let _ = with_timeout(fs.close_handle(handle)).await;
     }

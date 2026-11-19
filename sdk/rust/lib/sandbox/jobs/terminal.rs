@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::{JobAttachment, JobError, JobEvent, JobResult};
+use super::{JobAttachment, JobError, JobEvent, JobOutputSource, JobResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -310,7 +310,7 @@ fn input_not_flushed(reason: impl std::fmt::Display) -> JobError {
 fn render(event: Option<JobEvent>) -> JobResult<Option<Option<i32>>> {
     match event {
         Some(JobEvent::Output(entry)) => {
-            if entry.source == "stderr" {
+            if entry.source == JobOutputSource::Stderr {
                 let mut output = std::io::stderr().lock();
                 output.write_all(&entry.data)?;
                 output.flush()?;

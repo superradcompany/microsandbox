@@ -1,5 +1,7 @@
 //! Integration tests for secret substitution through HTTP CONNECT tunnels.
 
+#![cfg(feature = "net")]
+
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;

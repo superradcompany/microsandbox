@@ -93,8 +93,13 @@ func WithForkGuestFlush(policy GuestFlush) ForkOption {
 	return func(options *forkOptions) { options.guestFlush = policy }
 }
 
-// BackendKind returns the backend retained by this sandbox.
-func (s *Sandbox) BackendKind() BackendKind { return BackendKind(s.inner.BackendKind()) }
+// ContextKind identifies the retained destination without I/O.
+func (s *Sandbox) ContextKind() ContextKind {
+	if s.inner.BackendKind() == "cloud" {
+		return ContextRemote
+	}
+	return ContextKind(s.inner.BackendKind())
+}
 
 // CreateSandbox creates and boots a new sandbox. The returned Sandbox owns the
 // VM process — call Close (or Stop + Close) when done.
@@ -116,32 +121,33 @@ func ConnectOrCreateSandbox(ctx context.Context, name string, opts ...SandboxOpt
 }
 
 func createSandboxWithMode(ctx context.Context, name string, connectOrCreate bool, opts ...SandboxOption) (*Sandbox, error) {
-	o := SandboxConfig{}
-	for _, opt := range opts {
-		opt(&o)
-	}
-
-	if err := prepareSandboxCreateConfig(&o); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	ffiOpts := buildFFICreateOptions(o)
-
-	var inner *ffi.Sandbox
-	var err error
-	if connectOrCreate {
-		inner, err = ffi.ConnectOrCreateSandbox(ctx, name, ffiOpts)
-	} else {
-		inner, err = ffi.CreateSandbox(ctx, name, ffiOpts)
+	config := SandboxConfig{}
+	for _, apply := range opts {
+		apply(&config)
 	}
+	if err := prepareSandboxCreateConfig(&config); err != nil {
+		return nil, err
+	}
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	inner, err := selected.nativeContext().CreateSandbox(ctx, name, buildFFICreateOptions(config), connectOrCreate)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
 	return &Sandbox{inner: inner}, nil
+
 }
 
 // prepareSandboxCreateConfig resolves host inputs and validates options before native creation.
 func prepareSandboxCreateConfig(config *SandboxConfig) error {
+	if err := validateLifecycleLimits(&config.MaxDuration, &config.IdleTimeout); err != nil {
+		return err
+	}
 	if err := resolveRegistryCACertPaths(config); err != nil {
 		return err
 	}
@@ -195,8 +201,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		QuietLogs:         o.QuietLogs,
 		Scripts:           o.Scripts,
 		PullPolicy:        string(o.PullPolicy),
-		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
+		MaxDurationSecs:   uint64(o.MaxDuration / time.Second),
+		IdleTimeoutSecs:   uint64(o.IdleTimeout / time.Second),
 		Ports:             o.Ports,
 		PortsUDP:          o.PortsUDP,
 		PortBindings:      buildFFIPortBindings(o.PortBindings),
@@ -256,8 +262,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 			spec := ffi.MountSpec{
 				Bind:               m.Bind,
 				Named:              m.Named,
-				NamedMode:          m.NamedMode,
-				NamedKind:          m.NamedKind,
+				NamedMode:          string(m.NamedMode),
+				NamedKind:          string(m.NamedKind),
 				Owned:              m.Owned,
 				Tmpfs:              m.Tmpfs,
 				Disk:               m.Disk,
@@ -344,6 +350,22 @@ func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
 		spec.SizeMiB = &size
 	}
 	return spec
+}
+
+// The create and restore wire formats persist lifecycle limits in whole seconds.
+func validateLifecycleLimits(maxDuration, idleTimeout *time.Duration) error {
+	for _, limit := range []struct {
+		name  string
+		value *time.Duration
+	}{
+		{"max duration", maxDuration},
+		{"idle timeout", idleTimeout},
+	} {
+		if limit.value != nil && (*limit.value < 0 || *limit.value%time.Second != 0) {
+			return &Error{Kind: ErrInvalidConfig, Message: limit.name + " must be a non-negative whole number of seconds"}
+		}
+	}
+	return nil
 }
 
 // durationSecsCeil rounds a Duration up to whole seconds. Sub-second values
@@ -608,37 +630,52 @@ func buildFFIVsockRoutes(routes []VsockRoute) []ffi.VsockRouteOptions {
 	return out
 }
 
-// GetSandbox returns metadata for a sandbox by name without connecting to it.
-// Sandbox names are limited to 128 UTF-8 bytes.
-// Returns ErrSandboxNotFound if no such sandbox exists. The returned
-// SandboxHandle exposes Connect/Start/Stop/Kill/Remove to operate on the sandbox.
-func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error) {
-	info, err := ffi.LookupSandbox(ctx, name)
-	if err != nil {
-		return nil, wrapFFI(err)
+// GetSandbox looks up a resource without starting it or connecting to its guest.
+// Guest operations prepare the retained receiver automatically when needed.
+func GetSandbox(ctx context.Context, name string) (*Sandbox, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return newSandboxHandle(info), nil
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	return selected.Sandboxes().Get(ctx, name)
+}
+
+// GetRunningSandbox looks up an existing sandbox and connects or starts it.
+// Missing resources are errors. A newly started local run belongs to the returned
+// Sandbox; connecting to an existing run does not acquire shutdown ownership.
+func GetRunningSandbox(ctx context.Context, name string) (*Sandbox, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	return selected.Sandboxes().GetRunning(ctx, name)
 }
 
 // StartSandbox boots a stopped sandbox by name and returns a live Sandbox.
 // Sandbox names are limited to 128 UTF-8 bytes.
 func StartSandbox(ctx context.Context, name string) (*Sandbox, error) {
-	inner, err := ffi.StartSandbox(ctx, name, false)
+	selected, err := configuredContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	return &Sandbox{inner: inner}, nil
+	return selected.Sandboxes().Start(ctx, name)
 }
 
 // StartSandboxDetached boots a stopped sandbox in detached mode. The VM keeps
 // running after the returned handle is released. Sandbox names are limited to
 // 128 UTF-8 bytes.
 func StartSandboxDetached(ctx context.Context, name string) (*Sandbox, error) {
-	inner, err := ffi.StartSandbox(ctx, name, true)
+	selected, err := configuredContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	return &Sandbox{inner: inner}, nil
+	return selected.Sandboxes().StartDetached(ctx, name)
 }
 
 // AllSandboxMetrics returns a point-in-time metrics snapshot for every running
@@ -672,7 +709,7 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 
 // SandboxPage is one page returned by ListSandboxes or ListSandboxesWith.
 type SandboxPage struct {
-	Sandboxes  []*SandboxHandle
+	Sandboxes  []*Sandbox
 	NextCursor *string
 }
 
@@ -690,10 +727,6 @@ type lifecycleOptions struct {
 	timeoutSet bool
 }
 
-type connectOrStartOptions struct {
-	detached bool
-}
-
 type restartOptions struct {
 	force    bool
 	timeout  time.Duration
@@ -705,14 +738,11 @@ type destroyOptions struct {
 	timeout time.Duration
 }
 
-// StopOption configures Sandbox.Stop and SandboxHandle.Stop.
+// StopOption configures Sandbox.Stop.
 type StopOption func(*lifecycleOptions)
 
-// KillOption configures Sandbox.Kill and SandboxHandle.Kill.
+// KillOption configures Sandbox.Kill.
 type KillOption func(*lifecycleOptions)
-
-// ConnectOrStartOption configures SandboxHandle.ConnectOrStart.
-type ConnectOrStartOption func(*connectOrStartOptions)
 
 // RestartOption configures identity-safe sandbox restart.
 type RestartOption func(*restartOptions)
@@ -754,12 +784,6 @@ func WithStopTimeout(timeout time.Duration) StopOption {
 // WithKillTimeout sets how long Kill waits for stopped-state observation.
 func WithKillTimeout(timeout time.Duration) KillOption {
 	return func(o *lifecycleOptions) { o.timeout = timeout }
-}
-
-// WithConnectOrStartDetached starts in detached mode when a start is required.
-// It has no effect when ConnectOrStart connects to an already-running sandbox.
-func WithConnectOrStartDetached() ConnectOrStartOption {
-	return func(options *connectOrStartOptions) { options.detached = true }
 }
 
 // WithRestartForce force-terminates instead of requesting graceful shutdown.
@@ -822,373 +846,21 @@ func ListSandboxesWith(ctx context.Context, configure ...SandboxListOption) (*Sa
 }
 
 func listSandboxes(ctx context.Context, configure ...SandboxListOption) (*SandboxPage, error) {
-	options := sandboxListOptions{}
-	for _, apply := range configure {
-		apply(&options)
-	}
-	page, err := ffi.ListSandboxes(ctx, ffi.SandboxListOptions{
-		Cursor: options.cursor,
-		Limit:  options.limit,
-		Labels: options.labels,
-	})
+	selected, err := configuredContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	out := make([]*SandboxHandle, len(page.Sandboxes))
-	for i, info := range page.Sandboxes {
-		out[i] = newSandboxHandle(info)
-	}
-	return &SandboxPage{Sandboxes: out, NextCursor: page.NextCursor}, nil
+	return selected.Sandboxes().List(ctx, configure...)
 }
 
 // RemoveSandbox removes a stopped sandbox's persisted state by name.
 // Sandbox names are limited to 128 UTF-8 bytes.
 func RemoveSandbox(ctx context.Context, name string) error {
-	return wrapFFI(ffi.RemoveSandbox(ctx, name))
-}
-
-// ---------------------------------------------------------------------------
-// SandboxHandle — lightweight metadata reference to a sandbox
-// ---------------------------------------------------------------------------
-
-// SandboxHandle is a lightweight reference to a sandbox's persisted state.
-// It carries metadata (name, status, timestamps) and provides methods to
-// connect, start, stop, or remove the sandbox. Obtain via GetSandbox.
-type SandboxHandle struct {
-	id            string
-	name          string
-	status        SandboxStatus
-	configJSON    string
-	createdAtUnix *int64
-	updatedAtUnix *int64
-	backendKind   BackendKind
-}
-
-func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
-	backendKind := BackendKind(info.BackendKind)
-	if backendKind == "" {
-		backendKind = BackendUnknown
-	}
-	return &SandboxHandle{
-		id:            info.ID,
-		name:          info.Name,
-		status:        SandboxStatus(info.Status),
-		configJSON:    info.ConfigJSON,
-		createdAtUnix: info.CreatedAtUnix,
-		updatedAtUnix: info.UpdatedAtUnix,
-		backendKind:   backendKind,
-	}
-}
-
-// Name returns the sandbox name. Names are limited to 128 UTF-8 bytes.
-func (h *SandboxHandle) Name() string { return h.name }
-
-// ID returns the stable identity of this persisted sandbox.
-func (h *SandboxHandle) ID() string { return h.id }
-
-// Status returns the sandbox's last-known lifecycle status.
-func (h *SandboxHandle) Status() SandboxStatus { return h.status }
-
-// BackendKind returns the backend retained by this handle.
-func (h *SandboxHandle) BackendKind() BackendKind { return h.backendKind }
-
-// ConfigJSON returns the raw JSON configuration stored for this sandbox.
-func (h *SandboxHandle) ConfigJSON() string { return h.configJSON }
-
-// Config parses the stored sandbox configuration.
-func (h *SandboxHandle) Config() (*SandboxConfig, error) {
-	var config SandboxConfig
-	if err := json.Unmarshal([]byte(h.configJSON), &config); err != nil {
-		return nil, err
-	}
-	return &config, nil
-}
-
-// Refresh returns a fresh handle for the same persisted sandbox.
-func (h *SandboxHandle) Refresh(ctx context.Context) (*SandboxHandle, error) {
-	info, err := ffi.SandboxHandleInfoLifecycle(
-		ctx, h.name, h.id, "refresh", ffi.SandboxHandleLifecycleOptions{},
-	)
+	selected, err := configuredContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return err
 	}
-	return newSandboxHandle(info), nil
-}
-
-// CreatedAt returns the sandbox creation time, or the zero value if unknown.
-func (h *SandboxHandle) CreatedAt() time.Time {
-	if h.createdAtUnix == nil {
-		return time.Time{}
-	}
-	return time.Unix(*h.createdAtUnix, 0)
-}
-
-// UpdatedAt returns the last-updated time, or the zero value if unknown.
-func (h *SandboxHandle) UpdatedAt() time.Time {
-	if h.updatedAtUnix == nil {
-		return time.Time{}
-	}
-	return time.Unix(*h.updatedAtUnix, 0)
-}
-
-// Metrics returns a point-in-time resource snapshot for this sandbox.
-// The sandbox must be running or draining.
-func (h *SandboxHandle) Metrics(ctx context.Context) (*Metrics, error) {
-	m, err := ffi.SandboxHandleMetrics(ctx, h.name)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &Metrics{
-		CPUPercent:              m.CPUPercent,
-		VCPUTimeNs:              m.VCPUTimeNs,
-		MemoryBytes:             m.MemoryBytes,
-		MemoryAvailableBytes:    m.MemoryAvailableBytes,
-		MemoryHostResidentBytes: m.MemoryHostResidentBytes,
-		MemoryLimitBytes:        m.MemoryLimitBytes,
-		DiskReadBytes:           m.DiskReadBytes,
-		DiskWriteBytes:          m.DiskWriteBytes,
-		NetRxBytes:              m.NetRxBytes,
-		NetTxBytes:              m.NetTxBytes,
-		UpperUsedBytes:          m.UpperUsedBytes,
-		UpperFreeBytes:          m.UpperFreeBytes,
-		UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
-		Uptime:                  m.Uptime,
-	}, nil
-}
-
-// Ping checks whether agentd is reachable without refreshing idle activity.
-// It connects to an already-running sandbox and does not start stopped
-// sandboxes implicitly.
-func (h *SandboxHandle) Ping(ctx context.Context) (*SandboxPingResult, error) {
-	result, err := ffi.PingSandboxByName(ctx, h.name)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return sandboxPingResultFromFFI(result), nil
-}
-
-// Touch explicitly refreshes this sandbox's idle activity timer. It connects
-// to an already-running sandbox and does not start stopped sandboxes
-// implicitly.
-func (h *SandboxHandle) Touch(ctx context.Context) (*SandboxTouchResult, error) {
-	result, err := ffi.TouchSandboxByName(ctx, h.name)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return sandboxTouchResultFromFFI(result), nil
-}
-
-// Connect reattaches to the running sandbox and returns a live handle.
-func (h *SandboxHandle) Connect(ctx context.Context) (*Sandbox, error) {
-	inner, err := ffi.SandboxHandleLiveLifecycle(
-		ctx, h.name, h.id, "connect", ffi.SandboxHandleLifecycleOptions{},
-	)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &Sandbox{inner: inner}, nil
-}
-
-// Start boots the sandbox (if stopped) and returns a live handle.
-func (h *SandboxHandle) Start(ctx context.Context) (*Sandbox, error) {
-	inner, err := ffi.SandboxHandleLiveLifecycle(
-		ctx, h.name, h.id, "start", ffi.SandboxHandleLifecycleOptions{},
-	)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &Sandbox{inner: inner}, nil
-}
-
-// StartDetached boots the sandbox in detached mode.
-func (h *SandboxHandle) StartDetached(ctx context.Context) (*Sandbox, error) {
-	inner, err := ffi.SandboxHandleLiveLifecycle(
-		ctx, h.name, h.id, "start", ffi.SandboxHandleLifecycleOptions{Detached: true},
-	)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &Sandbox{inner: inner}, nil
-}
-
-// ConnectOrStart connects when this exact sandbox is running, waits while it is
-// starting, or starts it when it is created, stopped, or crashed. A same-name
-// replacement is rejected instead of becoming this handle's target.
-func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrStartOption) (*Sandbox, error) {
-	options := connectOrStartOptions{}
-	for _, apply := range opts {
-		apply(&options)
-	}
-	inner, err := ffi.SandboxHandleLiveLifecycle(
-		ctx,
-		h.name,
-		h.id,
-		"connect_or_start",
-		ffi.SandboxHandleLifecycleOptions{Detached: options.detached},
-	)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &Sandbox{inner: inner}, nil
-}
-
-// Stop requests graceful shutdown and waits for this exact sandbox run to finish.
-// There is no built-in timeout. Context cancellation or WithStopTimeout ends only
-// the wait and never force-kills the sandbox.
-func (h *SandboxHandle) Stop(ctx context.Context, opts ...StopOption) error {
-	return wrapFFI(ffi.StopSandboxHandle(ctx, h.name, h.id, stopTimeoutMillis(opts)))
-}
-
-// StopWithTimeout bounds graceful shutdown observation without force-killing.
-func (h *SandboxHandle) StopWithTimeout(ctx context.Context, timeout time.Duration) error {
-	return h.Stop(ctx, WithStopTimeout(timeout))
-}
-
-// RequestStop requests graceful shutdown and returns once the request is sent.
-func (h *SandboxHandle) RequestStop(ctx context.Context) error {
-	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_stop", ffi.SandboxHandleLifecycleOptions{}))
-}
-
-// ForkMany captures once and returns each named child's startup outcome in input order.
-func (h *SandboxHandle) ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
-	options := forkOptions{}
-	for _, opt := range opts {
-		opt(&options)
-	}
-	volumes, err := ffiForkVolumes(options.volumes)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.recordIntegrity, volumes, string(options.guestFlush))
-	return wrapBranchOutcomes(rows, err)
-}
-
-// Branch creates a live fork.
-//
-// Deprecated: use Fork.
-func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
-	return h.Fork(ctx, name, opts...)
-}
-
-// BranchMany creates live forks from one capture.
-//
-// Deprecated: use ForkMany.
-func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
-	return h.ForkMany(ctx, names, opts...)
-}
-
-// Fork creates an independent local CoW child without publishing a durable full snapshot.
-func (h *SandboxHandle) Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
-	options := forkOptions{}
-	for _, opt := range opts {
-		opt(&options)
-	}
-	volumes, err := ffiForkVolumes(options.volumes)
-	if err != nil {
-		return nil, err
-	}
-	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.recordIntegrity, volumes, string(options.guestFlush))
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &Sandbox{inner: inner}, nil
-}
-
-// Pause controls resident execution without creating a snapshot.
-func (h *SandboxHandle) Pause(ctx context.Context) error {
-	return wrapFFI(ffi.PauseSandboxByName(ctx, h.name))
-}
-
-// PauseWithGuestFlush pauses without resuming implicitly to satisfy missing flush coverage.
-func (h *SandboxHandle) PauseWithGuestFlush(ctx context.Context, policy GuestFlush) error {
-	return wrapFFI(ffi.PauseWithGuestFlush(ctx, 0, h.name, h.id, string(policy)))
-}
-
-// Resume controls resident execution without creating a snapshot.
-func (h *SandboxHandle) Resume(ctx context.Context) error {
-	return wrapFFI(ffi.ResumeSandboxByName(ctx, h.name))
-}
-
-// Kill force-kills the sandbox and waits until stopped state is observed.
-func (h *SandboxHandle) Kill(ctx context.Context, opts ...KillOption) error {
-	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "kill", ffi.SandboxHandleLifecycleOptions{TimeoutMs: killTimeoutMillis(opts)}))
-}
-
-// RequestKill requests force termination and returns once the request is sent.
-func (h *SandboxHandle) RequestKill(ctx context.Context) error {
-	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_kill", ffi.SandboxHandleLifecycleOptions{}))
-}
-
-// RequestDrain requests graceful drain and returns once the request is sent.
-func (h *SandboxHandle) RequestDrain(ctx context.Context) error {
-	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_drain", ffi.SandboxHandleLifecycleOptions{}))
-}
-
-// WaitUntilStopped waits until this sandbox is observed in terminal state.
-func (h *SandboxHandle) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error) {
-	result, err := ffi.SandboxHandleStopLifecycle(ctx, h.name, h.id)
-	return sandboxStopResultFromFFI(result), wrapFFI(err)
-}
-
-// Remove deletes the sandbox's persisted state. The sandbox must be stopped.
-func (h *SandboxHandle) Remove(ctx context.Context) error {
-	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "remove", ffi.SandboxHandleLifecycleOptions{}))
-}
-
-// WaitForStatus waits without a built-in timeout until this exact sandbox
-// reaches status. Use ctx for deadlines or cancellation. A same-name
-// replacement is rejected.
-func (h *SandboxHandle) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error) {
-	info, err := ffi.SandboxHandleInfoLifecycle(
-		ctx, h.name, h.id, "wait_for_status", ffi.SandboxHandleLifecycleOptions{Status: string(status)},
-	)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return newSandboxHandle(info), nil
-}
-
-// Restart stops and starts this exact sandbox. It defaults to graceful shutdown
-// with a ten-second convergence timeout; created, stopped, and crashed
-// sandboxes start directly.
-func (h *SandboxHandle) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error) {
-	options := restartOptions{timeout: defaultStopTimeout}
-	for _, apply := range opts {
-		apply(&options)
-	}
-	inner, err := ffi.SandboxHandleLiveLifecycle(ctx, h.name, h.id, "restart", ffi.SandboxHandleLifecycleOptions{
-		Detached:  options.detached,
-		Force:     options.force,
-		TimeoutMs: durationMillisCeil(options.timeout),
-	})
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &Sandbox{inner: inner}, nil
-}
-
-// Destroy stops and removes this exact sandbox. It defaults to graceful
-// shutdown with a ten-second convergence timeout and refuses to remove a
-// same-name replacement.
-func (h *SandboxHandle) Destroy(ctx context.Context, opts ...DestroyOption) error {
-	options := destroyOptions{timeout: defaultStopTimeout}
-	for _, apply := range opts {
-		apply(&options)
-	}
-	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "destroy", ffi.SandboxHandleLifecycleOptions{
-		Force:     options.force,
-		TimeoutMs: durationMillisCeil(options.timeout),
-	}))
-}
-
-// Snapshot captures this sandbox's disk under a bare name in the default
-// snapshots directory.
-func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error) {
-	info, err := ffi.SandboxHandleSnapshot(ctx, h.name, name)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return snapshotFromInfo(info), nil
+	return selected.Sandboxes().Remove(ctx, name)
 }
 
 // ---------------------------------------------------------------------------
@@ -1219,10 +891,6 @@ func (s *Sandbox) RestoreWarnings(ctx context.Context) ([]ExternalMountWarning, 
 		return nil, err
 	}
 	return warnings, nil
-}
-
-func (s *Sandbox) identityHandle() *SandboxHandle {
-	return &SandboxHandle{name: s.Name(), id: s.ID(), backendKind: s.BackendKind()}
 }
 
 // Stop requests graceful shutdown and waits for this exact sandbox run to finish.
@@ -1368,21 +1036,16 @@ func (s *Sandbox) RequestKill(ctx context.Context) error {
 	return wrapFFI(s.inner.RequestKill(ctx))
 }
 
-// Close releases the Rust-side handle. Safe to call multiple times; the
-// second call returns ErrInvalidHandle.
-//
-// For a sandbox created with WithDetached(), Close will stop the VM —
-// use Detach instead if the intent is to leave the sandbox running.
+// Close releases this native handle. An attached final owner triggers fallback
+// shutdown; completion is not awaited. Detached and remote runs keep running.
+// Use Stop(ctx) first when shutdown completion must be observed.
 func (s *Sandbox) Close() error {
 	return wrapFFI(s.inner.Close())
 }
 
-// Detach releases the Rust-side handle without stopping the VM. Use this
-// on sandboxes created with WithDetached() once the caller is done with
-// the handle but the sandbox should continue running in the background.
-//
-// After Detach, the handle is invalid; a subsequent Close returns
-// ErrInvalidHandle.
+// Detach disarms automatic shutdown for the shared local ownership group.
+// It is repeatable and leaves this Sandbox usable, including explicit Stop.
+// Call Close when finished to release the native handle.
 func (s *Sandbox) Detach(ctx context.Context) error {
 	return wrapFFI(s.inner.Detach(ctx))
 }
@@ -1401,22 +1064,42 @@ func (s *Sandbox) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, err
 // WaitForStatus waits without a built-in timeout until this exact sandbox
 // reaches status. Use ctx for deadlines or cancellation. A same-name
 // replacement is rejected.
-func (s *Sandbox) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error) {
-	return s.identityHandle().WaitForStatus(ctx, status)
+func (s *Sandbox) WaitForStatus(ctx context.Context, status SandboxStatus) error {
+	return wrapFFI(s.inner.WaitForStatus(ctx, string(status)))
 }
 
 // Restart stops and starts this exact sandbox. It defaults to graceful shutdown
 // with a ten-second convergence timeout; created, stopped, and crashed
 // sandboxes start directly.
 func (s *Sandbox) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error) {
-	return s.identityHandle().Restart(ctx, opts...)
+	options := restartOptions{timeout: defaultStopTimeout}
+	for _, apply := range opts {
+		apply(&options)
+	}
+	inner, err := s.inner.Lifecycle(ctx, "restart", ffi.SandboxHandleLifecycleOptions{
+		Detached:  options.detached,
+		Force:     options.force,
+		TimeoutMs: durationMillisCeil(options.timeout),
+	})
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
 }
 
 // Destroy stops and removes this exact sandbox. It defaults to graceful
 // shutdown with a ten-second convergence timeout and refuses to remove a
 // same-name replacement.
 func (s *Sandbox) Destroy(ctx context.Context, opts ...DestroyOption) error {
-	return s.identityHandle().Destroy(ctx, opts...)
+	options := destroyOptions{timeout: defaultStopTimeout}
+	for _, apply := range opts {
+		apply(&options)
+	}
+	_, err := s.inner.Lifecycle(ctx, "destroy", ffi.SandboxHandleLifecycleOptions{
+		Force:     options.force,
+		TimeoutMs: durationMillisCeil(options.timeout),
+	})
+	return wrapFFI(err)
 }
 
 // OwnsLifecycle reports whether this handle owns the VM process. When true,

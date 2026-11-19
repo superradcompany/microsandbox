@@ -89,7 +89,7 @@ microsandbox-migration = { workspace = true, optional = true }
 microsandbox-network = { workspace = true, default-features = false, optional = true }
 microsandbox-protocol.workspace = true
 microsandbox-runtime = { workspace = true, features = ["client"], optional = true }
-microsandbox-types.workspace = true
+microsandbox-types = { workspace = true, features = ["progress"] }
 microsandbox-utils.workspace = true
 nix = { workspace = true, features = ["process", "signal", "term"], optional = true }
 notify.workspace = true
@@ -128,10 +128,12 @@ tempfile.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 h2 = "0.4"
+hex.workspace = true
 http = "1"
 microsandbox-db.workspace = true
 ipnetwork.workspace = true
 microsandbox-network.workspace = true
+rand.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tempfile.workspace = true
