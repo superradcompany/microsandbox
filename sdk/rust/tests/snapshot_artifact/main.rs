@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use microsandbox::Snapshot;
+use microsandbox::Checkpoint;
 use microsandbox_types::snapshot::{
     DiskLayer, DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, Manifest,
     SCHEMA, SnapshotCapture, SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotRootDisk,
@@ -69,7 +69,7 @@ fn sample_manifest(upper_size: u64) -> Manifest {
 
 #[test]
 fn builder_supports_name_first_contract() {
-    let config = Snapshot::builder("clean-python")
+    let config = Checkpoint::builder("clean-python")
         .from_sandbox("build-box")
         .label("stage", "deps")
         .build()
@@ -82,7 +82,7 @@ fn builder_supports_name_first_contract() {
 
 #[test]
 fn builder_carries_dest_dir() {
-    let config = Snapshot::builder("clean")
+    let config = Checkpoint::builder("clean")
         .from_sandbox("box")
         .dest_dir("/mnt/big")
         .build()
@@ -96,7 +96,7 @@ fn builder_carries_dest_dir() {
 
 #[test]
 fn builder_requires_source_sandbox() {
-    let err = Snapshot::builder("clean").build().unwrap_err();
+    let err = Checkpoint::builder("clean").build().unwrap_err();
     assert!(err.to_string().contains("from_sandbox"));
 }
 

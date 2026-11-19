@@ -1,5 +1,11 @@
 //! Snapshot content verification.
 
+mod batch;
+mod group;
+
+pub(super) use group::verify_group;
+
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,7 +20,9 @@ use microsandbox_utils::extent::ExtentMap;
 use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};
 
-use crate::snapshot::{CheckpointVerifyStatus, SnapshotVerifyReport, UpperVerifyStatus};
+use crate::snapshot::{
+    CheckpointVerifyStatus, SnapshotVerifyCoverage, SnapshotVerifyReport, UpperVerifyStatus,
+};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -92,10 +100,46 @@ impl MerkleAccumulator {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Saved configuration is inline descriptor metadata. Verify its schema and agreement
+/// with the descriptor here, without resolving a binding or authorizing a sandbox launch.
+fn validate_verification_requirements(
+    manifest: &crate::snapshot::Manifest,
+) -> MicrosandboxResult<()> {
+    use microsandbox_types::snapshot::saved_config::{
+        SAVED_CONFIG_EXTENSION, SAVED_CONFIG_SCHEMA_VERSION,
+    };
+
+    let mut unsupported = manifest.unsupported_requires();
+    let saved_version = manifest
+        .extensions
+        .get(SAVED_CONFIG_EXTENSION)
+        .and_then(|value| value.get("schema_version"))
+        .and_then(serde_json::Value::as_u64);
+    // A later version may reference additional payloads. Keep the existing unsupported
+    // result until this verifier understands how to cover them.
+    if saved_version.is_none_or(|version| version == u64::from(SAVED_CONFIG_SCHEMA_VERSION)) {
+        manifest.saved_configuration()?;
+        unsupported.retain(|key| *key != SAVED_CONFIG_EXTENSION);
+    }
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    // An unrecognized extension may add payloads outside the known verification plan.
+    Err(MicrosandboxError::Unsupported {
+        op: crate::Operation::SnapshotOps,
+        reason: crate::error::UnsupportedReason::NotAvailable(format!(
+            "unknown required extensions: {}",
+            unsupported.join(", ")
+        )),
+    })
+}
+
 pub(super) async fn verify_snapshot(
     snap: &Snapshot,
     fs_state_limit: usize,
 ) -> MicrosandboxResult<SnapshotVerifyReport> {
+    validate_verification_requirements(snap.manifest())?;
+    let mut unrecorded = BTreeSet::new();
     if matches!(snap.manifest().state, SnapshotState::File(_)) {
         let owned = snap.manifest().owned_volumes()?;
         microsandbox_image::snapshot::verify_owned_directory_payloads(snap.path(), &owned)?;
@@ -120,6 +164,9 @@ pub(super) async fn verify_snapshot(
                             "owned disk payload integrity differs".into(),
                         ));
                     }
+                    if layer.integrity_root.is_none() {
+                        unrecorded.insert(path);
+                    }
                 }
             }
         }
@@ -128,7 +175,7 @@ pub(super) async fn verify_snapshot(
         let SnapshotState::Checkpoint(checkpoint_state) = &snap.manifest().state else {
             unreachable!("snapshot state is a closed enum")
         };
-        let checkpoint = verify_checkpoint_closure(
+        let (checkpoint, coverage) = verify_checkpoint_closure(
             snap.path().join(super::create::CHECKPOINT_DIRECTORY),
             checkpoint_state.checkpoint_root.clone(),
             snap.manifest().clone(),
@@ -142,6 +189,7 @@ pub(super) async fn verify_snapshot(
             // explicit checkpoint result below instead of overloading upper-layer terminology.
             upper: UpperVerifyStatus::NotRecorded,
             checkpoint: Some(checkpoint),
+            coverage,
         });
     };
     let mut upper = UpperVerifyStatus::NotRecorded;
@@ -149,6 +197,9 @@ pub(super) async fn verify_snapshot(
     // `upper` projection describing the head, while any ancestor mismatch fails the operation.
     for layer in &file_state.layers {
         let verified = verify_file_layer(snap, layer).await?;
+        if matches!(verified, UpperVerifyStatus::NotRecorded) {
+            unrecorded.insert(snap.layer_path(layer));
+        }
         if layer.layer_id == file_state.head {
             upper = verified;
         }
@@ -158,6 +209,7 @@ pub(super) async fn verify_snapshot(
         path: snap.path().to_path_buf(),
         upper,
         checkpoint: None,
+        coverage: verification_coverage(unrecorded),
     })
 }
 
@@ -211,7 +263,7 @@ async fn verify_checkpoint_closure(
     expected_root: String,
     manifest: microsandbox_image::snapshot::Manifest,
     fs_state_limit: usize,
-) -> MicrosandboxResult<CheckpointVerifyStatus> {
+) -> MicrosandboxResult<(CheckpointVerifyStatus, SnapshotVerifyCoverage)> {
     let pin = super::lease::pin_source(&closure_path)?;
     tokio::task::spawn_blocking(move || {
         let _lease = pin;
@@ -224,12 +276,34 @@ async fn verify_checkpoint_closure(
         closure
             .verify_memory_objects()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-        Ok(CheckpointVerifyStatus {
-            root: closure.root_id().to_string(),
-        })
+        // A valid composite root authenticates its metadata, not disk bytes whose roots were
+        // intentionally omitted. Keep that distinction even though RAM objects were checked.
+        let unrecorded = closure
+            .disks()
+            .iter()
+            .flat_map(|disk| &disk.layers)
+            .filter(|layer| layer.integrity_root.is_none())
+            .map(|layer| closure.disk_layer_path(layer))
+            .collect();
+        Ok((
+            CheckpointVerifyStatus {
+                root: closure.root_id().to_string(),
+            },
+            verification_coverage(unrecorded),
+        ))
     })
     .await
     .map_err(|error| MicrosandboxError::Custom(format!("checkpoint verify task: {error}")))?
+}
+
+fn verification_coverage(unrecorded: BTreeSet<PathBuf>) -> SnapshotVerifyCoverage {
+    if unrecorded.is_empty() {
+        SnapshotVerifyCoverage::Complete
+    } else {
+        SnapshotVerifyCoverage::Incomplete {
+            unrecorded: unrecorded.into_iter().collect(),
+        }
+    }
 }
 
 pub(super) async fn compute_merkle_integrity(path: &Path) -> MicrosandboxResult<UpperIntegrity> {

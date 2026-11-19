@@ -15,6 +15,7 @@ import {
   WindowsHostSetupError,
   ExecTimeoutError,
   StopTimeoutError,
+  ResizeTimeoutError,
   ImageNotFoundError,
   MetricsDisabledError,
   MicrosandboxError,
@@ -23,6 +24,7 @@ import {
   SandboxNotFoundError,
   SandboxReplacedError,
   SnapshotSourceRecoveryError,
+  SnapshotImportError,
   SandboxStopTimedOutError,
   ServiceError,
   ServiceNotFoundError,
@@ -59,6 +61,28 @@ describe("mapNapiError", () => {
     expect(mapped.message).toContain("no kill was requested");
     expect(mapped.cause).toBe(raw);
   });
+  it("maps resize timeout to its own error", () => {
+    const raw = new Error('[ResizeTimeout] timed out waiting for sandbox "api" live resize to converge');
+    const mapped = mapNapiError(raw);
+    expect(mapped).toBeInstanceOf(ResizeTimeoutError);
+    expect((mapped as ResizeTimeoutError).code).toBe("resizeTimeout");
+    expect((mapped as ResizeTimeoutError).status).toEqual([]);
+  });
+  it("retains the last resize status on timeout", () => {
+    const status = [{
+      resource: "memory", requested: "8 GiB", actual: "4 GiB", enforced: "8 GiB", state: "converging",
+    }];
+    const raw = new Error(`[ResizeTimeout] ${JSON.stringify({ message: "timed out", status })}`);
+    const mapped = mapNapiError(raw) as ResizeTimeoutError;
+    expect(mapped).toBeInstanceOf(ResizeTimeoutError);
+    expect(mapped.message).toBe("timed out");
+    expect(mapped.status).toEqual(status);
+    expect(mapped.cause).toBe(raw);
+    const empty = mapNapiError(
+      new Error(`[ResizeTimeout] ${JSON.stringify({ message: "timed out", status: [] })}`),
+    ) as ResizeTimeoutError;
+    expect(empty.status).toEqual([]);
+  });
   for (const kind of ["installed", "archive", null]) {
     it(`retains source recovery metadata with ${kind ?? "unpublished"} artifact`, () => {
       const recovery = {
@@ -86,6 +110,22 @@ describe("mapNapiError", () => {
         },
         detail: recovery.detail, publicationError: recovery.publication_error,
       });
+    });
+  }
+
+  for (const head of [null, { group: "history", previous: null, head: "snap_1", reason: "initialized", changed: true }]) {
+    it(`retains the operation's head outcome: ${JSON.stringify(head)}`, () => {
+      const raw = new Error(`[SnapshotSourceRecovery] ${JSON.stringify({
+        message: "source recovery failed",
+        recovery: {
+          source_sandbox: "source", checkpoint_id: "checkpoint-1", checkpoint_root: "root",
+          checkpoint_path: "/runtime/checkpoint", detail: "thaw failed", publication_error: null,
+          artifact: { kind: "installed", path: "/saved", snapshot_id: "snap_1", digest: "digest", head_update: head },
+        },
+      })}`);
+      const mapped = mapNapiError(raw) as SnapshotSourceRecoveryError;
+      expect(mapped).toBeInstanceOf(SnapshotSourceRecoveryError);
+      expect(mapped.recovery.artifact?.headUpdate).toEqual(head);
     });
   }
 
@@ -257,5 +297,23 @@ describe("mapNapiError", () => {
     );
     expect((mapped as ModificationNotConfirmedError).message).toBe(message);
     expect((mapped as MicrosandboxError).cause).toBe(raw);
+  });
+});
+
+describe("snapshot import outcomes", () => {
+  for (const outcome of ["not_committed", "committed", "unknown"]) {
+    it(`preserves ${outcome} across the native boundary`, () => {
+      const details = { operation_id: "attempt-1", archives: ["/base.msb", "/child.msb"], group_path: null, outcome, detail: "index failure" };
+      const raw = new Error(`[SnapshotImport] ${JSON.stringify({ message: "batch failure", import: details })}`);
+      const mapped = mapNapiError(raw) as SnapshotImportError;
+      expect(mapped).toBeInstanceOf(SnapshotImportError);
+      expect(mapped.code).toBe("snapshotImport");
+      expect(mapped.details).toEqual({ operationId: "attempt-1", archives: details.archives, groupPath: null, outcome, detail: "index failure" });
+      expect(mapped.cause).toBe(raw);
+    });
+  }
+  it("preserves unknown native payloads as failures", () => {
+    const raw = new Error('[SnapshotImport] {"message":"failed","import":{"outcome":"new_unknown_value"}}');
+    expect(mapNapiError(raw)).toBe(raw);
   });
 });

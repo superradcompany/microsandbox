@@ -70,6 +70,31 @@ pub fn verify_owned_directory_payloads(
     root: &Path,
     volumes: &[OwnedVolumeCapture],
 ) -> ImageResult<()> {
+    visit_owned_directory_payloads(root, volumes, |path, expected| {
+        let mut file = File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut bytes = [0; 64 * 1024];
+        loop {
+            let count = file.read(&mut bytes)?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&bytes[..count]);
+        }
+        if hex::encode(hasher.finalize()) != expected.digest {
+            return invalid("owned directory payload digest differs");
+        }
+        Ok(())
+    })
+}
+
+/// Visit the confined, size-checked directory payload inventory. This does not authenticate
+/// content: callers must execute the recorded checks before reporting successful verification.
+pub fn visit_owned_directory_payloads(
+    root: &Path,
+    volumes: &[OwnedVolumeCapture],
+    mut visit: impl FnMut(&Path, &OwnedDirectoryPayload) -> ImageResult<()>,
+) -> ImageResult<()> {
     validate_owned_volumes(volumes)?;
     for volume in volumes {
         if !matches!(volume.data, OwnedVolumeData::Directory { .. }) {
@@ -90,19 +115,7 @@ pub fn verify_owned_directory_payloads(
             if !metadata.file_type().is_file() || metadata.len() != expected.bytes {
                 return invalid("owned directory payload is missing or has a different size");
             }
-            let mut file = File::open(path)?;
-            let mut hasher = Sha256::new();
-            let mut bytes = [0; 64 * 1024];
-            loop {
-                let count = file.read(&mut bytes)?;
-                if count == 0 {
-                    break;
-                }
-                hasher.update(&bytes[..count]);
-            }
-            if hex::encode(hasher.finalize()) != expected.digest {
-                return invalid("owned directory payload digest differs");
-            }
+            visit(&path, expected)?;
         }
     }
     Ok(())

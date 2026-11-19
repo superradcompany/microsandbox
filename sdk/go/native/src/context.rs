@@ -234,13 +234,13 @@ async fn persistent_operation(
             vec![Resource::Volume(builder.create().await?)]
         }
         "snapshot_get" => vec![Resource::snapshot(
-            context.snapshots().get(&request.name).await?,
+            context.checkpoints().get(&request.name).await?,
         )],
         "snapshot_open" => vec![Resource::snapshot(
-            context.snapshots().open(&request.name).await?,
+            context.checkpoints().open(&request.name).await?,
         )],
         "snapshot_list" => context
-            .snapshots()
+            .checkpoints()
             .list()
             .await?
             .into_iter()
@@ -248,7 +248,7 @@ async fn persistent_operation(
             .collect(),
         "snapshot_remove" => {
             context
-                .snapshots()
+                .checkpoints()
                 .remove(
                     &request.name,
                     request.args["force"].as_bool().unwrap_or(false),
@@ -299,7 +299,7 @@ async fn persistent_operation(
             );
         }
         "snapshot_read_group_head" => {
-            let head = context.snapshots().group_head(&request.name).await?;
+            let head = context.checkpoints().group_head(&request.name).await?;
             return Ok(serde_json::json!(head.map(|id| id.to_string())).to_string());
         }
         "snapshot_set_group_head" => {
@@ -309,7 +309,7 @@ async fn persistent_operation(
             let id = microsandbox::snapshot::SnapshotId::new(id)
                 .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
             let update = context
-                .snapshots()
+                .checkpoints()
                 .set_group_head(&request.name, &id)
                 .await?;
             return serde_json::to_string(&update).map_err(|e| FfiError::internal(e.to_string()));

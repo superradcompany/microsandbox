@@ -19,6 +19,16 @@ pub struct ControlContext {
 pub(crate) trait Handler: Send + Sync + 'static {
     fn handle(&self, request: ControlOperation, generation: u8) -> Response;
 
+    fn handle_labels(
+        &self,
+        _request: microsandbox_protocol::labels::LabelsRequest,
+    ) -> Result<microsandbox_protocol::labels::LabelsResponse, ControlError> {
+        Err(ControlError::rejected(
+            "unsupported_operation",
+            "runtime-owned label updates are unavailable",
+        ))
+    }
+
     fn handle_exec_signal(
         &self,
         _request: microsandbox_protocol::exec_control::ExecControlRequest,
@@ -27,6 +37,16 @@ pub(crate) trait Handler: Send + Sync + 'static {
             "unsupported_feature",
             "independent exec control is unavailable",
         )
+    }
+
+    fn handle_resize(
+        &self,
+        _request: microsandbox_protocol::resize::ResizeRequest,
+    ) -> Result<microsandbox_protocol::resize::ResizeResponse, ControlError> {
+        Err(ControlError::rejected(
+            "unsupported_operation",
+            "resize tracking is unavailable",
+        ))
     }
 
     fn handle_job(
@@ -74,8 +94,10 @@ pub(crate) struct Response {
 }
 
 pub(crate) enum Reply {
+    Labels(microsandbox_protocol::labels::LabelsResponse),
     ExecSignal(microsandbox_protocol::exec_control::ExecControlResponse),
     Job(microsandbox_protocol::jobs::JobResponse),
+    Resize(microsandbox_protocol::resize::ResizeResponse),
     Capabilities(Capabilities),
     RuntimeCapabilities(RuntimeCapabilities),
     Memory(MemoryState),
@@ -110,9 +132,19 @@ impl Response {
 impl Reply {
     pub(crate) fn envelope(&self, generation: u8) -> Result<Envelope, WireError> {
         match self {
+            Self::Labels(value) => Envelope::new(
+                generation,
+                microsandbox_protocol::labels::LABELS_RESPONSE,
+                value,
+            ),
             Self::ExecSignal(value) => Envelope::new(
                 generation,
                 microsandbox_protocol::exec_control::EXEC_CONTROL_RESPONSE,
+                value,
+            ),
+            Self::Resize(value) => Envelope::new(
+                generation,
+                microsandbox_protocol::resize::RESIZE_RESPONSE,
                 value,
             ),
             Self::Job(value) => {
@@ -149,6 +181,20 @@ impl Reply {
 //--------------------------------------------------------------------------------------------------
 
 impl Handler for ControlContext {
+    fn handle_resize(
+        &self,
+        request: microsandbox_protocol::resize::ResizeRequest,
+    ) -> Result<microsandbox_protocol::resize::ResizeResponse, ControlError> {
+        self.executor.resize_request(request)
+    }
+
+    fn handle_labels(
+        &self,
+        request: microsandbox_protocol::labels::LabelsRequest,
+    ) -> Result<microsandbox_protocol::labels::LabelsResponse, ControlError> {
+        self.executor.labels_request(request)
+    }
+
     fn handle_exec_signal(
         &self,
         request: microsandbox_protocol::exec_control::ExecControlRequest,
@@ -199,7 +245,11 @@ impl Handler for ControlContext {
                 .error
                 .clone()
                 .unwrap_or_else(|| "control operation failed".into()),
-            effect: if mutation {
+            effect: if mutation
+                && !matches!(
+                    result.error_code.as_deref(),
+                    Some("configuration_not_applied" | "memory_pressure")
+                ) {
                 ErrorEffect::Unknown
             } else {
                 ErrorEffect::None
@@ -210,6 +260,7 @@ impl Handler for ControlContext {
         } else if let Some(checkpoint) = result.checkpoint.clone() {
             Reply::Checkpoint(CheckpointResult {
                 checkpoint: Some(CheckpointState {
+                    configuration: checkpoint.configuration,
                     checkpoint_id: checkpoint.checkpoint_id,
                     checkpoint_root: checkpoint.checkpoint_root,
                     path: checkpoint.path,
@@ -223,6 +274,12 @@ impl Handler for ControlContext {
             Reply::Error(error())
         } else if let Some(caps) = result.capabilities {
             let capabilities = RuntimeCapabilities {
+                resize_operations: caps.resize_operations,
+                configuration_capture: caps.configuration_capture,
+                configuration_block_capacity: caps.configuration_block_capacity,
+                configuration_exec_limits: caps.configuration_exec_limits,
+                configuration_freeze_resources: caps.configuration_freeze_resources,
+                configuration_storage: caps.configuration_storage,
                 root_disk_grow: caps.root_disk_grow,
                 guest_flush_policy: caps.guest_flush_policy,
                 optional_disk_integrity: caps.optional_disk_integrity,
@@ -258,6 +315,7 @@ impl Handler for ControlContext {
             })
         } else if let Some(state) = result.disk_checkpoint {
             Reply::DiskCheckpoint(DiskCheckpointState {
+                configuration: state.configuration,
                 checkpoint_id: state.checkpoint_id,
                 path: state.path,
                 disk: state.disk,
@@ -330,6 +388,11 @@ fn operation_to_legacy(
             },
         },
         ControlOperation::CheckpointCreate(request) => Legacy::CheckpointCreate {
+            retain_configuration: request.retain_configuration,
+            retain_configuration_block_capacity: request.retain_configuration_block_capacity,
+            retain_configuration_exec_limits: request.retain_configuration_exec_limits,
+            retain_configuration_freeze_resources: request.retain_configuration_freeze_resources,
+            retain_configuration_storage: request.retain_configuration_storage,
             guest_flush: request.guest_flush,
             record_integrity: request.record_integrity,
             checkpoint_id: request.checkpoint_id,
@@ -340,6 +403,11 @@ fn operation_to_legacy(
             },
         },
         ControlOperation::DiskCheckpointCreate(request) => Legacy::DiskCheckpointCreate {
+            retain_configuration: request.retain_configuration,
+            retain_configuration_block_capacity: request.retain_configuration_block_capacity,
+            retain_configuration_exec_limits: request.retain_configuration_exec_limits,
+            retain_configuration_freeze_resources: request.retain_configuration_freeze_resources,
+            retain_configuration_storage: request.retain_configuration_storage,
             guest_flush: request.guest_flush,
             checkpoint_id: request.checkpoint_id,
         },
