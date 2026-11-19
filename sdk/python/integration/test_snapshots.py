@@ -32,7 +32,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
     snapshot_selector = f"{base_name}:{snapshot_name}"
     await remove_snapshot(snapshot_selector)
 
-    base = await Sandbox.create(base_name, image=IMAGE, cpus=1, memory=512, replace=True)
+    base = await Sandbox.create(base_name, image=IMAGE, cpus=1, memory=512)
     fork = None
     copied_handle = None
     try:
