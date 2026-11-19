@@ -148,6 +148,88 @@ fn assert_error(raw: &Value, bindings: StorageCaptureBindings, code: &str) {
 //--------------------------------------------------------------------------------------------------
 
 #[test]
+fn captured_mounts_use_receipt_geometry_and_never_reopen_the_source() {
+    let raw = source();
+    let source = RuntimeCaptureSource::from_recorded(&raw, None, None).unwrap();
+    let mut descriptor = manifest(false);
+    descriptor.set_owned_volumes(vec![owned("/owned")]).unwrap();
+    let observe = |receipt: Value| {
+        let inventory = serde_json::from_value(receipt).unwrap();
+        source
+            .project_observed_storage(Some(&inventory), &descriptor, Default::default())
+            .unwrap()
+    };
+    for quota in [Value::Null, json!(0), json!(19 * 1024 * 1024)] {
+        let saved = observe(json!({
+            "/data": {"kind":"file", "quota_bytes":0},
+            "/named": {"kind":"directory", "quota_bytes":quota},
+        }));
+        let mounts = saved.mounts.as_ref().and_then(SavedValue::value).unwrap();
+        assert!(mounts.iter().any(|mount| matches!(
+            mount,
+            SavedMount::Bind {
+                root_kind: SavedBindRootKind::File,
+                ..
+            }
+        )));
+        assert!(mounts.iter().any(|mount| matches!(mount, SavedMount::Named {storage: SavedNamedStorage::Directory {quota_mib}, ..} if quota_mib.map(u64::from) == quota.as_u64().map(|v| v/(1024*1024)))));
+        assert_eq!(
+            saved
+                .vsock
+                .as_ref()
+                .and_then(SavedValue::value)
+                .unwrap()
+                .len(),
+            2
+        );
+        let portable = serde_json::to_string(&saved).unwrap();
+        assert!(!portable.contains("PRIVATE_"));
+        assert!(portable.contains("active.storage.mounts.1"));
+        assert!(portable.contains("active.storage.routes.0"));
+    }
+
+    let observed = serde_json::from_value(json!({
+        "/data":{"kind":"directory","quota_bytes":0}, "/named":{"kind":"directory","quota_bytes":null}
+    })).unwrap();
+    let explicit = || StorageCaptureBindings {
+        mounts: [(
+            "/data".to_owned(),
+            SavedExternalMountCapture::Bind {
+                binding: reference("destination.bind"),
+                root_kind: SavedBindRootKind::Directory,
+            },
+        )]
+        .into(),
+        routes: Vec::new(),
+    };
+    let selected = source
+        .project_observed_storage(Some(&observed), &descriptor, explicit())
+        .unwrap();
+    assert!(
+        serde_json::to_string(&selected)
+            .unwrap()
+            .contains("destination.bind")
+    );
+    assert!(
+        source
+            .project_observed_storage(None, &descriptor, explicit())
+            .is_err()
+    );
+
+    // A missing mount, non-representable quota or contradictory bind quota makes
+    // the complete inventory unknown. Independently recorded sockets stay usable.
+    for receipt in [
+        json!({"/data":{"kind":"file","quota_bytes":0}}),
+        json!({"/data":{"kind":"file","quota_bytes":0},"/named":{"kind":"directory","quota_bytes":1}}),
+        json!({"/data":{"kind":"file","quota_bytes":null},"/named":{"kind":"directory","quota_bytes":0}}),
+    ] {
+        let saved = observe(receipt);
+        assert!(unknown(&saved.mounts));
+        assert!(saved.vsock.as_ref().and_then(SavedValue::value).is_some());
+    }
+}
+
+#[test]
 fn pending_storage_records_requests_without_borrowing_active_owned_payloads() {
     let raw = source();
     let original = raw.clone();

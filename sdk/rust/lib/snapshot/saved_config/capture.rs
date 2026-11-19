@@ -94,11 +94,23 @@ impl RuntimeCaptureSource<'_> {
         request: CaptureDocumentRequest<'_>,
         active_generation: SavedValue<String>,
     ) -> MicrosandboxResult<SavedSandboxConfig> {
+        let mut request = request;
+        let storage =
+            self.project_storage(std::mem::take(&mut request.storage), request.manifest)?;
+        self.assemble_document(request, active_generation, storage)
+    }
+
+    pub(crate) fn assemble_document(
+        &self,
+        request: CaptureDocumentRequest<'_>,
+        active_generation: SavedValue<String>,
+        active_storage: microsandbox_types::snapshot::saved_config::SavedStorageConfig,
+    ) -> MicrosandboxResult<SavedSandboxConfig> {
         let CaptureDocumentRequest {
             manifest,
             resources,
             network,
-            storage,
+            storage: _,
             runtime_controls,
             execution_controls,
             network_controls,
@@ -129,7 +141,7 @@ impl RuntimeCaptureSource<'_> {
             runtime: runtime.active,
             network: self.project_network(network, network_controls)?,
             execution: self.project_execution(&active_execution)?,
-            storage: self.project_storage(storage, manifest)?,
+            storage: active_storage,
         };
         let pending = match pending {
             Some(pending) => Some(SavedActiveConfig {

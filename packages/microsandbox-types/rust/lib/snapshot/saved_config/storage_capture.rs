@@ -14,7 +14,7 @@ use super::{
 
 /// Caller-supplied binding and active backing evidence. Capture must obtain this under
 /// its coherent source guard; it cannot infer named-volume storage from creation intent.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SavedExternalMountCapture {
     /// Observed bind root kind, with a caller-selected logical destination reference.
     Bind {

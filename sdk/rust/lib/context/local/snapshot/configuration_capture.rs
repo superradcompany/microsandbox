@@ -125,10 +125,6 @@ impl CapturedSandboxConfiguration {
     }
 
     /// Actual mounted kind/quota; missing evidence cannot certify a reusable binding.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "portable publication remains gated")
-    )]
     pub(crate) fn mounted_storage(
         &self,
     ) -> Option<&microsandbox_runtime::retention::MountedStorageEvidence> {
@@ -197,7 +193,7 @@ impl CapturedSandboxConfiguration {
     )]
     pub(crate) fn project_document(
         &self,
-        request: CaptureDocumentRequest<'_>,
+        mut request: CaptureDocumentRequest<'_>,
     ) -> MicrosandboxResult<SavedSandboxConfig> {
         // Reject a caller substituting later catalog intent, omitting selected intent, or
         // manufacturing pending defaults for an older receipt that did not record them.
@@ -215,15 +211,21 @@ impl CapturedSandboxConfiguration {
             .source
             .as_ref()
             .ok_or_else(|| invalid("capture has no recorded source"))?;
-        let mut document =
-            RuntimeCaptureSource::from_recorded(raw, self.init.as_ref(), self.scripts.as_ref())?
-                .project_document(
-                    request,
-                    SavedValue::Value {
-                        value: self.source.generation.to_string(),
-                        origin: SavedOrigin::Observed,
-                    },
-                )?;
+        let source =
+            RuntimeCaptureSource::from_recorded(raw, self.init.as_ref(), self.scripts.as_ref())?;
+        let storage = source.project_observed_storage(
+            self.mounted_storage(),
+            request.manifest,
+            std::mem::take(&mut request.storage),
+        )?;
+        let mut document = source.assemble_document(
+            request,
+            SavedValue::Value {
+                value: self.source.generation.to_string(),
+                origin: SavedOrigin::Observed,
+            },
+            storage,
+        )?;
         document.active.execution.exec_limits = Some(match self.exec_limits {
             Some(value) => SavedValue::Value {
                 value: SavedExecLimits(value),
