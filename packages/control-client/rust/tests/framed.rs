@@ -386,6 +386,7 @@ fn all_checked_operations_use_shared_records_and_full_width_values() {
 fn generation_two_checked_operations_use_stable_names_and_typed_results() {
     let checkpoint = CreateCheckpoint(CheckpointCreate {
         retain_configuration: None,
+        retain_configuration_block_capacity: None,
         retain_configuration_exec_limits: None,
         retain_configuration_storage: None,
         guest_flush: None,
@@ -400,6 +401,7 @@ fn generation_two_checked_operations_use_stable_names_and_typed_results() {
     assert_eq!(
         CreateDiskCheckpoint(DiskCheckpointCreate {
             retain_configuration: None,
+            retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: None,
             retain_configuration_storage: None,
             guest_flush: None,

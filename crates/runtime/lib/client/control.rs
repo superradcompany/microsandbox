@@ -40,6 +40,9 @@ pub enum ControlRequest {
         /// Retain host-private configuration evidence for this exact capture.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retain_configuration: Option<bool>,
+        /// Negotiated private capture of guest-visible block capacity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retain_configuration_block_capacity: Option<bool>,
         /// Request execution-limit evidence only after capability negotiation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retain_configuration_exec_limits: Option<bool>,
@@ -150,6 +153,9 @@ pub enum ControlRequest {
         /// Retain host-private configuration evidence for this exact capture.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retain_configuration: Option<bool>,
+        /// Negotiated private capture of guest-visible block capacity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retain_configuration_block_capacity: Option<bool>,
         /// Request execution-limit evidence only after capability negotiation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retain_configuration_exec_limits: Option<bool>,
@@ -325,6 +331,9 @@ pub struct ControlCapabilities {
     /// Captures can retain configuration under runtime mutation authority.
     #[serde(default)]
     pub configuration_capture: bool,
+    /// Negotiated private capture of guest-visible block capacity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub configuration_block_capacity: bool,
     /// Optional private receipt evidence for effective guest execution limits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub configuration_exec_limits: bool,
@@ -551,6 +560,7 @@ mod tests {
             capabilities: Some(ControlCapabilities {
                 resize_operations: false,
                 configuration_capture: true,
+                configuration_block_capacity: true,
                 configuration_exec_limits: true,
                 configuration_storage: true,
                 guest_flush_policy: true,

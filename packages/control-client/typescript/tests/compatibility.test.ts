@@ -477,7 +477,7 @@ it("legacy capture prepared values retain their existing mutability", async () =
   }
 });
 
-it("storage capture negotiates separately and leaves old operations usable", async () => {
+it.each([false, true])("storage capture negotiates requested evidence (block capacity: %s)", async (block) => {
   const { CreateDiskCheckpoint } = await import("../src/index.js");
   for (const supported of [false, true]) {
     let captures = 0, probes = 0;
@@ -492,7 +492,7 @@ it("storage capture negotiates separately and leaves old operations usable", asy
         transport.feed(packet(0, "control.welcome", { protocol: "msb.control", generation: 2, max_frame_size: 4096, max_in_flight: 4 }));
       } else if (envelope.t === "control.capabilities") {
         probes++;
-        send(transport, id, "control.capabilities.result", { ...caps, configuration_capture: true, configuration_storage: supported });
+        send(transport, id, "control.capabilities.result", { ...caps, configuration_capture: true, configuration_storage: block || supported, configuration_block_capacity: block && supported });
       } else if (envelope.t === "control.disk.checkpoint.create") {
         captures++;
         send(transport, id, "control.disk.checkpoint.result", { checkpoint_id: "capture", path: "/capture", disk: {}, configuration: { sha256: "a".repeat(64) } });
@@ -501,7 +501,7 @@ it("storage capture negotiates separately and leaves old operations usable", asy
       } else throw new Error("unexpected operation");
     }));
     const client = await ControlConnection.connectConnector(dialer);
-    const result = client.requestTyped(new CreateDiskCheckpoint({ checkpoint_id: "capture", retain_configuration: true, retain_configuration_storage: true }));
+    const result = client.requestTyped(new CreateDiskCheckpoint({ checkpoint_id: "capture", retain_configuration: true, retain_configuration_storage: true, ...(block ? { retain_configuration_block_capacity: true } : {}) }));
     if (supported) expect((await result).configuration).toEqual({ sha256: "a".repeat(64) });
     else await expect(result).rejects.toMatchObject({ code: "unsupported_operation", delivery: "not_sent" });
     expect(probes).toBe(1); expect(captures).toBe(supported ? 1 : 0);
@@ -509,7 +509,6 @@ it("storage capture negotiates separately and leaves old operations usable", asy
     await client.close();
   }
 });
-
 
 it("storage capture refuses old JSON receipt peers without dispatch", async () => {
   const { CreateDiskCheckpoint } = await import("../src/index.js");

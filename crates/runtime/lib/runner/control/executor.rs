@@ -52,6 +52,7 @@ pub struct RuntimeControlExecutor {
     retention_db: microsandbox_db::DbWriteConnection,
     runtime_script_root: Option<std::fs::File>,
     mounted_filesystems: crate::retention::MountedStorageEvidence,
+    managed_block_mounts: BTreeMap<String, String>,
 }
 
 pub(super) struct ExecutorState {
@@ -129,6 +130,10 @@ impl RuntimeControlExecutor {
         checkpoint.inherit_local_memory(inherited_memory);
         Ok(Self {
             mounted_filesystems: mounted_filesystems.guest_evidence(guest_bootstrap),
+            managed_block_mounts: crate::runner::storage_observation::managed_block_mounts(
+                &vm_config.disks,
+                guest_bootstrap,
+            ),
             runtime_script_root,
             retention_db,
             signal_runtime: runtime.clone(),
@@ -644,11 +649,20 @@ impl RuntimeControlExecutor {
         let response = match request {
             ControlRequest::DiskCheckpointCreate {
                 retain_configuration,
+                retain_configuration_block_capacity,
                 retain_configuration_exec_limits,
                 retain_configuration_storage,
                 checkpoint_id,
                 guest_flush,
             } => {
+                if retain_configuration_block_capacity == Some(true)
+                    && retain_configuration_storage != Some(true)
+                {
+                    return control_error(
+                        "invalid_request",
+                        "block capacity requires mounted storage evidence",
+                    );
+                }
                 if (retain_configuration_storage == Some(true)
                     || retain_configuration_exec_limits == Some(true))
                     && retain_configuration != Some(true)
@@ -666,6 +680,8 @@ impl RuntimeControlExecutor {
                         self.runtime_script_root.as_ref(),
                         (retain_configuration_storage == Some(true))
                             .then_some(&self.mounted_filesystems),
+                        (retain_configuration_block_capacity == Some(true))
+                            .then_some(&self.managed_block_mounts),
                         // Ready belongs to this executor's guest and the policy is immutable.
                         // Older guests omit it; never manufacture current defaults as evidence.
                         (retain_configuration_exec_limits == Some(true))
@@ -851,6 +867,7 @@ impl RuntimeControlExecutor {
             }
             ControlRequest::CheckpointCreate {
                 retain_configuration,
+                retain_configuration_block_capacity,
                 retain_configuration_exec_limits,
                 retain_configuration_storage,
                 guest_flush,
@@ -858,6 +875,14 @@ impl RuntimeControlExecutor {
                 intent,
                 record_integrity,
             } => {
+                if retain_configuration_block_capacity == Some(true)
+                    && retain_configuration_storage != Some(true)
+                {
+                    return control_error(
+                        "invalid_request",
+                        "block capacity requires mounted storage evidence",
+                    );
+                }
                 if (retain_configuration_storage == Some(true)
                     || retain_configuration_exec_limits == Some(true))
                     && retain_configuration != Some(true)
@@ -875,6 +900,8 @@ impl RuntimeControlExecutor {
                         self.runtime_script_root.as_ref(),
                         (retain_configuration_storage == Some(true))
                             .then_some(&self.mounted_filesystems),
+                        (retain_configuration_block_capacity == Some(true))
+                            .then_some(&self.managed_block_mounts),
                         // Ready belongs to this executor's guest and the policy is immutable.
                         // Older guests omit it; never manufacture current defaults as evidence.
                         (retain_configuration_exec_limits == Some(true))
@@ -1078,6 +1105,7 @@ impl RuntimeControlExecutor {
                 capabilities: Some(ControlCapabilities {
                     resize_operations: true,
                     configuration_capture: true,
+                    configuration_block_capacity: true,
                     configuration_exec_limits: true,
                     configuration_storage: true,
                     cpu_resize: self.vm.cpu_resize_supported(),

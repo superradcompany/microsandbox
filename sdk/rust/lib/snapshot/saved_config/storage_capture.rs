@@ -2,9 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use microsandbox_runtime::retention::{
-    MountedFilesystem, MountedFilesystemKind, MountedStorageEvidence,
-};
+use microsandbox_runtime::retention::{MountedFilesystemKind, MountedStorageEvidence};
 use microsandbox_types::VolumeMount;
 use microsandbox_types::snapshot::Manifest;
 use microsandbox_types::snapshot::saved_config::{
@@ -129,8 +127,7 @@ impl RuntimeCaptureSource<'_> {
                         id: format!("active.storage.mounts.{index}"),
                     },
                 };
-                let backing = observed.and_then(|inventory| inventory.get(mount.guest()));
-                let Some(requirement) = observed_external_mount(mount, binding, backing) else {
+                let Some(requirement) = observed_external_mount(mount, binding, observed) else {
                     complete = false;
                     break;
                 };
@@ -300,9 +297,10 @@ impl RuntimeCaptureSource<'_> {
 fn observed_external_mount(
     mount: &VolumeMount,
     binding: SavedBindingReference,
-    backing: Option<MountedFilesystem>,
+    observed: Option<&MountedStorageEvidence>,
 ) -> Option<SavedExternalMountCapture> {
     const MIB: u64 = 1024 * 1024;
+    let backing = observed.and_then(|e| e.get(mount.guest()));
     Some(match mount {
         VolumeMount::DiskImage { .. } => SavedExternalMountCapture::DiskImage { binding },
         VolumeMount::Bind { quota_mib, .. } => {
@@ -317,17 +315,25 @@ fn observed_external_mount(
             SavedExternalMountCapture::Bind { binding, root_kind }
         }
         VolumeMount::Named { .. } => {
-            let actual =
-                backing.filter(|observed| observed.kind == MountedFilesystemKind::Directory)?;
-            let quota_mib = match actual.quota_bytes {
-                Some(bytes) if bytes.is_multiple_of(MIB) => Some(u32::try_from(bytes / MIB).ok()?),
+            let storage = match observed?.block_capacity_bytes(mount.guest()) {
+                Some(bytes) if bytes.is_multiple_of(MIB) => SavedNamedStorage::Disk {
+                    capacity_mib: u32::try_from(bytes / MIB).ok()?,
+                },
                 Some(_) => return None,
-                None => None,
+                None => {
+                    let directory =
+                        backing.filter(|fs| fs.kind == MountedFilesystemKind::Directory)?;
+                    let quota_mib = match directory.quota_bytes {
+                        Some(bytes) if bytes.is_multiple_of(MIB) => {
+                            Some(u32::try_from(bytes / MIB).ok()?)
+                        }
+                        Some(_) => return None,
+                        None => None,
+                    };
+                    SavedNamedStorage::Directory { quota_mib }
+                }
             };
-            SavedExternalMountCapture::Named {
-                binding,
-                storage: SavedNamedStorage::Directory { quota_mib },
-            }
+            SavedExternalMountCapture::Named { binding, storage }
         }
         VolumeMount::Owned { .. } | VolumeMount::Tmpfs { .. } => return None,
     })

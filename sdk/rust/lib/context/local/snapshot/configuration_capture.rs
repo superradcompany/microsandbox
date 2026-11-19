@@ -53,6 +53,7 @@ pub(crate) struct ExpectedConfigurationCapture {
     owner: RetentionOwner,
     storage_requested: bool,
     exec_limits_requested: bool,
+    block_capacity_requested: bool,
 }
 
 /// Retains lifecycle ownership and exact evidence through a stopped disk cut.
@@ -358,6 +359,8 @@ impl ExpectedConfigurationCapture {
             directory: local.sandboxes_dir().join(name),
             owner,
             storage_requested: session.capabilities().configuration_storage,
+            block_capacity_requested: session.capabilities().configuration_storage
+                && session.capabilities().configuration_block_capacity,
             exec_limits_requested: session.capabilities().configuration_exec_limits,
         }))
     }
@@ -380,6 +383,15 @@ impl ExpectedConfigurationCapture {
         if !self.storage_requested && captured.storage().is_some() {
             return Err(invalid(
                 "runtime storage evidence did not match capture negotiation",
+            ));
+        }
+        if !self.block_capacity_requested
+            && captured
+                .storage()
+                .is_some_and(|storage| storage.has_block_capacity())
+        {
+            return Err(invalid(
+                "runtime block capacity evidence did not match capture negotiation",
             ));
         }
         if !self.exec_limits_requested && captured.exec_limits().is_some() {
@@ -624,6 +636,7 @@ mod tests {
                 directory: self.home.path().to_path_buf(),
                 owner,
                 storage_requested,
+                block_capacity_requested: false,
                 exec_limits_requested,
             }
             .read(
@@ -1023,6 +1036,7 @@ mod tests {
             directory: fixture.home.path().to_path_buf(),
             owner: fixture.owner,
             storage_requested: false,
+            block_capacity_requested: false,
             exec_limits_requested: false,
         }
         .read("capture_one", "full:root", None)

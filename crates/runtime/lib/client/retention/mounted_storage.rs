@@ -33,7 +33,24 @@ pub struct MountedFilesystem {
 /// No Debug implementation: even guest paths should not leak through diagnostics.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct MountedStorageEvidence(pub(crate) BTreeMap<String, MountedFilesystem>);
+pub struct MountedStorageEvidence(pub(crate) BTreeMap<String, MountedBacking>);
+
+// Keep the released filesystem representation unchanged. The optional block representation
+// is sent only when the reader advertised support before dispatch.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub(crate) enum MountedBacking {
+    Filesystem(MountedFilesystem),
+    Block {
+        capacity_bytes: std::num::NonZeroU64,
+    },
+}
+
+impl From<MountedFilesystem> for MountedBacking {
+    fn from(value: MountedFilesystem) -> Self {
+        Self::Filesystem(value)
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -42,7 +59,37 @@ pub struct MountedStorageEvidence(pub(crate) BTreeMap<String, MountedFilesystem>
 impl MountedStorageEvidence {
     /// Read only explicitly observed backing; unavailable mappings remain unknown.
     pub fn get(&self, guest_path: &str) -> Option<MountedFilesystem> {
-        self.0.get(guest_path).copied()
+        match self.0.get(guest_path)? {
+            MountedBacking::Filesystem(fs) => Some(*fs),
+            MountedBacking::Block { .. } => None,
+        }
+    }
+
+    /// Guest-visible virtual capacity. Sparse allocation and directory write quotas have
+    /// different meanings and must never fill this field.
+    pub fn block_capacity_bytes(&self, guest_path: &str) -> Option<u64> {
+        match self.0.get(guest_path)? {
+            MountedBacking::Block { capacity_bytes } => Some(capacity_bytes.get()),
+            MountedBacking::Filesystem(_) => None,
+        }
+    }
+
+    /// Used by the recipient to reject unsolicited evidence.
+    pub fn has_block_capacity(&self) -> bool {
+        self.0
+            .values()
+            .any(|value| matches!(value, MountedBacking::Block { .. }))
+    }
+
+    #[cfg(feature = "runner")]
+    pub(crate) fn record_block(&mut self, path: &str, capacity: u64) {
+        if self.0.len() < microsandbox_types::snapshot::saved_config::MAX_SAVED_CONFIG_ENTRIES
+            && let Some(capacity_bytes) = std::num::NonZeroU64::new(capacity)
+        {
+            self.0
+                .entry(path.to_owned())
+                .or_insert(MountedBacking::Block { capacity_bytes });
+        }
     }
 
     pub(crate) fn validate(&self) -> std::io::Result<()> {

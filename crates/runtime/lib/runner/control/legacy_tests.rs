@@ -52,6 +52,7 @@ fn secrets_update_round_trips_through_json() {
 fn checkpoint_request_round_trips_through_json() {
     let request = ControlRequest::CheckpointCreate {
         retain_configuration: None,
+        retain_configuration_block_capacity: None,
         retain_configuration_exec_limits: None,
         retain_configuration_storage: None,
         guest_flush: None,
@@ -71,6 +72,7 @@ fn checkpoint_request_round_trips_through_json() {
         parsed,
         ControlRequest::CheckpointCreate {
             retain_configuration: None,
+            retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: None,
             retain_configuration_storage: None,
             guest_flush: None,
@@ -85,6 +87,7 @@ fn checkpoint_request_round_trips_through_json() {
 fn disk_only_capture_has_a_distinct_wire_operation() {
     let request = ControlRequest::DiskCheckpointCreate {
         retain_configuration: None,
+        retain_configuration_block_capacity: None,
         retain_configuration_exec_limits: None,
         retain_configuration_storage: None,
         guest_flush: None,
@@ -140,6 +143,7 @@ fn capabilities_response_serializes_flags() {
         capabilities: Some(ControlCapabilities {
             resize_operations: false,
             configuration_capture: true,
+            configuration_block_capacity: true,
             configuration_exec_limits: true,
             configuration_storage: true,
             guest_flush_policy: true,

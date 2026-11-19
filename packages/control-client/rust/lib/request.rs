@@ -385,10 +385,11 @@ impl Request<ControlProtocol> for GetPauseState {
 }
 
 macro_rules! compatible_v2 {
-    ($request:ty, $json:expr, $decode:expr $(, $configuration:expr, $storage:expr, $exec_limits:expr)?) => {
+    ($request:ty, $json:expr, $decode:expr $(, $configuration:expr, $storage:expr, $block:expr, $exec_limits:expr)?) => {
         impl CompatibleControlRequest for $request {
             $(fn requires_configuration_capture(&self) -> bool { ($configuration)(self) }
               fn requires_configuration_storage(&self) -> bool { ($storage)(self) }
+              fn requires_configuration_block_capacity(&self) -> bool { ($block)(self) }
               fn requires_configuration_exec_limits(&self) -> bool { ($exec_limits)(self) })?
             fn min_generation(&self) -> u8 {
                 2
@@ -436,6 +437,9 @@ compatible_v2!(
         if let Some(retain) = request.0.retain_configuration {
             value["retain_configuration"] = retain.into();
         }
+        if let Some(block) = request.0.retain_configuration_block_capacity {
+            value["retain_configuration_block_capacity"] = block.into();
+        }
         if let Some(limits) = request.0.retain_configuration_exec_limits {
             value["retain_configuration_exec_limits"] = limits.into();
         }
@@ -447,6 +451,7 @@ compatible_v2!(
     decode_checkpoint_json,
     |request: &CreateCheckpoint| request.0.retain_configuration == Some(true),
     |request: &CreateCheckpoint| request.0.retain_configuration_storage == Some(true),
+    |request: &CreateCheckpoint| request.0.retain_configuration_block_capacity == Some(true),
     |request: &CreateCheckpoint| request.0.retain_configuration_exec_limits == Some(true)
 );
 compatible_v2!(
@@ -460,6 +465,9 @@ compatible_v2!(
         if let Some(retain) = request.0.retain_configuration {
             value["retain_configuration"] = retain.into();
         }
+        if let Some(block) = request.0.retain_configuration_block_capacity {
+            value["retain_configuration_block_capacity"] = block.into();
+        }
         if let Some(limits) = request.0.retain_configuration_exec_limits {
             value["retain_configuration_exec_limits"] = limits.into();
         }
@@ -471,6 +479,7 @@ compatible_v2!(
     |reply| decode_json_field(reply, "disk_checkpoint"),
     |request: &CreateDiskCheckpoint| request.0.retain_configuration == Some(true),
     |request: &CreateDiskCheckpoint| request.0.retain_configuration_storage == Some(true),
+    |request: &CreateDiskCheckpoint| request.0.retain_configuration_block_capacity == Some(true),
     |request: &CreateDiskCheckpoint| request.0.retain_configuration_exec_limits == Some(true)
 );
 compatible_v2!(

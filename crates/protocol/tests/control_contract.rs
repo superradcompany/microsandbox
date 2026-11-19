@@ -594,6 +594,7 @@ fn generation_two_inventory_and_requests_are_additive() {
             "control.checkpoint.create",
             &CheckpointCreate {
                 retain_configuration: None,
+                retain_configuration_block_capacity: None,
                 retain_configuration_exec_limits: None,
                 retain_configuration_storage: None,
                 guest_flush: None,
@@ -608,6 +609,7 @@ fn generation_two_inventory_and_requests_are_additive() {
             "control.disk.checkpoint.create",
             &DiskCheckpointCreate {
                 retain_configuration: None,
+                retain_configuration_block_capacity: None,
                 retain_configuration_exec_limits: None,
                 retain_configuration_storage: None,
                 guest_flush: None,

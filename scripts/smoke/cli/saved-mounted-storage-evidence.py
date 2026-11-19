@@ -95,8 +95,8 @@ for kind, binary, capture_binary, expected in cases:
                     assert storage['/mnt/dir'] == {'kind': 'directory', 'quota_bytes': 0 if quota == '0' else 32 * 1024 * 1024}, storage
                     assert storage['/mnt/named'] == {'kind': 'directory', 'quota_bytes': None}, storage
                     assert storage['/mnt/owned'] == {'kind': 'directory', 'quota_bytes': 4 * 1024 ** 3}, storage
-                    assert '/mnt/disk' not in storage, 'block device must not be fabricated as filesystem backend'
-                    assert str(source) not in json.dumps(storage) and 'ndir' not in json.dumps(storage)
+                    assert storage['/mnt/disk'] == {'capacity_bytes': 512 * 1024 ** 2}, storage
+                    assert str(source) not in json.dumps(storage) and all(name not in json.dumps(storage) for name in ('ndir', 'ndisk'))
                 with tarfile.open(archive) as package:
                     names = package.getnames()
                     assert not any(('last-active' in name for name in names)), names

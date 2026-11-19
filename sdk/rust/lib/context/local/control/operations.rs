@@ -167,6 +167,10 @@ impl ControlSession {
         }
         let request = microsandbox_protocol::control::CheckpointCreate {
             retain_configuration: retain_configuration.then_some(true),
+            retain_configuration_block_capacity: (retain_configuration
+                && capabilities.configuration_storage
+                && capabilities.configuration_block_capacity)
+                .then_some(true),
             retain_configuration_exec_limits: (retain_configuration
                 && capabilities.configuration_exec_limits)
                 .then_some(true),
@@ -205,6 +209,10 @@ impl ControlSession {
         }
         let request = microsandbox_protocol::control::DiskCheckpointCreate {
             retain_configuration: retain_configuration.then_some(true),
+            retain_configuration_block_capacity: (retain_configuration
+                && capabilities.configuration_storage
+                && capabilities.configuration_block_capacity)
+                .then_some(true),
             retain_configuration_exec_limits: (retain_configuration
                 && capabilities.configuration_exec_limits)
                 .then_some(true),

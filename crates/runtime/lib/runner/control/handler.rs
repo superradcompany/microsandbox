@@ -276,6 +276,7 @@ impl Handler for ControlContext {
             let capabilities = RuntimeCapabilities {
                 resize_operations: caps.resize_operations,
                 configuration_capture: caps.configuration_capture,
+                configuration_block_capacity: caps.configuration_block_capacity,
                 configuration_exec_limits: caps.configuration_exec_limits,
                 configuration_storage: caps.configuration_storage,
                 root_disk_grow: caps.root_disk_grow,
@@ -387,6 +388,7 @@ fn operation_to_legacy(
         },
         ControlOperation::CheckpointCreate(request) => Legacy::CheckpointCreate {
             retain_configuration: request.retain_configuration,
+            retain_configuration_block_capacity: request.retain_configuration_block_capacity,
             retain_configuration_exec_limits: request.retain_configuration_exec_limits,
             retain_configuration_storage: request.retain_configuration_storage,
             guest_flush: request.guest_flush,
@@ -400,6 +402,7 @@ fn operation_to_legacy(
         },
         ControlOperation::DiskCheckpointCreate(request) => Legacy::DiskCheckpointCreate {
             retain_configuration: request.retain_configuration,
+            retain_configuration_block_capacity: request.retain_configuration_block_capacity,
             retain_configuration_exec_limits: request.retain_configuration_exec_limits,
             retain_configuration_storage: request.retain_configuration_storage,
             guest_flush: request.guest_flush,

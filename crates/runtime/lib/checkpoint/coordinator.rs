@@ -607,7 +607,7 @@ impl CheckpointCoordinator {
         // execution serialization is needed for this cold-boot storage artifact.
         let result: Result<_, Failure> = (|| {
             let selected_configuration = configuration
-                .map(|context| self.runtime.block_on(context.observe()))
+                .map(|context| self.runtime.block_on(context.observe(vm)))
                 .transpose()
                 .map_err(Failure::pre_rebind)?;
             if !self.owned_directories.is_empty() {
@@ -1414,7 +1414,7 @@ impl CheckpointCoordinator {
         configuration: Option<&ConfigurationCaptureContext<'_>>,
     ) -> Result<PausedCapture, CheckpointFailure> {
         let selected_configuration = configuration
-            .map(|context| self.runtime.block_on(context.observe()))
+            .map(|context| self.runtime.block_on(context.observe(vm)))
             .transpose()
             .map_err(CheckpointFailure::resumable)?;
         let mut timings = PausedCaptureTimings::default();

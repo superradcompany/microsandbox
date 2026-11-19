@@ -64,6 +64,7 @@ export function jsonRuntimeCapabilities(value: JsonValue | undefined): RuntimeCa
   const optional = (name: string): boolean => fields.has(name) ? boolean(name) : false;
   return {
     configuration_capture: optional("configuration_capture"),
+    configuration_block_capacity: optional("configuration_block_capacity"),
     configuration_exec_limits: optional("configuration_exec_limits"),
     configuration_storage: optional("configuration_storage"),
     root_disk_grow: optional("root_disk_grow"), guest_flush_policy: optional("guest_flush_policy"),

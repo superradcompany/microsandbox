@@ -188,6 +188,23 @@ fn captured_mounts_use_receipt_geometry_and_never_reopen_the_source() {
         assert!(portable.contains("active.storage.routes.0"));
     }
 
+    let disk = observe(
+        json!({"/data":{"kind":"file","quota_bytes":0},"/named":{"capacity_bytes": 77 * 1024 * 1024}}),
+    );
+    assert!(
+        disk.mounts
+            .as_ref()
+            .and_then(SavedValue::value)
+            .unwrap()
+            .iter()
+            .any(|mount| matches!(
+                mount,
+                SavedMount::Named {
+                    storage: SavedNamedStorage::Disk { capacity_mib: 77 },
+                    ..
+                }
+            ))
+    );
     let observed = serde_json::from_value(json!({
         "/data":{"kind":"directory","quota_bytes":0}, "/named":{"kind":"directory","quota_bytes":null}
     })).unwrap();
@@ -220,6 +237,8 @@ fn captured_mounts_use_receipt_geometry_and_never_reopen_the_source() {
     // the complete inventory unknown. Independently recorded sockets stay usable.
     for receipt in [
         json!({"/data":{"kind":"file","quota_bytes":0}}),
+        json!({"/data":{"kind":"file","quota_bytes":0},"/named":{"capacity_bytes":1048577}}),
+        json!({"/data":{"kind":"file","quota_bytes":0},"/named":{"capacity_bytes":u64::MAX-1048575}}),
         json!({"/data":{"kind":"file","quota_bytes":0},"/named":{"kind":"directory","quota_bytes":1}}),
         json!({"/data":{"kind":"file","quota_bytes":null},"/named":{"kind":"directory","quota_bytes":0}}),
     ] {

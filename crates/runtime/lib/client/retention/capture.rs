@@ -44,6 +44,7 @@ pub(crate) struct ConfigurationCaptureContext<'a> {
     db: &'a DbWriteConnection,
     runtime_script_root: Option<&'a fs::File>,
     storage: Option<&'a MountedStorageEvidence>,
+    block_mounts: Option<&'a std::collections::BTreeMap<String, String>>,
     exec_limits: Option<ExecLimits>,
 }
 
@@ -103,6 +104,7 @@ impl<'a> ConfigurationCaptureContext<'a> {
         db: &'a DbWriteConnection,
         runtime_script_root: Option<&'a fs::File>,
         storage: Option<&'a MountedStorageEvidence>,
+        block_mounts: Option<&'a std::collections::BTreeMap<String, String>>,
         exec_limits: Option<ExecLimits>,
     ) -> Self {
         Self {
@@ -110,11 +112,15 @@ impl<'a> ConfigurationCaptureContext<'a> {
             db,
             runtime_script_root,
             storage,
+            block_mounts,
             exec_limits,
         }
     }
 
-    pub(crate) async fn observe(&self) -> io::Result<ConfigurationCaptureObservation<'a>> {
+    pub(crate) async fn observe(
+        &self,
+        vm: &msb_krun::VmControl,
+    ) -> io::Result<ConfigurationCaptureObservation<'a>> {
         let selected = self.journal.select_live_configuration(self.db).await?;
         let scripts = ScriptBackingObservation::observe(
             self.runtime_script_root,
@@ -132,8 +138,31 @@ impl<'a> ConfigurationCaptureContext<'a> {
             .map(|selected| read_retained_init(sandbox_directory, selected.configuration()))
             .transpose()?
             .flatten();
+        let mut storage = self.storage.cloned();
+        if let (Some(storage), Some(devices), Some(mounts)) = (
+            storage.as_mut(),
+            self.block_mounts,
+            selected
+                .as_ref()
+                .and_then(|s| s.configuration().source.as_ref())
+                .and_then(|s| s.get("mounts"))
+                .and_then(serde_json::Value::as_array),
+        ) && mounts.len() <= microsandbox_types::snapshot::saved_config::MAX_SAVED_CONFIG_ENTRIES
+        {
+            // Only the mount role comes from the confirmed configuration. Identity comes
+            // from the admitted bootstrap and capacity from the device at the actual cut.
+            for mount in mounts {
+                if mount.get("type").and_then(serde_json::Value::as_str) == Some("Named")
+                    && let Some(path) = mount.get("guest").and_then(serde_json::Value::as_str)
+                    && let Some(id) = devices.get(path)
+                    && let Ok(Some(bytes)) = vm.block_capacity_bytes(id)
+                {
+                    storage.record_block(path, bytes);
+                }
+            }
+        }
         Ok(ConfigurationCaptureObservation {
-            storage: self.storage.cloned(),
+            storage,
             exec_limits: self.exec_limits,
             init,
             scripts,
@@ -685,14 +714,16 @@ mod tests {
             MountedFilesystem {
                 kind: MountedFilesystemKind::Directory,
                 quota_bytes: Some(0),
-            },
+            }
+            .into(),
         );
         storage.0.insert(
             "/file".into(),
             MountedFilesystem {
                 kind: MountedFilesystemKind::File,
                 quota_bytes: None,
-            },
+            }
+            .into(),
         );
         for requested in [false, true] {
             let id = if requested { "extended" } else { "original" };

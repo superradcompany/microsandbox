@@ -155,6 +155,7 @@ impl JsonControlClient {
                 options,
                 request.requires_configuration_capture(),
                 request.requires_configuration_storage(),
+                request.requires_configuration_block_capacity(),
                 request.requires_configuration_exec_limits(),
             )
             .await?;
@@ -177,7 +178,7 @@ impl JsonControlClient {
         request: Zeroizing<Vec<u8>>,
         options: RequestOptions,
     ) -> ControlClientResult<JsonReply> {
-        self.operation_bytes_checked(request, options, false, false, false)
+        self.operation_bytes_checked(request, options, false, false, false, false)
             .await
     }
 
@@ -187,10 +188,13 @@ impl JsonControlClient {
         options: RequestOptions,
         configuration_capture: bool,
         configuration_storage: bool,
+        configuration_block_capacity: bool,
         configuration_exec_limits: bool,
     ) -> ControlClientResult<JsonReply> {
-        let configuration_capture =
-            configuration_capture || configuration_storage || configuration_exec_limits;
+        let configuration_capture = configuration_capture
+            || configuration_storage
+            || configuration_block_capacity
+            || configuration_exec_limits;
         // JSON uses separate discovery and mutation sockets. Only independently verified runtime
         // ownership can prevent a replacement peer from silently ignoring a new request field.
         if configuration_capture && !self.dialer.verified() {
@@ -216,6 +220,8 @@ impl JsonControlClient {
                     if configuration_capture
                         && (!capabilities.configuration_capture
                             || (configuration_storage && !capabilities.configuration_storage)
+                            || (configuration_block_capacity
+                                && !capabilities.configuration_block_capacity)
                             || (configuration_exec_limits
                                 && !capabilities.configuration_exec_limits))
                     {

@@ -33,6 +33,7 @@ export interface CheckedControlRequest<T> extends Request<T> {
 export interface CompatibleControlRequest<T> extends Request<T> {
   /** New optional capture contract; older/custom requests keep their existing route. */
   readonly requiresConfigurationCapture?: boolean;
+  readonly requiresConfigurationBlockCapacity?: boolean;
   readonly requiresConfigurationExecLimits?: boolean;
   readonly requiresConfigurationStorage?: boolean;
   readonly minGeneration: number;

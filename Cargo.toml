@@ -230,5 +230,5 @@ russh-sftp = "2.3.0"
 # Replace these patches with the maintainer's published native version before
 # publishing dependent crates: workspace patches do not propagate to consumers.
 [patch.crates-io]
-msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "46209182d92f43b71d4599a8319d8975e1d2fda7" }
-msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "46209182d92f43b71d4599a8319d8975e1d2fda7" }
+msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "77cad8a1b7d3c519fe12fd1e1e8dc6b2c5d383a3" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "77cad8a1b7d3c519fe12fd1e1e8dc6b2c5d383a3" }

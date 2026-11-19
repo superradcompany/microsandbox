@@ -52,7 +52,7 @@ impl MountedFilesystemInventory {
                 && !guest.contains('\0')
                 && let Some(observed) = self.for_guest(bootstrap, guest)
             {
-                evidence.0.insert(guest.clone(), observed);
+                evidence.0.insert(guest.clone(), observed.into());
             }
         }
         evidence
@@ -126,6 +126,60 @@ impl fmt::Debug for MountedFilesystemInventory {
             .field("exhausted", &self.exhausted)
             .finish()
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Select unique guest paths backed by an admitted managed block device. A restored
+/// placeholder or ambiguous transport must never acquire evidence from a sibling.
+pub(crate) fn managed_block_mounts(
+    disks: &[super::vm::DiskMountSpec],
+    bootstrap: &GuestBootstrap,
+) -> BTreeMap<String, String> {
+    if bootstrap.disk_mounts.is_empty() || disks.len() > MAX_SAVED_CONFIG_ENTRIES {
+        return BTreeMap::new();
+    }
+    let paths = bootstrap
+        .file_mounts
+        .iter()
+        .map(|m| &m.guest_path)
+        .chain(bootstrap.dir_mounts.iter().map(|m| &m.guest_path))
+        .chain(bootstrap.tmpfs_mounts.iter().map(|m| &m.path))
+        .chain(bootstrap.disk_mounts.iter().map(|m| &m.guest_path));
+    let mut counts = BTreeMap::new();
+    for (index, path) in paths.enumerate() {
+        if index == MAX_SAVED_CONFIG_ENTRIES {
+            return BTreeMap::new();
+        }
+        *counts.entry(path).or_insert(0usize) += 1;
+    }
+    let admitted: BTreeMap<_, _> = disks.iter().map(|disk| (&disk.id, disk)).collect();
+    if admitted.len() != disks.len() {
+        return BTreeMap::new();
+    }
+    let mut ids = BTreeSet::new();
+    let mut bindings = BTreeMap::new();
+    for mount in &bootstrap.disk_mounts {
+        if !ids.insert(&mount.id) {
+            return BTreeMap::new();
+        }
+        if let Some(disk) = admitted.get(&mount.id)
+            && disk.snapshot_owned
+            && !disk.lifecycle_owned
+            // The CLI supplies the canonical guest path through bootstrap only.
+            && (disk.guest.is_empty() || disk.guest == mount.guest_path)
+            && disk.readonly == mount.flags.readonly
+            && counts.get(&mount.guest_path) == Some(&1)
+            && mount.guest_path.len() <= 4096
+            && mount.guest_path.starts_with('/')
+            && !mount.guest_path.contains('\0')
+        {
+            bindings.insert(mount.guest_path.clone(), disk.id.clone());
+        }
+    }
+    bindings
 }
 
 //--------------------------------------------------------------------------------------------------

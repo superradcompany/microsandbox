@@ -48,6 +48,11 @@ pub trait CompatibleControlRequest: Request<ControlProtocol, Error = ControlClie
         false
     }
 
+    /// Whether private block capacity must be supported by the same capture peer.
+    fn requires_configuration_block_capacity(&self) -> bool {
+        false
+    }
+
     /// Whether private effective execution-limit evidence is required before dispatch.
     fn requires_configuration_exec_limits(&self) -> bool {
         false

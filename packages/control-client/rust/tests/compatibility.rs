@@ -910,6 +910,7 @@ async fn retained_capture_requires_verified_json_ownership_and_fresh_capability(
         };
         let request = CreateCheckpoint(CheckpointCreate {
             retain_configuration: Some(true),
+            retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: None,
             retain_configuration_storage: None,
             guest_flush: None,
@@ -955,6 +956,7 @@ async fn verified_json_retained_capture_preserves_receipt_and_sends_once() {
         .unwrap();
     let request = CreateCheckpoint(CheckpointCreate {
         retain_configuration: Some(true),
+        retain_configuration_block_capacity: None,
         retain_configuration_exec_limits: None,
         retain_configuration_storage: None,
         guest_flush: None,
@@ -1023,6 +1025,7 @@ async fn retained_capture_probes_the_actual_framed_peer_before_mutation() {
             .unwrap();
         let request = CreateCheckpoint(CheckpointCreate {
             retain_configuration: Some(true),
+            retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: None,
             retain_configuration_storage: None,
             guest_flush: None,
@@ -1082,6 +1085,7 @@ async fn retained_capture_generation_one_uses_verified_json_before_any_framed_pr
         .unwrap();
     let request = CreateDiskCheckpoint(DiskCheckpointCreate {
         retain_configuration: Some(true),
+        retain_configuration_block_capacity: None,
         retain_configuration_exec_limits: None,
         retain_configuration_storage: None,
         guest_flush: None,
@@ -1116,6 +1120,7 @@ async fn retained_capture_probe_timeout_is_not_a_sent_mutation() {
         .unwrap();
     let request = CreateDiskCheckpoint(DiskCheckpointCreate {
         retain_configuration: Some(true),
+        retain_configuration_block_capacity: None,
         retain_configuration_exec_limits: None,
         retain_configuration_storage: None,
         guest_flush: None,
@@ -1135,7 +1140,7 @@ async fn retained_capture_probe_timeout_is_not_a_sent_mutation() {
 
 #[tokio::test]
 async fn storage_capture_requires_its_own_fresh_capability_and_preserves_old_operations() {
-    for supported in [false, true] {
+    for (block, supported) in [(false, false), (false, true), (true, false), (true, true)] {
         let (connector, mut peers) = QueueConnector::new(2);
         let mut framed = peers.pop().unwrap();
         let discovery = peers.pop().unwrap();
@@ -1147,7 +1152,7 @@ async fn storage_capture_requires_its_own_fresh_capability_and_preserves_old_ope
                 Envelope::decode(&raw.body).unwrap().t,
                 "control.capabilities"
             );
-            let payload = serde_json::json!({"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true,"configuration_storage":supported});
+            let payload = serde_json::json!({"cpu_resize":true,"memory_resize":true,"secrets_update":true,"configuration_capture":true,"configuration_storage":block || supported, "configuration_block_capacity":block && supported});
             let response = Envelope::new(2, "control.capabilities.result", &payload)
                 .unwrap()
                 .frame(raw.id, 1)
@@ -1162,6 +1167,10 @@ async fn storage_capture_requires_its_own_fresh_capability_and_preserves_old_ope
                 let request: CheckpointCreate = envelope.payload().unwrap();
                 assert_eq!(request.retain_configuration, Some(true));
                 assert_eq!(request.retain_configuration_storage, Some(true));
+                assert_eq!(
+                    request.retain_configuration_block_capacity,
+                    block.then_some(true)
+                );
                 let payload = serde_json::json!({"checkpoint":{"checkpoint_id":"retained","checkpoint_root":"root","path":"/private/capture","memory_mode":"full","memory_logical_bytes":0,"memory_emitted_bytes":0,"configuration":{"sha256":"receipt-digest"}}});
                 codec::write_raw_frame(
                     &mut framed,
@@ -1185,6 +1194,7 @@ async fn storage_capture_requires_its_own_fresh_capability_and_preserves_old_ope
             .unwrap();
         let request = CreateCheckpoint(CheckpointCreate {
             retain_configuration: Some(true),
+            retain_configuration_block_capacity: block.then_some(true),
             retain_configuration_exec_limits: None,
             retain_configuration_storage: Some(true),
             guest_flush: None,
@@ -1246,6 +1256,7 @@ async fn storage_capture_refuses_old_json_receipts_before_dispatch() {
         };
         let request = CreateCheckpoint(CheckpointCreate {
             retain_configuration: Some(true),
+            retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: None,
             retain_configuration_storage: Some(true),
             guest_flush: None,
@@ -1324,6 +1335,7 @@ async fn exec_limit_capture_requires_its_own_fresh_capability_and_preserves_old_
             .unwrap();
         let request = CreateCheckpoint(CheckpointCreate {
             retain_configuration: Some(true),
+            retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: Some(true),
             retain_configuration_storage: None,
             guest_flush: None,
@@ -1385,6 +1397,7 @@ async fn exec_limit_capture_refuses_old_json_receipts_before_dispatch() {
         };
         let request = CreateCheckpoint(CheckpointCreate {
             retain_configuration: Some(true),
+            retain_configuration_block_capacity: None,
             retain_configuration_exec_limits: Some(true),
             retain_configuration_storage: None,
             guest_flush: None,

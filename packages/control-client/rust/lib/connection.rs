@@ -265,6 +265,7 @@ impl ControlConnection {
                 }
                 if request.requires_configuration_capture()
                     || request.requires_configuration_storage()
+                    || request.requires_configuration_block_capacity()
                     || request.requires_configuration_exec_limits()
                 {
                     // Query this exact framed peer, not only the earlier JSON discovery socket.
@@ -291,6 +292,8 @@ impl ControlConnection {
                     if !capabilities.configuration_capture
                         || (request.requires_configuration_storage()
                             && !capabilities.configuration_storage)
+                        || (request.requires_configuration_block_capacity()
+                            && !capabilities.configuration_block_capacity)
                         || (request.requires_configuration_exec_limits()
                             && !capabilities.configuration_exec_limits)
                     {
