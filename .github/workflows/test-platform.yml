@@ -116,4 +116,7 @@ jobs:
         uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Test workspace
-        run: cargo +stable test --workspace --exclude microsandbox-agentd
+        # Several SDK tests mutate process-global cwd/env state and the runtime
+        # capability probes are intentionally bounded. Keep the workspace phase
+        # parallel enough for CI while avoiding probe starvation and cwd races.
+        run: cargo +stable test --workspace --exclude microsandbox-agentd -- --test-threads 2
