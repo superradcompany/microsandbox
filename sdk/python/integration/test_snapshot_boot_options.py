@@ -1,6 +1,5 @@
 """Destination boot choices must affect only a newly booted snapshot child."""
 
-import json
 import os
 from contextlib import suppress
 
@@ -77,7 +76,7 @@ async def test_snapshot_destination_init_and_hostname(sandbox_name, full):
             assert (await child.shell("test ! -e /root/default-ran")).success
             result = await child.exec_default()
             assert result.success and result.stdout_text == "/root:full-value"
-            config = json.loads((await Sandbox.get(name)).config_json)
+            config = (await child.config())["spec"]
             assert config["labels"]["destination"] == "full-child"
             assert (await child.shell("cat /root/marker")).stdout_text == "source-marker"
             await child.stop()
@@ -112,10 +111,10 @@ async def test_snapshot_destination_init_and_hostname(sandbox_name, full):
                 assert (await child.shell("test ! -e /root/default-ran")).success
                 result = await child.exec_default()
                 assert result.success and result.stdout_text == "/root:disk-value"
-                resources = json.loads((await Sandbox.get(name)).config_json)["resources"]
+                config = (await child.config())["spec"]
+                resources = config["resources"]
                 assert resources["max_cpus"] == 2
                 assert resources["max_memory_mib"] == 512
-                config = json.loads((await Sandbox.get(name)).config_json)
                 assert config["labels"]["destination"] == "boot-child"
                 capacity = await child.shell("nproc; cat /sys/devices/system/cpu/possible")
                 assert capacity.success
