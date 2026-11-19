@@ -76,11 +76,14 @@ fn links_and_untrusted_parents_never_chmod_unrelated_targets() {
         assert_eq!(mode(&external), 0o644);
         assert_eq!(fs::read_to_string(&external).unwrap(), "untouched");
     }
-    let dir = root.path().join("hardlink");
-    fs::create_dir(&dir).unwrap();
-    fs::hard_link(&external, dir.join("msb.db")).unwrap();
-    assert!(prepare_database_file(&dir.join("msb.db"), true).is_err());
-    assert_eq!(mode(&external), 0o644);
+    for name in ["msb.db", "msb.db-wal", "msb.db-shm", "msb.db-journal"] {
+        let dir = root.path().join(format!("hardlink-{name}"));
+        fs::create_dir(&dir).unwrap();
+        fs::hard_link(&external, dir.join(name)).unwrap();
+        assert!(prepare_database_file(&dir.join("msb.db"), true).is_err());
+        assert_eq!(mode(&external), 0o644);
+    }
+    let dir = root.path().join("hardlink-msb.db");
     let alias = root.path().join("db-link");
     symlink(&dir, &alias).unwrap();
     assert!(ensure_private_database_directory(&alias).is_err());
@@ -655,4 +658,37 @@ fn symbolic_link_authority_checks_its_own_acl_without_following_or_repairing() {
             .success()
     );
     assert!(verify_symbolic_link_authority(&target).is_err());
+}
+
+#[test]
+fn sidecar_removal_during_hardening_is_not_an_alias_violation() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let path = prepare_database_file(&root.path().join("db/msb.db"), true).unwrap();
+    let sidecar = path.with_file_name("msb.db-wal");
+    let running = Arc::new(AtomicBool::new(true));
+    let writer_running = running.clone();
+    // SQLite removes a WAL when its last connection closes. A following
+    // context may inspect the disappearing inode while opening its own pool.
+    let churn = std::thread::spawn(move || {
+        use std::os::unix::fs::OpenOptionsExt;
+        while writer_running.load(Ordering::Relaxed) {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&sidecar)
+                .unwrap();
+            fs::remove_file(&sidecar).unwrap();
+            drop(file);
+        }
+    });
+    let result = (0..2_000).try_for_each(|_| harden_database_files(&path));
+    running.store(false, Ordering::Relaxed);
+    churn.join().unwrap();
+    result.unwrap();
 }
