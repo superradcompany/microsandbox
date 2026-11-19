@@ -1,5 +1,7 @@
 //! Cloud secret-substitution wire contracts and domain conversions.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -123,8 +125,8 @@ pub enum CloudViolationAction {
 //--------------------------------------------------------------------------------------------------
 
 // Debug output must not show the secret value.
-impl std::fmt::Debug for CloudSecretEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for CloudSecretEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CloudSecretEntry")
             .field("env_var", &self.env_var)
             .field("value", &"[REDACTED]")
