@@ -952,9 +952,20 @@ async fn endpoint_answers(path: &Path) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    // Connect already distinguishes absent or malformed paths from listeners.
-    // An async metadata preflight would queue on Tokio's blocking pool and can
-    // exhaust the probe budget before reaching a completely absent endpoint.
+    // These are local runtime paths. Inspect them directly so a busy Tokio
+    // filesystem pool cannot consume the liveness budget before connect starts.
+    // Keep inspection errors distinct from connection errors for diagnostics.
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error)
+            if error.kind() == ErrorKind::NotFound
+                || matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(endpoint_error("inspect", path, error)),
+    }
+
     loop {
         match tokio::net::UnixStream::connect(path).await {
             Ok(_) => return Ok(true),
