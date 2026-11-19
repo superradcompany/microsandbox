@@ -12,7 +12,7 @@ Pi is a terminal coding agent distributed as a Node.js package. This guide pins 
 <Steps>
 <Step title="Start Pi">
 
-<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="These examples mount files from your computer. On our managed cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-limited">Limited on managed cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
 ```sh macOS & Linux
@@ -45,7 +45,7 @@ msb run -t --name pi-demo --replace `
 The tested install downloads 188 packages and takes about a minute on a warm Node image cache. Configure a provider from the TUI when prompted.
 
 <Tip>
-  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`.
+  For an isolated workspace, or when using our managed cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`.
 </Tip>
 
 </Step>

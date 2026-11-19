@@ -1,4 +1,6 @@
 mod agent;
+mod context;
+mod conversion;
 mod error;
 mod exec;
 mod fs;
@@ -7,15 +9,14 @@ mod image;
 mod jobs;
 mod logs;
 mod metrics;
+mod provider;
 mod sandbox;
-mod sandbox_handle;
+mod service;
 mod setup;
 mod snapshot;
 mod ssh;
 mod storage;
 mod volume;
-
-use std::sync::Arc;
 
 use pyo3::prelude::*;
 
@@ -23,32 +24,14 @@ use pyo3::prelude::*;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Restorable process-wide backend scope.
-#[pyclass(name = "BackendScope")]
-struct PyBackendScope {
-    previous: Option<Arc<dyn microsandbox::Backend>>,
-}
-
-/// Secret-safe information about an SDK backend.
-#[pyclass(name = "BackendInfo", frozen)]
-struct PyBackendInfo {
-    #[pyo3(get)]
-    kind: String,
-    #[pyo3(get)]
-    api_url: Option<String>,
-    #[pyo3(get)]
-    source: String,
-    #[pyo3(get)]
-    profile: Option<String>,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
 /// The `_microsandbox` native extension module.
-#[pymodule]
-fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(provider::configured_provider_kind, m)?)?;
+    m.add_function(wrap_pyfunction!(provider::provider_info, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(setup::resolve_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(setup::diagnose_storage, m)?)?;
@@ -58,13 +41,13 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_runtime_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(setup::set_packaged_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(set_runtime_libkrunfw_path, m)?)?;
-    m.add_function(wrap_pyfunction!(set_default_backend, m)?)?;
-    m.add_function(wrap_pyfunction!(backend_scope, m)?)?;
-    m.add_function(wrap_pyfunction!(default_backend_kind, m)?)?;
-    m.add_function(wrap_pyfunction!(default_backend_info, m)?)?;
     m.add_function(wrap_pyfunction!(resolved_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(setup::resolved_cli_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
+    m.add_class::<context::PyContext>()?;
+    m.add_class::<context::PySandboxes>()?;
+    m.add_class::<context::PyVolumes>()?;
+    m.add_class::<context::PySnapshots>()?;
     m.add_class::<sandbox::PySandbox>()?;
     m.add_class::<sandbox::PyStorageRecovery>()?;
     m.add_class::<sandbox::PyForkOutcome>()?;
@@ -75,7 +58,6 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sandbox::PySandboxTouchResult>()?;
     m.add_class::<sandbox::PyExternalMountWarning>()?;
     m.add_class::<sandbox::PySandboxPage>()?;
-    m.add_class::<sandbox_handle::PySandboxHandle>()?;
     m.add_class::<jobs::PyJob>()?;
     m.add_class::<jobs::PyJobAttachment>()?;
     m.add_class::<jobs::PyJobLogStream>()?;
@@ -99,17 +81,18 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<storage::PyMemoryCacheEntry>()?;
     m.add_class::<storage::PyMemoryCacheReport>()?;
     m.add_class::<volume::PyVolume>()?;
-    m.add_class::<volume::PyVolumeHandle>()?;
     m.add_class::<volume::PyVolumeFs>()?;
+    m.add_class::<service::PyService>()?;
+    m.add_class::<service::PyServicePage>()?;
     m.add_class::<snapshot::PySnapshot>()?;
     m.add_class::<snapshot::PySnapshotArchive>()?;
     m.add_class::<snapshot::PySnapshotCopyBuilder>()?;
-    m.add_class::<snapshot::PySnapshotHandle>()?;
     m.add_class::<metrics::PyMetricsStream>()?;
     m.add_class::<metrics::PySandboxMetrics>()?;
     m.add_class::<logs::PyLogEntry>()?;
     m.add_class::<logs::PyLogStream>()?;
     m.add_class::<sandbox::PyPullSession>()?;
+    m.add_class::<sandbox::PyPullProgressIter>()?;
     m.add_class::<sandbox::PyPullEvent>()?;
     m.add_class::<ssh::PySandboxSshOps>()?;
     m.add_class::<ssh::PySshOutput>()?;
@@ -119,8 +102,6 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<exec::PyExecEvent>()?;
     m.add_class::<fs::PyFsEntry>()?;
     m.add_class::<fs::PyFsMetadata>()?;
-    m.add_class::<PyBackendScope>()?;
-    m.add_class::<PyBackendInfo>()?;
     Ok(())
 }
 
@@ -146,159 +127,23 @@ fn set_runtime_libkrunfw_path(path: String) {
     microsandbox::config::set_sdk_libkrunfw_path(path);
 }
 
-/// Set the process-wide default backend.
-///
-/// `BackendKind.LOCAL` selects the local libkrun backend. `BackendKind.CLOUD`
-/// requires either `api_key` (with an optional `url` override), or `profile`.
-#[pyfunction]
-#[pyo3(signature = (kind, *, url=None, api_key=None, profile=None))]
-fn set_default_backend(
-    py: Python<'_>,
-    kind: Py<PyAny>,
-    url: Option<String>,
-    api_key: Option<String>,
-    profile: Option<String>,
-) -> PyResult<()> {
-    let kind = crate::helpers::extract_str_enum(kind.bind(py), "BackendKind")?;
-    microsandbox::set_default_backend(build_backend(kind, url, api_key, profile)?);
-    Ok(())
-}
-
-/// Temporarily replace the process-wide default backend.
-///
-/// Use as a regular context manager, including inside async functions:
-///
-/// ```python
-/// with backend_scope(BackendKind.CLOUD, profile="dev"):
-///     sandbox = await Sandbox.create("x", image="alpine:3.19")
-/// ```
-///
-/// This is process-wide while active, not task-local. Concurrent work in the
-/// same process can observe the temporary backend.
-#[pyfunction]
-#[pyo3(signature = (kind, *, url=None, api_key=None, profile=None))]
-fn backend_scope(
-    py: Python<'_>,
-    kind: Py<PyAny>,
-    url: Option<String>,
-    api_key: Option<String>,
-    profile: Option<String>,
-) -> PyResult<PyBackendScope> {
-    let kind = crate::helpers::extract_str_enum(kind.bind(py), "BackendKind")?;
-    let previous = microsandbox::swap_default_backend(build_backend(kind, url, api_key, profile)?);
-    Ok(PyBackendScope {
-        previous: Some(previous),
-    })
-}
-
-/// Return the active default backend kind.
-#[pyfunction]
-fn default_backend_kind(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let kind = match microsandbox::default_backend_info()
-        .map_err(error::to_py_err)?
-        .kind
-    {
-        microsandbox::BackendKind::Local => "local",
-        microsandbox::BackendKind::Cloud => "cloud",
-    };
-    crate::helpers::str_enum_member(py, "BackendKind", kind)
-}
-
-/// Return secret-safe information about the active default backend.
-#[pyfunction]
-fn default_backend_info() -> PyResult<PyBackendInfo> {
-    let info = microsandbox::default_backend_info().map_err(error::to_py_err)?;
-    Ok(PyBackendInfo {
-        kind: info.kind.as_str().to_string(),
-        api_url: info.api_url,
-        source: info.source.as_str().to_string(),
-        profile: info.profile,
-    })
-}
-
 /// Return the `msb` binary path the native resolver would currently use.
 ///
 /// Intended as a test/diagnostic hook for verifying the Python-to-native bridge.
 #[pyfunction]
 fn resolved_msb_path() -> PyResult<String> {
-    let backend = microsandbox::backend::default_backend();
-    let local = backend
-        .as_local()
-        .ok_or_else(|| error::local_only("resolved_msb_path"))?;
-    microsandbox::setup::resolve_runtime(local.config())
-        .map(|runtime| runtime.msb_path.to_string_lossy().into_owned())
-        .map_err(error::to_py_err)
-}
-
-fn build_backend(
-    kind: String,
-    url: Option<String>,
-    api_key: Option<String>,
-    profile: Option<String>,
-) -> PyResult<Arc<dyn microsandbox::Backend>> {
-    match kind.trim().to_ascii_lowercase().as_str() {
-        "local" => Ok(Arc::new(
-            microsandbox::LocalBackend::lazy().map_err(error::to_py_err)?,
-        )),
-        "cloud" => {
-            let cloud = if let Some(profile) = profile {
-                microsandbox::CloudBackend::from_profile(&profile)
-            } else {
-                let api_key = api_key.ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(
-                        "cloud backend requires api_key or profile",
-                    )
-                })?;
-                match url {
-                    Some(url) => microsandbox::CloudBackend::new(url, api_key),
-                    None => microsandbox::CloudBackend::with_api_key(api_key),
-                }
-            }
-            .map_err(error::to_py_err)?;
-            Ok(Arc::new(cloud))
-        }
-        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "backend kind must be 'local' or 'cloud', got {other:?}"
-        ))),
+    #[cfg(not(feature = "local"))]
+    {
+        Err(error::local_only("resolved_msb_path"))
     }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods
-//--------------------------------------------------------------------------------------------------
-
-#[pymethods]
-impl PyBackendScope {
-    fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf
-    }
-
-    fn __exit__(
-        &mut self,
-        _exc_type: &Bound<'_, PyAny>,
-        _exc_value: &Bound<'_, PyAny>,
-        _traceback: &Bound<'_, PyAny>,
-    ) -> bool {
-        self.restore_inner();
-        false
-    }
-
-    /// Restore the backend that was active before this scope was created.
-    fn restore(&mut self) {
-        self.restore_inner();
-    }
-}
-
-impl PyBackendScope {
-    fn restore_inner(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            microsandbox::set_default_backend(previous);
-        }
-    }
-}
-
-impl Drop for PyBackendScope {
-    fn drop(&mut self) {
-        self.restore_inner();
+    #[cfg(feature = "local")]
+    {
+        let backend = microsandbox::context::configured_context();
+        let local = backend
+            .as_local()
+            .ok_or_else(|| error::local_only("resolved_msb_path"))?;
+        microsandbox::setup::resolve_runtime(local.config())
+            .map(|runtime| runtime.msb_path.to_string_lossy().into_owned())
+            .map_err(error::to_py_err)
     }
 }

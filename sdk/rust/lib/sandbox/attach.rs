@@ -534,15 +534,23 @@ pub(crate) mod agent {
     };
 
     pub(crate) async fn attach(
-        backend: &dyn crate::backend::Backend,
+        backend: &dyn crate::context::Context,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
         opts_builder: AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        let opts = opts_builder.build()?;
-
         let client = Arc::new(super::super::fs::agent::connect_agent(backend, name).await?);
+        attach_on_client(client, config, cmd, opts_builder).await
+    }
+
+    pub(crate) async fn attach_on_client(
+        client: Arc<crate::agent::AgentClient>,
+        config: &SandboxConfig,
+        cmd: String,
+        opts_builder: AttachOptionsBuilder,
+    ) -> MicrosandboxResult<i32> {
+        let opts = opts_builder.build()?;
 
         let detach_keys = match &opts.detach_keys {
             Some(spec) => DetachKeys::parse(spec)?,
@@ -705,7 +713,7 @@ pub(crate) mod agent {
 
     use microsandbox_protocol::{exec::ExecResize, message::MessageType};
 
-    use crate::backend::Backend;
+    use crate::context::Context;
     use crate::{
         MicrosandboxError, MicrosandboxResult,
         sandbox::{
@@ -722,15 +730,23 @@ pub(crate) mod agent {
     };
 
     pub(crate) async fn attach(
-        backend: &dyn Backend,
+        backend: &dyn Context,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
         opts_builder: AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        let opts = opts_builder.build()?;
-
         let client = Arc::new(super::super::fs::agent::connect_agent(backend, name).await?);
+        attach_on_client(client, config, cmd, opts_builder).await
+    }
+
+    pub(crate) async fn attach_on_client(
+        client: Arc<crate::agent::AgentClient>,
+        config: &SandboxConfig,
+        cmd: String,
+        opts_builder: AttachOptionsBuilder,
+    ) -> MicrosandboxResult<i32> {
+        let opts = opts_builder.build()?;
 
         let detach_keys = match &opts.detach_keys {
             Some(spec) => DetachKeys::parse(spec)?,

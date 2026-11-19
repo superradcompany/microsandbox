@@ -259,8 +259,12 @@ impl RuntimeOwnedAdditionalDisk {
             ));
         }
         let directory = checkpoint_root.join("layers");
-        std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        microsandbox_utils::private_file::create_private_dir_all(&directory)
+            .map_err(|error| error.to_string())?;
         let staging = tempfile::tempdir_in(&directory).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_directory(staging.path())
+            .map_err(|error| error.to_string())?;
         let staged = staging.path().join(format!("disk.{}", self.format));
         let (file_bytes, strategy) =
             microsandbox_utils::copy::fast_copy_with_strategy(&self.source, &staged)
@@ -282,6 +286,9 @@ impl RuntimeOwnedAdditionalDisk {
             .write(true)
             .open(&staged)
             .and_then(|file| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_file(&staged)
             .map_err(|error| error.to_string())?;
         let layer_id = new_id("layer");
         let manifest = DiskGenerationManifest {

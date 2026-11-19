@@ -126,7 +126,7 @@ pub struct InstallArgs {
 
 /// Execute the `msb install` command.
 pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
-    let bin_dir = resolve_bin_dir();
+    let bin_dir = resolve_bin_dir()?;
 
     if args.list {
         return list_aliases(&bin_dir);
@@ -164,7 +164,11 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
 
     // Validate the same merged builder the generated alias will create, before writing anything.
     let cli_opts = install_sandbox_opts(&args);
-    let builder = resolved.apply(microsandbox::sandbox::Sandbox::builder("msb-install-check"))?;
+    let builder = resolved.apply(
+        crate::commands::common::selected_context()?
+            .sandboxes()
+            .builder("msb-install-check"),
+    )?;
     let builder = image.apply(builder)?;
     let builder = apply_sandbox_opts_after_config(builder, &cli_opts)?;
     builder.build().await?;
@@ -210,13 +214,13 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
 }
 
 /// Resolve the bin directory for installed aliases.
-fn resolve_bin_dir() -> PathBuf {
-    let backend = microsandbox::backend::default_backend();
+fn resolve_bin_dir() -> anyhow::Result<PathBuf> {
+    let backend = crate::commands::common::selected_context()?;
     let home = match backend.as_local() {
         Some(local) => local.config().home(),
         None => microsandbox_utils::resolve_home(),
     };
-    home.join("bin")
+    Ok(home.join("bin"))
 }
 
 /// Validate that an alias name is safe to use as a filename in the bin directory.

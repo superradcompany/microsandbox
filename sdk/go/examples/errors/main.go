@@ -44,7 +44,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("CreateVolume: %v", err)
 	}
-	defer vol.Remove(context.Background())
+	defer vol.Destroy(context.Background())
 
 	if _, err := microsandbox.CreateVolume(ctx, name); err == nil {
 		log.Fatal("expected ErrVolumeAlreadyExists")

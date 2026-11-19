@@ -17,7 +17,7 @@ use test_utils::msb_test;
 async fn cleanup(name: &str) {
     if let Ok(handle) = Sandbox::get(name).await {
         let _ = handle.kill().await;
-        let _ = handle.remove().await;
+        let _ = handle.destroy().await;
     }
 }
 

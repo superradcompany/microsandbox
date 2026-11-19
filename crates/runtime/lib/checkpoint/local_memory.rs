@@ -350,10 +350,14 @@ impl LocalMemoryCapture {
                 return Ok(disk);
             }
         }
+        let staging = tempfile::Builder::new()
+            .prefix(".capture-")
+            .tempdir_in(&cache.root)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_directory(staging.path())?;
+
         Ok(Self {
-            staging: tempfile::Builder::new()
-                .prefix(".capture-")
-                .tempdir_in(&cache.root)?,
+            staging,
             file: backing.try_clone()?,
             path: PathBuf::new(),
             regions: baseline
@@ -392,12 +396,12 @@ impl LocalMemoryCapture {
             return Err(io::Error::other("local baseline exceeds memory capacity"));
         }
         let cache = MemoryCache::open_namespace(root.into(), "branches")?;
-        let (staging, path) = (
-            tempfile::Builder::new()
-                .prefix(".capture-")
-                .tempdir_in(&cache.root)?,
-            cache.root.join(format!("{id}-{}.ram", cache.page_size)),
-        );
+        let staging = tempfile::Builder::new()
+            .prefix(".capture-")
+            .tempdir_in(&cache.root)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_directory(staging.path())?;
+        let path = cache.root.join(format!("{id}-{}.ram", cache.page_size));
         let temporary = staging.path().join("memory");
         let mut reflink = false;
         let mut baseline_bytes = 0;
@@ -431,6 +435,7 @@ impl LocalMemoryCapture {
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+                microsandbox_utils::private_file::harden_existing_file(&temporary)?;
             }
         }
         let file = OpenOptions::new()
@@ -439,6 +444,8 @@ impl LocalMemoryCapture {
             .create(true)
             .truncate(false)
             .open(&temporary)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden(&file, false)?;
         let length = file.metadata()?.len();
         // A cancelled initiating SDK can release its handoff guard while capture is still
         // running. The source keeps the staging inode pinned until a readonly successor owns

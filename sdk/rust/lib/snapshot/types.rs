@@ -1,4 +1,4 @@
-//! Backend-neutral snapshot result and operation types.
+//! Context-neutral snapshot result and operation types.
 
 use serde::Serialize;
 use std::path::PathBuf;

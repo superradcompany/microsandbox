@@ -17,21 +17,21 @@ pub struct SandboxStopResult {
     pub source: Option<String>,
 }
 
-/// Result returned by `Sandbox.ping()` / `SandboxHandle.ping()`.
+/// Result returned by `Sandbox.ping()`.
 #[napi(object)]
 pub struct SandboxPingResult {
     pub name: String,
     pub latency_ms: f64,
 }
 
-/// Result returned by `Sandbox.touch()` / `SandboxHandle.touch()`.
+/// Result returned by `Sandbox.touch()`.
 #[napi(object)]
 pub struct SandboxTouchResult {
     pub name: String,
     pub activity_seq: f64,
 }
 
-/// Options accepted by `Sandbox.modify()` / `SandboxHandle.modify()`.
+/// Options accepted by `Sandbox.modify()`.
 ///
 /// `memoryMib` / `maxMemoryMib` / `rootDiskSizeMib` are in MiB. `policy` is `"no_restart"`
 /// (default), `"next_start"`, or `"restart"`. With `dryRun: true` the plan
@@ -296,21 +296,6 @@ pub struct ExecEvent {
     pub data: Option<napi::bindgen_prelude::Buffer>,
     /// Exit code (only for "exited" events).
     pub code: Option<i32>,
-}
-
-/// Volume handle info from the database.
-#[napi(object)]
-pub struct VolumeInfo {
-    pub name: String,
-    pub is_default: bool,
-    pub kind: String,
-    pub quota_mib: Option<u32>,
-    pub used_bytes: f64,
-    pub capacity_bytes: Option<f64>,
-    pub disk_format: Option<String>,
-    pub disk_fstype: Option<String>,
-    pub labels: HashMap<String, String>,
-    pub created_at: Option<f64>,
 }
 
 //--------------------------------------------------------------------------------------------------

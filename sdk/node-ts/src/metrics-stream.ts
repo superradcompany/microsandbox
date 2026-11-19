@@ -1,5 +1,4 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
-import { mapAsyncIterable } from "./internal/async-iter.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import type { NapiMetricsStream } from "./internal/napi.js";
 import type { SandboxMetrics } from "./metrics.js";
@@ -18,18 +17,21 @@ export class MetricsStream
   async recv(): Promise<SandboxMetrics | null> {
     if (this.done) return null;
     const raw = await withMappedErrors(() => this.inner.recv());
-    if (raw === null) {
+    // Disposal may happen while the native read is in flight.
+    if (this.done || raw === null) {
       this.done = true;
       return null;
     }
     return metricsFromNapi(raw);
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<SandboxMetrics> {
-    return mapAsyncIterable(
-      { recv: () => this.inner.recv() },
-      metricsFromNapi,
-    )[Symbol.asyncIterator]();
+  async *[Symbol.asyncIterator](): AsyncIterator<SandboxMetrics> {
+    // Use the same disposal and error contract for direct reads and iteration.
+    for (;;) {
+      const metrics = await this.recv();
+      if (this.done || metrics === null) return;
+      yield metrics;
+    }
   }
 
   async [Symbol.asyncDispose](): Promise<void> {

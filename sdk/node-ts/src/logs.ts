@@ -1,5 +1,4 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
-import { mapAsyncIterable } from "./internal/async-iter.js";
 import type {
   LogEntry as NapiLogEntry,
   LogOptions as NapiLogOptions,
@@ -160,18 +159,19 @@ export class LogStream
   async recv(): Promise<LogEntry | null> {
     if (this.done) return null;
     const raw = await withMappedErrors(() => this.inner.recv());
-    if (raw === null) {
+    if (this.done || raw === null) {
       this.done = true;
       return null;
     }
     return logEntryFromNapi(raw);
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<LogEntry> {
-    return mapAsyncIterable(
-      { recv: () => this.inner.recv() },
-      logEntryFromNapi,
-    )[Symbol.asyncIterator]();
+  async *[Symbol.asyncIterator](): AsyncIterator<LogEntry> {
+    for (;;) {
+      const item = await this.recv();
+      if (this.done || item === null) return;
+      yield item;
+    }
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
