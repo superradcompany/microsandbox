@@ -1820,7 +1820,7 @@ fn _assert_atomic_traits() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Barrier;
+    use std::sync::{Barrier, mpsc};
     use std::thread;
 
     use super::*;
@@ -2574,34 +2574,51 @@ mod tests {
         const ITERATIONS: u64 = 4_000;
         let barrier = Arc::new(Barrier::new(WRITERS + 1));
         let mut handles = Vec::new();
+        let mut stop_senders = Vec::new();
         for worker in 0..WRITERS {
             let writer = writer.clone();
             let barrier = Arc::clone(&barrier);
+            let (stop_sender, stop_receiver) = mpsc::channel::<()>();
+            stop_senders.push(stop_sender);
             handles.push(thread::spawn(move || {
-                barrier.wait();
-                for n in 0..ITERATIONS {
+                for n in 0_u64.. {
                     let counter = ((worker as u64) << 48) | n | 1;
-                    writer
-                        .write_sample(SampleWrite {
-                            sampled_at: Utc::now(),
-                            cpu_percent: Some((counter % 100) as f32),
-                            vcpu_time_ns: Some(counter),
-                            memory_bytes: Some(counter),
-                            memory_available_bytes: Some(counter),
-                            memory_host_resident_bytes: Some(counter),
-                            memory_limit_bytes: None,
-                            disk_read_bytes: counter,
-                            disk_write_bytes: counter,
-                            net_rx_bytes: counter,
-                            net_tx_bytes: counter,
-                            net_inbound_tcp_rejected: None,
-                            net_outbound_tcp_rejected: None,
-                            net_outbound_udp_evicted: None,
-                            upper_used_bytes: None,
-                            upper_free_bytes: None,
-                            upper_host_allocated_bytes: None,
-                        })
-                        .unwrap();
+                    let result = writer.write_sample(SampleWrite {
+                        sampled_at: Utc::now(),
+                        cpu_percent: Some((counter % 100) as f32),
+                        vcpu_time_ns: Some(counter),
+                        memory_bytes: Some(counter),
+                        memory_available_bytes: Some(counter),
+                        memory_host_resident_bytes: Some(counter),
+                        memory_limit_bytes: None,
+                        disk_read_bytes: counter,
+                        disk_write_bytes: counter,
+                        net_rx_bytes: counter,
+                        net_tx_bytes: counter,
+                        net_inbound_tcp_rejected: None,
+                        net_outbound_tcp_rejected: None,
+                        net_outbound_udp_evicted: None,
+                        upper_used_bytes: None,
+                        upper_free_bytes: None,
+                        upper_host_allocated_bytes: None,
+                    });
+                    if n == 0 {
+                        // Publish before releasing the reader, even on a single CPU.
+                        // Keep Result checking after the barrier so an ordinary
+                        // write error cannot strand the reader at the barrier.
+                        barrier.wait();
+                    }
+                    result.unwrap();
+                    // Writers remain active until reading finishes. Dropping
+                    // senders also releases them if a reader assertion panics.
+                    if n + 1 >= ITERATIONS
+                        && matches!(
+                            stop_receiver.try_recv(),
+                            Err(mpsc::TryRecvError::Disconnected)
+                        )
+                    {
+                        break;
+                    }
                     if n % 64 == 0 {
                         thread::yield_now();
                     }
@@ -2611,7 +2628,7 @@ mod tests {
 
         barrier.wait();
         let mut successful_reads = 0;
-        while handles.iter().any(|handle| !handle.is_finished()) {
+        for _ in 0..10_000 {
             let snap = reg.snapshot().unwrap();
             if let Some(item) = snap.first() {
                 assert_eq!(item.memory_bytes, item.disk_read_bytes);
@@ -2624,6 +2641,7 @@ mod tests {
             }
             thread::yield_now();
         }
+        drop(stop_senders);
         for handle in handles {
             handle.join().unwrap();
         }

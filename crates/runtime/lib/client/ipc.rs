@@ -1286,9 +1286,16 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::WouldBlock,
         );
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(1), paths.may_be_live()).await;
-        assert!(result.unwrap().unwrap());
+        // Keep the conservative 50 ms deadline independently specified in the
+        // test. Saturating a real listener must still retain uncertain owners.
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        assert!(paths.may_be_live().await.unwrap());
+        // Tokio rounds timer deadlines to millisecond ticks. Depending on the
+        // clock's alignment, the 50 ms deadline can fire on the next 1 ms tick.
+        let budget = Duration::from_millis(50);
+        assert!((budget..=budget + Duration::from_millis(1)).contains(&started.elapsed()));
+        tokio::time::resume();
         assert!(path.exists());
         // Free one slot while the next probe is retrying. Verify a new connection
         // actually arrives, so a timeout cannot masquerade as a successful retry.

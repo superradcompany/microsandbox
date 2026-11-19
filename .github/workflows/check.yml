@@ -1684,11 +1684,13 @@ jobs:
           status=0
           # Short isolated homes avoid Unix socket limits and cross-layout reuse.
           # Run both even if one fails so the artifact reports retain both outcomes.
+          # Allow aggregate I/O contention across the many operations on shared runners;
+          # each operation still has its independent 30-second deadline.
           for layout in managed flat; do
             python3 scripts/smoke/cli/snapshot-branch.py \
               --binary "${{ github.workspace }}/build/msb" \
               --output "/tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-$layout" \
-              --layout "$layout" || status=$?
+              --layout "$layout" --suite-timeout 240 || status=$?
           done
           exit "$status"
 
