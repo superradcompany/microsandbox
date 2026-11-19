@@ -289,6 +289,25 @@ async fn rollback_schema_steps_through_latest_migrations() {
     .unwrap();
     Migrator::up(db.inner(), None).await.unwrap();
 
+    // Process identity is now the newest migration. Empty catalogs can remove
+    // its column without discarding evidence, before retiring protected storage.
+    assert!(
+        microsandbox_db::catalog::has_column(&db, "run", "process_identity")
+            .await
+            .unwrap()
+    );
+    rollback_schema(db.inner(), 1).await.unwrap();
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "run", "process_identity")
+            .await
+            .unwrap()
+    );
+    assert!(
+        microsandbox_db::catalog::has_table(&db, "protected_sandbox_state")
+            .await
+            .unwrap()
+    );
+
     // An empty catalog can retire protection before the older creation migrations.
     rollback_schema(db.inner(), 1).await.unwrap();
     assert!(

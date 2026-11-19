@@ -94,11 +94,30 @@ impl Sandbox {
                         Ok(started) => return self.retain_prepared(started),
                         // Another receiver won startup. Reinspect instead of starting
                         // twice or taking ownership of that receiver's run.
-                        Err(MicrosandboxError::SandboxStillRunning(_)) => {}
+                        Err(error @ MicrosandboxError::SandboxStillRunning(_)) => {
+                            // Only retry a real competing start. Ownership/endpoint
+                            // refusal on an unchanged terminal row cannot make progress.
+                            let current = self.refresh_handle().await?;
+                            if !matches!(
+                                current.status_snapshot(),
+                                SandboxStatus::Starting | SandboxStatus::Running
+                            ) {
+                                return Err(error);
+                            }
+                        }
                         Err(error) => return Err(error),
                     }
                 }
-                SandboxStatus::Starting => {}
+                SandboxStatus::Starting => {
+                    #[cfg(all(feature = "local", any(target_os = "linux", target_os = "macos")))]
+                    if let (Some(context), Some(local)) =
+                        (self.backend.as_local(), record.local_state())
+                    {
+                        context
+                            .validate_starting_observer(&self.name, local.db_id)
+                            .await?;
+                    }
+                }
                 SandboxStatus::Draining => {
                     return Err(MicrosandboxError::SandboxStillRunning(format!(
                         "cannot prepare '{}': shutdown is already in progress",

@@ -1403,9 +1403,9 @@ pub(super) async fn remove_local_persisted_sandbox(
         )));
     }
 
-    // The runtime lock is the authoritative ownership proof. A numeric PID can remain visible
-    // while an exited Unix child is waiting to be reaped, or can already identify an unrelated
-    // process after PID reuse, so it must not override successful lock acquisition.
+    // A terminal row and free lifecycle lock do not prove that a legacy runtime
+    // released this storage. Keep identity, endpoint and disk fences through deletion.
+    let _disks = local_backend.released_sandbox_resources(&current).await?;
     if crate::context::local::creation::pending(pools.write(), expected_id).await? {
         return local_backend
             .remove_incomplete_sandbox(expected_id, name, RemovalMode::Recovery)
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn persisted_removal_trusts_runtime_ownership_over_a_recycled_pid() {
+    async fn persisted_removal_requires_proof_for_a_visible_pid() {
         use crate::db::entity::run as run_entity;
 
         let temp = tempdir().unwrap();
@@ -1789,8 +1789,7 @@ mod tests {
         .unwrap();
         run_entity::ActiveModel {
             sandbox_id: Set(current.id),
-            // This PID is alive but cannot own the free lifecycle lock. It models both PID reuse
-            // and an exited Unix child that remains visible until its parent reaps the zombie.
+            // A free lifecycle lock alone cannot establish that this live PID was recycled.
             pid: Set(Some(std::process::id() as i32)),
             status: Set(run_entity::RunStatus::Running),
             ..Default::default()
@@ -1801,18 +1800,36 @@ mod tests {
         let sandbox_dir = backend.sandboxes_dir().join("recycled-pid");
         std::fs::create_dir_all(&sandbox_dir).unwrap();
 
-        remove_local_persisted_sandbox(&backend, "recycled-pid", current.id)
-            .await
-            .unwrap();
-
-        assert!(!sandbox_dir.exists());
-        assert!(
-            super::sandbox_entity::Entity::find_by_id(current.id)
-                .one(pools.read())
-                .await
-                .unwrap()
-                .is_none()
-        );
+        let result = remove_local_persisted_sandbox(&backend, "recycled-pid", current.id).await;
+        #[cfg(unix)]
+        {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unverified ownership")
+            );
+            assert!(sandbox_dir.exists());
+            assert!(
+                super::sandbox_entity::Entity::find_by_id(current.id)
+                    .one(pools.read())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        #[cfg(windows)]
+        {
+            result.unwrap();
+            assert!(!sandbox_dir.exists());
+            assert!(
+                super::sandbox_entity::Entity::find_by_id(current.id)
+                    .one(pools.read())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[tokio::test]

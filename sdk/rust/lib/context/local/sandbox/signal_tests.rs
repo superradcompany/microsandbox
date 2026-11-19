@@ -174,6 +174,12 @@ async fn kill_sandbox_spares_unrelated_recycled_pid() {
     expect_line(&child_lines(innocent.stdout.take().unwrap()), "ready");
     let (backend, id) =
         backend_with_stale_running_pid(home.path(), "stale", innocent.id() as i32).await;
+    // #1685 requires exact persisted evidence before retiring a recycled PID.
+    let run = LocalContext::load_latest_run(backend.db().await.unwrap().read(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    super::process_record::tests::model_reused_pid(&backend, &run).await;
     backend.kill_sandbox("stale", None).await.unwrap();
     assert!(
         LocalContext::pid_is_alive(innocent.id() as i32),
@@ -181,7 +187,7 @@ async fn kill_sandbox_spares_unrelated_recycled_pid() {
     );
     assert_eq!(
         recorded_sandbox_status(&backend, id).await,
-        SandboxStatus::Stopped
+        SandboxStatus::Crashed
     );
 }
 
@@ -204,6 +210,12 @@ async fn drain_sandbox_spares_unrelated_recycled_pid() {
     expect_line(&child_lines(innocent.stdout.take().unwrap()), "ready");
     let (backend, id) =
         backend_with_stale_running_pid(home.path(), "stale", innocent.id() as i32).await;
+    // #1685 requires exact persisted evidence before retiring a recycled PID.
+    let run = LocalContext::load_latest_run(backend.db().await.unwrap().read(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    super::process_record::tests::model_reused_pid(&backend, &run).await;
     backend.drain_sandbox("stale", None).await.unwrap();
     assert!(
         LocalContext::pid_is_alive(innocent.id() as i32),
@@ -371,7 +383,7 @@ async fn ambiguous_runtime_ownership_preserves_active_state() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn stop_reconciles_a_released_generation_with_a_private_pid() {
+async fn stop_refuses_a_private_pid_without_persisted_proof() {
     use std::process::Stdio;
 
     let home = test_home();
@@ -413,11 +425,8 @@ async fn stop_reconciles_a_released_generation_with_a_private_pid() {
     )
     .await
     .unwrap()
-    .unwrap();
-    assert_eq!(
-        recorded_sandbox_status(&backend, id).await,
-        SandboxStatus::Crashed
-    );
+    .unwrap_err();
+    assert_active_run(&backend, id).await;
     assert!(child.try_wait().unwrap().is_none());
 }
 
@@ -497,11 +506,8 @@ async fn held_disk_prevents_unverified_kill_and_drain() {
     assert_active_run(&backend, id).await;
     assert!(marker.exists(), "uncertain ownership must preserve storage");
     drop(guards);
-    backend.kill_sandbox("disk", Some(id)).await.unwrap();
-    assert_eq!(
-        recorded_sandbox_status(&backend, id).await,
-        SandboxStatus::Stopped
-    );
+    assert!(backend.kill_sandbox("disk", Some(id)).await.is_err());
+    assert_active_run(&backend, id).await;
 }
 
 #[cfg(target_os = "linux")]
@@ -549,18 +555,9 @@ async fn denied_inspection_case(signal: libc::c_int, owned: bool) {
     } else {
         backend.drain_sandbox("denied", Some(id)).await
     };
-    if owned {
-        assert!(result.is_err());
-        assert_active_run(&backend, id).await;
-    } else {
-        result.unwrap();
-        let expected = if signal == libc::SIGKILL {
-            SandboxStatus::Stopped
-        } else {
-            SandboxStatus::Crashed
-        };
-        assert_eq!(recorded_sandbox_status(&backend, id).await, expected);
-    }
+    // Free locks do not replace missing process identity evidence.
+    assert!(result.is_err());
+    assert_active_run(&backend, id).await;
     assert!(
         child.try_wait().unwrap().is_none(),
         "unverified child must survive"

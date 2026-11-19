@@ -21,35 +21,12 @@ impl RuntimeExit {
         let Some(pid) = pid.filter(|pid| *pid > 0) else {
             return Ok(None);
         };
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-        if fd < 0 {
-            let error = std::io::Error::last_os_error();
-            return if error.raw_os_error() == Some(libc::ESRCH) {
-                Ok(None)
-            } else {
-                Err(error)
-            };
-        }
-        // pidfd_open sets CLOEXEC. Neither this handle nor disk descriptors are retained
-        // after the stop future finishes, and observing exit never steals Child's wait status.
-        let process = Self(unsafe { OwnedFd::from_raw_fd(fd as i32) });
-        let inherited = format!(
-            "/proc/{pid}/fd/{}",
-            microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
-        );
-        let actual = match std::fs::metadata(inherited) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let expected = match std::fs::metadata(lifecycle) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
+        let Some(process) = open_process(pid)? else {
+            return Ok(None);
         };
         // A stale catalog PID can point to an unrelated process. Require the runtime's
         // inherited lifecycle file, not just a live PID or a terminal database row.
-        if (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
+        if !lifecycle_matches(pid, lifecycle)? {
             return Ok(None);
         }
         Ok(Some(process))
@@ -76,27 +53,84 @@ impl RuntimeExit {
         // the leader becoming a zombie is insufficient while workers release shared files.
         Ok(poll.revents & (libc::POLLIN | libc::POLLHUP) != 0)
     }
+}
 
-    pub(super) fn send_signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                self.0.as_raw_fd(),
-                signal,
-                std::ptr::null::<libc::siginfo_t>(),
-                0,
-            )
-        };
-        if result < 0 {
-            let error = std::io::Error::last_os_error();
-            return if error.raw_os_error() == Some(libc::ESRCH) {
-                Ok(false)
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Observe completion even when a zombie leader no longer exposes its descriptors.
+/// A process pidfd becomes ready only after every thread has exited.
+pub(super) fn pid_has_exited(pid: i32) -> std::io::Result<bool> {
+    match open_process(pid)? {
+        Some(process) => process.has_exited(),
+        None => Ok(true),
+    }
+}
+
+fn open_process(pid: i32) -> std::io::Result<Option<RuntimeExit>> {
+    if pid <= 0 {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    let result = if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        // pidfd_open sets CLOEXEC. Observing completion does not reap Child's status.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    };
+    process_from_pidfd_result(pid, result)
+}
+
+fn process_from_pidfd_result(
+    pid: i32,
+    result: std::io::Result<OwnedFd>,
+) -> std::io::Result<Option<RuntimeExit>> {
+    match result {
+        Ok(fd) => Ok(Some(RuntimeExit(fd))),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOSYS | libc::EINVAL | libc::EPERM)
+            ) =>
+        {
+            // Old kernels or seccomp can deny pidfds even after the PID disappears.
+            // Only ESRCH proves absence. Success also includes zombies; permission
+            // failures and live PIDs remain unverified. This never authorizes a signal.
+            if unsafe { libc::kill(pid, 0) } < 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                Ok(None)
             } else {
                 Err(error)
-            };
+            }
         }
-        Ok(true)
+        Err(error) => Err(error),
     }
+}
+
+/// Whether `pid` holds the sandbox's lifecycle lock file on the runtime's inherited descriptor.
+///
+/// Only the live runtime of this sandbox name holds that exclusive lock, so a match identifies
+/// the process beyond its PID. A missing descriptor is `false`; other `/proc` failures are
+/// reported so callers can decide how much doubt to tolerate.
+pub(super) fn lifecycle_matches(pid: i32, lifecycle: &Path) -> std::io::Result<bool> {
+    let inherited = format!(
+        "/proc/{pid}/fd/{}",
+        microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
+    );
+    let actual = match std::fs::metadata(inherited) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let expected = match std::fs::metadata(lifecycle) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok((actual.dev(), actual.ino()) == (expected.dev(), expected.ino()))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -109,8 +143,66 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
+    use super::super::super::control::identity::ProcessIdentity;
     use super::super::signal_tests::{child_lines, cleanup_child, expect_line, wait_child};
     use super::*;
+
+    #[test]
+    fn unavailable_pidfd_proves_only_a_missing_pid() {
+        let mut child = scopeguard::guard(
+            Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap(),
+            |mut child| {
+                let _ = child.kill();
+                let _ = child.wait();
+            },
+        );
+        let pid = child.id() as i32;
+        // Leave the child unreaped to exercise a zombie, which kill(pid, 0) must
+        // not misreport as absent (its thread group may still own resources).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            if stat
+                .rsplit_once(')')
+                .unwrap()
+                .1
+                .trim_start()
+                .starts_with('Z')
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        for code in [libc::ENOSYS, libc::EINVAL, libc::EPERM] {
+            assert!(
+                process_from_pidfd_result(pid, Err(std::io::Error::from_raw_os_error(code)))
+                    .is_err()
+            );
+            assert!(
+                process_from_pidfd_result(
+                    std::process::id() as i32,
+                    Err(std::io::Error::from_raw_os_error(code))
+                )
+                .is_err()
+            );
+        }
+        child.wait().unwrap();
+        for code in [libc::ENOSYS, libc::EINVAL, libc::EPERM] {
+            assert!(
+                process_from_pidfd_result(pid, Err(std::io::Error::from_raw_os_error(code)))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // Unrelated errors must not be hidden even for a missing process.
+        assert!(
+            process_from_pidfd_result(pid, Err(std::io::Error::from_raw_os_error(libc::EMFILE)))
+                .is_err()
+        );
+        assert!(pid_has_exited(0).is_err());
+        assert!(pid_has_exited(-1).is_err());
+    }
 
     fn lock_disk(path: &Path) -> std::io::Result<std::fs::File> {
         let file = std::fs::OpenOptions::new()
@@ -212,6 +304,9 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        let identity =
+            super::super::super::control::identity::ProcessIdentity::capture(child.id() as i32)
+                .unwrap();
         drop(lock);
         drop(lifecycle);
         child.stdin.as_mut().unwrap().write_all(b"l").unwrap();
@@ -222,6 +317,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(!barrier.has_exited().unwrap());
+        assert!(!identity.has_exited().unwrap());
         let ownership =
             microsandbox_runtime::ipc::try_acquire_lifecycle_guard(home.path(), "exit").unwrap();
         assert!(ownership.is_some());
@@ -230,12 +326,14 @@ mod tests {
         wait_line("disk-released");
         let next_owner = lock_disk(disk.path()).unwrap();
         assert!(!barrier.has_exited().unwrap());
+        assert!(!identity.has_exited().unwrap());
         child.stdin.take().unwrap().write_all(b"x").unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !barrier.has_exited().unwrap() {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        assert!(identity.has_exited().unwrap());
         assert!(
             wait_child(&mut child).success(),
             "exit observation must not reap Child"
@@ -301,6 +399,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        let identity = ProcessIdentity::capture(child.id() as i32).unwrap();
         child.stdin.as_mut().unwrap().write_all(b"l").unwrap();
         wait_line("lifecycle-released");
         child.stdin.as_mut().unwrap().write_all(b"d").unwrap();
@@ -308,6 +407,7 @@ mod tests {
         // The helper keeps its worker alive until this final handshake byte.
         child.stdin.take().unwrap().write_all(b"x").unwrap();
         assert!(wait_child(&mut child).success());
-        assert!(!barrier.send_signal(libc::SIGKILL).unwrap());
+        identity.signal(libc::SIGKILL).unwrap();
+        assert!(barrier.has_exited().unwrap());
     }
 }
