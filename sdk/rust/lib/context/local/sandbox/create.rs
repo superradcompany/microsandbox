@@ -101,6 +101,12 @@ struct ResolvedOciImage {
     cached_metadata: Option<CachedImageMetadata>,
 }
 
+/// Only the OCI architecture is needed to check historical disk launches.
+#[derive(serde::Deserialize)]
+struct ImagePlatform<'a> {
+    architecture: Option<&'a str>,
+}
+
 /// Short-lived ownership of one sandbox name while persisted state or host resources change.
 ///
 /// The file handle owns a process-held lock. Closing it releases the lock on both Unix and
@@ -410,21 +416,36 @@ impl LocalContext {
                 ca_certs: config.ca_certs.clone(),
                 ..Default::default()
             };
-            resolved_image = Some(
-                timing::measure(
-                    &timing_name,
-                    "image_resolution",
-                    self.resolve_oci_image_for_create(
-                        &oci.reference,
-                        config.spec.pull_policy,
-                        registry,
-                        config.manifest_digest.as_deref(),
-                        materialization,
-                        progress.clone(),
-                    ),
-                )
-                .await?,
-            );
+            let mut image = timing::measure(
+                &timing_name,
+                "image_resolution",
+                self.resolve_oci_image_for_create(
+                    &oci.reference,
+                    config.spec.pull_policy,
+                    registry,
+                    config.manifest_digest.as_deref(),
+                    materialization,
+                    progress.clone(),
+                ),
+            )
+            .await?;
+            // Read the selected platform config under the image lease, before a disk
+            // editor can boot or replacement can stop the existing destination.
+            if image.cached_metadata.is_none() {
+                let reference = image
+                    .metadata_reference
+                    .parse::<Reference>()
+                    .map_err(|e| MicrosandboxError::InvalidConfig(e.to_string()))?;
+                image.cached_metadata = image
+                    .cache_operation
+                    .read_image_metadata_async(&reference)
+                    .await?;
+            }
+            let metadata = image.cached_metadata.as_ref().ok_or_else(|| {
+                MicrosandboxError::ImageNotFound(image.metadata_reference.clone())
+            })?;
+            validate_snapshot_image_architecture(&metadata.raw_config_json)?;
+            resolved_image = Some(image);
         }
 
         if edit_child {
@@ -2638,6 +2659,37 @@ impl LocalContext {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Historical file checkpoints can carry architecture only in the pinned OCI config.
+/// Without recognizable source evidence, preserve their existing launch behavior.
+fn validate_snapshot_image_architecture(raw_config: &str) -> MicrosandboxResult<()> {
+    let Ok(ImagePlatform {
+        architecture: Some(arch),
+    }) = serde_json::from_str(raw_config)
+    else {
+        return Ok(());
+    };
+    let source = match arch {
+        "amd64" | "x86_64" => "x86_64",
+        "arm64" | "aarch64" => "aarch64",
+        other
+            if matches!(
+                microsandbox_image::Arch::from(other),
+                microsandbox_image::Arch::Other(_)
+            ) =>
+        {
+            return Ok(());
+        }
+        other => other,
+    };
+    let host = std::env::consts::ARCH;
+    if source != host {
+        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+            "checkpoint architecture {source} cannot restore on {host}"
+        )));
+    }
+    Ok(())
+}
+
 /// Repoint only extracted child-owned paths after same-filesystem publication.
 /// Disk headers use relative basenames, so moving the whole directory preserves
 /// root and owned-volume chains without rewriting or copying their contents.
@@ -2935,6 +2987,35 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn snapshot_architecture_uses_only_known_oci_evidence() {
+        for config in [
+            "{}",
+            r#"{"architecture":null}"#,
+            r#"{"architecture":"unknown"}"#,
+        ] {
+            super::validate_snapshot_image_architecture(config).unwrap();
+        }
+        let host = std::env::consts::ARCH;
+        let native = microsandbox_image::Platform::host_linux().arch.to_string();
+        let foreign = if host == "x86_64" { "arm64" } else { "amd64" };
+        for name in [native.as_str(), host] {
+            super::validate_snapshot_image_architecture(
+                &serde_json::json!({"architecture": name}).to_string(),
+            )
+            .unwrap();
+        }
+        let error = super::validate_snapshot_image_architecture(
+            &serde_json::json!({"architecture": foreign}).to_string(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("cannot restore on {host}"))
+        );
     }
 
     #[test]

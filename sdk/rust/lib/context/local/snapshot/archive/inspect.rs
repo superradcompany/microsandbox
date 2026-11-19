@@ -82,18 +82,20 @@ impl SandboxConfig {
             (SnapshotState::Checkpoint(state), Some(checkpoint)) => {
                 validate_checkpoint_owned_inventory(&manifest, &checkpoint)?;
 
+                if checkpoint.architecture != std::env::consts::ARCH {
+                    return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                        "checkpoint architecture {} cannot restore on {}",
+                        checkpoint.architecture,
+                        std::env::consts::ARCH
+                    )));
+                }
+
                 if self.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
                     crate::sandbox::require_guest_mounts(
                         self,
                         crate::sandbox::external_bind_guest_paths(&checkpoint.resources)?,
                     )?;
                 } else {
-                    if checkpoint.architecture != std::env::consts::ARCH {
-                        return Err(MicrosandboxError::SnapshotIntegrity(
-                            "checkpoint architecture cannot restore on this host".into(),
-                        ));
-                    }
-
                     crate::sandbox::apply_checkpoint_restore_constraints(self, state, &checkpoint)?;
                     self.suppress_launch_for_full_restore();
                 }

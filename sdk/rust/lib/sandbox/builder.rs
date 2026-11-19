@@ -2803,6 +2803,13 @@ pub(crate) fn prepare_local_snapshot_restore(
                 ));
             }
             crate::snapshot::validate_checkpoint_owned_inventory(snap.loaded_manifest()?, &opened)?;
+            if opened.architecture != std::env::consts::ARCH {
+                return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
+                    "checkpoint architecture {} cannot restore on {}",
+                    opened.architecture,
+                    std::env::consts::ARCH
+                )));
+            }
             if config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
                 // A disk-only restore does not reconnect captured external binds; require
                 // destination mounts up front.
@@ -2812,11 +2819,6 @@ pub(crate) fn prepare_local_snapshot_restore(
                 crate::sandbox::require_guest_mounts(config, required_bind_paths)?;
             }
             if config.snapshot_restore_mode == SnapshotRestoreMode::Full {
-                if opened.architecture != std::env::consts::ARCH {
-                    return Err(crate::MicrosandboxError::SnapshotIntegrity(
-                        "checkpoint architecture cannot restore on this host".into(),
-                    ));
-                }
                 apply_checkpoint_restore_constraints(config, state, &opened)?;
                 config.suppress_launch_for_full_restore();
             }

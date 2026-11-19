@@ -910,4 +910,6 @@ server deployments might ignore these optional fields; there are no self-hosted
 deployments in the user's supported fleet and this is an approved server-support
 requirement. Local runtime capability checks are unchanged.
 
+Local snapshot launch checks the architecture recorded in a memory checkpoint or identified by the pinned OCI image for a disk restore. A confirmed mismatch fails before a replacement stops its destination. Import, inspection and verification accept foreign artifacts. Historical disks without recognizable architecture metadata retain the existing launch behavior.
+
 Disk snapshots captured with confirmed last-active guest-clock policy now use the existing clock descriptor extension. A recorded `off` survives group and archive restores unless the destination explicitly overrides it. Sync, historical descriptors and captures without clock evidence retain the existing fallback. Earlier readers without the required clock extension refuse a newly recorded off policy.
