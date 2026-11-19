@@ -23,8 +23,8 @@ use crate::sandbox::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
     CloudCompute, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus,
-    NamedVolumeMode, NetworkSpec, RootDisk, SandboxRuntimeOptions, TlsConfig, VolumeKind,
-    VolumeMount,
+    CloudSecretSource, CloudSecretValue, CloudSecretsConfig, NamedVolumeMode, NetworkSpec,
+    RootDisk, SandboxRuntimeOptions, TlsConfig, VolumeKind, VolumeMount,
 };
 use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
@@ -223,7 +223,8 @@ impl RemoteContext {
         // Validate the whole request before provisioning anything. Only the default
         // ensure-exists behavior is resolved here; the wire and retained config use
         // plain named mounts, while the local backend keeps its inline-create path.
-        let (mut request, config) = cloud_create_body_and_config(config)?;
+        let (mut request, config) =
+            cloud_create_body_and_config(config, super::modify::resolve_env)?;
         request.compute = self
             .inner
             .compute_type
@@ -644,13 +645,65 @@ fn cloud_identity(identity: SandboxIdentity) -> MicrosandboxResult<String> {
 
 fn cloud_create_body_and_config(
     mut config: SandboxConfig,
+    resolve_env: impl FnMut(&str) -> Option<CloudSecretValue>,
 ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
     // Build the request first to preserve cloud-specific error precedence,
     // then apply the same successful canonicalization to the config retained
     // by Sandbox::config().
-    let request = CloudCreateBody::try_from(config.clone())?;
+    let mut request = CloudCreateBody::try_from(config.clone())?;
+    resolve_secret_sources(
+        request.spec.sandbox_spec_mut().network.secrets.as_mut(),
+        resolve_env,
+    )?;
     crate::sandbox::validate_volume_mounts(&mut config.spec.mounts)?;
     Ok((request, config))
+}
+
+/// Env references are read from the caller's environment when the sandbox is
+/// created, while the sandbox config keeps the reference. A source wins over
+/// a value set on the same secret, as it does on a local create.
+fn resolve_secret_sources(
+    spec_secrets: Option<&mut CloudSecretsConfig>,
+    mut resolve_env: impl FnMut(&str) -> Option<CloudSecretValue>,
+) -> MicrosandboxResult<()> {
+    let Some(spec_secrets) = spec_secrets else {
+        return Ok(());
+    };
+
+    for entry in &mut spec_secrets.entries {
+        let Some(source) = &entry.source else {
+            continue;
+        };
+
+        match source {
+            CloudSecretSource::Env { var } => {
+                let var = var.clone();
+                let value = resolve_env(&var).ok_or_else(|| {
+                    MicrosandboxError::InvalidConfig(format!(
+                        "invalid secret configuration: secret {}: host environment variable {var} is not set",
+                        entry.env_var
+                    ))
+                })?;
+                if value.expose().is_empty() {
+                    return Err(MicrosandboxError::InvalidConfig(format!(
+                        "invalid secret configuration: secret {}: host environment variable {var} is empty",
+                        entry.env_var
+                    )));
+                }
+
+                entry.value = value.expose().to_owned();
+                entry.source = None;
+            }
+            CloudSecretSource::Store { .. } => {
+                return Err(MicrosandboxError::Custom(format!(
+                    "invalid secret configuration: secret {}: store-backed secret sources are not supported yet",
+                    entry.env_var
+                )));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Validate the root filesystem before converting a normal cloud create. The
@@ -1013,8 +1066,11 @@ mod tests {
 
     use microsandbox_types::{
         CloudSecretsConfig, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode,
-        SecretsConfig, StatVirtualization, VolumeKind, VolumeMount,
+        SecretSource, SecretsConfig, StatVirtualization, VolumeKind, VolumeMount,
     };
+
+    #[cfg(feature = "net")]
+    use zeroize::Zeroizing;
 
     use super::*;
     use crate::ComputeType;
@@ -1511,7 +1567,7 @@ mod tests {
             },
         ];
 
-        let (request, config) = cloud_create_body_and_config(config).unwrap();
+        let (request, config) = cloud_create_body_and_config(config, |_| None).unwrap();
         let retained = config
             .spec
             .mounts
@@ -2109,6 +2165,145 @@ mod tests {
                 .map(|secrets| secrets.entries.len()),
             Some(1),
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_resolves_env_secret_only_in_request() {
+        let config = cloud_config_with_secret_source(SecretSource::Env {
+            var: "API_KEY_VAR".into(),
+        })
+        .await;
+        let mut resolved_vars = Vec::new();
+
+        let (request, retained) = cloud_create_body_and_config(config, |var| {
+            resolved_vars.push(var.to_owned());
+            Some(CloudSecretValue::new("material"))
+        })
+        .unwrap();
+
+        let sent = &request
+            .spec
+            .sandbox_spec()
+            .network
+            .secrets
+            .as_ref()
+            .unwrap()
+            .entries[0];
+        assert_eq!(sent.value, "material");
+        assert!(sent.source.is_none());
+        assert_eq!(resolved_vars, vec!["API_KEY_VAR"]);
+
+        let retained = &retained.spec.network.secrets.as_ref().unwrap().secrets[0];
+        assert!(retained.value.is_empty());
+        assert!(matches!(
+            retained.source.as_ref(),
+            Some(SecretSource::Env { var }) if var == "API_KEY_VAR"
+        ));
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_env_secret_source_wins_over_value() {
+        let mut config = cloud_config_with_secret_source(SecretSource::Env {
+            var: "API_KEY_VAR".into(),
+        })
+        .await;
+        config.spec.network.secrets.as_mut().unwrap().secrets[0].value =
+            Zeroizing::new("inline".into());
+
+        let (request, _) =
+            cloud_create_body_and_config(config, |_| Some(CloudSecretValue::new("material")))
+                .unwrap();
+
+        let sent = &request
+            .spec
+            .sandbox_spec()
+            .network
+            .secrets
+            .as_ref()
+            .unwrap()
+            .entries[0];
+        assert_eq!(sent.value, "material");
+        assert!(sent.source.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_store_secret_source_with_value_is_refused() {
+        let mut config = cloud_config_with_secret_source(SecretSource::Store {
+            reference: "vault-key".into(),
+        })
+        .await;
+        config.spec.network.secrets.as_mut().unwrap().secrets[0].value =
+            Zeroizing::new("inline".into());
+
+        let error = cloud_create_body_and_config(config, |_| {
+            panic!("store source must not call the environment resolver")
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("store-backed secret sources are not supported yet")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_rejects_missing_or_empty_env_secret() {
+        for (resolved, expected) in [
+            (None, "is not set"),
+            (Some(CloudSecretValue::new("")), "is empty"),
+        ] {
+            let config = cloud_config_with_secret_source(SecretSource::Env {
+                var: "API_KEY_VAR".into(),
+            })
+            .await;
+
+            let error = cloud_create_body_and_config(config, |_| resolved.clone()).unwrap_err();
+
+            assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
+            let message = error.to_string();
+            assert!(message.contains("API_KEY_VAR"));
+            assert!(message.contains(expected));
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_rejects_store_secret_source() {
+        let config = cloud_config_with_secret_source(SecretSource::Store {
+            reference: "vault-key".into(),
+        })
+        .await;
+
+        let error = cloud_create_body_and_config(config, |_| {
+            panic!("store source must not call the environment resolver")
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("store-backed secret sources are not supported yet")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    async fn cloud_config_with_secret_source(source: SecretSource) -> SandboxConfig {
+        SandboxBuilder::new("agent-1")
+            .image("python:3.12")
+            .secret(|secret| {
+                secret
+                    .env("API_KEY")
+                    .source(source)
+                    .allow("api.example.com")
+            })
+            .build()
+            .await
+            .unwrap()
     }
 
     #[cfg(feature = "net")]
