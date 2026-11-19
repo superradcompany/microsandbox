@@ -354,6 +354,9 @@ mod tests {
                 "--exact",
                 "context::local::sandbox::process_exit::tests::exit_barrier_child",
                 "--nocapture",
+                // Pretty serial test output prefixes the child's first handshake line.
+                "--format",
+                "terse",
             ])
             .env("MSB_DARWIN_EXIT_CHILD", "1")
             .stdin(Stdio::piped())

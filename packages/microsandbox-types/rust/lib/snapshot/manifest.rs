@@ -475,6 +475,14 @@ impl Manifest {
             }
             previous = Some(key.as_str());
         }
+        // Older readers ignore optional extensions. Never accept portable launch
+        // settings in that form: their destination requirements affect guest execution.
+        let saved_key = super::saved_config::SAVED_CONFIG_EXTENSION;
+        if self.extensions.contains_key(saved_key)
+            && !self.requires.iter().any(|key| key == saved_key)
+        {
+            return descriptor_error("portable sandbox configuration must be required");
+        }
         for value in self.extensions.values() {
             validate_json_value(value, 0)?;
         }

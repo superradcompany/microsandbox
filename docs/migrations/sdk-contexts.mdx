@@ -3,13 +3,22 @@ title: "SDK contexts and unified resources"
 description: "Migrate destination selection, resource access, inspection and ownership to the redesigned SDK."
 ---
 
-The redesigned SDK uses one `Sandbox`, `Volume`, and `Snapshot` type each. Lookups and lists return operational resources; there is no separate resource Handle type or conversion step. This is a breaking application API migration. It does not change the runtime protocol or persisted resource format.
+Resource lookups return objects you can use directly. In the snapshot API, `Snapshot` represents a history and `Checkpoint` represents one immutable capture. Existing checkpoint IDs continue to identify the same artifacts.
+
+## Migrate snapshot lookups
+
+| What you have | Rust | Go |
+| --- | --- | --- |
+| Group name | `ctx.snapshots().get(name).await?` | `provider.Snapshots().Get(ctx, name)` |
+| Checkpoint ID | `ctx.checkpoints().get(id).await?` | `provider.Checkpoints().Get(ctx, id)` |
+
+In TypeScript and Python, use `await ctx.snapshots.get(name)` or `await ctx.checkpoints.get(id)`. In Ruby, use `ctx.snapshots.get(name)` or `ctx.checkpoints.get(id)`. In Go, change individual artifact declarations from `*microsandbox.Snapshot` to `*microsandbox.Checkpoint`. Local groups can spawn from their head or a selected member. Cloud supports individual disk checkpoints through the checkpoint collection.
 
 ## Keep unqualified resource calls
 
-Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSandbox` for ordinary resource operations. The matching get/list and Volume/Snapshot factories remain available. These calls honor the configured backend and use local when unset. An API key alone supplies credentials.
+Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSandbox` for ordinary resource operations. Use the matching resource or collection for lookups and lists. These calls honor the configured backend and use local when unset. An API key alone supplies credentials.
 
-Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. See [context selection](/operations/backends#sdk-contexts) for complete language examples. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. `Sandbox.ctx(context)` and the corresponding Volume/Snapshot entry points remain available.
+Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. See [context selection](/operations/backends#sdk-contexts) for complete language examples. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. Use the selected context’s collections to keep related operations on the same provider.
 
 ## Use the returned resource directly
 
@@ -68,9 +77,9 @@ Local context `build()` is synchronous and validates configuration immediately; 
 
 ## Update cleanup and execution code
 
-Volume and Snapshot instance deletion is `destroy`; static or collection `remove` remains an explicit name/reference-selected convenience. Remote path-based Snapshot destruction reports Unsupported until the provider can atomically enforce the captured identity. Explicit collection removal remains available.
+Use `destroy` on a volume or individual checkpoint to delete it through its retained provider. Removing a snapshot group deletes its history. A cloud checkpoint selected by a mutable host-volume path cannot guarantee exact deletion. Use an explicit collection operation if you intend to remove the resource currently at that path.
 
-`wait_for_status` signals completion only. Keep using the original resource and call `info` afterward if a new observation is needed. Snapshot `manifest` and `state` load metadata lazily through fallible I/O; get/list do not eagerly read every artifact.
+`wait_for_status` signals completion only. Keep using the original resource and call `info` afterward if a new observation is needed. Checkpoint `manifest` and `state` load metadata lazily through fallible I/O; get/list do not eagerly read every artifact.
 
 Execution retains its terminal outcome. A later wait returns the same recorded completion after an earlier wait, collection, or terminal event read. This does not rerun the command or replay its output. Cancelling a caller's wait is not proof that the command finished.
 
