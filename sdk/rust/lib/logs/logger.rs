@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use super::watch::LogRegistration;
 use super::{LogEntry, LogOptions, LogSnapshot, LogStreamOptions};
 use crate::MicrosandboxResult;
-use crate::backend::LocalBackend;
-use crate::backend::sandbox::LogStream;
+use crate::context::LocalContext;
+use crate::context::sandbox::LogStream;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -28,7 +28,7 @@ use crate::backend::sandbox::LogStream;
 
 /// Take the log directory and host file policy from one retained default backend.
 pub(super) fn default_logger(name: &str) -> SandboxLogger {
-    let backend = crate::backend::default_backend();
+    let backend = crate::context::default_local_context();
     if let Some(local) = backend.as_local() {
         return SandboxLogger::for_local(local, name);
     }
@@ -67,7 +67,7 @@ impl SandboxLogger {
 
     /// Construct a logger for a sandbox of `local`, using its log directory and
     /// host file policy.
-    pub(crate) fn for_local(local: &LocalBackend, name: &str) -> Self {
+    pub(crate) fn for_local(local: &LocalContext, name: &str) -> Self {
         Self {
             name: name.to_string(),
             log_dir: super::log_dir_for_local(local, name),

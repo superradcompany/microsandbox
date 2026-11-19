@@ -90,8 +90,8 @@ use stream::{LogEngine, LogFileConfig, LogFileFormat};
 use crate::MicrosandboxError;
 use crate::MicrosandboxResult;
 #[cfg(feature = "local")]
-use crate::backend::LocalBackend;
-use crate::backend::sandbox::LogStream;
+use crate::context::LocalContext;
+use crate::context::sandbox::LogStream;
 
 //--------------------------------------------------------------------------------------------------
 // LOG_FILES
@@ -153,7 +153,7 @@ pub fn log_dir_for(name: &str) -> PathBuf {
 
 /// Compute the on-disk log directory for an explicit local backend.
 #[cfg(feature = "local")]
-pub(crate) fn log_dir_for_local(local: &LocalBackend, name: &str) -> PathBuf {
+pub(crate) fn log_dir_for_local(local: &LocalContext, name: &str) -> PathBuf {
     local.config().sandboxes_dir().join(name).join("logs")
 }
 
@@ -172,8 +172,11 @@ pub(crate) fn log_dir_for_local(local: &LocalBackend, name: &str) -> PathBuf {
 /// stream's per-source ordering doesn't match snapshot's "filter after sort"
 /// contract.
 pub async fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>> {
-    let backend = crate::backend::default_backend();
-    backend.sandboxes().logs(backend.clone(), name, opts).await
+    let backend = crate::context::configured_context();
+    backend
+        .sandbox_ops()
+        .logs(backend.clone(), name, opts)
+        .await
 }
 
 /// Replay filtered history, then follow new entries through the selected backend.
@@ -182,9 +185,9 @@ pub async fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<
 /// satisfy a requested filter return a typed [`MicrosandboxError::Unsupported`]
 /// error.
 pub async fn follow_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogStream> {
-    let backend = crate::backend::default_backend();
+    let backend = crate::context::configured_context();
     backend
-        .sandboxes()
+        .sandbox_ops()
         .follow_logs(backend.clone(), name, opts)
         .await
 }
@@ -195,14 +198,17 @@ pub async fn follow_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Lo
 /// [`MicrosandboxError::BootStart`] during create/start. The cloud backend
 /// currently returns `None` because its API has no boot-error concept yet.
 pub async fn boot_error(name: &str) -> MicrosandboxResult<Option<BootError>> {
-    let backend = crate::backend::default_backend();
-    backend.sandboxes().boot_error(backend.clone(), name).await
+    let backend = crate::context::configured_context();
+    backend
+        .sandbox_ops()
+        .boot_error(backend.clone(), name)
+        .await
 }
 
 /// Read all matching log entries through an explicit local backend.
 #[cfg(feature = "local")]
 pub(crate) async fn read_logs_local(
-    local: &LocalBackend,
+    local: &LocalContext,
     name: &str,
     opts: &LogOptions,
 ) -> MicrosandboxResult<Vec<LogEntry>> {
@@ -212,7 +218,7 @@ pub(crate) async fn read_logs_local(
 /// Read a filtered snapshot and cursor through an explicit local backend.
 #[cfg(feature = "local")]
 pub(crate) async fn read_logs_snapshot_local(
-    local: &LocalBackend,
+    local: &LocalContext,
     name: &str,
     opts: &LogOptions,
 ) -> MicrosandboxResult<LogSnapshot> {
@@ -285,7 +291,7 @@ pub async fn log_stream(
 /// Stream log entries through an explicit local backend.
 #[cfg(feature = "local")]
 pub(crate) async fn log_stream_local(
-    local: &LocalBackend,
+    local: &LocalContext,
     name: &str,
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {

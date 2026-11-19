@@ -1,8 +1,8 @@
 //! `msb list` command — list all sandboxes.
 
 use clap::Args;
-use microsandbox::BackendKind;
-use microsandbox::sandbox::{SandboxConfig, SandboxHandle, SandboxStatus};
+use microsandbox::ContextKind;
+use microsandbox::sandbox::{SandboxConfig, SandboxRecord, SandboxStatus};
 
 use crate::ui::{self, OutputFormat};
 
@@ -78,7 +78,7 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
     let mut table = ui::Table::new(&["NAME", "IMAGE", "STATUS", "CREATED"]);
 
     for s in &filtered {
-        let image = extract_image(s.config_json(), s.backend_kind());
+        let image = extract_image(s.config_json(), s.context_kind());
         let status = format!("{:?}", s.status_snapshot());
         let created = s
             .created_at()
@@ -99,8 +99,8 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
 }
 
 /// Extract image name from config JSON.
-fn extract_image(config_json: &str, backend: BackendKind) -> String {
-    if backend == BackendKind::Cloud {
+fn extract_image(config_json: &str, backend: ContextKind) -> String {
+    if backend == ContextKind::Remote {
         // Cloud inspection returns a curated projection, not a serialized local
         // SandboxConfig. Do not fill absent cloud fields with local defaults.
         return serde_json::from_str::<serde_json::Value>(config_json)
@@ -126,7 +126,7 @@ fn extract_image(config_json: &str, backend: BackendKind) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn print_json(sandboxes: &[SandboxHandle]) -> anyhow::Result<()> {
+fn print_json(sandboxes: &[SandboxRecord]) -> anyhow::Result<()> {
     let entries: Vec<serde_json::Value> = sandboxes
         .iter()
         .map(|s| {
@@ -134,7 +134,7 @@ fn print_json(sandboxes: &[SandboxHandle]) -> anyhow::Result<()> {
                 "name": s.name(),
                 "status": format!("{:?}", s.status_snapshot()),
                 "created_at": s.created_at().map(|dt| ui::format_json_datetime(&dt)),
-                "image": extract_image(s.config_json(), s.backend_kind()),
+                "image": extract_image(s.config_json(), s.context_kind()),
             })
         })
         .collect();
@@ -157,12 +157,12 @@ mod tests {
         assert_eq!(
             extract_image(
                 r#"{"image":"python:3.12","memory_mib":512}"#,
-                BackendKind::Cloud
+                ContextKind::Remote
             ),
             "python:3.12"
         );
         for json in ["null", "{}", r#"{"image":null}"#, "invalid"] {
-            assert_eq!(extract_image(json, BackendKind::Cloud), "-");
+            assert_eq!(extract_image(json, ContextKind::Remote), "-");
         }
     }
 
@@ -174,7 +174,7 @@ mod tests {
             root_disk: None,
         });
         assert_eq!(
-            extract_image(&serde_json::to_string(&config).unwrap(), BackendKind::Local),
+            extract_image(&serde_json::to_string(&config).unwrap(), ContextKind::Local),
             "node:22"
         );
     }

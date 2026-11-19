@@ -13,7 +13,7 @@ use microsandbox_utils::process_lock;
 use sea_orm::EntityTrait;
 
 use crate::MicrosandboxResult;
-use crate::backend::LocalBackend;
+use crate::context::LocalContext;
 use crate::db::{
     DbReadConnection,
     entity::{image_ref, layer, manifest, snapshot},
@@ -36,7 +36,7 @@ pub(super) struct Journal {
 
 impl Journal {
     /// Recover abandoned unlink intents while preserving current owners and replacements.
-    pub(super) async fn recover(local: &LocalBackend) -> MicrosandboxResult<()> {
+    pub(super) async fn recover(local: &LocalContext) -> MicrosandboxResult<()> {
         let cache = GlobalCache::new(&local.cache_dir())?;
         let root = local.cache_dir();
         let directory = root.join(".image-deletions");
@@ -128,7 +128,7 @@ impl Journal {
     /// Recover entries independently; a busy entry keeps the journal for a later pass.
     async fn recover_files(
         self,
-        local: &LocalBackend,
+        local: &LocalContext,
         cache: &GlobalCache,
     ) -> MicrosandboxResult<()> {
         let pools = local.db().await?;

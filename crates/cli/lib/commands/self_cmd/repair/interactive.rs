@@ -4,7 +4,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use microsandbox::sandbox::{Sandbox, StorageRecovery, StorageRecoveryOptions};
+use microsandbox::sandbox::{StorageRecovery, StorageRecoveryOptions};
 use microsandbox::setup::{
     self, StorageDiagnosticReason, StorageDiagnosticStatus, StorageRepairBlocker,
     StorageSandboxDiagnosis, StorageSelection,
@@ -172,7 +172,8 @@ impl Operations for LocalOperations {
     type Blocker = StorageRepairBlocker;
 
     async fn inspect(&mut self, name: &str) -> MicrosandboxResult<StorageSandboxDiagnosis> {
-        setup::diagnose_storage(
+        setup::diagnose_storage_in(
+            crate::commands::common::selected_context()?.as_ref(),
             Default::default(),
             StorageSelection::Named(vec![name.into()]),
         )
@@ -184,7 +185,12 @@ impl Operations for LocalOperations {
     }
 
     async fn blockers(&mut self, name: &str) -> MicrosandboxResult<Vec<Self::Blocker>> {
-        setup::storage_repair_blockers(Default::default(), name).await
+        setup::storage_repair_blockers_in(
+            crate::commands::common::selected_context()?.as_ref(),
+            Default::default(),
+            name,
+        )
+        .await
     }
 
     fn blocker_name(blocker: &Self::Blocker) -> &str {
@@ -192,7 +198,10 @@ impl Operations for LocalOperations {
     }
 
     async fn stop(&mut self, blocker: &Self::Blocker) -> MicrosandboxResult<()> {
-        Sandbox::stop_storage_repair_blocker(blocker).await
+        crate::commands::common::selected_context()?
+            .sandboxes()
+            .stop_storage_repair_blocker(blocker)
+            .await
     }
 
     async fn repair(
@@ -202,14 +211,16 @@ impl Operations for LocalOperations {
     ) -> MicrosandboxResult<StorageRecovery> {
         // Empty selections preserve the existing validated state. The shared engine still
         // reacquires lifecycle ownership and excludes related writers for every target.
-        Sandbox::recover_storage(
-            name,
-            StorageRecoveryOptions {
-                legacy_writers_stopped: maintenance,
-                ..Default::default()
-            },
-        )
-        .await
+        crate::commands::common::selected_context()?
+            .sandboxes()
+            .recover_storage(
+                name,
+                StorageRecoveryOptions {
+                    legacy_writers_stopped: maintenance,
+                    ..Default::default()
+                },
+            )
+            .await
     }
 }
 
@@ -250,7 +261,12 @@ pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
         vec![name]
     } else {
         // This inventory belongs to an explicitly requested picker, never ordinary startup.
-        let inspected = setup::diagnose_storage(Default::default(), StorageSelection::All).await;
+        let inspected = setup::diagnose_storage_in(
+            crate::commands::common::selected_context()?.as_ref(),
+            Default::default(),
+            StorageSelection::All,
+        )
+        .await;
         if cancellation.checkpoint().await {
             return finish(&mut screen, &[], true);
         }
@@ -292,20 +308,23 @@ pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
     };
 
     // The picker is provisional. Inspect the exact accepted set again before offering repairs.
-    let mut entries =
-        match setup::diagnose_storage(Default::default(), StorageSelection::Named(names.clone()))
-            .await
-        {
-            Ok(report) => report
-                .sandboxes
-                .into_iter()
-                .map(Entry::inspected)
-                .collect::<Vec<_>>(),
-            Err(error) => names
-                .into_iter()
-                .map(|name| Entry::unavailable(name, &error))
-                .collect(),
-        };
+    let mut entries = match setup::diagnose_storage_in(
+        crate::commands::common::selected_context()?.as_ref(),
+        Default::default(),
+        StorageSelection::Named(names.clone()),
+    )
+    .await
+    {
+        Ok(report) => report
+            .sandboxes
+            .into_iter()
+            .map(Entry::inspected)
+            .collect::<Vec<_>>(),
+        Err(error) => names
+            .into_iter()
+            .map(|name| Entry::unavailable(name, &error))
+            .collect(),
+    };
     let mut operations = LocalOperations;
     if cancellation.checkpoint().await {
         cancel_pending(&mut entries);

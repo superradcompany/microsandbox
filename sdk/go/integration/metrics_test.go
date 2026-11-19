@@ -90,7 +90,7 @@ func recvMetricsEventually(
 		if err == nil {
 			return m
 		}
-		if !strings.Contains(err.Error(), "no live metrics slot") {
+		if !strings.Contains(err.Error(), "no live metrics slot") && !strings.Contains(err.Error(), "no verified live metrics slot") {
 			t.Fatalf("Recv #%d: %v", index, err)
 		}
 		lastErr = err

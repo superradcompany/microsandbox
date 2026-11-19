@@ -134,8 +134,8 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	if !strings.Contains(h.ConfigJSON(), `"link_local"`) {
-		t.Errorf("expected link-local rule in ConfigJSON; got %s", h.ConfigJSON())
+	if !strings.Contains(liveConfigJSON(t, ctx, h), `"link_local"`) {
+		t.Errorf("expected link-local rule in ConfigJSON; got %s", liveConfigJSON(t, ctx, h))
 	}
 
 	// 1.1.1.1:443 should be reachable; 8.8.8.8:443 should not.

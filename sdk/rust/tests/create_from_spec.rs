@@ -15,7 +15,7 @@ const FROM_SPEC_VALUE: &str = "{\"message\":\"hello\",\"nested\":{\"quote\":\"a=
 async fn cleanup(name: &str) {
     if let Ok(h) = Sandbox::get(name).await {
         let _ = h.kill().await;
-        let _ = h.remove().await;
+        let _ = h.destroy().await;
     }
 }
 

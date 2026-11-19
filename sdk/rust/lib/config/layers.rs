@@ -9,7 +9,7 @@ use super::{
     GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PathsConfigPatch,
     persistence::ManagedConfig, registry::RegistrySettingsPatch,
 };
-use crate::backend::{BackendKind, BackendSelectionSource};
+use crate::context::{ContextKind, ContextSelectionSource};
 use crate::sandbox::restore_resources::RestoreResources;
 #[cfg(feature = "ssh")]
 use crate::sandbox::ssh::SshTimeoutPatch;
@@ -63,7 +63,7 @@ impl GlobalConfig {
 
 impl BackendConfig {
     /// Borrow the settings captured by the sandbox's backend, independent of ambient routing.
-    pub(crate) fn for_backend(backend: &dyn crate::backend::Backend) -> Option<&Self> {
+    pub(crate) fn for_backend(backend: &dyn crate::context::Context) -> Option<&Self> {
         #[cfg(feature = "local")]
         if let Some(local) = backend.as_local() {
             return Some(local.config_sources());
@@ -236,8 +236,8 @@ impl BackendConfig {
         );
         let effective = reader.resolved_config();
         reader.require_backend(
-            BackendKind::Local,
-            Some(BackendSelectionSource::Programmatic),
+            ContextKind::Local,
+            Some(ContextSelectionSource::Programmatic),
         )?;
         if effective.home() != home
             || [
@@ -283,8 +283,8 @@ impl BackendConfig {
     /// Check permission independently of backend selection and credential resolution.
     pub(crate) fn require_backend(
         &self,
-        kind: BackendKind,
-        source: Option<BackendSelectionSource>,
+        kind: ContextKind,
+        source: Option<ContextSelectionSource>,
     ) -> MicrosandboxResult<()> {
         self.validate_backend_policy()?;
         if let Some(allowed) = &self.resolved_config().allowed_backends
@@ -296,7 +296,7 @@ impl BackendConfig {
                 .collect::<Vec<_>>()
                 .join(", ");
             let source = source
-                .unwrap_or(BackendSelectionSource::Programmatic)
+                .unwrap_or(ContextSelectionSource::Programmatic)
                 .as_str();
             return Err(self.backend_policy_error(&format!(
                 "{} backend selected by {source} is disabled; allowed backends: {allowed}",
@@ -477,7 +477,7 @@ mod tests {
                 serde_json::from_value(user.clone()).unwrap(),
                 serde_json::from_value(managed.clone()).unwrap(),
             );
-            for (kind, allowed) in [(BackendKind::Local, local), (BackendKind::Cloud, cloud)] {
+            for (kind, allowed) in [(ContextKind::Local, local), (ContextKind::Remote, cloud)] {
                 assert_eq!(
                     config.require_backend(kind, None).is_ok(),
                     allowed,
@@ -494,18 +494,18 @@ mod tests {
     #[test]
     fn policy_errors_explain_source_selection_and_recovery() {
         for managed in [false, true] {
-            let patch = GlobalConfigPatch::new().allowed_backends(vec![BackendKind::Cloud]);
+            let patch = GlobalConfigPatch::new().allowed_backends(vec![ContextKind::Remote]);
             let config = if managed {
                 BackendConfig::new(Default::default(), patch)
             } else {
                 BackendConfig::new(patch, Default::default())
             };
             let error = config
-                .require_backend(BackendKind::Local, Some(BackendSelectionSource::MsbBackend))
+                .require_backend(ContextKind::Local, Some(ContextSelectionSource::MsbBackend))
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("local backend selected by MSB_BACKEND is disabled"));
-            assert!(error.contains("allowed backends: cloud"));
+            assert!(error.contains("allowed backends: remote"));
             if managed {
                 assert!(error.contains("managed config"));
                 assert!(error.contains("contact your administrator"));
@@ -871,9 +871,9 @@ mod tests {
             patched.resolved_config().paths.logs,
             Some(admin.parent().unwrap().join("logs"))
         );
-        patched.require_backend(BackendKind::Local, None).unwrap();
+        patched.require_backend(ContextKind::Local, None).unwrap();
         let error = patched
-            .require_backend(BackendKind::Cloud, None)
+            .require_backend(ContextKind::Remote, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("managed config"));

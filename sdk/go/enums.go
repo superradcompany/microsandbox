@@ -104,6 +104,22 @@ const (
 	PullPolicyNever     PullPolicy = "never"
 )
 
+// UnmarshalText accepts the Rust variant names used by persisted local specs
+// as well as the public SDK spellings.
+func (p *PullPolicy) UnmarshalText(text []byte) error {
+	switch string(text) {
+	case "IfMissing":
+		*p = PullPolicyIfMissing
+	case "Always":
+		*p = PullPolicyAlways
+	case "Never":
+		*p = PullPolicyNever
+	default:
+		*p = PullPolicy(text)
+	}
+	return nil
+}
+
 // LogLevel selects the sandbox process log verbosity.
 type LogLevel string
 

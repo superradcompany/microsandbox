@@ -212,6 +212,30 @@ pub struct CloudSandboxResources {
     pub disk_size_mib: Option<u32>,
 }
 
+/// Compute options chosen when a sandbox is created.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct CloudCompute {
+    /// The kind of machine the sandbox runs on.
+    #[serde(rename = "type", default)]
+    pub compute_type: CloudComputeType,
+}
+
+/// The kind of machine a sandbox runs on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum CloudComputeType {
+    /// Dedicated CPU capacity.
+    #[default]
+    Standard,
+    /// CPU capacity shared with other sandboxes.
+    Shared,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Types: Response
 //--------------------------------------------------------------------------------------------------

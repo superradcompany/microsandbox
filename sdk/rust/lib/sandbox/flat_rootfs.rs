@@ -6,7 +6,7 @@ use std::time::Instant;
 use microsandbox_types::FlatClone;
 use microsandbox_utils::copy::FastCopyStrategy;
 
-use crate::backend::local::creation::CreationStorage;
+use crate::context::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -279,7 +279,7 @@ mod tests {
 
         create_private_flat_rootfs(
             base.clone(),
-            &crate::backend::local::creation::CreationStorage::for_test(destination.clone()),
+            &crate::context::local::creation::CreationStorage::for_test(destination.clone()),
             target_mib,
             FlatClone::Copy,
         )
@@ -308,7 +308,7 @@ mod tests {
 
         let error = create_private_flat_rootfs(
             base,
-            &crate::backend::local::creation::CreationStorage::for_test(
+            &crate::context::local::creation::CreationStorage::for_test(
                 dir.path().join(FLAT_ROOTFS_FILENAME),
             ),
             1,
@@ -348,7 +348,7 @@ mod tests {
         .unwrap();
 
         let target_mib = create_patched_flat_rootfs(
-            &crate::backend::local::creation::CreationStorage::for_test(destination.clone()),
+            &crate::context::local::creation::CreationStorage::for_test(destination.clone()),
             tree,
             None,
         )

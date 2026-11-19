@@ -1,4 +1,8 @@
-"""Live lifecycle convergence and identity-safety example."""
+"""Live lifecycle convergence and identity-safety example.
+
+Explicit preparation measures readiness and concurrent convergence.
+Ordinary shell/exec examples should rely on automatic preparation.
+"""
 
 import asyncio
 import json
@@ -56,8 +60,8 @@ async def main() -> None:
             "concurrent_connect_or_create",
             lambda: asyncio.gather(*(create_candidate(marker) for marker in candidates)),
         )
-        race_id = await raced[0].id
-        race_ids = await asyncio.gather(*(sandbox.id for sandbox in raced))
+        race_id = raced[0].id
+        race_ids = [sandbox.id for sandbox in raced]
         if any(identity != race_id for identity in race_ids):
             raise RuntimeError("concurrent connect_or_create callers selected different identities")
         marker = await read_marker(raced[0])
@@ -66,31 +70,32 @@ async def main() -> None:
 
         await raced[0].stop()
         handles = await asyncio.gather(*(Sandbox.get(RACE_NAME) for _ in candidates))
-        connected = await measured(
-            "concurrent_connect_or_start",
-            lambda: asyncio.gather(*(handle.connect_or_start() for handle in handles)),
+        await measured(
+            "concurrent_ensure_running",
+            lambda: asyncio.gather(*(sandbox.ensure_running() for sandbox in handles)),
         )
-        connected_ids = await asyncio.gather(*(sandbox.id for sandbox in connected))
+        connected = handles
+        connected_ids = [sandbox.id for sandbox in connected]
         if any(identity != race_id for identity in connected_ids):
-            raise RuntimeError("concurrent connect_or_start callers selected different identities")
+            raise RuntimeError("concurrent ensure_running callers selected different identities")
         if await read_marker(connected[0]) != marker:
             raise RuntimeError("start race lost persisted configuration")
 
         await connected[0].stop()
         detached = await measured(
-            "connect_or_start_detached",
-            lambda: handles[0].connect_or_start(detached=True),
+            "start_detached",
+            lambda: Sandbox.start_detached(RACE_NAME),
         )
-        if await detached.id != race_id or await detached.owns_lifecycle:
+        if detached.id != race_id or await detached.owns_lifecycle:
             raise RuntimeError(
-                "detached connect_or_start changed identity or took lifecycle ownership"
+                "detached ensure_running changed identity or took lifecycle ownership"
             )
 
         forced = await measured(
             "restart_force",
             lambda: detached.restart(force=True, timeout=5.0),
         )
-        if await forced.id != race_id or not await forced.owns_lifecycle:
+        if forced.id != race_id or not await forced.owns_lifecycle:
             raise RuntimeError(
                 "forced restart changed identity or failed to return an attached handle"
             )
@@ -101,7 +106,7 @@ async def main() -> None:
             "restart_detached_timeout",
             lambda: forced.restart(timeout=3.0, detached=True),
         )
-        if await detached_restart.id != race_id or await detached_restart.owns_lifecycle:
+        if detached_restart.id != race_id or await detached_restart.owns_lifecycle:
             raise RuntimeError("detached restart changed identity or took lifecycle ownership")
         if await read_marker(detached_restart) != marker:
             raise RuntimeError("detached restart lost persisted configuration")
@@ -124,7 +129,7 @@ async def main() -> None:
                 env={"LIFECYCLE_MARKER": "original"},
             ),
         )
-        original_id = await created.id
+        original_id = created.id
 
         reused = await measured(
             "connect_or_create_existing",
@@ -135,7 +140,7 @@ async def main() -> None:
                 env={"LIFECYCLE_MARKER": "ignored"},
             ),
         )
-        if await reused.id != original_id:
+        if reused.id != original_id:
             raise RuntimeError("connect_or_create changed the persisted identity")
         if await read_marker(reused) != "original":
             raise RuntimeError("existing configuration did not win")
@@ -143,15 +148,16 @@ async def main() -> None:
         # Strict start resumes an existing stopped identity without accepting creation options.
         await reused.stop()
         resumed = await measured("start", lambda: Sandbox.start(NAME))
-        if await resumed.id != original_id:
+        if resumed.id != original_id:
             raise RuntimeError("start changed the persisted identity")
         if await read_marker(resumed) != "original":
             raise RuntimeError("start lost persisted configuration")
 
         handle = await Sandbox.get(NAME)
-        connected = await measured("connect_or_start", handle.connect_or_start)
-        if await connected.id != original_id:
-            raise RuntimeError("connect_or_start changed the persisted identity")
+        await measured("ensure_running", handle.ensure_running)
+        connected = handle
+        if connected.id != original_id:
+            raise RuntimeError("ensure_running changed the persisted identity")
 
         await measured("wait_for_running", lambda: connected.wait_for_status("running"))
 
@@ -161,7 +167,7 @@ async def main() -> None:
 
         await measured("exec", verify_original_marker)
         restarted = await measured("restart", connected.restart)
-        if await restarted.id != original_id:
+        if restarted.id != original_id:
             raise RuntimeError("restart changed the persisted identity")
         if await read_marker(restarted) != "original":
             raise RuntimeError("restart lost persisted configuration")
@@ -175,7 +181,7 @@ async def main() -> None:
             memory=256,
             env={"LIFECYCLE_MARKER": "replacement"},
         )
-        if await replacement.id == original_id:
+        if replacement.id == original_id:
             raise RuntimeError("replacement reused the destroyed identity")
 
         async def reject_stale_receiver():

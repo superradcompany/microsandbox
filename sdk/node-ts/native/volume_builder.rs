@@ -43,14 +43,8 @@ pub struct JsVolumeBuilder {
 impl JsVolumeBuilder {
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
-        Self {
-            inner: Some(RustVolumeBuilder::new(&name)),
-            name,
-            kind: "dir".to_string(),
-            quota_mib: None,
-            capacity_mib: None,
-            labels: Vec::new(),
-        }
+        let builder = RustVolumeBuilder::new(&name);
+        Self::from_builder(name, builder)
     }
 
     /// Create a directory-backed named volume.
@@ -136,5 +130,18 @@ impl JsVolumeBuilder {
         self.inner
             .take()
             .expect("VolumeBuilder used after consumption")
+    }
+}
+
+impl JsVolumeBuilder {
+    pub(crate) fn from_builder(name: String, builder: microsandbox::volume::VolumeBuilder) -> Self {
+        Self {
+            inner: Some(builder),
+            name,
+            kind: "dir".to_string(),
+            quota_mib: None,
+            capacity_mib: None,
+            labels: Vec::new(),
+        }
     }
 }

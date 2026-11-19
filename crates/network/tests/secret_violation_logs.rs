@@ -96,7 +96,8 @@ async fn assert_proxy_violation_logs(logs: &CapturedLogs) {
                         .value("real-secret")
                         .placeholder("$KEY")
                         .allow("api.example.com")
-                        .build(),
+                        .build()
+                        .unwrap(),
                 ],
                 violation_action: action.clone(),
                 ..Default::default()
@@ -238,7 +239,8 @@ fn secret_violation_logs_distinguish_blocking_from_allowed_placeholders() {
                             .value("real-secret")
                             .placeholder("$KEY")
                             .allow("api.example.com")
-                            .build(),
+                            .build()
+                            .unwrap(),
                     ],
                     violation_action: action.clone(),
                     ..Default::default()
