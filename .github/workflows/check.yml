@@ -971,6 +971,12 @@ jobs:
       - name: Check generated microsandbox types
         run: cargo +stable run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
 
+      # `agentd` is compiled into the host binary, so a checkout must embed its
+      # own `build/agentd` and must never silently substitute a stale or released
+      # payload from a different revision of the tree.
+      - name: Check guest agent provenance
+        run: scripts/ci/check-agentd-provenance.sh
+
   node-sdk-build:
     name: TypeScript and Node Quality
     needs: [build-linux-x86_64, changes]
