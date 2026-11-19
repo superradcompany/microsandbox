@@ -2121,6 +2121,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn kill_waits_for_start_publication_and_terminates_the_created_run() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::process::Stdio;
+
+        use super::signal_tests::{child_lines, cleanup_child, expect_line};
+
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = Arc::new(
             crate::test_support::local_backend_builder(home.path())
@@ -2183,8 +2188,43 @@ mod tests {
         journal
             .confirm(Some(serde_json::to_value(&source).unwrap()))
             .unwrap();
-        // Finish fallible evidence setup before spawning the disposable process.
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        // Publish a child with the runtime's inherited identity descriptor. A plain sleep
+        // process is deliberately treated as a recycled PID and must not be signaled.
+        let lifecycle = microsandbox_runtime::ipc::acquire_lifecycle_guard(
+            &backend.config().run_dir(),
+            "kill-start",
+        )
+        .unwrap();
+        let lifecycle_fd = lifecycle.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "context::local::sandbox::signal_tests::lifecycle_signal_child",
+                "--nocapture",
+                "--format",
+                "terse",
+            ])
+            .env("MSB_LIFECYCLE_SIGNAL_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        unsafe {
+            command.pre_exec(move || {
+                let copy = libc::fcntl(lifecycle_fd, libc::F_DUPFD_CLOEXEC, 200);
+                if copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(copy, microsandbox_runtime::vm::LIFECYCLE_LOCK_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
+            cleanup_child(&mut child);
+        });
+        expect_line(&child_lines(child.stdout.take().unwrap()), "ready");
+        drop(lifecycle);
         let pid = child.id() as i32;
         let published = run_entity::Entity::update_many()
             .col_expr(
@@ -2201,10 +2241,8 @@ mod tests {
         }
         drop(transition);
         let result = tokio::time::timeout(Duration::from_secs(6), kill).await;
-        // Ensure assertion failures never leave the helper process behind.
-        let _ = child.kill();
-        child.wait().unwrap();
         result.unwrap().unwrap().unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
         assert_eq!(
             backend
                 .sandbox_handle_state("kill-start", Some(id))
