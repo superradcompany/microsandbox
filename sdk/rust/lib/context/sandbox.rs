@@ -98,7 +98,7 @@ pub struct SandboxRemoteState {
     pub id: String,
     /// Owning org's UUID.
     pub org_id: String,
-    /// Creation timestamp returned by msb-cloud.
+    /// Creation timestamp returned by the cloud API.
     pub created_at: DateTime<Utc>,
 }
 
@@ -148,13 +148,13 @@ pub struct SandboxRecordCloudState {
     pub id: String,
     /// Owning org's UUID.
     pub org_id: String,
-    /// Lifecycle status mapped from msb-cloud's
+    /// Lifecycle status mapped from the cloud API's
     /// [`CloudSandboxStatus`](crate::CloudSandboxStatus).
     pub status: SandboxStatus,
     /// Serialized [`CloudCreateSandboxRequest`](crate::CloudCreateSandboxRequest)
-    /// returned by msb-cloud.
+    /// returned by the cloud API.
     pub config_json: String,
-    /// Creation timestamp returned by msb-cloud.
+    /// Creation timestamp returned by the cloud API.
     pub created_at: Option<DateTime<Utc>>,
     /// Last start timestamp, when known.
     pub started_at: Option<DateTime<Utc>>,
@@ -169,7 +169,7 @@ pub struct SandboxRecordCloudState {
 /// Trait methods take the [`Arc<dyn Context>`] that they should wrap any
 /// returned [`Sandbox`] / [`SandboxRecord`] with. Callers (e.g.
 /// `Sandbox::create`) resolve the backend via
-/// [`default_local_context`](super::default_local_context) and forward it through.
+/// [`configured_context`](super::configured_context) and forward it through.
 pub trait SandboxOps: Send + Sync {
     /// Suggested budget for callers choosing a bounded graceful-stop observation.
     ///

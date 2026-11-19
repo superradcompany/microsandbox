@@ -95,11 +95,10 @@ pub fn from_options_json(json: &str) -> MicrosandboxResult<Arc<dyn Context>> {
                     }
                     return Ok(super::RemoteContext::from_profile(&profile)?.clone_shared());
                 }
-                let mut builder = super::RemoteContext::builder().api_key(
-                    options
-                        .api_key
-                        .ok_or_else(|| invalid("remote context requires apiKey or profile"))?,
-                );
+                let mut builder = super::RemoteContext::builder();
+                if let Some(key) = options.api_key {
+                    builder = builder.api_key(key);
+                }
                 if let Some(url) = options.url {
                     builder = builder.url(url);
                 }

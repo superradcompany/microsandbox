@@ -1289,8 +1289,8 @@ impl SshSession {
             &runtime.config,
             cmd,
             opts,
-            rows,
-            cols,
+            (rows, cols),
+            true,
         )
         .await?;
         handle.retain_runtime(runtime);
@@ -1689,8 +1689,7 @@ impl russh::server::Handler for SshSession {
             .sandbox
             .config()
             .await?
-            .spec
-            .runtime
+            .runtime()
             .workdir
             .as_deref()
             .filter(|path| !path.is_empty() && path.starts_with('/'))

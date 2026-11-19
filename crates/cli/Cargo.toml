@@ -17,6 +17,8 @@ path = "lib/lib.rs"
 
 [features]
 default = ["net", "download-binaries", "embed-binaries", "keyring", "ssh"]
+# Never enabled by packaging; used by the isolated retention failure-injection harness.
+retention-test-hooks = ["microsandbox-runtime/retention-test-hooks"]
 keyring = ["microsandbox/keyring"]
 download-binaries = [
     "microsandbox/download-binaries",

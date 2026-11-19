@@ -147,7 +147,7 @@ pub fn storage_prune<'env>(
 fn resolve_local(operation: microsandbox::Operation) -> Result<Arc<dyn microsandbox::Context>> {
     // Keep this selected backend alive across the await; concurrent selection changes must
     // not redirect a scan or a deletion to a different configured runtime home.
-    let backend = microsandbox::context::default_local_context();
+    let backend = microsandbox::context::configured_context();
     if backend.as_local().is_none() {
         return Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
             operation,

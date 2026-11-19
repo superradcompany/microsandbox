@@ -39,12 +39,17 @@ mod context;
 mod creation_progress;
 mod exec_adapter;
 mod execution_result;
+mod ffi_error;
 mod jobs;
 mod persistent_resource;
 mod provider;
+mod resize;
+mod resize_operations;
 mod resource;
 mod restore;
+mod service;
 mod setup;
+mod snapshot_objects;
 mod storage;
 mod volume_fs;
 
@@ -66,8 +71,8 @@ use base64::Engine;
 #[cfg(feature = "local")]
 use microsandbox::sandbox::all_sandbox_metrics_local;
 use microsandbox::{
-    AgentBridge, LoadOptions, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot,
-    SnapshotReference, UpperVerifyStatus, default_local_context,
+    AgentBridge, Checkpoint as Snapshot, LogLevel, MicrosandboxError, RegistryAuth, Sandbox,
+    SnapshotReference, UnsupportedReason, UpperVerifyStatus, configured_context,
     logs::{LogOptions, LogSource},
     sandbox::{
         DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile,
@@ -471,6 +476,7 @@ mod error_kind {
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
     pub const STOP_TIMEOUT: &str = "stop_timeout";
+    pub const RESIZE_TIMEOUT: &str = "resize_timeout";
     pub const NO_DEFAULT_COMMAND: &str = "no_default_command";
     pub const INVALID_CONFIG: &str = "invalid_config";
     pub const INVALID_ARGUMENT: &str = "invalid_argument";
@@ -488,18 +494,38 @@ mod error_kind {
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const SNAPSHOT_MIGRATION: &str = "snapshot_migration";
     pub const SNAPSHOT_SOURCE_RECOVERY: &str = "snapshot_source_recovery";
+    pub const SNAPSHOT_IMPORT: &str = "snapshot_import";
+    pub const SNAPSHOT_GROUP_REMOVAL_RECOVERY: &str = "snapshot_group_removal_recovery";
+    pub const SNAPSHOT_REMOVAL_RECOVERY: &str = "snapshot_removal_recovery";
+    pub const SNAPSHOT_VERIFICATION: &str = "snapshot_verification";
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const METRICS_DISABLED: &str = "metrics_disabled";
     pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
     pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
+    pub const CLOUD_ONLY: &str = "cloud_only";
     pub const MODIFICATION_NOT_CONFIRMED: &str = "modification_not_confirmed";
     pub const IO: &str = "io";
+    pub const SERVICE_NOT_FOUND: &str = "service_not_found";
+    pub const SERVICE_ALREADY_EXISTS: &str = "service_already_exists";
+    pub const SERVICE: &str = "service";
 }
 
 struct FfiError {
     kind: &'static str,
     message: String,
+    changed: Option<microsandbox::ChangeState>,
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
+    import: Option<Box<microsandbox::SnapshotImportError>>,
+    verification: Option<Box<microsandbox::snapshot::SnapshotGroupVerifyReport>>,
+    removal: Option<Box<(microsandbox::CheckpointRemoveResult, String)>>,
+    group_removal: Option<Box<(microsandbox::SnapshotRemoveResult, String)>>,
+    #[expect(
+        clippy::box_collection,
+        reason = "a single pointer keeps the common FFI error small; only resize timeouts allocate"
+    )]
+    resize_status: Option<Box<Vec<microsandbox::sandbox::ResourceResizeStatus>>>,
+    resize_wait: Option<Box<microsandbox::ResizeWaitError>>,
+    service: Option<Box<service::ServiceErrorDetails>>,
     os_error: Option<i32>,
 }
 
@@ -511,103 +537,6 @@ struct BranchManyRequest {
     guest_flush: microsandbox::snapshot::GuestFlush,
     #[serde(default)]
     volumes: HashMap<String, MountSpec>,
-}
-
-impl FfiError {
-    fn new(kind: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-            recovery: None,
-            os_error: None,
-        }
-    }
-
-    fn invalid_argument(message: impl Into<String>) -> Self {
-        Self::new(error_kind::INVALID_ARGUMENT, message)
-    }
-
-    fn invalid_handle(handle: Handle) -> Self {
-        Self::new(
-            error_kind::INVALID_HANDLE,
-            format!("unknown sandbox handle: {handle}"),
-        )
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self::new(error_kind::INTERNAL, message)
-    }
-
-    /// Serialize to the JSON payload returned by the error C string.
-    fn to_json(&self) -> String {
-        // Message is escaped via serde_json so it's safe to embed arbitrary text.
-        let msg = serde_json::to_string(&self.message).unwrap_or_else(|_| "\"\"".into());
-        if let Some(os_error) = self.os_error {
-            return format!(
-                r#"{{"kind":"{}","message":{},"os_error":{}}}"#,
-                self.kind, msg, os_error
-            );
-        }
-        if let Some(recovery) = &self.recovery
-            && let Ok(recovery) = serde_json::to_string(recovery)
-        {
-            return format!(
-                r#"{{"kind":"{}","message":{},"recovery":{}}}"#,
-                self.kind, msg, recovery
-            );
-        }
-        format!(r#"{{"kind":"{}","message":{}}}"#, self.kind, msg)
-    }
-}
-
-impl From<MicrosandboxError> for FfiError {
-    fn from(e: MicrosandboxError) -> Self {
-        let kind = match &e {
-            MicrosandboxError::SandboxNotFound(_) => error_kind::SANDBOX_NOT_FOUND,
-            MicrosandboxError::SandboxStillRunning(_) => error_kind::SANDBOX_STILL_RUNNING,
-            MicrosandboxError::SandboxNotRunning(_) => error_kind::SANDBOX_NOT_RUNNING,
-            MicrosandboxError::SandboxAlreadyExists(_) => error_kind::SANDBOX_ALREADY_EXISTS,
-            MicrosandboxError::SandboxReplaced { .. } => error_kind::SANDBOX_REPLACED,
-            MicrosandboxError::SandboxStopTimedOut { .. } => error_kind::SANDBOX_STOP_TIMED_OUT,
-            MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
-            MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
-            MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
-            MicrosandboxError::StopTimeout { .. } => error_kind::STOP_TIMEOUT,
-            MicrosandboxError::NoDefaultCommand => error_kind::NO_DEFAULT_COMMAND,
-            MicrosandboxError::InvalidConfig(_)
-            | MicrosandboxError::MissingRestoreBindings { .. } => error_kind::INVALID_CONFIG,
-            MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
-            MicrosandboxError::ImageNotFound(_) => error_kind::IMAGE_NOT_FOUND,
-            MicrosandboxError::ImageInUse(_) => error_kind::IMAGE_IN_USE,
-            MicrosandboxError::SnapshotNotFound(_) => error_kind::SNAPSHOT_NOT_FOUND,
-            MicrosandboxError::SnapshotAlreadyExists(_) => error_kind::SNAPSHOT_ALREADY_EXISTS,
-            MicrosandboxError::SnapshotSandboxRunning(_) => error_kind::SNAPSHOT_SANDBOX_RUNNING,
-            MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
-            MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
-            MicrosandboxError::SnapshotMigration { .. } => error_kind::SNAPSHOT_MIGRATION,
-            MicrosandboxError::SnapshotSourceRecovery(_) => error_kind::SNAPSHOT_SOURCE_RECOVERY,
-            MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
-            MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
-            MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
-            MicrosandboxError::Unsupported { .. } => error_kind::UNSUPPORTED_OPERATION,
-            MicrosandboxError::ModificationNotConfirmed { .. } => {
-                error_kind::MODIFICATION_NOT_CONFIRMED
-            }
-            MicrosandboxError::RuntimeNotInstalled(_) => "runtime_not_installed",
-            MicrosandboxError::RuntimeIncomplete(_) => "runtime_incomplete",
-            MicrosandboxError::Io(_) => error_kind::IO,
-            _ => error_kind::INTERNAL,
-        };
-        Self {
-            kind,
-            message: e.to_string(),
-            os_error: None,
-            recovery: match e {
-                MicrosandboxError::SnapshotSourceRecovery(recovery) => Some(recovery),
-                _ => None,
-            },
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,7 +946,7 @@ struct NetworkOpts {
     http: Option<microsandbox_network::config::HttpConfig>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct OutboundProxyOpts {
     protocol: String,
     address: String,
@@ -1029,7 +958,7 @@ struct OutboundProxyOpts {
     password_source: Option<SecretSourceOpts>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct SecretSourceOpts {
     kind: String,
     #[serde(default)]
@@ -1275,6 +1204,8 @@ struct SnapshotCreateOpts {
 
 #[derive(serde::Deserialize, Default)]
 struct SnapshotSaveOptsJson {
+    #[serde(default)]
+    compatibility: microsandbox::ArchiveCompatibility,
     since: Option<String>,
     last_layers: Option<usize>,
     #[serde(default)]
@@ -1287,12 +1218,14 @@ struct SnapshotSaveOptsJson {
 
 #[derive(serde::Deserialize, Default)]
 struct SnapshotLoadOptsJson {
-    maximum_disk_bytes: Option<u64>,
+    caller_directory: Option<PathBuf>,
     dest: Option<PathBuf>,
     base: Option<String>,
     group: Option<String>,
     #[serde(default)]
     set_head: bool,
+    #[serde(default)]
+    maximum_disk_bytes: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2513,7 +2446,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
 
         let context = match opts.context_handle {
             Some(handle) => context::get(handle)?,
-            None => microsandbox::context::default_local_context(),
+            None => microsandbox::context::configured_context(),
         };
 
         // Pre-parse pull policy / log level / violation action so any error
@@ -2651,12 +2584,12 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(secs) = opts.max_duration_secs
                 && secs > 0
             {
-                builder = builder.max_duration(secs);
+                builder = builder.max_duration(std::time::Duration::from_secs(secs));
             }
             if let Some(secs) = opts.idle_timeout_secs
                 && secs > 0
             {
-                builder = builder.idle_timeout(secs);
+                builder = builder.idle_timeout(std::time::Duration::from_secs(secs));
             }
             // `registry` overwrites insecure and ca_certs wholesale, so all
             // three overrides have to be applied in one call.
@@ -2999,7 +2932,7 @@ struct SandboxHandleLifecycleOpts {
 async fn sandbox_record(
     name: &str,
 ) -> microsandbox::MicrosandboxResult<microsandbox::sandbox::SandboxRecord> {
-    let context = microsandbox::context::default_local_context();
+    let context = microsandbox::context::configured_context();
     context.sandbox_ops().get(context.clone(), name).await
 }
 
@@ -3008,14 +2941,7 @@ async fn identified_sandbox_handle(
     expected_id: &str,
 ) -> Result<microsandbox::sandbox::SandboxRecord, FfiError> {
     let handle = sandbox_record(name).await.map_err(FfiError::from)?;
-    let actual_id = handle.id().to_string();
-    if actual_id != expected_id {
-        return Err(FfiError::from(MicrosandboxError::SandboxReplaced {
-            name: name.to_string(),
-            expected: expected_id.to_string(),
-            actual: actual_id,
-        }));
-    }
+    resize::ensure_expected_identity(name, expected_id, handle.id().to_string())?;
     Ok(handle)
 }
 
@@ -3087,7 +3013,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
             })?;
 
         let running_lookup = matches!(operation.as_str(), "get" | "get_running").then(|| {
-            let context = microsandbox::context::default_local_context();
+            let context = microsandbox::context::configured_context();
             Sandbox::ctx(context.as_ref())
         });
         Ok(Box::pin(async move {
@@ -4064,7 +3990,7 @@ pub unsafe extern "C" fn msb_sandbox_list(
             .map_err(|e| FfiError::invalid_argument(format!("invalid list filter JSON: {e}")))?;
 
         Ok(Box::pin(async move {
-            let context = microsandbox::context::default_local_context();
+            let context = microsandbox::context::configured_context();
             let query = resource::list_query(opts)?;
             let page = context.sandbox_ops().list(context.clone(), query).await?;
             let mut out = String::from("{\"sandboxes\":[");
@@ -6170,7 +6096,7 @@ pub unsafe extern "C" fn msb_all_sandbox_metrics(
     {
         run_c(cancel_id, buf, buf_len, || {
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend
                     .as_local()
                     .ok_or_else(|| FfiError::invalid_argument("metrics require a local backend"))?;
@@ -6324,7 +6250,7 @@ pub unsafe extern "C" fn msb_default_backend_info(
     buf_len: usize,
 ) -> *mut c_char {
     run(buf, buf_len, || {
-        serde_json::to_string(&microsandbox::default_local_context().info()?)
+        serde_json::to_string(&microsandbox::configured_context().info()?)
             .map_err(|error| FfiError::internal(format!("serialize backend info: {error}")))
     })
 }
@@ -6368,7 +6294,7 @@ pub unsafe extern "C" fn msb_image_get(
         run_c(cancel_id, buf, buf_len, || {
             let reference = unsafe { cstr(reference) }?;
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6399,7 +6325,7 @@ pub unsafe extern "C" fn msb_image_list(
     {
         run_c(cancel_id, buf, buf_len, || {
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6433,7 +6359,7 @@ pub unsafe extern "C" fn msb_image_inspect(
         run_c(cancel_id, buf, buf_len, || {
             let reference = unsafe { cstr(reference) }?;
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6501,7 +6427,7 @@ pub unsafe extern "C" fn msb_image_remove(
         run_c(cancel_id, buf, buf_len, || {
             let reference = unsafe { cstr(reference) }?;
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6532,7 +6458,7 @@ pub unsafe extern "C" fn msb_image_prune(
     {
         run_c(cancel_id, buf, buf_len, || {
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6582,7 +6508,7 @@ pub unsafe extern "C" fn msb_image_load(
             let tags: Vec<String> = serde_json::from_str(&raw_tags)
                 .map_err(|e| FfiError::invalid_argument(format!("invalid tags payload: {e}")))?;
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6643,7 +6569,7 @@ pub unsafe extern "C" fn msb_image_save(
                 }
             };
             Ok(Box::pin(async move {
-                let backend = microsandbox::context::default_local_context();
+                let backend = microsandbox::context::configured_context();
                 let local = backend.as_local().ok_or_else(|| {
                     FfiError::invalid_argument("image ops require a local backend")
                 })?;
@@ -6763,7 +6689,7 @@ async fn snapshot_json(s: &Snapshot) -> Result<serde_json::Value, FfiError> {
     }))
 }
 
-fn snapshot_handle_json(h: &microsandbox::Snapshot) -> serde_json::Value {
+fn snapshot_handle_json(h: &microsandbox::Checkpoint) -> serde_json::Value {
     serde_json::json!({
         "id": h.id(),
         "digest": h.digest(),
@@ -6773,7 +6699,7 @@ fn snapshot_handle_json(h: &microsandbox::Snapshot) -> serde_json::Value {
         "parent_digest": h.parent_digest(),
         "image_ref": h.image_ref(),
         "scope": snapshot_scope_str(h.scope()),
-        "state_kind": h.state_kind(),
+        "state_kind": h.state_kind().as_str(),
         "format": h.format().map(snapshot_format_str),
         "fstype": h.fstype(),
         "checkpoint_manifest_digest": h.checkpoint_manifest_digest(),
@@ -6804,6 +6730,7 @@ fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> s
         "path": report.path.display().to_string(),
         "upper": upper,
         "checkpoint": checkpoint,
+        "coverage": report.coverage,
     })
 }
 
@@ -6826,7 +6753,7 @@ fn snapshot_builder_from_opts(
     opts: SnapshotCreateOpts,
 ) -> Result<microsandbox::SnapshotBuilder, FfiError> {
     snapshot_builder_in(
-        microsandbox::context::default_local_context(),
+        microsandbox::context::configured_context(),
         source_sandbox,
         opts,
     )
@@ -6838,7 +6765,7 @@ fn snapshot_builder_in(
     opts: SnapshotCreateOpts,
 ) -> Result<microsandbox::SnapshotBuilder, FfiError> {
     let mut builder = context
-        .snapshots()
+        .checkpoints()
         .builder(opts.name.unwrap_or_default())
         .from_sandbox(source_sandbox)
         .guest_flush(opts.guest_flush);
@@ -6875,10 +6802,20 @@ pub unsafe extern "C" fn msb_sandbox_handle_snapshot(
         let sandbox_name = unsafe { cstr(sandbox_name) }?;
         let snapshot_name = unsafe { cstr(snapshot_name) }?;
         Ok(Box::pin(async move {
-            let h = sandbox_record(&sandbox_name)
-                .await
-                .map_err(FfiError::from)?;
-            let snap = h.snapshot(&snapshot_name).await.map_err(FfiError::from)?;
+            let context = microsandbox::configured_context();
+            let h = context
+                .sandbox_ops()
+                .get(context.clone(), &sandbox_name)
+                .await?;
+            let config = context
+                .checkpoints()
+                .builder(snapshot_name)
+                .from_sandbox(&sandbox_name)
+                .build()?;
+            let snap = context
+                .snapshot_ops()
+                .create_from(context.clone(), config, &h.id())
+                .await?;
             Ok(snapshot_json(&snap).await?.to_string())
         }))
     })
@@ -7097,13 +7034,14 @@ pub unsafe extern "C" fn msb_snapshot_export(
         let opts: SnapshotSaveOptsJson = serde_json::from_str(&opts_raw)
             .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
         Ok(Box::pin(async move {
-            let backend = default_local_context();
+            let backend = configured_context();
             backend
                 .snapshot_ops()
                 .save(
                     reference,
                     &PathBuf::from(out),
                     SaveOpts {
+                        compatibility: opts.compatibility,
                         with_parents: opts.with_parents,
                         with_image: opts.with_image,
                         plain_tar: opts.plain_tar,
@@ -7169,13 +7107,9 @@ pub unsafe extern "C" fn msb_snapshot_import(
             Some(PathBuf::from(dest))
         };
         Ok(Box::pin(async move {
-            let h = Snapshot::load(&PathBuf::from(archive), {
-                let mut options = LoadOptions::default();
-                options.dest = dest;
-                options
-            })
-            .await
-            .map_err(FfiError::from)?;
+            let h = Snapshot::load(&PathBuf::from(archive), dest.as_deref())
+                .await
+                .map_err(FfiError::from)?;
             Ok(snapshot_handle_json(&h).to_string())
         }))
     })
@@ -7201,17 +7135,17 @@ pub unsafe extern "C" fn msb_snapshot_import_with_base(
             Some(PathBuf::from(dest))
         };
         Ok(Box::pin(async move {
-            let h = Snapshot::load(&archive, {
-                let mut options = LoadOptions::default().base(base);
-                options.dest = dest;
-                options
-            })
-            .await
-            .map_err(FfiError::from)?;
+            let h = Snapshot::load_with_base(&archive, dest.as_deref(), &base)
+                .await
+                .map_err(FfiError::from)?;
             Ok(snapshot_handle_json(&h).to_string())
         }))
     })
 }
+
+/// Advertise enforcement of the snapshot import byte limit.
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_supports_snapshot_import_budget() {}
 
 /// Import an archive with group selection without changing the existing import ABI.
 #[unsafe(no_mangle)]
@@ -7228,15 +7162,16 @@ pub unsafe extern "C" fn msb_snapshot_import_with_options(
         let opts: SnapshotLoadOptsJson = serde_json::from_str(&opts_raw)
             .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
         Ok(Box::pin(async move {
-            let h = Snapshot::load(&archive, {
-                let mut options = LoadOptions::default();
-                options.dest = opts.dest;
-                options.base = opts.base;
-                options.group = opts.group;
-                options.set_head = opts.set_head;
-                options.maximum_disk_bytes = opts.maximum_disk_bytes;
-                options
-            })
+            let h = Snapshot::load_with_options(
+                &archive,
+                microsandbox::snapshot::LoadOpts {
+                    dest: opts.dest,
+                    base: opts.base,
+                    group: opts.group,
+                    set_head: opts.set_head,
+                    maximum_disk_bytes: opts.maximum_disk_bytes,
+                },
+            )
             .await
             .map_err(FfiError::from)?;
             Ok(snapshot_handle_json(&h).to_string())
@@ -7261,15 +7196,16 @@ pub unsafe extern "C" fn msb_snapshot_import_many(
         let opts: SnapshotLoadOptsJson = serde_json::from_str(&opts_raw)
             .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
         Ok(Box::pin(async move {
-            let handles = Snapshot::load_many(&archives, {
-                let mut options = LoadOptions::default();
-                options.dest = opts.dest;
-                options.base = opts.base;
-                options.group = opts.group;
-                options.set_head = opts.set_head;
-                options.maximum_disk_bytes = opts.maximum_disk_bytes;
-                options
-            })
+            let handles = Snapshot::load_many(
+                &archives,
+                microsandbox::snapshot::LoadOpts {
+                    dest: opts.dest,
+                    base: opts.base,
+                    group: opts.group,
+                    set_head: opts.set_head,
+                    maximum_disk_bytes: opts.maximum_disk_bytes,
+                },
+            )
             .await
             .map_err(FfiError::from)?;
             let values = handles.iter().map(snapshot_handle_json).collect::<Vec<_>>();
@@ -7289,7 +7225,9 @@ pub unsafe extern "C" fn msb_snapshot_group_head(
     run_c(cancel_id, buf, buf_len, || {
         let selector = unsafe { cstr(selector) }?;
         Ok(Box::pin(async move {
-            let update = Snapshot::group_head(&selector)
+            let update = microsandbox::context::configured_context()
+                .snapshot_ops()
+                .group_head_selector(&selector)
                 .await
                 .map_err(FfiError::from)?;
             serde_json::to_string(&update)
@@ -8463,6 +8401,60 @@ mod tests {
     }
 
     #[test]
+    fn resize_timeout_maps_to_stable_kind_and_max_is_unbounded() {
+        let error = FfiError::from(MicrosandboxError::ResizeTimeout {
+            name: "worker".into(),
+            timeout: Duration::from_secs(5),
+            status: Vec::new(),
+        });
+        assert_eq!(error.kind, error_kind::RESIZE_TIMEOUT);
+        assert!(error.message.contains("worker"));
+        let payload: serde_json::Value = serde_json::from_str(&error.to_json()).unwrap();
+        assert_eq!(payload["resize_status"], serde_json::json!([]));
+        assert_eq!(resize::resize_wait_timeout(u64::MAX), None);
+        assert_eq!(resize::resize_wait_timeout(0), Some(Duration::ZERO));
+        assert_eq!(
+            resize::resize_wait_timeout(1500),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(
+            resize::resize_status_json(Vec::new()).ok().as_deref(),
+            Some("[]")
+        );
+    }
+
+    #[test]
+    fn resize_timeout_error_carries_last_status() {
+        let status = microsandbox::sandbox::ResourceResizeStatus {
+            resource: microsandbox::sandbox::ResourceKind::Cpus,
+            requested: "4".into(),
+            actual: "2".into(),
+            enforced: "4".into(),
+            state: microsandbox::sandbox::ResourceConvergenceState::Converging,
+        };
+        let error = FfiError::from(MicrosandboxError::ResizeTimeout {
+            name: "worker".into(),
+            timeout: Duration::from_secs(5),
+            status: vec![status],
+        });
+        let payload: serde_json::Value = serde_json::from_str(&error.to_json()).unwrap();
+        assert_eq!(payload["kind"], "resize_timeout");
+        assert_eq!(payload["resize_status"][0]["resource"], "cpus");
+        assert_eq!(payload["resize_status"][0]["actual"], "2");
+        assert_eq!(payload["resize_status"][0]["state"], "converging");
+        assert!(payload.get("recovery").is_none());
+    }
+
+    #[test]
+    fn handle_identity_mismatch_reports_replacement() {
+        assert!(resize::ensure_expected_identity("worker", "local:42", "local:42".into()).is_ok());
+        let error =
+            resize::ensure_expected_identity("worker", "local:42", "local:43".into()).unwrap_err();
+        assert_eq!(error.kind, error_kind::SANDBOX_REPLACED);
+        assert!(error.message.contains("worker"));
+    }
+
+    #[test]
     fn source_recovery_error_preserves_ffi_payload() {
         let error = MicrosandboxError::SnapshotSourceRecovery(Box::new(
             microsandbox::SnapshotSourceRecoveryError {
@@ -8475,6 +8467,7 @@ mod tests {
                     path: "/saved.msb".into(),
                     snapshot_id: "snap_1".into(),
                     digest: "sha256:descriptor".into(),
+                    head_update: None,
                 }),
                 detail: "thaw acknowledgement lost".into(),
                 publication_error: None,

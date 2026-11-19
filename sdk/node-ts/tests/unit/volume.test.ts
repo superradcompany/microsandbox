@@ -27,9 +27,16 @@ it("returns operational Volumes from create/get/list and protects same-name repl
         assert.equal(resource.id, created.id);
         assert.equal(typeof resource.id, 'string');
         assert.equal(resource.name, 'cache');
+        assert.equal(resource.kind, 'dir');
+        assert.equal((await resource.info()).kind, resource.kind);
         assert.deepEqual((await resource.info()).labels, [['team', 'sdk']]);
         await resource.fs().write('marker', Buffer.from('original'));
       }
+      const disk = await Volume.builder('disk').disk().size(256).create();
+      try {
+        assert.equal(disk.kind, 'disk');
+        assert.equal((await disk.info()).kind, disk.kind);
+      } finally { await disk.destroy(); }
       const retainedFs = listed.fs();
       await listed.destroy();
       const replacement = await Volume.builder('cache').create();

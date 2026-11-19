@@ -972,13 +972,14 @@ mod tests {
         drop(reader);
         assert!(StorageLease::try_exclusive(&a).unwrap().is_none());
         drop(clone);
+        assert_exclusive_lease_released(&a);
+    }
+
+    fn assert_exclusive_lease_released(path: &Path) {
+        // A concurrent fork can retain the last descriptor until exec closes it.
         let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if StorageLease::try_exclusive(&a).unwrap().is_some() {
-                break;
-            }
-            // A concurrent fork can retain the last descriptor until exec closes it.
-            assert!(Instant::now() < deadline, "reader lease remained busy");
+        while StorageLease::try_exclusive(path).unwrap().is_none() {
+            assert!(Instant::now() < deadline, "lease remained busy: {path:?}");
             std::thread::sleep(Duration::from_millis(1));
         }
     }
@@ -993,7 +994,7 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         assert!(StorageLease::try_exclusive(&path).unwrap().is_none());
         drop(lease);
-        assert!(StorageLease::try_exclusive(&path).unwrap().is_some());
+        assert_exclusive_lease_released(&path);
     }
 
     #[test]

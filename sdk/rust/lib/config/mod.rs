@@ -712,7 +712,7 @@ impl Default for BlockWritebackConfig {
 /// [`MicrosandboxError::Unsupported`] when the active backend is cloud.
 #[cfg(feature = "local")]
 pub fn config() -> MicrosandboxResult<Arc<GlobalConfig>> {
-    let backend = crate::context::default_local_context();
+    let backend = crate::context::configured_context();
     let local = backend
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(Operation::Config))?;

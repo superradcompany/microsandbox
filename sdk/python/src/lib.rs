@@ -10,9 +10,12 @@ mod jobs;
 mod logs;
 mod metrics;
 mod provider;
+mod resize;
 mod sandbox;
+mod service;
 mod setup;
 mod snapshot;
+mod snapshot_group;
 mod ssh;
 mod storage;
 mod volume;
@@ -29,6 +32,7 @@ use pyo3::prelude::*;
 
 /// The `_microsandbox` native extension module.
 pub(crate) fn register_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(provider::configured_provider_kind, m)?)?;
     m.add_function(wrap_pyfunction!(provider::provider_info, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(setup::resolve_runtime, m)?)?;
@@ -46,6 +50,7 @@ pub(crate) fn register_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<context::PySandboxes>()?;
     m.add_class::<context::PyVolumes>()?;
     m.add_class::<context::PySnapshots>()?;
+    m.add_class::<context::PyCheckpoints>()?;
     m.add_class::<sandbox::PySandbox>()?;
     m.add_class::<sandbox::PyStorageRecovery>()?;
     m.add_class::<sandbox::PyForkOutcome>()?;
@@ -80,8 +85,16 @@ pub(crate) fn register_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<storage::PyMemoryCacheReport>()?;
     m.add_class::<volume::PyVolume>()?;
     m.add_class::<volume::PyVolumeFs>()?;
+    m.add_class::<service::PyService>()?;
+    m.add_class::<service::PyServicePage>()?;
     m.add_class::<snapshot::PySnapshot>()?;
+    m.add_class::<snapshot_group::PySnapshotGroup>()?;
+    m.add_class::<snapshot_group::PySnapshotCreateResult>()?;
+    m.add_class::<snapshot_group::PySnapshotImportResult>()?;
+    m.add_class::<snapshot_group::PyCheckpointCaptureResult>()?;
     m.add_class::<snapshot::PySnapshotArchive>()?;
+    m.add_class::<snapshot::PyCheckpointRemoveResult>()?;
+    m.add_class::<snapshot_group::PySnapshotRemoveResult>()?;
     m.add_class::<snapshot::PySnapshotCopyBuilder>()?;
     m.add_class::<metrics::PyMetricsStream>()?;
     m.add_class::<metrics::PySandboxMetrics>()?;
@@ -134,7 +147,7 @@ fn resolved_msb_path() -> PyResult<String> {
     }
     #[cfg(feature = "local")]
     {
-        let backend = microsandbox::context::default_local_context();
+        let backend = microsandbox::context::configured_context();
         let local = backend
             .as_local()
             .ok_or_else(|| error::local_only("resolved_msb_path"))?;

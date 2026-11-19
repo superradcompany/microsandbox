@@ -611,6 +611,7 @@ pub fn smoltcp_poll_loop(
                     strict,
                     conn.proxy_connect,
                     connection_outbound_proxy,
+                    dns_forwarder_handle.clone(),
                 );
                 tokio_handle.spawn(proxy.run());
                 continue;
@@ -687,6 +688,7 @@ pub fn smoltcp_poll_loop(
                 strict,
                 conn.proxy_connect,
                 connection_outbound_proxy,
+                dns_forwarder_handle.clone(),
             );
             tokio_handle.spawn(proxy.run());
         }
@@ -2434,6 +2436,96 @@ mod tests {
         );
 
         (server_isn, guest_seq, new_conns)
+    }
+
+    /// A restored guest may retransmit ciphertext from a captured connection. The new
+    /// proxy must reject that old stream, never treat its bytes as a new request. This
+    /// only covers active traffic: an idle guest read needs separate restore fencing.
+    #[test]
+    fn restored_tcp_payload_is_reset_without_replaying_it() {
+        let source = Arc::new(SharedState::new(64));
+        let config = leak_poll_config();
+        let mut source_device = SmoltcpDevice::new(source.clone(), config.mtu);
+        let mut source_iface = create_interface(&mut source_device, &config);
+        let mut source_sockets = SocketSet::new(vec![]);
+        let mut source_tracker = TcpConnectionTracker::new(None);
+        let now = smoltcp_now();
+        let (server_isn, guest_seq, _source_connections) = establish(
+            &mut source_tracker,
+            &mut source_device,
+            &mut source_iface,
+            &mut source_sockets,
+            &source,
+            now,
+            54321,
+        );
+
+        // Full restore builds a fresh host stack while retaining the guest's
+        // sequence numbers. No source socket or proxy task crosses this boundary.
+        let destination = Arc::new(SharedState::new(64));
+        let mut device = SmoltcpDevice::new(destination.clone(), config.mtu);
+        let mut iface = create_interface(&mut device, &config);
+        let mut sockets = SocketSet::new(vec![]);
+        let mut tracker = TcpConnectionTracker::new(None);
+        ingress(
+            build_arp_request_frame(GUEST_MAC, GUEST_IP, GATEWAY_IP),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &destination,
+            now,
+        );
+        let _ = last_tcp_reply(&destination);
+        let captured_data = build_tcp_frame(
+            54321,
+            443,
+            TcpControl::None,
+            guest_seq,
+            Some(server_isn + 1),
+            b"captured encrypted application record",
+        );
+        assert!(matches!(
+            classify_frame(&captured_data),
+            FrameAction::Passthrough
+        ));
+        ingress(
+            captured_data,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &destination,
+            now,
+        );
+        let (seq, _, syn, fin, rst) =
+            last_tcp_reply(&destination).expect("stale guest stream must receive a TCP reset");
+        assert!(rst && !syn && !fin);
+        assert_eq!(
+            seq,
+            server_isn + 1,
+            "reset must match the guest receive sequence"
+        );
+        assert!(tracker.take_new_connections(&mut sockets).is_empty());
+        assert!(only_tcp_state(&sockets).is_none());
+        assert_eq!(
+            only_tcp_state(&source_sockets),
+            Some(tcp::State::Established)
+        );
+
+        // Recovery is an application-owned new handshake, including when the OS
+        // reuses the same tuple. Rejected bytes are never given to the new proxy.
+        let (_, _, mut connections) = establish(
+            &mut tracker,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &destination,
+            now,
+            54321,
+        );
+        assert!(matches!(
+            connections[0].from_smoltcp.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

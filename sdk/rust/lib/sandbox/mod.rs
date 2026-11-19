@@ -9,6 +9,7 @@ pub(crate) mod attach;
 pub(crate) mod branch;
 mod branch_batch;
 mod builder;
+mod config_inspection;
 mod context;
 mod execution;
 mod inspection;
@@ -16,17 +17,22 @@ mod lifetime;
 mod readiness;
 mod state;
 #[cfg(feature = "local")]
-pub(crate) use builder::prepare_local_snapshot_restore;
+pub(crate) use builder::{apply_portable_snapshot_defaults, prepare_local_snapshot_restore};
 mod caller_config_overrides;
 #[cfg(feature = "cloud")]
 mod cloud;
+pub(crate) mod command_provenance;
 mod compact;
 pub(crate) mod config;
 #[cfg(test)]
 mod control_pipe;
+#[cfg(feature = "local")]
+mod creation_cleanup;
+mod environment_provenance;
 pub mod exec;
 #[cfg(feature = "local")]
 mod exit;
+mod field_presence;
 #[cfg(feature = "local")]
 pub(crate) mod flat_rootfs;
 pub mod fs;
@@ -34,10 +40,18 @@ mod fs_handle;
 mod handle;
 pub(crate) mod identity;
 pub mod init;
+pub(crate) mod init_provenance;
 pub mod jobs;
 pub(crate) mod metrics;
 #[cfg(any(feature = "local", feature = "cloud"))]
 mod modify;
+mod mount_presence;
+#[cfg(all(test, feature = "local"))]
+mod mount_presence_tests;
+mod network_policy_presence;
+pub(crate) mod network_presence;
+#[cfg(all(test, feature = "local"))]
+mod network_presence_tests;
 #[cfg(feature = "local")]
 mod patch;
 #[cfg(feature = "local")]
@@ -53,8 +67,11 @@ pub(crate) mod pause;
 mod reap;
 #[cfg(not(feature = "local"))]
 mod remote_only;
+#[cfg(feature = "local")]
+mod resize;
 mod restore_builder;
 pub(crate) mod restore_resources;
+mod snapshot;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 // Windows-only in shipping builds, but kept compiled under `test` so the
@@ -156,6 +173,11 @@ pub use branch::{ForkBuilder, ForkManyBuilder, ForkOutcome};
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use compact::{DiskCompactionBuilder, DiskCompactionDiskResult, DiskCompactionResult};
 pub use config::{SandboxConfig, SandboxConfigPatch};
+pub use config_inspection::{
+    RemoteMountInspection, RemoteNetworkInspection, RemoteResourceInspection,
+    RemoteSandboxInspection, RemoteSecretInjection, RemoteSecretInspection, RemoteSecretViolation,
+    SandboxConfigInspection, SandboxInspectedSettings,
+};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 #[cfg(feature = "local")]
 pub use exit::{SandboxRunExit, SandboxTerminationReason};
@@ -221,6 +243,12 @@ pub(crate) use external_mounts::{
     external_bind_guest_paths, require_guest_mounts, require_recorded_mounts,
     resolve_external_mounts,
 };
+#[cfg(feature = "local")]
+pub use microsandbox_protocol::resize::{
+    ResizeObservation, ResizeOperation, ResizeOutcome, ResizeTarget, ResizeTracking,
+};
+#[cfg(feature = "local")]
+pub use modify::SandboxModificationResult;
 #[cfg(any(feature = "local", feature = "cloud"))]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
@@ -229,6 +257,8 @@ pub use modify::{
     SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind, SecretModificationPatch,
     SecretPatchBuilder, SecretPlannedChange, SecretSource,
 };
+#[cfg(feature = "local")]
+pub use resize::DEFAULT_RESIZE_READ_TIMEOUT;
 #[cfg(feature = "ssh")]
 pub use ssh::{
     DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSshOps, SftpClient, SshAttachOptionsBuilder,
@@ -348,10 +378,8 @@ impl Sandbox {
 
     /// Create a sandbox from a config.
     ///
-    /// Routes through the ambient [`default_local_context`](crate::context::default_local_context)
-    /// so a cloud profile will dispatch to `RemoteContext` instead of the local
-    /// libkrun runtime. The returned [`Sandbox`] always carries the backend it
-    /// was created on; subsequent method calls keep using that backend.
+    /// Uses the configured context. To override the destination, use
+    /// `Sandbox::remote()?.builder(name)` or `Sandbox::ctx(&context).builder(name)`.
     pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
         #[cfg(feature = "local")]
         if create_spawn_mode(&config, SpawnMode::Attached) == SpawnMode::Detached {
@@ -360,7 +388,7 @@ impl Sandbox {
             // so an exiting CLI/SDK process cannot reap the successfully restored VM.
             return Self::create_detached(config).await;
         }
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .sandbox_ops()
             .create(backend.clone(), config, true)
@@ -371,10 +399,9 @@ impl Sandbox {
     ///
     /// This is intended for detached CLI workflows such as `msb create` and
     /// `msb run --detach`, where the sandbox should keep running in the
-    /// background after the command returns. Routes through the ambient
-    /// [`default_local_context`](crate::context::default_local_context).
+    /// background after the command returns. Uses the configured context.
     pub async fn create_detached(config: SandboxConfig) -> MicrosandboxResult<Self> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .sandbox_ops()
             .create_detached(backend.clone(), config)
@@ -385,10 +412,8 @@ impl Sandbox {
     ///
     /// Returns a progress handle for per-layer pull events and a task handle
     /// for the sandbox creation result. The caller should consume progress
-    /// events until the channel closes, then await the task. **Local backend
-    /// only** — pull progress is a local concept (cloud workers handle image
-    /// pulls server-side); on a cloud backend this falls back to a no-progress
-    /// create with an immediately-closed channel.
+    /// events until the channel closes, then await the task. This entry point uses
+    /// the configured context.
     #[cfg(feature = "local")]
     pub fn create_with_pull_progress(
         config: SandboxConfig,
@@ -421,7 +446,7 @@ impl Sandbox {
         PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         // Resolve before spawning: the task may first run after the caller changes cwd.
         let paths = if backend.as_local().is_some() {
             crate::context::local::host_paths::resolve_host_paths(&mut config)
@@ -458,28 +483,27 @@ impl Sandbox {
     /// Start an existing stopped sandbox from persisted state.
     ///
     /// Reuses the serialized sandbox config and pinned rootfs state without
-    /// re-resolving the original OCI reference. Routes through the ambient
-    /// [`default_local_context`](crate::context::default_local_context).
+    /// re-resolving the original OCI reference. Uses the configured context.
     ///
-    /// On a Cloud sandbox, a start is refused with
+    /// For an explicitly remote start via `Sandbox::remote()?.start(name)`, the provider returns
     /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
     /// secret change to it is being saved, or while its result is not yet known after
     /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
     /// this usually clears within seconds. Start again after a short wait.
     pub async fn start(name: &str) -> MicrosandboxResult<Self> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.sandbox_ops().start(backend.clone(), name).await
     }
 
-    /// Start an existing sandbox in detached/background mode.
+    /// Start an existing sandbox in detached/background mode in the configured context.
     ///
-    /// On a Cloud sandbox, a start is refused with
+    /// For an explicitly remote start via `Sandbox::remote()?.start_detached(name)`, the provider returns
     /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
     /// secret change to it is being saved, or while its result is not yet known after
     /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
     /// this usually clears within seconds. Start again after a short wait.
     pub async fn start_detached(name: &str) -> MicrosandboxResult<Self> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .sandbox_ops()
             .start_detached(backend.clone(), name)
@@ -493,7 +517,7 @@ impl Sandbox {
     }
 
     pub(crate) async fn get_record(name: &str) -> MicrosandboxResult<SandboxRecord> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.sandbox_ops().get(backend.clone(), name).await
     }
 
@@ -515,7 +539,7 @@ impl Sandbox {
             )));
         }
 
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend
             .sandbox_ops()
             .list(backend.clone(), query)
@@ -523,10 +547,9 @@ impl Sandbox {
             .map(SandboxPage::from_records)
     }
 
-    /// Remove a stopped sandbox by name via the ambient
-    /// [`default_local_context`](crate::context::default_local_context).
+    /// Remove a stopped sandbox by name in the configured context.
     pub async fn remove(name: &str) -> MicrosandboxResult<()> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.sandbox_ops().remove(backend.clone(), name).await
     }
 }
@@ -816,7 +839,7 @@ impl Sandbox {
     /// Stream log entries for this sandbox.
     ///
     /// Local streams the on-disk JSON Lines files produced by the relay tap;
-    /// cloud streams the msb-cloud SSE logs endpoint and maps each event into
+    /// cloud streams the API SSE logs endpoint and maps each event into
     /// a typed [`LogEntry`].
     pub async fn log_stream(
         &self,
@@ -1073,23 +1096,9 @@ impl Sandbox {
         if let Some(local) = self.local_state()
             && let Some(cleanup) = &local.cleanup
         {
-            cleanup.disarm()?;
+            cleanup.disarm_retained(local.handle.as_ref())?;
         }
         Ok(())
-    }
-
-    /// Creation cleanup owns this exact process and must not reacquire its transition lock.
-    #[cfg(feature = "local")]
-    pub(crate) async fn terminate_creation_owner(&self) {
-        if let Some(local) = self.local_state()
-            && let Some(handle) = &local.handle
-        {
-            let mut handle = handle.lock().await;
-            if matches!(handle.try_wait(), Ok(None)) {
-                let _ = handle.kill();
-                let _ = tokio::time::timeout(DEFAULT_KILL_TIMEOUT, handle.wait()).await;
-            }
-        }
     }
 
     fn is_local_ephemeral(&self) -> bool {
@@ -1327,6 +1336,9 @@ pub(super) async fn remove_local_persisted_sandbox(
     name: &str,
     expected_id: i32,
 ) -> MicrosandboxResult<()> {
+    // An internal recovery alias may be visible to a mixed-version catalog reader.
+    // It cannot own a user operation, including deletion of TLS keys by numeric ID.
+    validate_sandbox_name(name)?;
     let _transition_guard =
         LocalContext::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
             .await?;
@@ -1415,6 +1427,11 @@ pub(super) async fn remove_local_persisted_sandbox(
 
     let _storage = CreationStorage::acquire(local_backend, name)?;
     local_backend.remove_socket_artifacts(name)?;
+    microsandbox_runtime::checkpoint::remove_sandbox_identity(
+        &local_backend.config().home(),
+        expected_id,
+    )
+    .map_err(crate::MicrosandboxError::Runtime)?;
     remove_dir_if_exists(&local_backend.sandboxes_dir().join(name))?;
     sandbox_entity::Entity::delete_by_id(expected_id)
         .exec(pools.write())

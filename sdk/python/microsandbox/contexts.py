@@ -5,6 +5,7 @@ import os
 from typing import Literal
 
 from ._microsandbox import Context
+from .types import ComputeType
 
 
 class LocalContext(Context):
@@ -29,7 +30,7 @@ class LocalContext(Context):
 
 
 class RemoteContext(Context):
-    """A remote destination; constructing it never changes default-local routing."""
+    """A remote destination; constructing it preserves the configured default."""
 
     def __new__(
         cls,
@@ -39,7 +40,7 @@ class RemoteContext(Context):
         profile: str | None = None,
         request_timeout_ms: int | None = None,
         user_agent: str | None = None,
-        compute_type: Literal["standard", "shared"] | None = None,
+        compute_type: ComputeType | Literal["standard", "shared"] | None = None,
     ):
         if request_timeout_ms is not None and (
             isinstance(request_timeout_ms, bool)
@@ -78,7 +79,7 @@ class RemoteContext(Context):
         api_key: str | None = None,
         request_timeout_ms: int | None = None,
         user_agent: str | None = None,
-        compute_type: Literal["standard", "shared"] | None = None,
+        compute_type: ComputeType | Literal["standard", "shared"] | None = None,
     ) -> "RemoteContext":
         """Return an independent context with overrides; None retains the captured value.
 
@@ -111,7 +112,7 @@ class RemoteContext(Context):
         *,
         request_timeout_ms: int | None = None,
         user_agent: str | None = None,
-        compute_type: Literal["standard", "shared"] | None = None,
+        compute_type: ComputeType | Literal["standard", "shared"] | None = None,
     ) -> "RemoteContext":
         """Select an explicit endpoint while retaining the normal option validation."""
         return cls(
@@ -128,4 +129,4 @@ class RemoteContext(Context):
 
     @classmethod
     def from_env(cls) -> "RemoteContext":
-        return cls(url=os.environ.get("MSB_API_URL"), api_key=os.environ.get("MSB_API_KEY"))
+        return cls()

@@ -27,6 +27,7 @@ pub mod progress;
 #[cfg(feature = "local")]
 pub mod runtime;
 pub mod sandbox;
+pub mod service;
 #[cfg(feature = "local")]
 pub mod setup;
 pub mod snapshot;
@@ -40,13 +41,14 @@ pub use agent::{
 #[cfg(feature = "local")]
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use context::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
-    CloudVolumeKind, CloudVolumeStatus, ComputeType, Context, ContextInfo, ContextKind,
-    ContextSelectionSource, Profile, ProfileKind, SandboxInner, SandboxOps,
-    SandboxRecordCloudState, SandboxRecordInner, SandboxRemoteState, Sandboxes, Snapshots,
-    VolumeInner, VolumeOps, VolumeRemoteState, Volumes, default_local_context,
-    resolve_default_backend,
+    Checkpoints, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
+    CloudErrorBody, CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudSandboxStatusReason, CloudService, CloudServiceStatus, CloudServiceTarget,
+    CloudUpdateServiceRequest, CloudVolumeKind, CloudVolumeStatus, ComputeType, Context,
+    ContextInfo, ContextKind, ContextSelectionSource, Profile, ProfileKind, SandboxInner,
+    SandboxOps, SandboxRecordCloudState, SandboxRecordInner, SandboxRemoteState, Sandboxes,
+    ServiceOps, Snapshots, VolumeInner, VolumeOps, VolumeRemoteState, Volumes, configured_context,
+    default_local_context, resolve_default_backend,
 };
 /// Previous name for [`ComputeType`].
 #[deprecated(note = "use ComputeType instead")]
@@ -96,22 +98,31 @@ pub use sandbox::{
 };
 pub use sandbox::{
     ExecOutput, ExternalMountRestorePolicy, ExternalMountWarning, MAX_HOSTNAME_BYTES,
-    MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox, SandboxConfig, SandboxConfigPatch,
-    SandboxInfo, SandboxLaunchInfo, SandboxListBuilder, SandboxMetrics, SandboxPage,
-    SandboxPingResult, SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch,
-    SandboxSpecPatch, SandboxTouchResult, StorageRecovery, StorageRecoveryOptions,
-    StorageRecoverySelection, VsockSpecPatch, validate_sandbox_name,
+    MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox, SandboxConfig, SandboxConfigInspection,
+    SandboxConfigPatch, SandboxInfo, SandboxInspectedSettings, SandboxLaunchInfo,
+    SandboxListBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxPolicyPatch,
+    SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxSpecPatch, SandboxTouchResult,
+    StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection, VsockSpecPatch,
+    validate_sandbox_name,
 };
 #[cfg(feature = "local")]
 pub use sandbox::{
     SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics, all_sandbox_metrics_local,
     all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
 };
+pub use service::{
+    Service, ServiceBuilder, ServiceListBuilder, ServicePage, ServiceStatus, ServiceTarget,
+    ServiceUpdate,
+};
 pub use snapshot::{
-    CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOptions,
-    SaveOpts, Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotConfig, SnapshotCopyBuilder,
-    SnapshotDescriptor, SnapshotFormat, SnapshotReference, SnapshotRootDisk, SnapshotScope,
-    SnapshotSpec, SnapshotState, SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
+    ArchiveCompatibility, Checkpoint, CheckpointCaptureResult, CheckpointRemoveOptions,
+    CheckpointRemoveResult, CheckpointSnapshotState, FileSnapshotState, HeadUpdate,
+    HeadUpdateReason, LoadOpts, SaveOpts, Snapshot, SnapshotArchive, SnapshotBuilder,
+    SnapshotCaptureOptions, SnapshotConfig, SnapshotCopyBuilder, SnapshotCreateResult,
+    SnapshotDescriptor, SnapshotFormat, SnapshotGroupInfo, SnapshotImportOptions,
+    SnapshotImportResult, SnapshotReference, SnapshotRemoveResult, SnapshotRootDisk, SnapshotScope,
+    SnapshotSourceBinding, SnapshotSourceStatus, SnapshotSpec, SnapshotState, SnapshotStateKind,
+    SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
 };
 pub use storage::{Storage, StorageCategoryUsage, StorageItemUsage, StorageUsage};
 pub use volume::{Volume, VolumeConfig, VolumeId, VolumeKind, VolumeSpec};

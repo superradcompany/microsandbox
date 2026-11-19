@@ -1,3 +1,6 @@
+import { UnsupportedError } from "./errors.js";
+import { snapshotCreateResult, type SnapshotCreateResult, SnapshotCaptureOptions } from "./snapshot-group.js";
+import type { SandboxConfigInspection } from "./config-inspection.js";
 import { bindingFor } from "./internal/provider.js";
 import { Snapshot } from "./snapshot.js";
 import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
@@ -16,10 +19,20 @@ import {
 import {
   modificationPlanFromJson,
   modifyOptionsToNapi,
+  resizeStatusFromJson,
+  validateResizeTimeout,
   requireModifyCapabilities,
   type ModifyOptions,
+  type ResourceResizeStatus,
   type SandboxModificationPlan,
 } from "./modify.js";
+import {
+  modificationResultFromJson,
+  resizeOperationsFromJson,
+  resizeOperationsToJson,
+  type ResizeOperation,
+  type SandboxModificationResult,
+} from "./resize.js";
 import {
   napi,
   type NapiAttachOptionsBuilder,
@@ -205,7 +218,7 @@ export class PullProgressCreate {
   /** @internal */
   private readonly name: string;
   /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string) {
+  constructor(inner: NapiPullProgressCreate, name: string, private readonly attachedCreation = false) {
     this.inner = inner;
     this.name = name;
   }
@@ -229,8 +242,7 @@ export class PullProgressCreate {
   /** Await the sandbox. Resolves once pull + boot finishes. */
   async awaitSandbox(): Promise<Sandbox> {
     const inner = await withMappedErrors(() => this.inner.awaitSandbox());
-    // Native ownership accounts for local auto-detach; remote runs are independent.
-    return new Sandbox(inner, this.name);
+    return new Sandbox(inner, await inner.name, this.attachedCreation);
   }
 }
 
@@ -238,8 +250,8 @@ export class PullProgressCreate {
 export class CreationProgressCreate {
   private readonly creation: PullProgressCreate;
   /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string) {
-    this.creation = new PullProgressCreate(inner, name);
+  constructor(inner: NapiPullProgressCreate, name: string, attachedCreation = false) {
+    this.creation = new PullProgressCreate(inner, name, attachedCreation);
   }
   get progress(): import("./creation-progress.js").CreationProgressStream {
     return this.creation.progress as unknown as import("./creation-progress.js").CreationProgressStream;
@@ -251,12 +263,32 @@ export class CreationProgressCreate {
   awaitSandbox(): Promise<Sandbox> { return this.creation.awaitSandbox(); }
 }
 
+/** An argument list may be an array, set or generator. A string is one argument. */
+export type CommandArgs = Iterable<string> & object;
+
+function commandArgs(args?: CommandArgs): string[] | undefined {
+  if (typeof args === "string") {
+    throw new TypeError("Pass command arguments as a list, for example ['argument'].");
+  }
+  return args === undefined ? undefined : Array.from(args);
+}
+
 export class Sandbox implements AsyncDisposable {
 
   /** Recover stopped storage after diagnosis. Never boots or stops a VM; originals are retained. */
   static async recoverStorage(name: string, options: StorageRecoveryOptions = {}): Promise<StorageRecovery> {
     return recoverStorage(name, options);
   }
+
+  async snapshot(group: string): Promise<SnapshotCreateResult> {
+    return this.snapshotWith(group, options => options);
+  }
+
+  async snapshotWith(group: string, configure: (options: SnapshotCaptureOptions) => SnapshotCaptureOptions): Promise<SnapshotCreateResult> {
+    const options = configure(new SnapshotCaptureOptions()).toNative();
+    return snapshotCreateResult(await withMappedErrors(() => this.inner.snapshot(group, options)));
+  }
+
   async getJob(id: string): Promise<Job> { return new Job(await jobCall(() => this.inner.getJob(id))); }
   async listJobs(): Promise<JobPage> { return this.listJobsWith(b => b); }
   async listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage> {
@@ -264,8 +296,9 @@ export class Sandbox implements AsyncDisposable {
     return jobPageFromJson(await jobCall(() => this.inner.listJobs(b.includeAll, b.pageSize, b.after)));
   }
 
-  async execDetached(cmd: string, args: Iterable<string> = []): Promise<Job> {
-    return new Job(await jobCall(() => this.inner.execDetached(cmd, Array.from(args))));
+  async execDetached(cmd: string, args?: CommandArgs): Promise<Job> {
+    const argv = commandArgs(args) ?? [];
+    return new Job(await jobCall(() => this.inner.execDetached(cmd, argv)));
   }
   async execDetachedWith(cmd: string, configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder): Promise<Job> {
     const builder = configure(new (bindingFor(this.inner, napi).ExecOptionsBuilder)().stdinPipe());
@@ -282,6 +315,16 @@ export class Sandbox implements AsyncDisposable {
 
   /** @internal Wrap terminals without replacing the native builder's retained destination. */
   static fromNativeRestoreBuilder(builder: NapiRestoreBuilder): RestoreBuilder {
+    // A new JS package can load an older native addon. Reject explicit unsupported policy
+    // instead of dropping it; ordinary restores still use the old supported entry points.
+    if (typeof builder.guestClock !== "function") {
+      builder.guestClock = () => { throw new UnsupportedError("guest clock selection requires an updated native SDK"); };
+    }
+    for (const option of ["init", "initWith", "hostname", "maxCpus", "maxMemory", "label", "labels", "workdir", "shell", "entrypoint", "cmd", "env", "envs", "proxy", "pullPolicy"] as const) {
+      if (typeof builder[option] !== "function") {
+        builder[option] = () => { throw new UnsupportedError(`${option} selection requires an updated native SDK`); };
+      }
+    }
     const restore = builder.restore.bind(builder);
     const progress = builder.restoreWithProgress.bind(builder);
     let name = "";
@@ -306,22 +349,26 @@ export class Sandbox implements AsyncDisposable {
   readonly id: string;
   /** Whether this handle acquired cleanup ownership for its scope. */
   get ownsLifecycle(): boolean {
-    return this.inner.backendKind === "local" && this.inner.ownsLifecycle;
+    return this.contextKind === "local" ? this.inner.ownsLifecycle : this.stopRemoteOnDispose;
   }
   /** Backend retained by this sandbox. */
   readonly contextKind: "local" | "remote";
+
+  private stopRemoteOnDispose: boolean;
 
   /** @internal use `Sandbox.builder(name).create()` */
   constructor(
     inner: NapiSandbox,
     name: string,
+    attachedCreation = false,
   ) {
     this.inner = inner;
     this.name = name;
     this.id = inner.id;
-    // Client scopes never acquire remote runtime ownership. Local results carry
-    // the actual launch mode, which may differ from the requested builder mode.
     this.contextKind = inner.backendKind === "local" ? "local" : "remote";
+    // Only the creating wrapper owns the remote stop request. Local ownership
+    // stays native so detach and automatic local launch modes remain observable.
+    this.stopRemoteOnDispose = this.contextKind === "remote" && attachedCreation;
   }
 
   // -- statics ------------------------------------------------------------
@@ -334,7 +381,7 @@ export class Sandbox implements AsyncDisposable {
 
   get context(): Context { return Context.fromNative(this.inner.context()); }
 
-  /** Begin building a default-local sandbox. Names are limited to 128 UTF-8 bytes. */
+  /** Begin building a sandbox on the configured backend. Names are limited to 128 UTF-8 bytes. */
   static builder(name: string): SandboxBuilder {
     return Sandbox.fromNativeBuilder(name, new napi.SandboxBuilder(name));
   }
@@ -345,10 +392,18 @@ export class Sandbox implements AsyncDisposable {
     const origConnectOrCreate = nb.connectOrCreate.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
     const origCreateWithProgress = nb.createWithProgress?.bind(nb);
-    // Override the terminals so they return a TS Sandbox.
+    const setDetached = nb.detached.bind(nb);
+    let detached = false;
+    nb.detached = (enabled: boolean) => {
+      const result = setDetached(enabled);
+      detached = enabled;
+      return result;
+    };
+    // Capture the mode when each creation starts, including progress sessions.
     (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
+      const attached = !detached;
       const inner = await withMappedErrors(() => origCreate());
-      return new Sandbox(inner, name);
+      return new Sandbox(inner, name, attached);
     };
     (
       nb as unknown as { connectOrCreate: () => Promise<Sandbox> }
@@ -363,13 +418,15 @@ export class Sandbox implements AsyncDisposable {
         createWithPullProgress: () => Promise<PullProgressCreate>;
       }
     ).createWithPullProgress = async () => {
+      const attached = !detached;
       const raw = await withMappedErrors(() => origCreateWithPP());
-      return new PullProgressCreate(raw, name);
+      return new PullProgressCreate(raw, name, attached);
     };
     (nb as unknown as { createWithProgress: () => Promise<CreationProgressCreate> }).createWithProgress = async () => {
       if (!origCreateWithProgress) throw new Error("Installed native SDK does not support creation progress");
+      const attached = !detached;
       const raw = await withMappedErrors(() => origCreateWithProgress());
-      return new CreationProgressCreate(raw, name);
+      return new CreationProgressCreate(raw, name, attached);
     };
     return nb as unknown as SandboxBuilder;
   }
@@ -466,8 +523,8 @@ export class Sandbox implements AsyncDisposable {
     return new ExecHandle(raw);
   }
 
-  async exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput> {
-    const argv = args ? Array.from(args) : undefined;
+  async exec(cmd: string, args?: CommandArgs): Promise<ExecOutput> {
+    const argv = commandArgs(args);
     const raw = await withMappedErrors(() => this.inner.exec(cmd, argv));
     return new ExecOutput(raw);
   }
@@ -483,8 +540,8 @@ export class Sandbox implements AsyncDisposable {
     return new ExecOutput(raw);
   }
 
-  async execStream(cmd: string, args?: Iterable<string>): Promise<ExecHandle> {
-    const argv = args ? Array.from(args) : undefined;
+  async execStream(cmd: string, args?: CommandArgs): Promise<ExecHandle> {
+    const argv = commandArgs(args);
     const raw = await withMappedErrors(() =>
       this.inner.execStream(cmd, argv),
     );
@@ -527,8 +584,8 @@ export class Sandbox implements AsyncDisposable {
     );
   }
 
-  async attach(cmd: string, args?: Iterable<string>): Promise<number> {
-    const argv = args ? Array.from(args) : undefined;
+  async attach(cmd: string, args?: CommandArgs): Promise<number> {
+    const argv = commandArgs(args);
     return await withMappedErrors(() => this.inner.attach(cmd, argv));
   }
 
@@ -585,9 +642,15 @@ export class Sandbox implements AsyncDisposable {
   }
 
   /** Fetch the latest persisted settings; these may still require a restart to apply. */
-  async config(): Promise<SandboxConfig> {
+  async config(): Promise<SandboxConfigInspection> {
     const json = await withMappedErrors(() => this.inner.configJson());
-    return remapKeysToCamel(JSON.parse(json)) as SandboxConfig;
+    const view = remapKeysToCamel(JSON.parse(json));
+    if (view.kind === "local") {
+      // Local specs persist Rust variant names. Builders accept kebab-case values.
+      const policy: string = view.spec.pullPolicy;
+      view.spec.pullPolicy = policy === "IfMissing" ? "if-missing" : policy.toLowerCase();
+    }
+    return view as SandboxConfigInspection;
   }
 
   // -- logs ---------------------------------------------------------------
@@ -654,6 +717,60 @@ export class Sandbox implements AsyncDisposable {
       this.inner.modify(modifyOptionsToNapi(opts)),
     );
     return modificationPlanFromJson(raw);
+  }
+
+  /** Apply once and retain this call's operation identities; ordinary modify() is unchanged. */
+  async modifyWithResizeTracking(opts?: ModifyOptions): Promise<SandboxModificationResult> {
+    if (typeof this.inner.modifyWithResizeTracking !== "function") {
+      throw new Error("resize operation tracking requires an updated native library");
+    }
+    requireModifyCapabilities(opts);
+    return modificationResultFromJson(await withMappedErrors(() =>
+      this.inner.modifyWithResizeTracking!(modifyOptionsToNapi(opts)),
+    ));
+  }
+
+  /** Read current operation identities and evidence without changing targets. */
+  async resizeOperations(): Promise<ResizeOperation[]> {
+    if (typeof this.inner.resizeOperations !== "function") {
+      throw new Error("resize operation tracking requires an updated native library");
+    }
+    return resizeOperationsFromJson(await withMappedErrors(() => this.inner.resizeOperations!()));
+  }
+
+  /** Wait for supplied identities. Timeout ends waiting only; later targets cannot replace them. */
+  async waitForResizeOperations(
+    operations: readonly ResizeOperation[], timeoutMs?: number,
+  ): Promise<ResourceResizeStatus[]> {
+    validateResizeTimeout(timeoutMs);
+    const raw = resizeOperationsToJson(operations);
+    if (typeof this.inner.waitForResizeOperations !== "function") {
+      throw new Error("resize operation tracking requires an updated native library");
+    }
+    return resizeStatusFromJson(await withMappedErrors(() =>
+      this.inner.waitForResizeOperations!(raw, timeoutMs),
+    ));
+  }
+
+  /** Read retained CPU and memory resize status. Rejects a stopped sandbox or unsupported runtime. */
+  async resizeStatus(): Promise<ResourceResizeStatus[]> {
+    return resizeStatusFromJson(
+      await withMappedErrors(() => this.inner.resizeStatus()),
+    );
+  }
+
+  /**
+   * Wait for the operations selected at the first read to be guest-confirmed.
+   * Stopped, unsupported, superseded or unavailable history is not success.
+   * Omitted waits without a deadline and keeps polling while a guest
+   * never converges; `0` checks once. Expiry throws `ResizeTimeoutError`, whose
+   * `status` is empty if no read completed before the deadline.
+   */
+  async waitUntilResized(timeoutMs?: number): Promise<ResourceResizeStatus[]> {
+    validateResizeTimeout(timeoutMs);
+    return resizeStatusFromJson(
+      await withMappedErrors(() => this.inner.waitUntilResized(timeoutMs)),
+    );
   }
 
   /** Compact sealed root and owned-data disk layers without rewriting existing snapshots. */
@@ -759,8 +876,8 @@ export class Sandbox implements AsyncDisposable {
    * instead of silently redirecting the wait to the new identity.
    */
   /** Capture this resource's stable identity in its retained context. */
-  async snapshot(name: string): Promise<Snapshot> {
-    return new Snapshot(await withMappedErrors(() => this.inner.snapshot(name)));
+  async checkpoint(name: string): Promise<Snapshot> {
+    return new Snapshot(await withMappedErrors(() => this.inner.checkpoint(name)));
   }
 
   async storageUsage(): Promise<StorageItemUsage> {
@@ -804,10 +921,20 @@ export class Sandbox implements AsyncDisposable {
    */
   async detach(): Promise<void> {
     await withMappedErrors(() => this.inner.detach());
+    this.stopRemoteOnDispose = false;
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
     if (!this.ownsLifecycle) return;
+    if (this.stopRemoteOnDispose) {
+      this.stopRemoteOnDispose = false;
+      try {
+        await this.stop();
+      } catch {
+        // Remote scope exit has always been best-effort. Explicit stop reports errors.
+      }
+      return;
+    }
     // The native owner checks its captured run, so an old scope cannot stop a
     // restarted sandbox. Let await-using preserve body and cleanup errors.
     await withMappedErrors(() => this.inner.shutdownOwned());

@@ -62,7 +62,7 @@ pub struct StorageRecovery {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
-    /// Import or resume a stopped sandbox's storage without starting it or stopping another VM.
+    /// Import or resume stopped storage and, on Unix, secure recognized host-managed files.
     ///
     /// Inspect first with `setup::diagnose_storage`. Candidate IDs are revalidated under locks;
     /// an old report cannot authorize changed files or a different sandbox incarnation. Original
@@ -71,7 +71,7 @@ impl Sandbox {
         name: &str,
         options: StorageRecoveryOptions,
     ) -> MicrosandboxResult<StorageRecovery> {
-        crate::context::default_local_context()
+        crate::context::configured_context()
             .sandboxes()
             .recover_storage(name, options)
             .await
@@ -116,6 +116,10 @@ async fn recover_local(
 ) -> MicrosandboxResult<StorageRecovery> {
     with_locked_storage(context, name, async |local, config, storage| {
         protected_state::prepare_selected(local, config, storage, &options).await?;
+        let runtime = storage.join("runtime");
+        protected_state::filesystem_work(name, || {
+            microsandbox_runtime::checkpoint::layout::repair_managed_permissions(&runtime)
+        })?;
         Ok(StorageRecovery {
             name: name.into(),
             ready: true,

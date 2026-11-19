@@ -221,6 +221,8 @@ msb attach worker --job "$shell_job"
 
 One attachment can write at a time; others can use `--read-only`. Detaching or reaching local input EOF leaves guest input open. An abrupt disconnect releases input ownership within 30 seconds. Terminal output combines stdout and stderr as `output`; pipes keep them separate.
 
+A terminal job completes when its tracked process exits, after draining queued output. A background child holding the terminal open does not keep the job running. Completion does not send an additional kill signal to descendants; explicit job signals still target the job’s process group. The terminal closes when the job finishes, so surviving children must not rely on continued access to that terminal. Run independently managed work as a separate job.
+
 </Accordion>
 
 <Accordion title="History and limits">
@@ -261,7 +263,7 @@ const output = await sb.execWith("python", (e) =>
     e.args(["compute.py"])
         .cwd("/app")
         .env("PYTHONPATH", "/app/lib")
-        .timeout(30_000)
+        .timeoutMilliseconds(30_000)
         .rlimit("nofile", 1024),
 );
 ```
@@ -582,11 +584,13 @@ _, err = handle.Wait(ctx)
 
 ## Output and stdin buffering
 
-Each command has a 1 MiB output buffer, shared by stdout and stderr. When it fills, the guest stops reading the command's output; once the guest pipe buffers also fill, the command's writes block (or return `EAGAIN` for nonblocking writers) until you consume output. Nothing is dropped, and other threads in the guest keep running.
+Newly booted sandboxes use a 4 MiB output allowance per command, shared by stdout and stderr. When it fills, the guest stops reading the command's output; once the guest pipe buffers also fill, the command's writes block (or return `EAGAIN` for nonblocking writers) until you consume output. Nothing is dropped, and other threads in the guest keep running.
 
 Read output while the command runs; waiting for a completion marker before reading can leave the command blocked. Collecting complete output uses memory proportional to its size. To let a command finish without a reader, redirect its output to a file. This applies to SDK, CLI, and SSH execution.
 
-Stdin has a 64 KiB allowance per command. Writes wait for capacity and send straight from your buffer; cancelling a write can leave an already-delivered prefix. When a command both reads input and writes output, send and read concurrently so neither side blocks the other.
+Stdin has a 1 MiB allowance per command. Writes wait for capacity and send straight from your buffer; cancelling a write can leave an already-delivered prefix. When a command both reads input and writes output, send and read concurrently so neither side blocks the other.
+
+Up to 128 executions can be admitted per sandbox. Together, their stdin and output allowances can reach 640 MiB before transport, allocator, and kernel-pipe overhead; this memory is not preallocated. Size sandbox memory and command concurrency for your workload. Older running guests keep their advertised limits, and memory snapshots preserve the limits captured in the snapshot. Clients honor those limits automatically.
 
 ## Session IDs
 

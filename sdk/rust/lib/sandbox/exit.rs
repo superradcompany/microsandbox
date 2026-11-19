@@ -149,8 +149,8 @@ mod tests {
                 .cpus(1)
                 .memory(256)
                 .ephemeral(false)
-                .idle_timeout(5)
-                .max_duration(60);
+                .idle_timeout(std::time::Duration::from_secs(5))
+                .max_duration(std::time::Duration::from_secs(60));
             // Released runtimes may not support HTTP denial responses.
             #[cfg(feature = "net")]
             let builder = builder.network(|network| network.http(|http| http.deny_response(false)));

@@ -1,21 +1,25 @@
-import { binding } from "./internal/provider.js";
+import { UnsupportedError } from "./errors.js";
+import { binding, nativeOwner } from "./internal/provider.js";
 import { type NapiSnapshotSeed, type NapiContext } from "./internal/napi.js";
 import { withMappedErrors } from "./internal/error-mapping.js";
 import { Sandbox, SandboxListBuilder, sandboxPageFromNapi, type RestoreBuilder, type SandboxBuilder, type SandboxPage } from "./sandbox.js";
 import { Volume, type VolumeBuilder } from "./volume.js";
-import { Snapshot, wrapBuilder, type SnapshotBuilder } from "./snapshot.js";
+import { Snapshot as Group, SnapshotLoadOptions, wrapImportResult, type SnapshotImportResult } from "./snapshot-group.js";
+import { Snapshot, wrapBuilder, type SnapshotBuilder, type HeadUpdate } from "./snapshot.js";
 
 export interface LocalContextOptions {
   readonly home?: string;
   readonly configPath?: string;
 }
 
+export type ComputeType = "standard" | "shared";
+
 export interface RemoteContextOptions {
   readonly url?: string;
-  readonly apiKey: string;
+  readonly apiKey?: string;
   readonly requestTimeoutMs?: number;
   readonly userAgent?: string;
-  readonly computeType?: "standard" | "shared";
+  readonly computeType?: ComputeType;
 }
 
 /** Shared destination configuration; no process-wide routing changes. */
@@ -23,11 +27,13 @@ export class Context {
   readonly sandboxes: Sandboxes;
   readonly volumes: Volumes;
   readonly snapshots: Snapshots;
+  readonly checkpoints: Checkpoints;
 
   protected constructor(readonly native: NapiContext) {
     this.sandboxes = new Sandboxes(this);
     this.volumes = new Volumes(this);
     this.snapshots = new Snapshots(this);
+    this.checkpoints = new Checkpoints(this);
   }
 
   /** @internal Rewrap already-retained native state without resolving configuration. */
@@ -43,9 +49,15 @@ export class LocalContext extends Context {
 }
 
 export class RemoteContext extends Context {
-  constructor(options: RemoteContextOptions | { readonly profile: string }) {
+  constructor(options: RemoteContextOptions | { readonly profile: string } = {}) {
     if ("requestTimeoutMs" in options && options.requestTimeoutMs !== undefined && (!Number.isSafeInteger(options.requestTimeoutMs) || options.requestTimeoutMs < 0)) {
       throw new RangeError("requestTimeoutMs must be a non-negative safe integer");
+    }
+    if (!("profile" in options)) {
+      // Workers have their own process.env. Capture both fields before entering native code.
+      const apiKey = options.apiKey ?? process.env.MSB_API_KEY;
+      if (apiKey === undefined) throw new Error("RemoteContext requires apiKey or MSB_API_KEY");
+      options = { ...options, apiKey, url: options.url ?? (process.env.MSB_API_URL?.trim() || "https://api.microsandbox.dev") };
     }
     super(new (binding("remote").Context)(JSON.stringify({ ...options, kind: "remote" })));
   }
@@ -65,9 +77,7 @@ export class RemoteContext extends Context {
     return new RemoteContext({ profile });
   }
   static fromEnv(): RemoteContext {
-    const apiKey = process.env.MSB_API_KEY;
-    if (!apiKey) throw new Error("MSB_API_KEY is required for RemoteContext.fromEnv()");
-    return new RemoteContext({ apiKey, url: process.env.MSB_API_URL });
+    return new RemoteContext();
   }
 }
 
@@ -84,7 +94,7 @@ export class RemoteContextBuilder {
   url(url: string): this { this.options = { ...this.options, url }; return this; }
   apiKey(apiKey: string): this { this.options = { ...this.options, apiKey }; return this; }
   requestTimeoutMs(requestTimeoutMs: number): this { this.options = { ...this.options, requestTimeoutMs }; return this; }
-  computeType(computeType: "standard" | "shared"): this { this.options = { ...this.options, computeType }; return this; }
+  computeType(computeType: ComputeType): this { this.options = { ...this.options, computeType }; return this; }
   userAgent(userAgent: string): this { this.options = { ...this.options, userAgent }; return this; }
   build(): RemoteContext {
     const timeout = this.options.requestTimeoutMs;
@@ -95,9 +105,7 @@ export class RemoteContextBuilder {
       // Dispatch through the retained binding, even if provider registrations later change.
       return RemoteContext.fromNative(this.base.native.deriveRemote(JSON.stringify(this.options)));
     }
-    const apiKey = this.options.apiKey;
-    if (apiKey === undefined) throw new Error("remote context requires apiKey");
-    return new RemoteContext({ ...this.options, apiKey });
+    return new RemoteContext(this.options);
   }
 }
 
@@ -158,6 +166,35 @@ export class Volumes {
 }
 
 export class Snapshots {
+  constructor(readonly context: Context) {}
+
+  async open(path: string): Promise<Group> {
+    return new Group(await withMappedErrors(() => this.context.native.snapshotGroupOpen(path)));
+  }
+
+  async load(name: string, files: string[], configure: (options: SnapshotLoadOptions) => SnapshotLoadOptions = options => options): Promise<SnapshotImportResult> {
+    const options = configure(new SnapshotLoadOptions()).toNative();
+    if (options.maximumDiskBytes != null && !nativeOwner(this.context.native)?.Snapshot.supportsImportBudget?.()) throw new UnsupportedError("Snapshot import size limits require an updated native SDK");
+    return wrapImportResult(await withMappedErrors(() => this.context.native.snapshotGroupLoad(name, [...files], options)));
+  }
+
+  async get(name: string): Promise<Group> {
+    return new Group(await withMappedErrors(() => this.context.native.snapshotGroupGet(name)));
+  }
+
+  async list(): Promise<Group[]> {
+    return (await withMappedErrors(() => this.context.native.snapshotGroupList())).map(group => new Group(group));
+  }
+}
+
+export class Checkpoints {
+  async groupHead(group: string): Promise<string | null> {
+    return (await withMappedErrors(() => this.context.native.snapshotGroupHead(group))) ?? null;
+  }
+  async setGroupHead(group: string, id: string): Promise<HeadUpdate> {
+    const update = await withMappedErrors(() => this.context.native.snapshotSetGroupHead(group, id));
+    return { ...update, previous: update.previous ?? null };
+  }
   constructor(readonly context: Context) {}
   builder(name = ""): SnapshotBuilder { return wrapBuilder(this.context.native.snapshotBuilder(name)); }
   async get(reference: string): Promise<Snapshot> {

@@ -59,28 +59,28 @@ jobs:
         if: inputs.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev strace python3-dev
 
-      - name: Set up Python (macOS)
-        if: inputs.os == 'darwin'
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          python-version: "3.13"
-          enable-cache: false
-
       - name: Configure Python linking
         id: python
+        shell: bash
         run: |
-          # Rust tests embed Python. Use apt's matching library on Linux and
-          # the managed interpreter on macOS instead of cached runner-image paths.
-          if [ "${{ inputs.os }}" = linux ]; then
-            python_executable=/usr/bin/python3
+          # Rust tests embed Python. On Linux, select the interpreter whose headers and
+          # shared library were installed together by apt, not a toolcache Python. On
+          # macOS, resolve the runner's python3 to its versioned path: PyO3 reconfigures
+          # only when PYO3_PYTHON or PATH changes, and an image upgrade changes neither.
+          if [[ "${{ inputs.os }}" == linux ]]; then
+            python=/usr/bin/python3
           else
-            python_executable=$(uv python find 3.13)
+            python=$(python3 -c 'import os, sys; print(os.path.realpath(sys.executable))')
           fi
-          echo "PYO3_PYTHON=$python_executable" >> "$GITHUB_ENV"
-          # PyO3 caches its linker configuration. Invalidate it when the selected
-          # interpreter or its library paths change.
-          python_config=$("$python_executable" -c 'import hashlib, sysconfig; print(hashlib.sha256(repr(sorted(sysconfig.get_config_vars().items())).encode()).hexdigest())')
-          echo "cache-key=embedding-python-${python_config}" >> "$GITHUB_OUTPUT"
+          echo "PYO3_PYTHON=$python" >> "$GITHUB_ENV"
+          # PyO3 caches its linker configuration. Include the Python configuration so
+          # runner image upgrades cannot restore stale libpython paths.
+          if command -v sha256sum >/dev/null; then
+            python_config=$("$python" -m sysconfig | sha256sum | cut -d ' ' -f 1)
+          else
+            python_config=$("$python" -m sysconfig | shasum -a 256 | cut -d ' ' -f 1)
+          fi
+          echo "cache-key=system-python-${python_config}" >> "$GITHUB_OUTPUT"
 
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
@@ -116,4 +116,14 @@ jobs:
         uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Test workspace
-        run: cargo +stable test --workspace --exclude microsandbox-agentd
+        env:
+          TEST_PLATFORM_OS: ${{ inputs.os }}
+        run: |
+          # Concurrent fresh shell fixtures can exceed the runtime's two-second
+          # probe deadline on macOS. Bound harness workers, not production timeouts;
+          # tests still exercise their own explicit concurrency unchanged.
+          if [[ "$TEST_PLATFORM_OS" == "darwin" ]]; then
+            workers="$(sysctl -n hw.logicalcpu)"
+            export RUST_TEST_THREADS="$(( workers < 4 ? workers : 4 ))"
+          fi
+          cargo +stable test --workspace --exclude microsandbox-agentd

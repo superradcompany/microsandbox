@@ -283,7 +283,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 
 <p className="msb-member-group" id="instance-methods">Instance methods</p>
 
-A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle. Cloud sandboxes remain independent of client scope lifetime, including creation, start, restart and progress results. Connected handles and detached handles do not acquire cleanup ownership. Calling `detach()` releases scope cleanup.
+A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle. Attached remote creations, including creation with progress, own their TypeScript scope cleanup. Fetched, detached, and remotely started or restarted handles are non-owning. Calling `await sandbox.detach()` releases scope cleanup.
 
 Command execution (`exec`, `execWith`, `execStream`, `execStreamWith`, `shell`, `shellStream`) and foreground attachment (`attach`, `attachWith`, `attachShell`) live on the [Execution](/sdk/typescript/execution) page.
 
@@ -292,28 +292,30 @@ Lifecycle calls do not wait for unrelated guest operations on the same handle to
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">config()</span>
 
 ```typescript
-config(): Promise<SandboxConfig>
+config(): Promise<SandboxConfigInspection>
 ```
 
 <Accordion title="Example">
 
 ```typescript
 const config = await sandbox.config();
-console.log(`${config.memoryMib} MiB`);
+console.log(`${config.spec.resources.memoryMib} MiB`);
 ```
 
 </Accordion>
 
-Fetch the latest persisted configuration from the backend. Lookup errors are returned without a cached fallback; saved settings may still require restart to apply. The shape mirrors [`SandboxBuilder.build()`](#sandboxbuilder-build).
+Fetch the latest persisted configuration from the backend. Lookup errors are returned without a cached fallback; saved settings may still require restart to apply. The result is an inspection observation, not the creation input returned by `SandboxBuilder.build()`.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxconfig">Promise&lt;SandboxConfig&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxconfiginspection">Promise&lt;SandboxConfigInspection&gt;</a></div>
     <div className="msb-param-desc">Sandbox configuration.</div>
   </div>
 </div>
+
+The result distinguishes local persisted specifications from remote inspection projections. Remote source details may be unavailable and secret material is redacted; these are explicit paths in `unavailable` and `redacted`, not fabricated defaults. See [inspection migration](/migrations/sdk-contexts#configuration-result-shape).
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">detach()</span>
 
@@ -549,7 +551,7 @@ console.log(`${keepalive.name}: ${keepalive.activitySeq}`);
 
 </Accordion>
 
-Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `maxDuration`.
+Explicitly refresh the running sandbox's idle activity. This sends `core.touch`, receives `core.touched`, and advances the guest activity sequence used by the runtime idle-timeout monitor. It does not start stopped sandboxes and it does not bypass `maxDurationSeconds`.
 
 <p className="msb-label">Returns</p>
 
@@ -614,7 +616,7 @@ Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at
 
 Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `policy: "restart"` to apply now, or `policy: "next_start"` to save for the next start.
 
-A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
+A live CPU or memory resize can take a moment to settle. The immediate result's `resizeStatus` reports `"accepted"` after the runtime accepts each target; it does not confirm guest completion. The plan's `applied` field describes applying the modification request, not usable guest capacity. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
 <p className="msb-label">Parameters</p>
 
@@ -633,6 +635,65 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
     <div className="msb-param-desc">The modification plan, applied unless <code>dryRun: true</code>.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">modifyWithResizeTracking()</span>
+
+```typescript
+modifyWithResizeTracking(opts?: ModifyOptions): Promise<SandboxModificationResult>
+```
+
+Accepts the same options as `modify()` and returns `{ plan, resizeOperations }`. The records identify this call's accepted live requests. Tracking is `null` for dry runs, non-live changes and supported changes through older runtimes; it must not be replaced with a later current operation. Existing `modify()` output is unchanged. A missing native method refuses before mutation, and a dispatched mutation is never retried through another API.
+
+<Accordion title="Example">
+
+```typescript
+const result = await sandbox.modifyWithResizeTracking({ cpus: 4 });
+if (result.resizeOperations !== null) {
+  await sandbox.waitForResizeOperations(result.resizeOperations, 30_000);
+}
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">resizeOperations()</span>
+
+```typescript
+resizeOperations(): Promise<ResizeOperation[]>
+```
+
+Read the latest recorded operation per resource without changing targets. Reads return retained evidence and request a background refresh; they do not wait for a new guest sample. Use an operation-specific wait to await confirmed completion. An empty list means no recorded request. Records contain `id`, `runtimeBootId`, `generation`, `requestedTarget`, `acceptedTarget`, `status`, `outcome` and `observation`. Generation is a `bigint`; memory targets use `{ resource: "memory", totalMib: bigint }`, and CPU targets use `{ resource: "cpus", online: number }`. Status preserves requested, actual, enforced and convergence quantities. Outcome is `pending`, `applied` or `superseded`; observation is `available`, `unsupported`, `paused` or `unavailable`.
+
+Keep bigint fields intact when storing records for reconnection; ordinary `JSON.stringify` cannot serialize bigint. Use a bigint-aware serializer that restores those fields as bigint, not JavaScript numbers.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">waitForResizeOperations()</span>
+
+```typescript
+waitForResizeOperations(
+  operations: readonly ResizeOperation[], timeoutMs?: number,
+): Promise<ResourceResizeStatus[]>
+```
+
+Wait on the supplied one or two records, rechecking their identities against the runtime. Reconnection to the same runtime is supported. Runtime replacement, expired history or supersession fails instead of following a new request; caller-supplied applied status is not proof. An omitted timeout waits indefinitely and zero performs one bounded check. Expiry raises `ResizeTimeoutError` with completed per-resource reads and does not undo the resize. Unsupported observation is an error, never successful completion.
+
+The runtime retains at most 256 operation records, protecting the latest CPU and memory records from eviction. Older records can expire; restarting the runtime clears its history. Resident pause preserves the history. An expired identity cannot establish completion.
+
+`ResizeWaitError` exposes `reason`, `sandbox`, `operationId`, verified `status` and the native error as `cause`. Reasons distinguish `superseded`, `interrupted`, `history_unavailable`, `invalid_response` and `observation_unavailable`. None implies rollback or final failure of the resize. Timeout and unsupported-feature errors remain separate; unknown future peer errors retain their ordinary mapping.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">resizeStatus()</span>
+
+```typescript
+resizeStatus(): Promise<ResourceResizeStatus[]>
+```
+
+Read current resource status without operation identities. Use `resizeOperations()` when a later wait must remain tied to those records.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">waitUntilResized()</span>
+
+```typescript
+waitUntilResized(timeoutMs?: number): Promise<ResourceResizeStatus[]>
+```
+
+Select the operations present at the first read and wait for those identities. This does not establish which caller submitted them; use the result of `modifyWithResizeTracking()` for a wait tied to your modification.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
@@ -887,7 +948,9 @@ Block until the sandbox is observed in a terminal non-running state, without tri
 
 </Accordion>
 
-Implements `AsyncDisposable` for `await using`. Scope exit awaits graceful shutdown of the local run this object owns, preserving persisted state except for configured ephemeral cleanup. Detached, independently connected, and cloud resources are not stopped. Cleanup checks the captured run, so an old scope cannot stop a replacement run. Cleanup errors reject; when both the body and disposal fail, `await using` preserves both in its `SuppressedError`.
+For an attached remote creation, scope exit awaits a best-effort stop by sandbox ID, including when the block throws. Call `stop()` explicitly to observe remote stop errors. Detached and fetched remote sandboxes keep running.
+
+For an owned local run, disposal awaits graceful shutdown of the captured run. Local cleanup errors reject. If the block also throws, `SuppressedError` preserves both failures.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">restoreWarnings()</span>
 
@@ -1006,7 +1069,7 @@ await sandbox.detach();
 
 </Accordion>
 
-Build and boot the sandbox. By default, a local handle is attached and stops when its `await using` binding goes out of scope. A cloud handle does not own the service-managed VM, so stop or remove it explicitly. Call [`detached(true)`](#sandboxbuilder-detached) first for local background mode.
+Build and boot an attached sandbox. With `await using`, scope exit awaits local shutdown or a best-effort remote stop. Use [`detached(true)`](#sandboxbuilder-detached) to keep it running after scope exit.
 
 <p className="msb-label">Returns</p>
 
@@ -1209,10 +1272,10 @@ Deprecated compatibility alias for older builder chains. This sets the same proc
   </div>
 </div>
 
-#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">idleTimeout()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">idleTimeoutSeconds()</span>
 
 ```typescript
-idleTimeout(secs: number): this
+idleTimeoutSeconds(secs: number): this
 ```
 
 Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
@@ -1413,10 +1476,10 @@ Override the sandbox process's log verbosity.
   </div>
 </div>
 
-#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">maxDuration()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">maxDurationSeconds()</span>
 
 ```typescript
-maxDuration(secs: number): this
+maxDurationSeconds(secs: number): this
 ```
 
 Set the maximum sandbox lifetime in seconds. When exceeded, the sandbox is drained and stopped. Enforced on the host side - the guest cannot override it.
@@ -2840,7 +2903,7 @@ Secret change in a modification plan. Values are omitted by construction; `befor
 | allowHosts | `string[]` | Allowed hosts after the requested change |
 | reason | `string \| null` | Human-readable reason for the classification, when useful |
 
-`ResourceResizeStatus` reports runtime convergence for a live resize; enforcement applies immediately, the guest converges asynchronously:
+`ResourceResizeStatus` describes a live resize. The immediate modification result reports `"accepted"`; equal reported quantities do not establish operation-bound guest completion, and plugged memory may still be offline:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2848,7 +2911,7 @@ Secret change in a modification plan. Values are omitted by construction; `befor
 | requested | `string` | Requested value |
 | actual | `string` | Actual value observed in the guest/runtime |
 | enforced | `string` | Host/VMM-enforced value |
-| state | `"accepted" \| "converging" \| "applied" \| "guest-refused" \| "failed"` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining CPUs or plugging memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway) |
+| state | `"accepted" \| "converging" \| "applied" \| "guest-refused" \| "failed"` | The immediate modification result reports `"accepted"`. `"applied"` requires confirmed guest completion for the operation; equal quantities alone are insufficient |
 
 ### SandboxPingResult
 
@@ -2946,7 +3009,7 @@ static recoverStorage(
 ): Promise<StorageRecovery>
 ```
 
-Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage repair](/repairs/sandbox-storage) for maintenance requirements and recovery limits.
 
 <p className="msb-label">Options</p>
 
@@ -2973,3 +3036,9 @@ Import or resume storage for a stopped local sandbox. Inspect it first with [sto
     <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originalsRetained</code> (boolean) confirms the original disks were retained.</div>
   </div>
 </div>
+
+## SandboxConfigInspection
+
+`name` is the name observed by this lookup. `unavailable` and `redacted` contain snake_case paths relative to `spec`, including in TypeScript. They identify information the backend cannot expose or deliberately withholds. This result cannot be used as creation input.
+
+`kind` discriminates `{ kind: "local", spec: LocalSandboxInspection }` from `{ kind: "remote", spec: RemoteSandboxInspection }`. Runtime settings are at `spec.runtime`; remote resources use `spec.resources.vcpus` and local resources use `spec.resources.cpus`. Remote `image: null` means the source details are unavailable.

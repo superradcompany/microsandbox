@@ -122,7 +122,11 @@ impl Sandbox {
     pub async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics> {
         self.backend()
             .sandbox_ops()
-            .metrics(self.backend().clone(), self.name(), &self.config().await?)
+            .metrics(
+                self.backend().clone(),
+                self.name(),
+                &self.refresh_handle().await?.config()?,
+            )
             .await
     }
 
@@ -135,7 +139,7 @@ impl Sandbox {
         let sandbox = self.observer();
         use futures::TryStreamExt;
         futures::stream::once(async move {
-            let config = sandbox.config().await?;
+            let config = sandbox.refresh_handle().await?.config()?;
             Ok::<_, crate::MicrosandboxError>(sandbox.backend().sandbox_ops().metrics_stream(
                 sandbox.backend().clone(),
                 sandbox.name().to_owned(),
@@ -239,7 +243,7 @@ pub(crate) fn local_metrics_stream(
 /// Get the latest metrics snapshot for every running sandbox from the active local backend.
 #[cfg(feature = "local")]
 pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
-    let backend = crate::context::default_local_context();
+    let backend = crate::context::configured_context();
     let local = backend
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(Operation::AllSandboxMetrics))?;
@@ -514,6 +518,9 @@ mod tests {
             vcpu_time_ns: 0,
             memory_bytes: 128 * MIB,
             memory_bytes_reported: true,
+            memory_total_bytes: None,
+            guest_memory_observation: None,
+            guest_memory_validity: None,
             memory_available_bytes: None,
             memory_host_resident_bytes: None,
             memory_limit_bytes,

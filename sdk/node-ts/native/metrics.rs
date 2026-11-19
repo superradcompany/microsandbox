@@ -22,7 +22,7 @@ pub async fn all_sandbox_metrics() -> Result<HashMap<String, SandboxMetrics>> {
     }
     #[cfg(feature = "local")]
     {
-        let backend = microsandbox::context::default_local_context();
+        let backend = microsandbox::context::configured_context();
         let local = backend.as_local().ok_or_else(|| {
             napi::Error::from_reason("all_sandbox_metrics requires a local backend".to_string())
         })?;

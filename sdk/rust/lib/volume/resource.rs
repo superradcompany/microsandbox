@@ -79,19 +79,19 @@ impl Volume {
 
     /// Provision a volume.
     ///
-    /// Uses the fixed default-local destination. For an explicit destination,
+    /// Uses the configured backend, which defaults to local. For an explicit destination,
     /// use `Volume::ctx(&context).create(config)`. The returned resource retains it.
     ///
     /// Locally fails with [`MicrosandboxError::VolumeAlreadyExists`] if a
     /// volume with the same name already exists.
     pub async fn create(config: VolumeConfig) -> MicrosandboxResult<Self> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.volume_ops().create(backend.clone(), config).await
     }
 
-    /// Look up a unified volume in the default-local destination.
+    /// Look up a unified volume on the configured backend.
     pub async fn get(name: &str) -> MicrosandboxResult<Volume> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.volume_ops().get(backend.clone(), name).await
     }
 
@@ -100,19 +100,19 @@ impl Volume {
     /// The local backend deliberately returns [`MicrosandboxError::Unsupported`]
     /// so a missing cloud credential can never turn this into host filesystem access.
     pub async fn get_default() -> MicrosandboxResult<Volume> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.volume_ops().get_default(backend.clone()).await
     }
 
-    /// List unified volumes in the default-local destination.
+    /// List unified volumes on the configured backend.
     pub async fn list() -> MicrosandboxResult<Vec<Volume>> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.volume_ops().list(backend.clone()).await
     }
 
-    /// Remove the name-selected volume in the default-local destination.
+    /// Remove the name-selected volume on the configured backend.
     pub async fn remove(name: &str) -> MicrosandboxResult<()> {
-        let backend = crate::context::default_local_context();
+        let backend = crate::context::configured_context();
         backend.volume_ops().remove(backend.clone(), name).await
     }
 }
@@ -335,7 +335,7 @@ impl VolumeBuilder {
     /// Start building a volume with the given name. Names must contain only
     /// alphanumeric characters, dots, hyphens, and underscores.
     pub fn new(name: impl Into<String>) -> Self {
-        Self::for_context(crate::context::default_local_context(), name)
+        Self::for_context(crate::context::configured_context(), name)
     }
 
     pub(crate) fn for_context(context: Arc<dyn Context>, name: impl Into<String>) -> Self {
@@ -412,7 +412,7 @@ impl VolumeBuilder {
 impl From<VolumeConfig> for VolumeBuilder {
     fn from(config: VolumeConfig) -> Self {
         Self {
-            context: crate::context::default_local_context(),
+            context: crate::context::configured_context(),
             config,
         }
     }

@@ -170,7 +170,7 @@ pub async fn diagnose_storage_in(
 }
 
 fn inspection_config(options: GlobalConfigPatch) -> MicrosandboxResult<BackendConfig> {
-    inspection_config_in(crate::context::default_local_context().as_ref(), options)
+    inspection_config_in(crate::context::configured_context().as_ref(), options)
 }
 
 fn inspection_config_in(

@@ -56,10 +56,15 @@ def check(feature, args, expected="success", stdin=None, timeout=90):
             if r.returncode == 0
             else ("UNSUPPORTED" if reason == "unsupported" else "FAIL")
         )
-        if feature == "volume_inspect" and r.returncode:
-            verdict = (
-                "FAIL"  # Remote inspection exists; the CLI's local-only route is a gap.
+        if feature == "volume_inspect":
+            # A remote volume has metadata but no path on the client's host.
+            valid = (
+                r.returncode == 0
+                and name in r.stdout
+                and "Kind:" in r.stdout
+                and "Path:" not in r.stdout
             )
+            verdict = "PASS" if valid else "FAIL"
         if expected == "not_found":
             verdict = "PASS" if r.returncode != 0 and reason == "not_found" else "FAIL"
         if expected == "unsupported":
@@ -193,7 +198,7 @@ finally:
             and re.search(r"404|not found", r.stderr, re.IGNORECASE)
         ):
             rows[-1]["verdict"] = "ABSENT"
-        verified = check(
+        check(
             "cleanup_verified" + (suffix or "-sandbox"),
             ["inspect", name + suffix],
             "not_found",

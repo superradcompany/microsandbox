@@ -1,5 +1,7 @@
 //! Integration tests for plain-HTTP secret substitution.
 
+#![cfg(feature = "net")]
+
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 

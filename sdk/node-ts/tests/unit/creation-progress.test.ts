@@ -64,8 +64,8 @@ vi.mock("../../dist/internal/napi.js", () => {
         maxUdpConnections(value: number): this { native.controls("maxUdpConnections", value); return this; }
         disableNetwork(): this { native.controls("disableNetwork"); return this; }
         security(value: string): this { native.controls("security", value); return this; }
-        maxDuration(value: number): this { native.controls("maxDuration", value); return this; }
-        idleTimeout(value: number): this { native.controls("idleTimeout", value); return this; }
+        maxDurationSeconds(value: number): this { native.controls("maxDurationSeconds", value); return this; }
+        idleTimeoutSeconds(value: number): this { native.controls("idleTimeoutSeconds", value); return this; }
         async restore() {
           native.restore();
           return sandbox();
@@ -131,6 +131,7 @@ describe("creation result lifecycle ownership", () => {
     native.shutdownOwned.mockRejectedValueOnce(cleanup);
     try {
       await using sandbox = await Sandbox.builder("both-fail").create();
+      expect(sandbox.ownsLifecycle).toBe(true);
       throw body;
     } catch (error) {
       expect(error).toMatchObject({ error: cleanup, suppressed: body });
@@ -176,13 +177,13 @@ describe("creation result lifecycle ownership", () => {
       const policy = { defaultEgress: "deny" as const, defaultIngress: "deny" as const, rules: [] };
       const builder = Sandbox.restore("baseline").name("destination")
         .cpus(2).memory(512).networkPolicy(policy).maxTcpConnections(0).maxUdpConnections(7)
-        .disableNetwork().security("default").maxDuration(0).idleTimeout(0);
+        .disableNetwork().security("default").maxDurationSeconds(0).idleTimeoutSeconds(0);
       if (method === "restore") await builder.restore();
       else await (await builder.restoreWithProgress()).awaitSandbox();
       expect(native.controls.mock.calls).toEqual([
         ["cpus", 2], ["memory", 512], ["networkPolicy", policy],
         ["maxTcpConnections", 0], ["maxUdpConnections", 7],
-        ["disableNetwork"], ["security", "default"], ["maxDuration", 0], ["idleTimeout", 0],
+        ["disableNetwork"], ["security", "default"], ["maxDurationSeconds", 0], ["idleTimeoutSeconds", 0],
       ]);
       expect(native.create).not.toHaveBeenCalled();
     });
@@ -245,20 +246,24 @@ describe("cloud scope cleanup", () => {
   });
 
   for (const method of ["create", "createWithProgress", "createWithPullProgress"] as const) {
-    for (const detached of [false, true]) {
-      it(`${method} leaves cloud lifetime independent (detached=${detached})`, async () => {
-        const builder = Sandbox.builder("cloud-scope").detached(detached);
-        const sandbox = method === "create"
-          ? await builder.create()
-          : await (await builder[method]()).awaitSandbox();
-        expect(sandbox.ownsLifecycle).toBe(false);
-        await sandbox[Symbol.asyncDispose]();
-        expect(native.stop).not.toHaveBeenCalled();
+    for (const detached of [undefined, false, true]) {
+      it(`${method} scopes remote creation with detached=${detached}`, async () => {
+        const builder = Sandbox.builder("cloud-scope");
+        if (detached !== undefined) builder.detached(detached);
+        {
+          await using sandbox = method === "create"
+            ? await builder.create()
+            : await (await builder[method]()).awaitSandbox();
+          expect(sandbox.ownsLifecycle).toBe(!detached);
+          expect(native.stop).not.toHaveBeenCalled();
+        }
+        expect(native.stop).toHaveBeenCalledTimes(detached ? 0 : 1);
+        expect(native.shutdownOwned).not.toHaveBeenCalled();
       });
     }
   }
 
-  for (const method of ["start", "startDetached", "getRunning"] as const) {
+  for (const method of ["get", "start", "startDetached", "getRunning"] as const) {
     it(`${method} does not acquire remote scope ownership`, async () => {
       const sandbox = await Sandbox[method]("existing-cloud");
       expect(sandbox.ownsLifecycle).toBe(false);
@@ -273,12 +278,38 @@ describe("cloud scope cleanup", () => {
     expect(native.stop).toHaveBeenCalledTimes(1);
   });
 
-  it("does not stop remote runs on exceptional scope exit", async () => {
+  it("attempts remote stop on exceptional exit and preserves the body error", async () => {
+    native.stop.mockRejectedValueOnce(new Error("provider unavailable"));
     await expect((async () => {
       await using sandbox = await Sandbox.builder("cloud-error").create();
       throw new Error("guest failed");
     })()).rejects.toThrow("guest failed");
-    expect(native.stop).not.toHaveBeenCalled();
+    expect(native.stop).toHaveBeenCalledOnce();
+  });
+
+  it("awaits remote stop even when the provider eventually rejects it", async () => {
+    const stop = Promise.withResolvers<void>();
+    native.stop.mockReturnValueOnce(stop.promise);
+    let exited = false;
+    const scope = (async () => {
+      await using sandbox = await Sandbox.builder("cloud-stop").create();
+      expect(sandbox.ownsLifecycle).toBe(true);
+    })().then(() => { exited = true; });
+    await vi.waitFor(() => expect(native.stop).toHaveBeenCalledOnce());
+    expect(exited).toBe(false);
+    stop.reject(new Error("provider unavailable"));
+    await scope;
+    expect(exited).toBe(true);
+  });
+
+  it("keeps remote cleanup armed when detach fails", async () => {
+    native.detach.mockRejectedValueOnce(new Error("detach failed"));
+    {
+      await using sandbox = await Sandbox.builder("cloud-detach-failure").create();
+      await expect(sandbox.detach()).rejects.toThrow("detach failed");
+      expect(sandbox.ownsLifecycle).toBe(true);
+    }
+    expect(native.stop).toHaveBeenCalledOnce();
   });
 
   it("honors detaching a created handle", async () => {

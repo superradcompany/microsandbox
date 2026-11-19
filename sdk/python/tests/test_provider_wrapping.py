@@ -16,7 +16,7 @@ def wrappers(monkeypatch):
     package.__path__ = []
     schema = ModuleType("_provider_test_core._schema")
     schema.VERSION = "test"
-    schema.CLASSES = {"Sandbox": ["__aenter__", "__aexit__"], "ForkOutcome": [],
+    schema.CLASSES = {"Sandbox": ["__aenter__", "__aexit__"], "ForkOutcome": [], "Volume": [],
                       "ExecHandle": ["__aiter__", "__anext__"], "ExecOutput": [], "Context": []}
     schema.FUNCTIONS = ["version"]
     monkeypatch.setitem(sys.modules, package.__name__, package)
@@ -29,6 +29,7 @@ def wrappers(monkeypatch):
 
     def register(kind, version="test"):
         native = ModuleType(f"_provider_test_{kind}")
+        native.configured_provider_kind = lambda: "local"
         native.provider_info = lambda: json.dumps({"abi": 1, "version": version, kind: True})
 
         class Output:
@@ -114,7 +115,7 @@ async def test_cancelled_wrapper_wait_does_not_record_completion(wrappers):
     await asyncio.sleep(0)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await pending
+        _ = await pending
     assert execution._inner.completion is None
     execution._inner.ready.set()
     assert await execution.wait() == await execution.wait() == 7
@@ -147,3 +148,17 @@ def test_context_derivation_keeps_its_original_provider(wrappers, monkeypatch):
     assert derived._provider is native
     assert derived._inner.base is base._inner
     assert derived._inner.options == {"url": "https://derived.example"}
+
+
+def test_remote_only_volume_mount_factories_do_not_select_local_resources(wrappers):
+    core, register = wrappers
+    remote = register("remote")
+    factories = {"bind": ("/src",), "named": ("data",), "owned": (), "tmpfs": (), "disk": ("/img",)}
+    remote.Volume = type("Volume", (), {
+        name: staticmethod(lambda *args, **kwargs: (args, kwargs)) for name in factories
+    })
+    for name, args in factories.items():
+        assert getattr(core.Volume, name)(*args, readonly=True) == (args, {"readonly": True})
+
+    with pytest.raises(ImportError, match="microsandbox-local"):
+        core.Volume.get("data")

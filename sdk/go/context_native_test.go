@@ -92,6 +92,30 @@ func TestExplicitContextsNative(t *testing.T) {
 	t.Setenv("MSB_API_URL", urls["a"])
 	t.Setenv("MSB_API_KEY", "key-a")
 	t.Setenv("MSB_BACKEND", "local")
+	for _, tc := range []struct {
+		envURL, envKey string
+		options        []RemoteContextOption
+	}{
+		{urls["a"], "key-a", []RemoteContextOption{WithRemoteComputeType(ComputeShared)}},
+		{urls["a"], "wrong", []RemoteContextOption{WithRemoteAPIKey("key-a")}},
+		{urls["b"], "key-a", []RemoteContextOption{WithRemoteURL(urls["a"])}},
+	} {
+		t.Setenv("MSB_API_URL", tc.envURL)
+		t.Setenv("MSB_API_KEY", tc.envKey)
+		remote, err := NewRemoteContextWithOptions(tc.options...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := remote.Sandboxes().Get(context.Background(), "task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.ID() != "cloud:a" {
+			t.Errorf("unexpected destination: %s", task.ID())
+		}
+		task.Close()
+	}
+	t.Setenv("MSB_API_URL", urls["a"])
 	collection, err := SandboxRemote()
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +129,14 @@ func TestExplicitContextsNative(t *testing.T) {
 		t.Fatal("snapshot remote selector", err)
 	}
 	t.Setenv("MSB_BACKEND", "remote")
+	routed, err := GetSandbox(context.Background(), "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer routed.Close()
+	if routed.ID() != "cloud:a" {
+		t.Fatalf("configured lookup reached %q", routed.ID())
+	}
 	sl, err := SandboxLocal()
 	if err != nil || sl.Context().Kind() != ContextLocal {
 		t.Fatal("sandbox local selector", err)
@@ -271,8 +303,19 @@ func exercisePersistentResources(t *testing.T) {
 		t.Fatalf("unified large string read: %d bytes, %v", len(got), err)
 	}
 	info, err := a.Info(ctx)
-	if err != nil || info.ID != a.ID() {
+	if err != nil || info.ID != a.ID() || info.Kind != a.Kind() || info.Kind != VolumeKindDir {
 		t.Fatalf("volume info = %+v, %v", info, err)
+	}
+	disk, err := first.Volumes().Create(ctx, "scratch", WithVolumeKind(VolumeKindDisk), WithVolumeSize(256))
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskInfo, err := disk.Info(ctx)
+	if err != nil || diskInfo.Kind != VolumeKindDisk || diskInfo.Kind != disk.Kind() {
+		t.Fatalf("disk volume info = %+v, %v", diskInfo, err)
+	}
+	if err := disk.Destroy(ctx); err != nil {
+		t.Fatal(err)
 	}
 	if err := a.Destroy(ctx); err != nil {
 		t.Fatal(err)
@@ -305,11 +348,11 @@ func exercisePersistentResources(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, "disk.ext4"), []byte("data"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := first.Snapshots().Open(ctx, directory)
+	snapshot, err := first.Checkpoints().Open(ctx, directory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fetchedSnapshot, err := snapshot.Context().Snapshots().Get(ctx, snapshot.ID())
+	fetchedSnapshot, err := snapshot.Context().Checkpoints().Get(ctx, snapshot.ID())
 	if err != nil {
 		t.Fatal(err)
 	}

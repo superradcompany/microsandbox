@@ -233,8 +233,9 @@ async fn create_sandbox(name: &str) -> Sandbox {
 }
 
 async fn cleanup(sandbox: Sandbox, name: &str) {
+    // Await shutdown while retaining the owner; dropping it first races its automatic cleanup
+    // against a second stop request from a freshly fetched resource.
+    sandbox.stop().await.expect("stop sandbox");
     drop(sandbox);
-    let handle = Sandbox::get(name).await.expect("get sandbox");
-    handle.stop().await.expect("stop sandbox");
     Sandbox::remove(name).await.expect("remove sandbox");
 }

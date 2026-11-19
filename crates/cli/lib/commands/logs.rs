@@ -23,6 +23,7 @@ use clap::{Args, ValueEnum};
 use console::style;
 use futures::{Stream, StreamExt};
 use microsandbox::MicrosandboxError;
+use microsandbox::jobs::{JobLogOptions, JobOutputSource};
 use microsandbox::logs::{BootError, LogEntry as EngineLogEntry, LogOptions, LogSource};
 use microsandbox_utils::log_text::{base64_decode, strip_ansi};
 use regex::Regex;
@@ -363,6 +364,17 @@ struct SourceMask {
 }
 
 impl SourceMask {
+    fn to_job_sources(self) -> Vec<JobOutputSource> {
+        [
+            self.stdout.then_some(JobOutputSource::Stdout),
+            self.stderr.then_some(JobOutputSource::Stderr),
+            self.output.then_some(JobOutputSource::Output),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
     /// Translate the mask into the engine's flat source list. Order
     /// is fixed (stdout, stderr, output, system) for stable behavior.
     fn to_engine_sources(self) -> Vec<LogSource> {
@@ -446,20 +458,11 @@ async fn run_job_logs(args: LogsArgs) -> anyhow::Result<()> {
         .await?
         .get_job(id)
         .await?;
-    let sources = resolve_sources(&args.source)
-        .to_engine_sources()
-        .into_iter()
-        .map(|source| {
-            match source {
-                LogSource::Stdout => "stdout",
-                LogSource::Stderr => "stderr",
-                LogSource::Output => "output",
-                LogSource::System => "system",
-            }
-            .to_string()
-        })
-        .collect();
-    let options = microsandbox::jobs::JobLogOptions {
+    let sources = resolve_sources(&args.source).to_job_sources();
+    // Only sandbox-wide logs have system records. An empty SDK filter selects
+    // all program output, so suppress rendering for a system-only job query.
+    let system_only = sources.is_empty();
+    let options = JobLogOptions {
         tail: args.tail,
         since: parse_time_arg(args.since.as_deref())?.map(|time| time.timestamp_millis()),
         until: parse_time_arg(args.until.as_deref())?.map(|time| time.timestamp_millis()),
@@ -481,7 +484,7 @@ async fn run_job_logs(args: LogsArgs) -> anyhow::Result<()> {
     let mut output = job.log_stream(&options).await?;
     while let Some(entry) = output.next().await {
         let entry = entry?;
-        if !grep_matches(grep.as_ref(), &String::from_utf8_lossy(&entry.data)) {
+        if system_only || !grep_matches(grep.as_ref(), &String::from_utf8_lossy(&entry.data)) {
             continue;
         }
         let timestamp = DateTime::<Utc>::from_timestamp_millis(entry.timestamp)
@@ -495,7 +498,7 @@ async fn run_job_logs(args: LogsArgs) -> anyhow::Result<()> {
         };
         let record = LogEntry {
             t: timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
-            s: entry.source,
+            s: entry.source.to_string(),
             d,
             id: None,
             e,
@@ -902,6 +905,24 @@ mod tests {
     fn source_mask_default_excludes_system() {
         let mask = resolve_sources(&[]);
         assert!(mask.stdout && mask.stderr && mask.output && !mask.system);
+    }
+
+    #[test]
+    fn job_source_mask_ignores_system_without_enabling_stdin_diagnostics() {
+        use JobOutputSource::{Output, Stderr, Stdout};
+        assert!(
+            resolve_sources(&[SourceFilter::System])
+                .to_job_sources()
+                .is_empty()
+        );
+        assert_eq!(
+            resolve_sources(&[SourceFilter::All]).to_job_sources(),
+            [Stdout, Stderr, Output]
+        );
+        assert_eq!(
+            resolve_sources(&[SourceFilter::System, SourceFilter::Stderr]).to_job_sources(),
+            [Stderr]
+        );
     }
 
     #[test]

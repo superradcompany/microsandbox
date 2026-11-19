@@ -16,9 +16,7 @@ use crate::sandbox::{Sandbox, SandboxRecord, build_exec_request};
 
 #[cfg(feature = "local")]
 use super::JobState;
-use super::client::Target;
-#[cfg(not(feature = "local"))]
-use super::client::unsupported;
+use super::client::{Target, unsupported};
 #[cfg(feature = "local")]
 use super::client::{history_error, invalid_response};
 use super::{Job, JobError, JobId, JobListBuilder, JobPage, JobResult};
@@ -44,7 +42,10 @@ impl Sandbox {
         cmd: impl Into<String>,
         configure: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> JobResult<Job> {
-        let options = configure(ExecOptionsBuilder::default().stdin_pipe()).build()?;
+        let configured = configure(ExecOptionsBuilder::default().stdin_pipe());
+        #[cfg(feature = "local")]
+        let explicit_argv = configured.explicit_argv();
+        let options = configured.build()?;
         let no_stdin = matches!(options.stdin, StdinMode::Null);
         if options.tty && no_stdin {
             return Err(JobError::operation(
@@ -64,6 +65,11 @@ impl Sandbox {
             }
             _ => None,
         };
+        // Preparing a stopped sandbox starts it. A provider that cannot launch
+        // managed jobs must reject the request before that lifecycle change.
+        if self.context().kind() == crate::ContextKind::Remote {
+            return Err(unsupported());
+        }
         let session = self.prepare_runtime().await?;
         let request = build_exec_request(
             &session.config,
@@ -102,26 +108,48 @@ impl Sandbox {
                         .map_err(|_| JobError::operation("invalid_options", "timeout is too large"))
                 })
                 .transpose()?;
-            let response = connection
-                .request(JobOperation::Start {
+            let operation = match &session.inner {
+                crate::context::SandboxInner::Local(local)
+                    if local.client.exec_binding_boot_id().is_some() =>
+                {
+                    if local.client.exec_binding_boot_id() != Some(connection.boot_id.as_str()) {
+                        return Err(JobError::operation(
+                            "runtime_changed",
+                            "the runtime changed during detached command preparation",
+                        ));
+                    }
+                    JobOperation::StartWithBindings {
+                        id: id.clone(),
+                        command: request,
+                        binding_overrides:
+                            microsandbox_protocol::exec_bindings::ExecBindingOverrides {
+                                explicit_argv,
+                                env_keys: options.env.iter().map(|env| env.key.clone()).collect(),
+                            },
+                        no_stdin,
+                        input_base64,
+                        timeout_ms,
+                    }
+                }
+                _ => JobOperation::Start {
                     id: id.clone(),
                     command: request,
                     no_stdin,
                     input_base64,
                     timeout_ms,
-                })
-                .await
-                .map_err(|error| {
-                    // A structured runtime refusal is definitive; a lost response isn't.
-                    if matches!(error, JobError::Operation { .. }) {
-                        error
-                    } else {
-                        JobError::LaunchUnconfirmed {
-                            id: id.clone(),
-                            message: error.to_string(),
-                        }
+                },
+            };
+            let response = connection.request(operation).await.map_err(|error| {
+                // A structured runtime refusal is definitive; a lost response isn't.
+                if matches!(error, JobError::Operation { .. }) {
+                    error
+                } else {
+                    JobError::LaunchUnconfirmed {
+                        id: id.clone(),
+                        message: error.to_string(),
                     }
-                })?;
+                }
+            })?;
             let JobResponse::Info { info } = response else {
                 return Err(invalid_response());
             };

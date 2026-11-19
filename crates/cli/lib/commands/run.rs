@@ -59,6 +59,10 @@ pub struct RunArgs {
     #[arg(last = true)]
     pub command: Vec<String>,
 
+    /// Snapshot source and restore-mode selection.
+    #[command(flatten)]
+    pub snapshot: crate::snapshot_source::SnapshotSourceArgs,
+
     /// Sandbox configuration options.
     #[command(flatten)]
     pub sandbox: SandboxOpts,
@@ -66,6 +70,7 @@ pub struct RunArgs {
 
 /// Parsed per-command execution options for `msb run`.
 struct ExecOpts {
+    inherited_command: bool,
     tty: bool,
     no_stdin: bool,
     timeout: Option<Duration>,
@@ -87,6 +92,8 @@ impl ExecOpts {
         };
 
         Ok(Self {
+            // OCI run may prepend a saved entrypoint even with a positional command.
+            inherited_command: args.command.is_empty() || args.sandbox.entrypoint.is_none(),
             tty: args.tty,
             no_stdin: args.no_stdin,
             timeout,
@@ -109,10 +116,24 @@ pub async fn run(args: RunArgs, log_level: Option<microsandbox::LogLevel>) -> an
     // or --replace-with-timeout). --replace-with-timeout implies --replace,
     // so either flag opts out of the reuse path.
     let replace_requested = args.sandbox.replace || args.sandbox.replace_with_timeout.is_some();
-    if is_named
-        && !replace_requested
-        && crate::commands::common::sandbox_record(&name).await.is_ok()
-    {
+    if is_named && !replace_requested && common::sandbox_record(&name).await.is_ok() {
+        // Preserve image-run reuse (including ignored configuration), but never
+        // discard a canonical snapshot source in favor of an existing sandbox.
+        let configured = sandbox_config::resolve(&args.sandbox.config).ok();
+        if args
+            .snapshot
+            .resolve(
+                configured
+                    .as_ref()
+                    .and_then(|config| config.snapshot_source()),
+                args.image.is_some(),
+            )?
+            .is_some()
+        {
+            anyhow::bail!(
+                "sandbox '{name}' already exists; use --replace to launch from a snapshot"
+            );
+        }
         return run_existing(name, args).await;
     }
 
@@ -137,13 +158,14 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let exec_opts = ExecOpts::parse(&args)?;
+    let mut exec_opts = ExecOpts::parse(&args)?;
+    exec_opts.inherited_command = true;
     let interactive =
         common::use_interactive_tty(io::stdin().is_terminal(), args.no_tty || args.no_stdin);
 
     let result: anyhow::Result<i32> = async {
         let (cmd, cmd_args) =
-            common::resolve_command(&sandbox.config().await?, args.command, interactive)?;
+            common::resolve_command(sandbox.config().await?.runtime(), args.command, interactive)?;
         match cmd {
             Some(cmd) => exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await,
             None => Ok(0),
@@ -165,18 +187,16 @@ async fn run_new(
     mut args: RunArgs,
     log_level: Option<microsandbox::LogLevel>,
 ) -> anyhow::Result<()> {
+    // Parse command-only controls before source preparation or replacement can
+    // stop a destination. An invalid duration/rlimit must not create a guest.
+    let exec_opts = ExecOpts::parse(&args)?;
     let launch_started_at = chrono::Utc::now();
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
-    let image = resolved.image(args.image.as_deref(), None)?;
-    if matches!(image, sandbox_config::ResolvedImage::Snapshot(_)) {
-        anyhow::bail!("snapshot sources require `msb snap restore SNAPSHOT --name NAME`");
-    }
-    let builder = resolved.apply(
-        crate::commands::common::selected_context()?
-            .sandboxes()
-            .builder(&name),
-    )?;
-    let builder = image.apply(builder)?;
+    let builder = resolved.apply(common::selected_context()?.sandboxes().builder(&name))?;
+    let (builder, display_label) = args
+        .snapshot
+        .apply(&resolved, args.image.as_deref(), builder)
+        .await?;
     if args.sandbox.log_level.is_none()
         && let Some(log_level) = log_level
     {
@@ -208,7 +228,6 @@ async fn run_new(
         builder.create_with_progress()?
     };
 
-    let display_label = image.display();
     let mut display = if args.sandbox.quiet {
         ui::PullProgressDisplay::quiet(&display_label)
     } else {
@@ -226,25 +245,6 @@ async fn run_new(
 
     common::display_restore_warnings(&sandbox).await;
 
-    if sandbox
-        .launch_info()
-        .is_some_and(|info| info.resumed_from_full_snapshot)
-    {
-        if !args.command.is_empty() {
-            ui::warn(&format!(
-                "command ignored because snapshot restore resumed its captured workload (use `msb exec {name} -- ...` after restore)"
-            ));
-        }
-        if !args.detach {
-            ui::warn(
-                "full snapshot restore resumes in the background because it has no new foreground command to attach",
-            );
-        }
-        sandbox.detach().await?;
-        println!("{name}");
-        return Ok(());
-    }
-
     // Detach mode: just print the name and exit.
     if args.detach {
         sandbox.detach().await?;
@@ -252,7 +252,6 @@ async fn run_new(
         return Ok(());
     }
 
-    let exec_opts = ExecOpts::parse(&args)?;
     let interactive =
         common::use_interactive_tty(io::stdin().is_terminal(), args.no_tty || args.no_stdin);
 
@@ -279,7 +278,7 @@ async fn run_new(
     }
 
     let (cmd, cmd_args) =
-        common::resolve_command(&sandbox.config().await?, args.command, interactive)?;
+        common::resolve_command(sandbox.config().await?.runtime(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
         (Some(cmd), args) => (cmd, args),
         (None, _) => {
@@ -366,13 +365,15 @@ async fn exec_in_sandbox(
         let rlimits = opts.rlimits.clone();
         let detach_keys = opts.detach_keys.clone();
         let timeout = opts.timeout;
-        let has_opts = !rlimits.is_empty() || detach_keys.is_some();
+        let has_opts = opts.inherited_command || !rlimits.is_empty() || detach_keys.is_some();
 
         let attach_fut = async {
             if has_opts {
                 Ok(sandbox
                     .attach_with(cmd, |a| {
-                        let mut a = a.args(cmd_args);
+                        let mut a = a
+                            .with_inherited_command(opts.inherited_command)
+                            .args(cmd_args);
                         for (resource, soft, hard) in rlimits {
                             a = a.rlimit_range(resource, soft, hard);
                         }
@@ -409,11 +410,17 @@ async fn exec_in_sandbox(
                 .await;
         }
 
-        let has_opts = tty || opts.no_stdin || timeout.is_some() || !rlimits.is_empty();
+        let has_opts = opts.inherited_command
+            || tty
+            || opts.no_stdin
+            || timeout.is_some()
+            || !rlimits.is_empty();
         let output: ExecOutput = if has_opts {
             sandbox
                 .exec_with(cmd, |e| {
-                    let mut e = e.args(cmd_args);
+                    let mut e = e
+                        .with_inherited_command(opts.inherited_command)
+                        .args(cmd_args);
                     if opts.no_stdin {
                         e = e.stdin_bytes(Vec::new());
                     }
@@ -677,6 +684,8 @@ mod tests {
             "base.yaml",
             "--resource-conf",
             "second.yaml",
+            "--file",
+            "Sandboxfile",
             "--net-conf",
             "network.yaml",
         ]);
@@ -691,6 +700,7 @@ mod tests {
                 (SandboxConfigKind::Resources, PathBuf::from("first.yaml")),
                 (SandboxConfigKind::Root, PathBuf::from("base.yaml")),
                 (SandboxConfigKind::Resources, PathBuf::from("second.yaml")),
+                (SandboxConfigKind::Root, PathBuf::from("Sandboxfile")),
                 (SandboxConfigKind::Network, PathBuf::from("network.yaml")),
             ]
         );
@@ -704,18 +714,10 @@ mod tests {
     }
 
     #[test]
-    fn existing_reuse_cannot_silently_ignore_a_snapshot_source() {
-        assert!(
-            TestCli::try_parse_from([
-                "msb",
-                "--name",
-                "box",
-                "--detach",
-                "--from-snapshot",
-                "clean"
-            ])
-            .is_err()
-        );
+    fn snapshot_selection_survives_named_detached_parsing() {
+        let args = parse_run_args(&["--name", "box", "--detach", "--from-snapshot", "clean"]);
+        assert!(args.snapshot.resolve(None, false).unwrap().is_some());
+        assert!(args.detach);
     }
 
     #[cfg(feature = "net")]
@@ -811,9 +813,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_source_and_discarded_alias_are_rejected() {
+    fn snapshot_source_and_legacy_alias_select_the_same_group() {
         for flag in ["--from-snapshot", "--from-snap"] {
-            assert!(TestCli::try_parse_from(["msb", "--name", "box", flag, "clean"]).is_err());
+            let args = parse_run_args(&["--name", "box", flag, "clean"]);
+            assert_eq!(args.snapshot.sources, ["clean"]);
         }
     }
 
@@ -825,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn external_mount_policy_is_explicit_and_requires_full_restore() {
+    fn external_mount_policy_is_validated_and_requires_a_snapshot_source() {
         for args in [
             vec!["msb", "alpine", "--external-mount-policy", "relaxed"],
             vec![
@@ -835,29 +838,33 @@ mod tests {
                 "--external-mount-policy",
                 "unknown",
             ],
-            vec![
-                "msb",
-                "--from-snapshot",
-                "saved",
-                "--external-mount-policy",
-                "relaxed",
-                "--disk-only",
-            ],
         ] {
             assert!(TestCli::try_parse_from(&args).is_err(), "accepted {args:?}");
         }
+        let args = parse_run_args(&[
+            "--from-snapshot",
+            "saved",
+            "--external-mount-policy",
+            "relaxed",
+            "--disk-only",
+        ]);
+        assert_eq!(
+            args.snapshot.external_mount_policy.as_deref(),
+            Some("relaxed")
+        );
+        assert!(args.snapshot.disk_only);
     }
 
     #[test]
-    fn from_snap_alias_is_hidden_from_help() {
+    fn snapshot_launch_is_visible_in_help() {
         let mut help = Vec::new();
         <TestCli as clap::CommandFactory>::command()
             .write_long_help(&mut help)
             .unwrap();
         let help = String::from_utf8(help).unwrap();
 
-        assert!(!help.contains("--from-snapshot"));
-        assert!(!help.contains("--from-snap "));
+        assert!(help.contains("--from-snapshot"));
+        assert!(help.contains("--from-snap"));
     }
 
     #[test]

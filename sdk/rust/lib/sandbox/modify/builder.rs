@@ -21,6 +21,20 @@ use crate::size::Mebibytes;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Modification result with exact resize identities when the selected runtime supports them.
+///
+/// Existing [`SandboxModificationBuilder::apply`] retains its original plan result.
+#[cfg(feature = "local")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SandboxModificationResult {
+    /// Existing modification plan and accepted resource statuses.
+    pub plan: SandboxModificationPlan,
+    /// Operations dispatched by this call. `None` means no tracked live request was made,
+    /// including supported modifications through an older runtime. Never substitute a later
+    /// current operation for missing tracking evidence.
+    pub resize_operations: Option<Vec<microsandbox_protocol::resize::ResizeOperation>>,
+}
+
 /// Fluent builder returned by [`Sandbox::modify`](crate::sandbox::Sandbox::modify).
 ///
 /// [`dry_run`](Self::dry_run) plans the patch; [`apply`](Self::apply) applies it.
@@ -305,9 +319,21 @@ impl SandboxModificationBuilder {
                 .await;
         }
         #[cfg(feature = "local")]
-        return local::apply(self).await;
+        return Ok(local::apply(self, false).await?.plan);
         #[cfg(not(feature = "local"))]
         Err(local_engine_missing())
+    }
+
+    /// Apply once and retain identities for live resize operations on a local sandbox.
+    /// Older runtimes use their supported setter once and return no operation identities.
+    #[cfg(feature = "local")]
+    pub async fn apply_with_resize_tracking(self) -> MicrosandboxResult<SandboxModificationResult> {
+        if self.backend.as_local().is_none() {
+            return Err(crate::MicrosandboxError::local_only(
+                crate::error::Operation::SandboxModify,
+            ));
+        }
+        local::apply(self, true).await
     }
 
     /// The id of the Cloud sandbox this builder was taken from.
@@ -518,9 +544,27 @@ mod tests {
         assert_eq!(plan.sandbox, "agent-1");
         assert_eq!(
             *lines.lock().unwrap(),
-            [format!(
-                "POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1"
-            )]
+            [format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1")]
+        );
+
+        // Secret material must never become part of the request URL, including
+        // through the public fluent builder that carries both transport and patch.
+        cloud_sandbox(&url)
+            .modify()
+            .secret(|secret| {
+                secret
+                    .env("API_KEY")
+                    .value("synthetic-url-canary/?token=value")
+            })
+            .apply()
+            .await
+            .unwrap();
+        assert_eq!(
+            *lines.lock().unwrap(),
+            [
+                format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1"),
+                format!("PATCH /v1/sandboxes/{SANDBOX_ID} HTTP/1.1"),
+            ]
         );
 
         let unbound = SandboxModificationBuilder::new(
@@ -531,6 +575,6 @@ mod tests {
             unbound.dry_run().await,
             Err(MicrosandboxError::Runtime(_))
         ));
-        assert_eq!(lines.lock().unwrap().len(), 1);
+        assert_eq!(lines.lock().unwrap().len(), 2);
     }
 }

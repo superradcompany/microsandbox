@@ -82,7 +82,12 @@ it.skipIf(!local || !remote)("coexists with distinct local and remote native lib
       await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
       try {
         const context = new remote.RemoteContext({url:'http://127.0.0.1:'+server.address().port,apiKey:'key'});
-        const sb = await context.sandboxes.get('task');
+        process.env.MSB_BACKEND = 'remote';
+        process.env.MSB_API_URL = 'http://127.0.0.1:'+server.address().port;
+        process.env.MSB_API_KEY = 'key';
+        const sb = await local.Sandbox.get('task');
+        assert.equal((await context.sandboxes.get('task')).id, sb.id);
+        process.env.MSB_BACKEND = 'local';
         assert(sb instanceof local.Sandbox);
         assert.equal(sb.context.kind, 'remote');
         assert.equal((await sb.info()).id, sb.id);

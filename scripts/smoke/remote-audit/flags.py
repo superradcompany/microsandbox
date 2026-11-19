@@ -84,6 +84,8 @@ for name, args in [
     ("group", ["sandbox", "--remote", "list", "--format", "json"]),
     ("alias", ["sbx", "ls", "--remote", "--format", "json"]),
     ("volume", ["volume", "list", "--remote", "--format", "json"]),
+    ("plural_volumes", ["volumes", "--remote", "--format", "json"]),
+    ("short_volumes", ["vols", "--remote", "--format", "json"]),
     ("snapshot", ["snapshot", "list", "--remote", "--format", "json"]),
     ("plural_snapshots", ["snapshots", "--remote", "--format", "json"]),
 ]:

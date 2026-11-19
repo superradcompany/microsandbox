@@ -163,10 +163,14 @@ impl RestoreControlArgs {
             builder = builder.guest_clock(policy);
         }
         if let Some(duration) = &self.max_duration {
-            builder = builder.max_duration(super::common::parse_duration_secs(duration)?);
+            builder = builder.max_duration(std::time::Duration::from_secs(
+                super::common::parse_duration_secs(duration)?,
+            ));
         }
         if let Some(duration) = &self.idle_timeout {
-            builder = builder.idle_timeout(super::common::parse_duration_secs(duration)?);
+            builder = builder.idle_timeout(std::time::Duration::from_secs(
+                super::common::parse_duration_secs(duration)?,
+            ));
         }
         #[cfg(feature = "net")]
         {

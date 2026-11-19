@@ -7,15 +7,17 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use futures::stream;
+use microsandbox_types::{CloudCreateServiceRequest, CloudUpdateServiceRequest};
 
 use super::sandbox::{LogStream, MetricsStream};
-use super::{Context, ContextKind, SandboxOps, SnapshotOps, VolumeOps};
+use super::{Context, ContextKind, SandboxOps, ServiceOps, SnapshotOps, VolumeOps};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{Sandbox, SandboxConfig, SandboxListBuilder, SandboxRecord};
+use crate::service::{Service, ServiceListBuilder, ServicePage};
 use crate::snapshot::{
-    LoadOptions, Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotReference,
-    SnapshotVerifyReport,
+    Checkpoint as Snapshot, HeadUpdate, Manifest, SaveOpts, SnapshotConfig, SnapshotId,
+    SnapshotReference, SnapshotVerifyReport,
 };
 use crate::volume::{Volume, VolumeConfig, VolumeFsReadStream, VolumeFsWriteSink};
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -89,6 +91,10 @@ impl Context for ConfigurationErrorBackend {
     }
 
     fn snapshot_ops(&self) -> &dyn SnapshotOps {
+        self
+    }
+
+    fn service_ops(&self) -> &dyn ServiceOps {
         self
     }
 
@@ -240,6 +246,21 @@ impl SandboxOps for ConfigurationErrorBackend {
 }
 
 impl SnapshotOps for ConfigurationErrorBackend {
+    fn group_head<'a>(
+        &'a self,
+        _group: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<SnapshotId>>> {
+        self.fail()
+    }
+
+    fn set_group_head<'a>(
+        &'a self,
+        _group: &'a str,
+        _id: &'a SnapshotId,
+    ) -> BoxFuture<'a, MicrosandboxResult<HeadUpdate>> {
+        self.fail()
+    }
+
     fn create<'a>(
         &'a self,
         _backend: Arc<dyn Context>,
@@ -265,15 +286,6 @@ impl SnapshotOps for ConfigurationErrorBackend {
     }
 
     fn list(&self, _backend: Arc<dyn Context>) -> BoxFuture<'_, MicrosandboxResult<Vec<Snapshot>>> {
-        self.fail()
-    }
-
-    fn load_many<'a>(
-        &'a self,
-        _backend: Arc<dyn Context>,
-        _archives: &'a [PathBuf],
-        _opts: LoadOptions,
-    ) -> BoxFuture<'a, MicrosandboxResult<Vec<Snapshot>>> {
         self.fail()
     }
 
@@ -344,6 +356,15 @@ impl SnapshotOps for ConfigurationErrorBackend {
         _out: &'a Path,
         _opts: SaveOpts,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        self.fail()
+    }
+
+    fn load<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _archive: &'a Path,
+        _dest: Option<&'a Path>,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
         self.fail()
     }
 }
@@ -493,6 +514,65 @@ impl VolumeOps for ConfigurationErrorBackend {
     }
 }
 
+impl ServiceOps for ConfigurationErrorBackend {
+    fn create<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _request: CloudCreateServiceRequest,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn get<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _slug: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn list<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _query: ServiceListBuilder,
+    ) -> BoxFuture<'a, MicrosandboxResult<ServicePage>> {
+        self.fail()
+    }
+
+    fn update<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _slug: &'a str,
+        _request: CloudUpdateServiceRequest,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn enable<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _slug: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn disable<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _slug: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
+        self.fail()
+    }
+
+    fn remove<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _slug: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        self.fail()
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -502,7 +582,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn sandbox_volume_and_snapshot_calls_preserve_configuration_error() {
+    async fn sandbox_and_volume_calls_preserve_configuration_error() {
         let backend: Arc<dyn Context> = Arc::new(ConfigurationErrorBackend::new(
             MicrosandboxError::InvalidConfig("MSB_BACKEND=cloud requires a key".into()),
         ));
@@ -525,22 +605,6 @@ mod tests {
             .get_default(backend.clone())
             .await
             .unwrap_err();
-        let snapshots = Snapshot::ctx(backend.as_ref());
-        for result in [
-            snapshots
-                .load(Path::new("missing.msb"), LoadOptions::default())
-                .await
-                .map(|_| ()),
-            snapshots
-                .load_many(&[PathBuf::from("missing.msb")], LoadOptions::default())
-                .await
-                .map(|_| ()),
-        ] {
-            assert!(matches!(
-                result,
-                Err(MicrosandboxError::InvalidConfig(message)) if message == "MSB_BACKEND=cloud requires a key"
-            ));
-        }
 
         assert!(sandbox_error.to_string().contains("MSB_BACKEND=cloud"));
         assert!(volume_error.to_string().contains("MSB_BACKEND=cloud"));

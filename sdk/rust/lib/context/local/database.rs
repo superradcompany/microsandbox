@@ -1,6 +1,7 @@
 //! Guarded catalog reads and transactional SDK/CLI upgrades that preserve already-running VMs.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use microsandbox_db::DbReadConnection;
@@ -33,6 +34,23 @@ pub(crate) struct CurrentCatalog {
 //--------------------------------------------------------------------------------------------------
 
 impl LocalContext {
+    /// Finish SQLite worker teardown for a transient binding query before the caller can fork.
+    /// A retained context or resource continues to own its catalog.
+    #[doc(hidden)]
+    pub async fn finish_unshared_catalog_query(self) -> MicrosandboxResult<()> {
+        if let Ok(inner) = Arc::try_unwrap(self.inner)
+            && let Some(pools) = inner.db.into_inner()
+        {
+            let (read, write) = tokio::join!(
+                pools.read().inner().close_by_ref(),
+                pools.write().inner().close_by_ref(),
+            );
+            read?;
+            write?;
+        }
+        Ok(())
+    }
+
     /// Prepare this installation's catalog for a user-facing CLI operation.
     ///
     /// SDK and CLI opens use the same upgrade policy. The CLI calls this
@@ -312,6 +330,25 @@ mod tests {
             .ok_or_else(|| {
                 MicrosandboxError::Runtime(format!("unrecognized catalog release {version}"))
             })
+    }
+
+    #[tokio::test]
+    async fn transient_query_closes_both_pools_only_after_the_last_context() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .unwrap();
+        let pools = local.db().await.unwrap();
+        let read = pools.read().inner().clone();
+        let write = pools.write().inner().clone();
+
+        local.clone().finish_unshared_catalog_query().await.unwrap();
+        read.ping().await.unwrap();
+        write.ping().await.unwrap();
+
+        local.finish_unshared_catalog_query().await.unwrap();
+        assert!(read.ping().await.is_err());
+        assert!(write.ping().await.is_err());
     }
 
     #[tokio::test]
@@ -624,7 +661,7 @@ mod tests {
             // fail the protected-state prerequisite before the nesting-policy check.
             if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
                 let rejected = destination.sandboxes().builder("catalog-unsupported")
-                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(std::time::Duration::from_secs(120))
                     .create().await;
                 let error = match rejected {
                     Ok(unexpected) => {
@@ -652,7 +689,7 @@ mod tests {
                 // A newer SDK must not silently omit a security/resource
                 // request that the selected previous runtime cannot honor.
                 let rejected = destination.sandboxes().builder("catalog-unsupported")
-                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(std::time::Duration::from_secs(120))
                     .network(|network| network.max_udp_connections(0).http(|http| http.deny_response(false)))
                     .create().await;
                 let error = match rejected {
@@ -675,7 +712,7 @@ mod tests {
                 let name = format!("catalog-mounts-{count}");
                 let started = std::time::Instant::now();
                 // Keep catalog compatibility independent of newer HTTP denial support.
-                let mut builder = destination.sandboxes().builder(&name).image("alpine:3.21").cpus(1).memory(256u32).max_duration(120);
+                let mut builder = destination.sandboxes().builder(&name).image("alpine:3.21").cpus(1).memory(256u32).max_duration(std::time::Duration::from_secs(120));
                 #[cfg(feature = "net")]
                 {
                     builder = builder.network(|network| network.http(|http| http.deny_response(false)));
@@ -719,7 +756,7 @@ mod tests {
                     let output = restarted.exec("sh", ["-c", "printf '%s:%s' \"$CATALOG_TEST_A\" \"$CATALOG_TEST_B\""]).await.unwrap();
                     assert!(output.status().success);
                     assert_eq!(output.stdout().unwrap(), "one:two");
-                    assert_eq!(restarted.config().await.unwrap().spec.resources.memory_mib, 384);
+                    assert_eq!(restarted.config().await.unwrap().local_spec().unwrap().resources.memory_mib, 384);
                     restarted.stop().await.unwrap();
                     let after = Migrator::get_applied_migrations(local.db().await.unwrap().write().inner()).await.unwrap();
                     assert_eq!(after.iter().map(|migration| migration.name()).collect::<Vec<_>>(), before.iter().map(|migration| migration.name()).collect::<Vec<_>>());
@@ -732,7 +769,7 @@ mod tests {
             let host_file = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(host_file.path(), b"file-mount-compatible").unwrap();
             let builder = destination.sandboxes().builder("catalog-file-mount")
-                .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                .image("alpine:3.21").cpus(1).memory(256u32).max_duration(std::time::Duration::from_secs(120))
                 .volume("/compat-file", |mount| mount.bind(host_file.path()).readonly());
             #[cfg(feature = "net")]
             let builder = builder.network(|network| network.http(|http| http.deny_response(false)));
@@ -814,6 +851,10 @@ mod tests {
                 .unwrap(),
             serde_json::to_value(test_support::fixtures::decode(&original).unwrap()).unwrap()
         );
+        // This checks pre-launch validation and preservation, not registry availability.
+        // An empty disposable directory is enough: the invalid hostname must fail before boot.
+        let rootfs = home.path().join("rootfs");
+        std::fs::create_dir(&rootfs).unwrap();
         let backend: Arc<dyn crate::context::Context> = local;
         let result = async {
             let destination: std::sync::Arc<dyn crate::Context> = backend;
@@ -821,7 +862,7 @@ mod tests {
             destination
                 .sandboxes()
                 .builder("preserved")
-                .image("alpine:3.21")
+                .image(rootfs)
                 .hostname("x".repeat(65))
                 .replace()
                 .create()

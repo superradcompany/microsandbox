@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
             "-lc",
             "for i in 1 2 3; do echo rust-cloud-$i; sleep 1; done",
         ])
-        .max_duration(60)
+        .max_duration(std::time::Duration::from_secs(60))
         .create()
         .await?;
 

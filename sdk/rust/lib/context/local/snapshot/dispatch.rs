@@ -11,8 +11,8 @@ use super::{archive, artifact, copy, create, group, store, verify};
 use crate::context::{Context, LocalContext, SnapshotOps};
 use crate::sandbox::SandboxConfig;
 use crate::snapshot::{
-    HeadUpdate, LoadOptions, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
-    SnapshotReference, SnapshotVerifyReport,
+    Checkpoint as Snapshot, HeadUpdate, LoadOpts, Manifest, SaveOpts, SnapshotArchive,
+    SnapshotConfig, SnapshotId, SnapshotReference, SnapshotVerifyReport,
 };
 use crate::{MicrosandboxError, MicrosandboxResult, Operation};
 
@@ -21,6 +21,49 @@ use crate::{MicrosandboxError, MicrosandboxResult, Operation};
 //--------------------------------------------------------------------------------------------------
 
 impl LocalContext {
+    pub(crate) async fn export_encrypted(
+        &self,
+        reference: SnapshotReference,
+        expected: &str,
+        out: &Path,
+        mut opts: SaveOpts,
+        recipients: &[String],
+    ) -> MicrosandboxResult<()> {
+        let out = std::path::absolute(out)?;
+        opts.since = opts.since.map(anchor_archive_selector).transpose()?;
+        let selector = local_selector(self, reference).await?;
+        archive::save_archive(
+            self,
+            &selector,
+            &out,
+            opts,
+            Some(expected),
+            Some(recipients),
+        )
+        .await
+    }
+
+    pub(crate) async fn import_encrypted(
+        &self,
+        backend: Arc<dyn Context>,
+        name: &str,
+        paths: &[PathBuf],
+        mut opts: LoadOpts,
+        identity: &Path,
+    ) -> MicrosandboxResult<crate::SnapshotImportResult> {
+        group::validate_group_name(name)?;
+        opts.group = Some(name.to_owned());
+        let identity = std::path::absolute(identity)?;
+        let paths = paths
+            .iter()
+            .map(std::path::absolute)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        opts.dest = opts.dest.map(std::path::absolute).transpose()?;
+        opts.base = opts.base.map(anchor_archive_selector).transpose()?;
+        let imported = archive::load_encrypted(self, &paths, opts, &identity).await?;
+        Ok(import_result(backend, name, imported))
+    }
+
     /// Inspect a restore source; caller options remain separate from resolved settings.
     pub(crate) async fn prepare_local_restore(
         &self,
@@ -41,9 +84,25 @@ impl LocalContext {
         };
         let selector = local_selector(self, reference).await?;
         if may_be_archive && Path::new(&selector).is_file() {
+            // The shared preparation path also serves retained checkpoint handles. A
+            // selected installed member must never become an archive after replacement.
+            if config.snapshot_expected_digest.is_some() {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot was replaced since this handle was opened".into(),
+                ));
+            }
             config.snapshot_archive_source = Some(PathBuf::from(selector));
         } else {
             let artifact = store::open_snapshot_leased(self, &selector).await?;
+            if config
+                .snapshot_expected_digest
+                .as_ref()
+                .is_some_and(|expected| expected != artifact.digest())
+            {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot was replaced since this handle was opened".into(),
+                ));
+            }
             config.snapshot_lease = artifact.lease.clone();
             let snapshot = from_artifact(backend, artifact)?;
             crate::sandbox::prepare_local_snapshot_restore(config, &snapshot)?;
@@ -156,6 +215,202 @@ impl LocalContext {
 //--------------------------------------------------------------------------------------------------
 
 impl SnapshotOps for LocalContext {
+    fn inspect_group<'a>(
+        &'a self,
+        reference: &'a SnapshotReference,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::snapshot::SnapshotGroupInfo>> {
+        Box::pin(async move { group::inspect_history(self, self.path(reference)?).await })
+    }
+
+    fn remove_group<'a>(
+        &'a self,
+        reference: &'a SnapshotReference,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::snapshot::SnapshotRemoveResult>> {
+        Box::pin(async move { group::remove_history(self, self.path(reference)?).await })
+    }
+
+    fn remove_checkpoint<'a>(
+        &'a self,
+        checkpoint: &'a Snapshot,
+        options: crate::snapshot::CheckpointRemoveOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::snapshot::CheckpointRemoveResult>> {
+        Box::pin(async move {
+            let reference = checkpoint.reference();
+            let selector = local_selector(self, reference).await?;
+            store::remove_snapshot_report(self, &selector, options.force, Some(checkpoint.digest()))
+                .await?
+                .ok_or_else(|| MicrosandboxError::SnapshotNotFound(checkpoint.id().to_string()))
+        })
+    }
+
+    fn change_head<'a>(
+        &'a self,
+        reference: &'a SnapshotReference,
+        member: Option<&'a str>,
+    ) -> BoxFuture<'a, MicrosandboxResult<HeadUpdate>> {
+        Box::pin(async move { group::change_head(self.path(reference)?, member).await })
+    }
+
+    fn create_group<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        mut config: SnapshotConfig,
+        source_id: crate::sandbox::SandboxId,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
+        Box::pin(async move {
+            config.dest_dir = config.dest_dir.map(std::path::absolute).transpose()?;
+            from_artifact(
+                backend,
+                create::create_group(self, config, source_id).await?,
+            )
+        })
+    }
+
+    fn get_group<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::Snapshot>> {
+        Box::pin(async move {
+            group::validate_group_name(name)?;
+            let directory = self.snapshots_dir().join(name);
+            group::validate_directory(&directory).await?;
+            Ok(crate::Snapshot {
+                backend,
+                name: name.into(),
+                reference: SnapshotReference::Path(directory.to_string_lossy().into_owned()),
+            })
+        })
+    }
+
+    fn open_group<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        directory: &'a Path,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::Snapshot>> {
+        Box::pin(async move {
+            group::validate_directory(directory).await?;
+            // Canonicalization is only for the display name; retain the admitted path
+            // so symlink/parent semantics are not rewritten before later operations.
+            let resolved = directory.canonicalize()?;
+            let name = resolved
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    MicrosandboxError::InvalidConfig(
+                        "snapshot group directory has no UTF-8 name".into(),
+                    )
+                })?;
+            let path = directory.to_str().ok_or_else(|| {
+                MicrosandboxError::InvalidConfig("snapshot group path must be UTF-8".into())
+            })?;
+            Ok(crate::Snapshot {
+                backend,
+                name: name.into(),
+                reference: SnapshotReference::Path(path.into()),
+            })
+        })
+    }
+
+    fn list_groups<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<crate::Snapshot>>> {
+        Box::pin(async move {
+            // The last group can disappear before catalog cleanup. Discover its journal
+            // through stable parent pointers, rather than requiring a surviving member.
+            for parent in super::deletion::recovery_parents(self)? {
+                group::recover_histories(self, &parent).await?;
+            }
+            let mut groups = Vec::new();
+            let mut entries = match tokio::fs::read_dir(self.snapshots_dir()).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(groups),
+                Err(error) => return Err(error.into()),
+            };
+            while let Some(entry) = entries.next_entry().await? {
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if name.starts_with('.')
+                    || !entry.file_type().await?.is_dir()
+                    || !entry.path().join(group::GROUP_FILENAME).is_file()
+                {
+                    continue;
+                }
+                groups.push(self.get_group(backend.clone(), &name).await?);
+            }
+            groups.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(groups)
+        })
+    }
+
+    fn read_head<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        reference: &'a SnapshotReference,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<Snapshot>>> {
+        Box::pin(async move {
+            let directory = self.path(reference)?;
+            let Some(path) = group::inspect_directory(directory).await? else {
+                return Ok(None);
+            };
+            // Resolve the head once; opening the exact ID must not silently follow a newer head.
+            from_artifact(
+                backend,
+                store::open_snapshot(self, &path.to_string_lossy()).await?,
+            )
+            .map(Some)
+        })
+    }
+
+    fn group_members<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        reference: &'a SnapshotReference,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<Snapshot>>> {
+        Box::pin(async move {
+            let directory = self.path(reference)?;
+            group::inspect_directory(directory).await?;
+            let mut paths = group::member_paths(directory).await?;
+            paths.sort();
+            let mut members = Vec::with_capacity(paths.len());
+            for path in paths {
+                members.push(from_handle(
+                    backend.clone(),
+                    store::get_handle(self, &path.to_string_lossy()).await?,
+                ));
+            }
+            Ok(members)
+        })
+    }
+
+    fn get_checkpoint<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        reference: &'a SnapshotReference,
+        member: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
+        Box::pin(async move {
+            let path = group::selected_path(self.path(reference)?, member).await?;
+            from_artifact(
+                backend,
+                store::open_snapshot(self, &path.to_string_lossy()).await?,
+            )
+        })
+    }
+
+    fn checkpoint<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        mut config: SnapshotConfig,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
+        Box::pin(async move {
+            config.dest_dir = config.dest_dir.map(std::path::absolute).transpose()?;
+            from_artifact(backend, create::create_checkpoint(self, config).await?)
+        })
+    }
+
     fn create<'a>(
         &'a self,
         backend: Arc<dyn Context>,
@@ -270,6 +525,13 @@ impl SnapshotOps for LocalContext {
         }
     }
 
+    fn verify_group<'a>(
+        &'a self,
+        reference: &'a SnapshotReference,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::snapshot::SnapshotGroupVerifyReport>> {
+        Box::pin(async move { verify::verify_group(self, self.path(reference)?).await })
+    }
+
     fn verify<'a>(
         &'a self,
         snapshot: &'a Snapshot,
@@ -343,11 +605,45 @@ impl SnapshotOps for LocalContext {
         })
     }
 
+    fn load<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        path: &'a Path,
+        dest: Option<&'a Path>,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
+        Box::pin(async move {
+            let path = std::path::absolute(path)?;
+            let dest = dest.map(std::path::absolute).transpose()?;
+            Ok(from_handle(
+                backend,
+                archive::load_snapshot(self, &path, dest.as_deref()).await?,
+            ))
+        })
+    }
+
+    fn load_group<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        paths: &'a [PathBuf],
+        mut opts: LoadOpts,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::SnapshotImportResult>> {
+        Box::pin(async move {
+            let paths = paths
+                .iter()
+                .map(std::path::absolute)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            opts.dest = opts.dest.map(std::path::absolute).transpose()?;
+            opts.base = opts.base.map(anchor_archive_selector).transpose()?;
+            load_group_admitted(self, backend, name, &paths, opts).await
+        })
+    }
+
     fn load_many<'a>(
         &'a self,
         backend: Arc<dyn Context>,
         paths: &'a [PathBuf],
-        mut opts: LoadOptions,
+        mut opts: LoadOpts,
     ) -> BoxFuture<'a, MicrosandboxResult<Vec<Snapshot>>> {
         Box::pin(async move {
             let paths = paths
@@ -356,15 +652,26 @@ impl SnapshotOps for LocalContext {
                 .collect::<std::io::Result<Vec<_>>>()?;
             opts.dest = opts.dest.map(std::path::absolute).transpose()?;
             opts.base = opts.base.map(anchor_archive_selector).transpose()?;
-            Ok(archive::load_snapshots(self, &paths, opts)
-                .await?
-                .into_iter()
-                .map(|handle| from_handle(backend.clone(), handle))
-                .collect())
+            load_many_admitted(self, backend, &paths, opts).await
         })
     }
 
     fn group_head<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<SnapshotId>>> {
+        Box::pin(async move { group::read_head(&self.snapshots_dir(), name).await })
+    }
+
+    fn set_group_head<'a>(
+        &'a self,
+        name: &'a str,
+        id: &'a SnapshotId,
+    ) -> BoxFuture<'a, MicrosandboxResult<HeadUpdate>> {
+        Box::pin(async move { group::set_head(&self.snapshots_dir(), name, id).await })
+    }
+
+    fn group_head_selector<'a>(
         &'a self,
         selector: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<HeadUpdate>> {
@@ -375,6 +682,63 @@ impl SnapshotOps for LocalContext {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Import a call-time-admitted request without interpreting its base selector again.
+/// A bare group must stay a group even if a later working directory contains that filename.
+pub(crate) async fn load_group_admitted(
+    local: &LocalContext,
+    backend: Arc<dyn Context>,
+    name: &str,
+    paths: &[PathBuf],
+    mut opts: LoadOpts,
+) -> MicrosandboxResult<crate::SnapshotImportResult> {
+    group::validate_group_name(name)?;
+    if opts.group.as_deref().is_some_and(|group| group != name) {
+        return Err(MicrosandboxError::InvalidConfig(
+            "import options cannot select a different destination group".into(),
+        ));
+    }
+    opts.group = Some(name.into());
+    let imported = archive::load_group(local, paths, opts).await?;
+    Ok(import_result(backend, name, imported))
+}
+
+fn import_result(
+    backend: Arc<dyn Context>,
+    name: &str,
+    imported: archive::ImportedBatch,
+) -> crate::SnapshotImportResult {
+    crate::SnapshotImportResult {
+        operation_id: imported.operation_id,
+        snapshot: crate::Snapshot {
+            backend: backend.clone(),
+            name: name.into(),
+            reference: SnapshotReference::path(imported.group_path.to_string_lossy()),
+        },
+        checkpoints: imported
+            .members
+            .into_iter()
+            .map(|handle| from_handle(backend.clone(), handle))
+            .collect(),
+        added: imported.added,
+        reused: imported.reused,
+        head_update: imported.head_update,
+        warnings: imported.warnings,
+    }
+}
+
+pub(crate) async fn load_many_admitted(
+    local: &LocalContext,
+    backend: Arc<dyn Context>,
+    paths: &[PathBuf],
+    opts: LoadOpts,
+) -> MicrosandboxResult<Vec<Snapshot>> {
+    Ok(archive::load_snapshots(local, paths, opts)
+        .await?
+        .into_iter()
+        .map(|handle| from_handle(backend.clone(), handle))
+        .collect())
+}
 
 async fn local_selector(
     local: &LocalContext,
@@ -412,15 +776,26 @@ fn anchor_auto_selector(value: String) -> MicrosandboxResult<String> {
 
 /// Base selectors also accept bare archive filenames. Capture that interpretation once,
 /// before deferred work can mistake a same-named file in another directory for the base.
-pub(super) fn anchor_archive_selector(value: String) -> MicrosandboxResult<String> {
-    if store::looks_like_path(&value) || Path::new(&value).is_file() {
-        Ok(std::path::absolute(value)?.to_string_lossy().into_owned())
+pub(crate) fn anchor_archive_selector(value: String) -> MicrosandboxResult<String> {
+    anchor_archive_selector_in(value, None)
+}
+
+pub(crate) fn anchor_archive_selector_in(
+    value: String,
+    directory: Option<&Path>,
+) -> MicrosandboxResult<String> {
+    let path = directory.map(|dir| dir.join(&value));
+    let candidate = path.as_deref().unwrap_or_else(|| Path::new(&value));
+    if store::looks_like_path(&value) || candidate.is_file() {
+        Ok(std::path::absolute(candidate)?
+            .to_string_lossy()
+            .into_owned())
     } else {
         Ok(value)
     }
 }
 
-fn from_artifact(
+pub(super) fn from_artifact(
     backend: Arc<dyn Context>,
     artifact: artifact::Snapshot,
 ) -> MicrosandboxResult<Snapshot> {
@@ -560,15 +935,13 @@ mod tests {
                 assert!(first.join("saved.tar").is_file());
                 assert!(!second.join("saved.tar").exists());
                 std::env::set_current_dir(&first).unwrap();
-                let archives = [PathBuf::from("./saved.tar")];
-                let load = SnapshotOps::load_many(
+                let load = SnapshotOps::load(
                     local.as_ref(),
                     local.clone(),
-                    &archives,
-                    LoadOptions::default().destination("./imported"),
+                    Path::new("./saved.tar"),
+                    Some(Path::new("./imported")),
                 );
-                let mut imported = switch_cwd_at_first_io(&second, load).await.unwrap();
-                let loaded = imported.pop().unwrap();
+                let loaded = switch_cwd_at_first_io(&second, load).await.unwrap();
                 assert!(loaded.path().unwrap().starts_with(first.join("imported")));
                 assert!(!second.join("imported").exists());
             });

@@ -8,9 +8,7 @@ use cap_std::fs::MetadataExt;
 use cap_std::fs::{DirBuilder, OpenOptions};
 #[cfg(unix)]
 use cap_std::fs::{DirBuilderExt, OpenOptionsExt};
-use microsandbox::{
-    MicrosandboxError, MicrosandboxResult, default_local_context, volume::VolumeFs,
-};
+use microsandbox::{MicrosandboxError, MicrosandboxResult, configured_context, volume::VolumeFs};
 use serde_json::{Value, json};
 
 use crate::FfiError;
@@ -51,7 +49,7 @@ pub(crate) async fn dispatch(target: &str, op: &str, args: &Value) -> Result<Str
     }
 
     // Keep the existing cloud request shape and immutable cloud-id target intact.
-    let fs = VolumeFs::with_backend(default_local_context(), target);
+    let fs = VolumeFs::with_backend(configured_context(), target);
     dispatch_fs(fs, op, args).await
 }
 

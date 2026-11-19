@@ -13,6 +13,36 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
+// JobEventType identifies the discriminator of a job attachment event.
+type JobEventType string
+
+const (
+	JobEventOutput    JobEventType = "output"
+	JobEventGap       JobEventType = "gap"
+	JobEventCompleted JobEventType = "completed"
+)
+
+// JobOutputSource identifies the origin of job output, including merged PTY and stdin error records.
+type JobOutputSource string
+
+const (
+	JobOutputStdout     JobOutputSource = "stdout"
+	JobOutputStderr     JobOutputSource = "stderr"
+	JobOutputPTY        JobOutputSource = "output"
+	JobOutputStdinError JobOutputSource = "stdin_error"
+)
+
+// JobState identifies the current lifecycle state of a managed job.
+type JobState string
+
+const (
+	JobStateStarting JobState = "starting"
+	JobStateRunning  JobState = "running"
+	JobStateExited   JobState = "exited"
+	JobStateFailed   JobState = "failed"
+	JobStateLost     JobState = "lost"
+)
+
 // JobError identifies managed-job failures across runtimes and SDKs.
 // JobID is retained when a launch was admitted but its result is uncertain.
 type JobError struct {
@@ -28,7 +58,7 @@ type JobInfo struct {
 	ID            string       `json:"id"`
 	RuntimeBootID string       `json:"runtime_boot_id"`
 	Command       []string     `json:"command"`
-	State         string       `json:"state"`
+	State         JobState     `json:"state"`
 	TTY           bool         `json:"tty"`
 	StdinClosed   bool         `json:"stdin_closed"`
 	PID           *uint32      `json:"pid"`
@@ -56,25 +86,25 @@ type JobExit struct {
 
 // JobLogEntry preserves original output bytes and a job-specific replay cursor.
 type JobLogEntry struct {
-	Timestamp int64  `json:"timestamp"`
-	Source    string `json:"source"`
-	Data      []byte `json:"data_base64"`
-	Cursor    string `json:"cursor"`
+	Timestamp int64           `json:"timestamp"`
+	Source    JobOutputSource `json:"source"`
+	Data      []byte          `json:"data_base64"`
+	Cursor    string          `json:"cursor"`
 }
 
 // JobLogOptions selects retained output. Follow continues after that snapshot.
 type JobLogOptions struct {
-	Tail       *uint    `json:"tail,omitempty"`
-	Since      *int64   `json:"since,omitempty"`
-	Until      *int64   `json:"until,omitempty"`
-	Sources    []string `json:"sources,omitempty"`
-	FromCursor string   `json:"from_cursor,omitempty"`
-	Follow     bool     `json:"follow"`
+	Tail       *uint             `json:"tail,omitempty"`
+	Since      *int64            `json:"since,omitempty"`
+	Until      *int64            `json:"until,omitempty"`
+	Sources    []JobOutputSource `json:"sources,omitempty"`
+	FromCursor string            `json:"from_cursor,omitempty"`
+	Follow     bool              `json:"follow"`
 }
 
 // JobEvent contains one attachment observation. Only the field matching Type is populated.
 type JobEvent struct {
-	Type      string
+	Type      JobEventType
 	Output    *JobLogEntry
 	GapCursor string
 	Completed *JobInfo
@@ -365,7 +395,7 @@ func (a *JobAttachment) request(ctx context.Context, op string, args map[string]
 }
 func (a *JobAttachment) Recv(ctx context.Context) (*JobEvent, error) {
 	var raw *struct {
-		Type  string          `json:"type"`
+		Type  JobEventType    `json:"type"`
 		Value json.RawMessage `json:"value"`
 	}
 	if err := a.request(ctx, "recv", nil, &raw); err != nil {
@@ -376,17 +406,17 @@ func (a *JobAttachment) Recv(ctx context.Context) (*JobEvent, error) {
 	}
 	event := &JobEvent{Type: raw.Type}
 	switch raw.Type {
-	case "output":
+	case JobEventOutput:
 		event.Output = &JobLogEntry{}
 		if err := json.Unmarshal(raw.Value, event.Output); err != nil {
 			return nil, err
 		}
-	case "completed":
+	case JobEventCompleted:
 		event.Completed = &JobInfo{}
 		if err := json.Unmarshal(raw.Value, event.Completed); err != nil {
 			return nil, err
 		}
-	case "gap":
+	case JobEventGap:
 		var value struct {
 			Cursor string `json:"cursor"`
 		}

@@ -731,7 +731,7 @@ fn root_disk_config_class<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
 fn resolve_local(
     op: microsandbox::Operation,
 ) -> microsandbox::MicrosandboxResult<std::sync::Arc<dyn microsandbox::Context>> {
-    let backend = microsandbox::context::default_local_context();
+    let backend = microsandbox::context::configured_context();
     if backend.as_local().is_none() {
         return Err(microsandbox::MicrosandboxError::local_only(op));
     }

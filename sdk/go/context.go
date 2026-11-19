@@ -2,9 +2,6 @@ package microsandbox
 
 import (
 	"context"
-	"os"
-	"strings"
-	"sync"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -24,6 +21,7 @@ type Context interface {
 	Sandboxes() *Sandboxes
 	Volumes() *Volumes
 	Snapshots() *Snapshots
+	Checkpoints() *Checkpoints
 	nativeContext() *ffi.Context
 }
 
@@ -46,30 +44,16 @@ func NewLocalContext(options LocalOptions) (*LocalContext, error) {
 	return &LocalContext{inner: inner}, nil
 }
 
-// NewRemoteContext selects the hosted endpoint using an explicit API key.
+// NewRemoteContext captures the explicit key and configured endpoint.
 func NewRemoteContext(apiKey string) (*RemoteContext, error) {
-	return newRemoteContext("", apiKey)
+	return NewRemoteContextWithOptions(WithRemoteAPIKey(apiKey))
 }
 
 // NewRemoteContextWithURL selects an explicit compatible remote endpoint.
 func NewRemoteContextWithURL(url, apiKey string) (*RemoteContext, error) {
-	if err := validateRemoteContextURL(url); err != nil {
-		return nil, err
-	}
-	return newRemoteContext(url, apiKey)
+	return NewRemoteContextWithOptions(WithRemoteURL(url), WithRemoteAPIKey(apiKey))
 }
 
-func newRemoteContext(url, apiKey string) (*RemoteContext, error) {
-	inner, err := ffi.SelectedProvider("remote").NewContext(struct {
-		Kind   string `json:"kind"`
-		URL    string `json:"url,omitempty"`
-		APIKey string `json:"apiKey"`
-	}{"remote", url, apiKey})
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &RemoteContext{inner: inner}, nil
-}
 func RemoteContextFromProfile(name string) (*RemoteContext, error) {
 	inner, err := ffi.SelectedProvider("remote").NewContext(struct {
 		Kind    string `json:"kind"`
@@ -81,19 +65,7 @@ func RemoteContextFromProfile(name string) (*RemoteContext, error) {
 	return &RemoteContext{inner: inner}, nil
 }
 func RemoteContextFromEnv() (*RemoteContext, error) {
-	url, apiKey := strings.TrimSpace(os.Getenv("MSB_API_URL")), os.Getenv("MSB_API_KEY")
-	if url == "" {
-		return NewRemoteContext(apiKey)
-	}
-	return NewRemoteContextWithURL(url, apiKey)
-}
-
-// An explicitly empty URL must not silently select the hosted endpoint.
-func validateRemoteContextURL(url string) error {
-	if strings.TrimSpace(url) == "" {
-		return &Error{Kind: ErrInvalidConfig, Message: "RemoteContext URL must not be empty"}
-	}
-	return nil
+	return NewRemoteContextWithOptions()
 }
 
 func (c *LocalContext) Kind() ContextKind  { return ContextLocal }
@@ -209,27 +181,14 @@ func (s *Sandbox) Context() Context {
 	return &LocalContext{inner: destination}
 }
 
-// Default-local conveniences capture configuration once and never consult remote selectors.
-var defaultLocalState struct {
-	sync.Mutex
-	context *LocalContext
-}
-
-func defaultLocalContext() (*LocalContext, error) {
-	defaultLocalState.Lock()
-	defer defaultLocalState.Unlock()
-	if defaultLocalState.context != nil {
-		return defaultLocalState.context, nil
-	}
-	inner, err := ffi.DefaultLibrary().NewContext(struct {
-		Kind string `json:"kind"`
-	}{"local"})
+// Resolve once per package operation and pass the retained native context through
+// retries, progress streams and returned resources.
+func configuredContext() (Context, error) {
+	inner, err := ffi.ConfiguredContext()
 	if err != nil {
-		return nil, err
+		return nil, wrapFFI(err)
 	}
-	selected := &LocalContext{inner: inner}
-	defaultLocalState.context = selected
-	return selected, nil
+	return contextFromNative(inner), nil
 }
 
 func (c *LocalContext) Volumes() *Volumes  { return VolumeCtx(c) }
@@ -246,3 +205,6 @@ func contextFromNative(destination *ffi.Context) Context {
 
 func (c *LocalContext) Snapshots() *Snapshots  { return SnapshotCtx(c) }
 func (c *RemoteContext) Snapshots() *Snapshots { return SnapshotCtx(c) }
+
+func (c *LocalContext) Checkpoints() *Checkpoints  { return CheckpointCtx(c) }
+func (c *RemoteContext) Checkpoints() *Checkpoints { return CheckpointCtx(c) }

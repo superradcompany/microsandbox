@@ -85,7 +85,7 @@ const output = await sandbox.shell("echo 'Hello from microsandbox!'");
 console.log(output.stdout().trim());
 ```
 
-`await using` awaits shutdown of its owned local run and exposes cleanup errors. Detached, independently connected, and remote runs are not stopped. If both the body and cleanup fail, `SuppressedError` retains both. Use `sandbox.detach()` to relinquish automatic cleanup while keeping the object usable.
+For an attached remote creation, `await using` awaits a best-effort stop on scope exit. Detached and fetched remote sandboxes keep running. Use `await sandbox.stop()` to observe a remote stop error. For an owned local run, disposal awaits shutdown and surfaces cleanup errors.
 
 ### Reusable Lifecycle Convergence
 
@@ -127,7 +127,7 @@ for (const entry of result.entries) {
 
 Pruning removes only unused published runtime RAM. Live mappings, retained baselines, and pending handoffs remain protected. Saved snapshots, images, sandbox disks, volumes, and stable lock files are retained. `olderThanSeconds` must be a whole non-negative safe integer; the default is zero. `dryRun` defaults to false. The SDK does not prompt for confirmation, and each apply call rechecks ownership. Individual failures remain in `entries` alongside completed removals; `physicalBytesReclaimed` is unknown (`null`). Cloud backends reject these local-only operations. Each call captures its backend before returning the promise; changing the default while it runs cannot redirect it. An older native addon without these methods raises `UnsupportedOperationError` when they are called.
 
-`Sandbox.storageUsage()` and `Snapshot.storageUsage()` report one object using its captured backend, with the same bigint byte fields and null unknowns. `Snapshot.get()` and `Snapshot.list()` return operational `Snapshot` objects retaining their context; descriptor inspection is lazy and awaitable.
+`Sandbox.storageUsage()` and `Checkpoint.storageUsage()` report storage for one object in its provider context. Get a history with `ctx.snapshots.get(name)` and select an individual checkpoint with `history.getCheckpoint(name)` or `ctx.checkpoints.get(id)`.
 
 ## Common Examples
 
@@ -161,7 +161,7 @@ const configured = await sandbox.execWith("python3", (exec) =>
     .args(["script.py"])
     .cwd("/app")
     .env("PYTHONPATH", "/app/lib")
-    .timeout(30_000),
+    .timeoutMilliseconds(30_000),
 );
 
 const handle = await sandbox.execStream("tail", ["-f", "/var/log/app.log"]);

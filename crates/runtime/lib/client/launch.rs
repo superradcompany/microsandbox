@@ -108,6 +108,9 @@ pub struct LaunchCapabilities {
     #[serde(default)]
     pub fs_state_limit: bool,
 
+    /// Runtime-owned durable last-active evidence and the optional source handoff.
+    #[serde(default)]
+    pub configuration_retention: bool,
     /// Host nesting support. Presence means the runtime enforces nesting policy;
     /// omission identifies runtimes that predate this capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,6 +154,10 @@ pub struct StartupCommand {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchConfig {
+    /// Send only after explicit capability discovery; older launch decoders reject unknown fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_source: Option<crate::retention::RetentionSource>,
+
     /// The launcher has admitted the protected storage layout before preparing disks.
     #[serde(default)]
     pub protected_guest_state: bool,
@@ -467,6 +474,13 @@ impl LaunchConfig {
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let config: Self = serde_json::from_slice(bytes)
             .map_err(|error| format!("invalid launch config: {error}"))?;
+        if config
+            .retention_source
+            .as_ref()
+            .is_some_and(|source| !source.configuration.is_object())
+        {
+            return Err("retained source configuration must be an object".into());
+        }
         if let Some(bytes) = config.fs_state_limit_bytes {
             const MIB: u64 = 1024 * 1024;
             let range =

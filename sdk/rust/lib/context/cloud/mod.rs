@@ -1,4 +1,4 @@
-//! Cloud backend implementation — talks to an msb-cloud control plane over HTTP.
+//! Cloud backend implementation — talks to the cloud API over HTTP.
 //!
 //! Holds the (url, api_key) tuple and a `reqwest::Client`. Lifecycle ops are
 //! plain HTTP; logs stream over SSE; exec, attach, and guest-fs ride the agent
@@ -7,14 +7,17 @@
 //! Construction requires an API key. Hosted-cloud callers use the default
 //! endpoint; `with_url`, environment configuration, and profiles can override it
 //! for development, self-hosted, and on-prem deployments.
-//! Auth is API-key-only — the same `msb_live_*` / `msb_test_*` tokens msb-cloud
-//! issues today. No OAuth or session credentials are honored here.
+//! Auth is API-key-only, using `msb_live_*` / `msb_test_*` tokens.
+//! No OAuth or session credentials are honored here.
 
 mod agent;
 mod constructors;
 mod http;
 mod modify;
+#[cfg(test)]
+mod named_volume_tests;
 pub(in crate::context) mod sandbox;
+mod service;
 mod sharing;
 mod snapshot;
 #[cfg(test)]
@@ -59,15 +62,15 @@ fn default_user_agent() -> String {
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Cloud-runtime backend: talks to an msb-cloud control plane over HTTP.
+/// Cloud-runtime backend: talks to the cloud API over HTTP.
 ///
 /// Holds the deployment URL, API key, and captured user and managed settings.
 /// The `(url, api_key)` pair determines
-/// which org's view the backend sees: msb-cloud derives the org from the API
+/// which org's view the backend sees: the cloud API derives the org from the API
 /// key, so there is no per-call org argument.
 ///
 /// Constructors:
-/// - [`RemoteContext::new`] — hosted service with the default API URL.
+/// - [`RemoteContext::new`] — explicit API key with the configured API URL.
 /// - [`RemoteContext::with_url`] — explicit URL + key for any compatible provider.
 /// - [`RemoteContext::from_env`] — reads `MSB_API_KEY`; `MSB_API_URL` is optional.
 /// - [`RemoteContext::from_profile`] — reads a named profile from the SDK config.
@@ -85,6 +88,7 @@ struct RemoteContextInner {
     url: String,
     api_key: String,
     http: reqwest::Client,
+    service_http: reqwest::Client,
     authorization: HeaderValue,
     user_agent_header: Option<HeaderValue>,
     request_timeout: Duration,
@@ -133,7 +137,7 @@ impl RemoteContext {
     /// Construct from a named SDK profile in `~/.microsandbox/config.json`.
     ///
     /// Profiles are local SDK sugar over the primary `(url, api_key)` constructor;
-    /// msb-cloud does not receive or interpret profile names.
+    /// the cloud API does not receive or interpret profile names.
     pub fn from_profile(name: &str) -> MicrosandboxResult<Self> {
         super::profile::cloud_backend_from_profile(name)
     }
@@ -143,7 +147,7 @@ impl RemoteContext {
         RemoteContextBuilder::default()
     }
 
-    /// Configured msb-cloud endpoint URL (no trailing slash).
+    /// Configured cloud API endpoint URL (no trailing slash).
     pub fn url(&self) -> &str {
         &self.inner.url
     }
@@ -236,15 +240,16 @@ impl RemoteContextBuilder {
             )
         })?;
 
-        let mut builder = Self::default().api_key(api_key.trim());
-        if let Some(url) = std::env::var("MSB_API_URL")
+        Ok(Self::default()
+            .api_key(api_key)
+            .url(Self::environment_url()))
+    }
+
+    fn environment_url() -> String {
+        std::env::var("MSB_API_URL")
             .ok()
-            .map(|url| url.trim().to_string())
-            .filter(|url| !url.is_empty())
-        {
-            builder = builder.url(url);
-        }
-        Ok(builder)
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_CLOUD_API_URL.to_owned())
     }
 
     /// Reuse sources already read by backend selection, or explicit sources in tests.
@@ -253,7 +258,7 @@ impl RemoteContextBuilder {
         self
     }
 
-    /// Set the msb-cloud endpoint URL.
+    /// Set the cloud API endpoint URL.
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
@@ -286,15 +291,19 @@ impl RemoteContextBuilder {
     /// Provide a fully custom `reqwest::Client`. When set, `request_timeout`
     /// and `user_agent` builder options are ignored — the supplied client owns
     /// its own transport configuration. The context API key always supplies Authorization.
+    ///
+    /// Service create, update, enable, disable and remove also use this client,
+    /// so its retry and redirect policies decide whether a change request can be
+    /// resent or redirected. Build it with `.retry(reqwest::retry::never())` and
+    /// `.redirect(reqwest::redirect::Policy::none())` to keep each change to the
+    /// requested endpoint at most once.
     pub fn client(mut self, client: reqwest::Client) -> Self {
         self.custom_client = Some(client);
         self
     }
 
-    /// Build the `RemoteContext`. Uses [`DEFAULT_CLOUD_API_URL`] when `.url(...)`
-    /// was not called. Errors when the API key is missing or invalid, an
-    /// explicitly supplied URL is empty, the HTTP client fails to construct,
-    /// or user or managed configuration cannot be loaded.
+    /// Omitted credentials and endpoint use `MSB_API_KEY` and `MSB_API_URL`.
+    /// A missing or blank environment URL uses [`DEFAULT_CLOUD_API_URL`].
     pub fn build(self) -> MicrosandboxResult<RemoteContext> {
         let config = match self.config {
             Some(config) => config,
@@ -302,18 +311,22 @@ impl RemoteContextBuilder {
         };
 
         config.require_backend(super::ContextKind::Remote, None)?;
-        let url = self.url.as_deref().unwrap_or(DEFAULT_CLOUD_API_URL);
+        let url = self.url.unwrap_or_else(Self::environment_url);
         let url = url.trim();
         if url.is_empty() {
             return Err(MicrosandboxError::InvalidConfig(
                 "RemoteContext URL must not be empty".into(),
             ));
         }
-        let api_key = self.api_key.ok_or_else(|| {
-            MicrosandboxError::InvalidConfig(
-                "RemoteContext requires an API key (call .api_key(...))".into(),
-            )
-        })?;
+        let api_key = self
+            .api_key
+            .or_else(|| std::env::var("MSB_API_KEY").ok())
+            .ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(
+                    "RemoteContext requires an API key (set MSB_API_KEY or call .api_key(...))"
+                        .into(),
+                )
+            })?;
         let api_key = api_key.trim();
         if api_key.is_empty() {
             return Err(MicrosandboxError::InvalidConfig(
@@ -349,11 +362,22 @@ impl RemoteContextBuilder {
             })?,
         };
 
+        let service_http = match self.custom_client.as_ref() {
+            Some(client) => client.clone(),
+            None => service::service_change_client_builder()
+                .build()
+                .map_err(|error| {
+                    MicrosandboxError::InvalidConfig(format!(
+                        "failed to build Service client: {error}"
+                    ))
+                })?,
+        };
         Ok(RemoteContext {
             inner: Arc::new(RemoteContextInner {
                 url,
                 api_key,
                 http,
+                service_http,
                 authorization,
                 user_agent_header,
                 request_timeout: self.request_timeout,
@@ -696,26 +720,6 @@ mod tests {
         }
         assert!(matches!(missing, Err(MicrosandboxError::InvalidConfig(_))));
         assert!(matches!(blank, Err(MicrosandboxError::InvalidConfig(_))));
-    }
-
-    #[test]
-    fn builder_uses_default_cloud_url() {
-        let b = RemoteContextBuilder::default()
-            .config_sources(BackendConfig::new(Default::default(), Default::default()))
-            .api_key("k")
-            .build()
-            .unwrap();
-        assert_eq!(b.url(), DEFAULT_CLOUD_API_URL);
-    }
-
-    #[test]
-    fn builder_rejects_missing_key() {
-        assert!(
-            RemoteContextBuilder::default()
-                .url("https://x")
-                .build()
-                .is_err()
-        );
     }
 
     #[test]

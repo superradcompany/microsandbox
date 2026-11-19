@@ -118,8 +118,11 @@ async fn config_reads_other_clients_changes_without_preparation() {
     let resource = Sandbox::ctx(owner.context()).get("task").await.unwrap();
     let first = resource.config().await.unwrap();
     let db = local.db().await.unwrap();
-    let mut config = first.clone();
-    config.spec.resources.memory_mib = first.spec.resources.memory_mib + 256;
+    let mut config = SandboxConfig {
+        spec: first.local_spec().unwrap().clone(),
+        ..Default::default()
+    };
+    config.spec.resources.memory_mib = first.local_spec().unwrap().resources.memory_mib + 256;
     let mut record: sandbox::ActiveModel = sandbox::Entity::find_by_id(1)
         .one(db.read())
         .await
@@ -129,8 +132,15 @@ async fn config_reads_other_clients_changes_without_preparation() {
     record.config = Set(serde_json::to_string(&config).unwrap());
     record.update(db.write()).await.unwrap();
     assert_eq!(
-        resource.config().await.unwrap().spec.resources.memory_mib,
-        first.spec.resources.memory_mib + 256
+        resource
+            .config()
+            .await
+            .unwrap()
+            .local_spec()
+            .unwrap()
+            .resources
+            .memory_mib,
+        first.local_spec().unwrap().resources.memory_mib + 256
     );
     assert!(resource.binding.current().is_none());
     // Fresh persisted settings never rewrite the connection's applied settings.
@@ -142,7 +152,7 @@ async fn config_reads_other_clients_changes_without_preparation() {
             .spec
             .resources
             .memory_mib,
-        first.spec.resources.memory_mib
+        first.local_spec().unwrap().resources.memory_mib
     );
     finish(&owner).await;
 }
@@ -594,8 +604,9 @@ async fn live_config_does_not_erase_launch_outcomes() {
         }));
     let clone = owner.clone();
     let persisted = owner.config().await.unwrap();
-    assert!(!persisted.init_owns_boot_workload());
-    assert!(!persisted.resumed_from_full_snapshot());
+    let json = serde_json::to_value(&persisted).unwrap();
+    assert!(json["spec"].get("init_owns_workload").is_none());
+    assert!(json["spec"].get("resumed_from_full_snapshot").is_none());
     let launch = clone.launch_info().unwrap();
     assert!(launch.init_owns_boot_workload);
     assert!(launch.resumed_from_full_snapshot);

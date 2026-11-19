@@ -68,6 +68,13 @@ func NewContext(path string, {parameters}) (*core.{selected}Context, error) {{
             # Keep the generated lean module aligned with the shared core constructors.
             with (directory / "provider.go").open("a") as stream:
                 stream.write('''
+// NewContextWithOptions captures explicit settings and environment defaults.
+func NewContextWithOptions(path string, options ...core.RemoteContextOption) (*core.RemoteContext, error) {
+ provider, err := Load(path)
+ if err != nil { return nil, err }
+ return provider.NewRemoteContextWithOptions(options...)
+}
+
 // NewContextWithURL captures an explicit endpoint on the selected provider.
 func NewContextWithURL(path, url, apiKey string) (*core.RemoteContext, error) {
  provider, err := Load(path)

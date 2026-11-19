@@ -11,7 +11,7 @@ See [Images](/images/overview) for image sources and caching behavior.
 
 ## Image
 
-These methods use the default local image cache. Use the corresponding `_local` method with a `LocalContext` to select another local cache.
+With a local backend these methods use its image cache. Selecting remote returns an unsupported-operation error. To target a particular local cache, pass its `LocalContext` to the corresponding `_local` method.
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">get()</span>
 

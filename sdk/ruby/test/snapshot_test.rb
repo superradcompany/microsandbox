@@ -28,12 +28,12 @@ class SnapshotTest < Test::Unit::TestCase
         })
         File.write(descriptor, bytes)
         File.write(File.join(path, "disk.ext4"), "data")
-        opened = Microsandbox::Snapshot.open(path)
+        opened = Microsandbox::Checkpoint.open(path)
         File.unlink(descriptor)
-        fetched = Microsandbox::Snapshot.get(opened.id)
-        listed = Microsandbox::Snapshot.list.fetch(0)
+        fetched = Microsandbox::Checkpoint.get(opened.id)
+        listed = Microsandbox::Checkpoint.list.fetch(0)
         [opened, fetched, listed].each do |snapshot|
-          raise "different type" unless snapshot.instance_of?(Microsandbox::Snapshot)
+          raise "different type" unless snapshot.instance_of?(Microsandbox::Checkpoint)
           raise "different identity" unless snapshot.id == opened.id
           failed = false
           begin
@@ -45,6 +45,8 @@ class SnapshotTest < Test::Unit::TestCase
         end
         File.write(descriptor, bytes)
         [opened, fetched, listed].each do |snapshot|
+          raise "wrong state kind" unless snapshot.state_kind == :file
+          raise "wrong reference kind" unless snapshot.reference_kind.is_a?(Symbol)
           raise "wrong state" unless snapshot.state.fetch("kind") == "file"
           raise "wrong identity" unless snapshot.manifest.fetch("snapshot_id") == snapshot.id
         end

@@ -7,7 +7,7 @@ use pyo3::types::PyDict;
 
 use crate::{
     error::to_py_err,
-    helpers::sandbox_builder_with_context,
+    helpers::{sandbox_builder_with_context, str_enum_member},
     sandbox::{PySandbox, PySandboxPage},
     snapshot::PySnapshot,
     volume::PyVolume,
@@ -37,6 +37,11 @@ pub struct PySnapshots {
     pub(crate) inner: Arc<dyn microsandbox::Context>,
 }
 
+#[pyclass(name = "Checkpoints")]
+pub struct PyCheckpoints {
+    pub(crate) inner: Arc<dyn microsandbox::Context>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -57,11 +62,12 @@ impl PyContext {
         Ok(Self { inner })
     }
     #[getter]
-    fn kind(&self) -> &'static str {
-        match self.inner.kind() {
+    fn kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let kind = match self.inner.kind() {
             microsandbox::context::ContextKind::Local => "local",
             microsandbox::context::ContextKind::Remote => "remote",
-        }
+        };
+        str_enum_member(py, "ContextKind", kind)
     }
     #[getter]
     fn sandboxes(&self) -> PySandboxes {
@@ -78,6 +84,12 @@ impl PyContext {
     #[getter]
     fn snapshots(&self) -> PySnapshots {
         PySnapshots {
+            inner: self.inner.clone(),
+        }
+    }
+    #[getter]
+    fn checkpoints(&self) -> PyCheckpoints {
+        PyCheckpoints {
             inner: self.inner.clone(),
         }
     }
@@ -352,7 +364,19 @@ impl PyVolumes {
 }
 
 #[pymethods]
-impl PySnapshots {
+impl PyCheckpoints {
+    fn group_head<'py>(&self, py: Python<'py>, group: String) -> PyResult<Bound<'py, PyAny>> {
+        crate::snapshot::group_head_in(self.inner.clone(), py, group)
+    }
+    fn set_group_head<'py>(
+        &self,
+        py: Python<'py>,
+        group: String,
+        id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        crate::snapshot::set_group_head_in(self.inner.clone(), py, group, id)
+    }
+
     #[getter]
     fn context(&self) -> PyContext {
         PyContext {
@@ -390,7 +414,7 @@ impl PySnapshots {
         )
     }
     fn get<'py>(&self, py: Python<'py>, reference: String) -> PyResult<Bound<'py, PyAny>> {
-        let collection = self.inner.snapshots();
+        let collection = self.inner.checkpoints();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             collection
                 .get(&reference)
@@ -400,7 +424,7 @@ impl PySnapshots {
         })
     }
     fn list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let collection = self.inner.snapshots();
+        let collection = self.inner.checkpoints();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             collection
                 .list()
@@ -421,13 +445,86 @@ impl PySnapshots {
         reference: String,
         force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let collection = self.inner.snapshots();
+        let collection = self.inner.checkpoints();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             collection
                 .remove(reference, force)
                 .await
                 .map_err(to_py_err)?;
             Ok(Python::attach(|py| py.None()))
+        })
+    }
+}
+
+#[pymethods]
+impl PySnapshots {
+    #[getter]
+    fn context(&self) -> PyContext {
+        PyContext {
+            inner: self.inner.clone(),
+        }
+    }
+
+    fn get<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        let groups = self.inner.snapshots();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(crate::snapshot_group::PySnapshotGroup {
+                inner: groups.get(&name).await.map_err(to_py_err)?,
+            })
+        })
+    }
+
+    fn list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let groups = self.inner.snapshots();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(groups
+                .list()
+                .await
+                .map_err(to_py_err)?
+                .into_iter()
+                .map(|inner| crate::snapshot_group::PySnapshotGroup { inner })
+                .collect::<Vec<_>>())
+        })
+    }
+
+    #[pyo3(signature = (group, files, *, dest=None, base=None, set_head=false, maximum_disk_bytes=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn load<'py>(
+        &self,
+        py: Python<'py>,
+        group: String,
+        files: Vec<std::path::PathBuf>,
+        dest: Option<std::path::PathBuf>,
+        base: Option<String>,
+        set_head: bool,
+        maximum_disk_bytes: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let prepared = self
+            .inner
+            .snapshots()
+            .prepare_import(
+                files,
+                microsandbox::snapshot::LoadOpts {
+                    dest,
+                    base,
+                    set_head,
+                    group: None,
+                    maximum_disk_bytes,
+                },
+            )
+            .map_err(to_py_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = prepared.group(group).await.map_err(to_py_err)?;
+            Ok(crate::snapshot_group::PySnapshotImportResult { inner })
+        })
+    }
+
+    fn open<'py>(&self, py: Python<'py>, path: std::path::PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let pending = self.inner.snapshots().open(path);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(crate::snapshot_group::PySnapshotGroup {
+                inner: pending.await.map_err(to_py_err)?,
+            })
         })
     }
 }

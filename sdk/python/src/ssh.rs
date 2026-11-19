@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::io::AsyncWriteExt;
@@ -68,10 +67,9 @@ impl PySandboxSshOps {
         user: String,
         term: Option<String>,
         sftp: bool,
-        inactivity_timeout: Option<f64>,
+        inactivity_timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inactivity_timeout =
-            parse_inactivity_timeout(inactivity_timeout).map_err(PyValueError::new_err)?;
+        let inactivity_timeout = parse_inactivity_timeout(inactivity_timeout)?;
         let ssh = Self {
             inner: self.inner.clone(),
         };
@@ -110,10 +108,9 @@ impl PySandboxSshOps {
         authorized_keys_path: Option<PathBuf>,
         user: Option<String>,
         sftp: bool,
-        inactivity_timeout: Option<f64>,
+        inactivity_timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inactivity_timeout =
-            parse_inactivity_timeout(inactivity_timeout).map_err(PyValueError::new_err)?;
+        let inactivity_timeout = parse_inactivity_timeout(inactivity_timeout)?;
         let ssh = Self {
             inner: self.inner.clone(),
         };
@@ -438,13 +435,10 @@ impl PySshServer {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn parse_inactivity_timeout(timeout: Option<f64>) -> Result<Option<Duration>, &'static str> {
-    match timeout {
-        Some(timeout) => Duration::try_from_secs_f64(timeout)
-            .map(Some)
-            .map_err(|_| "inactivity_timeout must be a non-negative finite duration"),
-        None => Ok(None),
-    }
+fn parse_inactivity_timeout(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Duration>> {
+    value
+        .map(|value| crate::helpers::duration_input(value, "inactivity_timeout", false))
+        .transpose()
 }
 
 fn sftp_py_err(error: impl std::fmt::Display) -> PyErr {
@@ -490,22 +484,20 @@ mod tests {
 
     #[test]
     fn inactivity_timeout_parsing_supports_inherit_set_and_disable() {
-        assert_eq!(parse_inactivity_timeout(None).unwrap(), None);
-        assert_eq!(
-            parse_inactivity_timeout(Some(30.5)).unwrap(),
-            Some(Duration::from_secs_f64(30.5))
-        );
-        assert_eq!(
-            parse_inactivity_timeout(Some(0.0)).unwrap(),
-            Some(Duration::ZERO)
-        );
-    }
-
-    #[test]
-    fn inactivity_timeout_rejects_invalid_values() {
-        assert!(parse_inactivity_timeout(Some(-1.0)).is_err());
-        assert!(parse_inactivity_timeout(Some(f64::INFINITY)).is_err());
-        assert!(parse_inactivity_timeout(Some(f64::NAN)).is_err());
-        assert!(parse_inactivity_timeout(Some(f64::MAX)).is_err());
+        Python::initialize();
+        Python::attach(|py| {
+            assert_eq!(parse_inactivity_timeout(None).unwrap(), None);
+            for secs in [0.0, 30.5] {
+                let value = pyo3::types::PyFloat::new(py, secs);
+                assert_eq!(
+                    parse_inactivity_timeout(Some(&value)).unwrap(),
+                    Some(Duration::from_secs_f64(secs))
+                );
+            }
+            for secs in [-1.0, f64::INFINITY, f64::NAN, f64::MAX] {
+                let value = pyo3::types::PyFloat::new(py, secs);
+                assert!(parse_inactivity_timeout(Some(&value)).is_err());
+            }
+        });
     }
 }

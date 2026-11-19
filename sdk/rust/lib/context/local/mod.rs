@@ -1167,7 +1167,8 @@ mod tests {
             ))
             .await
             .unwrap();
-        drop(pools);
+        // Keep the installer's own catalog connection alive while another opener
+        // is refused. This also pins SQLite's WAL for the duration of the check.
 
         let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
@@ -1179,10 +1180,6 @@ mod tests {
         let _lock = tokio::time::timeout(Duration::from_secs(5), acquire_migration_lock(&db_dir))
             .await
             .expect("failed startup must release the migration lock")
-            .unwrap();
-        let path = db_dir.join(microsandbox_utils::DB_FILENAME);
-        let pools = DbPools::open(&path, 1, Duration::from_secs(5), Duration::from_secs(5))
-            .await
             .unwrap();
         let error =
             microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
@@ -1619,7 +1616,7 @@ mod tests {
                 .cpus(8)
                 .memory(768u32)
                 .workdir("/")
-                .max_duration(120)
+                .max_duration(std::time::Duration::from_secs(120))
         };
         policy(1, 256);
         let captured = build();
@@ -1630,8 +1627,28 @@ mod tests {
             }
             .await
             .unwrap();
-            assert_eq!(first.config().await.unwrap().spec.resources.cpus, 1);
-            assert_eq!(first.config().await.unwrap().spec.resources.memory_mib, 256);
+            assert_eq!(
+                first
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .cpus,
+                1
+            );
+            assert_eq!(
+                first
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .memory_mib,
+                256
+            );
             let output = first.exec("sh", ["-c", "nproc; pwd"]).await.unwrap();
             assert!(output.status().success);
             assert_eq!(output.stdout().unwrap().trim(), "1\n/tmp");
@@ -1646,7 +1663,17 @@ mod tests {
             }
             .await
             .unwrap();
-            assert_eq!(retained.config().await.unwrap().spec.resources.cpus, 1);
+            assert_eq!(
+                retained
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .cpus,
+                1
+            );
             retained.stop().await.unwrap();
 
             let updated = build();
@@ -1656,8 +1683,28 @@ mod tests {
             }
             .await
             .unwrap();
-            assert_eq!(fresh.config().await.unwrap().spec.resources.cpus, 2);
-            assert_eq!(fresh.config().await.unwrap().spec.resources.memory_mib, 384);
+            assert_eq!(
+                fresh
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .cpus,
+                2
+            );
+            assert_eq!(
+                fresh
+                    .config()
+                    .await
+                    .unwrap()
+                    .local_spec()
+                    .unwrap()
+                    .resources
+                    .memory_mib,
+                384
+            );
             fresh.stop().await.unwrap();
 
             // New policy governs new creates. Restart keeps the existing

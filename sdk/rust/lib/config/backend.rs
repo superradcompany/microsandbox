@@ -73,6 +73,19 @@ struct SelectionConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl BackendSelection {
+    pub(crate) fn configured_kind() -> MicrosandboxResult<ContextKind> {
+        let user = GlobalConfigPatch::load_from(&super::config_path())?;
+        let managed = ManagedConfig::load(None)?.overrides;
+        let (selection, _) = Self::describe(
+            &user,
+            &managed,
+            std::env::var("MSB_BACKEND").ok(),
+            std::env::var("MSB_PROFILE").ok(),
+            std::env::var("MSB_API_KEY").ok().as_deref(),
+        )?;
+        Ok(selection.kind())
+    }
+
     pub(crate) fn resolve(
         user_path: &Path,
         managed_path: Option<&Path>,

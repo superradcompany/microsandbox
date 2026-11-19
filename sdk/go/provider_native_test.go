@@ -26,7 +26,7 @@ func TestProviderCoexistenceNative(t *testing.T) {
 		if err := LoadFullNative(fullPath); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := defaultLocalContext(); err != nil {
+		if _, err := configuredContext(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -38,11 +38,11 @@ func TestProviderCoexistenceNative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pinned, err := defaultLocalContext()
+	pinned, err := configuredContext()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defaultLibrary := pinned.inner.Library()
+	defaultLibrary := pinned.nativeContext().Library()
 	if os.Getenv("MSB_GO_FULL_PROVIDER") != "" && defaultLibrary == local.library {
 		t.Fatal("lean registration replaced the retained full provider")
 	}
@@ -73,6 +73,14 @@ func TestProviderCoexistenceNative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("MSB_BACKEND", "cloud")
+	t.Setenv("MSB_API_URL", server.URL)
+	t.Setenv("MSB_API_KEY", "provider-key")
+	configured, err := configuredContext()
+	if err != nil || configured.Kind() != ContextRemote || configured.nativeContext().Library() != remote.library {
+		t.Fatal("configured remote provider was not selected", err)
+	}
+	t.Setenv("MSB_BACKEND", "local")
 	ctx := context.Background()
 	sb, err := selected.Sandboxes().Get(ctx, "task")
 	if err != nil {
@@ -86,8 +94,8 @@ func TestProviderCoexistenceNative(t *testing.T) {
 	if _, err := LoadNativeProvider(localPath, ContextLocal); err != nil {
 		t.Fatal(err)
 	}
-	again, err := defaultLocalContext()
-	if err != nil || again.inner.Library() != defaultLibrary {
+	again, err := configuredContext()
+	if err != nil || again.nativeContext().Library() != defaultLibrary {
 		t.Fatal("default provider changed", err)
 	}
 	if _, err := pinned.Sandboxes().List(ctx); err != nil {

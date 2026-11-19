@@ -7,7 +7,8 @@ use std::sync::{
 
 use futures::StreamExt;
 use microsandbox::sandbox::jobs::{
-    Job, JobAttachment, JobError, JobId, JobListBuilder, JobLogOptions, JobLogStream, JobReplay,
+    Job, JobAttachment, JobError, JobId, JobListBuilder, JobLogOptions, JobLogStream,
+    JobOutputSource, JobReplay,
 };
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
@@ -131,7 +132,7 @@ impl PyJob {
             tail,
             since,
             until,
-            sources: sources.unwrap_or_default(),
+            sources: parse_job_sources(sources)?,
             from_cursor,
             follow: false,
         };
@@ -161,7 +162,7 @@ impl PyJob {
             tail,
             since,
             until,
-            sources: sources.unwrap_or_default(),
+            sources: parse_job_sources(sources)?,
             from_cursor,
             follow,
         };
@@ -192,7 +193,7 @@ impl PyJob {
             tail,
             since,
             until,
-            sources: sources.unwrap_or_default(),
+            sources: parse_job_sources(sources)?,
             from_cursor,
             follow: true,
         };
@@ -301,6 +302,18 @@ impl PyJobLogStream {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn parse_job_sources(sources: Option<Vec<String>>) -> PyResult<Vec<JobOutputSource>> {
+    sources
+        .unwrap_or_default()
+        .into_iter()
+        .map(|source| {
+            source
+                .parse()
+                .map_err(|_| PyValueError::new_err(format!("unknown job output source {source:?}")))
+        })
+        .collect()
+}
 
 pub(crate) fn decode(kind: &str, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     Python::attach(|py| {

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { MetricsStream } from "../../src/metrics-stream.js";
+import { FsReadStream } from "../../dist/fs.js";
+import { VolumeFsReadStream } from "../../dist/volume-fs.js";
+import { LogStream } from "../../dist/logs.js";
+import { MetricsStream } from "../../dist/metrics-stream.js";
 
 const sample = {
   cpuPercent: 1, vcpuTimeNs: 2, memoryBytes: 3, memoryLimitBytes: 4,
@@ -69,6 +72,21 @@ describe("MetricsStream disposal", () => {
     const stream = new MetricsStream({ recv } as never);
     expect((await stream[Symbol.asyncIterator]().next()).done).toBe(true);
     expect(await stream.recv()).toBeNull();
+    expect(recv).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.each([FsReadStream, VolumeFsReadStream, LogStream])("%s disposal", Stream => {
+  it("suppresses pending items and prevents later native reads", async () => {
+    let deliver!: (item: unknown) => void;
+    const recv = vi.fn(() => new Promise(resolve => { deliver = resolve; }));
+    const stream = new Stream({ recv } as never);
+    const pending = stream[Symbol.asyncIterator]().next();
+    await stream[Symbol.asyncDispose]();
+    deliver(Buffer.from("late"));
+    expect((await pending).done).toBe(true);
+    expect(await stream.recv()).toBeNull();
+    expect((await stream[Symbol.asyncIterator]().next()).done).toBe(true);
     expect(recv).toHaveBeenCalledTimes(1);
   });
 });

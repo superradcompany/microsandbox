@@ -22,8 +22,12 @@ class VolumeTest < Test::Unit::TestCase
         [created, fetched, listed].each do |volume|
           raise "different type" unless volume.instance_of?(Microsandbox::Volume)
           raise "different identity" unless volume.id == created.id
+          raise "inconsistent kind" unless volume.kind == :dir && volume.info.fetch("kind") == :dir
           raise "lost metadata" unless volume.info.fetch("labels") == {"team" => "sdk"}
         end
+        disk = Microsandbox::Volume.builder("scratch").disk.size(256).create
+        raise "wrong disk kind" unless disk.kind == :disk && disk.info.fetch("kind") == :disk
+        disk.destroy
         listed.destroy
         replacement = Microsandbox::Volume.builder("cache").create
         raise "reused identity" if created.id == replacement.id

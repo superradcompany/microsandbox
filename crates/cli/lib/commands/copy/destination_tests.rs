@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 use microsandbox::{
     LocalContext, MicrosandboxResult,
     agent::AgentClient,
-    context::{Context, ContextKind, SandboxOps, SnapshotOps, VolumeOps},
+    context::{Context, ContextKind, SandboxOps, ServiceOps, SnapshotOps, VolumeOps},
     sandbox::SandboxFsOps,
 };
 use microsandbox_protocol::{
@@ -55,6 +55,10 @@ impl Context for CopyBackend {
     }
 
     fn snapshot_ops(&self) -> &dyn SnapshotOps {
+        &self.0
+    }
+
+    fn service_ops(&self) -> &dyn ServiceOps {
         &self.0
     }
 

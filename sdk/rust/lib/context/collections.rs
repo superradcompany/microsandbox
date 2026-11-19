@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use super::Context;
 use crate::sandbox::SandboxBuilder;
-use crate::snapshot::LoadOptions;
+use crate::snapshot::{HeadUpdate, SnapshotId};
 use crate::volume::VolumeBuilder;
 use crate::{
-    MicrosandboxError, MicrosandboxResult, Sandbox, SandboxListBuilder, SandboxPage, Snapshot,
+    Checkpoint, MicrosandboxError, MicrosandboxResult, Sandbox, SandboxListBuilder, SandboxPage,
     SnapshotBuilder, SnapshotConfig, SnapshotReference, Volume, VolumeConfig,
 };
 
@@ -27,9 +27,15 @@ pub struct Volumes {
     pub(crate) context: Arc<dyn Context>,
 }
 
-/// Snapshot factories and lookup operations bound to one context.
+/// Named checkpoint histories on one destination.
 #[derive(Clone)]
 pub struct Snapshots {
+    pub(crate) context: Arc<dyn Context>,
+}
+
+/// Checkpoint factories and lookup operations bound to one context.
+#[derive(Clone)]
+pub struct Checkpoints {
     pub(crate) context: Arc<dyn Context>,
 }
 
@@ -206,11 +212,127 @@ impl Volumes {
 }
 
 impl Snapshots {
+    /// Destination retained by this collection and the groups it returns.
+    pub fn context(&self) -> &dyn Context {
+        self.context.as_ref()
+    }
+
+    /// Open a named history without resolving its mutable head.
+    pub async fn get(&self, name: &str) -> MicrosandboxResult<crate::Snapshot> {
+        self.context
+            .snapshot_ops()
+            .get_group(self.context.clone(), name)
+            .await
+    }
+
+    /// List named histories, including groups with a cleared head.
+    pub async fn list(&self) -> MicrosandboxResult<Vec<crate::Snapshot>> {
+        self.context
+            .snapshot_ops()
+            .list_groups(self.context.clone())
+            .await
+    }
+
+    /// Open an external local history. Anchor the path before the caller can defer polling.
+    pub fn open<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+    ) -> impl std::future::Future<Output = MicrosandboxResult<crate::Snapshot>> + Send + use<P>
+    {
+        let context = self.context.clone();
+        let path = path.as_ref();
+        let directory = if path.as_os_str().is_empty() {
+            Err(MicrosandboxError::InvalidConfig(
+                "snapshot group path cannot be empty".into(),
+            ))
+        } else {
+            std::path::absolute(path).map_err(MicrosandboxError::from)
+        };
+        async move {
+            context
+                .snapshot_ops()
+                .open_group(context.clone(), &directory?)
+                .await
+        }
+    }
+
+    /// Bind archive and destination paths to this context before a language binding defers work.
+    pub fn prepare_import(
+        &self,
+        files: Vec<std::path::PathBuf>,
+        options: crate::snapshot::LoadOpts,
+    ) -> MicrosandboxResult<crate::snapshot::PreparedSnapshotImport> {
+        crate::snapshot::PreparedSnapshotImport::with_backend(self.context.clone(), files, options)
+    }
+
+    /// Import an archive set atomically with default options.
+    pub async fn load(
+        &self,
+        group: &str,
+        files: &[std::path::PathBuf],
+    ) -> MicrosandboxResult<crate::SnapshotImportResult> {
+        self.load_with(group, files, |options| options).await
+    }
+
+    /// Import with the selected destination, dependencies and head policy.
+    pub async fn load_with(
+        &self,
+        group: &str,
+        files: &[std::path::PathBuf],
+        configure: impl FnOnce(crate::SnapshotImportOptions) -> crate::SnapshotImportOptions,
+    ) -> MicrosandboxResult<crate::SnapshotImportResult> {
+        let options = configure(Default::default()).into_load_opts();
+        self.context
+            .snapshot_ops()
+            .load_group(self.context.clone(), group, files, options)
+            .await
+    }
+
+    /// Authenticate encrypted inputs inside the selected local context before publication.
+    #[cfg(feature = "local")]
+    pub async fn load_encrypted(
+        &self,
+        group: &str,
+        files: &[std::path::PathBuf],
+        identity: &std::path::Path,
+        configure: impl FnOnce(crate::SnapshotImportOptions) -> crate::SnapshotImportOptions,
+    ) -> MicrosandboxResult<crate::SnapshotImportResult> {
+        let local = self
+            .context
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(crate::Operation::SnapshotOps))?;
+        local
+            .import_encrypted(
+                self.context.clone(),
+                group,
+                files,
+                configure(Default::default()).into_load_opts(),
+                identity,
+            )
+            .await
+    }
+}
+
+impl Checkpoints {
+    /// Read the selected snapshot ID. An existing headless group returns None.
+    pub async fn group_head(&self, group: &str) -> MicrosandboxResult<Option<SnapshotId>> {
+        self.context.snapshot_ops().group_head(group).await
+    }
+
+    /// Select a member of this group by its stable ID.
+    pub async fn set_group_head(
+        &self,
+        group: &str,
+        id: &SnapshotId,
+    ) -> MicrosandboxResult<HeadUpdate> {
+        self.context.snapshot_ops().set_group_head(group, id).await
+    }
+
     /// Inspect artifacts in a provider-supported directory.
     pub async fn list_dir(
         &self,
         dir: impl AsRef<std::path::Path>,
-    ) -> MicrosandboxResult<Vec<Snapshot>> {
+    ) -> MicrosandboxResult<Vec<Checkpoint>> {
         self.context
             .snapshot_ops()
             .list_dir(self.context.clone(), dir.as_ref().to_path_buf())
@@ -243,12 +365,24 @@ impl Snapshots {
             .await
     }
 
-    /// Import one archive with destination, dependency and size options.
+    /// Import one archive into this destination.
     pub async fn load(
         &self,
         path: &std::path::Path,
-        opts: LoadOptions,
-    ) -> MicrosandboxResult<Snapshot> {
+        dest: Option<&std::path::Path>,
+    ) -> MicrosandboxResult<Checkpoint> {
+        self.context
+            .snapshot_ops()
+            .load(self.context.clone(), path, dest)
+            .await
+    }
+
+    /// Import with an explicit dependency base and publication policy.
+    pub async fn load_with_options(
+        &self,
+        path: &std::path::Path,
+        opts: crate::snapshot::LoadOpts,
+    ) -> MicrosandboxResult<Checkpoint> {
         let mut snapshots = self.load_many(&[path.to_path_buf()], opts).await?;
         snapshots.pop().ok_or_else(|| {
             MicrosandboxError::InvalidConfig("provider returned no imported snapshot".into())
@@ -259,8 +393,8 @@ impl Snapshots {
     pub async fn load_many(
         &self,
         paths: &[std::path::PathBuf],
-        opts: LoadOptions,
-    ) -> MicrosandboxResult<Vec<Snapshot>> {
+        opts: crate::snapshot::LoadOpts,
+    ) -> MicrosandboxResult<Vec<Checkpoint>> {
         self.context
             .snapshot_ops()
             .load_many(self.context.clone(), paths, opts)
@@ -291,7 +425,7 @@ impl Snapshots {
     }
 
     /// Capture a snapshot on this destination.
-    pub async fn create(&self, config: SnapshotConfig) -> MicrosandboxResult<Snapshot> {
+    pub async fn create(&self, config: SnapshotConfig) -> MicrosandboxResult<Checkpoint> {
         self.context
             .snapshot_ops()
             .create(self.context.clone(), config)
@@ -299,7 +433,7 @@ impl Snapshots {
     }
 
     /// Open an existing snapshot on this destination.
-    pub async fn open(&self, reference: impl AsRef<str>) -> MicrosandboxResult<Snapshot> {
+    pub async fn open(&self, reference: impl AsRef<str>) -> MicrosandboxResult<Checkpoint> {
         self.open_ref(SnapshotReference::auto(reference.as_ref()))
             .await
     }
@@ -308,7 +442,7 @@ impl Snapshots {
     pub async fn open_ref(
         &self,
         reference: impl Into<SnapshotReference>,
-    ) -> MicrosandboxResult<Snapshot> {
+    ) -> MicrosandboxResult<Checkpoint> {
         self.context
             .snapshot_ops()
             .open(self.context.clone(), reference.into())
@@ -316,7 +450,7 @@ impl Snapshots {
     }
 
     /// Look up a snapshot on this destination.
-    pub async fn get(&self, name: &str) -> MicrosandboxResult<Snapshot> {
+    pub async fn get(&self, name: &str) -> MicrosandboxResult<Checkpoint> {
         self.context
             .snapshot_ops()
             .get(self.context.clone(), name)
@@ -324,7 +458,7 @@ impl Snapshots {
     }
 
     /// List snapshots on this destination.
-    pub async fn list(&self) -> MicrosandboxResult<Vec<Snapshot>> {
+    pub async fn list(&self) -> MicrosandboxResult<Vec<Checkpoint>> {
         self.context.snapshot_ops().list(self.context.clone()).await
     }
 
@@ -387,7 +521,27 @@ impl Volume {
     }
 }
 
-impl Snapshot {
+impl Checkpoint {
+    /// Select the default-local destination without consulting ambient remote selection.
+    #[cfg(feature = "local")]
+    pub fn local() -> Checkpoints {
+        super::default_local_context().checkpoints()
+    }
+
+    /// Capture remote credentials and endpoint from the environment, without backend I/O.
+    /// Existing collections and resources keep their previously captured destination.
+    #[cfg(feature = "cloud")]
+    pub fn remote() -> MicrosandboxResult<Checkpoints> {
+        Ok(super::RemoteContext::from_env()?.checkpoints())
+    }
+
+    /// Bind snapshot factories to an explicit context, retaining its shared state.
+    pub fn ctx(context: &dyn Context) -> Checkpoints {
+        context.checkpoints()
+    }
+}
+
+impl crate::Snapshot {
     /// Select the default-local destination without consulting ambient remote selection.
     #[cfg(feature = "local")]
     pub fn local() -> Snapshots {
@@ -417,7 +571,7 @@ mod tests {
 
     #[cfg(all(feature = "local", feature = "cloud"))]
     #[test]
-    fn selectors_capture_remote_and_preserve_default_local() {
+    fn selectors_override_the_configured_destination_and_builders_retain_it() {
         let _guard = crate::test_support::lock_env();
         let home = tempfile::tempdir().unwrap();
         let names = [
@@ -440,10 +594,11 @@ mod tests {
         }
         assert!(Sandbox::remote().is_err());
         assert!(Volume::remote().is_err());
-        assert!(Snapshot::remote().is_err());
+        assert!(Checkpoint::remote().is_err());
         unsafe {
             std::env::set_var("MSB_API_KEY", "fixture-key");
         }
+        let local_builder = Sandbox::builder("captured-local");
         let selected = Sandbox::remote().unwrap();
         let builder = selected.builder("retained");
         assert_eq!(
@@ -451,7 +606,7 @@ mod tests {
             crate::ContextKind::Remote
         );
         assert_eq!(
-            Snapshot::remote().unwrap().context().kind(),
+            Checkpoint::remote().unwrap().context().kind(),
             crate::ContextKind::Remote
         );
         unsafe {
@@ -479,13 +634,22 @@ mod tests {
         assert_eq!(Sandbox::local().context().kind(), crate::ContextKind::Local);
         assert_eq!(Volume::local().context().kind(), crate::ContextKind::Local);
         assert_eq!(
-            Snapshot::local().context().kind(),
+            Checkpoint::local().context().kind(),
             crate::ContextKind::Local
         );
         assert_eq!(
             Sandbox::builder("default").context().kind(),
-            crate::ContextKind::Local
+            crate::ContextKind::Remote
         );
+        assert_eq!(
+            Volume::builder("vol").context().kind(),
+            crate::ContextKind::Remote
+        );
+        assert_eq!(
+            Checkpoint::builder("snap").context().kind(),
+            crate::ContextKind::Remote
+        );
+        assert_eq!(local_builder.context().kind(), crate::ContextKind::Local);
         for (name, value) in previous {
             unsafe {
                 match value {
@@ -514,7 +678,7 @@ mod tests {
         let context = destination("retained");
         let sandboxes = context.sandboxes();
         let volumes = context.volumes();
-        let snapshots = context.snapshots();
+        let snapshots = context.checkpoints();
         assert!(std::ptr::eq(
             sandboxes.context(),
             sandboxes.builder("task").context()
@@ -537,7 +701,7 @@ mod tests {
             (
                 Sandbox::ctx(erased),
                 Volume::ctx(erased),
-                Snapshot::ctx(erased),
+                Checkpoint::ctx(erased),
             )
         };
         let (a, av, ass) = collections("destination-a");
@@ -552,6 +716,9 @@ mod tests {
         assert_destination(a.list().await, "destination-a");
         assert_destination(bv.list().await, "destination-b");
         assert_destination(ass.open("same-name").await, "destination-a");
+        assert_destination(ass.group_head("same-group").await, "destination-a");
+        let id = SnapshotId::new(format!("snap_{:032x}", 1)).unwrap();
+        assert_destination(bs.set_group_head("same-group", &id).await, "destination-b");
     }
 
     #[tokio::test]
@@ -562,7 +729,7 @@ mod tests {
                 context.sandboxes().builder("same-name").image("python"),
                 context.volumes().builder("same-name"),
                 context
-                    .snapshots()
+                    .checkpoints()
                     .builder("same-name")
                     .from_sandbox("source"),
             )

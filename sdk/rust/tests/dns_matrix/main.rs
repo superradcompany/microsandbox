@@ -25,6 +25,8 @@
 //! Split into two tests so each sandbox (plain DNS vs TLS-MITM) gets
 //! its own process and a failure in one path doesn't block the other.
 
+#![cfg(feature = "net")]
+
 mod sandbox;
 mod scenario;
 

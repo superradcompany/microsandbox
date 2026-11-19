@@ -7,7 +7,7 @@
 mod cloud;
 mod collections;
 mod dispatch;
-pub use collections::{Sandboxes, Snapshots, Volumes};
+pub use collections::{Checkpoints, Sandboxes, Snapshots, Volumes};
 #[cfg(feature = "local")]
 pub(crate) mod local;
 
@@ -16,6 +16,8 @@ pub(crate) use local::ControlSession;
 mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
+mod service;
+pub use service::ServiceOps;
 pub(crate) mod snapshot;
 pub(crate) mod volume;
 
@@ -37,11 +39,16 @@ pub use microsandbox_types::CloudComputeType as ComputeType;
 #[deprecated(note = "use ComputeType instead")]
 pub use microsandbox_types::CloudComputeType;
 pub use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
+    CloudErrorBody, CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudSandboxStatusReason, CloudService, CloudServiceStatus, CloudServiceTarget,
+    CloudUpdateServiceRequest,
 };
 
-pub use profile::{Profile, ProfileKind, resolve_cli_context, resolve_default_backend};
+pub use profile::{
+    Profile, ProfileKind, configured_context, configured_provider_kind, resolve_cli_context,
+    resolve_default_backend,
+};
 pub use sandbox::{
     SandboxIdentity, SandboxInner, SandboxOps, SandboxRecordCloudState, SandboxRecordInner,
     SandboxRemoteState,

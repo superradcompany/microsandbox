@@ -111,6 +111,9 @@ func (c *Context) Request(ctx context.Context, operation, name string, args, res
 	if err != nil {
 		return err
 	}
+	if err := c.lib().requireImportBudget(raw); err != nil {
+		return err
+	}
 	request := C.CString(string(raw))
 	defer C.free(unsafe.Pointer(request))
 	out, err := c.lib().call(ctx, func(id C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
@@ -133,22 +136,53 @@ func (receiver *Context) lib() *Library {
 	return defaultLibrary()
 }
 
-func (library *Library) NewContext(options any) (*Context, error) {
+func (library *Library) requestContext(options any) (string, error) {
 	if err := library.ensureLoaded(); err != nil {
-		return nil, err
+		return "", err
 	}
 	if C.provider_has_contexts(library.table) == 0 {
-		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support explicit contexts; update the native SDK"}
+		return "", &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support explicit contexts; update the native SDK"}
 	}
 	raw, err := json.Marshal(options)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	cOptions := C.CString(string(raw))
 	defer C.free(unsafe.Pointer(cOptions))
-	out, err := library.call(context.Background(), func(id C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
+	return library.call(context.Background(), func(id C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
 		return C.provider_call_msb_context_create(library.table, id, cOptions, buf, size)
 	})
+}
+
+// Ask an installed provider to read the common configuration before choosing
+// a library. The probe needs no credentials and allocates no native handle.
+func ConfiguredContext() (*Context, error) {
+	selection.Lock()
+	probe := selectedProviders["local"]
+	if probe == nil {
+		probe = selectedProviders["remote"]
+	}
+	selection.Unlock()
+	library := defaultNative
+	if probe != nil {
+		kind, err := probe.requestContext(map[string]string{"selection": "kind"})
+		if err != nil {
+			return nil, err
+		}
+		switch kind {
+		case "local":
+			library = DefaultLibrary()
+		case "remote":
+			library = SelectedProvider(kind)
+		default:
+			return nil, fmt.Errorf("unknown configured provider %q", kind)
+		}
+	}
+	return library.NewContext(map[string]string{"selection": "configured"})
+}
+
+func (library *Library) NewContext(options any) (*Context, error) {
+	out, err := library.requestContext(options)
 	if err != nil {
 		return nil, err
 	}

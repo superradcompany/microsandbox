@@ -15,7 +15,7 @@ impl Storage {
     pub async fn prune(
         options: &super::MemoryPruneOptions,
     ) -> MicrosandboxResult<super::MemoryCacheReport> {
-        Self::prune_with_context(crate::context::default_local_context().as_ref(), options).await
+        Self::prune_with_context(crate::context::configured_context().as_ref(), options).await
     }
 
     #[cfg(feature = "local")]
@@ -47,7 +47,7 @@ impl Storage {
 
     /// Observe storage through the selected backend. Remote accounting is explicitly unsupported.
     pub async fn usage() -> MicrosandboxResult<StorageUsage> {
-        Self::usage_with_context(crate::context::default_local_context().as_ref()).await
+        Self::usage_with_context(crate::context::configured_context().as_ref()).await
     }
 
     async fn usage_with_context(backend: &dyn crate::Context) -> MicrosandboxResult<StorageUsage> {

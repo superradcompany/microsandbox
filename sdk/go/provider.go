@@ -44,32 +44,22 @@ func (p *NativeProvider) NewLocalContext(options LocalOptions) (*LocalContext, e
 	return &LocalContext{inner: inner}, nil
 }
 
-// NewRemoteContext selects the hosted endpoint using an explicit API key.
+// NewRemoteContext captures the explicit key and configured endpoint.
 func (p *NativeProvider) NewRemoteContext(apiKey string) (*RemoteContext, error) {
-	return p.newRemoteContext("", apiKey)
+	return p.NewRemoteContextWithOptions(WithRemoteAPIKey(apiKey))
 }
 
 // NewRemoteContextWithURL selects an explicit compatible remote endpoint.
 func (p *NativeProvider) NewRemoteContextWithURL(url, apiKey string) (*RemoteContext, error) {
-	if err := validateRemoteContextURL(url); err != nil {
-		return nil, err
-	}
-	return p.newRemoteContext(url, apiKey)
+	return p.NewRemoteContextWithOptions(WithRemoteURL(url), WithRemoteAPIKey(apiKey))
 }
 
-func (p *NativeProvider) newRemoteContext(url, apiKey string) (*RemoteContext, error) {
+// NewRemoteContextWithOptions uses this provider with explicit settings and environment defaults.
+func (p *NativeProvider) NewRemoteContextWithOptions(options ...RemoteContextOption) (*RemoteContext, error) {
 	if p == nil || p.library == nil || p.kind != "remote" {
 		return nil, fmt.Errorf("remote context requires a remote native provider")
 	}
-	inner, err := p.library.NewContext(struct {
-		Kind   string `json:"kind"`
-		URL    string `json:"url,omitempty"`
-		APIKey string `json:"apiKey"`
-	}{"remote", url, apiKey})
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &RemoteContext{inner: inner}, nil
+	return buildRemoteContext(p.library, options)
 }
 
 // RegisterFullNativeLoader lets the full distribution install its lazy bundled

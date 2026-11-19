@@ -1,7 +1,7 @@
 //! Explicit Go destinations. Registry entries retain provider state, never ambient scope.
 
 use super::{FfiError, Handle, cstr, run_c};
-use microsandbox::{Context, LoadOptions};
+use microsandbox::Context;
 use std::{
     collections::HashMap,
     os::raw::{c_char, c_uchar},
@@ -69,7 +69,13 @@ pub unsafe extern "C" fn msb_context_create(
         let json = unsafe { cstr(options) }?;
         let value: serde_json::Value =
             serde_json::from_str(&json).map_err(|e| FfiError::invalid_argument(e.to_string()))?;
-        let context = if value.get("baseHandle").is_some() {
+        if value == serde_json::json!({"selection": "kind"}) {
+            let kind = microsandbox::context::configured_provider_kind()?;
+            return Ok(Box::pin(async move { Ok(kind.as_str().to_owned()) }));
+        }
+        let context = if value == serde_json::json!({"selection": "configured"}) {
+            microsandbox::context::resolve_default_backend()?
+        } else if value.get("baseHandle").is_some() {
             let request: Derivation = serde_json::from_value(value)
                 .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
             let base = get(request.base_handle)?;
@@ -228,13 +234,13 @@ async fn persistent_operation(
             vec![Resource::Volume(builder.create().await?)]
         }
         "snapshot_get" => vec![Resource::snapshot(
-            context.snapshots().get(&request.name).await?,
+            context.checkpoints().get(&request.name).await?,
         )],
         "snapshot_open" => vec![Resource::snapshot(
-            context.snapshots().open(&request.name).await?,
+            context.checkpoints().open(&request.name).await?,
         )],
         "snapshot_list" => context
-            .snapshots()
+            .checkpoints()
             .list()
             .await?
             .into_iter()
@@ -242,7 +248,7 @@ async fn persistent_operation(
             .collect(),
         "snapshot_remove" => {
             context
-                .snapshots()
+                .checkpoints()
                 .remove(
                     &request.name,
                     request.args["force"].as_bool().unwrap_or(false),
@@ -257,7 +263,7 @@ async fn persistent_operation(
             .into_iter()
             .map(Resource::snapshot)
             .collect(),
-        "snapshot_load" | "snapshot_load_with_size_limit" => {
+        "snapshot_load" => {
             let opts: super::SnapshotLoadOptsJson =
                 serde_json::from_value(request.args["options"].clone())
                     .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
@@ -266,15 +272,17 @@ async fn persistent_operation(
                     .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
             context
                 .snapshot_ops()
-                .load_many(context.clone(), &archives, {
-                    let mut options = LoadOptions::default();
-                    options.dest = opts.dest;
-                    options.base = opts.base;
-                    options.group = opts.group;
-                    options.set_head = opts.set_head;
-                    options.maximum_disk_bytes = opts.maximum_disk_bytes;
-                    options
-                })
+                .load_many(
+                    context.clone(),
+                    &archives,
+                    microsandbox::snapshot::LoadOpts {
+                        dest: opts.dest,
+                        base: opts.base,
+                        group: opts.group,
+                        set_head: opts.set_head,
+                        maximum_disk_bytes: opts.maximum_disk_bytes,
+                    },
+                )
                 .await?
                 .into_iter()
                 .map(Resource::snapshot)
@@ -291,9 +299,31 @@ async fn persistent_operation(
                     .to_string(),
             );
         }
+        "snapshot_read_group_head" => {
+            let head = context.checkpoints().group_head(&request.name).await?;
+            return Ok(serde_json::json!(head.map(|id| id.to_string())).to_string());
+        }
+        "snapshot_set_group_head" => {
+            let id = request.args["id"]
+                .as_str()
+                .ok_or_else(|| FfiError::invalid_argument("missing snapshot ID"))?;
+            let id = microsandbox::snapshot::SnapshotId::new(id)
+                .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
+            let update = context
+                .checkpoints()
+                .set_group_head(&request.name, &id)
+                .await?;
+            return serde_json::to_string(&update).map_err(|e| FfiError::internal(e.to_string()));
+        }
+        // Previous Go SDKs use this operation for both selector forms.
         "snapshot_group_head" => {
-            return serde_json::to_string(&context.snapshot_ops().group_head(&request.name).await?)
-                .map_err(|e| FfiError::internal(e.to_string()));
+            return serde_json::to_string(
+                &context
+                    .snapshot_ops()
+                    .group_head_selector(&request.name)
+                    .await?,
+            )
+            .map_err(|e| FfiError::internal(e.to_string()));
         }
         "snapshot_create_archive" => {
             let opts: super::SnapshotCreateOpts =

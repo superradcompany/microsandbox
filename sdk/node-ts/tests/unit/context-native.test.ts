@@ -47,6 +47,17 @@ it("retains independent destinations through collections, builders and resources
         process.env.MSB_API_KEY = "key-a";
         process.env.MSB_BACKEND = "local";
         for (const resource of [Sandbox, Volume, Snapshot]) assert.equal(resource.remote().context.kind, "remote");
+        const envBuilder = RemoteContext.builder().computeType("shared");
+        const urlA = process.env.MSB_API_URL;
+        for (const selected of [new RemoteContext(), envBuilder.build()]) {
+          assert.equal((await selected.sandboxes.get("task")).id, "cloud:a");
+        }
+        process.env.MSB_API_KEY = "wrong";
+        assert.equal((await RemoteContext.builder().apiKey("key-a").build().sandboxes.get("task")).id, "cloud:a");
+        process.env.MSB_API_KEY = "key-a";
+        process.env.MSB_API_URL = "http://127.0.0.1:" + b.address().port;
+        assert.equal((await RemoteContext.builder().url(urlA).build().sandboxes.get("task")).id, "cloud:a");
+        process.env.MSB_API_URL = urlA;
         const sandboxes = Sandbox.remote();
         process.env.MSB_BACKEND = "remote";
         for (const resource of [Sandbox, Volume, Snapshot]) assert.equal(resource.local().context.kind, "local");
@@ -54,6 +65,7 @@ it("retains independent destinations through collections, builders and resources
         process.env.MSB_API_URL = "http://127.0.0.1:" + b.address().port;
         process.env.MSB_API_KEY = "key-b";
         const builder = sandboxes.builder("task").image("python");
+        const shared = remote.toBuilder().build();
         const originalId = (await sandboxes.get("task")).id;
         assert.equal((await remote.toBuilder().build().sandboxes.get("task")).id, originalId);
         assert.throws(() => remote.toBuilder().apiKey("").build());
@@ -72,8 +84,12 @@ it("retains independent destinations through collections, builders and resources
         assert.equal((await sandboxes.list()).sandboxes[0].id, first.id);
         await assert.rejects(builder.create(), /403|denied|forbidden/i);
         assert.deepEqual(requests.filter(r => r[1] === "POST").map(r => r[0]), ["a"]);
+        // The environment-selected collection has no compute override. Test
+        // retention separately on the context explicitly configured as shared.
+        assert.equal(requests.filter(r => r[1] === "POST")[0][3], undefined);
+        await assert.rejects(shared.sandboxes.builder("task").image("python").create(), /403|denied|forbidden/i);
         await assert.rejects(remote.toBuilder().computeType("standard").build().sandboxes.builder("task").image("python").create(), /403|denied|forbidden/i);
-        assert.deepEqual(requests.filter(r => r[1] === "POST").map(r => r[3]), ["shared", "standard"]);
+        assert.deepEqual(requests.filter(r => r[1] === "POST").map(r => r[3]), [undefined, "shared", "standard"]);
         assert.throws(() => new RemoteContext({apiKey:"key",computeType:"invalid"}));
         assert.equal(new LocalContext({home:process.env.MSB_HOME}).kind, "local");
         assert.throws(() => RemoteContext.builder().requestTimeoutMs(-1).apiKey("key").build(), RangeError);

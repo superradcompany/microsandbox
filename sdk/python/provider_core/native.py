@@ -80,9 +80,20 @@ def binding(kind):
 def default_binding():
     global _default_local
     with _lock:
+        kind = _mount_binding().configured_provider_kind()
+        if kind == "remote":
+            return binding(kind)
         if _default_local is None:
             _default_local = binding("local")
         return _default_local
+
+
+def _mount_binding():
+    # Mount factories construct shared MountConfig values without opening a resource.
+    with _lock:
+        if "remote" in _loaders and "local" not in _loaders and _full_loader is None:
+            return binding("remote")
+        return binding("local")
 
 
 def _unwrap(value, owner):
@@ -144,10 +155,15 @@ class NativeType(type):
             return lambda context: getattr(context, collection)
 
         def invoke(*args, **kwargs):
-            if name in ("local", "remote") and cls._native_name in (
-                "Sandbox", "Volume", "Snapshot"
+            if (
+                name in ("local", "remote")
+                and cls._native_name in ("Sandbox", "Volume", "Snapshot")
             ):
                 owner = binding(name)
+            elif cls._native_name == "Volume" and name in (
+                "bind", "named", "owned", "tmpfs", "disk",
+            ):
+                owner = _mount_binding()
             else:
                 owner = default_binding()
             function = getattr(getattr(owner, cls._native_name), name)

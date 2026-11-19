@@ -3,14 +3,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from microsandbox import LocalContext, RemoteContext
+import microsandbox
 
 
 def test_explicit_contexts_are_independent() -> None:
-    import microsandbox
-
-    remote = RemoteContext(url="http://127.0.0.1:9", api_key="fixture")
-    local = LocalContext()
+    remote = microsandbox.RemoteContext(url="http://127.0.0.1:9", api_key="fixture")
+    local = microsandbox.LocalContext()
     assert remote.kind == "remote"
     assert local.kind == "local"
     for name in (

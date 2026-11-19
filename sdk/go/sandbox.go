@@ -131,11 +131,11 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 	if err := prepareSandboxCreateConfig(&config); err != nil {
 		return nil, err
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	inner, err := local.inner.CreateSandbox(ctx, name, buildFFICreateOptions(config), connectOrCreate)
+	inner, err := selected.nativeContext().CreateSandbox(ctx, name, buildFFICreateOptions(config), connectOrCreate)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -145,6 +145,9 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 
 // prepareSandboxCreateConfig resolves host inputs and validates options before native creation.
 func prepareSandboxCreateConfig(config *SandboxConfig) error {
+	if err := validateLifecycleLimits(&config.MaxDuration, &config.IdleTimeout); err != nil {
+		return err
+	}
 	if err := resolveRegistryCACertPaths(config); err != nil {
 		return err
 	}
@@ -198,8 +201,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		QuietLogs:         o.QuietLogs,
 		Scripts:           o.Scripts,
 		PullPolicy:        string(o.PullPolicy),
-		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
+		MaxDurationSecs:   uint64(o.MaxDuration / time.Second),
+		IdleTimeoutSecs:   uint64(o.IdleTimeout / time.Second),
 		Ports:             o.Ports,
 		PortsUDP:          o.PortsUDP,
 		PortBindings:      buildFFIPortBindings(o.PortBindings),
@@ -259,8 +262,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 			spec := ffi.MountSpec{
 				Bind:               m.Bind,
 				Named:              m.Named,
-				NamedMode:          m.NamedMode,
-				NamedKind:          m.NamedKind,
+				NamedMode:          string(m.NamedMode),
+				NamedKind:          string(m.NamedKind),
 				Owned:              m.Owned,
 				Tmpfs:              m.Tmpfs,
 				Disk:               m.Disk,
@@ -347,6 +350,22 @@ func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
 		spec.SizeMiB = &size
 	}
 	return spec
+}
+
+// The create and restore wire formats persist lifecycle limits in whole seconds.
+func validateLifecycleLimits(maxDuration, idleTimeout *time.Duration) error {
+	for _, limit := range []struct {
+		name  string
+		value *time.Duration
+	}{
+		{"max duration", maxDuration},
+		{"idle timeout", idleTimeout},
+	} {
+		if limit.value != nil && (*limit.value < 0 || *limit.value%time.Second != 0) {
+			return &Error{Kind: ErrInvalidConfig, Message: limit.name + " must be a non-negative whole number of seconds"}
+		}
+	}
+	return nil
 }
 
 // durationSecsCeil rounds a Duration up to whole seconds. Sub-second values
@@ -617,11 +636,11 @@ func GetSandbox(ctx context.Context, name string) (*Sandbox, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().Get(ctx, name)
+	return selected.Sandboxes().Get(ctx, name)
 }
 
 // GetRunningSandbox looks up an existing sandbox and connects or starts it.
@@ -631,32 +650,32 @@ func GetRunningSandbox(ctx context.Context, name string) (*Sandbox, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().GetRunning(ctx, name)
+	return selected.Sandboxes().GetRunning(ctx, name)
 }
 
 // StartSandbox boots a stopped sandbox by name and returns a live Sandbox.
 // Sandbox names are limited to 128 UTF-8 bytes.
 func StartSandbox(ctx context.Context, name string) (*Sandbox, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().Start(ctx, name)
+	return selected.Sandboxes().Start(ctx, name)
 }
 
 // StartSandboxDetached boots a stopped sandbox in detached mode. The VM keeps
 // running after the returned handle is released. Sandbox names are limited to
 // 128 UTF-8 bytes.
 func StartSandboxDetached(ctx context.Context, name string) (*Sandbox, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().StartDetached(ctx, name)
+	return selected.Sandboxes().StartDetached(ctx, name)
 }
 
 // AllSandboxMetrics returns a point-in-time metrics snapshot for every running
@@ -827,21 +846,21 @@ func ListSandboxesWith(ctx context.Context, configure ...SandboxListOption) (*Sa
 }
 
 func listSandboxes(ctx context.Context, configure ...SandboxListOption) (*SandboxPage, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Sandboxes().List(ctx, configure...)
+	return selected.Sandboxes().List(ctx, configure...)
 }
 
 // RemoveSandbox removes a stopped sandbox's persisted state by name.
 // Sandbox names are limited to 128 UTF-8 bytes.
 func RemoveSandbox(ctx context.Context, name string) error {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return err
 	}
-	return local.Sandboxes().Remove(ctx, name)
+	return selected.Sandboxes().Remove(ctx, name)
 }
 
 // ---------------------------------------------------------------------------

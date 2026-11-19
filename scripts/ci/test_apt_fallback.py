@@ -89,6 +89,22 @@ deb [signed-by=/keys/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/
             self.assertFalse((output / "sources.list.d/ignored.save").exists())
             self.assertEqual((output / "sources.list.d/ubuntu.sources").stat().st_mode & 0o777, 0o644)
 
+    def test_x86_apt_mirror_list_contains_both_signed_archive_sources(self):
+        for arch in ("amd64", "amd64v3"):
+            with self.subTest(arch=arch), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, output = root / "etc", root / "output"
+                source.mkdir()
+                output.mkdir()
+                (source / "sources.list").write_text("deb https://archive.ubuntu.com/ubuntu noble main\n")
+                fallback.prepare_sources(source, output, arch)
+                mirrors = output / "ubuntu-mirrors.txt"
+                self.assertEqual(mirrors.read_text().splitlines(), [
+                    "https://mirrors.edge.kernel.org/ubuntu/", "https://mirrors.mit.edu/ubuntu/",
+                ])
+                uri = "mirror+" + mirrors.resolve().as_uri()
+                self.assertEqual((output / "sources.list").read_text(), f"deb {uri} noble main\n")
+
     def test_missing_ubuntu_sources_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -140,6 +156,10 @@ for arg in sys.argv[1:]:
     if arg.startswith('Dir::Etc::sourceparts='):
         parts = Path(arg.split('=', 1)[1])
         record['sources'] = {p.name: p.read_text() for p in parts.iterdir()}
+        mirrors = parts.parent / "ubuntu-mirrors.txt"
+        if mirrors.exists():
+            record['mirror_uri'] = "mirror+" + mirrors.resolve().as_uri()
+            record['mirrors'] = mirrors.read_text().splitlines()
 with log.open('a') as output:
     output.write(json.dumps(record) + '\\n')
 statuses = json.loads(os.environ['FAKE_STATUSES'])
@@ -163,7 +183,11 @@ sys.exit(statuses[len(calls)] if len(calls) < len(statuses) else 99)
     def assert_fallback(self, calls, architecture="amd64"):
         for call in calls:
             self.assertTrue(any(arg.startswith("Dir::State::lists=") for arg in call["args"]))
-            self.assertIn(fallback.MIRRORS[architecture], call["sources"]["ubuntu.sources"])
+            if architecture in ("amd64", "amd64v3"):
+                self.assertIn(call["mirror_uri"], call["sources"]["ubuntu.sources"])
+                self.assertIn(fallback.MIRRORS[architecture], call["mirrors"])
+            else:
+                self.assertIn(fallback.MIRRORS[architecture], call["sources"]["ubuntu.sources"])
             self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", call["sources"]["ubuntu.sources"])
             self.assertNotIn("--allow-unauthenticated", call["args"])
             self.assertNotIn("--allow-downgrades", call["args"])

@@ -3,6 +3,7 @@
 //! create wire shape.
 
 use crate::context::sandbox::SandboxRecordPage;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +24,8 @@ use crate::sandbox::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
     CloudCompute, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus,
-    NetworkSpec, RootDisk, SandboxRuntimeOptions, TlsConfig,
+    NamedVolumeMode, NetworkSpec, RootDisk, SandboxRuntimeOptions, TlsConfig, VolumeKind,
+    VolumeMount,
 };
 use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
@@ -38,6 +40,15 @@ const DEFAULT_CLOUD_STOP_TIMEOUT: Duration = Duration::from_secs(360);
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Execution-facing fields of a provider inspection response. These fields
+/// are independent of root-source, mount-source and secret redaction, and must
+/// not be decoded through the creation-request contract.
+#[derive(serde::Deserialize)]
+struct RemoteRuntimeInspection {
+    runtime: Option<SandboxRuntimeOptions>,
+    env: Option<Vec<microsandbox_types::EnvVar>>,
+}
 
 /// Wire body for the cloud's create route: the shared sandbox spec, nested
 /// under `spec`, with the cloud-only create options beside it.
@@ -85,29 +96,52 @@ impl RemoteContext {
     /// Stop the captured cloud identity and observe completion, including ephemeral deletion.
     pub(crate) async fn stop_complete(&self, id: &str) -> MicrosandboxResult<()> {
         let current = self.get_sandbox_by_id(id).await?;
-        if matches!(
-            current.status,
-            CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed
-        ) {
-            return Ok(());
+        let unrecognized_status = || {
+            MicrosandboxError::Runtime(format!(
+                "cloud sandbox {:?} reported a status this SDK does not recognize; upgrade the SDK",
+                current.name
+            ))
+        };
+        match current.status {
+            CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed => return Ok(()),
+            // A stop is already in flight. Poll it without submitting a duplicate.
+            CloudSandboxStatus::Stopping | CloudSandboxStatus::SavingState => {}
+            CloudSandboxStatus::Created
+            | CloudSandboxStatus::Starting
+            | CloudSandboxStatus::Running
+            | CloudSandboxStatus::TemporarilyUnavailable
+            | CloudSandboxStatus::RecoveryDecisionRequired => {
+                self.stop_sandbox_by_id(id).await?;
+            }
+            CloudSandboxStatus::Unknown => return Err(unrecognized_status()),
+            _ => return Err(unrecognized_status()),
         }
-        self.stop_sandbox_by_id(id).await?;
         loop {
             match self.get_sandbox_by_id(id).await {
-                Ok(observed)
-                    if matches!(
-                        observed.status,
-                        CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed
-                    ) =>
-                {
-                    return Ok(());
-                }
+                Ok(observed) => match observed.status {
+                    CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed => return Ok(()),
+                    CloudSandboxStatus::RecoveryDecisionRequired => {
+                        return Err(MicrosandboxError::Runtime(format!(
+                            "cloud sandbox {:?} needs a recovery decision before it can stop",
+                            current.name
+                        )));
+                    }
+                    CloudSandboxStatus::Unknown => return Err(unrecognized_status()),
+                    CloudSandboxStatus::Created
+                    | CloudSandboxStatus::Starting
+                    | CloudSandboxStatus::Running
+                    | CloudSandboxStatus::Stopping
+                    | CloudSandboxStatus::SavingState
+                    | CloudSandboxStatus::TemporarilyUnavailable => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    _ => return Err(unrecognized_status()),
+                },
                 // Only disappearance after a successful stop of a confirmed ephemeral
                 // sandbox is completion. Missing persistent sandboxes and failed stop
                 // requests still surface their errors, and a reused name is never followed.
                 Err(MicrosandboxError::SandboxNotFound(_)) if current.ephemeral => return Ok(()),
                 Err(error) => return Err(error),
-                Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
     }
@@ -133,12 +167,59 @@ impl RemoteContext {
         &self,
         builder: SandboxBuilder,
     ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
-        let config = self.build_sandbox_config(builder).await?;
+        let mut config = self.build_sandbox_config(builder).await?;
+        let mut names = BTreeSet::new();
+        for mount in &mut config.spec.mounts {
+            let VolumeMount::Named { name, create, .. } = mount else {
+                continue;
+            };
+            let Some(requested) = create.take() else {
+                continue;
+            };
+            if requested.name != *name {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "named volume {name:?} has a different creation name"
+                )));
+            }
+            if requested.mode != NamedVolumeMode::EnsureExists
+                || requested.kind != VolumeKind::Directory
+                || requested.quota_mib.is_some()
+                || requested.capacity_mib.is_some()
+                || !requested.labels.is_empty()
+            {
+                return Err(MicrosandboxError::unsupported(
+                    Operation::SandboxCreate,
+                    UnsupportedReason::ConfigField("named volume inline create"),
+                ));
+            }
+            names.insert(name.clone());
+        }
+
+        // Validate the whole request before provisioning anything. Only the default
+        // ensure-exists behavior is resolved here; the wire and retained config use
+        // plain named mounts, while the local backend keeps its inline-create path.
         let (mut request, config) = cloud_create_body_and_config(config)?;
         request.compute = self
             .inner
             .compute_type
             .map(|compute_type| CloudCompute { compute_type });
+        for name in names {
+            match self.find_volume(&name).await {
+                Ok(_) => {}
+                Err(MicrosandboxError::VolumeNotFound(_)) => {
+                    match self.create_volume(&name, None, &[]).await {
+                        Ok(_) => {}
+                        // Another client may have created the same volume since lookup.
+                        Err(MicrosandboxError::VolumeAlreadyExists(_)) => {
+                            self.find_volume(&name).await?;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
         Ok((request, config))
     }
 
@@ -182,7 +263,7 @@ impl SandboxOps for RemoteContext {
         config: SandboxConfig,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         // Cloud has no notion of "detached" — the sandbox lifecycle is owned
-        // by msb-cloud, not by this process. Reuse the eager-start path.
+        // by the cloud API, not by this process. Reuse the eager-start path.
         self.create(backend, config, true)
     }
 
@@ -193,7 +274,7 @@ impl SandboxOps for RemoteContext {
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
             let current = RemoteContext::get_sandbox(self, name).await?;
-            let config = sandbox_config_from_cloud(&current);
+            let config = sandbox_config_from_cloud(&current)?;
             let cloud = RemoteContext::start_sandbox(self, name).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -209,7 +290,7 @@ impl SandboxOps for RemoteContext {
         // after this process exits. Same code path as `start`.
         Box::pin(async move {
             let current = RemoteContext::get_sandbox(self, name).await?;
-            let config = sandbox_config_from_cloud(&current);
+            let config = sandbox_config_from_cloud(&current)?;
             let cloud = RemoteContext::start_sandbox(self, name).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -225,7 +306,7 @@ impl SandboxOps for RemoteContext {
         Box::pin(async move {
             let id = cloud_identity(identity)?;
             let current = RemoteContext::get_sandbox_by_id(self, &id).await?;
-            let config = sandbox_config_from_cloud(&current);
+            let config = sandbox_config_from_cloud(&current)?;
             let cloud = RemoteContext::start_sandbox_by_id(self, &id).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -761,17 +842,22 @@ fn cloud_tls_config_is_harmless(
 
 /// Map [`CloudSandboxStatus`] to the SDK's [`SandboxStatus`] enum.
 ///
-/// `Stopping` collapses to `Draining` (microsandbox uses `Draining` for
-/// the graceful-stop state); `Failed` collapses to `Crashed`. All other
-/// variants map 1:1.
+/// `Stopping` and `SavingState` collapse to `Draining`; `Failed` collapses to
+/// `Crashed`; `TemporarilyUnavailable`, `RecoveryDecisionRequired`, `Unknown`,
+/// and any unrecognized status collapse to `Paused`. All other variants map 1:1.
 pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxStatus {
     match s {
         CloudSandboxStatus::Created => SandboxStatus::Created,
         CloudSandboxStatus::Starting => SandboxStatus::Starting,
         CloudSandboxStatus::Running => SandboxStatus::Running,
         CloudSandboxStatus::Stopping => SandboxStatus::Draining,
+        CloudSandboxStatus::SavingState => SandboxStatus::Draining,
+        CloudSandboxStatus::TemporarilyUnavailable => SandboxStatus::Paused,
+        CloudSandboxStatus::RecoveryDecisionRequired => SandboxStatus::Paused,
         CloudSandboxStatus::Stopped => SandboxStatus::Stopped,
         CloudSandboxStatus::Failed => SandboxStatus::Crashed,
+        CloudSandboxStatus::Unknown => SandboxStatus::Paused,
+        _ => SandboxStatus::Paused,
     }
 }
 
@@ -786,7 +872,7 @@ fn ensure_cloud_sandbox_ready(cloud: &CloudCreateSandboxResponse) -> Microsandbo
             cloud
                 .last_failure_message
                 .as_deref()
-                .unwrap_or("the cloud control plane reported no failure reason")
+                .unwrap_or("the cloud API reported no failure reason")
         ))),
         CloudSandboxStatus::Starting => Err(MicrosandboxError::Runtime(format!(
             "cloud sandbox {:?} did not reach running before the readiness wait expired",
@@ -802,23 +888,30 @@ fn ensure_cloud_sandbox_ready(cloud: &CloudCreateSandboxResponse) -> Microsandbo
 /// Build the best available runtime config for a sandbox the SDK did not
 /// create itself.
 ///
-/// The cloud owns its response projection and may omit `spec` or return a
-/// curated shape. A complete shared cloud spec is decoded when available;
-/// otherwise agent operations use SDK defaults. Lifecycle start must never
-/// depend on the optional inspection projection.
-fn sandbox_config_from_cloud(cloud: &CloudCreateSandboxResponse) -> SandboxConfig {
+/// The provider may omit `spec` or return a curated shape. Runtime settings
+/// are decoded independently from creation metadata; malformed settings fail
+/// preparation. An omitted projection retains the existing legacy behavior.
+fn sandbox_config_from_cloud(
+    cloud: &CloudCreateSandboxResponse,
+) -> MicrosandboxResult<SandboxConfig> {
     sandbox_config_from_cloud_spec(&cloud.name, cloud.spec.clone())
 }
 
 /// Decode the server-owned spec projection carried by a cloud handle.
 ///
-/// Agent operations only require a best-effort runtime config. The response
-/// projection may be absent or curated, so reconnecting must preserve the
-/// lifecycle contract without requiring a complete create request.
+/// This internal session config is not the public live configuration result.
+/// Preserve execution settings even when a redacted projection cannot supply
+/// creation metadata; never discard a runtime decoding error.
 pub(crate) fn sandbox_config_from_cloud_spec(
     name: &str,
     spec: Option<serde_json::Value>,
-) -> SandboxConfig {
+) -> MicrosandboxResult<SandboxConfig> {
+    // Validate the fields consumed by execution independently. In particular,
+    // malformed runtime settings are not permission to run with other defaults.
+    let runtime = spec
+        .as_ref()
+        .map(|value| serde_json::from_value::<RemoteRuntimeInspection>(value.clone()))
+        .transpose()?;
     let mut config = spec
         .and_then(|value| serde_json::from_value::<CloudCreateSandboxRequest>(value).ok())
         .and_then(|request| crate::sandbox::SandboxSpec::try_from(request).ok())
@@ -828,10 +921,19 @@ pub(crate) fn sandbox_config_from_cloud_spec(
         })
         .unwrap_or_default();
 
+    if let Some(runtime) = runtime {
+        if let Some(options) = runtime.runtime {
+            config.spec.runtime = options;
+        }
+        if let Some(env) = runtime.env {
+            config.spec.env = env;
+        }
+    }
+
     // The top-level response name is canonical even when a complete spec was
     // unavailable or carried stale inspection data.
     config.spec.name = name.to_string();
-    config
+    Ok(config)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1976,7 +2078,7 @@ mod tests {
             last_failure_message: None,
         };
 
-        let config = sandbox_config_from_cloud(&cloud);
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
 
         assert_eq!(config.spec.name, "agent-1");
         assert!(
@@ -2010,11 +2112,66 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_config_from_cloud_preserves_inspected_runtime_settings() {
+        // Inspection is a provider projection, not a source-tagged create request.
+        // These values must survive get/connect even though mount sources and
+        // private secret material are deliberately absent from that projection.
+        let mut cloud = cloud_response(CloudSandboxStatus::Running);
+        cloud.spec = Some(serde_json::json!({
+            "image": "python",
+            "resources": { "vcpus": 2, "memory_mib": 512 },
+            "runtime": {
+                "shell": "/bin/bash",
+                "entrypoint": ["printf"],
+                "cmd": ["configured-default"],
+                "workdir": "/tmp",
+                "user": "1000",
+                "scripts": { "check": "printf checked" }
+            },
+            "env": [{ "key": "CONFIG_TEST", "value": "retained" }],
+            "labels": {},
+            "rlimits": [],
+            "lifecycle": { "ephemeral": false },
+            "mounts": [],
+            "network": { "enabled": true, "ports": [], "trust_host_cas": false }
+        }));
+
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
+
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/tmp"));
+        assert_eq!(config.spec.runtime.user.as_deref(), Some("1000"));
+        assert_eq!(config.spec.runtime.entrypoint, Some(vec!["printf".into()]));
+        assert_eq!(
+            config.spec.runtime.cmd,
+            Some(vec!["configured-default".into()])
+        );
+        assert_eq!(config.spec.runtime.scripts["check"], "printf checked");
+        assert_eq!(
+            config.spec.env,
+            vec![EnvVar::new("CONFIG_TEST", "retained")]
+        );
+    }
+
+    #[test]
+    fn sandbox_config_from_cloud_rejects_malformed_runtime_settings() {
+        for runtime in [
+            serde_json::json!({ "shell": 42 }),
+            serde_json::json!({ "entrypoint": "printf" }),
+            serde_json::json!({ "workdir": [] }),
+        ] {
+            let mut cloud = cloud_response(CloudSandboxStatus::Running);
+            cloud.spec = Some(serde_json::json!({ "image": "python", "runtime": runtime }));
+            assert!(sandbox_config_from_cloud(&cloud).is_err());
+        }
+    }
+
+    #[test]
     fn sandbox_config_from_cloud_does_not_require_spec() {
         let mut cloud = cloud_response(CloudSandboxStatus::Stopped);
         cloud.spec = None;
 
-        let config = sandbox_config_from_cloud(&cloud);
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
 
         assert_eq!(config.spec.name, cloud.name);
         assert_eq!(config.spec.runtime.shell, None);
@@ -2028,37 +2185,37 @@ mod tests {
             "resources": { "vcpus": 1 }
         }));
 
-        let config = sandbox_config_from_cloud(&cloud);
+        let config = sandbox_config_from_cloud(&cloud).unwrap();
 
         assert_eq!(config.spec.name, cloud.name);
         assert_eq!(config.spec.runtime.shell, None);
     }
 
     #[test]
-    fn cloud_status_maps_created_and_starting_one_to_one() {
-        assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Created),
-            SandboxStatus::Created,
-        );
-        assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Starting),
-            SandboxStatus::Starting,
-        );
-        assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Running),
-            SandboxStatus::Running,
-        );
+    fn cloud_status_maps_to_existing_sandbox_states() {
         assert_eq!(
             cloud_status_to_sandbox_status(CloudSandboxStatus::Stopping),
             SandboxStatus::Draining,
         );
         assert_eq!(
-            cloud_status_to_sandbox_status(CloudSandboxStatus::Stopped),
-            SandboxStatus::Stopped,
+            cloud_status_to_sandbox_status(CloudSandboxStatus::SavingState),
+            SandboxStatus::Draining,
+        );
+        assert_eq!(
+            cloud_status_to_sandbox_status(CloudSandboxStatus::TemporarilyUnavailable),
+            SandboxStatus::Paused,
+        );
+        assert_eq!(
+            cloud_status_to_sandbox_status(CloudSandboxStatus::RecoveryDecisionRequired),
+            SandboxStatus::Paused,
         );
         assert_eq!(
             cloud_status_to_sandbox_status(CloudSandboxStatus::Failed),
             SandboxStatus::Crashed,
+        );
+        assert_eq!(
+            cloud_status_to_sandbox_status(CloudSandboxStatus::Unknown),
+            SandboxStatus::Paused,
         );
     }
 
@@ -2070,8 +2227,12 @@ mod tests {
             CloudSandboxStatus::Created,
             CloudSandboxStatus::Starting,
             CloudSandboxStatus::Stopping,
+            CloudSandboxStatus::SavingState,
+            CloudSandboxStatus::TemporarilyUnavailable,
+            CloudSandboxStatus::RecoveryDecisionRequired,
             CloudSandboxStatus::Stopped,
             CloudSandboxStatus::Failed,
+            CloudSandboxStatus::Unknown,
         ] {
             assert!(ensure_cloud_sandbox_ready(&cloud_response(status)).is_err());
         }

@@ -109,7 +109,9 @@ impl LocalObjectStore {
     /// Open or create a local object store rooted at `root`.
     pub fn open(root: impl Into<PathBuf>) -> ImageResult<Self> {
         let root = root.into();
-        std::fs::create_dir_all(root.join("objects").join("sha256"))?;
+        microsandbox_utils::private_file::create_private_dir_all(
+            &root.join("objects").join("sha256"),
+        )?;
         Ok(Self {
             root,
             ownership: Arc::new(StoreOwnership::default()),
@@ -126,12 +128,9 @@ impl LocalObjectStore {
             return Ok(id);
         }
         let parent = path.parent().expect("object path has a parent");
-        std::fs::create_dir_all(parent)?;
+        microsandbox_utils::private_file::create_private_dir_all(parent)?;
         let temporary = parent.join(format!(".{}.{}.tmp", id.hex(), rand::random::<u64>()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -169,11 +168,15 @@ impl LocalObjectStore {
             return Ok(target);
         }
         let parent = target.parent().expect("closure object has a parent");
-        std::fs::create_dir_all(parent)?;
+        microsandbox_utils::private_file::create_private_dir_all(parent)?;
         match std::fs::hard_link(&source, &target) {
             Ok(()) => {}
             Err(_) => {
-                std::fs::copy(&source, &target)?;
+                let mut source_file = File::open(&source)?;
+                let mut target_file = microsandbox_utils::private_file::create_new(&target)?;
+                std::io::copy(&mut source_file, &mut target_file)?;
+                target_file.sync_all()?;
+                drop(target_file);
                 // `FlushFileBuffers`, used by `sync_all` on Windows, requires a handle opened
                 // with write access even though the immutable bytes are already complete.
                 let sync_result = OpenOptions::new()
@@ -250,13 +253,10 @@ impl CaptureObjectBatch {
             return Ok(id);
         }
         let parent = path.parent().expect("object parent");
-        std::fs::create_dir_all(parent)?;
+        microsandbox_utils::private_file::create_private_dir_all(parent)?;
         let temporary = parent.join(format!(".{}.{}.tmp", id.hex(), rand::random::<u64>()));
         let result = (|| -> ImageResult<AdmittedObject> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
+            let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
@@ -290,7 +290,7 @@ impl CaptureObjectBatch {
             .join(&encoded[..2])
             .join(encoded);
         let parent = target.parent().expect("closure object parent");
-        std::fs::create_dir_all(parent)?;
+        microsandbox_utils::private_file::create_private_dir_all(parent)?;
         if target.exists() {
             // Existing targets are not automatically part of this batch's ownership. Retain
             // the checked public behavior, except for the exact already-admitted inode.
@@ -585,10 +585,7 @@ fn read_object_at(file: &File, bytes: &mut [u8], offset: u64) -> std::io::Result
 }
 
 fn copy_admitted_object(object: &AdmittedObject, source: &File, target: &Path) -> ImageResult<()> {
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)?;
+    let mut destination = microsandbox_utils::private_file::create_new(target)?;
     let result = (|| -> ImageResult<()> {
         let mut buffer = vec![0; 1024 * 1024];
         let mut offset = 0;
@@ -636,6 +633,11 @@ fn sync_directories_through(path: &Path, stop: &Path) -> ImageResult<()> {
 /// Compute a sparse-aware fixed-leaf Merkle root without reading unallocated holes.
 pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
     sparse_file_integrity_handle(&File::open(path)?)
+}
+
+/// Hash the already-open checkpoint payload.
+pub fn sparse_file_integrity_from_file(file: &mut File) -> ImageResult<SparseFileIntegrity> {
+    sparse_file_integrity_handle(file)
 }
 
 /// Compute the same content root on a pinned file, without resolving its pathname again.
@@ -748,6 +750,64 @@ fn hash_parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_objects_and_new_storage_directories_are_private() {
+        for host_umask in [0o000, 0o022, 0o077] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("checkpoint_store_umask_child")
+                .arg("--nocapture")
+                .env("MSB_TEST_CHECKPOINT_STORE_UMASK", format!("{host_umask:o}"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "host umask {host_umask:03o}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_store_umask_child() {
+        let Ok(value) = std::env::var("MSB_TEST_CHECKPOINT_STORE_UMASK") else {
+            return;
+        };
+        let host_umask = u32::from_str_radix(&value, 8).unwrap();
+        let previous_umask = unsafe { libc::umask(host_umask as libc::mode_t) };
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("private-store");
+        let store = LocalObjectStore::open(&root).unwrap();
+        let id = store.put_bytes(b"private checkpoint bytes").unwrap();
+
+        for path in [
+            root.clone(),
+            root.join("objects"),
+            root.join("objects/sha256"),
+            store.object_path(&id).parent().unwrap().to_path_buf(),
+        ] {
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(store.object_path(&id))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        unsafe { libc::umask(previous_umask) };
+    }
 
     #[test]
     fn capture_batch_reuses_owned_objects_and_syncs_each_directory_once() {

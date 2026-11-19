@@ -53,7 +53,7 @@ go run github.com/superradcompany/microsandbox/sdk/go/core/cmd/ffi-setup@VERSION
 
 Setup accepts `--target` for cross-target provisioning and `--cache` for a custom cache. It verifies and copies the selected FFI only, and never installs the host runtime. Module installation, import and first use do not download native files.
 
-Load the verified provider once before ordinary default-local calls. An empty path selects the verified default cache; a nonempty path selects an explicitly trusted preinstalled library:
+Load the verified local provider before using the following example with a local destination. An empty path selects the verified default cache; a nonempty path selects an explicitly trusted preinstalled library:
 
 ```go
 import (
@@ -77,4 +77,4 @@ Use matching package and native versions. A missing provider should produce an i
 
 A package download size differs from its installed size. Include the platform native package in npm totals, the selected wheel in Python totals, and the separately provisioned FFI in Go totals. Count the external local runtime separately. Build measurements are platform-specific and are not claims about a published registry payload.
 
-Use `remote.NewContext(path, apiKey)` for the hosted endpoint; `remote.NewContextWithURL(path, url, apiKey)` selects an explicit endpoint. The path selects the native library, not the remote service.
+Use `remote.NewContext(path, apiKey)` with `MSB_API_URL` or the hosted default; `remote.NewContextWithURL(path, url, apiKey)` selects an explicit endpoint. The path selects the native library, not the remote service.

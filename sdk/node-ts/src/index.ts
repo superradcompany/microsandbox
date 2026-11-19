@@ -17,7 +17,7 @@ export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox, SandboxListBuilder } from "./sandbox.js";
-export type { RestoreBuilder } from "./sandbox.js";
+export type { CommandArgs, RestoreBuilder } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
 /**
  * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is
@@ -83,7 +83,7 @@ export type {
 export { FsReadStream, FsWriteSink, SandboxFsOps } from "./fs.js";
 
 // Volumes
-export { Volume, type VolumeInfo } from "./volume.js";
+export { Volume, type VolumeInfo, type VolumeKind } from "./volume.js";
 import { Volume as _Volume, type VolumeBuilder as _VBT } from "./volume.js";
 /**
  * Native fluent builder for a named volume. `new VolumeBuilder(name)`
@@ -102,13 +102,27 @@ export {
   VolumeFsWriteSink,
 } from "./volume-fs.js";
 
+// Services
+export { Service, ServiceBuilder, ServiceListBuilder } from "./service.js";
+export type {
+  ServicePage,
+  ServiceStatus,
+  ServiceTarget,
+  ServiceUpdateOptions,
+} from "./service.js";
+
 // Snapshots
-export { Snapshot, SnapshotArchive } from "./snapshot.js";
+export type { SnapshotGroupInfo, SnapshotSourceBinding, SnapshotSourceStatus } from "./snapshot-inspection.js";
+export type { CheckpointRemoveResult, SnapshotRemoveResult } from "./snapshot-removal.js";
+export { Snapshot as Checkpoint, CheckpointRemoveOptions, SnapshotSaveOptions, SnapshotArchive } from "./snapshot.js";
+export { Snapshot, SnapshotCaptureOptions, SnapshotLoadOptions } from "./snapshot-group.js";
+export type { SnapshotCreateResult, CheckpointCaptureResult, SnapshotImportResult } from "./snapshot-group.js";
+export type { SnapshotGroupVerifyReport, CheckpointVerification, SnapshotVerificationFinding, SnapshotVerificationFindingKind, SnapshotVerificationState } from "./snapshot-verification.js";
 export type { DiskCompactionOptions, DiskCompactionDiskResult, DiskCompactionResult } from "./compact.js";
 import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapshot.js";
 /**
  * Native fluent builder for a snapshot. `new SnapshotBuilder(name)`
- * is equivalent to `Snapshot.builder(name)`.
+ * is equivalent to `Checkpoint.builder(name)`.
  */
 export const SnapshotBuilder = function SnapshotBuilder(
   this: unknown,
@@ -126,6 +140,7 @@ export type {
   GuestFlush,
   SnapshotState,
   SnapshotVerifyReport,
+  SnapshotVerifyCoverage,
 } from "./snapshot.js";
 
 // Local storage observations and runtime cache cleanup
@@ -185,6 +200,7 @@ import type {
   NapiHttpConnectProxyBuilder,
   NapiOutboundProxyBuilder,
   NapiRootDiskBuilder,
+  NapiInitOptionsBuilder,
   NapiRuleBuilder,
   NapiRuleDestinationBuilder,
   NapiSocks4ProxyBuilder,
@@ -233,11 +249,27 @@ export function setRuntimeLibkrunfwPath(path: string): void {
 
 // Errors
 export {
+  AgentClientError,
+  BootStartError,
+  ExecFailedError,
+  InvalidCursorError,
+  MissedRotationError,
+  NetworkBuilderError,
+  SnapshotAlreadyExistsError,
+  SnapshotImageMissingError,
+  SnapshotIntegrityError,
+  SnapshotMigrationError,
+  SnapshotNotFoundError,
+  SnapshotSandboxRunningError,
+  WindowsHostSetupError,
   CustomError,
   CloudHttpError,
   DatabaseError,
   ExecTimeoutError,
   StopTimeoutError,
+  ResizeTimeoutError,
+  ResizeWaitError,
+  type ResizeWaitFailure,
   HttpError,
   ImageError,
   ImageInUseError,
@@ -264,7 +296,14 @@ export {
   SandboxStopTimedOutError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  ServiceAlreadyExistsError,
+  ServiceError,
+  ServiceNotFoundError,
   SnapshotSourceRecoveryError,
+  SnapshotImportError,
+  SnapshotVerificationError,
+  SnapshotRemovalRecoveryError,
+  SnapshotGroupRemovalRecoveryError,
   TerminalError,
   UnsupportedOperationError,
   UnsupportedError,
@@ -272,9 +311,14 @@ export {
   VolumeNotFoundError,
 } from "./errors.js";
 export type {
+  ChangeState,
   MicrosandboxErrorCode,
   PublishedSnapshotArtifact,
+  ServiceErrorDetails,
+  ServiceErrorReason,
   SnapshotSourceRecoveryDetails,
+  SnapshotImportDetails,
+  SnapshotImportOutcome,
 } from "./errors.js";
 
 // Sizes
@@ -406,12 +450,22 @@ export const Rule = _Factories.Rule;
 export type Rule = _Types.Rule;
 
 export { Job, JobAttachment, JobError, JobLogStream, JobListBuilder, JobAttachOptionsBuilder } from "./jobs.js";
-export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState } from "./jobs.js";
+export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState, JobOutputSource } from "./jobs.js";
+
+export type {
+  ResizeOutcome,
+  ResizeObservation,
+  ResizeTarget,
+  ResizeOperation,
+  SandboxModificationResult,
+} from "./resize.js";
 
 export { diagnoseStorage } from "./storage-diagnosis.js";
 export type { StorageSelection, StorageDiagnosticStatus, StorageCandidate, StorageInspection, StorageSandboxDiagnosis, StorageDiagnosis } from "./storage-diagnosis.js";
 
 export type { StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection } from "./storage-recovery.js";
 
-export { Context, LocalContext, RemoteContext, LocalContextBuilder, RemoteContextBuilder, Sandboxes, Volumes, Snapshots } from "./context.js";
-export type { LocalContextOptions, RemoteContextOptions } from "./context.js";
+export { Context, LocalContext, RemoteContext, LocalContextBuilder, RemoteContextBuilder, Sandboxes, Volumes, Snapshots, Checkpoints } from "./context.js";
+export type { ComputeType, LocalContextOptions, RemoteContextOptions } from "./context.js";
+
+export type { SandboxConfigInspection, SandboxRuntimeInspection, RemoteSandboxInspection, LocalSandboxInspection, RemoteMountInspection, RemoteSecretInspection } from "./config-inspection.js";

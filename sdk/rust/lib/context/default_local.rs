@@ -26,10 +26,9 @@ struct ProcessContext {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// The shared local destination for resource shortcuts. Remote-only builds fail closed.
+/// The shared destination for explicit local selectors. Remote-only builds fail closed.
 ///
-/// This is a binding integration hook; applications normally use `Sandbox::builder`,
-/// `Volume::get`, etc. Explicit contexts never replace this destination.
+/// Bindings use this hook for their explicit local selectors.
 #[doc(hidden)]
 pub fn default_local_context() -> Arc<dyn Context> {
     let pid = std::process::id();
@@ -79,7 +78,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shortcuts_share_one_immutable_local_destination() {
+    fn explicit_local_calls_share_one_destination() {
         let first = default_local_context();
         let second = default_local_context();
         assert!(Arc::ptr_eq(&first, &second));

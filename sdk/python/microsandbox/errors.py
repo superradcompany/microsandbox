@@ -7,12 +7,26 @@ documented keyword arguments (for direct Python construction).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from microsandbox._microsandbox import CheckpointRemoveResult, SnapshotRemoveResult
+
+    from .types import ResourceResizeStatus
+
+from microsandbox.types import ChangeState, ServiceErrorReason
 
 
 class MicrosandboxError(Exception):
-    """Base exception for all microsandbox errors."""
+    """Base exception for all microsandbox errors.
+
+    ``changed`` is set on every error raised by Service create, update, enable,
+    disable, and remove. ``ChangeState.UNKNOWN`` means the change may have been
+    applied, so get and check the Service; it is ``None`` for other calls.
+    """
+
     code: str = "microsandbox-error"
+    changed: ChangeState | None = None
 
 
 class RuntimeNotInstalledError(MicrosandboxError):
@@ -85,6 +99,48 @@ class StopTimeoutError(MicrosandboxError, TimeoutError):
     code = "stop-timeout"
 
 
+class ResizeTimeoutError(MicrosandboxError, TimeoutError):
+    """A live resize did not converge within its budget; completion is unconfirmed.
+
+    The resize is not undone.
+
+    ``status`` is the last observed resize status, empty when no read completed
+    before the deadline.
+    """
+    code = "resize-timeout"
+
+    def __init__(
+        self, message: str, *, status: list[ResourceResizeStatus] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status: list[ResourceResizeStatus] = list(status) if status is not None else []
+
+
+ResizeWaitFailure = Literal[
+    "superseded", "interrupted", "history_unavailable",
+    "invalid_response", "observation_unavailable",
+]
+
+
+class ResizeWaitError(MicrosandboxError):
+    """Observation failed; this does not undo a resize or establish its final outcome."""
+    code = "resize-wait"
+
+    def __init__(
+        self, message: str, *, reason: ResizeWaitFailure, sandbox: str | None = None,
+        operation_id: str | None = None, status: list[ResourceResizeStatus] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.sandbox = sandbox
+        self.operation_id = operation_id
+        self.status = list(status) if status is not None else []
+
+    @classmethod
+    def _from_native(cls, payload: dict) -> ResizeWaitError:
+        return cls(**payload)
+
+
 class ExecFailedError(MicrosandboxError):
     """Command execution failed."""
     code = "exec-failed"
@@ -103,6 +159,49 @@ class PathNotFoundError(MicrosandboxError):
 class VolumeNotFoundError(MicrosandboxError):
     """Volume does not exist."""
     code = "volume-not-found"
+
+
+class ServiceNotFoundError(MicrosandboxError):
+    """No visible Service has this slug."""
+    code = "service-not-found"
+
+
+class ServiceAlreadyExistsError(MicrosandboxError):
+    """The slug is unavailable."""
+    code = "service-already-exists"
+
+
+class ServiceError(MicrosandboxError):
+    """A Service change was refused, or its outcome is unknown.
+
+    Get and check the Service when ``changed`` is ``ChangeState.UNKNOWN``.
+    For ``ServiceErrorReason.OTHER``, ``raw_code``, ``raw_status``, and
+    ``raw_message`` hold the unrecognized refusal's code, HTTP status, and message.
+    ``retry_after`` is the retry delay in seconds returned with the refusal, or ``None``.
+    """
+
+    code = "service"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        slug: str,
+        reason: str,
+        retry_after: float | None,
+        changed: str,
+        raw_code: str | None = None,
+        raw_status: int | None = None,
+        raw_message: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.slug = slug
+        self.reason = ServiceErrorReason(reason)
+        self.retry_after = retry_after
+        self.changed = ChangeState(changed)
+        self.raw_code = raw_code
+        self.raw_status = raw_status
+        self.raw_message = raw_message
 
 
 class ImageNotFoundError(MicrosandboxError):
@@ -173,6 +272,65 @@ class PublishedSnapshotArtifact:
     path: str
     snapshot_id: str
     digest: str
+    # Missing in older producers and archive-only captures. Never inferred from current head.
+    head_update: dict | None = None
+
+
+class SnapshotRemovalRecoveryError(MicrosandboxError):
+    """Removal committed; result is authoritative even though cleanup needs recovery."""
+
+    code = "snapshot-removal-recovery"
+
+    def __init__(self, message: str, result: CheckpointRemoveResult, detail: str) -> None:
+        super().__init__(message)
+        self.result = result
+        self.detail = detail
+
+
+class SnapshotGroupRemovalRecoveryError(MicrosandboxError):
+    """Removal committed; result is authoritative even though cleanup needs recovery."""
+
+    code = "snapshot-group-removal-recovery"
+
+    def __init__(self, message: str, result: SnapshotRemoveResult, detail: str) -> None:
+        super().__init__(message)
+        self.result = result
+        self.detail = detail
+
+
+class SnapshotVerificationError(MicrosandboxError):
+    """Verification failed; report retains every selected member and its findings."""
+    code = "snapshot-verification"
+
+    def __init__(self, message: str, report: dict) -> None:
+        super().__init__(message)
+        self.report = report
+
+
+class SnapshotImportError(MicrosandboxError):
+    """An import failure retaining whether the entire batch committed.
+
+    ``unknown`` requires recovery before assuming either success or no changes.
+    """
+
+    code = "snapshot-import"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation_id: str,
+        archives: list[str],
+        group_path: str | None,
+        outcome: Literal["not_committed", "committed", "unknown"],
+        detail: str,
+    ) -> None:
+        super().__init__(message)
+        self.operation_id = operation_id
+        self.archives = list(archives)
+        self.group_path = group_path
+        self.outcome = outcome
+        self.detail = detail
 
 
 class SnapshotSourceRecoveryError(MicrosandboxError):

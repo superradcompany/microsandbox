@@ -5,15 +5,17 @@
 //! `Vm::enter()` from msb_krun. It **never returns** — the VMM calls
 //! `_exit()` on guest shutdown after running exit observers.
 
+#[path = "snapshot_editor.rs"]
+mod snapshot_editor;
+pub use snapshot_editor::enter_snapshot_editor;
+
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::num::NonZero;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(unix)]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use microsandbox_db::DbWriteConnection;
@@ -61,7 +63,7 @@ pub use crate::launch::{
     STARTUP_FD, StartupCommand,
 };
 use crate::logging::LogLevel;
-use crate::metrics::run_metrics_sampler;
+use crate::metrics::{ConfirmedMemoryLimit, run_metrics_sampler};
 use crate::relay::{self, AgentRelay};
 use crate::{RuntimeError, RuntimeResult};
 
@@ -122,6 +124,9 @@ struct AgentConsoleBackends {
 /// agent relay, lifecycle policies). Passed to [`enter()`].
 #[derive(Debug)]
 pub struct Config {
+    /// Optional private source from a capable launcher; never trusted as guest resource completion.
+    pub retention_source: Option<crate::retention::RetentionSource>,
+
     /// Internal per-boot agent transport policy.
     #[doc(hidden)]
     pub agent_transport: AgentTransportProfile,
@@ -473,7 +478,9 @@ type VmBuildOutput = (
     GuestBootstrap,
     BindIdentityMapRegistration,
     Option<crate::checkpoint::RestoredAgentState>,
-    std::collections::BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
+    crate::checkpoint::CheckpointDeviceBindings,
+    Option<std::fs::File>,
+    super::storage_observation::MountedFilesystemInventory,
 );
 
 /// Public runtime endpoints held back until a restored guest is activated.
@@ -772,23 +779,12 @@ fn run(
     crate::checkpoint::layout::require_ready(&config.runtime_dir).map_err(RuntimeError::Custom)?;
     let guest_dir =
         crate::checkpoint::layout::guest_root(&config.runtime_dir).map_err(RuntimeError::Custom)?;
-    crate::checkpoint::layout::real_directory(&guest_dir.join("scripts"), true)
-        .map_err(RuntimeError::Custom)?;
-    crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm).map_err(
-        |error| RuntimeError::Custom(format!("recover runtime-owned root disk: {error}")),
-    )?;
-    recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks)?;
-    // Heartbeats are per boot, while the runtime directory persists across starts.
-    heartbeat::clear_stale(&guest_dir)?;
-    if config.vm.checkpoint_restore.is_some() {
-        prepare_runtime_restore_namespace(&guest_dir, config.vm.rootfs_vmdk.is_some())?;
-    }
-
     let socket_paths = RuntimeSocketPaths::new(&config.run_dir, &config.sandbox_name);
     #[cfg(unix)]
     socket_paths.prepare_canonical_directory(&config.agent_sock_path)?;
 
     // Create the relay and persist the run record with a single runtime hop.
+    let boot_id = super::control::RuntimeControlExecutor::new_boot_identity();
     let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
         let relay = async {
             if config.vm.checkpoint_restore.is_some() {
@@ -810,10 +806,65 @@ fn run(
             &config.sandbox_db_path,
             config.sandbox_db_connect_timeout_secs,
         );
-        let (relay, db) = tokio::try_join!(relay, db)?;
-        let run_db_id = insert_run(&db, config.sandbox_id, pid).await?;
+        let (mut relay, db) = tokio::try_join!(relay, db)?;
+        let (run_db_id, bindings, exec_limits) = insert_run(&db, config.sandbox_id, pid).await?;
+        if let Some(limits) = exec_limits {
+            // Old SDKs may send ordinary bootstrap defaults on restart. The catalog owns
+            // this sandbox's policy; require the same Ready on both cold and full boots.
+            config.vm.bootstrap.exec_limits = Some(limits);
+            relay.required_exec_limits = Some(limits);
+        }
+        relay.install_command_bindings(bindings, &boot_id);
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
+
+    // This fence is durable before VM construction/activation or recovery can change guest
+    // backing state. It does not change the shared catalog schema or active_config cleanup.
+    let retention = (|| -> RuntimeResult<crate::retention::RetentionJournal> {
+        let owner = tokio_rt.block_on(crate::retention::RetentionOwner::for_run(
+            &db,
+            &config.sandbox_db_path,
+            config.sandbox_id,
+            run_db_id,
+            boot_id,
+        ))?;
+        crate::retention::RetentionJournal::begin_start(
+            config.runtime_dir.parent().ok_or_else(|| {
+                RuntimeError::Custom("runtime directory has no sandbox parent".into())
+            })?,
+            owner,
+        )
+        .map_err(RuntimeError::Io)
+    })();
+    let retention = match retention {
+        Ok(retention) => retention,
+        Err(error) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(RuntimeError::Custom(format!(
+                "start refused before guest activation: cannot record configuration transition: {error}"
+            )));
+        }
+    };
+    let recovery = (|| -> RuntimeResult<()> {
+        crate::checkpoint::layout::real_directory(&guest_dir.join("scripts"), true)
+            .map_err(RuntimeError::Custom)?;
+        // Heartbeats are per boot, while the runtime directory persists across starts.
+        heartbeat::clear_stale(&guest_dir)?;
+        if config.vm.checkpoint_restore.is_some() {
+            prepare_runtime_restore_namespace(&guest_dir, config.vm.rootfs_vmdk.is_some())?;
+        }
+        crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm)
+            .map_err(|error| {
+                RuntimeError::Custom(format!("recover runtime-owned root disk: {error}"))
+            })?;
+        recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks)
+    })();
+    if let Err(error) = recovery {
+        // Recovery now follows the durable start fence and run insertion. Preserve its
+        // uncertain evidence, but do not leave this failed attempt recorded as a live run.
+        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+        return Err(error);
+    }
 
     let relay_idle = relay.idle_state();
     relay = relay.with_boot_error_log_dir(config.log_dir.clone());
@@ -936,6 +987,10 @@ fn run(
     // Build the VM with an exit observer for DB cleanup and socket removal.
     // The on_exit closure runs synchronously on the VMM thread before _exit().
     let rt_handle = tokio_rt.handle().clone();
+    // The builder installs the callback before it returns the VM's metrics handle.
+    // Populate this cell before entering the VM so a panic is visible even during shutdown.
+    let exit_observations = Arc::new(OnceLock::<msb_krun::MetricsHandle>::new());
+    let observed_exit = Arc::clone(&exit_observations);
     let exit_db = db.clone();
     let exit_sandbox_id = config.sandbox_id;
     let exit_run_id = run_db_id;
@@ -945,6 +1000,12 @@ fn run(
     let exit_socket_paths = socket_paths.clone();
     let exit_sandbox_name = config.sandbox_name.clone();
     let exit_sandboxes_dir = config.sandboxes_dir.clone();
+    let exit_retention_directory = config
+        .runtime_dir
+        .parent()
+        .expect("retention preparation validated the runtime parent")
+        .to_path_buf();
+    let exit_retention_boot = retention.record().owner.runtime_boot_id.clone();
     let exit_log_writer = exec_log_writer.clone();
     // Capture the activated writer so the exit observer can release the slot
     // without re-opening the registry (saving two mmap syscalls and a
@@ -995,22 +1056,33 @@ fn run(
             use sea_orm::QueryFilter;
             use sea_orm::sea_query::Expr;
 
-            // Map (exit_code, reason tag) → TerminationReason.
             let reason_tag = exit_reason_for_observer.load(std::sync::atomic::Ordering::SeqCst);
-            let reason = match reason_tag {
-                EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
-                EXIT_REASON_AGENT_UNRESPONSIVE => run_entity::TerminationReason::AgentUnresponsive,
-                EXIT_REASON_SHUTDOWN_REQUESTED => run_entity::TerminationReason::ShutdownRequested,
-                EXIT_REASON_STARTUP_COMMAND_FAILED => run_entity::TerminationReason::Failed,
-                EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
-                EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
-                EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
-                _ if exit_code == 0 => run_entity::TerminationReason::Completed,
-                _ => run_entity::TerminationReason::Failed,
-            };
+            let panicked = observed_exit
+                .get()
+                .is_some_and(msb_krun::MetricsHandle::guest_panicked);
+            if panicked {
+                tracing::error!(sandbox = %exit_sandbox_name, "guest kernel reported a panic");
+            }
+            let reason = termination_reason(reason_tag, exit_code, panicked);
 
             rt_handle.block_on(async {
                 let now = chrono::Utc::now().naive_utc();
+
+                // Preserve catalog provenance before terminal_sandbox_update clears it. This
+                // reads the durable generation, so exit never waits for the control mutex of
+                // an operation that may itself be waiting for the VM to finish exiting.
+                if let Err(error) = crate::retention::seal_terminal(
+                    &exit_db,
+                    &exit_retention_directory,
+                    exit_sandbox_id,
+                    exit_run_id,
+                    Some(&exit_retention_boot),
+                    crate::retention::RetentionTerminalOrigin::RuntimeExit,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "terminal configuration evidence unavailable");
+                }
 
                 if let Err(error) = exit_writeback_guard.release(&exit_db).await {
                     tracing::warn!(%error, "release writeback pressure membership at VM exit");
@@ -1144,7 +1216,9 @@ fn run(
         resolved_bootstrap,
         bind_identity_map,
         mut restored_agent,
-        owned_directory_checkpoints,
+        device_bindings,
+        runtime_script_root,
+        mounted_filesystems,
     ) = match build_result {
         Ok(vm) => vm,
         Err(e) => {
@@ -1196,13 +1270,18 @@ fn run(
         let _ = bind_identity_map;
     }
     let krun_metrics_handle = vm.metrics_handle();
+    let _ = exit_observations.set(krun_metrics_handle.clone());
     let exit_handle = vm.exit_handle();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
     // Serve every host-side control operation through one runtime-owned executor and endpoint.
     // Restore constructs the executor now but withholds both public endpoints until the guest has
     // crossed its VMGenID/workload activation barrier.
-    let (restore_endpoint_publication, managed_jobs) = {
+    let confirmed_memory_limit = ConfirmedMemoryLimit::boot(
+        u64::from(config.vm.memory_mib) << 20,
+        krun_metrics_handle.clone(),
+    );
+    let (restore_endpoint_publication, activation_control, managed_jobs) = {
         let control = vm.control_handle();
         #[cfg(feature = "net")]
         let secrets = _network_secrets_handle.clone();
@@ -1224,7 +1303,12 @@ fn run(
             restored_agent
                 .as_mut()
                 .and_then(|agent| agent.inherited_memory.take()),
-            owned_directory_checkpoints,
+            device_bindings,
+            confirmed_memory_limit.clone(),
+            runtime_script_root,
+            mounted_filesystems,
+            retention,
+            db.clone(),
         );
         let context = super::control::ControlContext {
             executor: match executor {
@@ -1237,6 +1321,10 @@ fn run(
                 }
             },
         };
+        // Fresh evidence also confirms restored hotplug capacity without inventing a resize
+        // operation in the new runtime. Sleeping observers cannot retain a finished runtime.
+        context.executor.start_resize_observer();
+        let activation_control = Arc::clone(&context.executor);
         let managed_jobs = context.executor.jobs();
         if restored_agent.is_some() {
             (
@@ -1246,6 +1334,7 @@ fn run(
                     sandbox_name: config.sandbox_name.clone(),
                     control: context,
                 }),
+                activation_control,
                 managed_jobs,
             )
         } else {
@@ -1261,7 +1350,7 @@ fn run(
                 let _ = socket_paths.remove_canonical_artifacts();
                 return Err(error);
             }
-            (None, managed_jobs)
+            (None, activation_control, managed_jobs)
         }
     };
 
@@ -1374,6 +1463,7 @@ fn run(
     let restore_runtime_dir = config.runtime_dir.clone();
     let relay_boot_log_dir = config.log_dir.clone();
     let restore_startup_progress = startup_progress.clone();
+    let retention_source = config.retention_source.take();
     tokio_rt.spawn(async move {
         let ready_result = tokio::task::spawn_blocking(move || {
             if let (Some(restored), Some(control)) =
@@ -1388,6 +1478,11 @@ fn run(
             } else {
                 relay.wait_ready()?;
             }
+            // No public Ready is released until confirmation is durable. Failure follows the
+            // existing readiness-failure termination path, including for legacy SDK callers.
+            activation_control
+                .confirm_activation(retention_source)
+                .map_err(RuntimeError::Custom)?;
             Ok::<_, RuntimeError>(relay)
         })
         .await;
@@ -1435,6 +1530,7 @@ fn run(
                         max_cpus: metrics_max_cpus,
                         krun_metrics: krun_metrics_handle,
                         vm_control: metrics_vm_control,
+                        memory_limit: confirmed_memory_limit,
                         network_metrics: network_metrics_handle,
                         upper_host_path,
                     }));
@@ -1954,12 +2050,14 @@ fn build_vm(
     let agent_queue_size = agent_primary_queue_size(bulk_console_backend.is_some());
     let vm = &config.vm;
     vm.validate_custom_backends()?;
-    let mut owned_directory_checkpoints = std::collections::BTreeMap::new();
+    let mut device_bindings = crate::checkpoint::CheckpointDeviceBindings::default();
     // Collects the runtime-owned bootstrap rootfs directories created for
     // unix block-root sandboxes; the caller reclaims them if this VM is
     // never started, and the exit observer reclaims them at teardown.
     #[cfg(not(unix))]
     let _ = trampoline_rootfs_dirs;
+    let runtime_script_root;
+    let mut mounted_filesystems = super::storage_observation::MountedFilesystemInventory::default();
     // Decode once before constructing devices: unavailable disks need the exact
     // captured capacity/features, never guessed geometry or a temporary backing.
     let prepared_restore = vm
@@ -2183,6 +2281,16 @@ fn build_vm(
         };
         let backend = PassthroughFs::new(cfg)
             .map_err(|e| RuntimeError::Custom(format!("runtime mount: {e}")))?;
+        // Keep observation tied to the mounted inode even if a host renames its pathname.
+        // Failure only makes this optional evidence unknown; legacy launch remains supported.
+        #[cfg(unix)]
+        {
+            runtime_script_root = backend.pin_runtime_script_root().ok();
+        }
+        #[cfg(not(unix))]
+        {
+            runtime_script_root = None;
+        }
         builder = builder.fs(move |fs| fs.tag(&runtime_tag).custom(Box::new(backend)));
     }
 
@@ -2327,6 +2435,11 @@ fn build_vm(
                     host_path.display()
                 ))
             })?;
+        mounted_filesystems.record_available(
+            &tag,
+            super::storage_observation::MountedFilesystemKind::File,
+            parsed.quota_bytes,
+        );
         builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
     }
 
@@ -2421,7 +2534,9 @@ fn build_vm(
                     .set_restore(&restore.closure.join("owned").join(&tag))
                     .map_err(|error| RuntimeError::Custom(format!("owned mount {tag}: {error}")))?;
             }
-            owned_directory_checkpoints.insert(tag.clone(), checkpoint.clone());
+            device_bindings
+                .directories
+                .insert(tag.clone(), checkpoint.clone());
         }
         // Explicit guest owner for host files with no per-file override. Parsing
         // guarantees uid/gid come as a pair, so this is Some only when both are set.
@@ -2499,6 +2614,11 @@ fn build_vm(
                 RuntimeError::Custom(format!("mount {tag}: {e}"))
             }
         })?;
+        mounted_filesystems.record_available(
+            &tag,
+            super::storage_observation::MountedFilesystemKind::Directory,
+            parsed.quota_bytes,
+        );
         builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
     }
 
@@ -2741,6 +2861,13 @@ fn build_vm(
             crate::checkpoint::layout::real_directory(&tls_dir, true)
                 .map_err(RuntimeError::Custom)?;
             if let Some(ca_pem) = network.ca_cert_pem() {
+                use rustls::pki_types::{CertificateDer, pem::PemObject};
+                use sha2::{Digest, Sha256};
+                let der = CertificateDer::from_pem_slice(&ca_pem).map_err(|e| {
+                    RuntimeError::Custom(format!("read active interception CA: {e}"))
+                })?;
+                device_bindings.intercept_ca_sha256 =
+                    Some(hex::encode(Sha256::digest(der.as_ref())));
                 crate::checkpoint::layout::write_guest_certificate(
                     &tls_dir.join("ca.pem"),
                     ca_pem.as_ref(),
@@ -2849,6 +2976,12 @@ fn build_vm(
         builder = builder.fs(move |fs| fs.tag(&tag).custom(backend));
     }
 
+    if let Some(prepared) = &prepared_restore {
+        prepared
+            .validate_intercept_ca(device_bindings.intercept_ca_sha256.as_deref())
+            .map_err(RuntimeError::Custom)?;
+    }
+
     let mut vm = builder
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
@@ -2894,7 +3027,9 @@ fn build_vm(
         bootstrap,
         bind_identity_map,
         restored_agent,
-        owned_directory_checkpoints,
+        device_bindings,
+        runtime_script_root,
+        mounted_filesystems,
     ))
 }
 
@@ -3078,13 +3213,17 @@ fn bootstrap_trampoline_backend(
     sandbox_dir: &Path,
 ) -> RuntimeResult<(PassthroughFs, PathBuf)> {
     let parent = sandbox_dir.join(BOOTSTRAP_ROOTFS_DIR);
-    std::fs::create_dir_all(&parent).map_err(|error| {
+    microsandbox_utils::private_file::create_private_dir_all(&parent).map_err(|error| {
         RuntimeError::Custom(format!("create bootstrap trampoline directory: {error}"))
     })?;
 
     let trampoline = tempfile::tempdir_in(parent)?;
+    microsandbox_utils::private_file::harden_existing_directory(trampoline.path())?;
     for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
-        std::fs::create_dir(trampoline.path().join(directory)).map_err(|error| {
+        microsandbox_utils::private_file::create_private_directory(
+            &trampoline.path().join(directory),
+        )
+        .map_err(|error| {
             RuntimeError::Custom(format!("create bootstrap mountpoint {directory}: {error}"))
         })?;
     }
@@ -3158,22 +3297,17 @@ fn trampoline_rootfs_cleanup_on_exit(
 fn prepare_runtime_restore_namespace(runtime_dir: &Path, oci_root: bool) -> RuntimeResult<()> {
     if oci_root {
         for directory in ["rootfs", "rootfs/lower", "rootfs/upperfs"] {
-            crate::checkpoint::layout::real_directory(&runtime_dir.join(directory), true).map_err(
-                |error| {
+            crate::checkpoint::layout::private_directory(&runtime_dir.join(directory), true)
+                .map_err(|error| {
                     RuntimeError::Custom(format!(
                         "create restored runtime mountpoint {directory}: {error}"
                     ))
-                },
-            )?;
+                })?;
         }
     }
 
     let heartbeat = runtime_dir.join("heartbeat.json");
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&heartbeat)
-    {
+    match microsandbox_utils::private_file::create_new(&heartbeat) {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(RuntimeError::Custom(format!(
@@ -3393,8 +3527,37 @@ async fn connect_db(
     .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))
 }
 
+fn termination_reason(
+    reason_tag: u8,
+    exit_code: i32,
+    guest_panicked: bool,
+) -> run_entity::TerminationReason {
+    if guest_panicked {
+        return run_entity::TerminationReason::Failed;
+    }
+    match reason_tag {
+        EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
+        EXIT_REASON_AGENT_UNRESPONSIVE => run_entity::TerminationReason::AgentUnresponsive,
+        EXIT_REASON_SHUTDOWN_REQUESTED => run_entity::TerminationReason::ShutdownRequested,
+        EXIT_REASON_STARTUP_COMMAND_FAILED => run_entity::TerminationReason::Failed,
+        EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
+        EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
+        EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
+        _ if exit_code == 0 => run_entity::TerminationReason::Completed,
+        _ => run_entity::TerminationReason::Failed,
+    }
+}
+
 /// Insert a run record into the database.
-async fn insert_run(db: &DbWriteConnection, sandbox_id: i32, pid: u32) -> RuntimeResult<i32> {
+async fn insert_run(
+    db: &DbWriteConnection,
+    sandbox_id: i32,
+    pid: u32,
+) -> RuntimeResult<(
+    i32,
+    Option<microsandbox_protocol::exec_bindings::DeferredCommandBindings>,
+    Option<microsandbox_types::ExecLimits>,
+)> {
     let now = chrono::Utc::now().naive_utc();
     let record = run_entity::ActiveModel {
         sandbox_id: Set(sandbox_id),
@@ -3403,11 +3566,23 @@ async fn insert_run(db: &DbWriteConnection, sandbox_id: i32, pid: u32) -> Runtim
         started_at: Set(Some(now)),
         ..Default::default()
     };
-    let result = run_entity::Entity::insert(record)
-        .exec(db)
-        .await
-        .map_err(|e| RuntimeError::Custom(format!("insert run: {e}")))?;
-    Ok(result.last_insert_id)
+    db.transaction(|txn| {
+        let record = record.clone();
+        async move {
+            let policy = crate::command_bindings::admit(&txn, sandbox_id).await?;
+            let limits = crate::restored_exec_limits::admit(&txn, sandbox_id).await?;
+            let result = run_entity::Entity::insert(record).exec(&txn).await?;
+            if limits.is_some() {
+                crate::restored_exec_limits::set_admitting(&txn, sandbox_id, false).await?;
+            }
+            if policy.is_some() {
+                crate::command_bindings::set_admitting(&txn, sandbox_id, false).await?;
+            }
+            Ok((txn, (result.last_insert_id, policy, limits)))
+        }
+    })
+    .await
+    .map_err(|e: sea_orm::DbErr| RuntimeError::Custom(format!("insert run: {e}")))
 }
 
 /// Mark a run record as failed (Terminated + InternalError) on startup error.
@@ -3976,6 +4151,28 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    #[test]
+    fn confirmed_panic_takes_precedence_over_concurrent_shutdown() {
+        use super::{EXIT_REASON_COMPLETED, EXIT_REASON_SHUTDOWN_REQUESTED, termination_reason};
+        use microsandbox_db::entity::run::TerminationReason;
+        assert_eq!(
+            termination_reason(EXIT_REASON_COMPLETED, 0, false),
+            TerminationReason::Completed
+        );
+        assert_eq!(
+            termination_reason(EXIT_REASON_SHUTDOWN_REQUESTED, 0, false),
+            TerminationReason::ShutdownRequested
+        );
+        for tag in [EXIT_REASON_COMPLETED, EXIT_REASON_SHUTDOWN_REQUESTED] {
+            for code in [0, 1] {
+                assert_eq!(
+                    termination_reason(tag, code, true),
+                    TerminationReason::Failed
+                );
+            }
+        }
+    }
+
     fn fs_context() -> Context {
         Context {
             uid: 0,
@@ -4422,6 +4619,7 @@ mod tests {
         };
         shape_rootfs(&mut vm);
         super::Config {
+            retention_source: None,
             agent_transport: AgentTransportProfile::default(),
             sandbox_name: "trampoline-test".into(),
             sandbox_id: 1,

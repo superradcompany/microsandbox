@@ -42,14 +42,24 @@ module Microsandbox
     end
 
     def self.from_env
-      new(url: ENV["MSB_API_URL"], api_key: ENV["MSB_API_KEY"])
+      new
     end
   end
 end
 
 module Microsandbox
+  class Checkpoint
+    def self.group_head(group)
+      local.group_head(group)
+    end
+
+    def self.set_group_head(group, id)
+      local.set_group_head(group, id)
+    end
+  end
+
   # Select before creation/lookup; returned collections retain their context.
-  { Sandbox => :sandboxes, Volume => :volumes, Snapshot => :snapshots }.each do |resource, collection|
+  { Sandbox => :sandboxes, Volume => :volumes, Snapshot => :snapshots, Checkpoint => :checkpoints }.each do |resource, collection|
     resource.define_singleton_method(:local) { LocalContext.new.public_send(collection) }
     resource.define_singleton_method(:remote) { RemoteContext.from_env.public_send(collection) }
   end

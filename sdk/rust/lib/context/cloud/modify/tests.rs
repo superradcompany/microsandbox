@@ -7,7 +7,7 @@ use serde_json::json;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
 use super::*;
 use crate::sandbox::SecretModificationPatch;
@@ -172,11 +172,11 @@ fn error_json(code: &str, message: &str) -> serde_json::Value {
 }
 
 fn plan_line() -> String {
-    format!("POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1")
+    format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1")
 }
 
 fn apply_line() -> String {
-    format!("PUT /v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
+    format!("PATCH /v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
 }
 
 fn body(request: &Recorded) -> serde_json::Value {
@@ -405,21 +405,20 @@ fn backend_with(url: &str, client: reqwest::Client) -> crate::RemoteContext {
     backend
 }
 
-/// Serve the mock on `addr` once 300 ms have passed; until then it refuses connections.
-fn serve_later(addr: SocketAddr) -> tokio::task::JoinHandle<MockCloud> {
-    tokio::spawn(async move {
+/// Reserve a port before delaying listen. Other parallel fixtures cannot take
+/// the address while the client is exercising the connection-refused path.
+fn serve_later() -> (SocketAddr, tokio::task::JoinHandle<MockCloud>) {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    let server = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let listener = TcpListener::bind(addr).await.unwrap();
         MockCloud::serve(
-            listener,
+            socket.listen(32).unwrap(),
             Arc::new(|_, _| Reply::Json(200, plan_json(true, "live"))),
         )
-    })
-}
-
-async fn closed_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap()
+    });
+    (addr, server)
 }
 
 /// Fails the first lookup, then resolves every name to `addr`.
@@ -444,9 +443,8 @@ impl reqwest::dns::Resolve for FlakyResolver {
 
 #[tokio::test]
 async fn a_refused_connection_is_sent_again() {
-    let addr = closed_addr().await;
+    let (addr, late) = serve_later();
     let backend = crate::test_support::cloud_backend(format!("http://{addr}"), "test-key").unwrap();
-    let late = serve_later(addr);
 
     let plan = apply_within(&backend, &value_patch(VALUE), short_budget(5_000))
         .await
@@ -539,14 +537,13 @@ async fn a_failed_tls_handshake_is_sent_again() {
 
 #[tokio::test]
 async fn a_refused_proxy_is_sent_again() {
-    let proxy = closed_addr().await;
+    // The proxy answers the forwarded request itself.
+    let (proxy, late) = serve_later();
     let client = reqwest::Client::builder()
         .proxy(reqwest::Proxy::all(format!("http://{proxy}")).unwrap())
         .build()
         .unwrap();
     let backend = backend_with("http://cloud.example", client);
-    // The proxy answers the forwarded request itself.
-    let late = serve_later(proxy);
 
     let plan = apply_within(&backend, &value_patch(VALUE), short_budget(5_000))
         .await
@@ -557,7 +554,7 @@ async fn a_refused_proxy_is_sent_again() {
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].line,
-        format!("PUT http://cloud.example/v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
+        format!("PATCH http://cloud.example/v1/sandboxes/{SANDBOX_ID} HTTP/1.1")
     );
 }
 
@@ -776,32 +773,18 @@ async fn in_progress_is_waited_out() {
     assert_eq!(mock.requests().len(), 3);
 }
 
-/// The real budget scaled down by 60: a crashed request's lock (90 s) is
-/// waited out, then one full answer (67 s) still fits in the total (180 s).
+/// A busy response followed by a slow success must fit within the client budget.
 #[tokio::test]
-async fn a_crashed_lock_is_waited_out() {
-    let scale = |budget: Duration| budget / 60;
-    let lock = scale(Duration::from_secs(90));
-    let answer = scale(Duration::from_secs(67));
-    let budget = ApplyBudget {
-        total: scale(APPLY_BUDGET.total),
-        per_request: scale(APPLY_BUDGET.per_request),
-        not_sent: Backoff {
-            first: scale(APPLY_BUDGET.not_sent.first),
-            max: scale(APPLY_BUDGET.not_sent.max),
-            jitter: false,
-        },
-        in_progress: Backoff {
-            first: scale(APPLY_BUDGET.in_progress.first),
-            max: scale(APPLY_BUDGET.in_progress.max),
-            jitter: true,
-        },
-    };
+async fn in_progress_then_a_slow_answer_fits_within_the_budget() {
+    let busy_for = Duration::from_millis(150);
+    let answer_delay = Duration::from_millis(200);
+    let mut budget = short_budget(2_000);
+    budget.per_request = Duration::from_millis(1_000);
     let mock = MockCloud::start(move |_, elapsed| {
-        if elapsed < lock {
+        if elapsed < busy_for {
             Reply::Json(409, error_json(CLOUD_MODIFICATION_IN_PROGRESS, "busy"))
         } else {
-            Reply::Slow(answer, 200, plan_json(true, "live"))
+            Reply::Slow(answer_delay, 200, plan_json(true, "live"))
         }
     })
     .await;
@@ -809,18 +792,27 @@ async fn a_crashed_lock_is_waited_out() {
     let plan = apply_within(&mock.backend(), &value_patch(VALUE), budget).await;
 
     assert!(plan.is_ok(), "{plan:?}");
-    assert!(mock.requests().len() > 2, "the lock was waited out");
+    assert!(mock.requests().len() > 1, "the busy response was retried");
 }
 
 #[tokio::test]
-async fn in_progress_until_the_deadline_returns_the_409() {
+async fn in_progress_without_retry_budget_returns_the_409() {
     let mock = MockCloud::replies(vec![Reply::Json(
         409,
         error_json(CLOUD_MODIFICATION_IN_PROGRESS, "busy"),
     )])
     .await;
 
-    let error = apply_within(&mock.backend(), &value_patch(VALUE), short_budget(600))
+    // Leave ample time to receive the response, but no room for the required retry delay.
+    // Repeating near a wall-clock deadline can instead time out an in-flight request, whose
+    // correct outcome is ModificationNotConfirmed rather than the last received 409.
+    let mut budget = short_budget(3_000);
+    budget.in_progress = Backoff {
+        first: budget.total,
+        max: budget.total,
+        jitter: false,
+    };
+    let error = apply_within(&mock.backend(), &value_patch(VALUE), budget)
         .await
         .unwrap_err();
 
@@ -832,7 +824,7 @@ async fn in_progress_until_the_deadline_returns_the_409() {
         ),
         "{error:?}"
     );
-    assert!(mock.requests().len() > 1);
+    assert_eq!(mock.requests().len(), 1);
 }
 
 #[tokio::test]

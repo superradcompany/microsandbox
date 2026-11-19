@@ -2,6 +2,10 @@
 
 require_relative "microsandbox/version"
 
+module Microsandbox
+  ServiceTarget = Data.define(:sandbox, :port)
+end
+
 # Platform gems stage the binary under lib/microsandbox/<major.minor>/ (one per
 # Ruby ABI); source builds produce the flat path. Try the ABI dir first. When
 # both misses are plain "no such file", either message will do; but a binary
@@ -21,6 +25,13 @@ end
 require_relative "microsandbox/errors"
 
 module Microsandbox
+  class Service
+    def target
+      value = _target
+      value && ServiceTarget.new(sandbox: value.fetch("sandbox"), port: value.fetch("port"))
+    end
+  end
+
   class HttpBuilder
     attr_reader :network_message, :secret_message, :response, :format, :message
 
@@ -32,6 +43,7 @@ module Microsandbox
     end
 
     def deny_response_format(value)
+      value = value.to_s if value.is_a?(Symbol)
       raise ArgumentError, "deny_response_format must be text or json" unless ["text", "json"].include?(value)
 
       @format = value
@@ -59,6 +71,22 @@ module Microsandbox
       @secret_message = value
       self
     end
+  end
+
+  # Progress is best effort. Always call result to obtain the sandbox or failure.
+  class PullSession
+    include Enumerable
+
+    def each
+      return enum_for(:each) unless block_given?
+
+      while (event = next_event)
+        yield event
+      end
+      self
+    end
+
+    def progress = enum_for(:each)
   end
 
   class SandboxBuilder

@@ -67,7 +67,6 @@ pub(super) async fn copy_snapshot_archive(
 mod tests {
     use crate::SaveOpts;
     use crate::context::LocalContext;
-    use crate::snapshot::LoadOptions;
 
     #[tokio::test]
     async fn previous_descriptor_exports_and_copies_without_changing_the_source() {
@@ -96,7 +95,7 @@ mod tests {
             let destination: std::sync::Arc<dyn crate::Context> = (backend).into();
 
             let snapshot = destination
-                .snapshots()
+                .checkpoints()
                 .open(source.to_string_lossy())
                 .await
                 .unwrap();
@@ -113,8 +112,8 @@ mod tests {
                 .await
                 .unwrap();
             let imported = destination
-                .snapshots()
-                .load(&archive, LoadOptions::default())
+                .checkpoints()
+                .load(&archive, None)
                 .await
                 .unwrap();
             let copy = temp.path().join("copy.tar.zst");
@@ -124,11 +123,7 @@ mod tests {
                 .save()
                 .await
                 .unwrap();
-            let copied = destination
-                .snapshots()
-                .load(&copy, LoadOptions::default())
-                .await
-                .unwrap();
+            let copied = destination.checkpoints().load(&copy, None).await.unwrap();
             assert_eq!(copied.manifest().await.unwrap(), manifest);
             assert!(copied.verify().await.is_ok());
             let manifest = copied.manifest().await.unwrap();

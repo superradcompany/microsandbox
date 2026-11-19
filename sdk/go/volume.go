@@ -69,6 +69,13 @@ func (v *Volume) Info(ctx context.Context) (*VolumeInfo, error) {
 	if err := v.inner.Operation(ctx, "info", nil, &result); err != nil {
 		return nil, wrapFFI(err)
 	}
+	// Older and current native inspections serialize Rust's variant names.
+	switch result.Kind {
+	case "Directory":
+		result.Kind = VolumeKindDir
+	case "Disk":
+		result.Kind = VolumeKindDisk
+	}
 	result.Labels = make(map[string]string, len(result.LabelPairs))
 	for _, pair := range result.LabelPairs {
 		result.Labels[pair[0]] = pair[1]
@@ -138,39 +145,39 @@ func (v *Volumes) Remove(ctx context.Context, name string) error {
 }
 
 func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volume, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Volumes().Create(ctx, name, opts...)
+	return selected.Volumes().Create(ctx, name, opts...)
 }
 func GetVolume(ctx context.Context, name string) (*Volume, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Volumes().Get(ctx, name)
+	return selected.Volumes().Get(ctx, name)
 }
 func GetDefaultVolume(ctx context.Context) (*Volume, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Volumes().GetDefault(ctx)
+	return selected.Volumes().GetDefault(ctx)
 }
 func ListVolumes(ctx context.Context) ([]*Volume, error) {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return nil, err
 	}
-	return local.Volumes().List(ctx)
+	return selected.Volumes().List(ctx)
 }
 func RemoveVolume(ctx context.Context, name string) error {
-	local, err := defaultLocalContext()
+	selected, err := configuredContext()
 	if err != nil {
 		return err
 	}
-	return local.Volumes().Remove(ctx, name)
+	return selected.Volumes().Remove(ctx, name)
 }
 
 // ---------------------------------------------------------------------------

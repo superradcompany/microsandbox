@@ -12,6 +12,8 @@ path = "lib/lib.rs"
 
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
+cap-primitives.workspace = true
+cap-std.workspace = true
 crossbeam-channel = "0.5"
 hex.workspace = true
 libc.workspace = true
@@ -24,6 +26,7 @@ serde.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [features]
 default = ["download-binaries", "embed-binaries"]

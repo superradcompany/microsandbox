@@ -96,21 +96,6 @@ async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
         .into_iter()
         .next()
         .context("sandbox inspection returned no result")?;
-    if item.status == StorageDiagnosticStatus::Ready {
-        if json {
-            // A no-op removes no originals and returns the same success shape as an import.
-            return done(
-                StorageRecovery {
-                    name,
-                    ready: true,
-                    originals_retained: true,
-                },
-                true,
-            );
-        }
-        println!("Storage for '{}' is already ready.", terminal_text(&name));
-        return Ok(());
-    }
     if item.reason == Some(StorageDiagnosticReason::IncompleteCreation) {
         return blocked(
             &item,
@@ -154,6 +139,26 @@ async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
             json,
             "Wait for the sandbox to finish stopping, then run repair again.",
         );
+    }
+    if item.status == StorageDiagnosticStatus::Ready {
+        if !cfg!(unix) {
+            if json {
+                return done(
+                    StorageRecovery {
+                        name,
+                        ready: true,
+                        originals_retained: true,
+                    },
+                    true,
+                );
+            }
+            println!("Storage for '{}' is already ready.", terminal_text(&name));
+            return Ok(());
+        }
+        let result =
+            microsandbox::Sandbox::recover_storage(&name, StorageRecoveryOptions::default())
+                .await?;
+        return done(result, json);
     }
     if item.status == StorageDiagnosticStatus::RecoveryRequired {
         return blocked(

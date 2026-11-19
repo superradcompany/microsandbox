@@ -83,9 +83,10 @@ export function binding(kind: ProviderKind): NativeBindings {
   throw new Error(`Install and import @microsandbox/${kind} before using ${kind} operations`);
 }
 
-/** Default-local shortcuts keep the first successfully resolved local library. */
+/** Select the library for this call; live objects retain their original library. */
 export function defaultBinding(): NativeBindings {
-  return defaultLocal ??= binding("local");
+  const kind = optionsBinding().configuredProviderKind();
+  return kind === "local" ? (defaultLocal ??= binding("local")) : binding("remote");
 }
 
 export function nativeOwner(value: object): NativeBindings | undefined {

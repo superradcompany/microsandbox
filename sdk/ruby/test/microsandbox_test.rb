@@ -15,9 +15,12 @@ class MicrosandboxTest < Test::Unit::TestCase
     SandboxStillRunningError SandboxStopTimedOutError StopTimeoutError
     ExecTimeoutError ExecFailedError
     FilesystemError PathNotFoundError
-    VolumeNotFoundError VolumeAlreadyExistsError ImageNotFoundError ImageInUseError ImagePullFailedError
+    VolumeNotFoundError VolumeAlreadyExistsError
+    ServiceNotFoundError ServiceAlreadyExistsError ServiceError
+    ImageNotFoundError ImageInUseError ImagePullFailedError
     SnapshotNotFoundError SnapshotAlreadyExistsError SnapshotSandboxRunningError
-    SnapshotImageMissingError SnapshotIntegrityError SnapshotSourceRecoveryError SnapshotMigrationError
+    SnapshotImageMissingError SnapshotIntegrityError SnapshotSourceRecoveryError SnapshotImportError SnapshotMigrationError
+    SnapshotVerificationError SnapshotRemovalRecoveryError SnapshotGroupRemovalRecoveryError
     NetworkPolicyError SecretViolationError TlsError
     IoError
     MetricsDisabledError MetricsUnavailableError
@@ -189,6 +192,21 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_equal "unsupported", error.code
   end
 
+  def test_secret_hash_rejects_unknown_keys_before_creation
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("invalid-secret", secrets: [
+        { env: "TOKEN", value: "private-value", allowed_host: "api.example", allow_host: "typo" }
+      ])
+    end
+    assert_match(/unknown keyword: :allow_host/, error.message)
+    assert_not_match(/private-value/, error.message)
+  end
+
+  def test_snapshot_head_read_rejects_member_selectors
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Checkpoint.group_head("app:previous") }
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Checkpoint.local.group_head("app:previous") }
+  end
+
   def test_snapshot_source_recovery_error_attributes_default_to_nil
     error = Microsandbox::SnapshotSourceRecoveryError.new("boom")
 
@@ -196,6 +214,15 @@ class MicrosandboxTest < Test::Unit::TestCase
       assert_nil error.public_send(name), name
     end
     assert_equal "snapshot-source-recovery", error.code
+  end
+
+  def test_snapshot_import_error_attributes_default_to_nil
+    error = Microsandbox::SnapshotImportError.new("boom")
+
+    %i[operation_id archives group_path outcome detail].each do |name|
+      assert_nil error.public_send(name), name
+    end
+    assert_equal "snapshot-import", error.code
   end
 
   def test_missing_sandbox_raises_sandbox_not_found_error
@@ -242,7 +269,7 @@ class MicrosandboxTest < Test::Unit::TestCase
       require "microsandbox"
       remote = Microsandbox::RemoteContext.new(api_key: "test-key", url: "http://127.0.0.1:9")
       settings = Microsandbox::HttpBuilder.new
-      settings.deny_message("legacy {host}").deny_response_format("json")
+      settings.deny_message("legacy {host}").deny_response_format(:json)
       abort "legacy config lost" unless settings.message == "legacy {host}" && settings.format == "json"
       settings.network_deny_message("dormant").secret_deny_message("secret")
       abort "secret message lost" unless settings.secret_message == "secret"

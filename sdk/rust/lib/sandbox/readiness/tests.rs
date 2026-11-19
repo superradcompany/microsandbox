@@ -104,6 +104,42 @@ async fn get_running_connects_existing_run_without_start_or_ownership() {
 }
 
 #[tokio::test]
+async fn get_preparation_retains_the_latest_inspected_runtime() {
+    let mut observed = sandbox("original", "running");
+    observed["spec"] = json!({
+        "image": "python",
+        "runtime": { "shell": "/bin/bash", "cmd": ["printf", "ready"], "workdir": "/tmp" }
+    });
+    let (context, server) = provider(vec![
+        (
+            "GET",
+            "/v1/sandboxes/by-name/task",
+            200,
+            sandbox("original", "running"),
+        ),
+        ("GET", "/v1/sandboxes/by-name/task", 200, observed),
+    ])
+    .await;
+    let resource = Sandbox::ctx(context.as_ref()).get("task").await.unwrap();
+    assert!(resource.binding.current().is_none());
+
+    resource.ensure_running().await.unwrap();
+
+    let session = resource.binding.current().unwrap();
+    assert_eq!(
+        session.config.spec.runtime.shell.as_deref(),
+        Some("/bin/bash")
+    );
+    assert_eq!(session.config.spec.runtime.workdir.as_deref(), Some("/tmp"));
+    assert_eq!(
+        session.config.spec.runtime.cmd,
+        Some(vec!["printf".into(), "ready".into()])
+    );
+    assert!(!resource.owns_lifecycle());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn get_running_starts_the_captured_identity_when_stopped() {
     let (context, server) = provider(vec![
         (
@@ -506,7 +542,7 @@ async fn status_wait_rejects_replacement_and_failed_observation() {
 }
 
 #[tokio::test]
-async fn retained_snapshot_rejects_replaced_source_before_capture() {
+async fn retained_checkpoint_rejects_replaced_source_before_capture() {
     let (context, server) = provider(vec![
         (
             "GET",
@@ -523,10 +559,142 @@ async fn retained_snapshot_rejects_replaced_source_before_capture() {
     ])
     .await;
     let resource = context.sandboxes().get("task").await.unwrap();
-    let result = resource.snapshot("saved").await;
+    let result = resource.checkpoint("saved").await;
     assert!(
         matches!(result, Err(MicrosandboxError::SandboxReplaced { .. })),
         "{result:?}"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn config_returns_fresh_typed_remote_observations_without_preparation() {
+    let mut first = sandbox("original", "stopped");
+    first["spec"] = crate::sandbox::config_inspection::tests::projection();
+    let mut second = first.clone();
+    second["spec"]["runtime"]["shell"] = json!("/bin/zsh");
+    let (context, server) = provider(vec![
+        ("GET", "/v1/sandboxes/by-name/task", 200, first.clone()),
+        ("GET", "/v1/sandboxes/by-name/task", 200, first),
+        ("GET", "/v1/sandboxes/by-name/task", 200, second),
+        (
+            "GET",
+            "/v1/sandboxes/by-name/task",
+            503,
+            json!({"message":"unavailable"}),
+        ),
+    ])
+    .await;
+    let resource = Sandbox::ctx(context.as_ref()).get("task").await.unwrap();
+    let captured = resource.config().await.unwrap();
+    assert_eq!(captured.runtime().shell.as_deref(), Some("/bin/bash"));
+    assert_eq!(
+        resource.config().await.unwrap().runtime().shell.as_deref(),
+        Some("/bin/zsh")
+    );
+    assert!(resource.config().await.is_err());
+    assert_eq!(captured.runtime().shell.as_deref(), Some("/bin/bash"));
+    assert!(resource.binding.current().is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_stop_waits_through_checkpoint_save() {
+    let (context, server) = provider(vec![
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "running"),
+        ),
+        (
+            "POST",
+            "/v1/sandboxes/original/stop",
+            200,
+            sandbox("original", "stopping"),
+        ),
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "saving_state"),
+        ),
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "saving_state"),
+        ),
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "stopped"),
+        ),
+    ])
+    .await;
+    // An exited VM with a checkpoint still saving is not stop completion.
+    context
+        .as_cloud()
+        .unwrap()
+        .stop_complete("original")
+        .await
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_stop_observes_in_progress_shutdown_without_resubmitting_stop() {
+    for status in ["stopping", "saving_state"] {
+        let (context, server) = provider(vec![
+            (
+                "GET",
+                "/v1/sandboxes/original",
+                200,
+                sandbox("original", status),
+            ),
+            (
+                "GET",
+                "/v1/sandboxes/original",
+                200,
+                sandbox("original", "stopped"),
+            ),
+        ])
+        .await;
+        context
+            .as_cloud()
+            .unwrap()
+            .stop_complete("original")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn remote_save_failure_propagates_without_inventing_completion() {
+    let (context, server) = provider(vec![
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "saving_state"),
+        ),
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            503,
+            json!({"message":"unavailable"}),
+        ),
+    ])
+    .await;
+    assert!(
+        context
+            .as_cloud()
+            .unwrap()
+            .stop_complete("original")
+            .await
+            .is_err()
     );
     server.await.unwrap();
 }

@@ -87,6 +87,8 @@ Create and boot a sandbox. Keyword arguments provide individual config fields; s
 
 The returned `Sandbox` is an async context manager. On scope exit, `async with` awaits graceful shutdown only for the local run this object owns; persisted state is retained except for configured ephemeral cleanup. Detached, independently connected, and cloud resources are not stopped. Cleanup checks the captured run and cannot stop a replacement run. A cleanup failure is raised, with any body exception retained as its cause.
 
+Creation also accepts `cpu_placement`, `placement_profile`, `thp`, `deployment_profile` and `proxy` through the default and context-bound factories.
+
 Pass `intercept_tls=True` to enable [TLS interception](/networking/tls) while preserving supplied network settings. `False` leaves them unchanged.
 
 <p className="msb-label">Parameters</p>
@@ -668,7 +670,7 @@ The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed di
 | `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
 | `resize_status` | `list[ResourceResizeStatus]` | Live resize outcomes after apply, using [`ResourceKind`](#resourcekind) and [`ResourceConvergenceState`](#resourceconvergencestate). Omitted when no live resize ran |
 
-A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
+A live CPU or memory resize can take a moment to settle. The immediate result's `resize_status` reports `accepted` after the runtime accepts each target; it does not confirm guest completion. The plan's `applied` field describes applying the modification request, not usable guest capacity.
 
 <p className="msb-label">Parameters</p>
 
@@ -739,6 +741,63 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
     <div className="msb-param-desc">The modification plan, applied unless <code>dry_run=True</code>.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">modify_with_resize_tracking()</span>
+
+```python
+async def modify_with_resize_tracking(self, **modify_options) -> SandboxModificationResult
+```
+
+Accepts the same keyword arguments as [`modify()`](#sb-modify). Returns `plan` and `resize_operations`, the exact requests dispatched by this call. `resize_operations` is `None` for dry runs, changes without tracked live resizes, and supported changes through older runtimes. Missing identities must not be replaced by a later current operation. The existing `modify()` return shape is unchanged.
+
+<Accordion title="Example">
+
+```python
+result = await sb.modify_with_resize_tracking(cpus=4)
+operations = result["resize_operations"]
+if operations is not None:
+    statuses = await sb.wait_for_resize_operations(operations, timeout=30)
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resize_operations()</span>
+
+```python
+async def resize_operations(self) -> list[ResizeOperation]
+```
+
+Read the latest recorded operation per resource without changing targets. Reads return retained evidence and request a background refresh; they do not wait for a new guest sample. Use an operation-specific wait to await confirmed completion. An empty list means no recorded request. Each record contains `id`, `runtime_boot_id`, `generation`, `requested_target`, `accepted_target`, `status`, `outcome` and `observation`. Targets use `ResourceKind.CPUS` with `online`, or `ResourceKind.MEMORY` with `total_mib`. Status retains requested/actual/enforced quantities and convergence state. Outcome is `ResizeOutcome.PENDING`, `APPLIED` or `SUPERSEDED`; observation is `ResizeObservation.AVAILABLE`, `UNSUPPORTED`, `PAUSED` or `UNAVAILABLE`.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_for_resize_operations()</span>
+
+```python
+async def wait_for_resize_operations(
+    self, operations: list[ResizeOperation], *, timeout: float | None = None
+) -> list[ResourceResizeStatus]
+```
+
+Wait for the supplied one or two operation records. Reconnecting to the same runtime is supported; a replaced runtime, expired identity or superseded operation fails instead of following a newer target. Caller-supplied status is rechecked and is never proof of completion. `timeout` is seconds: `None` has no deadline and zero performs one bounded check. Expiry raises `ResizeTimeoutError` with the last completed per-resource reads; it does not undo the resize. Unsupported observation reports an error without claiming success.
+
+The runtime retains at most 256 operation records, protecting the latest CPU and memory records from eviction. Older records can expire; restarting the runtime clears its history. Resident pause preserves the history. An expired identity cannot establish completion.
+
+`ResizeWaitError` exposes `reason`, `sandbox`, `operation_id` and verified `status`. Its reasons are `superseded`, `interrupted`, `history_unavailable`, `invalid_response` and `observation_unavailable`; none proves rollback or final failure of the resize. Timeout and unsupported-feature errors remain separate. Unknown future peer errors retain their ordinary error mapping.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resize_status()</span>
+
+```python
+async def resize_status(self) -> list[ResourceResizeStatus]
+```
+
+Return current per-resource status without operation identities. Use `resize_operations()` when a later wait must stay bound to those records.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_resized()</span>
+
+```python
+async def wait_until_resized(self, *, timeout: float | None = None) -> list[ResourceResizeStatus]
+```
+
+Select the operations present at the first read and wait for those identities. This does not identify which caller submitted them; use the result of `modify_with_resize_tracking()` for a wait tied to your modification. Timeout semantics match `wait_for_resize_operations()`.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
 
@@ -949,7 +1008,7 @@ Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` t
 <Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
-async def stop(self, timeout: float | None = None) -> None
+async def stop(self, timeout: float | timedelta | None = None) -> None
 ```
 
 <Accordion title="Example">
@@ -966,7 +1025,7 @@ Wait indefinitely for graceful shutdown and release of the targeted runtime's ow
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | timedelta | None</span></div>
     <div className="msb-param-desc">Total graceful-completion budget in seconds. <code>None</code> waits indefinitely; expiry raises <code>StopTimeoutError</code> without killing.</div>
   </div>
 </div>
@@ -974,7 +1033,7 @@ Wait indefinitely for graceful shutdown and release of the targeted runtime's ow
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
 
 ```python
-async def stop_with_timeout(self, timeout: float) -> None
+async def stop_with_timeout(self, timeout: float | timedelta) -> None
 ```
 
 Use `await sb.stop_with_timeout(seconds)` for an explicit total graceful-completion budget. Expiry raises `StopTimeoutError`; zero expires before dispatch. A delivered request may finish later, but the timeout never requests force termination.
@@ -1000,7 +1059,7 @@ Request graceful shutdown and return once the request is sent, without waiting f
 <Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
-async def kill(self, timeout: float | None = None) -> None
+async def kill(self, timeout: float | timedelta | None = None) -> None
 ```
 
 <Accordion title="Example">
@@ -1017,7 +1076,7 @@ Force-terminate the sandbox and wait until stopped state is observed. No gracefu
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | timedelta | None</span></div>
     <div className="msb-param-desc">Seconds to wait for the stopped state to be observed.</div>
   </div>
 </div>
@@ -1101,7 +1160,7 @@ async def restart(
     self,
     *,
     force: bool = False,
-    timeout: float | None = None,
+    timeout: float | timedelta | None = None,
     detached: bool = False,
 ) -> Sandbox
 ```
@@ -1111,7 +1170,7 @@ Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">destroy()</span>
 
 ```python
-async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None
+async def destroy(self, *, force: bool = False, timeout: float | timedelta | None = None) -> None
 ```
 
 Stop and remove this exact sandbox. Defaults to graceful shutdown with the SDK's ten-second timeout. Raises `SandboxReplacedError` rather than deleting a same-name replacement.
@@ -1509,7 +1568,7 @@ Async iterator of pull progress events
 result()
 ```
 
-Await once to get the final running sandbox. A second call raises `RuntimeError`
+Claim the sandbox once, inside the block or after it exits successfully. Normal exit waits for creation and raises any creation failure you haven’t already observed. If the block raises, the session requests cancellation and propagates the block’s exception. A second `result()` call raises `RuntimeError`.
 
 <p className="msb-label">Returns</p>
 
@@ -1520,7 +1579,7 @@ session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
 async with session:
     async for event in session.progress:
         print(event)
-    sb = await session.result()
+sb = await session.result()
 ```
 
 ## Types
@@ -1550,9 +1609,9 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | cmd | `Sequence[str]` | - | Override the image's stored CMD used by `exec_default`; an empty sequence clears CMD |
 | init | `str \| `[`InitConfig`](#initconfig)` \| `[`InitOptions`](#initoptions) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/bootstrap#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | `False` | Replace an existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
-| replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
-| max_duration | `float` | - | Maximum sandbox lifetime in seconds; finite and non-negative, rounded up to whole seconds |
-| idle_timeout | `float` | - | Idle timeout in seconds; finite and non-negative, rounded up to whole seconds |
+| replace_with_timeout | `float \| timedelta` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
+| max_duration | `float \| timedelta` | - | Maximum sandbox lifetime in seconds; must be a non-negative whole number of seconds |
+| idle_timeout | `float \| timedelta` | - | Idle timeout in seconds; must be a non-negative whole number of seconds |
 | ephemeral | `bool` | `False` | If `True`, the sandbox and all its persisted state are removed automatically once it stops, rather than left on disk for restart |
 | env | `Mapping[str, str]` | `{}` | Environment variables visible to all commands |
 | labels | `Mapping[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Select in bulk](/sandboxes/labels#select-in-bulk). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |
@@ -1802,11 +1861,19 @@ Observed convergence state for an accepted live resize.
 |--------|-------|-------------|
 | `ResourceConvergenceState.ACCEPTED` | `"accepted"` | Runtime accepted the request |
 | `ResourceConvergenceState.CONVERGING` | `"converging"` | Guest and VMM are still converging |
-| `ResourceConvergenceState.APPLIED` | `"applied"` | Desired, actual, and enforced values match |
+| `ResourceConvergenceState.APPLIED` | `"applied"` | Guest completion has been confirmed for the operation; not produced by the immediate target acknowledgement |
 | `ResourceConvergenceState.GUEST_REFUSED` | `"guest-refused"` | Guest refused or failed to cooperate |
 | `ResourceConvergenceState.FAILED` | `"failed"` | Resize failed |
 
-### SandboxMetrics
+#### config()
+
+```python
+async def config(self) -> SandboxConfigInspection: ...
+```
+
+Fetch a fresh persisted observation without starting the sandbox. The typed dictionary contains `kind`, `name`, `spec`, `unavailable` and `redacted`. Read execution settings through `observed["spec"]["runtime"]`. Remote source identities and secret material are not reconstructed; unavailable/redacted paths are explicit. Failed lookups raise instead of returning stale data. Persisted settings may require restart to apply. See [inspection result shapes](/migrations/sdk-contexts#configuration-result-shape).
+
+## SandboxMetrics
 
 <p className="msb-backref">Returned by <a href="#sb-metrics">metrics()</a> · <a href="#sb-metrics_stream">metrics_stream()</a></p>
 
@@ -2006,7 +2073,7 @@ async def recover_storage(
 ) -> StorageRecovery
 ```
 
-Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage repair](/repairs/sandbox-storage) for maintenance requirements and recovery limits.
 
 <p className="msb-label">Parameters</p>
 

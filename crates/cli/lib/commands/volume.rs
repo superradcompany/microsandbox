@@ -234,10 +234,6 @@ async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
             .join(", ")
     };
 
-    let backend = crate::commands::common::resolve_local_backend()?;
-    let local = crate::commands::common::local_backend_ref(&backend)?;
-    let path = local.volume_path(handle.name());
-
     ui::detail_kv("Name", handle.name());
     ui::detail_kv("Kind", handle.kind().as_str());
     match handle.kind() {
@@ -248,7 +244,9 @@ async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
                 .map(format_mib)
                 .unwrap_or_else(|| "unlimited".to_string());
             ui::detail_kv("Quota", &quota);
-            ui::detail_kv("Path", &path.display().to_string());
+            if let Some(local) = handle.local_state() {
+                ui::detail_kv("Path", &local.path.display().to_string());
+            }
         }
         VolumeKind::Disk => {
             ui::detail_kv("Format", handle.disk_format().unwrap_or("raw"));
@@ -259,8 +257,9 @@ async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
                 .map(format_bytes)
                 .unwrap_or_else(|| "-".to_string());
             ui::detail_kv("Capacity", &capacity);
-            let disk_path = handle.disk_path().unwrap_or_else(|| path.join("disk.raw"));
-            ui::detail_kv("Path", &disk_path.display().to_string());
+            if let Some(path) = handle.disk_path() {
+                ui::detail_kv("Path", &path.display().to_string());
+            }
         }
     }
     ui::detail_kv("Created", &created);

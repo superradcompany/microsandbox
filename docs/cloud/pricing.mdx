@@ -54,8 +54,7 @@ Set the type on your remote context. It applies to new sandboxes and snapshot re
 ```typescript TypeScript
 import { RemoteContext } from "microsandbox";
 
-const remote = RemoteContext.fromEnv()
-  .toBuilder()
+const remote = RemoteContext.builder()
   .computeType("shared")
   .build();
 ```
@@ -63,8 +62,7 @@ const remote = RemoteContext.fromEnv()
 ```rust Rust
 use microsandbox::{ComputeType, RemoteContext};
 
-let remote = RemoteContext::from_env()?
-    .to_builder()
+let remote = RemoteContext::builder()
     .compute_type(ComputeType::Shared)
     .build()?;
 ```
@@ -72,22 +70,18 @@ let remote = RemoteContext::from_env()?
 ```python Python
 from microsandbox import RemoteContext
 
-remote = RemoteContext.from_env().replace(compute_type="shared")
+remote = RemoteContext(compute_type="shared")
 ```
 
 ```go Go
-remote, err := microsandbox.RemoteContextFromEnv()
-if err != nil {
-    return err
-}
-remote, err = remote.WithOptions(microsandbox.WithRemoteComputeType(microsandbox.ComputeShared))
+remote, err := microsandbox.NewRemoteContextWithOptions(microsandbox.WithRemoteComputeType(microsandbox.ComputeShared))
 if err != nil {
     return err
 }
 ```
 
 ```ruby Ruby
-remote = Microsandbox::RemoteContext.from_env.with(compute_type: "shared")
+remote = Microsandbox::RemoteContext.new(compute_type: "shared")
 ```
 </CodeGroup>
 

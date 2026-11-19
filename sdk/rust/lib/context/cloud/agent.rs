@@ -15,7 +15,7 @@ use tokio_tungstenite::{
 };
 
 use super::{RemoteContext, cloud_agent_tls_connector, default_user_agent};
-use crate::context::{Context, ContextInfo, ContextKind, SandboxOps, VolumeOps};
+use crate::context::{Context, ContextInfo, ContextKind, SandboxOps, ServiceOps, VolumeOps};
 use crate::{MicrosandboxError, MicrosandboxResult, timing};
 
 //--------------------------------------------------------------------------------------------------
@@ -53,6 +53,10 @@ impl Context for RemoteContext {
     }
 
     fn snapshot_ops(&self) -> &dyn crate::context::SnapshotOps {
+        self
+    }
+
+    fn service_ops(&self) -> &dyn ServiceOps {
         self
     }
 
@@ -135,7 +139,8 @@ impl Context for RemoteContext {
                 Err(_) => {
                     timing.finish("timeout");
                     Err(MicrosandboxError::Runtime(format!(
-                        "timed out connecting to cloud sandbox agent {name:?} after {timeout:?}"
+                        "timed out connecting to cloud sandbox agent {name:?} after {timeout:?} (stage: {})",
+                        timing.current_stage()
                     )))
                 }
             }
@@ -243,6 +248,7 @@ mod tests {
                         .to_string()
                         .contains("timed out connecting to cloud sandbox agent")
                 );
+                assert!(error.to_string().contains("stage: websocket"));
             }
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(2), server)
@@ -252,6 +258,50 @@ mod tests {
                 0,
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stalled_agent_handshake_reports_phase_and_closes_transport() {
+        use futures::StreamExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = crate::test_support::cloud_backend(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "test-key",
+        )
+        .unwrap()
+        .with_agent_identity("sandbox", "captured-id")
+        .unwrap();
+        let (upgraded, ready) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            upgraded.send(()).unwrap();
+            // The upgrade succeeds but the peer never replies to the agent
+            // handshake. Drain until the timed-out client closes its transport.
+            while let Some(message) = socket.next().await {
+                if message.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut dial = backend.dial_agent("sandbox", Duration::from_millis(500));
+        tokio::select! {
+            result = &mut dial => panic!("dial ended before handshake stall: {:?}", result.err()),
+            result = ready => result.unwrap(),
+        }
+        let error = dial.await.err().expect("silent agent must time out");
+        // Both the connection budget and the agent's handshake read can expire
+        // on the same poll. Either diagnostic must identify the timed-out phase.
+        let message = error.to_string();
+        assert!(
+            message.contains("handshake") && message.contains("timed out"),
+            "{error}"
+        );
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

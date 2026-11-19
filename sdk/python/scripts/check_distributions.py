@@ -13,8 +13,9 @@ def run(command, *, env=None):
 
 
 PROBE = r"""
-import asyncio, importlib, json, tempfile, threading
+import asyncio, importlib, json, os, tempfile, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 import microsandbox_core as core
 from microsandbox_core.errors import JobError
 import microsandbox_local as local
@@ -47,12 +48,14 @@ async def probe():
         selected = remote.RemoteContext(url=f'http://127.0.0.1:{server.server_port}', api_key='key')
         retained = selected.sandboxes
         destination = local.LocalContext(home=home)
-        assert destination.kind == 'local' and selected.kind == 'remote'
+        assert destination.kind is core.ContextKind.LOCAL
+        assert selected.kind is core.ContextKind.REMOTE
         sb = await retained.get('task')
         assert isinstance(sb, core.Sandbox)
         assert isinstance(sb.context, core.Context)
         assert isinstance(sb.context.sandboxes, core.Sandboxes)
-        assert (await sb.info())['id'] == sb.id
+        observation = await sb.info()
+        assert observation['id'] == sb.id and observation['status'] is core.SandboxStatus.STOPPED
         assert await sb.status() is core.SandboxStatus.STOPPED
         # Unsupported remote jobs must retain their typed error in every package.
         try: await sb.exec_detached('true')
@@ -65,12 +68,19 @@ async def probe():
         page = await retained.list()
         assert isinstance(page.sandboxes[0], core.Sandbox)
         assert await sb.wait_for_status('stopped') is None
-        # A default-local operation must never reach the remote endpoint.
-        before = len(requests)
-        try: await destination.sandboxes.get('missing')
-        except core.MicrosandboxError: pass
-        else: raise AssertionError('missing local sandbox unexpectedly exists')
-        assert len(requests) == before
+        # Compare default bindings later under the same configuration as before
+        # the probe. While remote is selected, the retained local context wins.
+        with patch.dict(os.environ,
+            MSB_BACKEND="remote",
+            MSB_API_URL=f"http://127.0.0.1:{server.server_port}",
+            MSB_API_KEY="key",
+        ):
+            assert (await core.Sandbox.get("task")).id == sb.id
+            before = len(requests)
+            try: await destination.sandboxes.get('missing')
+            except core.MicrosandboxError: pass
+            else: raise AssertionError('missing local sandbox unexpectedly exists')
+            assert len(requests) == before
 try: asyncio.run(probe())
 finally:
     server.shutdown()
@@ -85,7 +95,7 @@ JOBS_PROBE = r"""
 import asyncio, importlib, os, uuid
 from contextlib import suppress
 sdk=importlib.import_module(os.environ['MSB_TEST_PACKAGE'])
-from microsandbox_core.jobs import JobExit, JobInfo, JobPage
+from microsandbox_core.jobs import JobExit, JobInfo, JobOutputSource, JobPage, JobState
 async def main():
     name='review-jobs-'+uuid.uuid4().hex[:8]
     sb=await sdk.Sandbox.create(name, image='mirror.gcr.io/library/alpine', memory=512, cpus=1)
@@ -94,10 +104,11 @@ async def main():
         outcome=await job.wait()
         assert isinstance(outcome, JobExit) and outcome.code==7
         info=await job.inspect()
-        assert isinstance(info, JobInfo) and info.id==job.id
+        assert isinstance(info, JobInfo) and info.id==job.id and info.state is JobState.EXITED
         page=await sb.list_jobs(all=True)
         assert isinstance(page, JobPage) and any(item.id==job.id for item in page.items)
-        logs=await job.logs()
+        logs=await job.logs(sources=[JobOutputSource.STDOUT])
+        assert all(entry.source is JobOutputSource.STDOUT for entry in logs)
         assert b'job-output' in b''.join(item.data for item in logs)
         print(os.environ['MSB_TEST_PACKAGE'], 'native wait/inspect/list/output decoded')
     finally:

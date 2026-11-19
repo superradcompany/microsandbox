@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use microsandbox::{
     Sandbox,
-    jobs::{JobEvent, JobLogOptions, JobReplay, JobState},
+    jobs::{JobEvent, JobLogOptions, JobOutputSource, JobReplay, JobState},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -199,6 +199,11 @@ async fn managed_job_lifetime_io_and_deadlines() -> Result<(), Box<dyn std::erro
     assert!(
         tty_output
             .iter()
+            .all(|entry| entry.source == JobOutputSource::Output)
+    );
+    assert!(
+        tty_output
+            .iter()
             .any(|entry| String::from_utf8_lossy(&entry.data).contains("tty-marker"))
     );
 
@@ -256,17 +261,27 @@ async fn managed_job_options_logs_and_validation() -> Result<(), Box<dyn std::er
     assert!(!serde_json::to_string(&info)?.contains("private-value"));
     let stdout = job
         .logs(&JobLogOptions {
-            sources: vec!["stdout".into()],
+            sources: vec![JobOutputSource::Stdout],
             ..Default::default()
         })
         .await?;
+    assert!(
+        stdout
+            .iter()
+            .all(|entry| entry.source == JobOutputSource::Stdout)
+    );
     assert_eq!(output_bytes(&stdout), b"/tmp\n65534\nprivate-value\n128\n");
     let stderr = job
         .logs(&JobLogOptions {
-            sources: vec!["stderr".into()],
+            sources: vec![JobOutputSource::Stderr],
             ..Default::default()
         })
         .await?;
+    assert!(
+        stderr
+            .iter()
+            .all(|entry| entry.source == JobOutputSource::Stderr)
+    );
     assert_eq!(output_bytes(&stderr), b"err\n");
     let logs = job.logs(&JobLogOptions::default()).await?;
     let last = logs.last().unwrap();

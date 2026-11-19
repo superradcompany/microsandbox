@@ -3,7 +3,7 @@
 use std::io::{IsTerminal, Read, Write};
 
 use clap::Args;
-use microsandbox::jobs::{Job, JobEvent, JobId};
+use microsandbox::jobs::{Job, JobEvent, JobId, JobOutputSource};
 
 use crate::ui::OutputFormat;
 
@@ -217,7 +217,7 @@ pub async fn attach(args: AttachArgs) -> anyhow::Result<()> {
                 result = &mut writer => { result?; break None; },
                 event = attachment.recv() => match event? {
                     Some(JobEvent::Output(entry)) => {
-                        if entry.source == "stderr" { let mut out = std::io::stderr().lock(); out.write_all(&entry.data)?; out.flush()?; }
+                        if entry.source == JobOutputSource::Stderr { let mut out = std::io::stderr().lock(); out.write_all(&entry.data)?; out.flush()?; }
                         else { let mut out = std::io::stdout().lock(); out.write_all(&entry.data)?; out.flush()?; }
                     }
                     Some(JobEvent::Gap { .. }) => eprintln!("[job output was pruned before replay]"),

@@ -1183,3 +1183,16 @@ func TestWithInterceptTLSPreservesNetworkWithoutMutatingInput(t *testing.T) {
 		t.Fatal("later network configuration did not replace TLS settings")
 	}
 }
+
+func TestNamedVolumeOptionsAtFFIBoundary(t *testing.T) {
+	for _, opts := range []NamedVolumeOptions{
+		{}, {Mode: NamedVolumeExisting}, {Mode: NamedVolumeCreate, Kind: VolumeKindDir},
+		{Mode: NamedVolumeEnsureExists, Kind: VolumeKindDisk, SizeMiB: 128},
+	} {
+		mount := Mount.NamedWith("cache", MountOptions{}, opts)
+		wire := buildFFICreateOptions(SandboxConfig{Volumes: map[string]MountConfig{"/data": mount}}).Volumes["/data"]
+		if wire.NamedMode != string(opts.Mode) || wire.NamedKind != string(opts.Kind) || wire.SizeMiB != opts.SizeMiB {
+			t.Fatalf("wrong named mount wire options for %+v: %+v", opts, wire)
+		}
+	}
+}

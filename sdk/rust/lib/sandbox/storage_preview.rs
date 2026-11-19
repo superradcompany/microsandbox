@@ -69,7 +69,7 @@ impl Sandbox {
         name: &str,
         options: StorageRecoveryOptions,
     ) -> MicrosandboxResult<StoragePreview> {
-        crate::context::default_local_context()
+        crate::context::configured_context()
             .sandboxes()
             .preview_storage(name, options)
             .await

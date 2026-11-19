@@ -5,7 +5,7 @@
 //!
 //! CLI precedence: explicit flags, managed selection, MSB_BACKEND, MSB_PROFILE, active_profile, local.
 //! Explicit flags still enforce allowed_backends.
-//! SDK resource shortcuts do not call this resolver; they use the immutable local default.
+//! Unqualified SDK operations capture the same configured selection at construction.
 //! Explicit RemoteContext::from_profile loads its named profile independently.
 //!
 //! Profile fields are part of [`GlobalConfig`](crate::config::GlobalConfig), loaded from the
@@ -85,11 +85,10 @@ impl Profile {
         })?;
 
         let api_key = resolve_api_key_ref(name, key_ref)?;
-        let mut builder = RemoteContext::builder().api_key(api_key);
-        if let Some(url) = &self.url {
-            builder = builder.url(url);
-        }
-        Ok(builder)
+        // A named profile's credentials belong to its own endpoint.
+        Ok(RemoteContext::builder()
+            .api_key(api_key)
+            .url(self.url.as_deref().unwrap_or(super::DEFAULT_CLOUD_API_URL)))
     }
 }
 
@@ -110,11 +109,26 @@ impl From<ProfileKind> for ContextKind {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Resolve CLI environment and profile selection without installing a process-wide SDK default.
-/// Library callers can retain the returned context explicitly; resource shortcuts remain local.
+/// Capture the configured destination for an infallible SDK builder. Keep selection errors
+/// on the builder so its fallible operation fails without touching either destination.
+#[doc(hidden)]
+pub fn configured_context() -> Arc<dyn Context> {
+    resolve_default_backend().unwrap_or_else(|error| {
+        Arc::new(super::misconfigured::ConfigurationErrorBackend::new(error))
+    })
+}
+
+/// Resolve the configured SDK or CLI destination, falling back to local when unset.
 #[doc(hidden)]
 pub fn resolve_default_backend() -> MicrosandboxResult<Arc<dyn Context>> {
     resolve_default_backend_from(&crate::config::config_path(), None)
+}
+
+/// Identify which native library to load in a split-provider SDK. The selected
+/// library validates policy, capabilities and credentials when constructing the context.
+#[doc(hidden)]
+pub fn configured_provider_kind() -> MicrosandboxResult<ContextKind> {
+    BackendSelection::configured_kind()
 }
 
 /// Resolve an explicit CLI destination ahead of all ambient profile selection.
