@@ -68,6 +68,15 @@ def main():
     binary = args.msb.resolve(strict=True)
     firmware = args.libkrunfw.resolve(strict=True)
 
+    if sys.platform == "linux":
+        # Doctor resolves firmware explicitly, so its success alone cannot verify the ELF search path.
+        dynamic = subprocess.check_output(
+            ["readelf", "-dW", binary], text=True, env={**os.environ, "LC_ALL": "C"}
+        )
+        paths = re.findall(r"\((?:RUNPATH|RPATH)\)[^\n]*?\[([^\]]*)\]", dynamic)
+        if paths != ["$ORIGIN/../lib:$ORIGIN"]:
+            raise RuntimeError(f"unexpected ELF library search path in {binary}: {paths!r}")
+
     with runtime_install_directory() as temporary:
         home = Path(temporary).resolve()
         install = home / ".microsandbox"
@@ -96,6 +105,8 @@ def main():
         # Prevent an inherited runtime override from hiding the regression, and
         # isolate user configuration and the clone probe from the real home.
         env = {key: value for key, value in os.environ.items() if not key.upper().startswith("MSB_")}
+        if sys.platform == "linux":
+            env.pop("LD_LIBRARY_PATH", None)
         env.update(HOME=str(home), MSB_HOME=str(install),
                    XDG_CONFIG_HOME=str(home / ".config"), NO_COLOR="1", TERM="dumb")
         if windows:
