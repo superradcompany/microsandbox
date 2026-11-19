@@ -109,7 +109,8 @@ test("release builds before publishing and resolves platform dependencies after 
   assert.match(publisher, /NPM_CONFIG_PROVENANCE: "true"/);
   assert.match(publisher, /runs-on: ubuntu-latest/);
   const names = ["Publish platform packages", "Wait for npm to index platform packages",
-    "Build TypeScript output with published platform dependencies", "Verify root package platform dependencies", "Publish root package"];
+    "Build TypeScript output with published platform dependencies", "Verify root package platform dependencies", "Publish shared core and selected native packages",
+    "Wait for core and native provider indexing", "Publish local, remote and full SDK packages"];
   let previous = -1;
   for (const name of names) {
     const index = publisher.indexOf(`- name: ${name}`);

@@ -10,14 +10,98 @@
 //! `~/.microsandbox` so they can run in parallel without sharing the sqlite
 //! db, image cache, or sandbox namespace.
 
-use microsandbox::Sandbox;
+use std::sync::Arc;
+use std::time::Duration;
+
+use microsandbox::{NetworkPolicy, Sandbox};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use test_utils::msb_test;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+struct SelfSignedHttps {
+    port: u16,
+    listener: JoinHandle<()>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SelfSignedHttps {
+    async fn start() -> Self {
+        let key = rcgen::KeyPair::generate().expect("fixture key");
+        let cert = rcgen::CertificateParams::new(vec!["host.microsandbox.internal".into()])
+            .expect("fixture SAN")
+            .self_signed(&key)
+            .expect("fixture certificate");
+        // Select the fixture provider explicitly: workspace features enable both providers.
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("fixture protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(cert.der().to_vec())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+        )
+        .expect("fixture TLS config");
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("fixture listener");
+        let port = listener.local_addr().unwrap().port();
+        let listener = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    // Rejected certificate handshakes are expected in the control case.
+                    let _ = tokio::time::timeout(Duration::from_secs(10), async move {
+                        let mut stream = acceptor.accept(socket).await?;
+                        let mut header = Vec::new();
+                        while header.len() < 8192 && !header.ends_with(b"\r\n\r\n") {
+                            header.push(stream.read_u8().await?);
+                        }
+                        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nself-signed").await?;
+                        stream.shutdown().await
+                    }).await;
+                });
+            }
+        });
+        Self { port, listener }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for SelfSignedHttps {
+    fn drop(&mut self) {
+        self.listener.abort();
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
 
 async fn stop_and_remove(name: &str) {
     let handle = Sandbox::get(name).await.expect("get");
     handle.stop().await.expect("failed to stop");
     Sandbox::remove(name).await.expect("failed to remove");
 }
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
 
 /// Covers the default TLS-interception path:
 /// - Node.js fetch over TLS 1.3: guards against a past deadlock where
@@ -115,12 +199,18 @@ async fn tls_bypass_domain_connects() {
 /// active while allowing a live self-signed upstream certificate.
 #[msb_test]
 async fn tls_scoped_no_verify_accepts_live_self_signed_upstream() {
-    let host = "self-signed.badssl.com";
+    // A controlled upstream removes public DNS/service availability from the
+    // certificate-verification assertion while preserving the real VM/TLS path.
+    let server = SelfSignedHttps::start().await;
+    let host = "host.microsandbox.internal";
+    let port = server.port;
+    // Pin the injected CA explicitly; minimal curl images can use a different
+    // default trust bundle. Do not disable guest certificate verification.
     let curl_script = format!(
         concat!(
             "set +e\n",
-            "curl --http1.1 -m 30 -sS -o /tmp/self-signed-body ",
-            "-w 'status=%{{http_code}}\\n' https://{host}/\n",
+            "curl --cacert /.msb/tls/ca.pem --http1.1 -m 30 -sS -o /tmp/self-signed-body ",
+            "-w 'status=%{{http_code}}\\n' https://{host}:{port}/\n",
             "status=$?\n",
             "echo \"exit=$status\"\n",
             "if [ \"$status\" -eq 0 ] && grep -q self-signed /tmp/self-signed-body; then\n",
@@ -129,24 +219,24 @@ async fn tls_scoped_no_verify_accepts_live_self_signed_upstream() {
             "  echo body=missing\n",
             "fi\n"
         ),
-        host = host
+        host = host,
+        port = port
     );
 
     let control_name = "tls-test-live-self-signed-control";
     let control = Sandbox::builder(control_name)
-        .image("alpine")
+        .image("mirror.gcr.io/curlimages/curl")
         .cpus(1)
         .memory(512)
         .user("0")
-        .network(|n| n.tls(|t| t))
+        .network(|n| {
+            n.policy(NetworkPolicy::allow_all())
+                .tls(|t| t.intercepted_ports(vec![port]))
+        })
         .replace()
         .create()
         .await
         .expect("failed to create control sandbox");
-    control
-        .shell("apk add --quiet curl")
-        .await
-        .expect("failed to install curl in control sandbox");
     let control_output = control
         .shell(curl_script.as_str())
         .await
@@ -155,25 +245,28 @@ async fn tls_scoped_no_verify_accepts_live_self_signed_upstream() {
     stop_and_remove(control_name).await;
 
     assert!(
-        control_stdout.contains("exit=") && !control_stdout.contains("exit=0"),
+        control_stdout.contains("exit=")
+            && !control_stdout.contains("exit=0")
+            && !control_stdout.contains("exit=28"),
         "expected self-signed upstream to fail without scoped no-verify, stdout: {control_stdout}"
     );
 
     let scoped_name = "tls-test-live-self-signed-scoped";
     let scoped = Sandbox::builder(scoped_name)
-        .image("alpine")
+        .image("mirror.gcr.io/curlimages/curl")
         .cpus(1)
         .memory(512)
         .user("0")
-        .network(|n| n.tls(|t| t.verify_upstream_for(host, false)))
+        .network(|n| {
+            n.policy(NetworkPolicy::allow_all()).tls(|t| {
+                t.intercepted_ports(vec![port])
+                    .verify_upstream_for(host, false)
+            })
+        })
         .replace()
         .create()
         .await
         .expect("failed to create scoped sandbox");
-    scoped
-        .shell("apk add --quiet curl")
-        .await
-        .expect("failed to install curl in scoped sandbox");
     let scoped_output = scoped
         .shell(curl_script.as_str())
         .await
@@ -183,7 +276,8 @@ async fn tls_scoped_no_verify_accepts_live_self_signed_upstream() {
 
     assert!(
         scoped_stdout.contains("exit=0"),
-        "expected scoped no-verify curl to succeed, stdout: {scoped_stdout}"
+        "expected scoped no-verify curl to succeed, stdout: {scoped_stdout}, stderr: {}",
+        scoped_output.stderr().unwrap_or_default()
     );
     assert!(
         scoped_stdout.contains("status=200"),

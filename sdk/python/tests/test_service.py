@@ -37,10 +37,9 @@ def test_service_calls_surface_native_results_and_outcomes(tmp_path: Path) -> No
         from pathlib import Path
 
         from microsandbox import (
-            BackendKind, ChangeState, CloudHttpError, InvalidConfigError, Service,
+            ChangeState, CloudHttpError, InvalidConfigError, Service,
             ServiceError, ServiceErrorReason, ServiceNotFoundError, ServiceStatus,
             ServiceTarget, UnsupportedError,
-            set_default_backend,
         )
 
         fixtures = Path(os.environ["SERVICE_FIXTURES"])
@@ -103,7 +102,7 @@ def test_service_calls_surface_native_results_and_outcomes(tmp_path: Path) -> No
 
         async def main():
             url = f"http://127.0.0.1:{server.server_address[1]}"
-            set_default_backend(BackendKind.CLOUD, url=url, api_key="test")
+            os.environ.update(MSB_BACKEND="remote", MSB_API_URL=url, MSB_API_KEY="test")
 
             svc = await Service.create("shop", target=ServiceTarget("web-1", 8080))
             assert svc.url == "https://shop.<domain>"
@@ -192,7 +191,7 @@ def test_service_calls_surface_native_results_and_outcomes(tmp_path: Path) -> No
                 if "body" in want:
                     assert json.loads(body) == want["body"], route
 
-            set_default_backend(BackendKind.LOCAL)
+            os.environ["MSB_BACKEND"] = "local"
             try:
                 await svc.enable()
             except ServiceError as error:

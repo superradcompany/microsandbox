@@ -8,6 +8,10 @@ use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::ExitStatus;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[cfg(unix)]
 use nix::{
@@ -30,6 +34,8 @@ use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROC
 
 use microsandbox_metrics::MetricsRegistry;
 
+#[cfg(target_os = "linux")]
+use super::{child_exit::ChildExit, child_reaper};
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -54,16 +60,16 @@ pub struct ProcessHandle {
     pub(crate) startup_reader: Option<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>>,
 
     /// When true, the Drop impl will NOT send SIGTERM.
-    detached: bool,
+    cleanup: Arc<CleanupControl>,
 
     /// Writer side of the attached-parent watchdog pipe. Keeping this open
     /// lets the child detect when the owner process disappears.
     #[cfg(unix)]
-    parent_watchdog: Option<OwnedFd>,
+    parent_watchdog: Option<Arc<OwnedFd>>,
 
     /// Windows job object that owns the sandbox process tree.
     #[cfg(windows)]
-    job: Option<WindowsJob>,
+    job: Option<Arc<WindowsJob>>,
 
     /// Best-effort cleanup token for a metrics slot that may still be in
     /// `Reserved` if the runtime exits before activation.
@@ -87,6 +93,22 @@ struct ReapedChild {
     /// Runtime that spawned the child, so the reaper does not depend on the dropping thread.
     #[cfg(target_os = "linux")]
     runtime: Option<Handle>,
+}
+
+/// Shared cleanup control independent of the child-process wait lock.
+///
+/// Only owning resources retain this token. Idle non-owning helpers must not
+/// retain its watchdog or job, which are themselves lifetime authorities.
+pub(crate) struct CleanupControl {
+    detached: AtomicBool,
+    finished: AtomicBool,
+    #[cfg(target_os = "linux")]
+    reaper_started: AtomicBool,
+    transition: std::sync::Mutex<()>,
+    #[cfg(unix)]
+    watchdog: Option<Arc<OwnedFd>>,
+    #[cfg(windows)]
+    job: Option<Arc<WindowsJob>>,
 }
 
 /// Cancellation owner for a process whose startup has not completed.
@@ -114,6 +136,11 @@ pub(crate) struct WindowsJob {
 
 #[cfg(windows)]
 unsafe impl Send for WindowsJob {}
+
+// Windows job handles support concurrent queries/updates; the handle itself is
+// immutable and closes only after the final Arc is released.
+#[cfg(windows)]
+unsafe impl Sync for WindowsJob {}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -254,6 +281,21 @@ impl ProcessHandle {
             drop(disk_locks);
             Vec::new()
         };
+        #[cfg(unix)]
+        let parent_watchdog = parent_watchdog.map(Arc::new);
+        #[cfg(windows)]
+        let job = job.map(Arc::new);
+        let cleanup = Arc::new(CleanupControl {
+            detached: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            reaper_started: AtomicBool::new(false),
+            transition: std::sync::Mutex::new(()),
+            #[cfg(unix)]
+            watchdog: parent_watchdog.clone(),
+            #[cfg(windows)]
+            job: job.clone(),
+        });
         Self {
             pid,
             #[cfg(windows)]
@@ -261,7 +303,7 @@ impl ProcessHandle {
             sandbox_name,
             child: ReapedChild::new(child),
             startup_reader: None,
-            detached: false,
+            cleanup,
             _disk_locks: disk_locks,
             #[cfg(unix)]
             parent_watchdog,
@@ -283,6 +325,10 @@ impl ProcessHandle {
 
     /// Send SIGKILL to the sandbox process for immediate termination.
     pub fn kill(&self) -> MicrosandboxResult<()> {
+        // Background collection clears Child::id; the stored PID may now be reused.
+        if self.child.id().is_none() {
+            return Ok(());
+        }
         #[cfg(unix)]
         {
             tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGKILL");
@@ -308,6 +354,10 @@ impl ProcessHandle {
     /// The libkrun signal handler catches SIGUSR1, writes to the exit event
     /// fd, exit observers run, and the process terminates.
     pub fn drain(&self) -> MicrosandboxResult<()> {
+        // Background collection clears Child::id; the stored PID may now be reused.
+        if self.child.id().is_none() {
+            return Ok(());
+        }
         #[cfg(unix)]
         {
             tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGUSR1 (drain)");
@@ -326,17 +376,39 @@ impl ProcessHandle {
     /// Wait for the sandbox process to exit.
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
         tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "waiting for exit");
+        #[cfg(target_os = "linux")]
+        let status = {
+            let mut exit = ChildExit::observe(&self.child);
+            loop {
+                if let Some(status) = self.child.try_wait()? {
+                    break status;
+                }
+                // Child ownership is retained until collection, so this observer cannot
+                // accidentally follow a recycled PID. Cancellation leaves it waitable.
+                if let Some(exit) = &mut exit {
+                    exit.wait().await;
+                }
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
         let status = self.child.wait().await?;
+        self.cleanup.finished.store(true, Ordering::Release);
         self._disk_locks.clear();
         tracing::debug!(pid = self.pid, ?status, "process exited");
         self.cleanup_metrics_reservation();
         Ok(status)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn observe_exit(&self) -> Option<ChildExit> {
+        ChildExit::observe(&self.child)
+    }
+
     /// Check if the process has exited without blocking.
     pub fn try_wait(&mut self) -> MicrosandboxResult<Option<ExitStatus>> {
         let status = self.child.try_wait()?;
         if status.is_some() {
+            self.cleanup.finished.store(true, Ordering::Release);
             // Also release startup-owned copies on failed handoff. Cleanup may retain this
             // ProcessHandle while deleting the sandbox directory containing the sidecars.
             self._disk_locks.clear();
@@ -377,21 +449,14 @@ impl ProcessHandle {
 
     /// Disarm the SIGTERM safety net so the sandbox keeps running after
     /// this handle is dropped. Used by detached sandbox flows.
-    pub fn disarm(&mut self) {
-        self.detached = true;
+    pub fn disarm(&mut self) -> MicrosandboxResult<()> {
+        // An already reaped child has no live Unix watchdog to notify.
+        self.try_wait()?;
+        self.cleanup.disarm()
+    }
 
-        #[cfg(unix)]
-        {
-            if let Some(parent_watchdog) = &self.parent_watchdog
-                && let Err(err) = send_parent_watchdog_detach(parent_watchdog)
-            {
-                tracing::debug!(
-                    error = %err,
-                    sandbox = %self.sandbox_name,
-                    "failed to send parent-watch detach"
-                );
-            }
-        }
+    pub(crate) fn cleanup_control(&self) -> Arc<CleanupControl> {
+        self.cleanup.clone()
     }
 
     fn cleanup_metrics_reservation(&mut self) {
@@ -409,6 +474,54 @@ impl ReapedChild {
             #[cfg(target_os = "linux")]
             runtime: Handle::try_current().ok(),
         }
+    }
+}
+
+impl CleanupControl {
+    /// Start at most one observer for a retained detached run. It never owns cleanup authority.
+    pub(crate) fn disarm_retained(
+        &self,
+        handle: Option<&Arc<tokio::sync::Mutex<ProcessHandle>>>,
+    ) -> MicrosandboxResult<()> {
+        self.disarm()?;
+        #[cfg(target_os = "linux")]
+        if let Some(handle) = handle
+            && !self.reaper_started.swap(true, Ordering::AcqRel)
+        {
+            child_reaper::retained(Arc::downgrade(handle));
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = handle;
+        Ok(())
+    }
+
+    pub(crate) fn is_armed(&self) -> bool {
+        !self.detached.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn disarm(&self) -> MicrosandboxResult<()> {
+        // This lock covers only the synchronous one-byte notification/job update,
+        // never child wait, guest work, or an await. Concurrent detaches share it.
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.is_armed() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        if !self.finished.load(Ordering::Acquire)
+            && let Some(watchdog) = &self.watchdog
+        {
+            send_parent_watchdog_detach(watchdog)?;
+        }
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            job.disarm()?;
+        }
+        // A failed notification leaves authority armed and the receiver usable.
+        self.detached.store(true, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -459,6 +572,25 @@ impl MetricsReservationCleanup {
 
 #[cfg(windows)]
 impl WindowsJob {
+    /// Keep the existing job and process identity, but remove automatic termination.
+    fn disarm(&self) -> std::io::Result<()> {
+        let mut limits = unsafe { std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
+        // This SDK creates the job with only KILL_ON_JOB_CLOSE. Clear that flag
+        // before publishing detach; closing the retained job must no longer kill it.
+        let result = unsafe {
+            SetInformationJobObject(
+                self.handle,
+                JobObjectExtendedLimitInformation,
+                (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Create an unnamed job object that terminates its process tree when the
     /// final job handle closes.
     pub(crate) fn new_kill_on_close() -> std::io::Result<Self> {
@@ -550,7 +682,7 @@ impl Drop for StartupProcess {
 
 impl Drop for ProcessHandle {
     fn drop(&mut self) {
-        if self.detached {
+        if !self.cleanup.is_armed() {
             return;
         }
 
@@ -659,42 +791,10 @@ fn send_parent_watchdog_detach(fd: &OwnedFd) -> std::io::Result<()> {
     }
 }
 
-/// Wait for a released child in the background so its exit is always collected.
-///
-/// Without a Tokio runtime the child falls back to the normal orphan queue.
+/// Transfer the released child to signal-independent collection.
 #[cfg(target_os = "linux")]
-fn reap_in_background(mut child: Child, runtime: Option<Handle>) {
-    if !matches!(child.try_wait(), Ok(None)) {
-        return;
-    }
-    let Some(runtime) = runtime.or_else(|| Handle::try_current().ok()) else {
-        return;
-    };
-
-    // Close our pipe ends now, as dropping the handle always has; keep only the exit status.
-    drop(child.stdin.take());
-    drop(child.stdout.take());
-    drop(child.stderr.take());
-
-    runtime.spawn(async move {
-        let pid = child.id();
-        let Some(mut exit) = super::child_exit::ChildExit::observe(&child) else {
-            return;
-        };
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    tracing::debug!(?pid, ?status, "reaped released sandbox process");
-                    return;
-                }
-                Ok(None) => exit.wait().await,
-                Err(error) => {
-                    tracing::warn!(?pid, %error, "failed to reap released sandbox process");
-                    return;
-                }
-            }
-        }
-    });
+fn reap_in_background(child: Child, runtime: Option<Handle>) {
+    child_reaper::released(child, runtime);
 }
 
 #[cfg(windows)]
@@ -941,197 +1041,7 @@ mod tests {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-mod reap_tests {
-    use std::os::fd::FromRawFd;
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
-
-    use nix::errno::Errno;
-    use nix::sys::wait::{WaitPidFlag, waitpid};
-    use tokio::signal::unix::{SignalKind, signal as tokio_signal};
-
-    use super::*;
-
-    const CASE_ENV: &str = "MSB_REAP_TEST_CASE";
-    const REAP_TIMEOUT: Duration = Duration::from_secs(5);
-    const SETTLE_DELAY: Duration = Duration::from_millis(200);
-
-    /// How the child ends after its handle has been dropped.
-    #[derive(Clone, Copy)]
-    enum Ending {
-        /// The process exits on its own.
-        Exit,
-        /// Another handle stops it, e.g. `Sandbox::get(..).stop()`.
-        Term,
-        /// It is killed outright.
-        Kill,
-    }
-
-    /// Run one scenario in a fresh test process so the SIGCHLD change stays isolated.
-    fn run_isolated(case: &str) {
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "runtime::handle::reap_tests::isolated_case",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(CASE_ENV, case)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        assert!(
-            output.status.success(),
-            "case {case} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        assert!(
-            stdout.contains(&format!("reap case {case} passed")),
-            "case {case} did not run\nstdout:\n{stdout}"
-        );
-    }
-
-    /// Spawn a child that exits only on stdin EOF or a signal, after a host runtime reset
-    /// SIGCHLD (Node.js does this after every `child_process` call).
-    fn spawn_child(
-        parent_watchdog: Option<OwnedFd>,
-    ) -> (ProcessHandle, tokio::process::ChildStdin, u32) {
-        // The SDK installs Tokio's SIGCHLD handler before spawning a sandbox.
-        let sigchld = tokio_signal(SignalKind::child()).unwrap();
-        std::mem::forget(sigchld);
-
-        let mut child = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("read value")
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let pid = child.id().unwrap();
-        let handle = ProcessHandle::new(
-            pid,
-            "reap-test".into(),
-            child,
-            Vec::new(),
-            parent_watchdog,
-            None,
-        );
-
-        unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) };
-        (handle, stdin, pid)
-    }
-
-    async fn assert_reaped(pid: u32) {
-        let reaped = tokio::time::timeout(REAP_TIMEOUT, async {
-            // A zombie still answers kill(pid, 0); ESRCH means its status was collected.
-            while signal::kill(Pid::from_raw(pid as i32), None) != Err(Errno::ESRCH) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await;
-        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-
-        assert!(reaped.is_ok(), "child {pid} was not reaped: {state}");
-        assert_eq!(
-            waitpid(Pid::from_raw(pid as i32), Some(WaitPidFlag::WNOHANG)),
-            Err(Errno::ECHILD)
-        );
-    }
-
-    /// Release a running child as `detach()` does, or as dropping an unstopped attached
-    /// owner does (which only closes its parent-watchdog writer), then end it.
-    async fn released_child_is_reaped(detach: bool, ending: Ending) {
-        let mut fds = [0; 2];
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        let _watchdog_reader = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        let watchdog_writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-
-        let (mut handle, stdin, pid) = spawn_child(Some(watchdog_writer));
-        if detach {
-            handle.disarm();
-        }
-
-        // Drop away from the runtime, as a JS finalizer or Python GC may.
-        std::thread::spawn(move || drop(handle)).join().unwrap();
-
-        // A real VM keeps running long after release; end the child only once any
-        // immediate post-drop reaping attempt has already passed.
-        tokio::time::sleep(SETTLE_DELAY).await;
-        match ending {
-            Ending::Exit => drop(stdin),
-            Ending::Term => signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).unwrap(),
-            Ending::Kill => signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL).unwrap(),
-        }
-
-        assert_reaped(pid).await;
-    }
-
-    async fn owned_wait_reports_status_once() {
-        let (mut handle, stdin, pid) = spawn_child(None);
-        signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL).unwrap();
-
-        let status = tokio::time::timeout(REAP_TIMEOUT, handle.wait())
-            .await
-            .expect("owned wait timed out")
-            .unwrap();
-        drop(handle);
-        drop(stdin);
-
-        assert_eq!(status.signal(), Some(libc::SIGKILL));
-        assert_reaped(pid).await;
-    }
-
-    #[test]
-    fn isolated_case() {
-        let Ok(case) = std::env::var(CASE_ENV) else {
-            return;
-        };
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        runtime.block_on(async {
-            match case.as_str() {
-                "detached-exit" => released_child_is_reaped(true, Ending::Exit).await,
-                "detached-term" => released_child_is_reaped(true, Ending::Term).await,
-                "detached-kill" => released_child_is_reaped(true, Ending::Kill).await,
-                "attached-drop" => released_child_is_reaped(false, Ending::Exit).await,
-                "owned-wait" => owned_wait_reports_status_once().await,
-                other => panic!("unknown reap case {other}"),
-            }
-        });
-        println!("reap case {case} passed");
-    }
-
-    #[test]
-    fn detached_child_is_reaped_after_it_exits() {
-        run_isolated("detached-exit");
-    }
-
-    #[test]
-    fn detached_child_is_reaped_after_another_handle_stops_it() {
-        run_isolated("detached-term");
-    }
-
-    #[test]
-    fn detached_child_is_reaped_after_sigkill() {
-        run_isolated("detached-kill");
-    }
-
-    #[test]
-    fn dropped_attached_child_is_reaped() {
-        run_isolated("attached-drop");
-    }
-
-    #[test]
-    fn owned_wait_still_reports_exit_status() {
-        run_isolated("owned-wait");
-    }
-}
+mod reap_tests;
 
 #[cfg(all(test, windows))]
 mod windows_tests {
@@ -1237,9 +1147,13 @@ mod windows_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("disk.lock");
         let mut process = child(directory.path(), vec![open_lock(&path)]);
+        let job = WindowsJob::new_kill_on_close().unwrap();
+        job.assign_pid(process.pid()).unwrap();
+        process.job = Some(Arc::new(job));
+        Arc::get_mut(&mut process.cleanup).unwrap().job = process.job.clone();
         process.handoff_disk_locks().await.unwrap();
         ready(directory.path()).await;
-        process.disarm();
+        process.disarm().unwrap();
         drop(process);
         assert!(!available(&path));
         std::fs::write(directory.path().join("exit"), b"exit").unwrap();

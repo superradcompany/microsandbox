@@ -125,7 +125,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         .map(Duration::from_secs);
 
     if args.detach {
-        let handle = Sandbox::get(&args.name).await?;
+        let handle = crate::commands::common::sandbox_record(&args.name).await?;
         anyhow::ensure!(
             handle.status_snapshot() == microsandbox::sandbox::SandboxStatus::Running,
             "detached execution requires a running sandbox; start it with `msb start {}`",
@@ -133,8 +133,11 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         );
         let sandbox = handle.connect().await?;
         let tty = args.tty || interactive;
-        let (cmd, command_args) =
-            super::common::resolve_exec_command(sandbox.config(), args.command, tty)?;
+        let (cmd, command_args) = super::common::resolve_exec_command(
+            sandbox.config().await?.runtime(),
+            args.command,
+            tty,
+        )?;
         let cmd = cmd.ok_or_else(|| {
             anyhow::anyhow!("detached execution requires a command or configured default")
         })?;
@@ -204,11 +207,23 @@ async fn run_started(
     // Resolve the command with exec semantics: an explicit command runs
     // directly, while omitted commands can still fall back to the sandbox's
     // configured image command/default shell.
-    let (cmd, cmd_args) =
-        match super::common::resolve_exec_command(sandbox.config(), args.command, interactive)? {
-            (Some(cmd), cmd_args) => (cmd, cmd_args),
-            (None, _) => return Ok(0),
-        };
+    // An explicit command does not use the image defaults. Avoid a remote
+    // config request here, but keep execution's identity/status revalidation
+    // in prepare_runtime: skipping that check could target a replaced sandbox.
+    let resolved = if args.command.is_empty() {
+        super::common::resolve_exec_command(
+            sandbox.config().await?.runtime(),
+            args.command,
+            interactive,
+        )?
+    } else {
+        let mut command = args.command.into_iter();
+        (command.next(), command.collect())
+    };
+    let (cmd, cmd_args) = match resolved {
+        (Some(cmd), cmd_args) => (cmd, cmd_args),
+        (None, _) => return Ok(0),
+    };
 
     if args.stream || (!interactive && !stdin_is_terminal) {
         let options = apply_common_exec_opts(

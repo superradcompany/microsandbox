@@ -8,7 +8,7 @@ use sea_orm::{
     sea_query::Expr,
 };
 
-use crate::{MicrosandboxError, MicrosandboxResult, backend::LocalBackend};
+use crate::{MicrosandboxError, MicrosandboxResult, context::LocalContext};
 
 /// A valid network address-pool slot.
 ///
@@ -26,7 +26,7 @@ impl NetworkSlot {
     ///
     /// The slot is released when the sandbox stops and may change after a
     /// restart. Concurrent starts cannot receive the same slot.
-    pub(super) async fn lease(local: &LocalBackend, sandbox_id: i32) -> MicrosandboxResult<Self> {
+    pub(super) async fn lease(local: &LocalContext, sandbox_id: i32) -> MicrosandboxResult<Self> {
         let pools = local.db().await?;
         let db = pools.write();
         if !microsandbox_db::catalog::has_column(db, "sandbox", "network_slot").await? {
@@ -59,7 +59,7 @@ impl NetworkSlot {
 
     /// Reserve the ID-derived address used by pre-v0.6.16 runtimes.
     pub(super) async fn lease_legacy(
-        local: &LocalBackend,
+        local: &LocalContext,
         sandbox_id: i32,
     ) -> MicrosandboxResult<Self> {
         let slot = Self::try_from(u16::try_from(sandbox_id).map_err(|_| {
@@ -166,7 +166,7 @@ mod tests {
 
     use super::*;
 
-    async fn insert_sandbox_rows_with_ids(backend: &LocalBackend, ids: &[i32]) {
+    async fn insert_sandbox_rows_with_ids(backend: &LocalContext, ids: &[i32]) {
         let pools = backend.db().await.unwrap();
         let now = chrono::Utc::now().naive_utc();
         let models: Vec<sandbox_entity::ActiveModel> = ids
@@ -205,7 +205,6 @@ mod tests {
         let temp = tempdir().unwrap();
         let backend = crate::test_support::local_backend_builder(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
         insert_sandbox_rows_with_ids(&backend, &[1, 2, 65_700]).await;
         assert_eq!(NetworkSlot::lease(&backend, 65_700).await.unwrap().get(), 1);
@@ -226,12 +225,11 @@ mod tests {
     #[tokio::test]
     async fn allocates_the_lowest_free_slot() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("msb-home").join("config.json"))
             .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
 
         insert_sandbox_rows_with_ids(&backend, &[65_700, 65_701]).await;
@@ -242,12 +240,11 @@ mod tests {
     #[tokio::test]
     async fn recycles_the_lowest_free_slot_past_the_id_cap() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("msb-home").join("config.json"))
             .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
 
         insert_sandbox_rows_with_ids(&backend, &[1, 2, 65_700]).await;
@@ -267,12 +264,11 @@ mod tests {
     #[tokio::test]
     async fn finds_a_gap_below_the_highest_lease() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("msb-home").join("config.json"))
             .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
 
         insert_sandbox_rows_with_ids(&backend, &[65_700, 65_701, 65_702]).await;
@@ -292,12 +288,11 @@ mod tests {
     #[tokio::test]
     async fn high_ids_get_distinct_persisted_slots() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("msb-home").join("config.json"))
             .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
 
         insert_sandbox_rows_with_ids(&backend, &[65_700]).await;
@@ -322,12 +317,11 @@ mod tests {
     #[tokio::test]
     async fn repeated_lease_keeps_the_existing_slot() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("msb-home").join("config.json"))
             .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
 
         insert_sandbox_rows_with_ids(&backend, &[65_700]).await;
@@ -349,12 +343,11 @@ mod tests {
         let home = temp.path().join("msb-home");
         let mut backends = Vec::with_capacity(COUNT);
         for _ in 0..COUNT {
-            let backend = LocalBackend::builder()
+            let backend = LocalContext::builder()
                 .config_path(home.join("config.json"))
                 .managed_config_path(home.join("managed.json"))
                 .home(&home)
                 .build()
-                .await
                 .unwrap();
             backend.db().await.unwrap();
             backends.push(backend);
@@ -382,12 +375,11 @@ mod tests {
     #[tokio::test]
     async fn does_not_lease_after_start_is_stopped() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("msb-home").join("config.json"))
             .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
         insert_sandbox_rows_with_ids(&backend, &[65_700]).await;
         assert_eq!(NetworkSlot::lease(&backend, 65_700).await.unwrap().get(), 1);
@@ -424,12 +416,11 @@ mod tests {
     #[tokio::test]
     async fn leases_while_starting_before_readiness_is_published() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("msb-home").join("config.json"))
             .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
         insert_sandbox_rows_with_ids(&backend, &[65_700]).await;
 
@@ -450,12 +441,11 @@ mod tests {
     #[tokio::test]
     async fn exhaustion_reclaims_inactive_slots_and_retries() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("msb-home").join("config.json"))
             .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
 
         let pools = backend.db().await.unwrap();
@@ -486,12 +476,11 @@ mod tests {
     #[tokio::test]
     async fn pool_exhaustion_is_a_clear_error() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("msb-home").join("config.json"))
             .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
-            .await
             .unwrap();
 
         let pools = backend.db().await.unwrap();

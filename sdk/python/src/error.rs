@@ -10,7 +10,7 @@ use crate::helpers::str_enum_member;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Error returned when a sandbox handle has been consumed (detached/removed).
+/// Error returned when a sandbox handle has been consumed (removed or disposed).
 pub fn consumed() -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err("sandbox has been consumed")
 }
@@ -21,7 +21,7 @@ pub fn local_only(name: &str) -> PyErr {
     let msg = format!("{name}() is not supported by this backend: use a local backend");
     Python::attach(|py| {
         let instance = py
-            .import("microsandbox.errors")
+            .import(crate::provider::public_module("errors").as_str())
             .and_then(|m| m.getattr("UnsupportedError"))
             .and_then(|cls| cls.call1((msg.as_str(),)));
         match instance {
@@ -42,7 +42,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
     }
 
     Python::attach(|py| {
-        let errors_mod = match py.import("microsandbox.errors") {
+        let errors_mod = match py.import(crate::provider::public_module("errors").as_str()) {
             Ok(m) => m,
             Err(_) => return pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         };
@@ -296,7 +296,7 @@ mod tests {
 
             let raised = to_py_err(error);
             let class = py
-                .import("microsandbox.errors")
+                .import(crate::provider::public_module("errors").as_str())
                 .unwrap()
                 .getattr("ModificationNotConfirmedError")
                 .unwrap();

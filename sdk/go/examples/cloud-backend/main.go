@@ -121,7 +121,12 @@ func waitUntilStopped(ctx context.Context, name string) error {
 		if err != nil {
 			return err
 		}
-		if handle.Status() == microsandbox.SandboxStatusStopped {
+		status, statusErr := handle.Status(ctx)
+		_ = handle.Close()
+		if statusErr != nil {
+			return statusErr
+		}
+		if status == microsandbox.SandboxStatusStopped {
 			return nil
 		}
 

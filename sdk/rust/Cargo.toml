@@ -89,7 +89,7 @@ microsandbox-migration = { workspace = true, optional = true }
 microsandbox-network = { workspace = true, default-features = false, optional = true }
 microsandbox-protocol.workspace = true
 microsandbox-runtime = { workspace = true, features = ["client"], optional = true }
-microsandbox-types.workspace = true
+microsandbox-types = { workspace = true, features = ["progress"] }
 microsandbox-utils.workspace = true
 nix = { workspace = true, features = ["process", "signal", "term"], optional = true }
 notify.workspace = true

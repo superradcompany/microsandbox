@@ -6,6 +6,8 @@
 
 #[cfg(target_os = "linux")]
 mod child_exit;
+#[cfg(target_os = "linux")]
+mod child_reaper;
 pub(crate) mod handle;
 pub(crate) mod launch_contract;
 mod launch_input;

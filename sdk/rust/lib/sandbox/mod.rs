@@ -9,6 +9,13 @@ pub(crate) mod attach;
 pub(crate) mod branch;
 mod branch_batch;
 mod builder;
+mod config_inspection;
+mod context;
+mod execution;
+mod inspection;
+mod lifetime;
+mod readiness;
+mod state;
 #[cfg(feature = "local")]
 pub(crate) use builder::prepare_local_snapshot_restore;
 mod caller_config_overrides;
@@ -24,6 +31,7 @@ mod exit;
 #[cfg(feature = "local")]
 pub(crate) mod flat_rootfs;
 pub mod fs;
+mod fs_handle;
 mod handle;
 pub(crate) mod identity;
 pub mod init;
@@ -44,6 +52,8 @@ pub(crate) use patch::{
 pub(crate) mod pause;
 #[cfg(all(feature = "local", windows))]
 mod reap;
+#[cfg(not(feature = "local"))]
+mod remote_only;
 mod restore_builder;
 pub(crate) mod restore_resources;
 #[cfg(feature = "ssh")]
@@ -77,17 +87,15 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use microsandbox_image::progress_channel;
 
 #[cfg(feature = "local")]
-use crate::backend::local::creation::{CreationStorage, RemovalMode};
-use crate::{MicrosandboxResult, agent::AgentClient, backend::sandbox::SandboxIdentity};
+use crate::context::local::creation::{CreationStorage, RemovalMode};
+use crate::{MicrosandboxResult, agent::AgentClient, context::sandbox::SandboxIdentity};
 #[cfg(feature = "local")]
 use crate::{
-    backend::LocalBackend,
+    context::LocalContext,
     db::entity::sandbox as sandbox_entity,
     error::{Operation, UnsupportedReason},
     runtime::SpawnMode,
 };
-
-use self::exec::{ExecHandle, ExecOptions};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -149,6 +157,11 @@ pub use branch::{ForkBuilder, ForkManyBuilder, ForkOutcome};
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use compact::{DiskCompactionBuilder, DiskCompactionDiskResult, DiskCompactionResult};
 pub use config::{SandboxConfig, SandboxConfigPatch};
+pub use config_inspection::{
+    RemoteMountInspection, RemoteNetworkInspection, RemoteResourceInspection,
+    RemoteSandboxInspection, RemoteSecretInjection, RemoteSecretInspection, RemoteSecretViolation,
+    SandboxConfigInspection, SandboxInspectedSettings,
+};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 #[cfg(feature = "local")]
 pub use exit::{SandboxRunExit, SandboxTerminationReason};
@@ -157,18 +170,17 @@ pub use fs::{
     FsWriteSink, SandboxFsOps,
 };
 pub use handle::{
-    DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, DestroyOptions, RestartOptions, SandboxHandle,
+    DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, DestroyOptions, RestartOptions, SandboxRecord,
 };
 pub use identity::SandboxId;
 pub use init::{HandoffInit, InitOptionsBuilder};
+pub use inspection::{SandboxInfo, SandboxLaunchInfo};
 pub use metrics::SandboxMetrics;
 #[cfg(feature = "local")]
 pub use metrics::{
     SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics, all_sandbox_metrics_local,
     all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
 };
-#[cfg(feature = "local")]
-pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
@@ -184,6 +196,7 @@ pub use microsandbox_network::{HttpConnectCredentials, OutboundProxy, Socks5Cred
 #[cfg(feature = "local")]
 pub use microsandbox_runtime::control::PauseControlState as SandboxPauseState;
 pub use microsandbox_types::SandboxLogLevel as LogLevel;
+pub use microsandbox_types::pull_progress::{PullProgress, PullProgressHandle};
 pub use microsandbox_types::{CpuPlacement, PullPolicy};
 #[cfg(feature = "net")]
 pub use microsandbox_types::{
@@ -199,7 +212,6 @@ pub use microsandbox_types::{
     VsockSpec, VsockSpecPatch,
 };
 pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
-#[cfg(feature = "local")]
 pub use restore_builder::RestoreBuilder;
 #[cfg(feature = "local")]
 #[doc(hidden)]
@@ -259,30 +271,33 @@ pub struct SandboxListBuilder {
     pub(crate) labels: BTreeMap<String, String>,
 }
 
-/// One page of sandbox handles.
+/// One page of unprepared sandbox resources.
 pub struct SandboxPage {
     /// Sandboxes in this page.
-    pub sandboxes: Vec<SandboxHandle>,
+    pub sandboxes: Vec<Sandbox>,
     /// Opaque cursor for the next page, or `None` when this is the final page.
     pub next_cursor: Option<String>,
 }
 
-/// A running sandbox.
+/// A sandbox resource with stable identity and lazily prepared guest access.
 ///
-/// Created via [`Sandbox::builder`] or [`Sandbox::create`]. Provides
-/// lifecycle management and access to the agent bridge for guest communication.
+/// Created via [`Sandbox::builder`] or [`Sandbox::create`], or fetched without
+/// starting it via [`Sandbox::get`]. Guest execution prepares the resource;
+/// mutable inspection remains live and non-starting.
 ///
 /// Per the SDK local-cloud parity plan (D6.4) `Sandbox` is a single type
-/// regardless of backend. It holds an [`Arc<dyn Backend>`](crate::backend::Backend)
+/// regardless of backend. It holds an [`Arc<dyn Context>`](crate::context::Context)
 /// to route lifecycle ops through, and a backend-private
-/// [`SandboxInner`](crate::backend::SandboxInner) enum carrying variant-specific
-/// state. Users reach variant data via [`Sandbox::local`] / [`Sandbox::cloud`].
+/// [`SandboxInner`](crate::context::SandboxInner) enum carrying variant-specific
+/// state. Users reach variant data via [`Sandbox::local_state`] / [`Sandbox::remote_state`].
 #[derive(Clone)]
+#[must_use = "Retain the Sandbox; discarding an owning result may trigger shutdown"]
 pub struct Sandbox {
-    backend: Arc<dyn crate::backend::Backend>,
-    inner: Arc<crate::backend::SandboxInner>,
+    backend: Arc<dyn crate::context::Context>,
+    binding: Arc<state::SandboxBinding>,
+    identity: SandboxIdentity,
     name: String,
-    config: SandboxConfig,
+    ephemeral: bool,
 }
 
 /// Result of observing a sandbox in a terminal non-running state.
@@ -307,7 +322,7 @@ pub struct SandboxStopResult {
     pub source: Option<String>,
 }
 
-/// Result returned by [`Sandbox::ping`] and [`SandboxHandle::ping`].
+/// Result returned by [`Sandbox::ping`] and [`SandboxRecord::ping`].
 #[derive(Debug, Clone)]
 pub struct SandboxPingResult {
     /// Sandbox name that was pinged.
@@ -317,7 +332,7 @@ pub struct SandboxPingResult {
     pub latency: std::time::Duration,
 }
 
-/// Result returned by [`Sandbox::touch`] and [`SandboxHandle::touch`].
+/// Result returned by [`Sandbox::touch`] and [`SandboxRecord::touch`].
 #[derive(Debug, Clone)]
 pub struct SandboxTouchResult {
     /// Sandbox name that was touched.
@@ -339,10 +354,8 @@ impl Sandbox {
 
     /// Create a sandbox from a config.
     ///
-    /// Routes through the ambient [`default_backend`](crate::backend::default_backend)
-    /// so a cloud profile will dispatch to `CloudBackend` instead of the local
-    /// libkrun runtime. The returned [`Sandbox`] always carries the backend it
-    /// was created on; subsequent method calls keep using that backend.
+    /// Uses the configured context. To override the destination, use
+    /// `Sandbox::remote()?.builder(name)` or `Sandbox::ctx(&context).builder(name)`.
     pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
         #[cfg(feature = "local")]
         if create_spawn_mode(&config, SpawnMode::Attached) == SpawnMode::Detached {
@@ -351,9 +364,9 @@ impl Sandbox {
             // so an exiting CLI/SDK process cannot reap the successfully restored VM.
             return Self::create_detached(config).await;
         }
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::configured_context();
         backend
-            .sandboxes()
+            .sandbox_ops()
             .create(backend.clone(), config, true)
             .await
     }
@@ -362,12 +375,11 @@ impl Sandbox {
     ///
     /// This is intended for detached CLI workflows such as `msb create` and
     /// `msb run --detach`, where the sandbox should keep running in the
-    /// background after the command returns. Routes through the ambient
-    /// [`default_backend`](crate::backend::default_backend).
+    /// background after the command returns. Uses the configured context.
     pub async fn create_detached(config: SandboxConfig) -> MicrosandboxResult<Self> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::configured_context();
         backend
-            .sandboxes()
+            .sandbox_ops()
             .create_detached(backend.clone(), config)
             .await
     }
@@ -376,10 +388,8 @@ impl Sandbox {
     ///
     /// Returns a progress handle for per-layer pull events and a task handle
     /// for the sandbox creation result. The caller should consume progress
-    /// events until the channel closes, then await the task. **Local backend
-    /// only** — pull progress is a local concept (cloud workers handle image
-    /// pulls server-side); on a cloud backend this falls back to a no-progress
-    /// create with an immediately-closed channel.
+    /// events until the channel closes, then await the task. This entry point uses
+    /// the configured context.
     #[cfg(feature = "local")]
     pub fn create_with_pull_progress(
         config: SandboxConfig,
@@ -412,10 +422,10 @@ impl Sandbox {
         PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::configured_context();
         // Resolve before spawning: the task may first run after the caller changes cwd.
         let paths = if backend.as_local().is_some() {
-            crate::backend::local::host_paths::resolve_host_paths(&mut config)
+            crate::context::local::host_paths::resolve_host_paths(&mut config)
         } else {
             Ok(())
         };
@@ -426,7 +436,7 @@ impl Sandbox {
             // Pull progress is local-only; ignore the channel on non-local
             // backends and dispatch through the trait without progress events.
             match backend.kind() {
-                crate::backend::BackendKind::Local => {
+                crate::context::ContextKind::Local => {
                     let local = backend.as_local().ok_or_else(|| {
                         crate::MicrosandboxError::local_only(Operation::SandboxCreate)
                     })?;
@@ -434,10 +444,10 @@ impl Sandbox {
                         .create_sandbox(backend.clone(), config, mode, Some(sender))
                         .await
                 }
-                crate::backend::BackendKind::Cloud => {
+                crate::context::ContextKind::Remote => {
                     drop(sender); // close the channel — no per-layer events for cloud.
                     backend
-                        .sandboxes()
+                        .sandbox_ops()
                         .create(backend.clone(), config, true)
                         .await
                 }
@@ -449,39 +459,42 @@ impl Sandbox {
     /// Start an existing stopped sandbox from persisted state.
     ///
     /// Reuses the serialized sandbox config and pinned rootfs state without
-    /// re-resolving the original OCI reference. Routes through the ambient
-    /// [`default_backend`](crate::backend::default_backend).
+    /// re-resolving the original OCI reference. Uses the configured context.
     ///
-    /// On a Cloud sandbox, a start is refused with
+    /// For an explicitly remote start via `Sandbox::remote()?.start(name)`, the provider returns
     /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
     /// secret change to it is being saved, or while its result is not yet known after
     /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
     /// this usually clears within seconds. Start again after a short wait.
     pub async fn start(name: &str) -> MicrosandboxResult<Self> {
-        let backend = crate::backend::default_backend();
-        backend.sandboxes().start(backend.clone(), name).await
+        let backend = crate::context::configured_context();
+        backend.sandbox_ops().start(backend.clone(), name).await
     }
 
-    /// Start an existing sandbox in detached/background mode.
+    /// Start an existing sandbox in detached/background mode in the configured context.
     ///
-    /// On a Cloud sandbox, a start is refused with
+    /// For an explicitly remote start via `Sandbox::remote()?.start_detached(name)`, the provider returns
     /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
     /// secret change to it is being saved, or while its result is not yet known after
     /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
     /// this usually clears within seconds. Start again after a short wait.
     pub async fn start_detached(name: &str) -> MicrosandboxResult<Self> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::configured_context();
         backend
-            .sandboxes()
+            .sandbox_ops()
             .start_detached(backend.clone(), name)
             .await
     }
 
-    /// Get a sandbox handle by name. Routes through the ambient
-    /// [`default_backend`](crate::backend::default_backend).
-    pub async fn get(name: &str) -> MicrosandboxResult<SandboxHandle> {
-        let backend = crate::backend::default_backend();
-        backend.sandboxes().get(backend.clone(), name).await
+    /// Look up an existing resource without starting or connecting to its VM.
+    /// Guest execution prepares it lazily; inspection remains non-starting.
+    pub async fn get(name: &str) -> MicrosandboxResult<Self> {
+        Self::get_record(name).await.map(Self::from_record)
+    }
+
+    pub(crate) async fn get_record(name: &str) -> MicrosandboxResult<SandboxRecord> {
+        let backend = crate::context::configured_context();
+        backend.sandbox_ops().get(backend.clone(), name).await
     }
 
     /// List the first page of sandboxes using the default page size.
@@ -502,15 +515,18 @@ impl Sandbox {
             )));
         }
 
-        let backend = crate::backend::default_backend();
-        backend.sandboxes().list(backend.clone(), query).await
+        let backend = crate::context::configured_context();
+        backend
+            .sandbox_ops()
+            .list(backend.clone(), query)
+            .await
+            .map(SandboxPage::from_records)
     }
 
-    /// Remove a stopped sandbox by name via the ambient
-    /// [`default_backend`](crate::backend::default_backend).
+    /// Remove a stopped sandbox by name in the configured context.
     pub async fn remove(name: &str) -> MicrosandboxResult<()> {
-        let backend = crate::backend::default_backend();
-        backend.sandboxes().remove(backend.clone(), name).await
+        let backend = crate::context::configured_context();
+        backend.sandbox_ops().remove(backend.clone(), name).await
     }
 }
 
@@ -573,15 +589,21 @@ impl Sandbox {
     /// Build an outer `Sandbox` from local-variant inner state.
     #[cfg(feature = "local")]
     pub(crate) fn from_local(
-        backend: Arc<dyn crate::backend::Backend>,
-        local: crate::backend::SandboxLocalState,
+        backend: Arc<dyn crate::context::Context>,
+        local: crate::context::SandboxLocalState,
         config: SandboxConfig,
     ) -> Self {
+        let identity = SandboxIdentity::Local(local.db_id);
+        let session = state::RuntimeSession {
+            inner: crate::context::SandboxInner::Local(Arc::new(local)),
+            config: config.clone(),
+        };
         Self {
             backend,
-            inner: Arc::new(crate::backend::SandboxInner::Local(local)),
+            identity,
+            binding: Arc::new(state::SandboxBinding::new(Some(Arc::new(session)))),
             name: config.spec.name.clone(),
-            config,
+            ephemeral: config.spec.lifecycle.ephemeral,
         }
     }
 }
@@ -661,30 +683,28 @@ impl Sandbox {
         remove_local_persisted_sandbox(local_backend, &self.name, local.db_id).await
     }
 
-    /// Unique name identifying this sandbox.
+    /// Name captured when this resource was created or fetched.
+    /// Use `info().await` for the provider's current observation.
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Stable identity of this persisted sandbox.
     pub fn id(&self) -> SandboxId {
-        match self.inner.as_ref() {
-            crate::backend::SandboxInner::Local(state) => SandboxId::local(state.db_id),
-            crate::backend::SandboxInner::Cloud(state) => SandboxId::cloud(&state.id),
+        match &self.identity {
+            SandboxIdentity::Local(id) => SandboxId::local(*id),
+            SandboxIdentity::Cloud(id) => SandboxId::cloud(id),
         }
     }
 
     fn identity(&self) -> SandboxIdentity {
-        match self.inner.as_ref() {
-            crate::backend::SandboxInner::Local(state) => SandboxIdentity::Local(state.db_id),
-            crate::backend::SandboxInner::Cloud(state) => SandboxIdentity::Cloud(state.id.clone()),
-        }
+        self.identity.clone()
     }
 
-    async fn refresh_handle(&self) -> MicrosandboxResult<SandboxHandle> {
+    async fn refresh_handle(&self) -> MicrosandboxResult<SandboxRecord> {
         let handle = self
             .backend
-            .sandboxes()
+            .sandbox_ops()
             .get(self.backend.clone(), &self.name)
             .await?;
         if handle.identity() != self.identity() {
@@ -695,12 +715,6 @@ impl Sandbox {
             });
         }
         Ok(handle)
-    }
-
-    /// The full configuration this sandbox was created with (image, cpus,
-    /// memory, env, mounts, etc.).
-    pub fn config(&self) -> &SandboxConfig {
-        &self.config
     }
 
     /// Start a sandbox modification.
@@ -714,60 +728,61 @@ impl Sandbox {
 
     /// Explicitly compact sealed backing layers of the root and sandbox-owned data disks.
     pub fn compact(&self) -> DiskCompactionBuilder {
-        DiskCompactionBuilder::new(self.backend.clone(), self.name.clone())
+        DiskCompactionBuilder::new(self.backend.clone(), self.name.clone()).bound_to(self.id())
     }
 
-    /// Which backend variant this sandbox is bound to. Returns `Local` or
-    /// `Cloud` depending on how it was created.
-    pub fn backend_kind(&self) -> crate::backend::BackendKind {
+    /// Which context this sandbox retains: `Local` or `Remote`.
+    pub fn context_kind(&self) -> crate::context::ContextKind {
         self.backend.kind()
     }
 
-    /// The `Arc<dyn Backend>` this sandbox routes through. Useful when
+    /// The `Arc<dyn Context>` this sandbox routes through. Useful when
     /// invoking other backend resources (e.g. volumes) from a sandbox
     /// reference.
-    pub fn backend(&self) -> &Arc<dyn crate::backend::Backend> {
+    pub fn backend(&self) -> &Arc<dyn crate::context::Context> {
         &self.backend
     }
 
     /// Local-only state accessor. Returns `Some` when this `Sandbox` was
     /// created by the local libkrun backend.
     #[cfg(feature = "local")]
-    pub fn local(&self) -> Option<&crate::backend::SandboxLocalState> {
-        match self.inner.as_ref() {
-            crate::backend::SandboxInner::Local(s) => Some(s),
-            crate::backend::SandboxInner::Cloud(_) => None,
+    pub fn local_state(&self) -> Option<Arc<crate::context::SandboxLocalState>> {
+        match &self.binding.current()?.inner {
+            crate::context::SandboxInner::Local(local) => Some(local.clone()),
+            _ => None,
         }
     }
 
-    /// Cloud-only state accessor. Returns `Some` when this `Sandbox` was
-    /// created by the cloud backend.
-    pub fn cloud(&self) -> Option<&crate::backend::SandboxCloudState> {
-        match self.inner.as_ref() {
-            crate::backend::SandboxInner::Cloud(s) => Some(s),
-            crate::backend::SandboxInner::Local(_) => None,
+    /// Current remote runtime metadata, if preparation has established it.
+    pub fn remote_state(&self) -> Option<Arc<crate::context::SandboxRemoteState>> {
+        match &self.binding.current()?.inner {
+            crate::context::SandboxInner::Cloud(remote) => Some(remote.clone()),
+            _ => None,
         }
     }
 
-    /// Same as [`Sandbox::local`] but returns a typed `Unsupported` error
+    /// Same as [`Sandbox::local_state`] but returns a typed `Unsupported` error
     /// for cloud sandboxes. Used by methods that have no cloud equivalent yet.
     #[cfg(feature = "local")]
     fn require_local(
         &self,
         op: Operation,
-    ) -> MicrosandboxResult<&crate::backend::SandboxLocalState> {
-        self.local()
-            .ok_or_else(|| crate::MicrosandboxError::local_only(op))
+    ) -> MicrosandboxResult<Arc<crate::context::SandboxLocalState>> {
+        self.local_state().ok_or_else(|| {
+            if self.backend.as_local().is_some() {
+                crate::MicrosandboxError::SandboxNotRunning(self.name.clone())
+            } else {
+                crate::MicrosandboxError::local_only(op)
+            }
+        })
     }
 
-    /// Live status from the backend. Always hits `backend.sandboxes().get(name)`
+    /// Live status from the backend. Always hits `backend.sandbox_ops().get(name)`
     /// — there is no cached status on the outer struct, per the D6.4
     /// "fetch-live" policy.
     ///
     /// Each call is a separate round-trip (DB read for local, HTTP GET for
-    /// cloud). If you need to read multiple fields together (e.g. status +
-    /// last failure message), call [`Sandbox::get`](Self::get) once and read off the
-    /// returned [`SandboxHandle`]'s `*_snapshot` accessors instead.
+    /// cloud). Use [`Self::info`] to observe several fields in one lookup.
     pub async fn status(&self) -> MicrosandboxResult<SandboxStatus> {
         let handle = self.refresh_handle().await?;
         Ok(handle.status_snapshot())
@@ -777,8 +792,8 @@ impl Sandbox {
     /// backend, never reads a cached field.
     ///
     /// Each call is a separate round-trip. If you need this alongside
-    /// `status()`, fetch a fresh [`SandboxHandle`] via
-    /// [`Sandbox::get`](Self::get) once and read both off the snapshot.
+    /// `status()`, fetch [`info()`](Self::info) once and read both fields
+    /// from that observation.
     pub async fn last_failure_message(&self) -> MicrosandboxResult<Option<String>> {
         let handle = self.refresh_handle().await?;
         Ok(handle.last_failure_message_snapshot())
@@ -786,13 +801,13 @@ impl Sandbox {
 
     /// Read captured output from `exec.log` for this sandbox.
     ///
-    /// Routes through the [`SandboxBackend`](crate::backend::SandboxBackend)
+    /// Routes through the [`SandboxOps`](crate::context::SandboxOps)
     /// trait. Local reads the on-disk JSON Lines file the runtime writes via
     /// the relay tap (`crates/runtime/lib/exec_log.rs`); cloud returns
     /// `Unsupported` until bounded cloud log snapshots land.
     pub async fn logs(&self, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .logs(self.backend.clone(), &self.name, opts)
             .await
     }
@@ -805,9 +820,9 @@ impl Sandbox {
     pub async fn log_stream(
         &self,
         opts: &LogStreamOptions,
-    ) -> MicrosandboxResult<crate::backend::sandbox::LogStream> {
+    ) -> MicrosandboxResult<crate::context::sandbox::LogStream> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .log_stream(self.backend.clone(), &self.name, opts)
             .await
     }
@@ -821,9 +836,9 @@ impl Sandbox {
     pub async fn follow_logs(
         &self,
         opts: &LogOptions,
-    ) -> MicrosandboxResult<crate::backend::sandbox::LogStream> {
+    ) -> MicrosandboxResult<crate::context::sandbox::LogStream> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .follow_logs(self.backend.clone(), &self.name, opts)
             .await
     }
@@ -852,8 +867,14 @@ impl Sandbox {
     /// this fails before any bytes are sent with an unsupported-operation error.
     #[cfg(feature = "local")]
     pub async fn ping(&self) -> MicrosandboxResult<SandboxPingResult> {
-        self.require_local(Operation::SandboxPing)?;
-        ping_agent(&self.name, self.client()).await
+        if self.backend.as_local().is_none() {
+            return Err(crate::MicrosandboxError::local_only(Operation::SandboxPing));
+        }
+        let session = self.connect_running().await?;
+        let crate::context::SandboxInner::Local(local) = &session.inner else {
+            return Err(crate::MicrosandboxError::local_only(Operation::SandboxPing));
+        };
+        ping_agent(&self.name, &local.client).await
     }
 
     /// Explicitly refresh the sandbox idle timer.
@@ -862,68 +883,23 @@ impl Sandbox {
     /// sandbox alive intentionally without relying on unrelated agent traffic.
     #[cfg(feature = "local")]
     pub async fn touch(&self) -> MicrosandboxResult<SandboxTouchResult> {
-        self.require_local(Operation::SandboxTouch)?;
-        touch_agent(&self.name, self.client()).await
+        if self.backend.as_local().is_none() {
+            return Err(crate::MicrosandboxError::local_only(
+                Operation::SandboxTouch,
+            ));
+        }
+        let session = self.connect_running().await?;
+        let crate::context::SandboxInner::Local(local) = &session.inner else {
+            return Err(crate::MicrosandboxError::local_only(
+                Operation::SandboxTouch,
+            ));
+        };
+        touch_agent(&self.name, &local.client).await
     }
 
-    /// Low-level access to the guest agent client.
-    ///
-    /// **Local-only**: panics if called on a cloud sandbox. Use
-    /// [`local()`](Self::local) to check first when calling from generic
-    /// code. The cloud variant has no `AgentClient` — the cloud worker owns
-    /// the in-VM bridge — so there is nothing to return.
-    #[cfg(feature = "local")]
-    pub fn client(&self) -> &AgentClient {
-        match self.local() {
-            Some(local) => &local.client,
-            None => {
-                panic!("Sandbox::client called on cloud sandbox — use sb.local() to check first")
-            }
-        }
-    }
-
-    /// Get a cloneable reference to the agent client.
-    ///
-    /// **Local-only**: panics if called on a cloud sandbox. Mirrors
-    /// [`client`](Self::client).
-    #[cfg(feature = "local")]
-    pub fn client_arc(&self) -> Arc<AgentClient> {
-        match self.local() {
-            Some(local) => Arc::clone(&local.client),
-            None => panic!(
-                "Sandbox::client_arc called on cloud sandbox — use sb.local() to check first"
-            ),
-        }
-    }
-
-    /// Returns `true` if this sandbox handle owns the process lifecycle.
-    ///
-    /// When `true`, dropping this handle or calling [`stop`](Self::stop)
-    /// will terminate the sandbox. Cloud sandboxes never own a host process
-    /// — the cloud worker does — so this returns `false` for them.
-    pub fn owns_lifecycle(&self) -> bool {
-        #[cfg(feature = "local")]
-        {
-            self.local().map(|s| s.handle.is_some()).unwrap_or(false)
-        }
-        #[cfg(not(feature = "local"))]
-        {
-            false
-        }
-    }
-
-    /// Read, write, and manage files inside the running sandbox.
-    ///
-    /// Routes through the [`SandboxBackend`](crate::backend::SandboxBackend)
-    /// trait per-method, so this constructor is infallible. On cloud each
-    /// op returns `Unsupported` until cloud guest-fs lands; on local each
-    /// op routes through the agent protocol (`core.fs.*`).
-    pub fn fs(&self) -> fs::SandboxFsOps<'_> {
-        #[cfg(feature = "local")]
-        let client = self.local().map(|local| Arc::clone(&local.client));
-        #[cfg(not(feature = "local"))]
-        let client = None;
-        fs::SandboxFsOps::new(self.backend.clone(), &self.name, client)
+    /// Return an idle filesystem facade. Operations prepare this receiver on demand.
+    pub fn fs(&self) -> fs::SandboxFsOps {
+        fs::SandboxFsOps::new(self)
     }
 
     /// Request graceful shutdown and wait without a built-in deadline for completion.
@@ -951,7 +927,7 @@ impl Sandbox {
     pub async fn request_stop(&self) -> MicrosandboxResult<()> {
         tracing::debug!(sandbox = %self.name, "stop: dispatching");
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .stop_identified(self.backend.clone(), &self.name, self.identity())
             .await
     }
@@ -1001,7 +977,7 @@ impl Sandbox {
     /// process is confirmed dead. Cloud currently returns `Unsupported`.
     pub async fn request_kill(&self) -> MicrosandboxResult<()> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .kill_identified(self.backend.clone(), &self.name, self.identity())
             .await
     }
@@ -1014,6 +990,8 @@ impl Sandbox {
         match tokio::time::timeout(timeout, self.wait_until_stopped()).await {
             Ok(result) => {
                 result?;
+                #[cfg(feature = "local")]
+                self.reap_exited_child()?;
                 Ok(())
             }
             Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
@@ -1032,7 +1010,7 @@ impl Sandbox {
     /// Request graceful drain without waiting for observed exit.
     pub async fn request_drain(&self) -> MicrosandboxResult<()> {
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .drain_identified(self.backend.clone(), &self.name, self.identity())
             .await
     }
@@ -1047,14 +1025,6 @@ impl Sandbox {
                 "cannot wait: not the lifecycle owner".into(),
             )),
         }
-    }
-
-    /// Wait until this exact sandbox reaches `status`.
-    pub async fn wait_for_status(
-        &self,
-        status: SandboxStatus,
-    ) -> MicrosandboxResult<SandboxHandle> {
-        self.refresh_handle().await?.wait_for_status(status).await
     }
 
     /// Stop and start this exact sandbox using default graceful options.
@@ -1096,37 +1066,13 @@ impl Sandbox {
         }
     }
 
-    /// Detach this handle without stopping the sandbox.
-    ///
-    /// Disarms the SIGTERM safety net so the sandbox keeps running after
-    /// this handle is dropped. Intended for CLI flows like `create`, `start`,
-    /// and `run --detach`. No-op for cloud sandboxes (the cloud worker owns
-    /// the lifecycle regardless of this process).
-    pub async fn detach(self) {
-        #[cfg(feature = "local")]
-        {
-            if let crate::backend::SandboxInner::Local(local) = self.inner.as_ref()
-                && let Some(h) = &local.handle
-            {
-                h.lock().await.disarm();
-            }
-        }
-        // Normal drop runs — client reader task is aborted and
-        // ProcessHandle drops without sending SIGTERM.
-    }
-
     /// Keep the creator's process safety net armed until every creation check has succeeded.
     #[cfg(feature = "local")]
     pub(crate) async fn finish_detached_creation(&mut self) -> MicrosandboxResult<()> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            crate::MicrosandboxError::Runtime(
-                "creation owner was shared before finalization".into(),
-            )
-        })?;
-        if let crate::backend::SandboxInner::Local(local) = inner
-            && let Some(handle) = local.handle.take()
+        if let Some(local) = self.local_state()
+            && let Some(cleanup) = &local.cleanup
         {
-            handle.lock().await.disarm();
+            cleanup.disarm_retained(local.handle.as_ref())?;
         }
         Ok(())
     }
@@ -1134,7 +1080,7 @@ impl Sandbox {
     /// Creation cleanup owns this exact process and must not reacquire its transition lock.
     #[cfg(feature = "local")]
     pub(crate) async fn terminate_creation_owner(&self) {
-        if let Some(local) = self.local()
+        if let Some(local) = self.local_state()
             && let Some(handle) = &local.handle
         {
             let mut handle = handle.lock().await;
@@ -1148,382 +1094,12 @@ impl Sandbox {
     fn is_local_ephemeral(&self) -> bool {
         #[cfg(feature = "local")]
         {
-            self.local().is_some() && self.config.spec.lifecycle.ephemeral
+            matches!(self.identity, SandboxIdentity::Local(_)) && self.ephemeral
         }
         #[cfg(not(feature = "local"))]
         {
             false
         }
-    }
-
-    fn resolve_default_command(&self) -> MicrosandboxResult<microsandbox_types::ResolvedCommand> {
-        microsandbox_types::resolve_default_command(
-            self.config.spec.runtime.entrypoint.as_deref(),
-            self.config.spec.runtime.cmd.as_deref(),
-            None,
-        )
-        .map_err(Into::into)
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods: Execution
-//--------------------------------------------------------------------------------------------------
-
-impl Sandbox {
-    /// Execute the sandbox's effective OCI entrypoint and CMD and return a streaming handle.
-    pub async fn exec_default_stream(&self) -> MicrosandboxResult<ExecHandle> {
-        self.exec_default_stream_with(|options| options).await
-    }
-
-    /// Execute the sandbox's effective OCI entrypoint and CMD with full streaming options.
-    ///
-    /// Arguments configured through the options builder are appended after the resolved default
-    /// argv. They are execution arguments, not an OCI CMD override.
-    pub async fn exec_default_stream_with(
-        &self,
-        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
-    ) -> MicrosandboxResult<ExecHandle> {
-        let command = self.resolve_default_command()?;
-        let opts = f(ExecOptionsBuilder::default())
-            .prepend_args(command.args)
-            .build()?;
-        self.backend
-            .sandboxes()
-            .exec_stream(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                command.program,
-                opts,
-            )
-            .await
-    }
-
-    /// Execute the sandbox's effective OCI entrypoint and CMD and wait for completion.
-    pub async fn exec_default(&self) -> MicrosandboxResult<ExecOutput> {
-        self.exec_default_with(|options| options).await
-    }
-
-    /// Execute the sandbox's effective OCI entrypoint and CMD with full options.
-    ///
-    /// Arguments configured through the options builder are appended after the resolved default
-    /// argv. They are execution arguments, not an OCI CMD override.
-    pub async fn exec_default_with(
-        &self,
-        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
-    ) -> MicrosandboxResult<ExecOutput> {
-        let command = self.resolve_default_command()?;
-        let opts = f(ExecOptionsBuilder::default())
-            .prepend_args(command.args)
-            .build()?;
-        self.backend
-            .sandboxes()
-            .exec(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                command.program,
-                opts,
-            )
-            .await
-    }
-
-    /// Execute a command and return a streaming handle.
-    ///
-    /// ```ignore
-    /// let mut handle = sb.exec_stream("tail", ["-f", "/var/log/app.log"]).await?;
-    /// ```
-    pub async fn exec_stream(
-        &self,
-        cmd: impl Into<String>,
-        args: impl IntoIterator<Item = impl Into<String>>,
-    ) -> MicrosandboxResult<ExecHandle> {
-        let opts = ExecOptions {
-            args: args.into_iter().map(Into::into).collect(),
-            ..Default::default()
-        };
-        self.backend
-            .sandboxes()
-            .exec_stream(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                cmd.into(),
-                opts,
-            )
-            .await
-    }
-
-    /// Execute a command with full options and return a streaming handle.
-    ///
-    /// ```ignore
-    /// let mut handle = sb.exec_stream_with("python", |e| e.stdin_pipe().tty(true)).await?;
-    /// ```
-    pub async fn exec_stream_with(
-        &self,
-        cmd: impl Into<String>,
-        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
-    ) -> MicrosandboxResult<ExecHandle> {
-        let opts = f(ExecOptionsBuilder::default()).build()?;
-        self.backend
-            .sandboxes()
-            .exec_stream(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                cmd.into(),
-                opts,
-            )
-            .await
-    }
-
-    /// Execute a command and wait for completion.
-    ///
-    /// ```ignore
-    /// let output = sb.exec("python", ["-c", "print('hi')"]).await?;
-    /// ```
-    pub async fn exec(
-        &self,
-        cmd: impl Into<String>,
-        args: impl IntoIterator<Item = impl Into<String>>,
-    ) -> MicrosandboxResult<ExecOutput> {
-        let opts = ExecOptions {
-            args: args.into_iter().map(Into::into).collect(),
-            ..Default::default()
-        };
-        self.backend
-            .sandboxes()
-            .exec(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                cmd.into(),
-                opts,
-            )
-            .await
-    }
-
-    /// Execute a command with full options and wait for completion.
-    ///
-    /// ```ignore
-    /// let output = sb.exec_with("python", |e| e.args(["compute.py"]).cwd("/app")).await?;
-    /// ```
-    pub async fn exec_with(
-        &self,
-        cmd: impl Into<String>,
-        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
-    ) -> MicrosandboxResult<ExecOutput> {
-        let opts = f(ExecOptionsBuilder::default()).build()?;
-        self.backend
-            .sandboxes()
-            .exec(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                cmd.into(),
-                opts,
-            )
-            .await
-    }
-
-    /// Run a shell command and wait for completion.
-    ///
-    /// Uses the sandbox's configured shell (default: `/bin/sh`) to interpret
-    /// the script via `<shell> -c "<script>"`.
-    ///
-    /// - `sandbox.shell("echo hello")`
-    /// - `sandbox.shell("ENV=val cmd | other_cmd")`
-    pub async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput> {
-        let shell = self
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
-        let opts = ExecOptions {
-            args: vec!["-c".to_string(), script.into()],
-            ..Default::default()
-        };
-        self.backend
-            .sandboxes()
-            .exec(self.backend.clone(), &self.name, &self.config, shell, opts)
-            .await
-    }
-
-    /// Run a shell command with full options and wait for completion.
-    pub async fn shell_with(
-        &self,
-        script: impl Into<String>,
-        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
-    ) -> MicrosandboxResult<ExecOutput> {
-        let shell = self
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
-        let mut opts = f(ExecOptionsBuilder::default()).build()?;
-        opts.args.splice(0..0, ["-c".to_string(), script.into()]);
-        self.backend
-            .sandboxes()
-            .exec(self.backend.clone(), &self.name, &self.config, shell, opts)
-            .await
-    }
-
-    /// Run a shell command with streaming I/O.
-    ///
-    /// Like [`shell`](Self::shell) but returns a streaming [`ExecHandle`]
-    /// instead of waiting for completion.
-    pub async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle> {
-        let shell = self
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
-        let opts = ExecOptions {
-            args: vec!["-c".to_string(), script.into()],
-            ..Default::default()
-        };
-        self.backend
-            .sandboxes()
-            .exec_stream(self.backend.clone(), &self.name, &self.config, shell, opts)
-            .await
-    }
-
-    /// Run a shell command with full options and streaming I/O.
-    pub async fn shell_stream_with(
-        &self,
-        script: impl Into<String>,
-        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
-    ) -> MicrosandboxResult<ExecHandle> {
-        let shell = self
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
-        let mut opts = f(ExecOptionsBuilder::default()).build()?;
-        opts.args.splice(0..0, ["-c".to_string(), script.into()]);
-        self.backend
-            .sandboxes()
-            .exec_stream(self.backend.clone(), &self.name, &self.config, shell, opts)
-            .await
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods: Attach
-//--------------------------------------------------------------------------------------------------
-
-impl Sandbox {
-    /// Attach to the sandbox's effective OCI entrypoint and CMD.
-    pub async fn attach_default(&self) -> MicrosandboxResult<i32> {
-        self.attach_default_with(|options| options).await
-    }
-
-    /// Attach to the sandbox's effective OCI entrypoint and CMD with full options.
-    ///
-    /// Arguments configured through the options builder are appended after the resolved default
-    /// argv. They are execution arguments, not an OCI CMD override.
-    pub async fn attach_default_with(
-        &self,
-        f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
-    ) -> MicrosandboxResult<i32> {
-        let command = self.resolve_default_command()?;
-        let builder = f(AttachOptionsBuilder::default()).prepend_args(command.args);
-        self.backend
-            .sandboxes()
-            .attach(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                command.program,
-                builder,
-            )
-            .await
-    }
-
-    /// Attach to the sandbox with an interactive terminal session.
-    ///
-    /// ```ignore
-    /// let exit_code = sb.attach("bash", ["-l"]).await?;
-    /// ```
-    pub async fn attach(
-        &self,
-        cmd: impl Into<String>,
-        args: impl IntoIterator<Item = impl Into<String>>,
-    ) -> MicrosandboxResult<i32> {
-        let mut builder = AttachOptionsBuilder::default();
-        for arg in args {
-            builder = builder.arg(arg);
-        }
-        self.backend
-            .sandboxes()
-            .attach(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                cmd.into(),
-                builder,
-            )
-            .await
-    }
-
-    /// Attach to the sandbox with full options.
-    ///
-    /// ```ignore
-    /// let exit_code = sb.attach_with("zsh", |a| a.env("TERM", "xterm").detach_keys("ctrl-q")).await?;
-    /// ```
-    pub async fn attach_with(
-        &self,
-        cmd: impl Into<String>,
-        f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
-    ) -> MicrosandboxResult<i32> {
-        let builder = f(AttachOptionsBuilder::default());
-        self.backend
-            .sandboxes()
-            .attach(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                cmd.into(),
-                builder,
-            )
-            .await
-    }
-
-    /// Attach to the sandbox's default shell.
-    ///
-    /// Uses the sandbox's configured shell (default: `/bin/sh`).
-    pub async fn attach_shell(&self) -> MicrosandboxResult<i32> {
-        let shell = self
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
-        self.backend
-            .sandboxes()
-            .attach(
-                self.backend.clone(),
-                &self.name,
-                &self.config,
-                shell,
-                AttachOptionsBuilder::default(),
-            )
-            .await
     }
 }
 
@@ -1746,12 +1322,12 @@ pub(super) fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
 /// Remove one exact local sandbox identity after proving no runtime owns it.
 #[cfg(feature = "local")]
 pub(super) async fn remove_local_persisted_sandbox(
-    local_backend: &LocalBackend,
+    local_backend: &LocalContext,
     name: &str,
     expected_id: i32,
 ) -> MicrosandboxResult<()> {
     let _transition_guard =
-        LocalBackend::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
+        LocalContext::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
             .await?;
     let _lineage_guard =
         crate::snapshot::lineage::lock_source(&local_backend.config().run_dir(), name).await?;
@@ -1830,7 +1406,7 @@ pub(super) async fn remove_local_persisted_sandbox(
     // The runtime lock is the authoritative ownership proof. A numeric PID can remain visible
     // while an exited Unix child is waiting to be reaped, or can already identify an unrelated
     // process after PID reuse, so it must not override successful lock acquisition.
-    if crate::backend::local::creation::pending(pools.write(), expected_id).await? {
+    if crate::context::local::creation::pending(pools.write(), expected_id).await? {
         return local_backend
             .remove_incomplete_sandbox(expected_id, name, RemovalMode::Recovery)
             .await;
@@ -1880,7 +1456,7 @@ mod tests {
         ephemeral_cleanup_stop_result, hostname_from_sandbox_name, remove_dir_if_exists,
         remove_local_persisted_sandbox, sandbox_not_found_for_name, validate_hostname,
     };
-    use crate::backend::LocalBackend;
+    use crate::context::LocalContext;
     use crate::runtime::SpawnMode;
 
     #[test]
@@ -2122,12 +1698,11 @@ mod tests {
     #[tokio::test]
     async fn persisted_removal_rejects_a_stale_sandbox_identity() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("home").join("config.json"))
             .managed_config_path(temp.path().join("home").join("managed.json"))
             .home(temp.path().join("home"))
             .build()
-            .await
             .unwrap();
         let pools = backend.db().await.unwrap();
         let current = super::sandbox_entity::ActiveModel {
@@ -2158,12 +1733,11 @@ mod tests {
     #[tokio::test]
     async fn persisted_removal_removes_a_sandbox_that_never_started() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("home").join("config.json"))
             .managed_config_path(temp.path().join("home").join("managed.json"))
             .home(temp.path().join("home"))
             .build()
-            .await
             .unwrap();
         let pools = backend.db().await.unwrap();
         let created = super::sandbox_entity::ActiveModel {
@@ -2196,12 +1770,11 @@ mod tests {
         use crate::db::entity::run as run_entity;
 
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(temp.path().join("home").join("config.json"))
             .managed_config_path(temp.path().join("home").join("managed.json"))
             .home(temp.path().join("home"))
             .build()
-            .await
             .unwrap();
         let pools = backend.db().await.unwrap();
         let current = super::sandbox_entity::ActiveModel {
@@ -2248,7 +1821,6 @@ mod tests {
         let backend = std::sync::Arc::new(
             crate::test_support::local_backend_builder(temp.path().join("home"))
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.db().await.unwrap();

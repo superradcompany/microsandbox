@@ -34,8 +34,7 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
-              "getting-started/versions",
-              "cloud/overview",
+              "getting-started/managed-cloud",
               "getting-started/agents"
             ]
           },
@@ -75,7 +74,6 @@
             "group": "Deep dive",
             "icon": "gauge",
             "pages": [
-              "operations/backends",
               "operations/configuration",
               "observability/msb-metrics",
               "sandboxes/optimization"
@@ -101,6 +99,7 @@
             "pages": [
               "sdk/overview",
               "sdk/setup",
+              "getting-started/versions",
               "sdk/errors",
               "configuration"
             ]
@@ -230,30 +229,43 @@
         ]
       },
       {
-        "tab": "API Reference",
+        "tab": "Managed Cloud",
         "groups": [
           {
-            "group": "Getting Started",
-            "icon": "book-open",
+            "group": "Managed Cloud",
+            "icon": "cloud",
             "pages": [
-              "api-reference/overview"
+              "cloud/overview",
+              "cloud/connect",
+              "cloud/pricing",
+              "cloud/limitations"
             ]
           },
           {
-            "group": "API keys",
-            "icon": "key",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            }
-          },
-          {
-            "group": "Personal tokens",
-            "icon": "user",
-            "openapi": {
-              "source": "/api-reference/openapi.personal.json",
-              "directory": "api-reference/personal"
-            }
+            "group": "API Reference",
+            "icon": "book-open",
+            "pages": [
+              "api-reference/overview",
+              {
+                "group": "API keys",
+                "icon": "key",
+                "openapi": {
+                  "source": "/api-reference/openapi.json",
+                  "directory": "api-reference/endpoints"
+                },
+                "expanded": false
+              },
+              {
+                "group": "Personal tokens",
+                "icon": "user",
+                "openapi": {
+                  "source": "/api-reference/openapi.personal.json",
+                  "directory": "api-reference/personal"
+                },
+                "expanded": false
+              }
+            ],
+            "expanded": false
           }
         ]
       },
@@ -412,7 +424,9 @@
             "icon": "arrow-right-arrow-left",
             "pages": [
               "migrations/overview",
-              "migrations/v0.7"
+              "migrations/v0.7",
+              "migrations/sdk-contexts",
+              "migrations/sdk-distributions"
             ]
           },
           {
@@ -512,6 +526,22 @@
   },
   "redirects": [
     {
+      "source": "/getting-started/managed-cloud",
+      "destination": "/cloud/overview"
+    },
+    {
+      "source": "/operations/backends",
+      "destination": "/cloud/connect"
+    },
+    {
+      "source": "/cloud/compute-types",
+      "destination": "/cloud/pricing#standard-or-shared"
+    },
+    {
+      "source": "/cloud/supported-features",
+      "destination": "/cloud/limitations"
+    },
+    {
       "source": "/migrations/sandbox-storage",
       "destination": "/repairs/sandbox-storage"
     },
@@ -549,11 +579,11 @@
     },
     {
       "source": "/getting-started/backends",
-      "destination": "/operations/backends"
+      "destination": "/cloud/connect"
     },
     {
       "source": "/operations/backend-selection",
-      "destination": "/operations/backends"
+      "destination": "/cloud/connect"
     },
     {
       "source": "/observability/deep-dive",
@@ -597,7 +627,7 @@
     },
     {
       "source": "/cloud/compatibility",
-      "destination": "/cloud/overview#compatibility"
+      "destination": "/cloud/limitations"
     },
     {
       "source": "/enterprise/offline-deployment",

@@ -12,13 +12,11 @@ use microsandbox_protocol::jobs::{JobOperation, JobResponse};
 #[cfg(feature = "local")]
 use crate::sandbox::SandboxStatus;
 use crate::sandbox::exec::{ExecOptionsBuilder, StdinMode};
-use crate::sandbox::{Sandbox, SandboxHandle, build_exec_request};
+use crate::sandbox::{Sandbox, SandboxRecord, build_exec_request};
 
 #[cfg(feature = "local")]
 use super::JobState;
-use super::client::Target;
-#[cfg(not(feature = "local"))]
-use super::client::unsupported;
+use super::client::{Target, unsupported};
 #[cfg(feature = "local")]
 use super::client::{history_error, invalid_response};
 use super::{Job, JobError, JobId, JobListBuilder, JobPage, JobResult};
@@ -64,8 +62,14 @@ impl Sandbox {
             }
             _ => None,
         };
+        // Preparing a stopped sandbox starts it. A provider that cannot launch
+        // managed jobs must reject the request before that lifecycle change.
+        if self.context().kind() == crate::ContextKind::Remote {
+            return Err(unsupported());
+        }
+        let session = self.prepare_runtime().await?;
         let request = build_exec_request(
-            self.config(),
+            &session.config,
             cmd.into(),
             options.args,
             options.cwd,
@@ -192,7 +196,7 @@ impl Sandbox {
     }
 }
 
-impl SandboxHandle {
+impl SandboxRecord {
     /// Retrieve a retained job while preserving this handle's sandbox identity.
     pub async fn get_job(&self, id: impl AsRef<str>) -> JobResult<Job> {
         let id = JobId::parse(id.as_ref())

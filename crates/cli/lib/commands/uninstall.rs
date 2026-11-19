@@ -25,7 +25,7 @@ pub struct UninstallArgs {
 
 /// Execute the `msb uninstall` command.
 pub async fn run(args: UninstallArgs) -> anyhow::Result<()> {
-    let backend = microsandbox::backend::default_backend();
+    let backend = crate::commands::common::selected_context()?;
     let home = match backend.as_local() {
         Some(local) => local.config().home(),
         None => microsandbox_utils::resolve_home(),
