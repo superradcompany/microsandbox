@@ -5,18 +5,15 @@
 //! decode/error helpers they route through. Connection construction (URL,
 //! API key, HTTP client) stays in the parent module.
 
-use std::io::Error as IoError;
 use std::pin::Pin;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::{StreamExt, stream, stream::BoxStream};
+use futures::{StreamExt, stream};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderName, HeaderValue, USER_AGENT};
 use reqwest::{Body, Method, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::Instant;
-use tokio_util::task::AbortOnDropHandle;
+use tokio::sync::mpsc;
 
 use super::{RemoteContext, sandbox::CloudCreateBody, volume::CloudVolume};
 use crate::context::sandbox::LogStream;
@@ -40,9 +37,6 @@ const CLOUD_READY_WAIT_TIMEOUT_SECS: u64 = 90;
 /// Network headroom beyond the server wait so the JSON response can arrive
 /// before reqwest's ordinary 30-second client timeout applies.
 const CLOUD_READY_HTTP_TIMEOUT: Duration = Duration::from_secs(95);
-
-/// Largest piece of a volume upload handed to the HTTP client at once.
-const UPLOAD_PIECE_BYTES: usize = 256 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -75,10 +69,9 @@ pub(in crate::context) enum FileTransfer {
     /// File read: the request timeout bounds the wait for the response and
     /// each wait for more data, not the whole transfer.
     Download,
-    /// File write with this body stream. Waits for the caller's next chunk are
-    /// not timed; the request timeout bounds each wait for the client to take
-    /// a piece and the wait for the reply.
-    Upload(BoxStream<'static, Result<Bytes, IoError>>),
+    /// File write, retaining the ordinary total request timeout (or the custom
+    /// client's timeout). Body polling cannot measure transport write progress.
+    Upload(Body),
 }
 
 #[derive(Serialize)]
@@ -540,8 +533,8 @@ impl RemoteContext {
             urlencoding(id),
             suffix
         );
-        let streaming = !matches!(&transfer, FileTransfer::Request);
-        let mut request = if streaming {
+        let download = matches!(&transfer, FileTransfer::Download);
+        let mut request = if download {
             self.stream_request(method, &url)
         } else {
             self.request(method, &url)
@@ -552,97 +545,29 @@ impl RemoteContext {
         if let Some(json) = json {
             request = request.json(&json);
         }
-        let response = match transfer {
-            FileTransfer::Download => {
-                tokio::time::timeout(self.inner.request_timeout, request.send())
-                    .await
-                    .map_err(|_| {
-                        MicrosandboxError::Custom(format!(
-                            "volume read: no response within {:?}",
-                            self.inner.request_timeout
-                        ))
-                    })?
-                    .map_err(|e| cloud_io_error("volume filesystem request", e))?
-            }
-            FileTransfer::Request => request
+        if let FileTransfer::Upload(body) = transfer {
+            request = request.body(body);
+        }
+        let response = if download {
+            tokio::time::timeout(self.inner.request_timeout, request.send())
+                .await
+                .map_err(|_| {
+                    MicrosandboxError::Custom(format!(
+                        "volume read: no response within {:?}",
+                        self.inner.request_timeout
+                    ))
+                })?
+                .map_err(|e| cloud_io_error("volume filesystem request", e))?
+        } else {
+            request
                 .send()
                 .await
-                .map_err(|e| cloud_io_error("volume filesystem request", e))?,
-            FileTransfer::Upload(mut body_stream) => {
-                // The caller's stream is read by a task this request owns, so it
-                // is released, and further writes fail, once the request ends
-                // even if the HTTP client still holds the body. Splitting chunks
-                // into pieces keeps the stall limit working when the caller hands
-                // over one large buffer.
-                let (piece_tx, piece_rx) = mpsc::channel(1);
-                let _pump = AbortOnDropHandle::new(tokio::spawn(async move {
-                    while let Some(item) = body_stream.next().await {
-                        let mut chunk = match item {
-                            Ok(chunk) => chunk,
-                            Err(error) => {
-                                let _ = piece_tx.send(Err(error)).await;
-                                return;
-                            }
-                        };
-                        while !chunk.is_empty() {
-                            let piece = chunk.split_to(chunk.len().min(UPLOAD_PIECE_BYTES));
-                            if piece_tx.send(Ok(piece)).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }));
-                let (body_done_tx, body_done_rx) = oneshot::channel();
-                // Start the deadline before connection setup. The body suspends it
-                // while waiting for the caller, then restarts it for each piece.
-                let (sending_tx, sending_rx) = watch::channel(Some(Instant::now()));
-                let wrapped = stream::unfold(
-                    (piece_rx, Some(body_done_tx), sending_tx),
-                    |(mut piece_rx, mut body_done_tx, sending_tx)| async move {
-                        sending_tx.send_replace(None);
-                        match piece_rx.recv().await {
-                            Some(piece) => {
-                                sending_tx.send_replace(Some(Instant::now()));
-                                Some((piece, (piece_rx, body_done_tx, sending_tx)))
-                            }
-                            None => {
-                                if let Some(body_done_tx) = body_done_tx.take() {
-                                    let _ = body_done_tx.send(());
-                                }
-                                None
-                            }
-                        }
-                    },
-                );
-                // The body is done once it ends or the client drops it unread,
-                // as it does for an empty body.
-                let response_timeout = async {
-                    let _ = body_done_rx.await;
-                    tokio::time::sleep(self.inner.request_timeout).await;
-                };
-                tokio::select! {
-                    response = request.body(Body::wrap_stream(wrapped)).send() => {
-                        response.map_err(|e| cloud_io_error("volume filesystem request", e))?
-                    }
-                    _ = response_timeout => {
-                        return Err(MicrosandboxError::Custom(format!(
-                            "volume write: no response within {:?}",
-                            self.inner.request_timeout
-                        )));
-                    }
-                    _ = upload_stall(sending_rx, self.inner.request_timeout) => {
-                        return Err(MicrosandboxError::Custom(format!(
-                            "volume write stalled: no progress for {:?}",
-                            self.inner.request_timeout
-                        )));
-                    }
-                }
-            }
+                .map_err(|e| cloud_io_error("volume filesystem request", e))?
         };
         ensure_success_with_timeout(
             response,
             "volume filesystem request",
-            streaming.then_some(self.inner.request_timeout),
+            download.then_some(self.inner.request_timeout),
         )
         .await
     }
@@ -651,24 +576,6 @@ impl RemoteContext {
 //--------------------------------------------------------------------------------------------------
 // Functions: HTTP helpers
 //--------------------------------------------------------------------------------------------------
-
-/// Bound connection setup and each body piece held by the HTTP client.
-/// Caller delays suspend this deadline; the reply timeout covers a finished body.
-async fn upload_stall(mut sending: watch::Receiver<Option<Instant>>, timeout: Duration) {
-    loop {
-        let since = *sending.borrow_and_update();
-        let changed = match since {
-            Some(since) => tokio::select! {
-                _ = tokio::time::sleep_until(since + timeout) => return,
-                changed = sending.changed() => changed,
-            },
-            None => sending.changed().await,
-        };
-        if changed.is_err() {
-            std::future::pending::<()>().await;
-        }
-    }
-}
 
 /// Stream a volume file read, failing when no data arrives within `timeout`.
 pub(super) fn volume_download_stream(

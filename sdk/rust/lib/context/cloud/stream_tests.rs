@@ -1,8 +1,10 @@
 //! Exercise cloud streaming timeouts through public SDK APIs against local HTTP responses.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::{StreamExt, stream};
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -11,6 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::task::AbortOnDropHandle;
 
 use super::{RemoteContext, http::FileTransfer};
+use crate::MicrosandboxError;
 use crate::config::layers::BackendConfig;
 use crate::logs::{LogCursor, LogStreamOptions};
 use crate::volume::VolumeFs;
@@ -185,9 +188,118 @@ async fn serve_log_stream(listener: TcpListener, delays: Vec<Duration>) {
     reader.get_mut().write_all(b"0\r\n\r\n").await.unwrap();
 }
 
+fn assert_request_timeout(error: MicrosandboxError) {
+    assert!(
+        matches!(&error, MicrosandboxError::Http(error) if error.is_timeout()),
+        "expected the HTTP client's total request timeout, got {error:?}",
+    );
+}
+
+async fn upload_to_slow_http2_receiver(streaming: bool) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        // Custom clients own upload deadlines, even when the context's timeout
+        // is shorter than the time needed to drain one body chunk.
+        .timeout(TEST_TIMEOUT)
+        .http2_prior_knowledge()
+        .build()
+        .unwrap();
+    let backend = backend(format!("http://{}", listener.local_addr().unwrap()))
+        .to_builder()
+        .client(client)
+        .build()
+        .unwrap();
+    let fs = VolumeFs::with_backend(Arc::new(backend), "stream-test");
+    let data: Vec<u8> = (0..512 * 1024).map(|index| index as u8).collect();
+    let received_len = Arc::new(AtomicUsize::new(0));
+    let counted = received_len.clone();
+    let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+    let _server = AbortOnDropHandle::new(tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        // HTTP/2 flow control makes the backpressure independent of OS socket
+        // buffer sizes. Each window update permits another real network write,
+        // but a 256-KiB body piece takes longer than the request timeout to drain.
+        let mut connection = h2::server::Builder::new()
+            .initial_window_size(1024)
+            .handshake::<_, Bytes>(socket)
+            .await
+            .unwrap();
+        let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+        assert_eq!(request.uri().path(), "/v1/volumes");
+        let response = http::Response::builder()
+            .header("content-type", "application/json")
+            .body(())
+            .unwrap();
+        respond
+            .send_response(response, false)
+            .unwrap()
+            .send_data(Bytes::from(volume_response().to_string()), true)
+            .unwrap();
+
+        let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+        assert_eq!(
+            request.uri().path(),
+            format!("/v1/volumes/{VOLUME_ID}/files/content")
+        );
+        let _driver = AbortOnDropHandle::new(tokio::spawn(async move {
+            // Polling the connection drives DATA and WINDOW_UPDATE frames while
+            // the handler deliberately replenishes the receive window slowly.
+            assert!(connection.accept().await.is_none());
+        }));
+        let mut body = request.into_body();
+        let slow_until = tokio::time::Instant::now() + REQUEST_TIMEOUT * 3;
+        let mut received = Vec::new();
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk.unwrap();
+            received.extend_from_slice(&chunk);
+            counted.fetch_add(chunk.len(), Ordering::Relaxed);
+            if tokio::time::Instant::now() < slow_until {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            body.flow_control().release_capacity(chunk.len()).unwrap();
+        }
+        respond
+            .send_response(http::Response::new(()), true)
+            .unwrap();
+        received_tx.send(received).unwrap();
+        // Keep driving the connection until the client has received the response.
+        // The request owns this server task and cancels it when the test finishes.
+        std::future::pending::<()>().await;
+    }));
+
+    let result = if streaming {
+        let mut sink = fs.write_stream("/file").await.unwrap();
+        sink.write(data.clone()).await.unwrap();
+        sink.close().await
+    } else {
+        fs.write("/file", &data).await
+    };
+    assert!(
+        result.is_ok(),
+        "an upload must survive while the peer keeps receiving data ({} bytes received): {result:?}",
+        received_len.load(Ordering::Relaxed),
+    );
+    assert_eq!(received_rx.await.unwrap(), data);
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn volume_write_preserves_custom_timeout_with_slow_receiver() {
+    tokio::time::timeout(TEST_TIMEOUT, upload_to_slow_http2_receiver(false))
+        .await
+        .expect("slow receiver test timed out");
+}
+
+#[tokio::test]
+async fn volume_write_stream_preserves_custom_timeout_with_slow_receiver() {
+    tokio::time::timeout(TEST_TIMEOUT, upload_to_slow_http2_receiver(true))
+        .await
+        .expect("slow receiver test timed out");
+}
 
 #[tokio::test]
 async fn log_follow_keeps_delivering_past_request_timeout() {
@@ -338,37 +450,79 @@ async fn volume_download_reports_stall() {
 }
 
 #[tokio::test]
-async fn volume_upload_keeps_accepting_past_request_timeout() {
+async fn volume_upload_total_timeout_includes_caller_delays() {
     tokio::time::timeout(TEST_TIMEOUT, async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let backend = backend(format!("http://{}", listener.local_addr().unwrap()));
         let fs = VolumeFs::with_backend(Arc::new(backend), "stream-test");
-        let server = tokio::spawn(async move {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let _server = AbortOnDropHandle::new(tokio::spawn(async move {
             serve_volume_lookup(&listener).await;
-            let (target, mut reader) = accept_request(&listener).await;
-            assert_eq!(target, format!("/v1/volumes/{VOLUME_ID}/files/content"));
-            let received = read_chunked_body(&mut reader).await;
-            reader
-                .get_mut()
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .await
-                .unwrap();
-            received
-        });
+            let (_, _reader) = accept_request(&listener).await;
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
 
-        let mut sink = fs.write_stream("/file").await.unwrap();
-        // The connection deadline must stop while the caller prepares data.
+        let sink = fs.write_stream("/file").await.unwrap();
+        started_rx.await.unwrap();
+        // Uploads retain their total deadline while the caller prepares data.
         tokio::time::sleep(REQUEST_TIMEOUT * 2).await;
-        for index in 0..16u8 {
-            sink.write([index]).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        sink.close().await.unwrap();
-
-        assert_eq!(server.await.unwrap(), (0..16).collect::<Vec<u8>>());
+        let started = tokio::time::Instant::now();
+        assert_request_timeout(sink.close().await.unwrap_err());
+        assert!(
+            started.elapsed() < REQUEST_TIMEOUT,
+            "close restarted the total deadline"
+        );
     })
     .await
-    .expect("volume upload test timed out");
+    .expect("volume upload producer timeout test timed out");
+}
+
+#[tokio::test]
+async fn volume_upload_progress_does_not_restart_total_timeout() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = backend(format!("http://{}", listener.local_addr().unwrap()));
+        let fs = VolumeFs::with_backend(Arc::new(backend), "stream-test");
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(1);
+        let _server = AbortOnDropHandle::new(tokio::spawn(async move {
+            serve_volume_lookup(&listener).await;
+            let (_, mut reader) = accept_request(&listener).await;
+            // Acknowledge each chunk in the test so it cannot mistake buffered
+            // caller writes for actual network progress.
+            loop {
+                let mut size = String::new();
+                if reader.read_line(&mut size).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let size = usize::from_str_radix(size.trim(), 16).unwrap();
+                if size == 0 {
+                    return;
+                }
+                let mut data = vec![0; size + 2];
+                if reader.read_exact(&mut data).await.is_err() {
+                    return;
+                }
+                if progress_tx.send(()).await.is_err() {
+                    return;
+                }
+            }
+        }));
+
+        let mut sink = fs.write_stream("/file").await.unwrap();
+        let mut received = 0;
+        for _ in 0..12 {
+            if sink.write([7]).await.is_err() || progress_rx.recv().await.is_none() {
+                break;
+            }
+            received += 1;
+            tokio::time::sleep(REQUEST_TIMEOUT / 4).await;
+        }
+        assert!(received > 0, "the upload never reached the server");
+        assert_request_timeout(sink.close().await.unwrap_err());
+    })
+    .await
+    .expect("progressing upload timeout test timed out");
 }
 
 #[tokio::test]
@@ -389,11 +543,8 @@ async fn volume_write_fails_when_reply_never_comes() {
         let mut sink = fs.write_stream("/file").await.unwrap();
         for index in 0..8u8 {
             sink.write([index]).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let error = sink.close().await.unwrap_err().to_string();
-
-        assert!(error.contains("no response within"), "{error}");
+        assert_request_timeout(sink.close().await.unwrap_err());
         assert_eq!(received_rx.await.unwrap(), (0..8).collect::<Vec<u8>>());
         server.abort();
     })
@@ -414,9 +565,7 @@ async fn empty_volume_write_fails_when_reply_never_comes() {
             std::future::pending::<()>().await;
         });
 
-        let error = fs.write("/file", b"").await.unwrap_err().to_string();
-
-        assert!(error.contains("no response within"), "{error}");
+        assert_request_timeout(fs.write("/file", b"").await.unwrap_err());
         server.abort();
     })
     .await
@@ -470,13 +619,13 @@ async fn volume_upload_fails_when_server_stops_reading() {
                 break;
             }
         }
-        let error = sink.close().await.unwrap_err().to_string();
+        let error = sink.close().await.unwrap_err();
 
         assert!(
             write_failed,
             "writes kept succeeding after the upload stalled"
         );
-        assert!(error.contains("volume write stalled"), "{error}");
+        assert_request_timeout(error);
         server.abort();
     })
     .await
@@ -542,13 +691,14 @@ async fn volume_upload_times_out_during_tls_handshake() {
                 "/content",
                 &[],
                 None,
-                FileTransfer::Upload(stream::pending().boxed()),
+                FileTransfer::Upload(reqwest::Body::wrap_stream(stream::pending::<
+                    Result<Bytes, std::io::Error>,
+                >())),
             )
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
 
-        assert!(error.contains("volume write stalled"), "{error}");
+        assert_request_timeout(error);
         server.await.unwrap();
     })
     .await

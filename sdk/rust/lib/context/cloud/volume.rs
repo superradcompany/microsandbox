@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
-use futures::{StreamExt, future::BoxFuture, future::ready, stream};
+use futures::{StreamExt, future::BoxFuture, stream};
 use reqwest::Method;
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::{
     RemoteContext,
@@ -315,14 +316,9 @@ impl VolumeOps for RemoteContext {
                 Method::PUT,
                 &volume_id,
                 "/content",
-                &[
-                    (FILE_PATH_HEADER, encoded_path(path)),
-                    ("content-length", data.len().to_string()),
-                ],
+                &[(FILE_PATH_HEADER, encoded_path(path))],
                 None,
-                FileTransfer::Upload(
-                    stream::once(ready(Ok::<_, IoError>(Bytes::from(data)))).boxed(),
-                ),
+                FileTransfer::Upload(reqwest::Body::from(data)),
             )
             .await?;
             Ok(())
@@ -506,9 +502,20 @@ impl VolumeOps for RemoteContext {
             let id = self.volume_id_for_fs(name).await?;
             let path = path.to_string();
             let backend = self.clone();
-            let (tx, rx) = mpsc::channel::<Bytes>(8);
+            let (tx, mut rx) = mpsc::channel::<Bytes>(8);
             let completion = tokio::spawn(async move {
-                let body_stream = stream::unfold(rx, |mut rx| async {
+                // Reqwest can retain a body while a socket write is blocked even
+                // after its request times out. Own the caller's receiver here so
+                // ending the request also releases any blocked sink.write().
+                let (body_tx, body_rx) = mpsc::channel(1);
+                let _pump = AbortOnDropHandle::new(tokio::spawn(async move {
+                    while let Some(chunk) = rx.recv().await {
+                        if body_tx.send(chunk).await.is_err() {
+                            return;
+                        }
+                    }
+                }));
+                let body_stream = stream::unfold(body_rx, |mut rx| async {
                     rx.recv().await.map(|chunk| (Ok::<_, IoError>(chunk), rx))
                 });
                 backend
@@ -518,7 +525,7 @@ impl VolumeOps for RemoteContext {
                         "/content",
                         &[(FILE_PATH_HEADER, encoded_path(&path))],
                         None,
-                        FileTransfer::Upload(body_stream.boxed()),
+                        FileTransfer::Upload(reqwest::Body::wrap_stream(body_stream)),
                     )
                     .await?;
                 Ok(())

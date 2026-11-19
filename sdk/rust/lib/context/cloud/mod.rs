@@ -280,9 +280,10 @@ impl RemoteContextBuilder {
 
     /// Set the per-request timeout for outbound HTTP calls.
     ///
-    /// Volume file transfers use this as an inactivity limit while connecting,
-    /// waiting for a reply, or moving data. Log follows use it only while
-    /// opening the stream; an open follow waits for new entries without a limit.
+    /// Volume downloads use this to bound the wait for response headers and
+    /// each wait for more data. Log follows use it only while opening the stream;
+    /// an open follow waits for new entries without a limit. Uploads retain the
+    /// total request timeout, including time spent producing and sending data.
     pub fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
         self
@@ -295,10 +296,11 @@ impl RemoteContextBuilder {
     }
 
     /// Provide a fully custom `reqwest::Client`. When set, `user_agent` is ignored
-    /// and ordinary requests use the client's timeout. Log follows still use
-    /// `request_timeout` while opening the stream, and file transfers use it as an
-    /// inactivity limit; a total timeout configured on the client also limits those
-    /// streams. The context API key supplies Authorization.
+    /// and ordinary requests, including uploads, use the client's timeout.
+    /// Log follows still use `request_timeout` while opening the stream, and
+    /// downloads use it for response headers and read inactivity. A total timeout
+    /// configured on the client also limits those streams. The context API key
+    /// supplies Authorization.
     ///
     /// Service create, update, enable, disable and remove also use this client,
     /// so its retry and redirect policies decide whether a change request can be
