@@ -289,6 +289,37 @@ async fn rollback_schema_steps_through_latest_migrations() {
     .unwrap();
     Migrator::up(db.inner(), None).await.unwrap();
 
+    // An empty catalog can retire protection before the older creation migrations.
+    rollback_schema(db.inner(), 1).await.unwrap();
+    assert!(
+        !microsandbox_db::catalog::has_table(&db, "protected_sandbox_state")
+            .await
+            .unwrap()
+    );
+
+    // Retire standalone volume tracking before sandbox-owned creation tracking.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "volume", "creation_state")
+            .await
+            .unwrap()
+    );
+
+    // Completed catalogs can retire creation tracking before the older schema changes.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "sandbox", "creation_state")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "volume", "pending_creation_sandbox_id")
+            .await
+            .unwrap()
+    );
+
     // Remove saved caller overrides before rolling back the older schema changes.
     rollback_schema(db.inner(), 1).await.unwrap();
 

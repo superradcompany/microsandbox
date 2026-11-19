@@ -45,21 +45,21 @@ function workflow(path) {
   return JSON.parse(result.stdout);
 }
 
-function render(script) {
-  const values = { 'github.ref_name': 'v1.0.0', 'github.sha': 'abc123', 'steps.merge.outputs.result': 'clean' };
+function render(script, overrides = {}) {
+  const values = { 'needs.release-context.outputs.tag': 'v1.0.0', 'needs.release-context.outputs.source_sha': 'abc123', 'steps.merge.outputs.result': 'clean', 'needs.release-context.outputs.prerelease': 'false', ...overrides };
   return script.replace(/\$\{\{\s*([^}]+?)\s*\}\}/g, (_, key) => {
     assert.ok(Object.hasOwn(values, key), `Unsupported workflow expression: ${key}`);
     return values[key];
   });
 }
 
-function shell(script, directory) {
+function shell(script, directory, values = {}) {
   // Exercise the workflow's actual argument construction without git/network writes.
   writeFileSync(join(directory, 'git'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   writeFileSync(join(directory, 'gh'), `#!/usr/bin/env node
 require('node:fs').appendFileSync(process.env.CAPTURE, JSON.stringify(process.argv.slice(2)) + '\\n');
 `, { mode: 0o755 });
-  const result = spawnSync('bash', ['-e', '-c', render(script)], {
+  const result = spawnSync('bash', ['-e', '-c', render(script, values)], {
     cwd: directory, encoding: 'utf8',
     env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, RUNNER_TEMP: directory,
       CAPTURE: join(directory, 'calls.jsonl') },
@@ -137,7 +137,7 @@ test('release workflow backfills included PRs before generating and publishing i
       if (step.uses?.startsWith('actions/github-script@')) {
         await new AsyncFunction('require', 'github', 'context', 'process', step.with.script)(
           createRequire(join(root, 'workflow-runner.cjs')), github, { repo, serverUrl },
-          { env: { ...process.env, GITHUB_REF_NAME: 'v1.0.0', RUNNER_TEMP: directory } },
+          { env: { ...process.env, MSB_RELEASE_TAG: 'v1.0.0', RUNNER_TEMP: directory } },
         );
       }
       if (step.run?.includes('gh release create')) {
@@ -172,5 +172,24 @@ test('inventory ignores title links and supports releases with no PRs', async ()
     github.rest.repos.generateReleaseNotes = async () => ({ data: { body: ++generations === 1 ? body : 'final' } });
     assert.equal(await prepareReleaseNotes({ github, repo, tag: 'v1.0.0', serverUrl }), 'final');
     assert.deepEqual(additions, body.startsWith('* ') ? [[31, ['release:docs']]] : []);
+  }
+});
+
+
+test('GitHub publication uses prerelease flags only for candidates', () => {
+  const release = workflow(join(root, '.github/workflows/release.yml'));
+  const command = release.jobs.assemble.steps.find(step => step.name === 'Create GitHub Release').run;
+  for (const candidate of [false, true]) {
+    const directory = mkdtempSync(join(tmpdir(), 'msb-release-channel-'));
+    try {
+      const tag = candidate ? 'v0.8.0-rc.1' : 'v0.7.14';
+      const calls = shell(command, directory, {
+        'needs.release-context.outputs.tag': tag,
+        'needs.release-context.outputs.prerelease': String(candidate),
+      });
+      assert.deepEqual(calls[0].slice(0, 3), ['release', 'create', tag]);
+      assert.equal(calls[0].includes('--prerelease'), candidate);
+      assert.equal(calls[0].includes('--latest=false'), candidate);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   }
 });

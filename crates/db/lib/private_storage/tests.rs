@@ -309,11 +309,11 @@ fn second_account_cannot_read_legacy_fresh_or_acl_inherited_storage() {
     read_as_other(&files, true);
     let fresh = prepare_database_file(&dir.join("fresh.db"), true).unwrap();
     fs::write(&fresh, "fresh secret").unwrap();
-    read_as_other(&[fresh.clone()], true);
+    read_as_other(std::slice::from_ref(&fresh), true);
     // Isolate the inherited file ACL from the directory barrier: search-only access
     // must still leave the fresh file unreadable. Restore the boundary immediately.
     chmod(&dir, 0o711);
-    read_as_other(&[fresh.clone()], true);
+    read_as_other(std::slice::from_ref(&fresh), true);
     chmod(&dir, 0o700);
     let output = Command::new("sudo").args(["-n", "-u", "nobody", "python3", "-c",
         "import os,sys,errno\ntry: os.symlink(sys.argv[1],sys.argv[2])\nexcept PermissionError as e: assert e.errno==errno.EACCES\nelse: raise AssertionError('other account could substitute catalog path')"])
@@ -430,4 +430,229 @@ fn explicit_owner_acl_on_configured_parent_is_preserved() {
         "{output:?}"
     );
     assert_eq!(mode(root.path()), 0o755);
+}
+
+#[test]
+fn directory_authority_preserves_modes_and_distinguishes_sticky_ancestors() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = fs::File::open(root.path()).unwrap();
+    for (permissions, ancestor, publication) in [
+        (0o755, true, true),
+        (0o700, true, true),
+        (0o775, false, false),
+        (0o777, false, false),
+        (0o1777, true, false),
+    ] {
+        chmod(root.path(), permissions);
+        let before = directory.metadata().unwrap();
+        assert_eq!(
+            verify_directory_authority(&directory, false).is_ok(),
+            ancestor
+        );
+        assert_eq!(
+            verify_directory_authority(&directory, true).is_ok(),
+            publication
+        );
+        let after = directory.metadata().unwrap();
+        assert_eq!(before.mode(), after.mode());
+        assert_eq!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec())
+        );
+    }
+    chmod(root.path(), 0o700);
+    let path = root.path().join("not-a-directory");
+    fs::write(&path, b"preserved").unwrap();
+    let file = fs::File::open(path).unwrap();
+    assert!(verify_directory_authority(&file, false).is_err());
+    assert!(verify_directory_authority(&file, true).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn directory_authority_checks_inherited_acl_mutation_without_repair() {
+    let root = tempfile::tempdir().unwrap();
+    chmod(root.path(), 0o755);
+    let directory = fs::File::open(root.path()).unwrap();
+    for (grant, allowed) in [
+        (
+            "everyone allow read,readattr,readextattr,readsecurity",
+            true,
+        ),
+        ("everyone allow write,file_inherit,only_inherit", false),
+        ("everyone allow append,file_inherit,only_inherit", false),
+        ("everyone allow add_subdirectory,delete_child", false),
+    ] {
+        assert!(
+            Command::new("chmod")
+                .arg("-N")
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("chmod")
+                .args(["+a", grant])
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let before_acl = Command::new("ls")
+            .arg("-lde")
+            .arg(root.path())
+            .output()
+            .unwrap();
+        let before = directory.metadata().unwrap();
+        assert_eq!(
+            verify_directory_authority(&directory, true).is_ok(),
+            allowed,
+            "{grant}"
+        );
+        let after = directory.metadata().unwrap();
+        assert_eq!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec())
+        );
+        assert_eq!(
+            before_acl.stdout,
+            Command::new("ls")
+                .arg("-lde")
+                .arg(root.path())
+                .output()
+                .unwrap()
+                .stdout
+        );
+    }
+    assert!(
+        Command::new("chmod")
+            .arg("-N")
+            .arg(root.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn private_directory_boundary_requires_private_traversal() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = fs::File::open(root.path()).unwrap();
+    chmod(root.path(), 0o700);
+    assert!(is_private_directory_boundary(&directory).unwrap());
+    chmod(root.path(), 0o750);
+    assert!(!is_private_directory_boundary(&directory).unwrap());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn private_directory_boundary_accepts_harmless_acls_but_not_untrusted_search() {
+    let root = tempfile::tempdir().unwrap();
+    chmod(root.path(), 0o700);
+    let directory = fs::File::open(root.path()).unwrap();
+    let identity = Command::new("id").arg("-un").output().unwrap();
+    let owner = String::from_utf8(identity.stdout).unwrap();
+    for (grant, private) in [
+        ("everyone deny delete".to_owned(), true),
+        (
+            format!("user:{} allow read,search,readsecurity", owner.trim()),
+            true,
+        ),
+        ("everyone allow search".to_owned(), false),
+        (
+            "everyone allow search,directory_inherit,only_inherit".to_owned(),
+            false,
+        ),
+    ] {
+        assert!(
+            Command::new("chmod")
+                .arg("-N")
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("chmod")
+                .args(["+a", &grant])
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let before = directory.metadata().unwrap();
+        assert_eq!(
+            is_private_directory_boundary(&directory).unwrap(),
+            private,
+            "{grant}"
+        );
+        let after = directory.metadata().unwrap();
+        assert_eq!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec())
+        );
+    }
+    assert!(
+        Command::new("chmod")
+            .arg("-N")
+            .arg(root.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn symbolic_link_authority_checks_its_own_acl_without_following_or_repairing() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    let alias = root.path().join("alias");
+    fs::write(&target, b"untouched").unwrap();
+    symlink(&target, &alias).unwrap();
+    for (grant, allowed) in [
+        ("everyone allow read", true),
+        ("everyone allow delete", false),
+        ("everyone allow writesecurity", false),
+    ] {
+        assert!(
+            Command::new("chmod")
+                .args(["-h", "-N"])
+                .arg(&alias)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("chmod")
+                .args(["-h", "+a", grant])
+                .arg(&alias)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let before = fs::symlink_metadata(&alias).unwrap();
+        assert_eq!(
+            verify_symbolic_link_authority(&alias).is_ok(),
+            allowed,
+            "{grant}"
+        );
+        let after = fs::symlink_metadata(&alias).unwrap();
+        assert_eq!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec())
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"untouched");
+        assert_eq!(fs::read_link(&alias).unwrap(), target);
+    }
+    assert!(
+        Command::new("chmod")
+            .args(["-h", "-N"])
+            .arg(&alias)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(verify_symbolic_link_authority(&target).is_err());
 }

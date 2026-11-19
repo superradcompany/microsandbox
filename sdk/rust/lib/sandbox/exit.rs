@@ -3,8 +3,8 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{ColumnTrait, QueryFilter};
 
-use super::{SandboxHandle, SandboxStatus};
-use crate::backend::LocalBackend;
+use super::{SandboxRecord, SandboxStatus};
+use crate::context::LocalContext;
 use crate::db::entity::{run, sandbox};
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -32,7 +32,7 @@ pub struct SandboxRunExit {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl SandboxHandle {
+impl SandboxRecord {
     /// Read the latest retained exit for this exact local sandbox identity.
     ///
     /// Returns `None` while nonterminal or when the latest run has no terminal
@@ -44,15 +44,15 @@ impl SandboxHandle {
         let local = self
             .backend
             .as_local()
-            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleTerminalExit))?;
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxTerminalExit))?;
         let identity = self
-            .local()
-            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleTerminalExit))?;
+            .local_state()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxTerminalExit))?;
 
         // Serialize with SDK start/remove so a new execution cannot race the
         // terminal-state and latest-run reads below.
         let _transition =
-            LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), self.name())
+            LocalContext::acquire_sandbox_transition_guard(&local.config().run_dir(), self.name())
                 .await?;
 
         let db = local.db().await?;
@@ -78,7 +78,7 @@ impl SandboxHandle {
             return Ok(None);
         }
 
-        let Some(run) = LocalBackend::load_latest_run(db.read(), current.id).await? else {
+        let Some(run) = LocalContext::load_latest_run(db.read(), current.id).await? else {
             return Ok(None);
         };
 
@@ -97,6 +97,12 @@ impl SandboxHandle {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use crate::db::entity::run::TerminationReason as SandboxTerminationReason;
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -107,21 +113,18 @@ mod tests {
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
     use super::*;
-    use crate::backend::SandboxBackend;
+    use crate::context::SandboxOps;
     use crate::sandbox::SandboxConfig;
 
     #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires MSB_TEST_RUNTIME_DIR, a local VM runtime, and registry access"]
     async fn live_idle_timeout_retains_exit_until_explicit_cleanup() {
-        use crate::Sandbox;
-        use crate::backend::with_backend;
         use std::time::Duration;
 
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         // Exercise the candidate runtime built for this integration run, even
         // before its release archive exists.
@@ -136,19 +139,27 @@ mod tests {
         )
         .await
         .unwrap();
-        with_backend(backend, async {
-            let builder = Sandbox::builder("retained-idle")
+        async {
+            let destination: std::sync::Arc<dyn crate::Context> = (backend).into();
+
+            let builder = destination
+                .sandboxes()
+                .builder("retained-idle")
                 .image("alpine:3.20")
                 .cpus(1)
                 .memory(256)
                 .ephemeral(false)
-                .idle_timeout(5)
-                .max_duration(60);
+                .idle_timeout(std::time::Duration::from_secs(5))
+                .max_duration(std::time::Duration::from_secs(60));
             // Released runtimes may not support HTTP denial responses.
             #[cfg(feature = "net")]
             let builder = builder.network(|network| network.http(|http| http.deny_response(false)));
             let sandbox = builder.create_detached().await.unwrap();
-            let handle = Sandbox::get(sandbox.name()).await.unwrap();
+            let handle = destination
+                .sandbox_ops()
+                .get(destination.clone(), sandbox.name())
+                .await
+                .unwrap();
             let result = tokio::time::timeout(Duration::from_secs(45), async {
                 loop {
                     match handle.terminal_exit().await {
@@ -169,10 +180,13 @@ mod tests {
             assert_eq!(exit.exit_code, Some(0));
             assert!(exit.terminated_at.is_some());
             assert!(matches!(
-                Sandbox::get("retained-idle").await,
+                destination
+                    .sandbox_ops()
+                    .get(destination.clone(), "retained-idle")
+                    .await,
                 Err(MicrosandboxError::SandboxNotFound(_))
             ));
-        })
+        }
         .await;
     }
 
@@ -182,7 +196,6 @@ mod tests {
         let backend = Arc::new(
             crate::test_support::local_backend_builder(home.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let db = backend.db().await.unwrap();
@@ -281,9 +294,3 @@ mod tests {
         ));
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub use crate::db::entity::run::TerminationReason as SandboxTerminationReason;

@@ -6,7 +6,7 @@ use std::time::Duration;
 use clap::Args;
 use futures::{FutureExt, StreamExt};
 use microsandbox::logs::{LogSource, LogStreamOptions, LogStreamStart};
-use microsandbox::sandbox::{ExecOutput, RlimitResource, Sandbox};
+use microsandbox::sandbox::{ExecOptionsBuilder, ExecOutput, RlimitResource, Sandbox};
 
 use super::common::{self, SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
 use crate::{sandbox_config, ui};
@@ -109,7 +109,10 @@ pub async fn run(args: RunArgs, log_level: Option<microsandbox::LogLevel>) -> an
     // or --replace-with-timeout). --replace-with-timeout implies --replace,
     // so either flag opts out of the reuse path.
     let replace_requested = args.sandbox.replace || args.sandbox.replace_with_timeout.is_some();
-    if is_named && !replace_requested && Sandbox::get(&name).await.is_ok() {
+    if is_named
+        && !replace_requested
+        && crate::commands::common::sandbox_record(&name).await.is_ok()
+    {
         return run_existing(name, args).await;
     }
 
@@ -129,7 +132,7 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
     // Detach mode: ensure running and exit.
     if args.detach {
         warn_detached_command_ignored(&name, &args);
-        sandbox.detach().await;
+        sandbox.detach().await?;
         println!("{name}");
         return Ok(());
     }
@@ -139,7 +142,8 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
         common::use_interactive_tty(io::stdin().is_terminal(), args.no_tty || args.no_stdin);
 
     let result: anyhow::Result<i32> = async {
-        let (cmd, cmd_args) = common::resolve_command(sandbox.config(), args.command, interactive)?;
+        let (cmd, cmd_args) =
+            common::resolve_command(sandbox.config().await?.runtime(), args.command, interactive)?;
         match cmd {
             Some(cmd) => exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await,
             None => Ok(0),
@@ -167,7 +171,11 @@ async fn run_new(
     if matches!(image, sandbox_config::ResolvedImage::Snapshot(_)) {
         anyhow::bail!("snapshot sources require `msb snap restore SNAPSHOT --name NAME`");
     }
-    let builder = resolved.apply(Sandbox::builder(&name))?;
+    let builder = resolved.apply(
+        crate::commands::common::selected_context()?
+            .sandboxes()
+            .builder(&name),
+    )?;
     let builder = image.apply(builder)?;
     if args.sandbox.log_level.is_none()
         && let Some(log_level) = log_level
@@ -218,7 +226,10 @@ async fn run_new(
 
     common::display_restore_warnings(&sandbox).await;
 
-    if sandbox.config().resumed_from_full_snapshot() {
+    if sandbox
+        .launch_info()
+        .is_some_and(|info| info.resumed_from_full_snapshot)
+    {
         if !args.command.is_empty() {
             ui::warn(&format!(
                 "command ignored because snapshot restore resumed its captured workload (use `msb exec {name} -- ...` after restore)"
@@ -229,14 +240,14 @@ async fn run_new(
                 "full snapshot restore resumes in the background because it has no new foreground command to attach",
             );
         }
-        sandbox.detach().await;
+        sandbox.detach().await?;
         println!("{name}");
         return Ok(());
     }
 
     // Detach mode: just print the name and exit.
     if args.detach {
-        sandbox.detach().await;
+        sandbox.detach().await?;
         println!("{name}");
         return Ok(());
     }
@@ -245,7 +256,10 @@ async fn run_new(
     let interactive =
         common::use_interactive_tty(io::stdin().is_terminal(), args.no_tty || args.no_stdin);
 
-    if sandbox.config().init_owns_boot_workload() {
+    if sandbox
+        .launch_info()
+        .is_some_and(|info| info.init_owns_boot_workload)
+    {
         let observe = observe_init_owned_workload(&sandbox, launch_started_at);
         let result = match exec_opts.timeout {
             Some(duration) => match tokio::time::timeout(duration, observe).await {
@@ -264,7 +278,8 @@ async fn run_new(
         return handle_exit(result?);
     }
 
-    let (cmd, cmd_args) = common::resolve_command(sandbox.config(), args.command, interactive)?;
+    let (cmd, cmd_args) =
+        common::resolve_command(sandbox.config().await?.runtime(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
         (Some(cmd), args) => (cmd, args),
         (None, _) => {
@@ -383,6 +398,17 @@ async fn exec_in_sandbox(
         let rlimits = opts.rlimits.clone();
         let timeout = opts.timeout;
         let tty = opts.tty;
+
+        // `--no-tty` from a terminal keeps ignoring terminal input.
+        if !opts.no_stdin && !io::stdin().is_terminal() {
+            let mut options = ExecOptionsBuilder::default().args(cmd_args).tty(tty);
+            for (resource, soft, hard) in rlimits {
+                options = options.rlimit_range(resource, soft, hard);
+            }
+            return super::exec::run_piped(sandbox, cmd.to_string(), options, timeout, false, tty)
+                .await;
+        }
+
         let has_opts = tty || opts.no_stdin || timeout.is_some() || !rlimits.is_empty();
         let output: ExecOutput = if has_opts {
             sandbox
@@ -651,6 +677,8 @@ mod tests {
             "base.yaml",
             "--resource-conf",
             "second.yaml",
+            "--file",
+            "Sandboxfile",
             "--net-conf",
             "network.yaml",
         ]);
@@ -665,6 +693,7 @@ mod tests {
                 (SandboxConfigKind::Resources, PathBuf::from("first.yaml")),
                 (SandboxConfigKind::Root, PathBuf::from("base.yaml")),
                 (SandboxConfigKind::Resources, PathBuf::from("second.yaml")),
+                (SandboxConfigKind::Root, PathBuf::from("Sandboxfile")),
                 (SandboxConfigKind::Network, PathBuf::from("network.yaml")),
             ]
         );

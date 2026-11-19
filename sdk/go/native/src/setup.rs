@@ -2,9 +2,21 @@
 
 use std::os::raw::{c_char, c_uchar};
 
+#[cfg(feature = "local")]
 use microsandbox::setup::{binding_install_options, binding_runtime_config};
 
 use crate::{FfiError, cstr, run_c};
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StorageRecoveryRequest {
+    name: String,
+    options: microsandbox::sandbox::StorageRecoveryOptions,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -23,34 +35,65 @@ pub unsafe extern "C" fn msb_runtime_setup(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let operation = unsafe { cstr(operation) }?;
-        let config = binding_runtime_config(&unsafe { cstr(config_json) }?)?;
-        let options_json = unsafe { cstr(options_json) }?;
-        Ok(Box::pin(async move {
-            let runtime = match operation.as_str() {
-                "resolve" => microsandbox::setup::resolve_runtime(&config)?,
-                "install" => {
-                    microsandbox::setup::install_runtime(
-                        &config,
-                        binding_install_options(&options_json)?,
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::RuntimeSetup,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            let operation = unsafe { cstr(operation) }?;
+            let config_json = unsafe { cstr(config_json) }?;
+            let options_json = unsafe { cstr(options_json) }?;
+            Ok(Box::pin(async move {
+                if operation == "diagnose_storage" {
+                    return microsandbox::setup::binding_diagnose_storage(
+                        &config_json,
+                        &options_json,
                     )
-                    .await?
+                    .await
+                    .map_err(FfiError::from);
                 }
-                "ensure" => {
-                    microsandbox::setup::ensure_runtime(
-                        &config,
-                        binding_install_options(&options_json)?,
-                    )
-                    .await?
+                if operation == "recover_storage" {
+                    // Existing optional ABI, new explicit operation; use the active SDK backend.
+                    let request: StorageRecoveryRequest = serde_json::from_str(&options_json)
+                        .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
+                    let result =
+                        microsandbox::Sandbox::recover_storage(&request.name, request.options)
+                            .await?;
+                    return serde_json::to_string(&result)
+                        .map_err(|error| FfiError::internal(error.to_string()));
                 }
-                _ => {
-                    return Err(FfiError::invalid_argument(
-                        "unknown runtime setup operation",
-                    ));
-                }
-            };
-            serde_json::to_string(&runtime).map_err(|error| FfiError::internal(error.to_string()))
-        }))
-    })
+                let config = binding_runtime_config(&config_json)?;
+                let runtime = match operation.as_str() {
+                    "resolve" => microsandbox::setup::resolve_runtime(&config)?,
+                    "install" => {
+                        microsandbox::setup::install_runtime(
+                            &config,
+                            binding_install_options(&options_json)?,
+                        )
+                        .await?
+                    }
+                    "ensure" => {
+                        microsandbox::setup::ensure_runtime(
+                            &config,
+                            binding_install_options(&options_json)?,
+                        )
+                        .await?
+                    }
+                    _ => {
+                        return Err(FfiError::invalid_argument(
+                            "unknown runtime setup operation",
+                        ));
+                    }
+                };
+                serde_json::to_string(&runtime)
+                    .map_err(|error| FfiError::internal(error.to_string()))
+            }))
+        })
+    }
 }

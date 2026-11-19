@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../dist/internal/napi.js", () => ({ napi: {} }));
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
 
 describe("guest writeback forwarding", () => {
   for (const kind of ["sandbox", "handle"] as const) {
@@ -14,7 +13,7 @@ describe("guest writeback forwarding", () => {
           fork: vi.fn(async () => ({ id: "child-id", name: "child", backendKind: "local", ownsLifecycle: false })),
         };
         const source = kind === "sandbox"
-          ? new Sandbox(native as never, "source") : new SandboxHandle(native as never);
+          ? new Sandbox(native as never, "source") : new Sandbox(native as never);
         await source.pause();
         expect(native.pause).toHaveBeenLastCalledWith(undefined);
         await source.pause({ guestFlush: "required" });

@@ -5,17 +5,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use microsandbox::logs::{LogSource, LogStreamOptions};
 use microsandbox::sandbox::SandboxStatus;
-use microsandbox::{BackendKind, Sandbox};
+use microsandbox::{Context, RemoteContext, Sandbox};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    configure_cloud_backend()?;
+    let context = RemoteContext::from_env()?;
 
     let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let name = format!("rust-cloud-{suffix}");
 
     println!("creating {name} on the cloud backend");
-    let sandbox = Sandbox::builder(&name)
+    let sandbox = context
+        .sandboxes()
+        .builder(&name)
         .image("alpine:3.19")
         .cpus(1)
         .memory(512)
@@ -24,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
             "-lc",
             "for i in 1 2 3; do echo rust-cloud-$i; sleep 1; done",
         ])
-        .max_duration(60)
+        .max_duration(std::time::Duration::from_secs(60))
         .create()
         .await?;
 
@@ -62,30 +64,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     sandbox.stop().await?;
-    wait_until_stopped(&name).await?;
-    Sandbox::remove(&name).await?;
+    wait_until_stopped(&sandbox).await?;
+    sandbox.destroy().await?;
     println!("removed {name}");
 
     Ok(())
 }
 
-fn configure_cloud_backend() -> anyhow::Result<()> {
-    let kind = microsandbox::default_backend().kind();
-    if kind != BackendKind::Cloud {
-        anyhow::bail!(
-            "set MSB_BACKEND=cloud with MSB_API_KEY, or select a cloud profile; got {kind:?}"
-        );
-    }
-    Ok(())
-}
-
-async fn wait_until_stopped(name: &str) -> anyhow::Result<()> {
+async fn wait_until_stopped(sandbox: &Sandbox) -> anyhow::Result<()> {
     for _ in 0..30 {
-        let handle = Sandbox::get(name).await?;
-        if handle.status_snapshot() == SandboxStatus::Stopped {
+        if sandbox.status().await? == SandboxStatus::Stopped {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    anyhow::bail!("sandbox {name} did not stop within 30s")
+    anyhow::bail!("sandbox {} did not stop within 30s", sandbox.name())
 }

@@ -165,11 +165,7 @@ async fn shutdown_via_signal_path_terminates_guest() {
     // shutdown timeout.
     let handle = Sandbox::get(name).await.expect("get sandbox");
     handle.stop().await.expect("stop");
-    let status = handle
-        .refresh()
-        .await
-        .expect("refresh stopped sandbox")
-        .status_snapshot();
+    let status = handle.status().await.expect("inspect stopped sandbox");
     let _ = Sandbox::remove(name).await;
 
     assert_eq!(status, SandboxStatus::Stopped);

@@ -44,6 +44,8 @@ Read the entire contents of a file as raw bytes.
   </div>
 </div>
 
+Filesystem operations connect to an existing run or start a stopped sandbox when needed. Creating an idle helper does not start a sandbox or take ownership of shutdown. After you release the original sandbox handles, get a new Sandbox before starting more work. Active I/O and streams keep using the selected local run until they finish or are cleaned up. Explicit stop can still interrupt them.
+
 #### <span className="msb-recv">fs.</span><span className="msb-hn">readToString()</span>
 
 ```typescript

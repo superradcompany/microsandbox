@@ -71,7 +71,9 @@ await worker.resume()
 
 ```go Go
 worker, err := m.GetSandbox(ctx, "worker")
-if err != nil { return err }
+if err != nil {
+    return err
+}
 if err := worker.Pause(ctx); err != nil { return err }
 if err := worker.Resume(ctx); err != nil { return err }
 ```
@@ -193,34 +195,86 @@ sb = Microsandbox::Sandbox.connect_or_create(
 Creation options apply only to new sandboxes. An existing sandbox keeps its saved configuration. To recreate it with different settings, use [replacement locally](/sandboxes/overview#naming-conflicts), or remove and recreate it on cloud.
 </Warning>
 
-If you already have a `SandboxHandle`, use `connect_or_start` to connect to that exact sandbox or start it when needed.
+## Prepare an existing sandbox
+
+`get` returns a `Sandbox` without starting it. Execution, filesystem and SSH operations connect or start that same resource when needed. Inspection methods such as `status`, `info` and `config` never start it.
+
+For ordinary work, look up the resource and call the operation directly:
 
 <CodeGroup>
 ```typescript TypeScript
-const handle = await Sandbox.get("worker");
-const sb = await handle.connectOrStart();
+const sb = await Sandbox.get("worker");
+const output = await sb.shell("echo ready");
 ```
 
 ```rust Rust
-let handle = Sandbox::get("worker").await?;
-let sb = handle.connect_or_start().await?;
+use microsandbox::Sandbox;
+
+let sb = Sandbox::get("worker").await?;
+let output = sb.shell("echo ready").await?;
 ```
 
 ```python Python
-handle = await Sandbox.get("worker")
-sb = await handle.connect_or_start()
+sb = await Sandbox.get("worker")
+output = await sb.shell("echo ready")
 ```
 
 ```go Go
-handle, err := m.GetSandbox(ctx, "worker")
-sb, err := handle.ConnectOrStart(ctx)
+sb, err := m.GetSandbox(ctx, "worker")
+if err != nil {
+    return err
+}
+defer sb.Close()
+output, err := sb.Shell(ctx, "echo ready")
 ```
 
 ```ruby Ruby
-handle = Microsandbox::Sandbox.get("worker")
-sb = handle.connect_or_start
+sb = Microsandbox::Sandbox.get("worker")
+output = sb.shell("echo ready")
 ```
 </CodeGroup>
+
+### Prepare ahead of time
+
+Use `ensure_running` only when preparation itself is the task—for example, prewarming a sandbox or handling startup failure before accepting work. The following examples prepare now without submitting a command. Keep the receiver alive for the later work.
+
+<CodeGroup>
+```typescript TypeScript
+const sb = await Sandbox.get("worker");
+await sb.ensureRunning(); // Surface preparation failures now; submit work later.
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::get("worker").await?;
+sb.ensure_running().await?; // Surface preparation failures now; submit work later.
+```
+
+```python Python
+sb = await Sandbox.get("worker")
+await sb.ensure_running()  # Surface preparation failures now; submit work later.
+```
+
+```go Go
+sb, err := m.GetSandbox(ctx, "worker")
+if err != nil {
+    return err
+}
+defer sb.Close()
+// Surface preparation failures now; submit work later in this scope.
+if err := sb.EnsureRunning(ctx); err != nil { return err }
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.get("worker")
+sb.ensure_running # Surface preparation failures now; submit work later.
+```
+</CodeGroup>
+
+Preparation retains a newly started local run on the receiving object. Releasing the final owner stops that run; connecting to an already-running sandbox acquires no new cleanup ownership. `detach` explicitly releases cleanup ownership while leaving the object usable. Remote runs survive client process exit. In TypeScript, `await using` on an attached remote creation explicitly requests a best-effort stop at scope exit.
+
+Use the running-sandbox lookup to combine lookup and startup without creating a missing sandbox. Explicit start operations fail if the sandbox is already running. See your [SDK reference](/sdk/overview#reference) for the matching method.
 
 ## Keep a sandbox running
 
@@ -262,7 +316,7 @@ msb run -d python --name worker
 ```
 </CodeGroup>
 
-To detach a sandbox you already created, call `detach()` (`Detach` in Go).
+Detach an existing sandbox to let it keep running after its handle is released:
 
 ## List and inspect
 
@@ -272,40 +326,48 @@ List sandboxes to discover what exists, or get one by name when you already know
 ```typescript TypeScript
 const page = await Sandbox.list();
 for (const handle of page.sandboxes) {
-  console.log(`${handle.name}: ${handle.status}`);
+  console.log(`${handle.name}: ${await handle.status()}`);
 }
 
 const handle = await Sandbox.get("worker");
-console.log(handle.status);
+console.log(await handle.status());
 ```
 
 ```rust Rust
 for handle in Sandbox::list().await?.sandboxes {
-    println!("{}: {:?}", handle.name(), handle.status_snapshot());
+    println!("{}: {:?}", handle.name(), handle.status().await?);
 }
 ```
 
 ```python Python
 for handle in (await Sandbox.list()).sandboxes:
-    print(f"{handle.name}: {handle.status}")
+    print(f"{handle.name}: {await handle.status()}")
 
 handle = await Sandbox.get("worker")
-print(handle.status)
+print(await handle.status())
 ```
 
 ```go Go
 page, err := m.ListSandboxes(ctx)
 for _, handle := range page.Sandboxes {
-    fmt.Printf("%s: %s\n", handle.Name(), handle.Status())
+    status, err := handle.Status(ctx)
+    if err != nil {
+        return err
+    }
+    fmt.Printf("%s: %s\n", handle.Name(), status)
 }
 
 handle, err := m.GetSandbox(ctx, "worker")
-fmt.Println(handle.Status())
+status, err := handle.Status(ctx)
+if err != nil {
+    return err
+}
+fmt.Println(status)
 ```
 
 ```ruby Ruby
 Microsandbox::Sandbox.list.fetch("sandboxes").each do |handle|
-  puts "#{handle.name}: #{handle.status}"
+  puts "#{handle.name}: #{await handle.status()}"
 end
 
 handle = Microsandbox::Sandbox.get("worker")
@@ -348,7 +410,7 @@ To wait for a specific lifecycle state, use the status-wait method in your SDK: 
 
 ## Change configuration
 
-Use `msb modify`, or the SDK `modify()` methods, to change an existing sandbox without recreating it. Some changes apply immediately, some affect future commands, and some take effect after a restart.
+Use `msb modify`, or the SDK `modify()` methods, to change an existing sandbox without recreating it. Locally, you can resize resources and update settings. On our managed cloud, you can change secrets; recreate the sandbox to change CPU, memory, or mounts. Some changes apply immediately and others take effect at the next start.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -439,7 +501,7 @@ msb ping worker --touch
 ## Drain before stopping
 
 <Note>
-Draining is currently available only for local sandboxes. Use a graceful stop on microsandbox cloud.
+Draining is currently available only for local sandboxes. Use a graceful stop on our managed cloud.
 </Note>
 
 Use a drain when existing commands should finish but new commands should be rejected. The sandbox moves to `Draining`, waits for in-flight commands, and then stops. This is useful when rotating worker sandboxes without interrupting active jobs.
@@ -528,6 +590,14 @@ For a local sandbox, removal deletes sandbox-owned state while leaving independe
 
 Removing a sandbox does not undo writes made to a named volume, bind mount, or user-supplied disk image. On cloud, removal deletes the remote sandbox resource; the local disk details above do not apply.
 
+### Recover an interrupted local create
+
+If the creating process crashes, an incomplete sandbox stays recorded and cannot be started. Remove it with `msb rm <name>`, or recreate it with `--replace`. An ordinary create retry leaves the incomplete sandbox intact.
+
+Recovery removes partial sandbox files and any named volumes newly created by that attempt. Preexisting named volumes and bind-mounted files are preserved. The database records are deleted together only after file cleanup succeeds; if cleanup fails, fix the reported problem and retry removal.
+
+If preparation is still finishing, retry removal after its filesystem work completes. Background formatters retain a preparation lock even when the creating task is cancelled; the lock is released when their work finishes or the process exits. You do not need to close a long-running application after its workers finish.
+
 ## Automatic lifecycle policies
 
 For production workloads, configure a maximum lifetime or idle timeout so sandboxes shut down automatically.
@@ -536,16 +606,20 @@ For production workloads, configure a maximum lifetime or idle timeout so sandbo
 ```typescript TypeScript
 await using sb = await Sandbox.builder("worker")
     .image("python")
-    .maxDuration(3600)   // maximum sandbox lifetime in seconds
-    .idleTimeout(300)    // auto-drain after 5 minutes of inactivity
+    .maxDurationSeconds(3600)   // maximum sandbox lifetime in seconds
+    .idleTimeoutSeconds(300)    // auto-drain after 5 minutes of inactivity
     .create();
 ```
 
 ```rust Rust
+use std::time::Duration;
+
+use microsandbox::Sandbox;
+
 let sb = Sandbox::builder("worker")
     .image("python")
-    .max_duration(3600)
-    .idle_timeout(300)
+    .max_duration(Duration::from_secs(3600))
+    .idle_timeout(Duration::from_secs(300))
     .create()
     .await?;
 ```
@@ -603,14 +677,14 @@ Local status checks and startup maintenance mark abandoned starts as `Crashed`. 
 
 A name identifies the sandbox currently saved under it. An SDK handle identifies one specific sandbox. If that sandbox is removed and its name is reused, the old handle will not act on the replacement.
 
-Concurrent callers can safely use `connect_or_create` or `connect_or_start` to reuse a sandbox. If it is still starting, they wait rather than start another VM. See your [SDK reference](#reference) for identity checks and replacement errors.
+Concurrent callers can safely use `connect_or_create` or `ensure_running` to reuse a sandbox. If it is still starting, they wait rather than start another VM. See your [SDK reference](#reference) for identity checks and replacement errors.
 
 ## Troubleshooting
 
 ### Stop an unresponsive sandbox
 
 <Note>
-Force kill is currently available only for local sandboxes. Use a graceful stop on microsandbox cloud.
+Force kill is currently available only for local sandboxes. Use a graceful stop on our managed cloud.
 </Note>
 
 If [graceful stop](#stop-and-start-again) does not work, use `kill` to end the VM immediately. Running work is interrupted and unsaved data may be lost.
@@ -650,6 +724,10 @@ New connections are accepted again once input starts flowing.
 
 You can set request timeouts in your application. A timeout does not necessarily
 mean the request failed to run.
+
+### Remote checkpoint saving
+
+A remote provider can report `saving_state` after the VM exits while its checkpoint is still being saved. SDK status inspection reports this as `draining`. Stop and destroy wait for the provider's terminal state; an exited VM alone is not permission to delete persisted state. A later stop call observes an existing save without resubmitting the stop request.
 
 ### Logs and diagnostics
 

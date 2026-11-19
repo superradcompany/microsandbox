@@ -63,7 +63,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`async with` stops and removes the sandbox when the block exits. Use `Sandbox.create(...)` without a context manager when you want to control `stop()`, `kill()`, or `remove()` yourself.
+`async with` awaits graceful shutdown of its owned local run. It preserves persisted state except for configured ephemeral cleanup and leaves detached, independently connected, and remote runs alone. Cleanup errors are raised; a body exception remains available as their cause. `detach()` relinquishes automatic shutdown while keeping the object usable.
 
 ### Reusable Lifecycle Convergence
 
@@ -74,11 +74,11 @@ from microsandbox import SandboxStatus
 
 sandbox = await Sandbox.connect_or_create("worker", image="python", memory=1024)
 
-print(f"{await sandbox.name}: {await sandbox.id}")
-running = await (await Sandbox.get("worker")).connect_or_start()
+print(f"{sandbox.name}: {sandbox.id}")
+running = await Sandbox.get_running("worker")
 await running.request_stop()
-stopped = await running.wait_for_status(SandboxStatus.STOPPED)
-restarted = await stopped.restart()
+await running.wait_for_status(SandboxStatus.STOPPED)
+restarted = await running.restart()
 await restarted.destroy()
 ```
 
@@ -262,8 +262,7 @@ sandbox = await Sandbox.create(
     replace=True,
 )
 
-handle = await Sandbox.get("python-readme-background")
-reconnected = await handle.connect()
+reconnected = await Sandbox.get_running("python-readme-background")
 output = await reconnected.shell("echo reconnected")
 print(output.stdout_text.strip())
 ```

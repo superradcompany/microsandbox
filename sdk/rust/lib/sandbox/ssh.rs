@@ -32,15 +32,21 @@ use russh::client::Msg as ClientMsg;
 use russh::keys::{
     Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, decode_secret_key,
 };
-use russh::server::{Auth, ChannelOpenHandle, Msg, PublicKeyOffer, Session, VerifiedPublicKey};
+use russh::server::{
+    Auth, ChannelOpenHandle, Handle as SshServerHandle, Msg, PublicKeyOffer, Session,
+    VerifiedPublicKey,
+};
 use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{Mutex, Notify, mpsc};
 
-use super::attach;
 #[cfg(windows)]
 use super::terminal::{
     WindowsTerminalEvent, WindowsTerminalEventPump, WindowsTerminalGuard, current_terminal_size,
+};
+use super::{
+    attach,
+    state::{RuntimeSession, WeakSandbox},
 };
 use crate::config::{
     DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS, GlobalConfigPatch,
@@ -87,13 +93,13 @@ pub(crate) struct SshTimeout {
 /// SSH namespace for a sandbox.
 #[derive(Clone)]
 pub struct SandboxSshOps {
-    sandbox: Sandbox,
+    sandbox: WeakSandbox,
 }
 
 /// Host-side SSH defaults resolved from a local backend when one is available.
 ///
 /// Owning these values keeps the rest of the SSH implementation backend-neutral: cloud-only SDK
-/// builds never need to name `LocalBackend` or `LocalConfig`.
+/// builds never need to name `LocalContext` or `LocalConfig`.
 struct LocalSshDefaults {
     authorized_keys_path: PathBuf,
     host_key_path: PathBuf,
@@ -190,6 +196,7 @@ pub struct SshServer {
 #[derive(Clone)]
 struct SshSettings {
     sandbox: Sandbox,
+    runtime: Arc<RuntimeSession>,
     authorized_keys: Arc<Vec<String>>,
     guest_user: Option<String>,
     sftp: bool,
@@ -274,10 +281,11 @@ struct PtyInfo {
 
 struct SftpServerSession {
     client: Arc<AgentClient>,
+    runtime: Option<Arc<RuntimeSession>>,
     cwd: String,
     user: Option<String>,
     next_handle: u64,
-    handles: HashMap<String, crate::sandbox::fs::FsHandle>,
+    handles: HashMap<String, crate::sandbox::fs::AgentFsHandle>,
 }
 
 /// Ordered duplex stream backed by this process's stdin and stdout.
@@ -302,7 +310,7 @@ impl Sandbox {
     /// Return the SSH namespace for this sandbox.
     pub fn ssh(&self) -> SandboxSshOps {
         SandboxSshOps {
-            sandbox: self.clone(),
+            sandbox: WeakSandbox::new(self),
         }
     }
 }
@@ -356,6 +364,7 @@ impl SandboxSshOps {
             .window_size = SSH_IN_PROCESS_WINDOW;
 
         let (client_stream, server_stream) = tokio::io::duplex(SSH_IN_PROCESS_DUPLEX_CAPACITY);
+        let negotiated_version = local_negotiated_version(&server.settings.runtime);
         let server_task = tokio::spawn(async move { server.serve(server_stream).await });
         let client_config = russh::client::Config {
             window_size: SSH_IN_PROCESS_WINDOW,
@@ -403,7 +412,7 @@ impl SandboxSshOps {
             handle: client,
             term,
             server_task: Some(server_task),
-            negotiated_version: local_negotiated_version(&self.sandbox),
+            negotiated_version,
         })
     }
 
@@ -431,8 +440,9 @@ impl SandboxSshOps {
         f: impl FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder,
     ) -> MicrosandboxResult<SshServer> {
         let options = f(SshServerOptionsBuilder::default()).build();
-        let local_defaults = local_ssh_defaults(&self.sandbox);
-        let layers = match BackendConfig::for_backend(self.sandbox.backend().as_ref()) {
+        let sandbox = self.sandbox.upgrade()?;
+        let local_defaults = local_ssh_defaults(&sandbox);
+        let layers = match BackendConfig::for_backend(sandbox.backend().as_ref()) {
             Some(config) => config.ssh_layers(),
             // Custom backends without device settings retain the built-in timeout.
             None => ConfigLayers::unmanaged().base(SshTimeoutPatch::builtin()),
@@ -479,8 +489,11 @@ impl SandboxSshOps {
             inactivity_timeout,
             ..Default::default()
         });
+        // A prepared endpoint is active and run-bound; an idle ssh() facade is not.
+        let runtime = sandbox.prepare_runtime().await?;
         let settings = SshSettings {
-            sandbox: self.sandbox.clone(),
+            sandbox: sandbox.observer(),
+            runtime,
             authorized_keys: Arc::new(authorized_keys),
             guest_user: options.guest_user,
             sftp: options.sftp,
@@ -608,11 +621,15 @@ impl SshAttachOptionsBuilder {
 
 impl SshClient {
     /// Run an SSH exec request and collect stdout, stderr, and exit status.
+    ///
+    /// Returns an error if the channel closes without an exit status or signal.
     pub async fn exec(&self, command: impl Into<String>) -> MicrosandboxResult<SshOutput> {
         self.exec_with(command, |opts| opts).await
     }
 
     /// Run an SSH exec request with custom options.
+    ///
+    /// Returns an error if the channel closes without an exit status or signal.
     pub async fn exec_with(
         &self,
         command: impl Into<String>,
@@ -658,7 +675,7 @@ impl SshClient {
                         error_message
                     };
                     stderr.extend_from_slice(message.as_bytes());
-                    status = Some(128);
+                    status = Some(ssh_signal_exit_status(&signal_name));
                 }
                 ChannelMsg::Close => break,
                 ChannelMsg::Eof
@@ -681,8 +698,11 @@ impl SshClient {
             }
         }
 
+        let status = status
+            .ok_or_else(|| ssh_error("exec", "channel closed without an exit status or signal"))?;
+
         Ok(SshOutput {
-            status: status.unwrap_or(0),
+            status,
             stdout: Bytes::from(stdout),
             stderr: Bytes::from(stderr),
         })
@@ -777,8 +797,8 @@ impl SshClient {
                             ChannelMsg::ExitStatus { exit_status } => {
                                 exit_code = exit_status as i32;
                             }
-                            ChannelMsg::ExitSignal { .. } => {
-                                exit_code = 128;
+                            ChannelMsg::ExitSignal { signal_name, .. } => {
+                                exit_code = ssh_signal_exit_status(&signal_name);
                             }
                             ChannelMsg::Close => break,
                             _ => {}
@@ -902,8 +922,8 @@ impl SshClient {
                             ChannelMsg::ExitStatus { exit_status } => {
                                 exit_code = exit_status as i32;
                             }
-                            ChannelMsg::ExitSignal { .. } => {
-                                exit_code = 128;
+                            ChannelMsg::ExitSignal { signal_name, .. } => {
+                                exit_code = ssh_signal_exit_status(&signal_name);
                             }
                             ChannelMsg::Close => break,
                             _ => {}
@@ -1191,6 +1211,13 @@ impl SshSession {
             return Ok(Arc::clone(client));
         }
 
+        #[cfg(feature = "local")]
+        if let crate::context::SandboxInner::Local(local) = &self.settings.runtime.inner {
+            let client = local.client.clone();
+            self.client = Some(client.clone());
+            return Ok(client);
+        }
+
         let client = Arc::new(
             crate::sandbox::fs::agent::connect_agent(
                 self.settings.sandbox.backend().as_ref(),
@@ -1221,10 +1248,9 @@ impl SshSession {
             return Ok(());
         };
 
-        let shell = self
-            .settings
-            .sandbox
-            .config()
+        let runtime = self.settings.runtime.clone();
+        let shell = runtime
+            .config
             .spec
             .runtime
             .shell
@@ -1256,16 +1282,18 @@ impl SshSession {
         };
         let rows = pty.as_ref().map(|p| p.rows).unwrap_or(24);
         let cols = pty.as_ref().map(|p| p.cols).unwrap_or(80);
-        let handle = crate::sandbox::exec::agent::exec_stream_with_pty_size(
-            self.settings.sandbox.backend().as_ref(),
+        let client = self.agent_client().await?;
+        let mut handle = crate::sandbox::exec::agent::exec_stream_on_client(
+            client,
             self.settings.sandbox.name(),
-            self.settings.sandbox.config(),
+            &runtime.config,
             cmd,
             opts,
             rows,
             cols,
         )
         .await?;
+        handle.retain_runtime(runtime);
         let (control, stdin, mut events) = handle.into_parts();
         let session_handle = session.handle();
         let pty_enabled = pty.is_some();
@@ -1285,11 +1313,7 @@ impl SshSession {
                         }
                     }
                     ExecEvent::Exited { code } => {
-                        let _ = session_handle
-                            .exit_status_request(channel, code.max(0) as u32)
-                            .await;
-                        let _ = session_handle.eof(channel).await;
-                        let _ = session_handle.close(channel).await;
+                        send_exec_exit(&session_handle, channel, code).await;
                         break;
                     }
                     ExecEvent::Failed(failed) => {
@@ -1664,8 +1688,8 @@ impl russh::server::Handler for SshSession {
             .settings
             .sandbox
             .config()
-            .spec
-            .runtime
+            .await?
+            .runtime()
             .workdir
             .as_deref()
             .filter(|path| !path.is_empty() && path.starts_with('/'))
@@ -1681,6 +1705,7 @@ impl russh::server::Handler for SshSession {
             .filter(|user| user != "root");
         let sftp = SftpServerSession {
             client,
+            runtime: Some(self.settings.runtime.clone()),
             cwd,
             user,
             next_handle: 0,
@@ -1899,7 +1924,7 @@ impl SftpServerSession {
         }
     }
 
-    fn track_handle(&mut self, handle: crate::sandbox::fs::FsHandle) -> String {
+    fn track_handle(&mut self, handle: crate::sandbox::fs::AgentFsHandle) -> String {
         self.next_handle = self.next_handle.wrapping_add(1).max(1);
         let token = self.next_handle.to_string();
         self.handles.insert(token.clone(), handle);
@@ -1909,7 +1934,7 @@ impl SftpServerSession {
     fn resolve_handle(
         &self,
         token: &str,
-    ) -> Result<crate::sandbox::fs::FsHandle, russh_sftp::protocol::StatusCode> {
+    ) -> Result<crate::sandbox::fs::AgentFsHandle, russh_sftp::protocol::StatusCode> {
         self.handles
             .get(token)
             .copied()
@@ -1919,7 +1944,7 @@ impl SftpServerSession {
     fn forget_handle(
         &mut self,
         token: &str,
-    ) -> Result<crate::sandbox::fs::FsHandle, russh_sftp::protocol::StatusCode> {
+    ) -> Result<crate::sandbox::fs::AgentFsHandle, russh_sftp::protocol::StatusCode> {
         self.handles
             .remove(token)
             .ok_or(russh_sftp::protocol::StatusCode::Failure)
@@ -1930,10 +1955,18 @@ impl Drop for SftpServerSession {
     fn drop(&mut self) {
         let client = Arc::clone(&self.client);
         let handles: Vec<_> = self.handles.drain().map(|(_, handle)| handle).collect();
-        tokio::spawn(async move {
-            for handle in handles {
-                let _ = sftp_close_handle(&client, handle).await;
-            }
+        let runtime = self.runtime.take();
+        let Ok(executor) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        executor.spawn(async move {
+            let _runtime = runtime;
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                for handle in handles {
+                    let _ = sftp_close_handle(&client, handle).await;
+                }
+            })
+            .await;
         });
     }
 }
@@ -2306,6 +2339,41 @@ impl AsyncWrite for SshStdioStream {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Complete an SSH command without turning an unknown abnormal guest exit into success.
+async fn send_exec_exit(session: &SshServerHandle, channel: ChannelId, code: i32) {
+    // Agentd reports -1 when it has no exit code: the process died by a signal it does not
+    // report, or its exit notification was lost. Use a generic failure rather than inventing
+    // a signal or OOM cause.
+    let status = u32::try_from(code).unwrap_or(1);
+    let _ = session.exit_status_request(channel, status).await;
+    let _ = session.eof(channel).await;
+    let _ = session.close(channel).await;
+}
+
+/// Convert the SSH signal names from RFC 4254 to conventional shell exit statuses.
+fn ssh_signal_exit_status(signal: &Sig) -> i32 {
+    // Sandboxes run Linux. Host libc signal numbers differ on macOS (notably USR1/USR2).
+    let number = match signal {
+        Sig::HUP => 1,
+        Sig::INT => 2,
+        Sig::QUIT => 3,
+        Sig::ILL => 4,
+        Sig::ABRT => 6,
+        Sig::FPE => 8,
+        Sig::KILL => 9,
+        Sig::USR1 => 10,
+        Sig::SEGV => 11,
+        Sig::Custom(name) if name == "USR2" => 12,
+        Sig::PIPE => 13,
+        Sig::ALRM => 14,
+        Sig::TERM => 15,
+        // Preserve failure for unrecognized extension signals without guessing their number.
+        Sig::Custom(_) => 0,
+    };
+
+    128 + number
+}
+
 /// Forward SSH input from Russh's independent channel stream.
 ///
 /// This task may wait on guest bulk credit safely: the Russh session loop remains free to process
@@ -2618,19 +2686,13 @@ async fn build_authorized_keys(
     Ok(keys)
 }
 
-fn local_negotiated_version(sandbox: &Sandbox) -> Option<u8> {
+fn local_negotiated_version(runtime: &RuntimeSession) -> Option<u8> {
     #[cfg(feature = "local")]
-    {
-        sandbox
-            .local()
-            .map(|local| local.client.negotiated_version())
+    if let crate::context::SandboxInner::Local(local) = &runtime.inner {
+        return Some(local.client.negotiated_version());
     }
-
-    #[cfg(not(feature = "local"))]
-    {
-        let _ = sandbox;
-        None
-    }
+    let _ = runtime;
+    None
 }
 
 fn local_ssh_defaults(sandbox: &Sandbox) -> Option<LocalSshDefaults> {
@@ -2869,7 +2931,7 @@ async fn sftp_open_file(
     client: &AgentClient,
     path: &str,
     options: FsOpenOptions,
-) -> MicrosandboxResult<crate::sandbox::fs::FsHandle> {
+) -> MicrosandboxResult<crate::sandbox::fs::AgentFsHandle> {
     sftp_handle_op(
         client,
         FsOp::OpenFile {
@@ -2883,7 +2945,7 @@ async fn sftp_open_file(
 async fn sftp_open_dir(
     client: &AgentClient,
     path: &str,
-) -> MicrosandboxResult<crate::sandbox::fs::FsHandle> {
+) -> MicrosandboxResult<crate::sandbox::fs::AgentFsHandle> {
     sftp_handle_op(
         client,
         FsOp::OpenDir {
@@ -2896,7 +2958,7 @@ async fn sftp_open_dir(
 async fn sftp_handle_op(
     client: &AgentClient,
     op: FsOp,
-) -> MicrosandboxResult<crate::sandbox::fs::FsHandle> {
+) -> MicrosandboxResult<crate::sandbox::fs::AgentFsHandle> {
     match sftp_response(client, op).await?.data {
         Some(FsResponseData::Handle(handle)) => Ok(handle),
         _ => Err(MicrosandboxError::SandboxFsOps(
@@ -2907,14 +2969,14 @@ async fn sftp_handle_op(
 
 async fn sftp_close_handle(
     client: &AgentClient,
-    handle: crate::sandbox::fs::FsHandle,
+    handle: crate::sandbox::fs::AgentFsHandle,
 ) -> MicrosandboxResult<()> {
     sftp_simple_op(client, FsOp::CloseHandle { handle }).await
 }
 
 async fn sftp_read_handle(
     client: &Arc<AgentClient>,
-    handle: crate::sandbox::fs::FsHandle,
+    handle: crate::sandbox::fs::AgentFsHandle,
     offset: u64,
     len: Option<u64>,
 ) -> MicrosandboxResult<Bytes> {
@@ -2935,7 +2997,7 @@ async fn sftp_read_handle(
 
 async fn sftp_write_handle(
     client: &Arc<AgentClient>,
-    handle: crate::sandbox::fs::FsHandle,
+    handle: crate::sandbox::fs::AgentFsHandle,
     offset: u64,
     data: Vec<u8>,
 ) -> MicrosandboxResult<()> {
@@ -2971,7 +3033,7 @@ async fn sftp_stat(
 
 async fn sftp_fstat(
     client: &AgentClient,
-    handle: crate::sandbox::fs::FsHandle,
+    handle: crate::sandbox::fs::AgentFsHandle,
 ) -> MicrosandboxResult<FsEntryInfo> {
     sftp_stat_op(client, FsOp::FStat { handle }).await
 }
@@ -3004,7 +3066,7 @@ async fn sftp_set_stat(
 
 async fn sftp_fset_stat(
     client: &AgentClient,
-    handle: crate::sandbox::fs::FsHandle,
+    handle: crate::sandbox::fs::AgentFsHandle,
     attrs: FsSetAttrs,
 ) -> MicrosandboxResult<()> {
     sftp_simple_op(client, FsOp::FSetStat { handle, attrs }).await
@@ -3012,7 +3074,7 @@ async fn sftp_fset_stat(
 
 async fn sftp_read_dir(
     client: &AgentClient,
-    handle: crate::sandbox::fs::FsHandle,
+    handle: crate::sandbox::fs::AgentFsHandle,
     limit: Option<u32>,
 ) -> MicrosandboxResult<Vec<FsEntryInfo>> {
     match sftp_response(client, FsOp::ReadDir { handle, limit })
@@ -3191,6 +3253,173 @@ fn ssh_error(context: &str, error: impl std::fmt::Display) -> MicrosandboxError 
 mod tests {
     use super::*;
 
+    /// Exercise real SSH framing without a VM or a listening socket.
+    #[derive(Default)]
+    struct ExitTestServer {
+        channels: Vec<Channel<Msg>>,
+    }
+
+    impl russh::server::Handler for ExitTestServer {
+        type Error = anyhow::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+            // This test server is reachable only through an in-memory duplex stream.
+            Ok(Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: Channel<Msg>,
+            reply: ChannelOpenHandle,
+            _session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            self.channels.push(channel);
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            let command = std::str::from_utf8(data)?;
+            session.channel_success(channel)?;
+            session.data(channel, Bytes::from_static(b"stdout"))?;
+            session.extended_data(channel, 1, Bytes::from_static(b"stderr\n"))?;
+
+            if let Some(code) = command.strip_prefix("exit:") {
+                let code = code.parse()?;
+                let handle = session.handle();
+                tokio::spawn(async move { send_exec_exit(&handle, channel, code).await });
+                return Ok(());
+            }
+
+            if let Some(signal) = command.strip_prefix("signal:") {
+                session.exit_signal_request(
+                    channel,
+                    Sig::Custom(signal.to_owned()),
+                    false,
+                    "terminated",
+                    "",
+                )?;
+            } else {
+                assert_eq!(command, "missing");
+            }
+
+            session.eof(channel)?;
+            session.close(channel)?;
+            Ok(())
+        }
+    }
+
+    async fn exit_test_client() -> SshClient {
+        let key =
+            PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
+        let config = russh::server::Config {
+            keys: vec![key],
+            ..Default::default()
+        };
+        let (client_io, server_io) = tokio::io::duplex(SSH_IN_PROCESS_DUPLEX_CAPACITY);
+        let server_task = tokio::spawn(async move {
+            let session =
+                russh::server::run_stream(Arc::new(config), server_io, ExitTestServer::default())
+                    .await
+                    .map_err(|e| ssh_error("test server handshake", e))?;
+            session.await.map_err(|e| ssh_error("test server", e))
+        });
+        let mut handle = russh::client::connect_stream(
+            Arc::new(russh::client::Config::default()),
+            client_io,
+            SshClientHandler,
+        )
+        .await
+        .unwrap();
+        assert!(handle.authenticate_none("test").await.unwrap().success());
+
+        SshClient {
+            handle,
+            term: default_ssh_term(),
+            server_task: Some(server_task),
+            negotiated_version: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_preserves_normal_exits_and_rejects_abnormal_success() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let client = exit_test_client().await;
+
+            // Agentd emits -1 for signal termination or a lost exit notification, including
+            // older running guests. The adapter must preserve failure without a wire change.
+            for (guest_code, expected) in [(0, 0), (17, 17), (127, 127), (137, 137), (-1, 1)] {
+                let output = client.exec(format!("exit:{guest_code}")).await.unwrap();
+
+                assert_eq!(output.status, expected, "guest code {guest_code}");
+                assert_eq!(output.stdout.as_ref(), b"stdout");
+                assert_eq!(output.stderr.as_ref(), b"stderr\n");
+            }
+
+            client.close().await.unwrap();
+        })
+        .await
+        .expect("SSH exit round trips timed out");
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_preserves_signal_status_and_diagnostic() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let client = exit_test_client().await;
+
+            for (signal, expected) in [
+                ("HUP", 129),
+                ("INT", 130),
+                ("QUIT", 131),
+                ("ILL", 132),
+                ("ABRT", 134),
+                ("FPE", 136),
+                ("KILL", 137),
+                ("USR1", 138),
+                ("SEGV", 139),
+                ("USR2", 140),
+                ("PIPE", 141),
+                ("ALRM", 142),
+                ("TERM", 143),
+                ("unknown@example.com", 128),
+            ] {
+                let output = client.exec(format!("signal:{signal}")).await.unwrap();
+
+                assert_eq!(output.status, expected, "signal {signal}");
+                assert_eq!(output.stdout.as_ref(), b"stdout");
+                assert_eq!(output.stderr.as_ref(), b"stderr\nterminated");
+            }
+
+            client.close().await.unwrap();
+        })
+        .await
+        .expect("SSH signal round trips timed out");
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_requires_an_explicit_outcome() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let client = exit_test_client().await;
+
+            let error = client.exec("missing").await.unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("without an exit status or signal"),
+                "unexpected error: {error}"
+            );
+            client.close().await.unwrap();
+        })
+        .await
+        .expect("SSH missing-outcome round trip timed out");
+    }
+
     #[tokio::test]
     async fn persisted_ssh_keys_are_reused_with_private_permissions() {
         let dir = tempfile::tempdir().unwrap();
@@ -3345,9 +3574,43 @@ mod tests {
     #[cfg(feature = "cloud")]
     #[tokio::test]
     async fn cloud_ssh_uses_its_captured_policy_above_session_options() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        // Preparing an SSH endpoint now inspects its captured resource. Serve
+        // those observations locally; policy precedence must never use ambient.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let provider = tokio::spawn(async move {
+            for _ in 0..9 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    line.trim(),
+                    "GET /v1/sandboxes/by-name/cloud-timeout HTTP/1.1"
+                );
+                loop {
+                    line.clear();
+                    assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let body = serde_json::json!({
+                    "id": "test-sandbox", "org_id": "test-org", "name": "cloud-timeout",
+                    "slug": "cloud-timeout", "status": "running", "ephemeral": false,
+                    "created_at": "2026-11-16T00:00:00Z"
+                })
+                .to_string();
+                stream.get_mut().write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                ).as_bytes()).await.unwrap();
+            }
+        });
         let ambient_policy =
             serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":99}}"#).unwrap();
-        let ambient = crate::CloudBackend::builder()
+        let ambient = crate::RemoteContext::builder()
             .url("https://other-cloud.example")
             .api_key("test-token")
             .config_sources(BackendConfig::new(Default::default(), ambient_policy))
@@ -3356,21 +3619,23 @@ mod tests {
         let key =
             PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
         let public_key = key.public_key().public_key_base64();
-        crate::backend::with_backend(ambient, async {
+        async {
+            let _unrelated_context: std::sync::Arc<dyn crate::Context> = (ambient).into();
+
             for managed in [None, Some(0), Some(10)] {
                 let saved =
                     serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":30}}"#).unwrap();
                 let mut policy = GlobalConfigPatch::new();
                 policy.ssh.inactivity_timeout_secs = managed;
-                let cloud = crate::CloudBackend::builder()
-                    .url("https://cloud.example")
+                let cloud = crate::RemoteContext::builder()
+                    .url(&url)
                     .api_key("test-token")
                     .config_sources(BackendConfig::new(saved, policy))
                     .build()
                     .unwrap();
                 let sandbox = Sandbox::from_cloud_state(
                     Arc::new(cloud),
-                    crate::backend::SandboxCloudState {
+                    crate::context::SandboxRemoteState {
                         id: "test-sandbox".into(),
                         org_id: "test-org".into(),
                         created_at: chrono::Utc::now(),
@@ -3397,8 +3662,9 @@ mod tests {
                     assert_eq!(server.config.inactivity_timeout, expected);
                 }
             }
-        })
+        }
         .await;
+        provider.await.unwrap();
     }
 
     #[tokio::test]
@@ -3441,6 +3707,7 @@ mod tests {
             .unwrap();
         let mut sftp = SftpServerSession {
             client: Arc::new(client),
+            runtime: None,
             cwd: "/".to_string(),
             user: Some("alice".to_string()),
             next_handle: 0,

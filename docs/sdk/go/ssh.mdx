@@ -96,7 +96,7 @@ Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">PrepareServer()</span>
 
-<Tooltip tip="On microsandbox cloud, the reusable server works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, the reusable server works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (ssh *SandboxSSHOps) PrepareServer(ctx context.Context, opts ...SSHServerOption) (*SSHServer, error)
@@ -245,7 +245,7 @@ Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to t
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">int</span></div>
-    <div className="msb-param-desc">Shell exit code (128 if terminated by signal).</div>
+    <div className="msb-param-desc">Shell exit code. Known SSH signals return <code>128 +</code> the Linux signal number (for example, <code>143</code> for <code>TERM</code>); unknown signal names return <code>128</code>.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">error</span></div>

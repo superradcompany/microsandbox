@@ -20,11 +20,10 @@ it("captures storage backends at invocation and preserves native bigint reports"
     import { join } from "node:path";
     import { Storage } from "./dist/storage.js";
     import { Snapshot } from "./dist/snapshot.js";
-    import { setDefaultBackend } from "./dist/runtime.js";
-    import { UnsupportedError } from "./dist/errors.js";
+    import { RemoteContext } from "./dist/context.js";
 
-    const cloud = { kind: "cloud", url: "http://127.0.0.1:9", apiKey: "test" };
-    setDefaultBackend("local");
+
+    const cloud = new RemoteContext({ url: "http://127.0.0.1:9", apiKey: "test" });
     const dir = join(process.env.MSB_HOME, "cache", "memory", "branches");
     mkdirSync(dir, { recursive: true });
     const backing = join(dir, "branch_fixture-4096.ram");
@@ -33,15 +32,14 @@ it("captures storage backends at invocation and preserves native bigint reports"
     writeFileSync(lock, "");
 
     const observing = Storage.usage();
-    setDefaultBackend(cloud);
+    assert.equal(cloud.kind, "remote");
     const observed = await observing;
     assert.equal(observed.branchMemory.count, 1);
     assert.equal(observed.branchMemory.logicalBytes, 8192n);
     assert.equal(observed.images.inUse, null);
 
-    setDefaultBackend("local");
     const previewing = Storage.prune({ dryRun: true });
-    setDefaultBackend(cloud);
+    assert.equal(cloud.kind, "remote");
     const preview = await previewing;
     assert.equal(preview.filesRemoved, 0);
     assert.equal(preview.logicalBytesRemoved, 0n);
@@ -49,15 +47,8 @@ it("captures storage backends at invocation and preserves native bigint reports"
     assert.equal(preview.entries[0].state, "reclaimable");
     assert(existsSync(backing));
 
-    // Conversely a cloud invocation must never become local deletion merely
-    // because the default changes before the native future is polled.
-    const refused = Storage.prune();
-    setDefaultBackend("local");
-    await assert.rejects(refused, UnsupportedError);
-    assert(existsSync(backing));
-
     const pruning = Storage.prune();
-    setDefaultBackend(cloud);
+    assert.equal(cloud.kind, "remote");
     const result = await pruning;
     assert.equal(result.filesRemoved, 1);
     assert.equal(result.logicalBytesRemoved, 8192n);
@@ -66,7 +57,6 @@ it("captures storage backends at invocation and preserves native bigint reports"
     assert(!existsSync(backing));
     assert(existsSync(lock));
 
-    setDefaultBackend("local");
     const snapshotDir = join(process.env.MSB_HOME, "fixture-snapshot");
     mkdirSync(snapshotDir);
     const manifest = JSON.stringify({
@@ -81,7 +71,7 @@ it("captures storage backends at invocation and preserves native bigint reports"
     writeFileSync(join(snapshotDir, "snapshot.json"), manifest);
     writeFileSync(join(snapshotDir, "upper.ext4"), "hello");
     const artifact = await Snapshot.open(snapshotDir);
-    setDefaultBackend(cloud);
+    assert.equal(cloud.kind, "remote");
     const item = await artifact.storageUsage();
     assert.equal(item.path, snapshotDir);
     assert.equal(item.logicalBytes, BigInt(Buffer.byteLength(manifest)) + 5n);

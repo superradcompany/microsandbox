@@ -64,10 +64,7 @@ impl LocalDiskAdmissions {
         // ancestors; keeping the largest physical files retains the expensive base first.
         receipts.sort_by_key(|receipt| std::cmp::Reverse(receipt.stamp.length));
         receipts.truncate(MAX_RECEIPTS);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(root.join(RECEIPTS_FILE))?;
+        let mut file = microsandbox_utils::private_file::create_new(&root.join(RECEIPTS_FILE))?;
         serde_json::to_writer(&mut file, &receipts).map_err(io::Error::other)?;
         file.flush()
     }

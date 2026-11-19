@@ -1,0 +1,7 @@
+{
+  "slug": "shop",
+  "target": {
+    "sandbox": "web-1",
+    "port": 8080
+  }
+}

@@ -1,6 +1,10 @@
 package microsandbox
 
-import "testing"
+import (
+	"context"
+	"math"
+	"testing"
+)
 
 func newOutput(stdout, stderr string, code int) *ExecOutput {
 	return &ExecOutput{
@@ -106,5 +110,25 @@ func TestExecEventFields(t *testing.T) {
 	done := ExecEvent{Kind: ExecEventDone}
 	if done.Kind != ExecEventDone {
 		t.Errorf("Kind: got %d, want ExecEventDone", done.Kind)
+	}
+}
+
+func TestCollectedExecutionRejectsStdinBeforeDispatch(t *testing.T) {
+	sb := &Sandbox{}
+	ctx := context.Background()
+	for name, run := range map[string]func() (*ExecOutput, error){
+		"exec":    func() (*ExecOutput, error) { return sb.Exec(ctx, "cat", nil, WithExecStdinPipe()) },
+		"shell":   func() (*ExecOutput, error) { return sb.Shell(ctx, "cat", WithExecStdinPipe()) },
+		"default": func() (*ExecOutput, error) { return sb.ExecDefault(ctx, WithExecStdinPipe()) },
+	} {
+		if _, err := run(); !IsKind(err, ErrInvalidConfig) {
+			t.Errorf("%s: expected invalid config, got %v", name, err)
+		}
+	}
+}
+
+func TestMaxExecTimeoutRoundsUpWithoutOverflow(t *testing.T) {
+	if got := timeoutSecsCeil(math.MaxInt64); got != 9223372037 {
+		t.Fatalf("maximum duration rounded to %d seconds", got)
 	}
 }

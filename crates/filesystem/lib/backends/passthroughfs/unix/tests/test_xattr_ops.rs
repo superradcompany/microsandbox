@@ -1,4 +1,5 @@
 use super::*;
+use crate::backends::passthroughfs::StatVirtualization;
 use crate::backends::shared::stat_override::OVERRIDE_XATTR_KEY;
 
 #[test]
@@ -28,6 +29,103 @@ fn test_setxattr_getxattr_roundtrip() {
         GetxattrReply::Value(v) => assert_eq!(&v[..], value),
         GetxattrReply::Count(_) => panic!("expected Value, got Count"),
     }
+}
+
+#[test]
+fn test_user_xattrs_work_in_every_stat_virtualization_mode() {
+    for stat_virtualization in [
+        StatVirtualization::Strict,
+        StatVirtualization::Relaxed,
+        StatVirtualization::Off,
+    ] {
+        let sb = TestSandbox::with_config(|mut cfg| {
+            cfg.stat_virtualization = stat_virtualization;
+            cfg
+        });
+        let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();
+        let key = TestSandbox::cstr("user.app_metadata");
+
+        sb.fs
+            .setxattr(sb.ctx(), entry.inode, &key, b"value", 0)
+            .unwrap();
+
+        let reply = sb.fs.getxattr(sb.ctx(), entry.inode, &key, 64).unwrap();
+        assert!(matches!(reply, GetxattrReply::Value(value) if value == b"value"));
+
+        sb.fs.removexattr(sb.ctx(), entry.inode, &key).unwrap();
+    }
+}
+
+#[test]
+fn test_host_xattr_namespaces_are_rejected_in_every_stat_virtualization_mode() {
+    let protected_names = [
+        "system.posix_acl_access",
+        "system.posix_acl_default",
+        "security.selinux",
+        "security.capability",
+        "trusted.example",
+        "com.apple.quarantine",
+        "user.msb",
+        "user.msb.future",
+        "user.overlay",
+        "user.overlay.redirect",
+    ];
+
+    for stat_virtualization in [
+        StatVirtualization::Strict,
+        StatVirtualization::Relaxed,
+        StatVirtualization::Off,
+    ] {
+        let sb = TestSandbox::with_config(|mut cfg| {
+            cfg.stat_virtualization = stat_virtualization;
+            cfg
+        });
+        let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();
+
+        for name in protected_names {
+            let key = TestSandbox::cstr(name);
+            TestSandbox::assert_errno(
+                sb.fs.setxattr(sb.ctx(), entry.inode, &key, b"value", 0),
+                LINUX_EACCES,
+            );
+            TestSandbox::assert_errno(
+                sb.fs.getxattr(sb.ctx(), entry.inode, &key, 64),
+                LINUX_EACCES,
+            );
+            TestSandbox::assert_errno(sb.fs.removexattr(sb.ctx(), entry.inode, &key), LINUX_EACCES);
+        }
+    }
+}
+
+#[test]
+fn test_xattr_after_releasing_one_of_multiple_handles() {
+    let sb = TestSandbox::new();
+    let (entry, first) = sb.fuse_create_root("xattr.txt").unwrap();
+    let second = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
+
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, first, false, false, None)
+        .unwrap();
+    sb.fs
+        .setxattr(sb.ctx(), entry.inode, c"user.test", b"remaining", 0)
+        .unwrap();
+    let reply = sb
+        .fs
+        .getxattr(sb.ctx(), entry.inode, c"user.test", 64)
+        .unwrap();
+    assert!(matches!(reply, GetxattrReply::Value(value) if value == b"remaining"));
+
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, second, false, false, None)
+        .unwrap();
+    sb.fs
+        .setxattr(sb.ctx(), entry.inode, c"user.test", b"reopened", 0)
+        .unwrap();
+    let reply = sb
+        .fs
+        .getxattr(sb.ctx(), entry.inode, c"user.test", 64)
+        .unwrap();
+    assert!(matches!(reply, GetxattrReply::Value(value) if value == b"reopened"));
 }
 
 #[test]
@@ -151,6 +249,16 @@ fn test_listxattr_size_query_hides_override() {
         count as usize,
         names.len(),
         "size-query count must match filtered names length"
+    );
+
+    let exact_size_reply = sb.fs.listxattr(sb.ctx(), entry.inode, count).unwrap();
+    match exact_size_reply {
+        ListxattrReply::Names(exact_names) => assert_eq!(exact_names, names),
+        ListxattrReply::Count(_) => panic!("expected Names for a non-zero exact-size query"),
+    }
+    TestSandbox::assert_errno(
+        sb.fs.listxattr(sb.ctx(), entry.inode, count - 1),
+        libc::ERANGE,
     );
 
     // Verify the override key is absent from the names list.

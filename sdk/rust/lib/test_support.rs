@@ -1,7 +1,10 @@
-//! Fixture decoding, isolated backend construction, and synchronization for crate unit tests.
+//! Fixture decoding, isolated backend construction, a scripted HTTP server, and synchronization
+//! for crate unit tests.
 
 use std::sync::{Mutex, MutexGuard};
 
+#[cfg(feature = "cloud")]
+pub(crate) mod fake_server;
 pub(crate) mod fixtures;
 mod json;
 
@@ -29,8 +32,8 @@ pub(crate) fn lock_env() -> MutexGuard<'static, ()> {
 pub(crate) fn cloud_backend(
     url: impl Into<String>,
     api_key: impl Into<String>,
-) -> crate::MicrosandboxResult<crate::CloudBackend> {
-    crate::CloudBackend::builder()
+) -> crate::MicrosandboxResult<crate::RemoteContext> {
+    crate::RemoteContext::builder()
         .url(url)
         .api_key(api_key)
         .config_sources(crate::config::layers::BackendConfig::new(
@@ -42,13 +45,13 @@ pub(crate) fn cloud_backend(
 
 /// Construct a local backend from explicit settings without reading machine configuration.
 #[cfg(feature = "local")]
-pub(crate) fn local_backend(config: crate::config::GlobalConfig) -> crate::LocalBackend {
-    crate::LocalBackend::from_backend_config(
+pub(crate) fn local_backend(config: crate::config::GlobalConfig) -> crate::LocalContext {
+    crate::LocalContext::from_backend_config(
         crate::config::layers::BackendConfig::new(
             crate::config::GlobalConfigPatch::from_present_fields(config),
             Default::default(),
         ),
-        crate::BackendSelectionSource::Programmatic,
+        crate::ContextSelectionSource::Programmatic,
         None,
     )
 }
@@ -58,9 +61,9 @@ pub(crate) fn local_backend(config: crate::config::GlobalConfig) -> crate::Local
 #[cfg(feature = "local")]
 pub(crate) fn local_backend_builder(
     home: impl AsRef<std::path::Path>,
-) -> crate::backend::local::LocalBackendBuilder {
+) -> crate::context::local::LocalContextBuilder {
     let home = home.as_ref();
-    crate::LocalBackend::builder()
+    crate::LocalContext::builder()
         .config_path(home.join("config.json"))
         .managed_config_path(home.join("managed.json"))
         .home(home)

@@ -337,7 +337,7 @@ async fn exercise_header_policy(http2: bool) -> Result<()> {
                 "header-only update was not applied"
             );
 
-            let restarted = Sandbox::get(name).await?.start().await?;
+            let restarted = Sandbox::start(name).await?;
 
             probe(&restarted, &mut server, http2, false, &fields).await?;
             probe(&restarted, &mut server, http2, true, &fields).await?;

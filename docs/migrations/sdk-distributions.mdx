@@ -1,0 +1,80 @@
+---
+title: "SDK distribution choices"
+description: "Keep the full SDK or install only what you need."
+---
+
+These packages are unreleased and are not part of v0.7.15. When available, install matching SDK and native-library versions.
+
+Keep `npm install microsandbox` or `pip install microsandbox` to keep the full package. Switching to a smaller package is optional. The [API migration](/migrations/sdk-contexts) applies independently of package selection.
+
+## Choose what gets installed
+
+| Language | Full | Local only | Remote only |
+|---|---|---|---|
+| TypeScript | `microsandbox` | `@microsandbox/local` | `@microsandbox/remote` |
+| Python | `microsandbox` | `microsandbox-local` | `microsandbox-remote` |
+| Go | `github.com/superradcompany/microsandbox/sdk/go` | `…/sdk/go/local` | `…/sdk/go/remote` |
+
+Lean TypeScript packages and Python wheels deliver the selected native binding. They omit the host `msb` executable, `libkrunfw` firmware and runtime launcher. Lean Go modules contain wrappers only; provision their selected native library explicitly. Local execution also needs a compatible host runtime pair, following [bring your own runtime](/sdk/setup#bring-your-own-runtime). Remote execution needs no host runtime.
+
+Rust package defaults and Ruby distribution are unchanged by this packaging migration. They still participate in the context and resource API migration.
+
+## Update imports
+
+For local use, change the package you import:
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "@microsandbox/local";
+
+const sb = await Sandbox.builder("worker").image("python").create();
+```
+
+```python Python
+from microsandbox_local import Sandbox
+
+sb = await Sandbox.create("worker", image="python")
+```
+</CodeGroup>
+
+Python uses separate distributions, not `microsandbox[local]` or `microsandbox[remote]` extras. Each owns a separate import package. npm uses separately installable scoped packages, not `microsandbox/local` or `microsandbox/remote` subpath imports.
+
+Local and remote packages can be installed together. Existing objects keep their original connection. A remote-only installation requires a [RemoteContext](/cloud/connect#sdk-contexts); trying to run locally reports a missing-package error.
+
+## Provision Go FFI explicitly
+
+Add the selected module and install one exact-version native asset from trusted release metadata. Replace the placeholders with the released SDK version, artifact URL or offline path, and independently trusted SHA-256:
+
+```bash
+go get github.com/superradcompany/microsandbox/sdk/go/local@VERSION
+go run github.com/superradcompany/microsandbox/sdk/go/core/cmd/ffi-setup@VERSION \
+  --kind local --source EXACT_URL_OR_FILE --sha256 TRUSTED_SHA256
+```
+
+Setup accepts `--target` for cross-target provisioning and `--cache` for a custom cache. It verifies and copies the selected FFI only, and never installs the host runtime. Module installation, import and first use do not download native files.
+
+Load the verified local provider before using the following example with a local destination. An empty path selects the verified default cache; a nonempty path selects an explicitly trusted preinstalled library:
+
+```go
+import (
+    "context"
+
+    msb "github.com/superradcompany/microsandbox/sdk/go/core"
+    "github.com/superradcompany/microsandbox/sdk/go/local"
+)
+
+func create(ctx context.Context) (*msb.Sandbox, error) {
+    if _, err := local.Load(""); err != nil { return nil, err }
+    return msb.CreateSandbox(ctx, "worker", msb.WithImage("python"))
+}
+```
+
+For remote operations, provision `--kind remote` and use `remote.NewContextWithURL(path, url, apiKey)`. Full and smaller packages use the same object types. Objects keep using the library they were created with.
+
+## Verify the installation
+
+Use matching package and native versions. A missing provider should produce an installation error, and an incompatible provider should be rejected before resource operations. Removing one lean provider must leave the other usable. Full and lean providers may coexist without overwriting each other’s package files.
+
+A package download size differs from its installed size. Include the platform native package in npm totals, the selected wheel in Python totals, and the separately provisioned FFI in Go totals. Count the external local runtime separately. Build measurements are platform-specific and are not claims about a published registry payload.
+
+Use `remote.NewContext(path, apiKey)` with `MSB_API_URL` or the hosted default; `remote.NewContextWithURL(path, url, apiKey)` selects an explicit endpoint. The path selects the native library, not the remote service.
