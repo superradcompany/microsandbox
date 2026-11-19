@@ -687,8 +687,15 @@ fn sidecar_removal_during_hardening_is_not_an_alias_violation() {
             drop(file);
         }
     });
-    let result = (0..2_000).try_for_each(|_| harden_database_files(&path));
+    let result = (0..2_000).try_for_each(|_| match harden_database_files(&path) {
+        // Continuous replacement may exhaust the bounded retry budget. That
+        // refusal is intentional; alias or permission errors are not expected.
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        result => result,
+    });
     running.store(false, Ordering::Relaxed);
     churn.join().unwrap();
     result.unwrap();
+    // Once SQLite-style teardown stops, the stable catalog must be usable.
+    harden_database_files(&path).unwrap();
 }
