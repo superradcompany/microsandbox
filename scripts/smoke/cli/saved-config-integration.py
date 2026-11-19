@@ -130,12 +130,59 @@ def run(args, root):
         print(f"passed {test}", flush=True)
 
 
+def save_diagnostics(root, output, workspace, error=None):
+    """Retain command failures and cleanup outcomes, never private config records."""
+    output.mkdir(parents=True, exist_ok=True)
+    replacements = {str(root): "<fixture>", str(root.resolve()): "<fixture>",
+                    str(workspace): "<workspace>", str(Path.home()): "<host-home>"}
+
+    def redact(value):
+        text = str(value)
+        for source, replacement in sorted(replacements.items(), key=lambda item: -len(item[0])):
+            text = text.replace(source, replacement)
+        return text
+
+    result = {"status": "failed" if error else "passed", "commands": [], "cases": []}
+    if error:
+        result["error_type"] = type(error).__name__
+        result["error"] = redact(error)
+    for manifest in sorted(root.rglob("commands.json")):
+        for command in json.loads(manifest.read_text()):
+            row = {key: command[key] for key in ("label", "exit", "seconds", "error_type") if key in command}
+            row["suite"] = str(manifest.parent.relative_to(root))
+            # Arguments/stdout may contain saved configs or private script bodies.
+            # Keep only stderr, bounded in size, and redact temporary/host paths.
+            label = command["label"]
+            stderr = manifest.parent / (label + ".stderr")
+            if Path(label).name == label and stderr.is_file() and not stderr.is_symlink():
+                with stderr.open("rb") as source:
+                    data = source.read(65537)
+                row["stderr"] = redact(data[:65536].decode(errors="replace"))
+                row["stderr_truncated"] = len(data) > 65536
+            result["commands"].append(row)
+    for report in sorted(root.rglob("report.json")):
+        for case in json.loads(report.read_text()).get("cases", []):
+            row = {key: case[key] for key in ("runtime", "status", "remaining_sandboxes", "remaining_live_runs") if key in case}
+            row["suite"] = str(report.parent.relative_to(root))
+            if "cleanup" in case:
+                row["cleanup"] = {key: redact(value) for key, value in case["cleanup"].items()}
+            if "error" in case:
+                row["error"] = redact(case["error"])
+            result["cases"].append(row)
+    (output / "diagnostics.json").write_text(json.dumps(result, indent=2) + "\n")
+    for row in result["commands"]:
+        if row.get("exit") != 0:
+            print(f"{row['suite']}/{row['label']}: exit {row.get('exit')}\n{row.get('stderr', '')}",
+                  file=sys.stderr, flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("binary", "agent", "firmware", "workspace"):
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("image", "previous-writer"):
         parser.add_argument("--" + name, type=Path)
+    parser.add_argument("--output", type=Path, default=Path("build/saved-config-integration-results"))
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--archive", type=Path)
     mode.add_argument("--test-binary", type=Path)
@@ -144,9 +191,17 @@ def main():
         if isinstance(path, Path):
             setattr(args, name, path.resolve())
     evidence.install_termination_handler()
-    # Private records may contain host paths. Retain only test results in CI.
+    # Save bounded diagnostics before TemporaryDirectory removes private records,
+    # including on subprocess failure or termination after fixture cleanup.
     with tempfile.TemporaryDirectory(prefix="sce-", dir="/tmp") as tmp:
-        run(args, Path(tmp))
+        failure = None
+        try:
+            run(args, Path(tmp))
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            save_diagnostics(Path(tmp), args.output, args.workspace, failure)
 
 
 if __name__ == "__main__":
