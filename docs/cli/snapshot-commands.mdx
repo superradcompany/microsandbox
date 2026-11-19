@@ -137,6 +137,8 @@ msb snap inspect worker --checkpoint ready --verify
 
 Group output includes the member count and source status: available, missing sandbox, different catalog, or unbound. A renamed source shows its recorded and current names. A new sandbox with the old name does not become the source. Availability describes the observed association, not whether a future capture will succeed. Headless groups remain inspectable.
 
+When a checkpoint carries portable configuration, inspection lists the recorded logical binding names, their types, and where the captured configuration uses them. A binding marked `next start only` appears only in pending source settings. Which bindings a destination needs depends on the restore mode and overrides. Inspection reads the descriptor without looking up credentials or printing saved environment values and scripts.
+
 `--verify` requires `--checkpoint`; whole-group verification uses `msb snap verify worker --all`. Migration: replace `inspect worker:ready` with `inspect worker --checkpoint ready`. Bare group inspection now describes the history rather than implicitly displaying its head's artifact. Standalone artifacts remain inspectable through the SDK's `Checkpoint.open(...)` metadata accessors.
 
 <span id="msb-snapshot-verify" />

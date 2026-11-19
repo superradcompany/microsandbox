@@ -5,6 +5,9 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use microsandbox::{Checkpoint as Snapshot, Snapshot as SnapshotGroup, SnapshotReference};
+use microsandbox_types::snapshot::saved_config::{
+    SAVED_CONFIG_EXTENSION, SavedBindingConsumer, SavedBindingKind, SavedSandboxConfig,
+};
 use microsandbox_utils::format::format_bytes;
 
 use crate::{
@@ -780,6 +783,24 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
             );
         }
     }
+    if m.extensions.contains_key(SAVED_CONFIG_EXTENSION) {
+        ui::detail_header("Saved configuration");
+        // Inspection must still work for future versions. Never print raw extension
+        // contents, which can contain environment values, arguments, and script bodies.
+        match m
+            .saved_configuration()
+            .and_then(|config| config.as_ref().map(saved_binding_summary).transpose())
+        {
+            Ok(Some((version, rows))) => {
+                ui::detail_kv_indent("Schema version", &version.to_string());
+                ui::detail_kv_indent("Recorded bindings", &rows.len().to_string());
+                for (id, description) in rows {
+                    ui::detail_kv_indent(&id, &description);
+                }
+            }
+            _ => ui::detail_kv_indent("Bindings", "unavailable for this descriptor"),
+        }
+    }
     if args.verify {
         let report = snap.verify().await?;
         ui::detail_kv("Verification", &format_verify_status(&report.upper));
@@ -837,6 +858,56 @@ async fn verify(args: SnapshotVerifyArgs) -> anyhow::Result<()> {
         ui::detail_kv("Verification", &format_verify_status(&report.upper));
     }
     require_complete_verification(&report.coverage)
+}
+
+/// Describe only logical input names and consumers. Next-start intent can reference an
+/// input absent from the captured configuration and must never imply a restore requirement.
+fn saved_binding_summary(
+    config: &SavedSandboxConfig,
+) -> microsandbox_types::SnapshotManifestResult<(u32, Vec<(String, String)>)> {
+    use SavedBindingConsumer as C;
+    use SavedBindingKind as K;
+
+    let active = config.active_binding_uses()?;
+    let mut rows = Vec::with_capacity(config.bindings.len());
+    for (id, kind) in &config.bindings {
+        let kind = match kind {
+            K::Text => "text",
+            K::DnsResolver => "DNS resolver",
+            K::Listener => "listener",
+            K::Certificate => "certificate",
+            K::TlsIdentity => "TLS identity",
+            K::ProxyEndpoint => "proxy endpoint",
+            K::ProxyCredentials => "proxy credentials",
+            K::FilesystemFile => "file",
+            K::FilesystemDirectory => "directory",
+            K::NamedDirectory => "named directory volume",
+            K::NamedDisk => "named disk volume",
+            K::DiskImage => "disk image",
+            K::StreamSocket => "stream socket",
+            K::DatagramSocket => "datagram socket",
+        };
+        let consumers = match active.get(id) {
+            Some(usage) => usage
+                .consumers
+                .iter()
+                .map(|consumer| match consumer {
+                    C::BootInit => "boot init",
+                    C::NewCommand => "new command",
+                    C::ScriptBacking => "registered script",
+                    C::Gateway => "network gateway",
+                    C::GuestTrust => "guest trust",
+                    C::Listener => "network listener",
+                    C::Mount => "guest mount",
+                    C::Vsock => "guest socket",
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => "next start only".to_owned(),
+        };
+        rows.push((id.clone(), format!("{kind} ({consumers})")));
+    }
+    Ok((config.schema_version, rows))
 }
 
 fn display_group_verification(
