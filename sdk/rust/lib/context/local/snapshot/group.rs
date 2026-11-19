@@ -11,6 +11,10 @@ mod remove_history;
 mod retirement;
 mod transaction;
 
+#[cfg(test)]
+#[path = "group_tests.rs"]
+mod tests;
+
 #[cfg(windows)]
 mod txf;
 
@@ -1648,14 +1652,6 @@ fn sync_directory(_path: &Path) -> std::io::Result<()> {
     // Match artifact publication: payloads and metadata are flushed, directory rename is atomic.
     Ok(())
 }
-
-//--------------------------------------------------------------------------------------------------
-// Tests
-//--------------------------------------------------------------------------------------------------
-
-#[cfg(test)]
-#[path = "group_tests.rs"]
-mod tests;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports

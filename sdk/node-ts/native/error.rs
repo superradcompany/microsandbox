@@ -182,7 +182,9 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::SandboxStillRunning(_) => "SandboxStillRunning",
         MicrosandboxError::SandboxNotRunning(_) => "SandboxNotRunning",
         MicrosandboxError::SandboxStopTimedOut { .. } => "SandboxStopTimedOut",
-        MicrosandboxError::Runtime(_) => "Runtime",
+        MicrosandboxError::Runtime(_)
+        | MicrosandboxError::ReplacementStopped { .. }
+        | MicrosandboxError::ReplacementRecoveryPending { .. } => "Runtime",
         #[cfg(feature = "local")]
         MicrosandboxError::BootStart { .. } => "BootStart",
         MicrosandboxError::Json(_) => "Json",

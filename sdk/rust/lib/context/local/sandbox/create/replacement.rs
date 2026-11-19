@@ -32,6 +32,215 @@ struct Record {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl LocalContext {
+    pub(super) async fn finish_replacement(&self, attempt: &Attempt) -> MicrosandboxResult<bool> {
+        let _guard =
+            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &attempt.name).await?;
+        if let Some(token) = &attempt.token
+            && self.recover_replacement(&attempt.name, Some(token)).await?
+        {
+            return Ok(true);
+        }
+        // A different client may already have recovered this very attempt, or
+        // parking may have failed after shutdown but before releasing the name.
+        Ok(self
+            .db()
+            .await?
+            .write()
+            .query_one_raw(sql(
+                "SELECT id FROM sandbox WHERE id = ? AND name = ? AND status = 'Stopped'",
+                [attempt.original.into(), attempt.name.as_str().into()],
+            ))
+            .await?
+            .is_some())
+    }
+
+    /// Called by name-based lookups before selecting an identity. Never wait on
+    /// ordinary reads unless this specific sandbox has a replacement in progress.
+    pub(crate) async fn recover_replacement_for_lookup(
+        &self,
+        name: &str,
+    ) -> MicrosandboxResult<()> {
+        if name.starts_with(".msb-retained-") {
+            return Err(MicrosandboxError::Runtime(
+                "sandbox is retained for replacement recovery".into(),
+            ));
+        }
+        let pools = self.db().await?;
+        if storage_token(pools.write(), name).await?.is_some() {
+            let file = super::open_transition_lock(&self.config().run_dir(), name).await?;
+            if !microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+                return Err(MicrosandboxError::Runtime(format!(
+                    "replacement for {name:?} is in progress"
+                )));
+            }
+            self.recover_replacement(name, None).await?;
+        }
+        Ok(())
+    }
+
+    /// Caller owns the name transition. An attempt token prevents a returning
+    /// caller from rolling back a later replacement that has reused the same name.
+    pub(crate) async fn recover_replacement(
+        &self,
+        name: &str,
+        expected: Option<&str>,
+    ) -> MicrosandboxResult<bool> {
+        let pools = self.db().await?;
+        let db = pools.write();
+        let Some(token) = storage_token(db, name).await? else {
+            return Ok(false);
+        };
+        if expected.is_some_and(|expected| expected != token) {
+            return Ok(false);
+        }
+        let Some(record) = lookup(db, name).await? else {
+            clear_storage(db, &self.sandboxes_dir(), name, &token).await?;
+            return Ok(false);
+        };
+        if token != record.token {
+            return Err(MicrosandboxError::Runtime(
+                "replacement storage identity mismatch".into(),
+            ));
+        }
+
+        let root = self.sandboxes_dir();
+        let saved = backup_dir(&root, &record.token)?;
+        let original = record.original;
+        if !record.published {
+            let _lineage =
+                crate::snapshot::lineage::lock_source(&self.config().run_dir(), name).await?;
+            let current = db
+                .query_one_raw(sql("SELECT id FROM sandbox WHERE name = ?", [name.into()]))
+                .await?
+                .map(|row| row.try_get::<i32>("", "id"))
+                .transpose()?;
+            if current.is_some() && current != record.candidate {
+                return Err(MicrosandboxError::Runtime(format!(
+                    "replacement recovery found an unexpected sandbox at {name:?}"
+                )));
+            }
+            let run_dir = self.config().run_dir();
+            let pid = match current {
+                Some(id) => Self::load_latest_run(pools.read(), id)
+                    .await?
+                    .and_then(|run| run.pid),
+                None => None,
+            };
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let departing = super::super::process_exit::RuntimeExit::capture(
+                pid,
+                &microsandbox_runtime::ipc::lifecycle_lock_path(&run_dir, name),
+            )?;
+            let _runtime =
+                match microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run_dir, name)? {
+                    Some(guard) => guard,
+                    None => {
+                        // Creator death can leave an unpublished detached guest alive. The
+                        // agent path checks the exact catalog identity before dispatch.
+                        let id = current.ok_or_else(|| {
+                            MicrosandboxError::Runtime(format!(
+                                "runtime ownership unresolved for {name:?}"
+                            ))
+                        })?;
+                        self.request_agent_shutdown(name, id).await?;
+                        crate::runtime::acquire_sandbox_lifecycle_guard(
+                            &run_dir,
+                            name,
+                            Duration::from_secs(10),
+                        )
+                        .await?
+                    }
+                };
+            if let Some(id) = current {
+                // The runtime can drop its lifecycle lock before its final disk
+                // descriptors close. Observe process-wide exit without reaping it.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    let exited = match &departing {
+                        Some(process) => process.has_exited()?,
+                        None => pid.is_none_or(Self::pid_has_exited),
+                    };
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    let exited = pid.is_none_or(Self::pid_has_exited);
+                    if exited {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(MicrosandboxError::Runtime(format!(
+                            "replacement runtime for {name:?} still owns its files"
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                self.remove_incomplete_sandbox(id, name, creation::RemovalMode::Recovery)
+                    .await?;
+            }
+            let _storage = CreationStorage::acquire(self, name)?;
+            let public = root.join(name);
+            let source = saved.join("original");
+            if record.had_directory && !source.is_dir() {
+                return Err(MicrosandboxError::Runtime(format!(
+                    "missing retained storage for sandbox {name:?}"
+                )));
+            }
+            crate::sandbox::remove_dir_if_exists(&public)?;
+            if record.had_directory {
+                let tree = saved.join("tree");
+                if tree.try_exists()? {
+                    move_stopped_directory(&tree, &public).await?;
+                    sync_dir(&saved)?;
+                } else {
+                    retain_tree(&source, &public)?;
+                }
+            }
+            sync_dir(&root)?;
+        }
+        if record.published {
+            microsandbox_runtime::checkpoint::remove_sandbox_identity(
+                &self.config().home(),
+                original,
+            )
+            .map_err(MicrosandboxError::Runtime)?;
+        }
+        db.transaction(|txn| {
+            let token = &token;
+            async move {
+                let removed = txn
+                    .execute_raw(sql(
+                        "DELETE FROM sandbox_replacement WHERE original = ? AND token = ?",
+                        [original.into(), token.as_str().into()],
+                    ))
+                    .await?;
+                if removed.rows_affected() != 1 {
+                    return Err(MicrosandboxError::Runtime(
+                        "replacement journal changed during recovery".into(),
+                    ));
+                }
+                if record.published {
+                    txn.execute_raw(sql("DELETE FROM sandbox WHERE id = ?", [original.into()]))
+                        .await?;
+                } else {
+                    txn.execute_raw(sql(
+                        "UPDATE sandbox SET name = ? WHERE id = ?",
+                        [name.into(), original.into()],
+                    ))
+                    .await?;
+                }
+                Ok((txn, ()))
+            }
+        })
+        .await?;
+        clear_storage(db, &root, name, &token).await?;
+        Ok(!record.published)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -269,215 +478,6 @@ pub(super) async fn park(
         sync_dir(root)?;
     }
     Ok(())
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods
-//--------------------------------------------------------------------------------------------------
-
-impl LocalContext {
-    pub(super) async fn finish_replacement(&self, attempt: &Attempt) -> MicrosandboxResult<bool> {
-        let _guard =
-            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &attempt.name).await?;
-        if let Some(token) = &attempt.token
-            && self.recover_replacement(&attempt.name, Some(token)).await?
-        {
-            return Ok(true);
-        }
-        // A different client may already have recovered this very attempt, or
-        // parking may have failed after shutdown but before releasing the name.
-        Ok(self
-            .db()
-            .await?
-            .write()
-            .query_one_raw(sql(
-                "SELECT id FROM sandbox WHERE id = ? AND name = ? AND status = 'Stopped'",
-                [attempt.original.into(), attempt.name.as_str().into()],
-            ))
-            .await?
-            .is_some())
-    }
-
-    /// Called by name-based lookups before selecting an identity. Never wait on
-    /// ordinary reads unless this specific sandbox has a replacement in progress.
-    pub(crate) async fn recover_replacement_for_lookup(
-        &self,
-        name: &str,
-    ) -> MicrosandboxResult<()> {
-        if name.starts_with(".msb-retained-") {
-            return Err(MicrosandboxError::Runtime(
-                "sandbox is retained for replacement recovery".into(),
-            ));
-        }
-        let pools = self.db().await?;
-        if storage_token(pools.write(), name).await?.is_some() {
-            let file = super::open_transition_lock(&self.config().run_dir(), name).await?;
-            if !microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
-                return Err(MicrosandboxError::Runtime(format!(
-                    "replacement for {name:?} is in progress"
-                )));
-            }
-            self.recover_replacement(name, None).await?;
-        }
-        Ok(())
-    }
-
-    /// Caller owns the name transition. An attempt token prevents a returning
-    /// caller from rolling back a later replacement that has reused the same name.
-    pub(crate) async fn recover_replacement(
-        &self,
-        name: &str,
-        expected: Option<&str>,
-    ) -> MicrosandboxResult<bool> {
-        let pools = self.db().await?;
-        let db = pools.write();
-        let Some(token) = storage_token(db, name).await? else {
-            return Ok(false);
-        };
-        if expected.is_some_and(|expected| expected != token) {
-            return Ok(false);
-        }
-        let Some(record) = lookup(db, name).await? else {
-            clear_storage(db, &self.sandboxes_dir(), name, &token).await?;
-            return Ok(false);
-        };
-        if token != record.token {
-            return Err(MicrosandboxError::Runtime(
-                "replacement storage identity mismatch".into(),
-            ));
-        }
-
-        let root = self.sandboxes_dir();
-        let saved = backup_dir(&root, &record.token)?;
-        let original = record.original;
-        if !record.published {
-            let _lineage =
-                crate::snapshot::lineage::lock_source(&self.config().run_dir(), name).await?;
-            let current = db
-                .query_one_raw(sql("SELECT id FROM sandbox WHERE name = ?", [name.into()]))
-                .await?
-                .map(|row| row.try_get::<i32>("", "id"))
-                .transpose()?;
-            if current.is_some() && current != record.candidate {
-                return Err(MicrosandboxError::Runtime(format!(
-                    "replacement recovery found an unexpected sandbox at {name:?}"
-                )));
-            }
-            let run_dir = self.config().run_dir();
-            let pid = match current {
-                Some(id) => Self::load_latest_run(pools.read(), id)
-                    .await?
-                    .and_then(|run| run.pid),
-                None => None,
-            };
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            let departing = super::super::process_exit::RuntimeExit::capture(
-                pid,
-                &microsandbox_runtime::ipc::lifecycle_lock_path(&run_dir, name),
-            )?;
-            let _runtime =
-                match microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run_dir, name)? {
-                    Some(guard) => guard,
-                    None => {
-                        // Creator death can leave an unpublished detached guest alive. The
-                        // agent path checks the exact catalog identity before dispatch.
-                        let id = current.ok_or_else(|| {
-                            MicrosandboxError::Runtime(format!(
-                                "runtime ownership unresolved for {name:?}"
-                            ))
-                        })?;
-                        self.request_agent_shutdown(name, id).await?;
-                        crate::runtime::acquire_sandbox_lifecycle_guard(
-                            &run_dir,
-                            name,
-                            Duration::from_secs(10),
-                        )
-                        .await?
-                    }
-                };
-            if let Some(id) = current {
-                // The runtime can drop its lifecycle lock before its final disk
-                // descriptors close. Observe process-wide exit without reaping it.
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-                loop {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
-                    let exited = match &departing {
-                        Some(process) => process.has_exited()?,
-                        None => pid.is_none_or(Self::pid_has_exited),
-                    };
-                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    let exited = pid.is_none_or(Self::pid_has_exited);
-                    if exited {
-                        break;
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(MicrosandboxError::Runtime(format!(
-                            "replacement runtime for {name:?} still owns its files"
-                        )));
-                    }
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-                self.remove_incomplete_sandbox(id, name, creation::RemovalMode::Recovery)
-                    .await?;
-            }
-            let _storage = CreationStorage::acquire(self, name)?;
-            let public = root.join(name);
-            let source = saved.join("original");
-            if record.had_directory && !source.is_dir() {
-                return Err(MicrosandboxError::Runtime(format!(
-                    "missing retained storage for sandbox {name:?}"
-                )));
-            }
-            crate::sandbox::remove_dir_if_exists(&public)?;
-            if record.had_directory {
-                let tree = saved.join("tree");
-                if tree.try_exists()? {
-                    move_stopped_directory(&tree, &public).await?;
-                    sync_dir(&saved)?;
-                } else {
-                    retain_tree(&source, &public)?;
-                }
-            }
-            sync_dir(&root)?;
-        }
-        if record.published {
-            microsandbox_runtime::checkpoint::remove_sandbox_identity(
-                &self.config().home(),
-                original,
-            )
-            .map_err(MicrosandboxError::Runtime)?;
-        }
-        db.transaction(|txn| {
-            let token = &token;
-            async move {
-                let removed = txn
-                    .execute_raw(sql(
-                        "DELETE FROM sandbox_replacement WHERE original = ? AND token = ?",
-                        [original.into(), token.as_str().into()],
-                    ))
-                    .await?;
-                if removed.rows_affected() != 1 {
-                    return Err(MicrosandboxError::Runtime(
-                        "replacement journal changed during recovery".into(),
-                    ));
-                }
-                if record.published {
-                    txn.execute_raw(sql("DELETE FROM sandbox WHERE id = ?", [original.into()]))
-                        .await?;
-                } else {
-                    txn.execute_raw(sql(
-                        "UPDATE sandbox SET name = ? WHERE id = ?",
-                        [name.into(), original.into()],
-                    ))
-                    .await?;
-                }
-                Ok((txn, ()))
-            }
-        })
-        .await?;
-        clear_storage(db, &root, name, &token).await?;
-        Ok(!record.published)
-    }
 }
 
 //--------------------------------------------------------------------------------------------------

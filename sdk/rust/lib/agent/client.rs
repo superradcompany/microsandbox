@@ -4,6 +4,11 @@ use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
 
+use microsandbox_protocol::{
+    exec::ExecRequest,
+    exec_bindings::{BoundExecRequest, ExecBindingCapability, ExecBindingOverrides},
+    message::{Message, MessageType},
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     time::Instant,
@@ -12,11 +17,6 @@ use tokio::{
 #[cfg(feature = "local")]
 use super::AgentClientError;
 use super::AgentClientResult;
-use microsandbox_protocol::{
-    exec::ExecRequest,
-    exec_bindings::{BoundExecRequest, ExecBindingCapability, ExecBindingOverrides},
-    message::{Message, MessageType},
-};
 
 //--------------------------------------------------------------------------------------------------
 // Types

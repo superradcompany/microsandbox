@@ -219,6 +219,34 @@ pub enum MicrosandboxError {
     #[error("runtime error: {0}")]
     Runtime(String),
 
+    /// The attempted replacement failed and recovery retained the original sandbox.
+    #[error(
+        "{source}. Original sandbox {name:?} (ID {original_id}) is stopped and can be started explicitly"
+    )]
+    ReplacementStopped {
+        /// Public name restored to the original sandbox.
+        name: String,
+        /// Catalog identity of the retained sandbox.
+        original_id: i32,
+        /// Failure that prevented the new launch.
+        source: Box<MicrosandboxError>,
+    },
+
+    /// The attempted replacement failed and recovery still needs attention.
+    #[error(
+        "{source}. Recovery for sandbox {name:?} (ID {original_id}) is pending: {recovery}. Resolve the recovery error before starting the sandbox"
+    )]
+    ReplacementRecoveryPending {
+        /// Public name reserved by the recovery transaction.
+        name: String,
+        /// Catalog identity retained by the recovery transaction.
+        original_id: i32,
+        /// Failure that prevented the new launch.
+        source: Box<MicrosandboxError>,
+        /// Failure while recovering the original sandbox.
+        recovery: Box<MicrosandboxError>,
+    },
+
     /// Graceful shutdown did not establish completion within the caller's budget.
     #[error(
         "graceful stop of sandbox {name:?} ({identity}) timed out after {timeout:?} waiting for shutdown completion and runtime release; the shutdown request may still complete; no kill was requested"

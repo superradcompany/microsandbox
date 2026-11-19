@@ -149,14 +149,17 @@ impl LocalContext {
         };
         let recovered = Box::pin(self.finish_replacement(&attempt)).await;
         match (result, recovered) {
-            (Err(error), Ok(true)) => Err(MicrosandboxError::Runtime(format!(
-                "{error}; original sandbox {:?} (ID {}) is stopped. Restart it with: msb start {}",
-                attempt.name, attempt.original, attempt.name
-            ))),
-            (Err(error), Err(recovery)) => Err(MicrosandboxError::Runtime(format!(
-                "{error}; recovery for {:?} is pending: {recovery}. Retry msb start {} after resolving the error",
-                attempt.name, attempt.name
-            ))),
+            (Err(error), Ok(true)) => Err(MicrosandboxError::ReplacementStopped {
+                name: attempt.name,
+                original_id: attempt.original,
+                source: Box::new(error),
+            }),
+            (Err(error), Err(recovery)) => Err(MicrosandboxError::ReplacementRecoveryPending {
+                name: attempt.name,
+                original_id: attempt.original,
+                source: Box::new(error),
+                recovery: Box::new(recovery),
+            }),
             (Ok(sandbox), Err(error)) => {
                 // The replacement has published. Reporting a launch failure here
                 // would invite callers to repeat an already successful mutation.
