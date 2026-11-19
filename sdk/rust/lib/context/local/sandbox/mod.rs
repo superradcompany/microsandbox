@@ -177,7 +177,7 @@ impl LocalContext {
             .transpose()?
             .flatten();
         if let Some(pid) = previous_run.as_ref().and_then(|run| run.pid) {
-            let alive = async || -> MicrosandboxResult<bool> {
+            let blocking_reason = async || -> MicrosandboxResult<Option<&'static str>> {
                 #[cfg(windows)]
                 if let Some(owner) = &previous_owner {
                     return Ok(owner
@@ -185,7 +185,8 @@ impl LocalContext {
                         .as_ref()
                         .map(|process| process.alive())
                         .transpose()?
-                        .unwrap_or(false));
+                        .unwrap_or(false)
+                        .then_some("recorded runtime process is still alive"));
                 }
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 {
@@ -198,18 +199,19 @@ impl LocalContext {
                         ),
                     )
                     .await?
-                    .is_live());
+                    .blocking_reason());
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                Ok(!Self::pid_has_exited(pid))
+                Ok((!Self::pid_has_exited(pid))
+                    .then_some("recorded runtime process is still alive"))
             };
             let start = std::time::Instant::now();
-            while start.elapsed() < Duration::from_secs(5) && alive().await? {
+            while start.elapsed() < Duration::from_secs(5) && blocking_reason().await?.is_some() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            if alive().await? {
+            if let Some(reason) = blocking_reason().await? {
                 return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
-                    "cannot start sandbox {name:?}: previous runtime pid {pid} is still alive"
+                    "cannot start sandbox {name:?}: {reason} (PID {pid})"
                 )));
             }
         }
@@ -383,6 +385,17 @@ impl LocalContext {
                 "cannot gracefully stop paused sandbox {name:?}; resume it first or explicitly kill it"
             )));
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(run) = Self::load_latest_run(self.db().await?.read(), model.id).await?
+            && matches!(
+                process_record::ProcessRecord::load(self.db().await?.read(), &run).await?,
+                process_record::LoadedProcessRecord::Unsupported
+            )
+        {
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "cannot stop sandbox {name:?}: recorded process identity format is unsupported"
+            )));
+        }
         self.invalidate_control_session(model.id);
         self.request_agent_shutdown(name, model.id).await?;
         if model.status == SandboxStatus::Running {
@@ -434,7 +447,12 @@ impl LocalContext {
             // Nothing was signalled: the recorded PID is dead or recycled. Only write the
             // terminal state when no runtime owns the name; a runtime the row does not
             // identify must not end up behind a terminal row.
+            #[cfg(unix)]
             None => Self::lifecycle_is_unowned(&run_dir, name)?,
+            // Preserve the existing Windows completion path; Unix ownership fences are
+            // not qualified substitutes for Windows process-handle completion.
+            #[cfg(windows)]
+            None => true,
         };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(departing) = departing {
@@ -452,13 +470,15 @@ impl LocalContext {
             })??;
         }
         if all_dead {
-            // Keep resource ownership through terminal publication, not just unlinking.
+            // Keep Unix resource ownership through terminal publication, not just unlinking.
+            #[cfg(unix)]
             let _ownership = crate::runtime::acquire_sandbox_lifecycle_guard(
                 &run_dir,
                 name,
                 Duration::from_secs(5),
             )
             .await?;
+            #[cfg(unix)]
             let _disks =
                 Self::released_runtime_disks(&run_dir, &self.sandboxes_dir().join(name), &model)
                     .await?;
@@ -471,11 +491,12 @@ impl LocalContext {
             {
                 tracing::warn!(sandbox = %name, error = %e, "failed to update sandbox status after kill");
             }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            process_record::ProcessRecord::retire_finished(self.db().await?, model.id).await?;
         } else if process.is_none() {
-            tracing::warn!(
-                sandbox = %name,
-                "no signallable runtime process, but the lifecycle lock is still held; leaving the row for reconciliation"
-            );
+            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                "cannot kill sandbox {name:?}: its lifecycle lock is held by a runtime the recorded run does not identify"
+            )));
         } else {
             tracing::warn!(
                 sandbox = %name,
@@ -823,6 +844,21 @@ impl LocalContext {
             sandbox.status,
             SandboxStatus::Starting | SandboxStatus::Running | SandboxStatus::Draining
         ) {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if matches!(
+                sandbox.status,
+                SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
+            ) && let Some((run_dir, sandboxes_dir)) = socket_roots
+            {
+                Self::retire_stopped_process_records(
+                    pools,
+                    &sandbox,
+                    run_dir,
+                    sandboxes_dir,
+                    transition_owned,
+                )
+                .await?;
+            }
             return Ok(sandbox);
         }
 
@@ -1007,6 +1043,11 @@ impl LocalContext {
             reason,
         )
         .await?;
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if socket_roots.is_some() {
+            process_record::ProcessRecord::retire_finished(pools, sandbox.id).await?;
+        }
 
         microsandbox_db::catalog::sandbox_query(pools.read())
             .await?
@@ -2750,16 +2791,26 @@ mod tests {
             .await
             .unwrap();
         insert_active_run(pools, id, bystander.pid(), Some(an_hour_ago())).await;
+        let run = LocalContext::load_latest_run(pools.read(), id)
+            .await
+            .unwrap()
+            .unwrap();
+        super::process_record::tests::model_reused_pid(&backend, &run).await;
         let owner = microsandbox_runtime::ipc::acquire_lifecycle_guard(
             &backend.config().run_dir(),
             "kill-owned",
         )
         .unwrap();
 
-        backend
+        let error = backend
             .kill_sandbox("kill-owned", Some(id))
             .await
             .unwrap_err();
+        assert!(
+            matches!(error, crate::MicrosandboxError::SandboxStillRunning(ref message)
+            if message.contains("lifecycle lock is held")),
+            "{error:?}"
+        );
 
         let (model, _) = backend
             .sandbox_handle_state("kill-owned", Some(id))
@@ -2768,17 +2819,15 @@ mod tests {
         assert_eq!(model.status, SandboxStatus::Running);
         assert!(bystander.is_alive());
 
-        // Releasing the lock does not turn missing identity into proof of reuse.
+        // The saved birth token proves reuse. Once the unidentified owner releases the
+        // lifecycle lock, cleanup may complete without signalling the bystander.
         drop(owner);
-        backend
-            .kill_sandbox("kill-owned", Some(id))
-            .await
-            .unwrap_err();
+        backend.kill_sandbox("kill-owned", Some(id)).await.unwrap();
         let (model, _) = backend
             .sandbox_handle_state("kill-owned", Some(id))
             .await
             .unwrap();
-        assert_eq!(model.status, SandboxStatus::Running);
+        assert_eq!(model.status, SandboxStatus::Crashed);
         assert!(bystander.is_alive());
     }
 

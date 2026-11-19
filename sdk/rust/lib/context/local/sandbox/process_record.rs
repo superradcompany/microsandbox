@@ -1,11 +1,14 @@
 //! SDK-only identity persistence. The shared runtime ORM intentionally omits this column.
 
+use microsandbox_db::pool::DbPools;
 use microsandbox_db::{DbReadConnection, DbWriteConnection};
-use sea_orm::{ConnectionTrait, DbBackend, Statement};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement, sea_query::Expr,
+};
 use serde::{Deserialize, Serialize};
 
 use super::super::control::identity::ProcessIdentity;
-use super::run_entity;
+use super::{run_entity, runtime_identity::RecordedRuntime};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -22,6 +25,17 @@ pub(super) struct ProcessRecord {
     sandbox_id: i32,
     run_id: i32,
     pid: i32,
+}
+
+pub(super) enum LoadedProcessRecord {
+    Missing,
+    Known(ProcessRecord),
+    Unsupported,
+}
+
+#[derive(Deserialize)]
+struct RecordVersion {
+    version: u32,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -63,7 +77,17 @@ impl ProcessRecord {
     pub(super) async fn load(
         db: &DbReadConnection,
         run: &run_entity::Model,
-    ) -> MicrosandboxResult<Option<Self>> {
+    ) -> MicrosandboxResult<LoadedProcessRecord> {
+        match Self::load_json(db, run).await? {
+            Some(json) => Self::decode(&json, run),
+            None => Ok(LoadedProcessRecord::Missing),
+        }
+    }
+
+    async fn load_json(
+        db: &DbReadConnection,
+        run: &run_entity::Model,
+    ) -> MicrosandboxResult<Option<String>> {
         let row = db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Sqlite,
@@ -72,11 +96,19 @@ impl ProcessRecord {
             ))
             .await?
             .ok_or_else(|| invalid("run changed during identity lookup"))?;
-        let Some(json) = row.try_get_by_index::<Option<String>>(0)? else {
-            return Ok(None);
-        };
+        Ok(row.try_get_by_index::<Option<String>>(0)?)
+    }
+
+    fn decode(json: &str, run: &run_entity::Model) -> MicrosandboxResult<LoadedProcessRecord> {
+        // Read only the version envelope before applying the known format's strict
+        // decoder. Future fields must not break inspection or confer authority.
+        let envelope: RecordVersion =
+            serde_json::from_str(json).map_err(|_| invalid("malformed recorded identity"))?;
+        if envelope.version > 1 {
+            return Ok(LoadedProcessRecord::Unsupported);
+        }
         let record: Self =
-            serde_json::from_str(&json).map_err(|_| invalid("malformed recorded identity"))?;
+            serde_json::from_str(json).map_err(|_| invalid("malformed recorded identity"))?;
         if record.pid <= 0
             || record.version != 1
             || record.sandbox_id != run.sandbox_id
@@ -89,7 +121,39 @@ impl ProcessRecord {
                 "recorded identity does not match this run and host platform",
             ));
         }
-        Ok(Some(record))
+        Ok(LoadedProcessRecord::Known(record))
+    }
+
+    /// The caller holds transition, lifecycle and owned-disk guards. Retire each
+    /// known generation independently; terminal row status alone is not proof.
+    pub(super) async fn retire_finished(
+        pools: &DbPools,
+        sandbox_id: i32,
+    ) -> MicrosandboxResult<()> {
+        let runs = run_entity::Entity::find()
+            .filter(run_entity::Column::SandboxId.eq(sandbox_id))
+            .filter(Expr::cust("process_identity IS NOT NULL"))
+            .all(pools.read())
+            .await?;
+        for run in runs {
+            let Some(json) = Self::load_json(pools.read(), &run).await? else {
+                continue;
+            };
+            let LoadedProcessRecord::Known(record) = Self::decode(&json, &run)? else {
+                continue;
+            };
+            if RecordedRuntime::from_record(&record, run.pid.unwrap())?.is_live() {
+                continue;
+            }
+            // Clear the PID with its evidence: leaving a recycled PID without proof
+            // would make the next reader reject a safely stopped sandbox as unknown.
+            // Compare the exact observed value, preserving any concurrent replacement.
+            pools.write().execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+                "UPDATE run SET process_identity = NULL, pid = NULL WHERE id = ? AND sandbox_id = ? AND pid IS ? AND process_identity = ?",
+                [run.id.into(), sandbox_id.into(), run.pid.into(), json.into()],
+            )).await?;
+        }
+        Ok(())
     }
 }
 

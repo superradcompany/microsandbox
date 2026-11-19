@@ -165,6 +165,20 @@ mod tests {
             "ready"
         );
         next.stop().await.unwrap();
+        let finished = LocalContext::load_latest_run(pools.read(), next_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            finished.pid, None,
+            "completed VM must retire its PID with the identity"
+        );
+        assert!(matches!(
+            super::super::process_record::ProcessRecord::load(pools.read(), &finished)
+                .await
+                .unwrap(),
+            super::super::process_record::LoadedProcessRecord::Missing
+        ));
         assert!(child.try_wait().unwrap().is_none());
     }
 

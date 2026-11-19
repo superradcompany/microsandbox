@@ -176,6 +176,7 @@ msb self downgrade 0.6.18
 
 - Stop applications sharing the home and keep the default backup enabled.
 - Schema rollbacks and v0.6 configuration rewrites require stopped sandboxes. If the command reports active sandboxes, stop them and retry.
+- If rollback reports `recorded process identities remain`, stop and inspect those sandboxes with the newer SDK/CLI before retrying. Proven completion retires identity and PID while retaining the sandbox and other run history. Unverified evidence still blocks rollback; do not clear it manually.
 - Incompatible settings are rejected before changes. For example, v0.7.0–v0.7.2 cannot preserve global secret passthrough defaults, even empty lists. Force flags do not bypass these checks.
 
 A database downgrade does not make every newer snapshot or feature usable by an older release. See [downgrade options](/cli/management#msb-self).

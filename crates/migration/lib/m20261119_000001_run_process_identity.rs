@@ -30,7 +30,8 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
         // A terminal row does not prove process teardown. Do not discard identity
-        // evidence while its run survives; normal sandbox removal cascades its runs.
+        // evidence here. The SDK retires finished identities under runtime-resource
+        // guards; safe sandbox removal also cascades its runs.
         if db
             .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
@@ -39,7 +40,7 @@ impl MigrationTrait for Migration {
             .await?
             .is_some()
         {
-            return Err(DbErr::Migration("recorded process identities remain; retain the newer SDK or remove their sandboxes safely before downgrading".into()));
+            return Err(DbErr::Migration("recorded process identities remain; use the newer SDK to stop and inspect their sandboxes, or remove them safely, before downgrading".into()));
         }
         db.execute_unprepared("ALTER TABLE run DROP COLUMN process_identity;")
             .await?;

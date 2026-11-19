@@ -1906,12 +1906,12 @@ impl LocalContext {
             // A recycled PID must not block replacement, but one that may still be the
             // runtime must: its storage cannot be removed from under it.
             let latest = Self::load_latest_run(pools.read(), model.id).await?;
-            if Self::recorded_runtime(pools.read(), latest.as_ref(), &lifecycle)
+            if let Some(reason) = Self::recorded_runtime(pools.read(), latest.as_ref(), &lifecycle)
                 .await?
-                .is_live()
+                .blocking_reason()
             {
                 return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
-                    "cannot replace sandbox {:?}: its recorded runtime process is still alive",
+                    "cannot replace sandbox {:?}: {reason}",
                     config.spec.name
                 )));
             }

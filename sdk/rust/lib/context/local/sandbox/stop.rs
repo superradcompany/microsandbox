@@ -326,6 +326,8 @@ impl LocalContext {
                         .await?;
                     }
                 }
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                super::process_record::ProcessRecord::retire_finished(self.db().await?, id).await?;
                 // VM teardown uses _exit(), which bypasses Rust drop guards. Only retry
                 // cache reclamation after runtime ownership is gone; surviving source,
                 // paused-child and pending-handoff locks still protect shared generations.

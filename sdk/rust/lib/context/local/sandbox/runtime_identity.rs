@@ -6,10 +6,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::NaiveDateTime;
-
 #[cfg(unix)]
 use super::super::control::identity::ProcessIdentity;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::process_record::{LoadedProcessRecord, ProcessRecord, boot_identity};
 use super::{LocalContext, run_entity};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -55,41 +55,23 @@ impl LocalContext {
         lifecycle: &Path,
     ) -> MicrosandboxResult<RecordedRuntime> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if let Some(run) = run
-            && let Some(record) = super::process_record::ProcessRecord::load(db, run).await?
-        {
-            let pid = run.pid.unwrap(); // load validated a non-null matching PID.
-            if record.boot != super::process_record::boot_identity()? {
-                return Ok(RecordedRuntime::Recycled);
-            }
-            if let Ok(identity) = ProcessIdentity::capture(pid) {
-                if [identity.start.0, identity.start.1] != record.birth {
-                    return Ok(RecordedRuntime::Recycled);
+        if let Some(run) = run {
+            match ProcessRecord::load(db, run).await? {
+                LoadedProcessRecord::Known(record) => {
+                    return RecordedRuntime::from_record(&record, run.pid.unwrap());
                 }
-                #[cfg(target_os = "linux")]
-                if !identity.signals_through_handle() {
-                    return Ok(RecordedRuntime::Unverified { pid });
+                LoadedProcessRecord::Unsupported => {
+                    // Do not fall back to a PID/lifecycle heuristic for future evidence.
+                    return Ok(RecordedRuntime::Unverified {
+                        pid: run.pid.unwrap_or_default(),
+                    });
                 }
-                return Ok(match identity.has_exited() {
-                    Ok(true) => RecordedRuntime::Dead,
-                    Ok(false) => RecordedRuntime::Live(RuntimeProcess { pid, identity }),
-                    Err(_) => RecordedRuntime::Unverified { pid },
-                });
+                LoadedProcessRecord::Missing => {}
             }
-            // Once recorded, this identity stays authoritative. A failed capture
-            // cannot fall back to a second, differently identified lifecycle owner.
-            return Ok(
-                if matches!(super::process_exit::pid_has_exited(pid), Ok(true)) {
-                    RecordedRuntime::Dead
-                } else {
-                    RecordedRuntime::Unverified { pid }
-                },
-            );
         }
         let _ = db;
         Ok(RecordedRuntime::inspect(
             run.and_then(|run| run.pid),
-            run.and_then(|run| run.started_at),
             lifecycle,
         ))
     }
@@ -113,11 +95,37 @@ impl LocalContext {
 }
 
 impl RecordedRuntime {
-    pub(super) fn inspect(
-        pid: Option<i32>,
-        _started_at: Option<NaiveDateTime>,
-        lifecycle: &Path,
-    ) -> Self {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn from_record(record: &ProcessRecord, pid: i32) -> MicrosandboxResult<Self> {
+        if record.boot != boot_identity()? {
+            return Ok(Self::Recycled);
+        }
+        if let Ok(identity) = ProcessIdentity::capture(pid) {
+            if [identity.start.0, identity.start.1] != record.birth {
+                return Ok(Self::Recycled);
+            }
+            #[cfg(target_os = "linux")]
+            if !identity.signals_through_handle() {
+                return Ok(Self::Unverified { pid });
+            }
+            return Ok(match identity.has_exited() {
+                Ok(true) => Self::Dead,
+                Ok(false) => Self::Live(RuntimeProcess { pid, identity }),
+                Err(_) => Self::Unverified { pid },
+            });
+        }
+        // Recorded evidence remains authoritative. A failed capture cannot fall
+        // back to a second process identified only by a lifecycle descriptor.
+        Ok(
+            if matches!(super::process_exit::pid_has_exited(pid), Ok(true)) {
+                Self::Dead
+            } else {
+                Self::Unverified { pid }
+            },
+        )
+    }
+
+    pub(super) fn inspect(pid: Option<i32>, lifecycle: &Path) -> Self {
         let Some(pid) = pid.filter(|pid| *pid > 0) else {
             return Self::Dead;
         };
@@ -168,6 +176,18 @@ impl RecordedRuntime {
         #[cfg(not(unix))]
         {
             matches!(self, Self::Live(_))
+        }
+    }
+
+    /// Keep admission conservative without claiming an unverified PID is a live runtime.
+    pub(super) fn blocking_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Live(_) => Some("recorded runtime process is still alive"),
+            #[cfg(unix)]
+            Self::Unverified { .. } => {
+                Some("recorded runtime process ownership cannot be verified")
+            }
+            _ => None,
         }
     }
 

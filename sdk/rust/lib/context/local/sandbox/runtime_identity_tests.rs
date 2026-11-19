@@ -7,8 +7,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use chrono::{TimeDelta, Utc};
-
 use super::{RecordedRuntime, RuntimeSignal};
 
 //--------------------------------------------------------------------------------------------------
@@ -98,16 +96,13 @@ fn runtime_identity_child() {
 }
 
 #[test]
-fn name_and_clock_offsets_never_prove_ownership() {
+fn executable_name_does_not_prove_ownership() {
     let home = tempfile::tempdir().unwrap();
     let (child, _bin) = spawn_msb_child();
     let mut child = scopeguard::guard(child, |mut child| cleanup_child(&mut child));
     let lock = microsandbox_runtime::ipc::lifecycle_lock_path(home.path(), "unknown");
-    for offset in [-3600, 0, 3600] {
-        let started = (Utc::now() + TimeDelta::seconds(offset)).naive_utc();
-        let recorded = RecordedRuntime::inspect(Some(child.id() as i32), Some(started), &lock);
-        assert!(matches!(recorded, RecordedRuntime::Unverified { .. }));
-    }
+    let recorded = RecordedRuntime::inspect(Some(child.id() as i32), &lock);
+    assert!(matches!(recorded, RecordedRuntime::Unverified { .. }));
     assert!(child.try_wait().unwrap().is_none());
 }
 
@@ -117,8 +112,7 @@ fn matching_lifecycle_owner_can_be_signaled() {
     let child = spawn_owned_child(home.path(), "owned");
     let mut child = scopeguard::guard(child, |mut child| cleanup_child(&mut child));
     let lock = microsandbox_runtime::ipc::lifecycle_lock_path(home.path(), "owned");
-    let RecordedRuntime::Live(process) =
-        RecordedRuntime::inspect(Some(child.id() as i32), None, &lock)
+    let RecordedRuntime::Live(process) = RecordedRuntime::inspect(Some(child.id() as i32), &lock)
     else {
         panic!("inherited lifecycle ownership was not recognized");
     };
@@ -143,7 +137,7 @@ fn another_home_or_sandbox_does_not_prove_ownership() {
     ] {
         let lock = microsandbox_runtime::ipc::lifecycle_lock_path(root, name);
         assert!(matches!(
-            RecordedRuntime::inspect(Some(child.id() as i32), None, &lock),
+            RecordedRuntime::inspect(Some(child.id() as i32), &lock),
             RecordedRuntime::Unverified { .. }
         ));
     }
