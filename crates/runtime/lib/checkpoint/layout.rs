@@ -616,6 +616,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Public CA certificates must remain readable by non-root guest processes. Journals keep the
 /// private tempfile permissions; grant certificate access before publishing its final name.
+#[cfg(any(test, all(feature = "runner", feature = "net")))]
 pub(crate) fn write_guest_certificate(path: &Path, bytes: &[u8]) -> Result<(), String> {
     atomic_write_inner(path, bytes, true)
 }

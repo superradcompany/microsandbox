@@ -96,6 +96,15 @@ enum Commands {
     #[command(hide = true)]
     Machine(Box<MachineArgs>),
 
+    /// Apply ordered edits to a private staged disk in an isolated VM (internal).
+    #[command(name = "__snapshot-editor", hide = true)]
+    SnapshotEditor {
+        firmware: std::path::PathBuf,
+        scratch: std::path::PathBuf,
+        chain: std::path::PathBuf,
+        lower: Option<std::path::PathBuf>,
+    },
+
     /// Report launch wire capabilities without initializing a backend.
     #[command(name = "__launch-protocol", hide = true)]
     LaunchProtocol,
@@ -385,10 +394,26 @@ fn main() {
             "--local/--remote apply only to sandbox, volume, snapshot and context inspection commands").exit();
     }
     let exit_code = match command {
+        Commands::SnapshotEditor {
+            firmware,
+            scratch,
+            chain,
+            lower,
+        } => {
+            if let Err(error) = microsandbox_runtime::vm::enter_snapshot_editor(
+                &firmware,
+                &scratch,
+                &chain,
+                lower.as_deref(),
+            ) {
+                eprintln!("snapshot editor: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Commands::LaunchProtocol => {
-            println!(
-                "{}",
-                serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
+            let mut capabilities =
+                serde_json::to_value(microsandbox_runtime::launch::LaunchCapabilities {
                     storage_reader: microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
                     protected_guest_state: true,
                     protocols: vec![2, 1],
@@ -401,14 +426,17 @@ fn main() {
                     http_connect_proxy_auth: cfg!(feature = "net"),
                     guest_clock: true,
                     fs_state_limit: true,
+                    configuration_retention: true,
                     nested_virt: Some(
-                        microsandbox_runtime::nested_virt_supported().unwrap_or(false)
+                        microsandbox_runtime::nested_virt_supported().unwrap_or(false),
                     ),
                     exec_limits: true,
                     multi_tenant_nameservers: cfg!(feature = "net"),
                 })
-                .expect("serialize capabilities")
-            );
+                .expect("serialize capabilities");
+            capabilities["deferred_command_bindings"] = true.into();
+            capabilities["restored_exec_limits"] = true.into();
+            println!("{capabilities}");
             return;
         }
         // Sandbox process entry — never returns (VMM takes over).
@@ -624,6 +652,15 @@ fn render_anyhow_error(err: &anyhow::Error) -> i32 {
     }) {
         return 1;
     }
+    // A nested boot error may explain why the candidate failed, but the original
+    // sandbox's recovery outcome determines the action to show the CLI caller.
+    if let Some(hint) = replacement_restart_hint(err) {
+        microsandbox_cli::ui::error_with_lines(
+            &err.to_string(),
+            &[microsandbox_cli::ui::ErrorLine::Hint(&hint)],
+        );
+        return 1;
+    }
     if let Some((name, boot_err)) = find_boot_start_in_chain(err) {
         microsandbox_cli::boot_error_render::render(&name, &boot_err);
         return 1;
@@ -667,6 +704,21 @@ fn render_anyhow_error(err: &anyhow::Error) -> i32 {
     }
     microsandbox_cli::ui::error(&err.to_string());
     1
+}
+
+/// Translate an SDK replacement outcome into a CLI restart instruction.
+fn replacement_restart_hint(error: &anyhow::Error) -> Option<String> {
+    error.chain().find_map(|cause| {
+        match cause.downcast_ref::<microsandbox::MicrosandboxError>()? {
+            microsandbox::MicrosandboxError::ReplacementStopped { name, .. } => {
+                Some(format!("Restart with: msb start {name}"))
+            }
+            microsandbox::MicrosandboxError::ReplacementRecoveryPending { name, .. } => Some(
+                format!("After resolving the recovery error, retry: msb start {name}"),
+            ),
+            _ => None,
+        }
+    })
 }
 
 /// Walk the chain looking for a Windows host setup failure.
@@ -797,7 +849,7 @@ fn run_async_command_anyhow(
         }
 
         let result = match command {
-            Commands::Machine(_) | Commands::LaunchProtocol => {
+            Commands::Machine(_) | Commands::LaunchProtocol | Commands::SnapshotEditor { .. } => {
                 unreachable!("handled before Tokio starts")
             }
             Commands::SandboxShortcut(_) => unreachable!("normalized before dispatch"),
@@ -913,6 +965,39 @@ fn is_backend_independent_command(command: &Commands) -> bool {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+
+    #[test]
+    fn replacement_errors_preserve_sdk_context_and_offer_cli_recovery() {
+        use microsandbox::MicrosandboxError;
+
+        let launch_error = || Box::new(MicrosandboxError::Runtime("candidate boot failed".into()));
+        let stopped = MicrosandboxError::ReplacementStopped {
+            name: "original".into(),
+            original_id: 37,
+            source: launch_error(),
+        };
+        let pending = MicrosandboxError::ReplacementRecoveryPending {
+            name: "original".into(),
+            original_id: 37,
+            source: launch_error(),
+            recovery: Box::new(MicrosandboxError::Runtime("catalog busy".into())),
+        };
+        assert!(pending.to_string().contains("catalog busy"));
+        for (failure, hint) in [
+            (stopped, "Restart with: msb start original"),
+            (
+                pending,
+                "After resolving the recovery error, retry: msb start original",
+            ),
+        ] {
+            let message = failure.to_string();
+            assert!(message.contains("original") && message.contains("ID 37"));
+            assert!(message.contains("candidate boot failed") && !message.contains("msb start"));
+            let wrapped = anyhow::Error::new(failure).context("creating sandbox");
+            assert_eq!(replacement_restart_hint(&wrapped).as_deref(), Some(hint));
+        }
+        assert!(replacement_restart_hint(&anyhow::anyhow!("unrelated failure")).is_none());
+    }
 
     fn parse_sandbox(args: &[&str]) -> SandboxCommands {
         let argv = std::iter::once("msb")
@@ -1099,6 +1184,7 @@ mod command_tests {
                     path: "/saved/snapshot.tar".into(),
                     snapshot_id: "snap_test".into(),
                     digest: "digest".into(),
+                    head_update: None,
                 }),
                 detail: "thaw acknowledgement timed out".into(),
                 publication_error: None,
@@ -1338,8 +1424,7 @@ mod command_tests {
             vec!["snaps"],
         ] {
             let cli =
-                Cli::try_parse_from(["msb"].into_iter().chain(prefix).chain(["--group", "app"]))
-                    .unwrap();
+                Cli::try_parse_from(["msb"].into_iter().chain(prefix).chain(["app"])).unwrap();
             let args = match cli.command {
                 Commands::Snapshots(args) => args,
                 Commands::Snapshot(snapshot::SnapshotArgs {
@@ -1493,7 +1578,8 @@ mod sandbox_command_tests {
             let short = parse_sandbox(
                 prefix,
                 &[
-                    "modify", "demo", "-c", "2", "-m", "1G", "-e", "A=B", "-w", "/work",
+                    "modify", "demo", "-c", "2", "-m", "1G", "-e", "A=B", "-w", "/work", "--wait",
+                    "-t", "30",
                 ],
             );
             let long = parse_sandbox(
@@ -1509,6 +1595,9 @@ mod sandbox_command_tests {
                     "A=B",
                     "--workdir",
                     "/work",
+                    "--wait",
+                    "--timeout",
+                    "30",
                 ],
             );
             assert_eq!(format!("{short:?}"), format!("{long:?}"));
@@ -1809,7 +1898,7 @@ mod sandbox_command_tests {
                     "accepted {prefix:?} restore {extra:?}"
                 );
             }
-            // The old create/run route must fail, not parse as an ordinary fresh boot.
+            // Canonical create/run accepts a source without extending deprecated restore.
             for verb in ["create", "run"] {
                 let argv = ["msb"].into_iter().chain(prefix.iter().copied()).chain([
                     verb,
@@ -1818,7 +1907,7 @@ mod sandbox_command_tests {
                     "--name",
                     "child",
                 ]);
-                assert!(Cli::try_parse_from(argv).is_err());
+                assert!(Cli::try_parse_from(argv).is_ok());
             }
         }
     }

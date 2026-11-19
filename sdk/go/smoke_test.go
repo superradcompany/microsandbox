@@ -150,7 +150,7 @@ func TestSmokeSnapshotListDirEmpty(t *testing.T) {
 	dir := t.TempDir()
 	snaps, err := ListSnapshotsDir(ctx, dir)
 	if err != nil {
-		t.Fatalf("Snapshot.ListDir: %v", err)
+		t.Fatalf("Checkpoint.ListDir: %v", err)
 	}
 	if len(snaps) != 0 {
 		t.Fatalf("empty dir should yield zero artifacts, got %d", len(snaps))
@@ -162,7 +162,7 @@ func TestSmokeSnapshotReindexEmpty(t *testing.T) {
 	dir := t.TempDir()
 	n, err := ReindexSnapshots(ctx, dir)
 	if err != nil {
-		t.Fatalf("Snapshot.Reindex: %v", err)
+		t.Fatalf("Checkpoint.Reindex: %v", err)
 	}
 	if n != 0 {
 		t.Fatalf("empty dir should index zero artifacts, got %d", n)

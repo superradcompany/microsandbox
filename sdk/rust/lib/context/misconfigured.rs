@@ -16,8 +16,8 @@ use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{Sandbox, SandboxConfig, SandboxListBuilder, SandboxRecord};
 use crate::service::{Service, ServiceListBuilder, ServicePage};
 use crate::snapshot::{
-    HeadUpdate, Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotId, SnapshotReference,
-    SnapshotVerifyReport,
+    Checkpoint as Snapshot, HeadUpdate, Manifest, SaveOpts, SnapshotConfig, SnapshotId,
+    SnapshotReference, SnapshotVerifyReport,
 };
 use crate::volume::{Volume, VolumeConfig, VolumeFsReadStream, VolumeFsWriteSink};
 use crate::{MicrosandboxError, MicrosandboxResult};

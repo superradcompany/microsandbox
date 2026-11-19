@@ -638,11 +638,13 @@ pub(crate) async fn validate_runtime_config(
     network.secrets.validate().map_err(|error| {
         MicrosandboxError::InvalidConfig(format!("invalid secret configuration: {error}"))
     })?;
+    let needs_bindings = !config.deferred_command_bindings.is_empty();
+    let needs_guard = needs_bindings || config.retained_exec_limits().is_some();
     let runtime = match crate::setup::resolve_runtime(global) {
         Ok(runtime) => runtime,
         #[cfg(feature = "embed-binaries")]
         Err(MicrosandboxError::RuntimeNotInstalled(_))
-            if config.spec.resources.nested_virt == Some(true) =>
+            if config.spec.resources.nested_virt == Some(true) || needs_guard =>
         {
             // Keep first-use installation working, but discover host support
             // before replacement can remove the existing sandbox.
@@ -656,13 +658,29 @@ pub(crate) async fn validate_runtime_config(
             .await?
         }
         Err(MicrosandboxError::RuntimeNotInstalled(_))
-            if config.spec.resources.nested_virt != Some(true) =>
+            if config.spec.resources.nested_virt != Some(true) && !needs_guard =>
         {
             return Ok(());
         }
         Err(error) => return Err(error),
     };
     require_protected_guest_state(&runtime.msb_path).await?;
+    if needs_guard {
+        let advertisement: serde_json::Value =
+            serde_json::from_slice(&bounded_probe(&runtime.msb_path, "__launch-protocol").await?)?;
+        if config.retained_exec_limits().is_some()
+            && advertisement["restored_exec_limits"].as_bool() != Some(true)
+        {
+            return Err(MicrosandboxError::Runtime(upgrade_required(
+                "retained execution limits",
+            )));
+        }
+        if needs_bindings && advertisement["deferred_command_bindings"].as_bool() != Some(true) {
+            return Err(MicrosandboxError::Runtime(upgrade_required(
+                "deferred command bindings",
+            )));
+        }
+    }
     let contract = resolve(&runtime.msb_path).await?;
     validate_nested_virt(&runtime.msb_path, config, contract).await?;
     contract.validate_launch_intent(config)?;
@@ -757,20 +775,37 @@ pub(crate) async fn validate_http_deny_response(
     path: &Path,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<()> {
+    select_http_deny_response(path, config).await.map(|_| ())
+}
+
+/// Select once before dispatch. Only proven omission permits legacy response formatting;
+/// an explicit JSON choice or custom message must never be silently discarded.
+#[cfg(feature = "net")]
+pub(crate) async fn select_http_deny_response(
+    path: &Path,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<microsandbox_types::HttpConfig> {
+    let mut http = config.spec.network.http.clone();
     if !config.spec.network.enabled || !config.spec.network.http.deny_response {
-        return Ok(());
+        return Ok(http);
     }
-    let supported = bounded_probe(path, "__launch-protocol")
+    let capabilities = bounded_probe(path, "__launch-protocol")
         .await
         .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(
-            |capabilities| match config.spec.network.http.deny_response_format {
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok());
+    let supported =
+        capabilities
+            .as_ref()
+            .is_some_and(|capabilities| match http.deny_response_format {
                 HttpDenyResponseFormat::Text => capabilities.http_deny_message,
                 HttpDenyResponseFormat::Json => capabilities.http_deny_json,
-            },
-        );
+            });
     if !supported {
+        if config.has_implicit_http_defaults() {
+            http.deny_response_format = HttpDenyResponseFormat::Text;
+            http.deny_response = capabilities.is_some_and(|value| value.http_deny_message);
+            return Ok(http);
+        }
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
             crate::error::UnsupportedReason::NotAvailable(upgrade_required(
@@ -778,7 +813,7 @@ pub(crate) async fn validate_http_deny_response(
             )),
         ));
     }
-    Ok(())
+    Ok(http)
 }
 
 /// Refuse runtimes that would ignore the requested hardware virtualization policy.
@@ -941,6 +976,18 @@ pub(crate) async fn validate_fs_state_limit(
         ));
     }
     Ok(())
+}
+
+/// Optional evidence support never gates an otherwise-supported operation on an older runtime.
+/// Read the existing side-effect-free probe before dispatch; a failed/old probe means no handoff.
+pub(crate) async fn supports_configuration_retention(path: &Path) -> bool {
+    bounded_probe(path, "__launch-protocol")
+        .await
+        .ok()
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
+        .is_some_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.configuration_retention
+        })
 }
 
 /// Probe only the new combination. Ordinary starts/restores keep their cached,
@@ -1130,6 +1177,13 @@ fn upgrade_required(feature: &str) -> String {
 mod tests {
     use super::*;
 
+    // Fresh executable scripts can stall in macOS loader startup when many fixtures launch
+    // together. Keep these wall-clock-bounded fixtures separate without changing the real
+    // probe deadline or retries. Each test still controls its own concurrent discovery calls;
+    // real-runtime compatibility tests and production callers do not acquire this mutex.
+    #[cfg(unix)]
+    static PROBE_FIXTURES: Mutex<()> = Mutex::const_new(());
+
     #[test]
     fn symlinked_bind_roots_are_only_refused_from_the_enforcing_runtime() {
         let contract = |patch, machine| LaunchContract { patch, machine };
@@ -1215,6 +1269,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn required_backing_probe_distinguishes_old_and_capable_runtimes() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let old = script(
             dir.path(),
@@ -1241,6 +1296,7 @@ mod tests {
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
     async fn tcp_accept_queue_size_probe_refuses_machine_runtimes_that_would_drop_it() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         // v0.7.x: current `machine` entry point, but no accept queue size support to advertise.
         let old = script(
@@ -1276,6 +1332,7 @@ mod tests {
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
     async fn published_tcp_overrides_require_advertised_support() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         use microsandbox_network::config::NetworkConfig;
         let dir = tempfile::tempdir().unwrap();
         let old = script(dir.path(), "old", "printf '%s' '{\"protocols\":[2,1]}'");
@@ -1329,6 +1386,7 @@ mod tests {
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
     async fn network_capabilities_probe_only_machine_runtimes_asked_for_an_accept_queue_size() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         use microsandbox_network::config::NetworkConfig;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1433,6 +1491,7 @@ mod tests {
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
     async fn http_connect_requires_runtime_support_before_launch() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         use microsandbox_network::config::NetworkConfig;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1498,6 +1557,7 @@ mod tests {
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
     async fn http_deny_response_requires_an_explicit_runtime_capability() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::test_support::fixtures::decode(include_str!(
             "../db/fixtures/config-0.6.18.json"
@@ -1559,6 +1619,45 @@ mod tests {
         config.spec.network.http.deny_response_format =
             microsandbox_types::HttpDenyResponseFormat::Text;
         validate_http_deny_response(&path, &config).await.unwrap();
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn implicit_http_defaults_select_legacy_before_dispatch_but_explicit_json_is_strict() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::test_support::fixtures::decode(include_str!(
+            "../db/fixtures/config-0.6.18.json"
+        ))
+        .unwrap();
+        config.spec.network.enabled = true;
+        assert!(config.has_implicit_http_defaults());
+        for (name, reply, enabled, format) in [
+            ("no-feature", "exit 1", false, HttpDenyResponseFormat::Text),
+            (
+                "text",
+                r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+                true,
+                HttpDenyResponseFormat::Text,
+            ),
+            (
+                "json",
+                r#"printf '%s' '{"protocols":[2,1],"http_deny_json":true}'"#,
+                true,
+                HttpDenyResponseFormat::Json,
+            ),
+        ] {
+            let path = script(dir.path(), name, reply);
+            let selected = select_http_deny_response(&path, &config).await.unwrap();
+            assert_eq!(selected.deny_response, enabled);
+            assert_eq!(selected.deny_response_format, format);
+        }
+        let old = script(dir.path(), "old", "exit 1");
+        config.http_defaults_implicit = Some(false);
+        assert!(select_http_deny_response(&old, &config).await.is_err());
+        config.http_defaults_implicit = Some(true);
+        config.spec.network.http.network_deny_message = Some("explicit message".into());
+        assert!(select_http_deny_response(&old, &config).await.is_err());
     }
 
     #[cfg(unix)]
@@ -1791,6 +1890,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn guest_clock_off_requires_an_explicit_runtime_capability() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::test_support::fixtures::decode(include_str!(
             "../db/fixtures/config-0.6.18.json"
@@ -1871,6 +1971,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn fs_state_limit_requires_an_explicit_runtime_capability() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let mut global = GlobalConfig::default();
         // The default budget must avoid probing, including on an old runtime.
@@ -1903,9 +2004,43 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn retention_handoff_is_optional_and_selected_before_launch() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!supports_configuration_retention(&dir.path().join("missing")).await);
+        for (index, response) in [
+            "exit 1",
+            r#"printf '%s' '{"protocols":[2,1]}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"configuration_retention":false}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"configuration_retention":"true"}'"#,
+            r#"printf '%s' '{"protocols":[1],"configuration_retention":true}'"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = script(dir.path(), &format!("old-retention-{index}"), response);
+            assert!(!supports_configuration_retention(&path).await);
+        }
+        let path = script(
+            dir.path(),
+            "supports-retention",
+            r#"test "$1" = __launch-protocol || exit 97; printf '%s' '{"protocols":[2,1],"configuration_retention":true}'"#,
+        );
+        assert!(supports_configuration_retention(&path).await);
+        // Existing strict readers receive no additional property on the unsupported path.
+        let value = serde_json::to_value(LaunchConfig::default()).unwrap();
+        assert!(value.get("retention_source").is_none());
+    }
+
+    #[cfg(unix)]
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
+        // Exercise the fresh script's loader before measuring probe behavior. On macOS,
+        // first execution can stall before the shell body starts, even with serial tests.
+        // This setup-only argument must not execute fixture side effects or slow bodies.
+        let body = format!("if [ \"$1\" = __msb_probe_fixture_ready ]; then exit 0; fi\n{body}");
         // Keep writable script descriptors out of the test process: concurrent
         // forks can inherit them and make Linux exec fail with ETXTBSY.
         let status = std::process::Command::new("/bin/sh")
@@ -1918,12 +2053,33 @@ mod tests {
             .unwrap();
         assert!(status.success());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut ready = std::process::Command::new(&path)
+            .arg("__msb_probe_fixture_ready")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = ready.try_wait().unwrap() {
+                assert!(status.success(), "probe fixture setup failed");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = ready.kill();
+                let _ = ready.wait();
+                panic!("probe fixture setup timed out before the test started");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         path
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn version_probe_is_bounded_and_never_exposes_output() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let path = script(dir.path(), "valid", "printf 'msb 0.6.4\\n'");
         assert_eq!(probe(&path).await.unwrap(), Version::new(0, 6, 4));
@@ -1952,6 +2108,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_wrapper_is_reprobed_when_its_target_changes() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let version = dir.path().join("version");
         std::fs::write(&version, "msb 0.6.4").unwrap();
@@ -1993,6 +2150,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn canceled_discovery_releases_the_cache_and_terminates_its_probe() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("probe.pid");
         let path = script(

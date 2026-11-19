@@ -51,7 +51,9 @@ use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 #[cfg(feature = "net")]
 use microsandbox_network::{
-    ResolvedNetworkConfig, config::EnvNetworkSecretResolver, dns::Nameserver,
+    ResolvedNetworkConfig,
+    config::{EnvNetworkSecretResolver, NetworkConfig},
+    dns::Nameserver,
 };
 use microsandbox_protocol::{
     bootstrap::{
@@ -301,11 +303,8 @@ impl LocalContext {
         mode: SpawnMode,
         lifecycle_guard: Option<SandboxLifecycleGuard>,
     ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
-        let global = self.config();
-        #[cfg(feature = "net")]
-        let resolved_network = resolve_launch_network(config, &global.dns)?;
-
         // Resolve the already-layered runtime paths as one compatible pair before launch.
+        let global = self.config();
         #[cfg(feature = "embed-binaries")]
         let resolved_runtime = crate::setup::ensure_runtime(
             global,
@@ -320,12 +319,23 @@ impl LocalContext {
         ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
         launch_contract::require_protected_guest_state(&resolved_runtime.msb_path).await?;
         let launch_contract = launch_contract::resolve(&resolved_runtime.msb_path).await?;
+        let retention_supported = launch_contract.machine
+            && launch_contract::supports_configuration_retention(&resolved_runtime.msb_path).await;
         // A stopped sandbox may have been edited without a runtime installed, or
         // the selected executable may have changed since creation. Validate its
         // effective configuration here for both initial launch and later starts.
         launch_contract.validate_launch_intent(config)?;
         #[cfg(feature = "net")]
-        launch_contract::validate_http_deny_response(&resolved_runtime.msb_path, config).await?;
+        let resolved_network = {
+            let mut network = launch_network_config(config, &global.dns)?;
+            network.http =
+                launch_contract::select_http_deny_response(&resolved_runtime.msb_path, config)
+                    .await?;
+            // Resolve durable host-side secret sources only for this launch.
+            network
+                .resolve(&EnvNetworkSecretResolver)
+                .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
+        };
         launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
@@ -600,6 +610,12 @@ impl LocalContext {
         }
         if !launch_contract.machine {
             visible[0] = OsString::from("sandbox");
+        }
+        // Only advertise private tracking to a runtime that passed protected-state admission.
+        if retention_supported {
+            launch.retention_source = Some(microsandbox_runtime::retention::RetentionSource {
+                configuration: serde_json::to_value(config.clone_for_persistence())?,
+            });
         }
         let launch_value = match launch_contract.encode_for_runtime(&msb_path, &launch).await {
             Ok(launch) => launch,
@@ -2214,10 +2230,10 @@ pub(crate) fn guest_mount_tag(guest_path: &str) -> String {
 }
 
 #[cfg(feature = "net")]
-fn resolve_launch_network(
+fn launch_network_config(
     config: &SandboxConfig,
     dns: &HostDnsConfig,
-) -> MicrosandboxResult<ResolvedNetworkConfig> {
+) -> MicrosandboxResult<NetworkConfig> {
     let mut network = config.local_network_config()?;
     // The single-tenant host list is a default. Multi-tenant policy receives
     // the host list separately through the trusted launch field.
@@ -2228,10 +2244,7 @@ fn resolve_launch_network(
         network.dns.nameservers = nameservers.iter().copied().map(Nameserver::from).collect();
     }
 
-    // Resolve durable host-side secret sources only for this launch.
-    network
-        .resolve(&EnvNetworkSecretResolver)
-        .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))
+    Ok(network)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3527,7 +3540,7 @@ mod tests {
     fn single_tenant_launch_uses_host_nameservers_only_without_a_sandbox_override() {
         use microsandbox_network::dns::Nameserver;
 
-        use super::resolve_launch_network;
+        use super::launch_network_config;
         use crate::config::HostDnsConfig;
 
         let mut sandbox = SandboxConfig::default();
@@ -3538,12 +3551,12 @@ mod tests {
             nameservers: Some(vec![]),
         };
 
-        let launch = resolve_launch_network(&sandbox, &system_default).unwrap();
-        assert!(launch.config().dns.nameservers.is_empty());
+        let launch = launch_network_config(&sandbox, &system_default).unwrap();
+        assert!(launch.dns.nameservers.is_empty());
 
-        let launch = resolve_launch_network(&sandbox, &host).unwrap();
+        let launch = launch_network_config(&sandbox, &host).unwrap();
         assert_eq!(
-            launch.config().dns.nameservers,
+            launch.dns.nameservers,
             ["9.9.9.9:53".parse::<Nameserver>().unwrap()]
         );
 
@@ -3552,8 +3565,8 @@ mod tests {
         network.dns.nameservers = vec![sandbox_resolver.clone()];
         sandbox.set_local_network_config(network).unwrap();
 
-        let launch = resolve_launch_network(&sandbox, &host).unwrap();
-        assert_eq!(launch.config().dns.nameservers, [sandbox_resolver]);
+        let launch = launch_network_config(&sandbox, &host).unwrap();
+        assert_eq!(launch.dns.nameservers, [sandbox_resolver]);
     }
 
     //----------------------------------------------------------------------------------------------

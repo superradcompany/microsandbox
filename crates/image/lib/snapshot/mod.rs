@@ -29,5 +29,5 @@ pub use microsandbox_types::snapshot::{RESTORE_DEFAULTS_EXTENSION, RestoreDefaul
 pub use owned::{
     OWNED_VOLUMES_EXTENSION, OwnedDirectoryPayload, OwnedMountSnapshot, OwnedVolumeCapture,
     OwnedVolumeData, validate_owned_resources, validate_owned_volumes,
-    verify_owned_directory_payloads,
+    verify_owned_directory_payloads, visit_owned_directory_payloads,
 };

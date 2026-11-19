@@ -1167,7 +1167,8 @@ mod tests {
             ))
             .await
             .unwrap();
-        drop(pools);
+        // Keep the installer's own catalog connection alive while another opener
+        // is refused. This also pins SQLite's WAL for the duration of the check.
 
         let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
@@ -1179,10 +1180,6 @@ mod tests {
         let _lock = tokio::time::timeout(Duration::from_secs(5), acquire_migration_lock(&db_dir))
             .await
             .expect("failed startup must release the migration lock")
-            .unwrap();
-        let path = db_dir.join(microsandbox_utils::DB_FILENAME);
-        let pools = DbPools::open(&path, 1, Duration::from_secs(5), Duration::from_secs(5))
-            .await
             .unwrap();
         let error =
             microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())

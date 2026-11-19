@@ -16,6 +16,9 @@
 
 #[cfg(feature = "engine")]
 mod engine;
+#[cfg(feature = "intercept-identity")]
+#[doc(hidden)]
+pub mod identity;
 mod model;
 pub mod proxy;
 

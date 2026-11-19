@@ -37,6 +37,12 @@ pub(super) struct RestoreStaging {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl AsRef<Path> for RestoreStaging {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
 impl RestoreStaging {
     /// Reserve a unique staging name and persist its recovery record before extraction.
     /// The destination sandbox is left untouched.
@@ -60,6 +66,8 @@ impl RestoreStaging {
         let mut reserved = config.clone_for_persistence();
         reserved.spec.name = name.clone();
         reserved.spec.labels.clear();
+        // The reservation needs an identity, never a second copy of user-provided file content.
+        reserved.spec.patches.clear();
         reserved.replace_existing = false;
         reserved.spec.lifecycle.ephemeral = true;
 
@@ -132,15 +140,23 @@ mod tests {
         LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency,
         SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState,
     };
-    use sea_orm::EntityTrait;
+    use microsandbox_image::{
+        CachedImageMetadata, GlobalCache, ImageConfig, RootfsMaterialization,
+    };
+    use sea_orm::{EntityTrait, Set};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
 
     use crate::ContextSelectionSource;
     use crate::config::GlobalConfig;
+    use crate::config::RegistryOptions;
     use crate::context::local::database;
     use crate::context::local::snapshot::archive::{
         save_direct_checkpoint_snapshot, save_direct_file_snapshot,
     };
-    use crate::sandbox::{SandboxBuilder, SandboxListBuilder};
+    use crate::db::entity::run as run_entity;
+    use crate::sandbox::{PullPolicy, SandboxBuilder, SandboxListBuilder};
     use crate::snapshot::SnapshotReference;
     use crate::test_support::{local_backend, local_backend_builder};
 
@@ -152,6 +168,14 @@ mod tests {
     //--------------------------------------------------------------------------------------------------
     // Functions
     //--------------------------------------------------------------------------------------------------
+
+    fn private_test_root() -> tempfile::TempDir {
+        // Each root is a catalog ancestor and must remain private under a shared developer umask.
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
 
     async fn archive(root: &Path, flat: bool, plain: bool) -> PathBuf {
         let source = root.join("source.raw");
@@ -350,16 +374,20 @@ mod tests {
     }
 
     async fn backend(root: &Path, patch: u8) -> Arc<LocalContext> {
-        let executable = root.join("historical-msb");
-        // Version discovery is real, but no VM should ever be launched in these tests.
-        std::fs::write(
-            &executable,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'msb 0.6.{patch}'; else exit 99; fi\n"
-            ),
-        )
-        .unwrap();
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'msb 0.6.{patch}'; else exit 99; fi\n"
+        );
+        backend_with_probe(root, &script).await
+    }
+
+    async fn backend_with_probe(root: &Path, probe: &str) -> Arc<LocalContext> {
+        let executable = root.join("fixture-msb");
+        std::fs::write(&executable, probe).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        backend_with_executable(root, &executable).await
+    }
+
+    async fn backend_with_executable(root: &Path, executable: &Path) -> Arc<LocalContext> {
         let firmware = root.join("firmware");
         std::fs::write(&firmware, b"not launched").unwrap();
         let backend = LocalContext::from_backend_config(
@@ -420,15 +448,49 @@ mod tests {
         request: impl Into<SandboxBuilder>,
         reason: &str,
     ) {
+        assert_request_preserves_target_with_owner(backend, request, reason, false).await;
+    }
+
+    async fn assert_request_preserves_target_with_owner(
+        backend: Arc<LocalContext>,
+        request: impl Into<SandboxBuilder>,
+        reason: &str,
+        running: bool,
+    ) {
         let config = replaceable_config();
         let pools = backend.db().await.unwrap();
         let id = LocalContext::insert_sandbox_record_with_status(
             pools.write(),
             &config,
-            SandboxStatus::Stopped,
+            if running {
+                SandboxStatus::Running
+            } else {
+                SandboxStatus::Stopped
+            },
         )
         .await
         .unwrap();
+        // A real child catches premature stop/kill as well as catalog/storage deletion.
+        // It does not pretend to establish guest execution or VM activation behavior.
+        let mut owner = if running {
+            let child = tokio::process::Command::new("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            run_entity::Entity::insert(run_entity::ActiveModel {
+                sandbox_id: Set(id),
+                pid: Set(Some(child.id().unwrap() as i32)),
+                status: Set(run_entity::RunStatus::Running),
+                ..Default::default()
+            })
+            .exec(pools.write())
+            .await
+            .unwrap();
+            Some(child)
+        } else {
+            None
+        };
         let before = sandbox_entity::Entity::find_by_id(id)
             .one(pools.read())
             .await
@@ -468,6 +530,19 @@ mod tests {
             vec![std::ffi::OsString::from("replaceable")],
             "staging must be reclaimed"
         );
+        if let Some(owner) = owner.as_mut() {
+            assert!(
+                owner.try_wait().unwrap().is_none(),
+                "prior owner was stopped"
+            );
+            let run = LocalContext::load_latest_run(pools.read(), id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.status, run_entity::RunStatus::Running);
+            assert_eq!(run.pid, Some(owner.id().unwrap() as i32));
+            owner.kill().await.unwrap();
+        }
     }
 
     //--------------------------------------------------------------------------------------------------
@@ -475,8 +550,167 @@ mod tests {
     //--------------------------------------------------------------------------------------------------
 
     #[tokio::test]
+    async fn rejected_snapshot_restores_preserve_the_replacement_target() {
+        check_rejected_snapshot_replacement(None).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "set MSB_TEST_RESTORE_ADMISSION_RUNTIME to the compiled current msb executable"]
+    async fn native_runtime_reaches_image_admission_before_replacement() {
+        let runtime = std::env::var_os("MSB_TEST_RESTORE_ADMISSION_RUNTIME")
+            .or_else(|| std::env::var_os("MSB_PATH"))
+            .expect("set MSB_TEST_RESTORE_ADMISSION_RUNTIME or MSB_PATH to the compiled CLI");
+        check_rejected_snapshot_replacement(Some(Path::new(&runtime))).await;
+    }
+
+    async fn check_rejected_snapshot_replacement(runtime: Option<&Path>) {
+        for running in [false, true] {
+            let root = private_test_root();
+            let source = root.path().join("snapshot-upper.ext4");
+            std::fs::write(&source, b"snapshot disk must remain unchanged").unwrap();
+            // Pass the prerequisite capability checks so the test actually reaches image
+            // admission. A launch attempt is always a fixture error.
+            let backend = if let Some(runtime) = runtime {
+                backend_with_executable(root.path(), runtime).await
+            } else {
+                backend_with_probe(
+                    root.path(),
+                    r#"#!/bin/sh
+case "$1" in
+--version) echo 'msb 0.6.18';;
+__launch-protocol) echo '{"protocols":[2,1],"protected_guest_state":true,"nested_virt":true}';;
+*) exit 99;;
+esac
+"#,
+                )
+                .await
+            };
+            let mut request = replaceable_config();
+            request.snapshot_upper_source = Some(source.clone());
+            request.manifest_digest = Some(format!("sha256:{}", "1".repeat(64)));
+            request.spec.pull_policy = crate::sandbox::PullPolicy::Never;
+            request.replace_existing = true;
+            assert_request_preserves_target_with_owner(
+                backend,
+                request,
+                if runtime.is_none() && cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+                    "nested virtualization policy through a legacy runtime or wrapper"
+                } else {
+                    "is not cached locally and pull policy is `never`"
+                },
+                running,
+            )
+            .await;
+            assert_eq!(
+                std::fs::read(source).unwrap(),
+                b"snapshot disk must remain unchanged"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_snapshot_always_revalidates_the_recorded_digest() {
+        let root = private_test_root();
+        let backend = backend(root.path(), 18).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reference = format!("{}/fixture:mutable-tag", listener.local_addr().unwrap());
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let cache = GlobalCache::new(&backend.cache_dir()).unwrap();
+        cache.write_image_metadata_async(&reference.parse().unwrap(), &CachedImageMetadata {
+            manifest_digest: digest.clone(),
+            config_digest: format!("sha256:{}", "b".repeat(64)),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+            raw_config_json: r#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#.into(),
+            config: ImageConfig::default(),
+            layers: Vec::new(),
+        }).await.unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") && request.len() < 16 * 1024 {
+                    let mut byte = [0];
+                    if stream.read(&mut byte).await.unwrap() == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                let line = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                observed.lock().await.push(line.clone());
+                // Permit the registry probe, then refuse the immutable manifest. A cached
+                // image must not make explicit Always succeed when its registry is unavailable.
+                let response = if line.contains(" /v2/ ") {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        for policy in [PullPolicy::Never, PullPolicy::IfMissing] {
+            let image = backend
+                .resolve_snapshot_oci_image(
+                    &reference,
+                    &digest,
+                    policy,
+                    RegistryOptions {
+                        insecure: true,
+                        ..Default::default()
+                    },
+                    RootfsMaterialization::Flat,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(image.pull_result.manifest_digest.to_string(), digest);
+        }
+        assert!(
+            requests.lock().await.is_empty(),
+            "cache-only policies contacted registry"
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            backend.resolve_snapshot_oci_image(
+                &reference,
+                &digest,
+                PullPolicy::Always,
+                RegistryOptions {
+                    insecure: true,
+                    ..Default::default()
+                },
+                RootfsMaterialization::Flat,
+                None,
+            ),
+        )
+        .await;
+        server.abort();
+        let _ = server.await;
+        assert!(
+            result.expect("registry request must finish").is_err(),
+            "Always incorrectly accepted a cache hit"
+        );
+        let requests = requests.lock().await;
+        assert!(
+            requests
+                .iter()
+                .any(|line| line.contains(&format!("/manifests/{digest}"))),
+            "missing digest request: {requests:?}"
+        );
+        assert!(
+            requests.iter().all(|line| !line.contains("mutable-tag")),
+            "snapshot followed its original tag"
+        );
+    }
+
+    #[tokio::test]
     async fn restore_staging_does_not_match_destination_labels() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_test_root();
         let local = Arc::new(local_backend_builder(temp.path()).build().unwrap());
         let mut config = replaceable_config();
         config.spec.labels.insert("tier".into(), "web".into());
@@ -507,7 +741,7 @@ mod tests {
     async fn archive_flat_layout_is_admitted_before_replacement() {
         for patch in [0, 8] {
             for plain in [false, true] {
-                let root = tempfile::tempdir_in("/tmp").unwrap();
+                let root = private_test_root();
                 let archive = archive(root.path(), true, plain).await;
 
                 assert_rejection_preserves_target(
@@ -522,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn archive_disk_chain_is_admitted_before_replacement() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = archive(root.path(), false, false).await;
         assert_rejection_preserves_target(
             backend(root.path(), 18).await,
@@ -537,7 +771,7 @@ mod tests {
         use crate::config::{GlobalConfigPatch, layers::BackendConfig};
 
         for flat in [false, true] {
-            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let root = private_test_root();
             let archive = archive(root.path(), flat, false).await;
             let mut backend = backend_without_runtime(root.path());
             let user = GlobalConfigPatch::from_present_fields(backend.config().clone());
@@ -556,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn corrupt_archive_does_not_replace_target() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = root.path().join("broken.msnap");
         std::fs::write(&archive, b"not a tar archive").unwrap();
         let backend = backend_without_runtime(root.path());
@@ -580,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn copy_on_write_disk_archive_preserves_replacement_target() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = archive(root.path(), false, false).await;
         // Without an installed runtime, launch-contract checks are skipped, so only
         // the copy-on-write checks can reject this request.
@@ -605,7 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn historical_runtime_rejects_disk_only_restore_before_launch() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = checkpoint_archive(root.path()).await;
         // Linux x86 rejects the old runtime at nesting preflight. Other hosts
         // admit disk-only restore, then reject the materialized disk chain.
@@ -613,9 +847,10 @@ mod tests {
 
         // Match the public restore builder: the reference is resolved during preparation.
         let builder = SandboxBuilder::new("disk-only-child")
-            .network(|network| network.http(|http| http.deny_response(false)))
             .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))
             .disk_only();
+        #[cfg(feature = "net")]
+        let builder = builder.network(|network| network.http(|http| http.deny_response(false)));
         let error = match backend
             .create_sandbox(backend.clone(), builder, SpawnMode::Attached, None)
             .await
@@ -685,7 +920,7 @@ mod tests {
 
     #[tokio::test]
     async fn current_catalog_persistence_is_separate_from_create_admission() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let backend = backend(root.path(), 8).await;
         let pools = backend.db().await.unwrap();
         assert!(database::is_current(pools.read()).await.unwrap());
@@ -720,7 +955,7 @@ mod tests {
 
     #[tokio::test]
     async fn archive_publication_preserves_relative_disk_chain() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let archive = archive(root.path(), false, false).await;
         let backend = backend(root.path(), 18).await;
         let stage = tempfile::tempdir_in(root.path()).unwrap();
@@ -755,7 +990,7 @@ mod tests {
     #[tokio::test]
     async fn archive_settings_resolve_without_extracting_payloads() {
         use crate::config::{GlobalConfigPatch, layers::BackendConfig};
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let source = checkpoint_archive(root.path()).await;
         let mut local = backend(root.path(), 18).await;
         let mut defaults = GlobalConfigPatch::from_present_fields(local.config().clone());
@@ -793,7 +1028,7 @@ mod tests {
 
     #[tokio::test]
     async fn replacing_prepared_full_archive_discards_its_checkpoint() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let full = checkpoint_archive(root.path()).await;
         let disk = archive(root.path(), false, true).await;
         let local = backend(root.path(), 18).await;
@@ -822,7 +1057,7 @@ mod tests {
     async fn archive_changes_after_build_preserve_replacement_target() {
         for plain in [false, true] {
             for missing in [false, true] {
-                let root = tempfile::tempdir_in("/tmp").unwrap();
+                let root = private_test_root();
                 let source = archive(root.path(), false, plain).await;
                 let local = backend(root.path(), 18).await;
                 let mut builder = SandboxBuilder::new("replaceable")
@@ -849,7 +1084,7 @@ mod tests {
     async fn corrupt_payload_is_deferred_to_create_without_replacing_target() {
         use std::io::{Seek, SeekFrom, Write};
 
-        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let root = private_test_root();
         let source = archive(root.path(), false, true).await;
         let mut tar = tar::Archive::new(std::fs::File::open(&source).unwrap());
         let payload_offset = tar

@@ -83,7 +83,7 @@ class ContextNativeTest < Test::Unit::TestCase
 
           raise "wrong concrete type" unless a.is_a?(Microsandbox::RemoteContext)
           raise "wrong local type" unless Microsandbox::LocalContext.new.is_a?(Microsandbox::LocalContext)
-          [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Snapshot].each do |resource|
+          [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Checkpoint].each do |resource|
             rejected = false
             begin
               resource.remote
@@ -105,12 +105,12 @@ class ContextNativeTest < Test::Unit::TestCase
           raise "explicit URL lost" unless remote.new(url: url_a).sandboxes.get("task").id == "cloud:a"
           ENV["MSB_API_URL"] = url_a
           collection = Microsandbox::Sandbox.remote
-          [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Snapshot].each do |resource|
+          [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Checkpoint].each do |resource|
             raise "remote selector ignored" unless resource.remote.context.kind == :remote
           end
           ENV["MSB_BACKEND"] = "remote"
           raise "configured lookup missed remote" unless Microsandbox::Sandbox.get("task").id == collection.get("task").id
-          [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Snapshot].each do |resource|
+          [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Checkpoint].each do |resource|
             raise "local selector ignored" unless resource.local.context.kind == :local
           end
           ENV["MSB_API_URL"] = "http://127.0.0.1:#{servers.last.addr[1]}"
