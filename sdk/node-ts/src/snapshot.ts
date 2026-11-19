@@ -1,4 +1,3 @@
-import { nativeOwner } from "./internal/provider.js";
 import { parseCheckpointRemoval, type CheckpointRemoveResult } from "./snapshot-removal.js";
 import { Sandbox, CreationProgressCreate, type RestoreBuilder } from "./sandbox.js";
 import type { NapiRestoreBuilder } from "./internal/napi.js";

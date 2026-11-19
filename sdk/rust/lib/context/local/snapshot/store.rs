@@ -1149,8 +1149,14 @@ mod tests {
         println!("snapshot path lifetime checked");
     }
 
+    #[test]
+    fn whole_group_removal_refuses_external_dependents_and_readers() {
+        run_group_worker("whole_group_removal_worker");
+    }
+
     #[tokio::test]
-    async fn whole_group_removal_refuses_external_dependents_and_readers() {
+    #[ignore = "subprocess helper for whole-group removal with pinned readers"]
+    async fn whole_group_removal_worker() {
         let home = tempfile::tempdir().unwrap();
         let local = std::sync::Arc::new(
             crate::test_support::local_backend_builder(home.path())
@@ -1217,14 +1223,18 @@ mod tests {
 
     #[test]
     fn whole_group_recovery_preserves_a_recreated_group() {
-        // Recovery must reach the injected SQL failure immediately. Unrelated parallel
+        run_group_worker("whole_group_recovery_worker");
+    }
+
+    fn run_group_worker(worker: &str) {
+        // Each assertion must observe only the locks set by its fixture. Unrelated parallel
         // fork/exec tests can temporarily inherit setup's reader leases and correctly
         // cause pre-publication refusal instead. Create the fixture after exec in an
         // isolated process; do not retry removal or weaken its committed-result checks.
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "context::local::snapshot::store::tests::whole_group_recovery_worker",
+                &format!("context::local::snapshot::store::tests::{worker}"),
                 "--ignored",
                 "--nocapture",
             ])

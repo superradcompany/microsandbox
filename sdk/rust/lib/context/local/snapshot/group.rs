@@ -1663,9 +1663,4 @@ mod tests;
 
 pub(super) use capture::{CaptureReservation, CaptureTarget};
 pub(super) use inspection::inspect as inspect_history;
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
 pub(super) use remove_history::{recover as recover_histories, remove as remove_history};

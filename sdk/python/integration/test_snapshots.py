@@ -120,7 +120,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         )
         copied_group = imported.snapshot
         assert len(imported.checkpoints) == len(imported.added) == 1
-        copied = await imported.checkpoints[0].open()
+        copied = imported.checkpoints[0]
         assert await copied.labels() == {"environment": "test"}
         assert (await copied.verify())["upper"]["kind"] == "verified"
     finally:

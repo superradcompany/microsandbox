@@ -222,6 +222,27 @@ fn deferred_import_retains_paths_base_kind_and_backend() {
                     .unwrap(),
             );
             std::env::set_current_dir(&second).unwrap();
+            // Native Go dispatch received these strings after the process moved to
+            // the shadow directory. Only the directory observed by Go may select inputs.
+            for (name, base) in [
+                ("binding-group", "base-group"),
+                ("binding-archive", "base.tar"),
+            ] {
+                requests.push((
+                    name,
+                    PreparedSnapshotImport::with_caller_directory(
+                        backend.clone(),
+                        vec!["delta.tar".into()],
+                        LoadOpts {
+                            dest: Some("destination".into()),
+                            base: Some(base.into()),
+                            ..Default::default()
+                        },
+                        Some(&first),
+                    )
+                    .unwrap(),
+                ));
+            }
             for (group, request) in requests {
                 let imported = request.group(group.into()).await.unwrap();
                 assert_eq!(imported.checkpoints.len(), 1);

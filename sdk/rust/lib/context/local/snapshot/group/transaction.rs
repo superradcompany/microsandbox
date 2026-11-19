@@ -661,27 +661,23 @@ mod tests {
     #[tokio::test]
     #[ignore = "live subprocess worker; requires isolated home, archives and explicit crash boundary"]
     async fn live_windows_import_worker() {
-        use crate::{Checkpoint as Snapshot, context::LocalContext, snapshot::LoadOpts};
+        use crate::{Context as _, context::LocalContext, snapshot::LoadOpts};
         let home = PathBuf::from(std::env::var_os("MSB_TEST_IMPORT_HOME").unwrap());
         let archives: Vec<PathBuf> =
             serde_json::from_str(&std::env::var("MSB_TEST_IMPORT_ARCHIVES").unwrap()).unwrap();
         let group = std::env::var("MSB_TEST_IMPORT_GROUP").unwrap();
-        let backend = LocalContext::builder().home(&home).build().await.unwrap();
-        async {
-            use crate::Context as _;
-            backend
-                .checkpoints()
-                .load_many(
-                    &archives,
-                    LoadOpts {
-                        group: Some(group),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-        }
-        .await;
+        let backend = LocalContext::builder().home(&home).build().unwrap();
+        backend
+            .checkpoints()
+            .load_many(
+                &archives,
+                LoadOpts {
+                    group: Some(group),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
     }
 
     #[cfg(windows)]

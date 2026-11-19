@@ -1,6 +1,6 @@
 //! Call-time import admission for language bindings that schedule Rust work later.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::context::{Context, configured_context};
@@ -40,29 +40,59 @@ impl PreparedSnapshotImport {
         files: Vec<PathBuf>,
         options: LoadOpts,
     ) -> MicrosandboxResult<Self> {
+        Self::with_caller_directory(backend, files, options, None)
+    }
+
+    /// Native transports that dispatch on another thread can supply the directory
+    /// observed by the caller. Remote selectors remain provider-owned.
+    #[doc(hidden)]
+    pub fn with_caller_directory(
+        backend: Arc<dyn Context>,
+        files: Vec<PathBuf>,
+        options: LoadOpts,
+        directory: Option<&Path>,
+    ) -> MicrosandboxResult<Self> {
         let request = Self {
             backend,
             files,
             options,
         };
         #[cfg(feature = "local")]
-        let request = request.anchor_local()?;
+        let request = request.anchor_local(directory)?;
+        #[cfg(not(feature = "local"))]
+        let _ = directory;
         Ok(request)
     }
 
     #[cfg(feature = "local")]
-    fn anchor_local(mut self) -> MicrosandboxResult<Self> {
+    fn anchor_local(mut self, directory: Option<&Path>) -> MicrosandboxResult<Self> {
         if self.backend.kind() == crate::context::ContextKind::Local {
+            if directory.is_some_and(|path| !path.is_absolute()) {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "import working directory must be absolute".into(),
+                ));
+            }
+            let anchor = |path: PathBuf| {
+                if let Some(directory) = directory
+                    && !path.as_os_str().is_empty()
+                {
+                    std::path::absolute(directory.join(path))
+                } else {
+                    std::path::absolute(path)
+                }
+            };
             self.files = self
                 .files
                 .into_iter()
-                .map(std::path::absolute)
+                .map(anchor)
                 .collect::<std::io::Result<_>>()?;
-            self.options.dest = self.options.dest.map(std::path::absolute).transpose()?;
+            self.options.dest = self.options.dest.map(anchor).transpose()?;
             self.options.base = self
                 .options
                 .base
-                .map(crate::context::local::snapshot::anchor_archive_selector)
+                .map(|value| {
+                    crate::context::local::snapshot::anchor_archive_selector_in(value, directory)
+                })
                 .transpose()?;
         }
         Ok(self)

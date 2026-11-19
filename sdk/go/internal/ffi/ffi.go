@@ -5260,10 +5260,11 @@ type SnapshotSaveOptions struct {
 }
 
 type SnapshotLoadOptions struct {
-	Dest    string `json:"dest,omitempty"`
-	Base    string `json:"base,omitempty"`
-	Group   string `json:"group,omitempty"`
-	SetHead bool   `json:"set_head,omitempty"`
+	CallerDirectory string `json:"caller_directory,omitempty"`
+	Dest            string `json:"dest,omitempty"`
+	Base            string `json:"base,omitempty"`
+	Group           string `json:"group,omitempty"`
+	SetHead         bool   `json:"set_head,omitempty"`
 }
 
 type SnapshotHeadUpdate struct {

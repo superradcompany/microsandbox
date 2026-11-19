@@ -1838,7 +1838,15 @@ class Checkpoints:
 
 
 class Snapshots:
-    async def load(self, group: str, files: list[str | os.PathLike[str]], *, dest: str | os.PathLike[str] | None = None, base: str | None = None, set_head: bool = False) -> SnapshotImportResult: ...
+    async def load(
+        self,
+        group: str,
+        files: list[str | os.PathLike[str]],
+        *,
+        dest: str | os.PathLike[str] | None = None,
+        base: str | None = None,
+        set_head: bool = False,
+    ) -> SnapshotImportResult: ...
     @property
     def context(self) -> Context: ...
     async def open(self, path: str | os.PathLike[str]) -> SnapshotGroup: ...

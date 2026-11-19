@@ -2,9 +2,9 @@
 
 from microsandbox._microsandbox import (
     BranchOutcome,
-    Checkpoints,
     CheckpointCaptureResult,
     CheckpointRemoveResult,
+    Checkpoints,
     Context,
     ExecEvent,
     ExecHandle,
@@ -551,4 +551,6 @@ __all__ = [
 ]
 
 
-__all__ += ["Context", "LocalContext", "RemoteContext", "Sandboxes", "Volumes", "Snapshots", "Checkpoints"]
+__all__ += [
+    "Context", "LocalContext", "RemoteContext", "Sandboxes", "Volumes", "Snapshots", "Checkpoints",
+]

@@ -374,14 +374,18 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
                     "import options cannot select a different destination group",
                 ));
             }
-            let result = selected()
-                .snapshots()
-                .load_with(&name, &files, |_| microsandbox::SnapshotImportOptions {
+            let prepared = microsandbox::snapshot::PreparedSnapshotImport::with_caller_directory(
+                selected(),
+                files,
+                microsandbox::snapshot::LoadOpts {
                     dest: options.dest,
                     base: options.base,
                     set_head: options.set_head,
-                })
-                .await?;
+                    ..Default::default()
+                },
+                options.caller_directory.as_deref(),
+            )?;
+            let result = prepared.group(name).await?;
             Ok(json!({
                 "operation_id": result.operation_id,
                 "snapshot": pending.insert(Object::Group(result.snapshot))?,

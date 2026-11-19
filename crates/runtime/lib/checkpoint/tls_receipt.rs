@@ -277,6 +277,13 @@ mod tests {
         let sealed = capture(source.path(), 1, &config, &resources, "root-a")
             .unwrap()
             .unwrap();
+        // Repeating capture uses the same wrapping key, signer, and checkpoint binding.
+        // A fresh nonce is required even when the plaintext is identical.
+        let repeated = capture(source.path(), 1, &config, &resources, "root-a")
+            .unwrap()
+            .unwrap();
+        let nonce = HEADER.len()..HEADER.len() + 24;
+        assert_ne!(sealed[nonce.clone()], repeated[nonce]);
         assert!(!sealed.windows(11).any(|s| s == b"PRIVATE KEY"));
         write_staged(artifact.path(), &sealed).unwrap();
         super::super::remove_sandbox_identity(source.path(), 1).unwrap();

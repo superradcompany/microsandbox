@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
@@ -243,6 +244,15 @@ func (s *Snapshots) Load(ctx context.Context, group string, files []string, opti
 	if len(options) == 1 {
 		opts = options[0]
 	}
+	// Native dispatch can run after another goroutine changes the process cwd.
+	// The selected provider owns remote references, including relative strings.
+	var directory string
+	if s.selected.Kind() == ContextLocal {
+		files, opts, directory, err = prepareGroupImportPaths(files, opts)
+		if err != nil {
+			return nil, err
+		}
+	}
 	var wire struct {
 		OperationID string                  `json:"operation_id"`
 		Snapshot    *snapshotGroupWire      `json:"snapshot"`
@@ -253,7 +263,7 @@ func (s *Snapshots) Load(ctx context.Context, group string, files []string, opti
 		Warnings    []string                `json:"warnings"`
 	}
 	if err := snapshotObjectRequest(ctx, owner, map[string]any{"op": "load", "name": group, "files": files,
-		"options": ffi.SnapshotLoadOptions{Dest: opts.Dest, Base: opts.Base, SetHead: opts.SetHead}}, &wire); err != nil {
+		"options": ffi.SnapshotLoadOptions{CallerDirectory: directory, Dest: opts.Dest, Base: opts.Base, SetHead: opts.SetHead}}, &wire); err != nil {
 		return nil, err
 	}
 	history, err := snapshotGroupFromWire(owner, wire.Snapshot)
@@ -266,6 +276,43 @@ func (s *Snapshots) Load(ctx context.Context, group string, files []string, opti
 	}
 	return &SnapshotImportResult{OperationID: wire.OperationID, Snapshot: history, Checkpoints: checkpoints,
 		Added: wire.Added, Reused: wire.Reused, HeadUpdate: snapshotHeadUpdateFromInfo(wire.HeadUpdate), Warnings: wire.Warnings}, nil
+}
+
+// An ordinary relative input keeps its spelling until Rust resolves it against
+// this directory. On Unix, cleaning "link/../file" could change the selected file.
+func prepareGroupImportPaths(files []string, opts SnapshotImportOptions) ([]string, SnapshotImportOptions, string, error) {
+	relative := func(path string) bool { return path != "" && !filepath.IsAbs(path) }
+	if !relative(opts.Dest) && !relative(opts.Base) && !slices.ContainsFunc(files, relative) {
+		return files, opts, "", nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, opts, "", err
+	}
+	if filepath.Separator == '\\' {
+		// Windows keeps a working directory per drive. Resolve drive-relative
+		// inputs such as D:base.msb on the caller before native dispatch.
+		paths := slices.Clone(files)
+		resolveDrive := func(path string) (string, error) {
+			if relative(path) && filepath.VolumeName(path) != "" {
+				return filepath.Abs(path)
+			}
+			return path, nil
+		}
+		for i := range paths {
+			if paths[i], err = resolveDrive(paths[i]); err != nil {
+				return nil, opts, "", err
+			}
+		}
+		if opts.Dest, err = resolveDrive(opts.Dest); err != nil {
+			return nil, opts, "", err
+		}
+		if opts.Base, err = resolveDrive(opts.Base); err != nil {
+			return nil, opts, "", err
+		}
+		files = paths
+	}
+	return files, opts, cwd, nil
 }
 
 // Open reopens an explicit local history directory without default-store lookup.

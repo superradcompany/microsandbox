@@ -777,8 +777,19 @@ fn anchor_auto_selector(value: String) -> MicrosandboxResult<String> {
 /// Base selectors also accept bare archive filenames. Capture that interpretation once,
 /// before deferred work can mistake a same-named file in another directory for the base.
 pub(crate) fn anchor_archive_selector(value: String) -> MicrosandboxResult<String> {
-    if store::looks_like_path(&value) || Path::new(&value).is_file() {
-        Ok(std::path::absolute(value)?.to_string_lossy().into_owned())
+    anchor_archive_selector_in(value, None)
+}
+
+pub(crate) fn anchor_archive_selector_in(
+    value: String,
+    directory: Option<&Path>,
+) -> MicrosandboxResult<String> {
+    let path = directory.map(|dir| dir.join(&value));
+    let candidate = path.as_deref().unwrap_or_else(|| Path::new(&value));
+    if store::looks_like_path(&value) || candidate.is_file() {
+        Ok(std::path::absolute(candidate)?
+            .to_string_lossy()
+            .into_owned())
     } else {
         Ok(value)
     }

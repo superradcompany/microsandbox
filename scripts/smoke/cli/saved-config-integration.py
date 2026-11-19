@@ -89,8 +89,11 @@ def command_receipts(args, root, image):
             receipt, = (home / "sandboxes/rt/last-active/captures").glob("*.json")
             (root / (case + "-receipt.json")).write_text(json.dumps({"record": json.loads(receipt.read_text())}))
         finally:
-            runner.run("stop", "stop", "--force", "rt", required=False)
-            runner.run("remove", "rm", "--force", "rt", required=launched)
+            # A timed-out stop can leave a live runtime even when the launcher failed.
+            try:
+                runner.run("stop", "stop", "--force", "rt", required=False)
+            finally:
+                runner.run("remove", "rm", "--force", "rt", required=launched)
 
 
 def run(args, root):

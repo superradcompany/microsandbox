@@ -1218,6 +1218,7 @@ struct SnapshotSaveOptsJson {
 
 #[derive(serde::Deserialize, Default)]
 struct SnapshotLoadOptsJson {
+    caller_directory: Option<PathBuf>,
     dest: Option<PathBuf>,
     base: Option<String>,
     group: Option<String>,

@@ -3,6 +3,8 @@ package microsandbox
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -35,4 +37,22 @@ func testHistories(t *testing.T) *Snapshots {
 		t.Fatal(err)
 	}
 	return selected.Snapshots()
+}
+
+func TestGroupImportRetainsCallerDirectory(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []string{"nested/../delta.msb"}
+	options := SnapshotImportOptions{Dest: "output", Base: "history"}
+	resolved, opts, dir, err := prepareGroupImportPaths(files, options)
+	if err != nil || dir != cwd || resolved[0] != files[0] || opts != options {
+		t.Fatalf("relative inputs changed: %q, %+v, %q, %v", resolved, opts, dir, err)
+	}
+	absolute := filepath.Join(cwd, "delta.msb")
+	_, _, dir, err = prepareGroupImportPaths([]string{absolute}, SnapshotImportOptions{})
+	if err != nil || dir != "" {
+		t.Fatalf("absolute import depended on cwd: %q, %v", dir, err)
+	}
 }
