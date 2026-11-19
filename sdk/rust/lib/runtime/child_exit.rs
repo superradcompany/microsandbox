@@ -50,7 +50,9 @@ impl ChildExit {
     pub(super) async fn wait(&mut self) -> bool {
         if let Some(fd) = &self.0 {
             if let Ok(mut ready) = fd.readable().await {
-                ready.clear_ready();
+                // A pidfd stays readable after exit. Keep the notification across
+                // retries if a waiter holds the process lock during collection.
+                ready.retain_ready();
                 return true;
             }
             self.0 = None;

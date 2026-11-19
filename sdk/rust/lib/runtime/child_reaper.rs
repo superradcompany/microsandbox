@@ -75,6 +75,31 @@ impl Work {
     }
 }
 
+impl Handoff {
+    async fn reap(mut self) {
+        let work = self.0.as_mut().expect("pending collection");
+        if !work.collect() {
+            let Some(mut exit) = work.observe().await else {
+                self.0 = None;
+                return;
+            };
+            loop {
+                // Never hold the process mutex or a strong resource reference while waiting.
+                let notified = exit.wait().await;
+                if work.collect() {
+                    break;
+                }
+                if notified {
+                    // A ready pidfd stays readable. Back off if a concurrent waiter holds
+                    // the mutex, rather than spinning on the already delivered readiness.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+        self.0 = None;
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -111,29 +136,7 @@ fn schedule(work: Work, runtime: Option<Handle>) {
     let Some(runtime) = runtime.or_else(|| Handle::try_current().ok()) else {
         return; // Handoff queues work on the process-wide fallback thread.
     };
-    runtime.spawn(async move {
-        let mut handoff = handoff;
-        let work = handoff.0.as_mut().expect("pending collection");
-        if !work.collect() {
-            let Some(mut exit) = work.observe().await else {
-                handoff.0 = None;
-                return;
-            };
-            loop {
-                // Never hold the process mutex or a strong resource reference while waiting.
-                let notified = exit.wait().await;
-                if work.collect() {
-                    break;
-                }
-                if notified {
-                    // A ready pidfd stays readable. Back off if a concurrent waiter holds
-                    // the mutex, rather than spinning on the already delivered readiness.
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            }
-        }
-        handoff.0 = None;
-    });
+    runtime.spawn(handoff.reap());
 }
 
 fn enqueue(work: Work) {
@@ -182,3 +185,10 @@ fn fallback_loop(receiver: mpsc::Receiver<Work>) {
         }
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests;

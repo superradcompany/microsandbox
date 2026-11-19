@@ -1,7 +1,7 @@
 //! Host VM-child reaping, distinct from agentd's in-guest child reaping tests.
 //! Run on Linux KVM with `cargo test -p microsandbox --test detached_reaping -- --ignored`.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "local"))]
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
