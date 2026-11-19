@@ -65,6 +65,15 @@ def prepare_sources(source_dir, destination, architecture):
     if architecture not in MIRRORS:
         raise ValueError(f"No Ubuntu fallback configured for {architecture}")
     mirror = MIRRORS[architecture]
+    mirrors = [mirror]
+    if architecture in ("amd64", "amd64v3"):
+        # APT can retry each index or package against another mirror using the
+        # same signed Ubuntu metadata, even if a host fails after apt update.
+        mirrors.append("https://mirrors.mit.edu/ubuntu/")
+        mirror_list = destination / "ubuntu-mirrors.txt"
+        mirror_list.write_text("\n".join(mirrors) + "\n")
+        mirror_list.chmod(0o644)
+        mirror = "mirror+" + mirror_list.resolve().as_uri()
     parts = destination / "sources.list.d"
     parts.mkdir(mode=0o755)
     (destination / "lists").mkdir(mode=0o755)
@@ -84,7 +93,7 @@ def prepare_sources(source_dir, destination, architecture):
     (destination / "sources.list").touch(mode=0o644, exist_ok=True)
     if not replacements:
         raise ValueError("No recognized Ubuntu sources to replace; keeping system sources unchanged")
-    print(f"::warning::Using Ubuntu fallback mirror {mirror}", flush=True)
+    print("::warning::Using Ubuntu fallback mirror " + ", ".join(mirrors), flush=True)
 
 
 if __name__ == "__main__":

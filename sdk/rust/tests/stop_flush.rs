@@ -1,7 +1,7 @@
 //! Integration test for issue #705: graceful stop must flush guest
 //! writes before the VMM exits.
 //!
-//! Pre-fix, `SandboxHandle::stop` either sent SIGTERM directly to the
+//! Pre-fix, `SandboxRecord::stop` either sent SIGTERM directly to the
 //! VMM PID or rode the relay `core.shutdown` path that triggered
 //! `exit_handle.trigger()` host-side before agentd had a chance to
 //! `sync()` + power off the guest. Either path raced the block-backed
@@ -29,7 +29,7 @@ const MARKER_VALUE: &str = "hello-705";
 async fn cleanup(name: &str) {
     if let Ok(h) = Sandbox::get(name).await {
         let _ = h.kill().await;
-        let _ = h.remove().await;
+        let _ = h.destroy().await;
     }
 }
 
@@ -65,19 +65,14 @@ async fn graceful_stop_flushes_writes_to_rootfs() {
         write.stderr().unwrap_or_default()
     );
 
-    // Detach so the next stop goes through the same SandboxHandle path
+    // Detach so the next stop goes through the same SandboxRecord path
     // as `msb stop` rather than the in-process owner drop path.
-    sb.detach().await;
+    sb.detach().await.expect("detach sandbox");
 
     let handle = Sandbox::get(name).await.expect("get handle");
     handle.stop().await.expect("graceful stop");
 
-    let restarted = Sandbox::get(name)
-        .await
-        .expect("get for restart")
-        .start()
-        .await
-        .expect("start after stop");
+    let restarted = Sandbox::start(name).await.expect("start after stop");
 
     let read = restarted
         .exec("cat", [MARKER_PATH])

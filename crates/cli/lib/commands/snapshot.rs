@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use microsandbox::{Snapshot, SnapshotReference};
+use microsandbox::SnapshotReference;
 use microsandbox_utils::format::format_bytes;
 
 use crate::{
@@ -308,7 +308,9 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
 
 async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     let source = args.sandbox.clone();
-    let mut builder = Snapshot::builder(args.snapshot_name())
+    let mut builder = crate::commands::common::selected_context()?
+        .snapshots()
+        .builder(args.snapshot_name())
         .from_sandbox(&source)
         .guest_flush(args.guest_flush);
     if let Some(group) = args.group {
@@ -381,7 +383,9 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         super::common::resolve_local_backend()?;
     }
 
-    let snapshots: Vec<_> = Snapshot::list()
+    let snapshots: Vec<_> = crate::commands::common::selected_context()?
+        .snapshots()
+        .list()
         .await?
         .into_iter()
         .filter(|snapshot| {
@@ -402,7 +406,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
                     "group": s.group(),
                     "parent_digest": s.parent_digest(),
                     "scope": format_scope(s.scope()),
-                    "state_kind": s.state_kind(),
+                    "state_kind": s.state_kind().as_str(),
                     "image_ref": s.image_ref(),
                     "format": s.format().map(format_str),
                     "fstype": s.fstype(),
@@ -469,10 +473,13 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
 }
 
 async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
-    let snap = Snapshot::open(&args.snapshot).await?;
-    let m = snap.manifest();
+    let snap = crate::commands::common::selected_context()?
+        .snapshots()
+        .open(&args.snapshot)
+        .await?;
+    let m = snap.manifest().await?;
 
-    ui::detail_kv("Snapshot ID", snap.id().as_str());
+    ui::detail_kv("Snapshot ID", snap.id());
     ui::detail_kv("Descriptor Digest", snap.digest());
     ui::detail_kv("Reference", &format_reference(&snap.reference()));
     ui::detail_kv("Image", &m.image.reference);
@@ -526,9 +533,9 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     if let Some(ref src) = m.capture.source_lineage {
         ui::detail_kv("Source Sandbox", src);
     }
-    if !snap.labels().is_empty() {
-        let labels = snap
-            .labels()
+    let labels = snap.labels().await?;
+    if !labels.is_empty() {
+        let labels = labels
             .iter()
             .map(|(key, value)| format!("{key}={value}"))
             .collect::<Vec<_>>()
@@ -546,7 +553,10 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
 }
 
 async fn verify(args: SnapshotVerifyArgs) -> anyhow::Result<()> {
-    let snap = Snapshot::open(&args.snapshot).await?;
+    let snap = crate::commands::common::selected_context()?
+        .snapshots()
+        .open(&args.snapshot)
+        .await?;
     let report = snap.verify().await?;
     ui::detail_kv("Digest", &report.digest);
     ui::detail_kv("Path", &report.path.display().to_string());
@@ -572,7 +582,11 @@ async fn remove(args: SnapshotRemoveArgs) -> anyhow::Result<()> {
         } else {
             ui::Spinner::start("Removing", s)
         };
-        match Snapshot::remove(s, args.force).await {
+        match crate::commands::common::selected_context()?
+            .snapshots()
+            .remove(s, args.force)
+            .await
+        {
             Ok(()) => spinner.finish_success("Removed"),
             Err(e) => {
                 spinner.finish_clear();
@@ -598,7 +612,10 @@ async fn reindex(args: SnapshotReindexArgs) -> anyhow::Result<()> {
             local.snapshots_dir()
         }
     };
-    let n = Snapshot::reindex(&dir).await?;
+    let n = crate::commands::common::selected_context()?
+        .snapshots()
+        .reindex(&dir)
+        .await?;
     println!("indexed {n} snapshot(s) from {}", dir.display());
     Ok(())
 }
@@ -612,22 +629,31 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
         since: args.since,
         last_layers: args.last_layers,
     };
-    Snapshot::save(&args.snapshot, &out, opts).await?;
+    crate::commands::common::selected_context()?
+        .snapshots()
+        .save(
+            microsandbox::SnapshotReference::auto(&args.snapshot),
+            &out,
+            opts,
+        )
+        .await?;
     println!("{}", out.display());
     Ok(())
 }
 
 async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
-    let handles = Snapshot::load_many(
-        &args.archives,
-        microsandbox::snapshot::LoadOpts {
-            dest: args.dest,
-            base: args.base,
-            group: args.group,
-            set_head: args.set_head,
-        },
-    )
-    .await?;
+    let handles = crate::commands::common::selected_context()?
+        .snapshots()
+        .load_many(
+            &args.archives,
+            microsandbox::snapshot::LoadOpts {
+                dest: args.dest,
+                base: args.base,
+                group: args.group,
+                set_head: args.set_head,
+            },
+        )
+        .await?;
     // Every imported member belongs to one batch; report its single head decision once.
     if let Some(update) = handles.iter().find_map(|handle| handle.head_update()) {
         report_head_update(update);
@@ -651,7 +677,10 @@ async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
 }
 
 async fn head(args: SnapshotHeadArgs) -> anyhow::Result<()> {
-    let update = Snapshot::group_head(&args.selector).await?;
+    let update = crate::commands::common::selected_context()?
+        .snapshot_ops()
+        .group_head_selector(&args.selector)
+        .await?;
     if args.format == Some(OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&update)?);
     } else {

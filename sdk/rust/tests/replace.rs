@@ -20,7 +20,7 @@ const IMAGE: &str = "mirror.gcr.io/library/alpine";
 async fn cleanup(name: &str) {
     if let Ok(h) = Sandbox::get(name).await {
         let _ = h.kill().await;
-        let _ = h.remove().await;
+        let _ = h.destroy().await;
     }
 }
 

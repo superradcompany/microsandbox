@@ -10,12 +10,12 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 #[cfg(any(feature = "local", test))]
 use microsandbox_types::DiskCompactionTarget;
 
-use crate::{MicrosandboxError, MicrosandboxResult, backend::Backend};
+use crate::{MicrosandboxError, MicrosandboxResult, context::Context};
 
 #[cfg(feature = "local")]
 use super::{SandboxConfig, SandboxStatus};
 #[cfg(feature = "local")]
-use crate::backend::local::creation::{self, CreationStorage};
+use crate::context::local::creation::{self, CreationStorage};
 #[cfg(feature = "local")]
 use crate::db::entity::sandbox as sandbox_entity;
 
@@ -26,11 +26,12 @@ use crate::db::entity::sandbox as sandbox_entity;
 /// Plan or compact immutable root/owned-data disk prefixes without changing existing snapshots.
 #[derive(Clone)]
 pub struct DiskCompactionBuilder {
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     name: String,
     layers: Option<usize>,
     disk: Option<String>,
     root_disk_only: bool,
+    identity: Option<super::SandboxId>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -38,14 +39,20 @@ pub struct DiskCompactionBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl DiskCompactionBuilder {
-    pub(crate) fn new(backend: Arc<dyn Backend>, name: String) -> Self {
+    pub(crate) fn new(backend: Arc<dyn Context>, name: String) -> Self {
         Self {
             backend,
             name,
             layers: None,
             disk: None,
             root_disk_only: false,
+            identity: None,
         }
+    }
+
+    pub(crate) fn bound_to(mut self, identity: super::SandboxId) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     /// Select up to `layers` oldest sealed physical layers per disk, counting the base but
@@ -97,7 +104,7 @@ impl DiskCompactionBuilder {
                 "disk compaction is only supported by the local backend".into(),
             )
         })?;
-        let transition = crate::LocalBackend::acquire_sandbox_transition_guard(
+        let transition = crate::LocalContext::acquire_sandbox_transition_guard(
             &local.config().run_dir(),
             &self.name,
         )
@@ -109,8 +116,20 @@ impl DiskCompactionBuilder {
             .one(local.db().await?.read())
             .await?
             .ok_or_else(|| MicrosandboxError::SandboxNotFound(self.name.clone()))?;
+        // Resolve identity while holding the same transition/source locks as
+        // deletion and replacement; a retained builder must not compact a new VM.
+        if let Some(expected) = &self.identity {
+            let actual = super::SandboxId::local(model.id);
+            if expected != &actual {
+                return Err(MicrosandboxError::SandboxReplaced {
+                    name: self.name.clone(),
+                    expected: expected.to_string(),
+                    actual: actual.to_string(),
+                });
+            }
+        }
         let config: SandboxConfig = serde_json::from_str(&model.config)?;
-        crate::LocalBackend::validate_completed_restore(&config)?;
+        crate::LocalContext::validate_completed_restore(&config)?;
         validate_root_selection(&config, &target)?;
         if model.status == SandboxStatus::Running {
             crate::runtime::protected_state::require_running(local, &self.name)?;
@@ -156,7 +175,7 @@ impl DiskCompactionBuilder {
         let storage = CreationStorage::acquire(local, &self.name)?;
         let runtime_dir = storage.join("runtime");
         let current_config: SandboxConfig = serde_json::from_str(&current.config)?;
-        crate::LocalBackend::validate_completed_restore(&current_config)?;
+        crate::LocalContext::validate_completed_restore(&current_config)?;
         crate::runtime::protected_state::prepare(local, &current_config, &storage).await?;
         // The configuration can change before ownership is acquired. Classify the root from
         // this fresh row, not a stale pre-lock view or a journal's incidental presence.
@@ -281,7 +300,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let local = Arc::new(
                 crate::test_support::local_backend_builder(temp.path())
-                    .build().await.unwrap(),
+                    .build().unwrap(),
             );
             let mut config = SandboxConfig::default();
             config.spec.name = "complete".into();
@@ -372,7 +391,6 @@ mod tests {
             let local = Arc::new(
                 crate::test_support::local_backend_builder(temp.path())
                     .build()
-                    .await
                     .unwrap(),
             );
             let mut config = SandboxConfig::default();

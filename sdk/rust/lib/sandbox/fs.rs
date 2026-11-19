@@ -1,15 +1,14 @@
-//! Filesystem operations on a running sandbox.
+//! Filesystem operations prepare a resource and retain the selected runtime.
 //!
-//! [`SandboxFsOps`] provides methods to read, write, list, and manipulate files
-//! inside a running sandbox. Path-style helpers dispatch through the
-//! [`SandboxBackend`](crate::backend::SandboxBackend) trait and work on both
-//! backends: each call dials the sandbox's agent (the relay socket locally,
-//! the agent WebSocket route on cloud). Low-level handle helpers use the live
-//! local agent client because agentd scopes handles to a relay client.
+//! Idle facades retain identity/context through a weak receiver binding. Local
+//! operations use the selected run's existing client; remote operations preserve
+//! provider dispatch. Open files and streams retain their run until completion,
+//! explicit close, or bounded best-effort cleanup.
 
 use std::{path::Path, sync::Arc};
 
 use bytes::Bytes;
+use futures::future::BoxFuture;
 use microsandbox_agent_client::AgentFrame;
 use microsandbox_protocol::{
     bulk::{
@@ -24,8 +23,13 @@ use tokio::sync::{Mutex, mpsc};
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     agent::AgentClient,
-    backend::Backend,
+    context::Context,
     error::{Operation, UnsupportedReason},
+};
+
+use super::{
+    Sandbox,
+    state::{RuntimeSession, WeakSandbox},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -42,21 +46,30 @@ const FS_INLINE_WRITE_MAX: u64 = 16 * 1024;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Filesystem operations handle for a running sandbox.
-///
-/// Borrows the parent [`Sandbox`](super::Sandbox)'s `Arc<dyn Backend>` + name
-/// and dispatches path-style ops through the
-/// [`SandboxBackend`](crate::backend::SandboxBackend) trait. Low-level handle
-/// ops use the live local agent client so file and directory handles stay in
-/// the same relay-client range.
-pub struct SandboxFsOps<'a> {
-    backend: Arc<dyn Backend>,
-    client: Option<Arc<AgentClient>>,
-    name: &'a str,
+/// Lightweight filesystem facade. Construction performs no I/O and retains no run.
+#[derive(Clone)]
+pub struct SandboxFsOps {
+    backend: Arc<dyn Context>,
+    name: String,
+    resource: Option<WeakSandbox>,
 }
 
-/// Agentd-side filesystem handle.
-pub type FsHandle = u64;
+/// Internal agent handles never cross the public SDK boundary.
+pub(crate) type AgentFsHandle = u64;
+
+/// Agent selection shared by existing backend dispatch and receiver-bound I/O.
+pub(crate) trait FsAgentSource: Send + Sync {
+    fn retained_runtime(&self) -> Option<Arc<RuntimeSession>> {
+        None
+    }
+    fn fs_agent<'a>(&'a self, name: &'a str)
+    -> BoxFuture<'a, MicrosandboxResult<Arc<AgentClient>>>;
+}
+
+struct FsOperation {
+    backend: Arc<dyn Context>,
+    runtime: Option<Arc<RuntimeSession>>,
+}
 
 /// A filesystem entry returned from listing or stat operations.
 #[derive(Debug, Clone)]
@@ -141,11 +154,13 @@ pub struct FsReadStream {
     // Without this the AgentClient's reader task would be dropped after
     // `fs_read_stream` returns and `rx` would receive nothing.
     client: Option<Arc<AgentClient>>,
-    close_handle: Option<FsHandle>,
+    close_handle: Option<AgentFsHandle>,
     /// Set only after a terminal `FsResponse`; channel closure alone is an error.
     finished: bool,
     bulk: Option<BulkReceiveState>,
     bulk_finish_seen: bool,
+    runtime: Option<Arc<RuntimeSession>>,
+    pub(super) file: Option<Arc<super::fs_handle::FsHandleState>>,
 }
 
 /// A streaming writer for file data to the sandbox.
@@ -153,9 +168,16 @@ pub struct FsWriteSink {
     id: u32,
     client: Arc<AgentClient>,
     protocol: Mutex<Option<FsWriteProtocol>>,
-    close_handle: Option<FsHandle>,
+    close_handle: Option<AgentFsHandle>,
     finished: bool,
     bulk_active: bool,
+    retention: std::sync::Mutex<FsRetention>,
+    cleanup_started: std::sync::atomic::AtomicBool,
+}
+
+struct FsRetention {
+    runtime: Option<Arc<RuntimeSession>>,
+    file: Option<Arc<super::fs_handle::FsHandleState>>,
 }
 
 enum FsWriteProtocol {
@@ -172,29 +194,64 @@ enum FsWriteProtocol {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl<'a> SandboxFsOps<'a> {
-    /// Create a new filesystem handle bound to the supplied backend + sandbox name.
-    pub(crate) fn new(
-        backend: Arc<dyn Backend>,
-        name: &'a str,
-        client: Option<Arc<AgentClient>>,
-    ) -> Self {
+impl SandboxFsOps {
+    /// Creation validates the ready guest before publishing Running. Using the
+    /// public facade here would wait for that very publication. Only the startup
+    /// owner may call this path, with its already established run-bound session.
+    pub(crate) async fn stat_prepared(
+        sandbox: &Sandbox,
+        path: &str,
+    ) -> MicrosandboxResult<Result<FsMetadata, String>> {
+        let operation = FsOperation {
+            backend: sandbox.backend.clone(),
+            runtime: Some(sandbox.prepared_runtime()?),
+        };
+        agent::stat_answer(&operation, sandbox.name(), path).await
+    }
+
+    pub(crate) fn new(sandbox: &Sandbox) -> Self {
         Self {
-            backend,
-            client,
-            name,
+            backend: sandbox.backend.clone(),
+            name: sandbox.name().to_owned(),
+            resource: Some(WeakSandbox::new(sandbox)),
         }
     }
 
-    /// Public constructor for FFI shims that re-assemble a `SandboxFsOps` per
-    /// FFI call. Most callers should use [`Sandbox::fs`](super::Sandbox::fs);
-    /// low-level handle methods require that live sandbox-backed constructor.
-    pub fn with_backend(backend: Arc<dyn Backend>, name: &'a str) -> Self {
+    /// Provider-oriented path dispatch without a resource owner. SDK resource
+    /// wrappers must use Sandbox::fs so preparation and identity are retained.
+    #[doc(hidden)]
+    pub fn with_backend(backend: Arc<dyn Context>, name: &str) -> Self {
         Self {
             backend,
-            client: None,
-            name,
+            name: name.to_owned(),
+            resource: None,
         }
+    }
+
+    async fn prepare(&self) -> MicrosandboxResult<FsOperation> {
+        let runtime = match &self.resource {
+            Some(resource) => Some(resource.upgrade()?.prepare_runtime().await?),
+            None => None,
+        };
+        Ok(FsOperation {
+            backend: self.backend.clone(),
+            runtime,
+        })
+    }
+
+    fn require_owned_handle_support(&self, operation: Operation) -> MicrosandboxResult<()> {
+        #[cfg(feature = "local")]
+        if self.backend.as_local().is_some() {
+            return if self.resource.is_some() {
+                Ok(())
+            } else {
+                Err(MicrosandboxError::unsupported(
+                    operation,
+                    UnsupportedReason::UseInstead(Operation::SandboxFs),
+                ))
+            };
+        }
+        Err(MicrosandboxError::local_only(operation))
     }
 
     //----------------------------------------------------------------------------------------------
@@ -203,9 +260,13 @@ impl<'a> SandboxFsOps<'a> {
 
     /// Read an entire file from the guest filesystem into memory.
     pub async fn read(&self, path: &str) -> MicrosandboxResult<Bytes> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::read(&operation, &self.name, path).await;
+        }
         self.backend
-            .sandboxes()
-            .fs_read(self.backend.clone(), self.name, path)
+            .sandbox_ops()
+            .fs_read(self.backend.clone(), &self.name, path)
             .await
     }
 
@@ -220,32 +281,37 @@ impl<'a> SandboxFsOps<'a> {
     ///
     /// Returns an [`FsReadStream`] that yields chunks of data as they arrive.
     pub async fn read_stream(&self, path: &str) -> MicrosandboxResult<FsReadStream> {
-        self.backend
-            .sandboxes()
-            .fs_read_stream(self.backend.clone(), self.name, path)
-            .await
+        let operation = self.prepare().await?;
+        let mut stream = if operation.local_client().is_some() {
+            agent::read_stream(&operation, &self.name, path).await?
+        } else {
+            self.backend
+                .sandbox_ops()
+                .fs_read_stream(self.backend.clone(), &self.name, path)
+                .await?
+        };
+        stream.runtime = operation.runtime;
+        Ok(stream)
     }
 
     /// Read an entire open file handle into memory.
     pub async fn read_handle(
         &self,
-        handle: FsHandle,
+        handle: &FsHandle,
         offset: u64,
         len: Option<u64>,
     ) -> MicrosandboxResult<Bytes> {
-        let client = self.agent_client(Operation::SandboxFsReadHandle)?;
-        agent::read_handle(client, handle, offset, len).await
+        handle.read(offset, len).await
     }
 
     /// Read an open file handle with streaming.
     pub async fn read_handle_stream(
         &self,
-        handle: FsHandle,
+        handle: &FsHandle,
         offset: u64,
         len: Option<u64>,
     ) -> MicrosandboxResult<FsReadStream> {
-        let client = self.agent_client(Operation::SandboxFsReadHandleStream)?;
-        agent::read_handle_stream(client, handle, offset, len, None).await
+        handle.read_stream(offset, len).await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -254,11 +320,15 @@ impl<'a> SandboxFsOps<'a> {
 
     /// Write data to a file in the guest, creating it if it doesn't exist.
     pub async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::write(&operation, &self.name, path, data.as_ref().to_vec()).await;
+        }
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .fs_write(
                 self.backend.clone(),
-                self.name,
+                &self.name,
                 path,
                 data.as_ref().to_vec(),
             )
@@ -270,58 +340,70 @@ impl<'a> SandboxFsOps<'a> {
     /// Returns an [`FsWriteSink`] for writing data in chunks. Call
     /// [`FsWriteSink::close`] when done writing.
     pub async fn write_stream(&self, path: &str) -> MicrosandboxResult<FsWriteSink> {
-        self.backend
-            .sandboxes()
-            .fs_write_stream(self.backend.clone(), self.name, path)
-            .await
+        let operation = self.prepare().await?;
+        let mut stream = if operation.local_client().is_some() {
+            agent::write_stream(&operation, &self.name, path).await?
+        } else {
+            self.backend
+                .sandbox_ops()
+                .fs_write_stream(self.backend.clone(), &self.name, path)
+                .await?
+        };
+        stream
+            .retention
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .runtime = operation.runtime;
+        Ok(stream)
     }
 
     /// Write data to an open file handle.
     pub async fn write_handle(
         &self,
-        handle: FsHandle,
+        handle: &FsHandle,
         offset: u64,
         data: impl AsRef<[u8]>,
     ) -> MicrosandboxResult<()> {
-        let client = self.agent_client(Operation::SandboxFsWriteHandle)?;
-        agent::write_handle(client, handle, offset, data.as_ref()).await
+        handle.write(offset, data).await
     }
 
     /// Write to an open file handle with streaming.
     pub async fn write_handle_stream(
         &self,
-        handle: FsHandle,
+        handle: &FsHandle,
         offset: u64,
         len: Option<u64>,
     ) -> MicrosandboxResult<FsWriteSink> {
-        let client = self.agent_client(Operation::SandboxFsWriteHandleStream)?;
-        agent::write_handle_stream(client, handle, offset, len, None, false).await
+        handle.write_stream(offset, len).await
     }
 
     //----------------------------------------------------------------------------------------------
     // Handle Operations
     //----------------------------------------------------------------------------------------------
 
-    /// Open a file and return an agentd-side handle.
+    /// Open a file and return an owned, run-bound handle.
     pub async fn open_file(
         &self,
         path: &str,
         options: FsOpenOptions,
     ) -> MicrosandboxResult<FsHandle> {
-        let client = self.agent_client(Operation::SandboxFsOpenFile)?;
-        agent::open_file(&client, path, options).await
+        self.require_owned_handle_support(Operation::SandboxFsOpenFile)?;
+        let operation = self.prepare().await?;
+        let client = operation.fs_agent(&self.name).await?;
+        FsHandle::open(client, path.to_owned(), Some(options), operation.runtime).await
     }
 
-    /// Open a directory and return an agentd-side handle.
+    /// Open a directory and return an owned, run-bound handle.
     pub async fn open_dir(&self, path: &str) -> MicrosandboxResult<FsHandle> {
-        let client = self.agent_client(Operation::SandboxFsOpenDir)?;
-        agent::open_dir(&client, path).await
+        self.require_owned_handle_support(Operation::SandboxFsOpenDir)?;
+        let operation = self.prepare().await?;
+        let client = operation.fs_agent(&self.name).await?;
+        FsHandle::open(client, path.to_owned(), None, operation.runtime).await
     }
 
     /// Close an open file or directory handle.
     pub async fn close_handle(&self, handle: FsHandle) -> MicrosandboxResult<()> {
-        let client = self.agent_client(Operation::SandboxFsCloseHandle)?;
-        agent::close_handle(&client, handle).await
+        handle.close().await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -330,20 +412,23 @@ impl<'a> SandboxFsOps<'a> {
 
     /// List the immediate children of a directory in the guest (non-recursive).
     pub async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::list(&operation, &self.name, path).await;
+        }
         self.backend
-            .sandboxes()
-            .fs_list(self.backend.clone(), self.name, path)
+            .sandbox_ops()
+            .fs_list(self.backend.clone(), &self.name, path)
             .await
     }
 
     /// Read the next batch from an open directory handle.
     pub async fn read_dir_handle(
         &self,
-        handle: FsHandle,
+        handle: &FsHandle,
         limit: Option<u32>,
     ) -> MicrosandboxResult<Vec<FsEntry>> {
-        let client = self.agent_client(Operation::SandboxFsReadDirHandle)?;
-        agent::read_dir_handle(&client, handle, limit).await
+        handle.read_dir(limit).await
     }
 
     /// Read the next batch from an open directory handle.
@@ -351,7 +436,7 @@ impl<'a> SandboxFsOps<'a> {
     /// Compatibility alias for [`read_dir_handle`](Self::read_dir_handle).
     pub async fn read_dir(
         &self,
-        handle: FsHandle,
+        handle: &FsHandle,
         limit: Option<u32>,
     ) -> MicrosandboxResult<Vec<FsEntry>> {
         self.read_dir_handle(handle, limit).await
@@ -359,23 +444,32 @@ impl<'a> SandboxFsOps<'a> {
 
     /// Create a directory (and parents).
     pub async fn mkdir(&self, path: &str) -> MicrosandboxResult<()> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::mkdir(&operation, &self.name, path).await;
+        }
         self.backend
-            .sandboxes()
-            .fs_mkdir(self.backend.clone(), self.name, path)
+            .sandbox_ops()
+            .fs_mkdir(self.backend.clone(), &self.name, path)
             .await
     }
 
     /// Remove a directory recursively.
     pub async fn remove_dir(&self, path: &str) -> MicrosandboxResult<()> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::remove(&operation, &self.name, path, true).await;
+        }
         self.backend
-            .sandboxes()
-            .fs_remove(self.backend.clone(), self.name, path, true)
+            .sandbox_ops()
+            .fs_remove(self.backend.clone(), &self.name, path, true)
             .await
     }
 
     /// Remove an empty directory.
     pub async fn remove_empty_dir(&self, path: &str) -> MicrosandboxResult<()> {
-        agent::remove_dir(self.dialer(), self.name, path, false).await
+        let operation = self.prepare().await?;
+        agent::remove_dir(&operation, &self.name, path, false).await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -384,41 +478,56 @@ impl<'a> SandboxFsOps<'a> {
 
     /// Delete a single file. Use [`remove_dir`](Self::remove_dir) for directories.
     pub async fn remove(&self, path: &str) -> MicrosandboxResult<()> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::remove(&operation, &self.name, path, false).await;
+        }
         self.backend
-            .sandboxes()
-            .fs_remove(self.backend.clone(), self.name, path, false)
+            .sandbox_ops()
+            .fs_remove(self.backend.clone(), &self.name, path, false)
             .await
     }
 
     /// Copy a file within the sandbox.
     pub async fn copy(&self, from: &str, to: &str) -> MicrosandboxResult<()> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::copy(&operation, &self.name, from, to).await;
+        }
         self.backend
-            .sandboxes()
-            .fs_copy(self.backend.clone(), self.name, from, to)
+            .sandbox_ops()
+            .fs_copy(self.backend.clone(), &self.name, from, to)
             .await
     }
 
     /// Rename/move a file or directory.
     pub async fn rename(&self, from: &str, to: &str) -> MicrosandboxResult<()> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::rename(&operation, &self.name, from, to).await;
+        }
         self.backend
-            .sandboxes()
-            .fs_rename(self.backend.clone(), self.name, from, to)
+            .sandbox_ops()
+            .fs_rename(self.backend.clone(), &self.name, from, to)
             .await
     }
 
     /// Read the target of a symbolic link.
     pub async fn read_link(&self, path: &str) -> MicrosandboxResult<String> {
-        agent::read_link(self.dialer(), self.name, path).await
+        let operation = self.prepare().await?;
+        agent::read_link(&operation, &self.name, path).await
     }
 
     /// Create a symbolic link.
     pub async fn symlink(&self, target: &str, link_path: &str) -> MicrosandboxResult<()> {
-        agent::symlink(self.dialer(), self.name, target, link_path).await
+        let operation = self.prepare().await?;
+        agent::symlink(&operation, &self.name, target, link_path).await
     }
 
     /// Resolve a path to its canonical absolute form.
     pub async fn real_path(&self, path: &str) -> MicrosandboxResult<String> {
-        agent::real_path(self.dialer(), self.name, path).await
+        let operation = self.prepare().await?;
+        agent::real_path(&operation, &self.name, path).await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -427,9 +536,13 @@ impl<'a> SandboxFsOps<'a> {
 
     /// Get file/directory metadata.
     pub async fn stat(&self, path: &str) -> MicrosandboxResult<FsMetadata> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::stat(&operation, &self.name, path).await;
+        }
         self.backend
-            .sandboxes()
-            .fs_stat(self.backend.clone(), self.name, path)
+            .sandbox_ops()
+            .fs_stat(self.backend.clone(), &self.name, path)
             .await
     }
 
@@ -439,14 +552,8 @@ impl<'a> SandboxFsOps<'a> {
         path: &str,
         follow_symlink: bool,
     ) -> MicrosandboxResult<FsMetadata> {
-        agent::stat_with_follow(self.dialer(), self.name, path, follow_symlink).await
-    }
-
-    pub(crate) async fn stat_answer(
-        &self,
-        path: &str,
-    ) -> MicrosandboxResult<Result<FsMetadata, String>> {
-        agent::stat_answer(self.dialer(), self.name, path).await
+        let operation = self.prepare().await?;
+        agent::stat_with_follow(&operation, &self.name, path, follow_symlink).await
     }
 
     /// Update file/directory metadata.
@@ -456,44 +563,47 @@ impl<'a> SandboxFsOps<'a> {
         follow_symlink: bool,
         attrs: FsSetAttrs,
     ) -> MicrosandboxResult<()> {
-        agent::set_stat(self.dialer(), self.name, path, follow_symlink, attrs).await
+        let operation = self.prepare().await?;
+        agent::set_stat(&operation, &self.name, path, follow_symlink, attrs).await
     }
 
     /// Get metadata for an open file or directory handle.
-    pub async fn stat_handle(&self, handle: FsHandle) -> MicrosandboxResult<FsMetadata> {
-        let client = self.agent_client(Operation::SandboxFsStatHandle)?;
-        agent::stat_handle(&client, handle).await
+    pub async fn stat_handle(&self, handle: &FsHandle) -> MicrosandboxResult<FsMetadata> {
+        handle.stat().await
     }
 
     /// Get metadata for an open file or directory handle.
     ///
     /// Compatibility alias for [`stat_handle`](Self::stat_handle).
-    pub async fn fstat(&self, handle: FsHandle) -> MicrosandboxResult<FsMetadata> {
+    pub async fn fstat(&self, handle: &FsHandle) -> MicrosandboxResult<FsMetadata> {
         self.stat_handle(handle).await
     }
 
     /// Update metadata for an open file handle.
     pub async fn set_stat_handle(
         &self,
-        handle: FsHandle,
+        handle: &FsHandle,
         attrs: FsSetAttrs,
     ) -> MicrosandboxResult<()> {
-        let client = self.agent_client(Operation::SandboxFsSetStatHandle)?;
-        agent::set_stat_handle(&client, handle, attrs).await
+        handle.set_stat(attrs).await
     }
 
     /// Update metadata for an open file handle.
     ///
     /// Compatibility alias for [`set_stat_handle`](Self::set_stat_handle).
-    pub async fn fset_stat(&self, handle: FsHandle, attrs: FsSetAttrs) -> MicrosandboxResult<()> {
+    pub async fn fset_stat(&self, handle: &FsHandle, attrs: FsSetAttrs) -> MicrosandboxResult<()> {
         self.set_stat_handle(handle, attrs).await
     }
 
     /// Check whether a file or directory exists at the given path in the guest.
     pub async fn exists(&self, path: &str) -> MicrosandboxResult<bool> {
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::exists(&operation, &self.name, path).await;
+        }
         self.backend
-            .sandboxes()
-            .fs_exists(self.backend.clone(), self.name, path)
+            .sandbox_ops()
+            .fs_exists(self.backend.clone(), &self.name, path)
             .await
     }
 
@@ -507,12 +617,19 @@ impl<'a> SandboxFsOps<'a> {
         host_path: impl AsRef<Path>,
         guest_path: &str,
     ) -> MicrosandboxResult<()> {
+        // Host paths belong to this SDK process; anchor once before preparation yields.
+        let host_path = std::path::absolute(host_path.as_ref())?;
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::copy_from_host(&operation, &self.name, host_path.as_path(), guest_path)
+                .await;
+        }
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .fs_copy_from_host(
                 self.backend.clone(),
-                self.name,
-                host_path.as_ref(),
+                &self.name,
+                host_path.as_path(),
                 guest_path,
             )
             .await
@@ -528,39 +645,22 @@ impl<'a> SandboxFsOps<'a> {
         guest_path: &str,
         host_path: impl AsRef<Path>,
     ) -> MicrosandboxResult<()> {
+        // Host paths belong to this SDK process; anchor once before preparation yields.
+        let host_path = std::path::absolute(host_path.as_ref())?;
+        let operation = self.prepare().await?;
+        if operation.local_client().is_some() {
+            return agent::copy_to_host(&operation, &self.name, guest_path, host_path.as_path())
+                .await;
+        }
         self.backend
-            .sandboxes()
+            .sandbox_ops()
             .fs_copy_to_host(
                 self.backend.clone(),
-                self.name,
+                &self.name,
                 guest_path,
-                host_path.as_ref(),
+                host_path.as_path(),
             )
             .await
-    }
-
-    /// The backend as an agent dialer: the relay socket locally, the agent
-    /// WebSocket route on cloud.
-    fn dialer(&self) -> &dyn Backend {
-        self.backend.as_ref()
-    }
-
-    fn agent_client(&self, op: Operation) -> MicrosandboxResult<Arc<AgentClient>> {
-        self.client
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or_else(|| MicrosandboxError::unsupported(op, self.unsupported_reason()))
-    }
-
-    /// Why handle-based fs operations are unavailable without a live agent
-    /// connection: local callers should go through `Sandbox::fs` on a live
-    /// sandbox; cloud backends do not expose them at all.
-    fn unsupported_reason(&self) -> UnsupportedReason {
-        #[cfg(feature = "local")]
-        if self.backend.as_local().is_some() {
-            return UnsupportedReason::UseInstead(Operation::SandboxFs);
-        }
-        UnsupportedReason::LocalOnly
     }
 }
 
@@ -574,7 +674,7 @@ impl FsReadStream {
         id: u32,
         rx: mpsc::Receiver<AgentFrame>,
         client: Arc<AgentClient>,
-        close_handle: Option<FsHandle>,
+        close_handle: Option<AgentFsHandle>,
         bulk: Option<BulkReceiveState>,
     ) -> Self {
         Self {
@@ -585,6 +685,8 @@ impl FsReadStream {
             finished: false,
             bulk,
             bulk_finish_seen: false,
+            runtime: None,
+            file: None,
         }
     }
 
@@ -593,6 +695,19 @@ impl FsReadStream {
     /// Returns `None` when the stream is complete (after `FsResponse`).
     /// Returns an error if the guest reported a failure.
     pub async fn recv(&mut self) -> MicrosandboxResult<Option<Bytes>> {
+        let result = self.recv_inner().await;
+        if result.is_err() {
+            self.schedule_cleanup();
+            self.finished = true;
+        } else if matches!(result, Ok(None)) {
+            self.runtime.take();
+            self.file.take();
+            self.client.take();
+        }
+        result
+    }
+
+    async fn recv_inner(&mut self) -> MicrosandboxResult<Option<Bytes>> {
         if self.finished {
             return Ok(None);
         }
@@ -662,8 +777,11 @@ impl FsReadStream {
                     }
                     MessageType::FsResponse | MessageType::CoreError => {
                         let response = filesystem_response(msg);
-                        let close_result = self.close_owned_handle().await;
                         self.finished = true;
+                        // Terminal observation releases ownership even if the caller
+                        // cancels while the close acknowledgement is pending.
+                        let _retained = (self.runtime.take(), self.file.take());
+                        let close_result = self.close_owned_handle().await;
                         let resp = response?;
                         if !resp.ok {
                             return Err(MicrosandboxError::SandboxFsOps(
@@ -683,10 +801,34 @@ impl FsReadStream {
                 },
             }
         }
+        self.finished = true;
+        let _retained = (self.runtime.take(), self.file.take());
         self.close_owned_handle().await?;
         Err(MicrosandboxError::SandboxFsOps(
             "filesystem read stream closed before terminal response".into(),
         ))
+    }
+
+    fn schedule_cleanup(&mut self) {
+        if self.close_handle.is_none() && self.bulk.is_none() {
+            self.runtime.take();
+            self.file.take();
+            self.client.take();
+            return;
+        }
+        if let Some(client) = self.client.take() {
+            spawn_fs_cleanup(
+                self.id,
+                client,
+                self.close_handle.take(),
+                self.bulk.is_some(),
+                self.runtime.take(),
+                self.file.take(),
+            );
+        } else {
+            self.runtime.take();
+            self.file.take();
+        }
     }
 
     /// Collect all remaining data into bytes.
@@ -706,8 +848,9 @@ impl FsReadStream {
     }
 
     async fn fail(&mut self, message: &str) -> MicrosandboxResult<Option<Bytes>> {
-        let _ = self.close_owned_handle().await;
         self.finished = true;
+        let _retained = (self.runtime.take(), self.file.take());
+        let _ = self.close_owned_handle().await;
         Err(MicrosandboxError::SandboxFsOps(message.into()))
     }
 }
@@ -722,7 +865,7 @@ impl FsWriteSink {
         id: u32,
         client: Arc<AgentClient>,
         rx: mpsc::Receiver<AgentFrame>,
-        close_handle: Option<FsHandle>,
+        close_handle: Option<AgentFsHandle>,
         bulk: Option<BulkSendState>,
     ) -> Self {
         let bulk_active = bulk.is_some();
@@ -737,17 +880,70 @@ impl FsWriteSink {
             close_handle,
             finished: false,
             bulk_active,
+            retention: std::sync::Mutex::new(FsRetention {
+                runtime: None,
+                file: None,
+            }),
+            cleanup_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// Write a chunk of data.
     pub async fn write(&self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
-        self.write_owned(data.as_ref().to_vec()).await
+        let result = self.write_owned(data.as_ref().to_vec()).await;
+        if result.is_err() {
+            self.schedule_cleanup();
+        }
+        result
+    }
+
+    pub(super) fn retain_file(&mut self, file: Arc<super::fs_handle::FsHandleState>) {
+        self.retention
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .file = Some(file);
+    }
+
+    fn schedule_cleanup(&self) {
+        if self
+            .cleanup_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let mut retention = self
+            .retention
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        spawn_fs_cleanup(
+            self.id,
+            self.client.clone(),
+            self.close_handle,
+            self.bulk_active,
+            retention.runtime.take(),
+            retention.file.take(),
+        );
     }
 
     /// Write an already-owned chunk without cloning it at the SDK stream boundary.
     async fn write_owned(&self, data: Vec<u8>) -> MicrosandboxResult<()> {
+        if self
+            .cleanup_started
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(MicrosandboxError::SandboxFsOps(
+                "filesystem write stream failed or closed".into(),
+            ));
+        }
         let mut protocol = self.protocol.lock().await;
+        if self
+            .cleanup_started
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(MicrosandboxError::SandboxFsOps(
+                "filesystem write stream failed or closed".into(),
+            ));
+        }
         let protocol = protocol.as_mut().ok_or_else(|| {
             MicrosandboxError::SandboxFsOps("filesystem write stream is already closed".into())
         })?;
@@ -802,6 +998,16 @@ impl FsWriteSink {
     /// This must be called to finalize the write operation. Returns an
     /// error if the guest reports a write failure.
     pub async fn close(mut self) -> MicrosandboxResult<()> {
+        // Failure already handed this stream's handle to cleanup. Sending EOF
+        // or closing it again could act on a numeric ID reused by the agent.
+        if self
+            .cleanup_started
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(MicrosandboxError::SandboxFsOps(
+                "filesystem write stream failed or closed".into(),
+            ));
+        }
         let protocol = self.protocol.get_mut().take().ok_or_else(|| {
             MicrosandboxError::SandboxFsOps("filesystem write stream is already closed".into())
         })?;
@@ -839,24 +1045,61 @@ impl FsWriteSink {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl<T: Context + ?Sized> FsAgentSource for T {
+    fn fs_agent<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Arc<AgentClient>>> {
+        Box::pin(async move {
+            self.dial_agent(name, std::time::Duration::from_secs(10))
+                .await
+                .map(Arc::new)
+        })
+    }
+}
+
+impl FsOperation {
+    fn local_client(&self) -> Option<Arc<AgentClient>> {
+        #[cfg(feature = "local")]
+        if let Some(runtime) = &self.runtime
+            && let crate::context::SandboxInner::Local(local) = &runtime.inner
+        {
+            return Some(local.client.clone());
+        }
+        None
+    }
+}
+
+impl FsAgentSource for FsOperation {
+    fn retained_runtime(&self) -> Option<Arc<RuntimeSession>> {
+        self.runtime.clone()
+    }
+    fn fs_agent<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Arc<AgentClient>>> {
+        Box::pin(async move {
+            if let Some(client) = self.local_client() {
+                return Ok(client);
+            }
+            self.backend.as_ref().fs_agent(name).await
+        })
+    }
+}
+
 impl Drop for FsReadStream {
     fn drop(&mut self) {
-        if self.finished || self.bulk.is_none() {
-            return;
+        if !self.finished {
+            self.schedule_cleanup();
         }
-        let Some(client) = self.client.take() else {
-            return;
-        };
-        spawn_fs_bulk_cancel(self.id, client, self.close_handle.take());
     }
 }
 
 impl Drop for FsWriteSink {
     fn drop(&mut self) {
-        if self.finished || !self.bulk_active {
-            return;
+        if !self.finished {
+            self.schedule_cleanup();
         }
-        spawn_fs_bulk_cancel(self.id, Arc::clone(&self.client), self.close_handle.take());
     }
 }
 
@@ -864,21 +1107,35 @@ impl Drop for FsWriteSink {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Best-effort cancellation keeps a dropped SDK stream from draining or retaining guest work.
-fn spawn_fs_bulk_cancel(id: u32, client: Arc<AgentClient>, close_handle: Option<FsHandle>) {
-    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+fn spawn_fs_cleanup(
+    id: u32,
+    client: Arc<AgentClient>,
+    close_handle: Option<AgentFsHandle>,
+    bulk: bool,
+    runtime: Option<Arc<RuntimeSession>>,
+    file: Option<Arc<super::fs_handle::FsHandleState>>,
+) {
+    let Ok(executor) = tokio::runtime::Handle::try_current() else {
         return;
     };
-    runtime.spawn(async move {
-        let cancel = BulkCancel {
-            kind: BulkKind::Filesystem,
-            reason: BulkCancelReason::CallerCancelled,
-            message: "host filesystem stream was dropped".into(),
-        };
-        let _ = client.cancel_bulk(id, &cancel).await;
-        if let Some(handle) = close_handle {
-            let _ = agent::close_handle(&client, handle).await;
-        }
+    executor.spawn(async move {
+        let _retained = (runtime, file);
+        // Destructor/error cleanup is bounded; it must not pin a run forever
+        // after the consumer has gone away or the transport has failed.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            if bulk {
+                let cancel = BulkCancel {
+                    kind: BulkKind::Filesystem,
+                    reason: BulkCancelReason::CallerCancelled,
+                    message: "host filesystem stream ended before completion".into(),
+                };
+                let _ = client.cancel_bulk(id, &cancel).await;
+            }
+            if let Some(handle) = close_handle {
+                let _ = agent::close_handle(&client, handle).await;
+            }
+        })
+        .await;
     });
 }
 
@@ -1122,24 +1379,24 @@ pub(crate) mod agent {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient, backend::Backend};
+    use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient, context::Context};
 
     use super::{
-        FsEntry, FsHandle, FsMetadata, FsReadStream, FsWriteSink, check_response,
-        entry_info_to_fs_entry, entry_info_to_metadata, filesystem_response,
+        AgentFsHandle, FsAgentSource, FsEntry, FsMetadata, FsReadStream, FsWriteSink,
+        check_response, entry_info_to_fs_entry, entry_info_to_metadata, filesystem_response,
         receive_fs_bulk_acceptance, should_offer_fs_write_bulk,
     };
 
     /// Open a fresh agent connection for the named sandbox.
     pub(crate) async fn connect_agent(
-        backend: &dyn Backend,
+        backend: &dyn Context,
         name: &str,
     ) -> MicrosandboxResult<AgentClient> {
         connect_agent_with_timeout(backend, name, std::time::Duration::from_secs(10)).await
     }
 
     pub(crate) async fn connect_agent_with_timeout(
-        backend: &dyn Backend,
+        backend: &dyn Context,
         name: &str,
         timeout: std::time::Duration,
     ) -> MicrosandboxResult<AgentClient> {
@@ -1150,7 +1407,7 @@ pub(crate) mod agent {
         client: &AgentClient,
         path: &str,
         options: FsOpenOptions,
-    ) -> MicrosandboxResult<FsHandle> {
+    ) -> MicrosandboxResult<AgentFsHandle> {
         let req = FsRequest {
             op: FsOp::OpenFile {
                 path: path.to_string(),
@@ -1173,7 +1430,10 @@ pub(crate) mod agent {
         }
     }
 
-    pub(crate) async fn open_dir(client: &AgentClient, path: &str) -> MicrosandboxResult<FsHandle> {
+    pub(crate) async fn open_dir(
+        client: &AgentClient,
+        path: &str,
+    ) -> MicrosandboxResult<AgentFsHandle> {
         let req = FsRequest {
             op: FsOp::OpenDir {
                 path: path.to_string(),
@@ -1197,7 +1457,7 @@ pub(crate) mod agent {
 
     pub(crate) async fn close_handle(
         client: &AgentClient,
-        handle: FsHandle,
+        handle: AgentFsHandle,
     ) -> MicrosandboxResult<()> {
         let req = FsRequest {
             op: FsOp::CloseHandle { handle },
@@ -1209,7 +1469,7 @@ pub(crate) mod agent {
 
     pub(crate) async fn read_handle(
         client: Arc<AgentClient>,
-        handle: FsHandle,
+        handle: AgentFsHandle,
         offset: u64,
         len: Option<u64>,
     ) -> MicrosandboxResult<Bytes> {
@@ -1221,10 +1481,10 @@ pub(crate) mod agent {
 
     pub(crate) async fn read_handle_stream(
         client: Arc<AgentClient>,
-        handle: FsHandle,
+        handle: AgentFsHandle,
         offset: u64,
         len: Option<u64>,
-        close_handle: Option<FsHandle>,
+        close_handle: Option<AgentFsHandle>,
     ) -> MicrosandboxResult<FsReadStream> {
         let req = FsRequest {
             op: FsOp::Read {
@@ -1273,7 +1533,7 @@ pub(crate) mod agent {
 
     pub(crate) async fn write_handle(
         client: Arc<AgentClient>,
-        handle: FsHandle,
+        handle: AgentFsHandle,
         offset: u64,
         data: &[u8],
     ) -> MicrosandboxResult<()> {
@@ -1287,10 +1547,10 @@ pub(crate) mod agent {
 
     pub(crate) async fn write_handle_stream(
         client: Arc<AgentClient>,
-        handle: FsHandle,
+        handle: AgentFsHandle,
         offset: u64,
         len: Option<u64>,
-        close_handle: Option<FsHandle>,
+        close_handle: Option<AgentFsHandle>,
         exact_owned_payload: bool,
     ) -> MicrosandboxResult<FsWriteSink> {
         let req = FsRequest {
@@ -1333,7 +1593,7 @@ pub(crate) mod agent {
 
     pub(crate) async fn read_dir_handle(
         client: &AgentClient,
-        handle: FsHandle,
+        handle: AgentFsHandle,
         limit: Option<u32>,
     ) -> MicrosandboxResult<Vec<FsEntry>> {
         let req = FsRequest {
@@ -1359,7 +1619,7 @@ pub(crate) mod agent {
 
     pub(crate) async fn stat_handle(
         client: &AgentClient,
-        handle: FsHandle,
+        handle: AgentFsHandle,
     ) -> MicrosandboxResult<FsMetadata> {
         let req = FsRequest {
             op: FsOp::FStat { handle },
@@ -1384,7 +1644,7 @@ pub(crate) mod agent {
 
     pub(crate) async fn set_stat_handle(
         client: &AgentClient,
-        handle: FsHandle,
+        handle: AgentFsHandle,
         attrs: FsSetAttrs,
     ) -> MicrosandboxResult<()> {
         let req = FsRequest {
@@ -1396,48 +1656,40 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn read(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<Bytes> {
-        let client = Arc::new(connect_agent(backend, name).await?);
-        let handle = open_file(&client, path, super::read_only_open_options()).await?;
-        let mut stream = read_handle_stream(client, handle, 0, None, Some(handle)).await?;
-        let mut data = Vec::new();
-        while let Some(chunk) = stream.recv().await? {
-            data.extend_from_slice(&chunk);
-        }
-        Ok(Bytes::from(data))
+        read_stream(backend, name, path).await?.collect().await
     }
 
     pub(crate) async fn read_stream(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<FsReadStream> {
-        let client = Arc::new(connect_agent(backend, name).await?);
-        let handle = open_file(&client, path, super::read_only_open_options()).await?;
-
-        read_handle_stream(client, handle, 0, None, Some(handle)).await
+        let client = backend.fs_agent(name).await?;
+        let guard = super::FsHandle::open(
+            client.clone(),
+            path.to_owned(),
+            Some(super::read_only_open_options()),
+            backend.retained_runtime(),
+        )
+        .await?;
+        let handle = guard.raw();
+        let mut stream = read_handle_stream(client, handle, 0, None, Some(handle)).await?;
+        stream.runtime = backend.retained_runtime();
+        guard.transfer_close();
+        Ok(stream)
     }
 
     pub(crate) async fn write(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
         data: Vec<u8>,
     ) -> MicrosandboxResult<()> {
-        let client = Arc::new(connect_agent(backend, name).await?);
-        let handle = open_file(&client, path, super::write_open_options()).await?;
-        let sink = write_handle_stream(
-            client,
-            handle,
-            0,
-            Some(data.len() as u64),
-            Some(handle),
-            true,
-        )
-        .await?;
+        let sink = open_write_stream(backend, name, path, Some(data.len() as u64), true).await?;
         for chunk in data.chunks(FS_CHUNK_SIZE) {
             sink.write(chunk).await?;
         }
@@ -1445,22 +1697,45 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn write_stream(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<FsWriteSink> {
-        let client = Arc::new(connect_agent(backend, name).await?);
-        let handle = open_file(&client, path, super::write_open_options()).await?;
+        open_write_stream(backend, name, path, None, false).await
+    }
 
-        write_handle_stream(client, handle, 0, None, Some(handle), false).await
+    async fn open_write_stream(
+        backend: &(impl FsAgentSource + ?Sized),
+        name: &str,
+        path: &str,
+        len: Option<u64>,
+        prefer_inline: bool,
+    ) -> MicrosandboxResult<FsWriteSink> {
+        let client = backend.fs_agent(name).await?;
+        let guard = super::FsHandle::open(
+            client.clone(),
+            path.to_owned(),
+            Some(super::write_open_options()),
+            backend.retained_runtime(),
+        )
+        .await?;
+        let handle = guard.raw();
+        let mut sink =
+            write_handle_stream(client, handle, 0, len, Some(handle), prefer_inline).await?;
+        sink.retention
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .runtime = backend.retained_runtime();
+        guard.transfer_close();
+        Ok(sink)
     }
 
     pub(crate) async fn list(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<Vec<FsEntry>> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::List {
                 path: path.to_string(),
@@ -1485,11 +1760,11 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn mkdir(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::Mkdir {
                 path: path.to_string(),
@@ -1503,7 +1778,7 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn remove(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
         recursive: bool,
@@ -1512,7 +1787,7 @@ pub(crate) mod agent {
             return remove_dir(backend, name, path, true).await;
         }
 
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::Remove {
                 path: path.to_string(),
@@ -1524,12 +1799,12 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn remove_dir(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
         recursive: bool,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::RemoveDir {
                 path: path.to_string(),
@@ -1542,12 +1817,12 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn copy(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         from: &str,
         to: &str,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::Copy {
                 src: from.to_string(),
@@ -1560,12 +1835,12 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn rename(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         from: &str,
         to: &str,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::Rename {
                 src: from.to_string(),
@@ -1578,7 +1853,7 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn stat(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<FsMetadata> {
@@ -1586,7 +1861,7 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn stat_answer(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<Result<FsMetadata, String>> {
@@ -1594,7 +1869,7 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn stat_with_follow(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
         follow_symlink: bool,
@@ -1606,12 +1881,12 @@ pub(crate) mod agent {
     }
 
     async fn stat_with_follow_answer(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
         follow_symlink: bool,
     ) -> MicrosandboxResult<Result<FsMetadata, String>> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::Stat {
                 path: path.to_string(),
@@ -1635,13 +1910,13 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn set_stat(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
         follow_symlink: bool,
         attrs: FsSetAttrs,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::SetStat {
                 path: path.to_string(),
@@ -1655,11 +1930,11 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn read_link(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<String> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::ReadLink {
                 path: path.to_string(),
@@ -1684,12 +1959,12 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn symlink(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         target: &str,
         link_path: &str,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::Symlink {
                 target: target.to_string(),
@@ -1703,11 +1978,11 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn real_path(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<String> {
-        let client = connect_agent(backend, name).await?;
+        let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::RealPath {
                 path: path.to_string(),
@@ -1732,7 +2007,7 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn exists(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<bool> {
@@ -1744,7 +2019,7 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn copy_from_host(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         host_path: &Path,
         guest_path: &str,
@@ -1796,7 +2071,7 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn copy_to_host(
-        backend: &dyn Backend,
+        backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         guest_path: &str,
         host_path: &Path,
@@ -2124,6 +2399,77 @@ pub(crate) mod agent {
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "local", unix))]
+    #[tokio::test]
+    async fn failed_write_releases_run_and_cannot_close_a_reused_handle() {
+        use microsandbox_protocol::{
+            codec,
+            fs::{FsOp, FsRequest},
+        };
+
+        let (sb, mut peer, _stdin, _home) = crate::sandbox::lifetime::tests::fixture(None).await;
+        let runtime = sb.prepared_runtime().unwrap();
+        let generation = Arc::downgrade(&runtime);
+        let client = sb.local_state().unwrap().client.clone();
+        let offer = BulkOffer::filesystem_write();
+        let mut bulk = BulkSendState::new(
+            BulkKind::Filesystem,
+            BulkFlow::HostToGuest,
+            offer.max_record_payload,
+            offer.max_record_payload as u64,
+        )
+        .unwrap();
+        bulk.admit(offer.max_record_payload as usize).unwrap();
+        // A peer ending the credit stream is a terminal write failure.
+        let (tx, rx) = mpsc::channel(1);
+        drop(tx);
+        let mut sink = FsWriteSink::new(900, client, rx, Some(73), Some(bulk));
+        sink.retention.get_mut().unwrap().runtime = Some(runtime);
+        drop(sb);
+        assert!(sink.write(b"hello").await.is_err());
+        assert!(generation.upgrade().is_some());
+        let cancel = codec::read_message(&mut peer).await.unwrap();
+        assert_eq!(cancel.t, MessageType::BulkCancel);
+        let close = codec::read_message(&mut peer).await.unwrap();
+        assert!(matches!(
+            close.payload::<FsRequest>().unwrap().op,
+            FsOp::CloseHandle { handle: 73 }
+        ));
+        codec::write_message(
+            &mut peer,
+            &Message::with_payload(
+                MessageType::FsResponse,
+                close.id,
+                &FsResponse {
+                    ok: true,
+                    error: None,
+                    data: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while generation.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed sink must release its run even while retained");
+        assert!(sink.write(b"later").await.is_err());
+        assert!(sink.close().await.is_err());
+        // Cleanup has already closed ID 73. No second close or EOF may be sent.
+        if let Ok(message) = tokio::time::timeout(
+            std::time::Duration::from_millis(30),
+            codec::read_message(&mut peer),
+        )
+        .await
+        {
+            assert!(message.is_err(), "failed sink sent another request");
+        }
+    }
+
     #[test]
     fn only_exact_owned_small_filesystem_writes_stay_inline() {
         assert!(!should_offer_fs_write_bulk(false, true, None));
@@ -2158,6 +2504,8 @@ mod tests {
             finished: false,
             bulk: None,
             bulk_finish_seen: false,
+            runtime: None,
+            file: None,
         };
 
         let error = stream.recv().await.unwrap_err();
@@ -2201,6 +2549,8 @@ mod tests {
                     .unwrap()
                 }),
                 bulk_finish_seen: false,
+                runtime: None,
+                file: None,
             };
 
             if bulk {
@@ -2286,6 +2636,8 @@ mod pause_tests {
             finished: false,
             bulk: None,
             bulk_finish_seen: false,
+            runtime: None,
+            file: None,
         };
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), stream.recv())
             .await
@@ -2377,4 +2729,5 @@ mod pause_tests {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use super::fs_handle::FsHandle;
 pub use microsandbox_protocol::fs::{FsOpenOptions, FsSetAttrs};

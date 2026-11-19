@@ -44,7 +44,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         assert snapshot.reference
         assert snapshot.reference_kind == "path"
         assert snapshot.size_bytes > 0
-        assert snapshot.source_sandbox == base_name
+        assert await snapshot.source_sandbox() == base_name
         assert snapshot.state_kind is SnapshotStateKind.FILE
         assert snapshot.format is SnapshotFormat.RAW
         assert snapshot.scope is SnapshotScope.DISK
@@ -60,11 +60,10 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         assert handle.group == base_name
         assert snapshot.head_update["reason"] == "initialized"
         head = await Snapshot.group_head(base_name)
-        assert head["head"] == snapshot.id
-        assert head["changed"] is False
-        selected = await Snapshot.group_head(snapshot_selector)
+        assert head == snapshot.id
+        selected = await Snapshot.set_group_head(base_name, snapshot.id)
         assert selected["head"] == snapshot.id
-        opened = await handle.open()
+        opened = handle
         assert opened.digest == snapshot.digest
         assert opened.state_kind is SnapshotStateKind.FILE
 
@@ -107,8 +106,8 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
             copied_archive,
             dest=tmp_path / "copied-artifact",
         )
-        copied = await copied_handle.open()
-        assert copied.labels == {"environment": "test"}
+        copied = copied_handle
+        assert await copied.labels() == {"environment": "test"}
         assert (await copied.verify())["upper"]["kind"] == "verified"
     finally:
         if copied_handle is not None:

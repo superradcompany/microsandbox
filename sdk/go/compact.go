@@ -3,8 +3,6 @@ package microsandbox
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 // DiskCompactionOptions selects explicit maintenance, never persisted desired configuration.
@@ -52,20 +50,6 @@ func (s *Sandbox) Compact(ctx context.Context, opts DiskCompactionOptions) (*Dis
 		return nil, err
 	}
 	out, err := s.inner.Compact(ctx, string(data))
-	return parseCompaction(out, err)
-}
-
-// Compact performs explicit maintenance on a running or stopped sandbox.
-func (h *SandboxHandle) Compact(ctx context.Context, opts DiskCompactionOptions) (*DiskCompactionResult, error) {
-	// A metadata handle must not redirect a cloud sandbox's name into local storage.
-	if h.backendKind != BackendLocal {
-		return nil, &Error{Kind: ErrUnsupportedOperation, Message: "disk compaction requires a local sandbox handle"}
-	}
-	data, err := json.Marshal(opts)
-	if err != nil {
-		return nil, err
-	}
-	out, err := ffi.CompactSandbox(ctx, 0, h.name, string(data))
 	return parseCompaction(out, err)
 }
 

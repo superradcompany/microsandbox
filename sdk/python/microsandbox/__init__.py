@@ -1,8 +1,8 @@
 """microsandbox — Python SDK for secure, fast microVM-based sandboxing."""
 
 from microsandbox._microsandbox import (
-    BackendInfo,
     BranchOutcome,
+    Context,
     ExecEvent,
     ExecHandle,
     ExecOutput,
@@ -30,8 +30,8 @@ from microsandbox._microsandbox import (
     PullEvent,
     PullSession,
     Sandbox,
+    Sandboxes,
     SandboxFsOps,
-    SandboxHandle,
     SandboxMetrics,
     SandboxPage,
     SandboxPingResult,
@@ -44,7 +44,7 @@ from microsandbox._microsandbox import (
     Snapshot,
     SnapshotArchive,
     SnapshotCopyBuilder,
-    SnapshotHandle,
+    Snapshots,
     SshClient,
     SshOutput,
     SshServer,
@@ -54,12 +54,8 @@ from microsandbox._microsandbox import (
     StorageRecovery,
     StorageUsage,
     Volume,
-    VolumeHandle,
+    Volumes,
     all_sandbox_metrics,
-    backend_scope,
-    default_backend_info,
-    default_backend_kind,
-    set_default_backend,
     version,
 )
 from microsandbox._microsandbox import (
@@ -115,7 +111,23 @@ from microsandbox.errors import (
     UnsupportedOperationError,
     VolumeNotFoundError,
 )
-from microsandbox.jobs import JobEvent, JobExit, JobInfo, JobLogEntry, JobPage, JobState
+from microsandbox.inspection import (
+    SandboxConfigInspection,
+    SandboxInspectionSpec,
+    SandboxRuntimeInspection,
+)
+from microsandbox.jobs import (
+    JobCompletedEvent,
+    JobEvent,
+    JobExit,
+    JobGapEvent,
+    JobInfo,
+    JobLogEntry,
+    JobOutputEvent,
+    JobOutputSource,
+    JobPage,
+    JobState,
+)
 from microsandbox.setup import (
     InstallOptions,
     ResolvedRuntime,
@@ -136,10 +148,11 @@ from microsandbox.storage_diagnosis import (
 )
 from microsandbox.types import (
     Action,
-    BackendKind,
     ChangeKind,
     ChangeState,
+    ComputeType,
     ConfigPlannedChange,
+    ContextKind,
     CpuPlacement,
     DeploymentProfile,
     DestGroup,
@@ -202,6 +215,7 @@ from microsandbox.types import (
     RootDiskConfig,
     RootDiskKind,
     Rule,
+    SandboxInfo,
     SandboxModificationPlan,
     SandboxStatus,
     ScopedUpstreamCACert,
@@ -227,6 +241,7 @@ from microsandbox.types import (
     TlsConfig,
     TokenBucket,
     ViolationAction,
+    VolumeInfo,
     VolumeKind,
     VsockRoute,
     VsockSocketType,
@@ -234,15 +249,25 @@ from microsandbox.types import (
 
 # Register package discovery separately from explicit user overrides. Rust checks
 # the resolved runtime home before this candidate on each resolution.
+from .contexts import LocalContext, RemoteContext
+
 _bundled_msb = _msb_path()
 if _bundled_msb.is_file():
     _set_packaged_msb_path(str(_bundled_msb))
 
+
 __all__ = [
+    "SandboxConfigInspection",
+    "SandboxInspectionSpec",
+    "SandboxRuntimeInspection",
     "Job",
     "JobAttachment",
     "JobLogStream",
     "JobError",
+    "JobCompletedEvent",
+    "JobGapEvent",
+    "JobOutputEvent",
+    "JobOutputSource",
     "JobEvent",
     "JobExit",
     "JobInfo",
@@ -250,11 +275,8 @@ __all__ = [
     "JobPage",
     "JobState",
     # Backend selection
-    "BackendInfo",
-    "default_backend_info",
     # Sandbox lifecycle (native)
     "Sandbox",
-    "SandboxHandle",
     "SandboxPage",
     "SandboxStopResult",
     "SandboxPingResult",
@@ -264,6 +286,7 @@ __all__ = [
     "ForkOutcome",
     "PullSession",
     "SandboxStatus",
+    "SandboxInfo",
     "ModificationPolicy",
     "SandboxModificationPlan",
     "DiskCompactionDiskResult",
@@ -320,7 +343,6 @@ __all__ = [
     "FsEntryKind",
     # Volumes
     "Volume",
-    "VolumeHandle",
     # Services
     "Service",
     "ServicePage",
@@ -332,13 +354,13 @@ __all__ = [
     "MountKind",
     "StatVirtualization",
     "HostPermissions",
+    "VolumeInfo",
     "VolumeKind",
     "NamedVolumeMode",
     # Snapshots
     "Snapshot",
     "SnapshotArchive",
     "SnapshotCopyBuilder",
-    "SnapshotHandle",
     "SnapshotStateKind",
     "SnapshotFormat",
     "SnapshotScope",
@@ -472,9 +494,10 @@ __all__ = [
     "ResolvedRuntime",
     "RuntimeOrigin",
     "set_libkrunfw_path",
-    "set_default_backend",
-    "backend_scope",
-    "default_backend_kind",
-    "BackendKind",
+    "ComputeType",
+    "ContextKind",
     "version",
 ]
+
+
+__all__ += ["Context", "LocalContext", "RemoteContext", "Sandboxes", "Volumes", "Snapshots"]
