@@ -137,7 +137,9 @@ class Smoke:
         self.run("restore-" + name, "restore", snapshot, "--name", name, *options)
 
     def stop(self, name):
-        self.run("stop-" + name, "stop", name, "--timeout", "5")
+        # Guest filesystem flushes can exceed five seconds on a busy runner.
+        # Keep graceful completion within the normal operation/suite deadlines.
+        self.run("stop-" + name, "stop", name)
         self.active.remove(name)
 
     def check_markers(self, name, value, ram=True):
