@@ -55,6 +55,7 @@ pub struct ExecOptions {
 /// Builder for [`ExecOptions`].
 #[derive(Default)]
 pub struct ExecOptionsBuilder {
+    inherited_argv: bool,
     options: ExecOptions,
 }
 
@@ -193,6 +194,16 @@ pub struct ExecSink {
 //--------------------------------------------------------------------------------------------------
 
 impl ExecOptionsBuilder {
+    /// Mark a program or arguments resolved from sandbox defaults by a higher-level client.
+    pub fn with_inherited_command(mut self, inherited: bool) -> Self {
+        self.inherited_argv = inherited;
+        self
+    }
+
+    pub(crate) fn explicit_argv(&self) -> bool {
+        !self.inherited_argv
+    }
+
     /// Prepend arguments resolved by a higher-level execution helper.
     pub(crate) fn prepend_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
         self.options.args.splice(0..0, args);
@@ -702,7 +713,7 @@ pub(crate) mod agent {
         cols: u16,
     ) -> MicrosandboxResult<ExecHandle> {
         let client = Arc::new(connect_agent(backend, name).await?);
-        exec_stream_on_client(client, name, config, cmd, opts, rows, cols).await
+        exec_stream_on_client(client, name, config, cmd, opts, (rows, cols), true).await
     }
 
     pub(crate) async fn exec_stream_on_client(
@@ -711,9 +722,10 @@ pub(crate) mod agent {
         config: &SandboxConfig,
         cmd: String,
         opts: ExecOptions,
-        rows: u16,
-        cols: u16,
+        size: (u16, u16),
+        explicit_argv: bool,
     ) -> MicrosandboxResult<ExecHandle> {
+        let (rows, cols) = size;
         let policy = client.ready()?.exec_limits;
 
         if let Some(policy) = policy {
@@ -776,7 +788,7 @@ pub(crate) mod agent {
         let input_window = policy.filter(|_| controlled).map(|policy| {
             io::InputWindow::new(policy.input_limit, policy.stdin_chunk_size as usize)
         });
-        let (id, rx) = client.stream(MessageType::ExecRequest, &req).await?;
+        let (id, rx) = client.stream_exec(&req, &env, explicit_argv).await?;
 
         let stdin = match &stdin_mode {
             StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&client), input_window.clone())),

@@ -3,6 +3,7 @@ import { type NapiSnapshotSeed, type NapiContext } from "./internal/napi.js";
 import { withMappedErrors } from "./internal/error-mapping.js";
 import { Sandbox, SandboxListBuilder, sandboxPageFromNapi, type RestoreBuilder, type SandboxBuilder, type SandboxPage } from "./sandbox.js";
 import { Volume, type VolumeBuilder } from "./volume.js";
+import { Snapshot as Group, SnapshotLoadOptions, wrapImportResult, type SnapshotImportResult } from "./snapshot-group.js";
 import { Snapshot, wrapBuilder, type SnapshotBuilder, type HeadUpdate } from "./snapshot.js";
 
 export interface LocalContextOptions {
@@ -25,11 +26,13 @@ export class Context {
   readonly sandboxes: Sandboxes;
   readonly volumes: Volumes;
   readonly snapshots: Snapshots;
+  readonly checkpoints: Checkpoints;
 
   protected constructor(readonly native: NapiContext) {
     this.sandboxes = new Sandboxes(this);
     this.volumes = new Volumes(this);
     this.snapshots = new Snapshots(this);
+    this.checkpoints = new Checkpoints(this);
   }
 
   /** @internal Rewrap already-retained native state without resolving configuration. */
@@ -162,6 +165,27 @@ export class Volumes {
 }
 
 export class Snapshots {
+  constructor(readonly context: Context) {}
+
+  async open(path: string): Promise<Group> {
+    return new Group(await withMappedErrors(() => this.context.native.snapshotGroupOpen(path)));
+  }
+
+  async load(name: string, files: string[], configure: (options: SnapshotLoadOptions) => SnapshotLoadOptions = options => options): Promise<SnapshotImportResult> {
+    const options = configure(new SnapshotLoadOptions()).toNative();
+    return wrapImportResult(await withMappedErrors(() => this.context.native.snapshotGroupLoad(name, [...files], options)));
+  }
+
+  async get(name: string): Promise<Group> {
+    return new Group(await withMappedErrors(() => this.context.native.snapshotGroupGet(name)));
+  }
+
+  async list(): Promise<Group[]> {
+    return (await withMappedErrors(() => this.context.native.snapshotGroupList())).map(group => new Group(group));
+  }
+}
+
+export class Checkpoints {
   async groupHead(group: string): Promise<string | null> {
     return (await withMappedErrors(() => this.context.native.snapshotGroupHead(group))) ?? null;
   }

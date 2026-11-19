@@ -108,12 +108,41 @@ impl Sandbox {
 
 #[napi]
 impl Sandbox {
+    /// Create a new history from this exact sandbox incarnation.
+    #[napi(
+        ts_args_type = "name: string, options?: SnapshotCaptureOptions",
+        ts_return_type = "Promise<SnapshotCreateResult>"
+    )]
+    pub fn snapshot<'env>(
+        &self,
+        env: &'env Env,
+        name: String,
+        options: Option<crate::snapshot_group::JsSnapshotCaptureOptions>,
+    ) -> Result<PromiseRaw<'env, crate::snapshot_group::JsSnapshotCreateResult>> {
+        let options = crate::snapshot_group::capture_options_for_backend(
+            options.unwrap_or_default(),
+            self.backend_kind == "local",
+        );
+        let inner = self.inner.clone();
+        // Keep errors as promise rejections while taking caller-relative inputs synchronously.
+        env.spawn_future(async move {
+            let options = options?;
+            let sandbox = inner.get().await.ok_or_else(consumed_error)?;
+            Ok(crate::snapshot_group::JsSnapshotCreateResult::from_rust(
+                sandbox
+                    .snapshot_with(&name, |_| options)
+                    .await
+                    .map_err(to_napi_error)?,
+            ))
+        })
+    }
+
     /// Capture this retained identity without resolving a replacement by name.
     #[napi]
-    pub async fn snapshot(&self, name: String) -> Result<crate::snapshot::JsSnapshot> {
+    pub async fn checkpoint(&self, name: String) -> Result<crate::snapshot::JsSnapshot> {
         let sandbox = self.inner.get().await.ok_or_else(consumed_error)?;
         Ok(crate::snapshot::JsSnapshot::from_rust(
-            sandbox.snapshot(&name).await.map_err(to_napi_error)?,
+            sandbox.checkpoint(&name).await.map_err(to_napi_error)?,
         ))
     }
 
@@ -534,6 +563,57 @@ impl Sandbox {
             configure_modify(sb.modify(), options.as_ref())?
         };
         run_modify(builder, modify_dry_run(options.as_ref())).await
+    }
+
+    /// Apply once and retain exact operation identities; older runtimes return no tracking.
+    #[napi]
+    pub async fn modify_with_resize_tracking(
+        &self,
+        options: Option<SandboxModifyOptions>,
+    ) -> Result<String> {
+        let builder = {
+            let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+            configure_modify(sb.modify(), options.as_ref())?
+        };
+        crate::resize::run_modify_tracked(builder, modify_dry_run(options.as_ref())).await
+    }
+
+    /// Read current operation identities without changing targets.
+    #[napi]
+    pub async fn resize_operations(&self) -> Result<String> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        crate::resize::operations_json(sb.resize_operations().await)
+    }
+
+    /// Wait on supplied operation identities without following later requests.
+    #[napi]
+    pub async fn wait_for_resize_operations(
+        &self,
+        operations_json: String,
+        timeout_ms: Option<f64>,
+    ) -> Result<String> {
+        let operations = crate::resize::parse_operations(&operations_json)?;
+        let timeout = resize_wait_timeout(timeout_ms)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        resize_status_json(sb.wait_for_resize_operations(&operations, timeout).await)
+    }
+
+    /// Read the current live resize status as a JSON array.
+    #[napi]
+    pub async fn resize_status(&self) -> Result<String> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        resize_status_json(sb.resize_status().await)
+    }
+
+    /// Wait for live resizes to settle. Omitted waits without a deadline; `0` checks once.
+    #[napi]
+    pub async fn wait_until_resized(&self, timeout_ms: Option<f64>) -> Result<String> {
+        let timeout = resize_wait_timeout(timeout_ms)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        resize_status_json(match timeout {
+            Some(timeout) => sb.wait_until_resized_with_timeout(timeout).await,
+            None => sb.wait_until_resized().await,
+        })
     }
 
     /// Compact root and owned-data disk prefixes; the limit includes the base, not the writable head.
@@ -1498,6 +1578,25 @@ pub(crate) async fn run_modify(
     }
     .map_err(to_napi_error)?;
     serde_json::to_string(&plan).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+pub(crate) fn resize_status_json(
+    status: microsandbox::MicrosandboxResult<Vec<microsandbox::sandbox::ResourceResizeStatus>>,
+) -> Result<String> {
+    let status = status.map_err(to_napi_error)?;
+    serde_json::to_string(&status).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+pub(crate) fn resize_wait_timeout(timeout_ms: Option<f64>) -> Result<Option<Duration>> {
+    match timeout_ms {
+        Some(ms) if !ms.is_finite() || ms < 0.0 => Err(Error::from_reason(format!(
+            "resize wait timeout must be a non-negative finite number of milliseconds, got {ms}"
+        ))),
+        Some(ms) => Duration::try_from_secs_f64(ms / 1000.0)
+            .map(Some)
+            .map_err(|_| Error::from_reason("resize wait timeout is out of range")),
+        None => Ok(None),
+    }
 }
 
 fn cpu_count_u8(cpus: u32) -> Result<u8> {

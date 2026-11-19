@@ -21,7 +21,7 @@ use crate::context::Context;
 /// A context-bound snapshot returned by creation, lookup, listing and import.
 /// Descriptor-dependent inspection loads on demand and never changes the captured identity.
 #[derive(Clone)]
-pub struct Snapshot {
+pub struct Checkpoint {
     pub(crate) backend: Arc<dyn Context>,
     pub(crate) reference: SnapshotReference,
     pub(crate) snapshot_id: String,
@@ -75,7 +75,7 @@ pub enum SnapshotReference {
 
 /// Builder for [`SnapshotConfig`].
 ///
-/// Constructed via [`Snapshot::builder`]. The snapshot name is fixed at
+/// Constructed via [`Checkpoint::builder`]. The snapshot name is fixed at
 /// construction; the source sandbox is set with
 /// [`from_sandbox`](Self::from_sandbox) and is required.
 pub struct SnapshotBuilder {
@@ -106,7 +106,57 @@ pub struct SnapshotArchive {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl Snapshot {
+impl Checkpoint {
+    /// Export this immutable local checkpoint for the specified age recipients.
+    #[cfg(feature = "local")]
+    pub async fn save_encrypted(
+        &self,
+        out: &Path,
+        opts: SaveOpts,
+        recipients: &[String],
+    ) -> MicrosandboxResult<()> {
+        let local = self.backend.as_local().ok_or_else(|| {
+            crate::MicrosandboxError::InvalidConfig(
+                "encrypted archives require the local backend".into(),
+            )
+        })?;
+        local
+            .export_encrypted(self.reference(), self.digest(), out, opts, recipients)
+            .await
+    }
+
+    /// Remove this exact checkpoint, retaining its operation-owned head decision.
+    pub async fn remove(&self) -> MicrosandboxResult<super::CheckpointRemoveResult> {
+        self.remove_with(|options| options).await
+    }
+
+    /// Configure removal. Force never bypasses reader leases or identity validation.
+    /// Already missing/replaced checkpoints fail rather than claim a new removal.
+    pub async fn remove_with(
+        &self,
+        configure: impl FnOnce(super::CheckpointRemoveOptions) -> super::CheckpointRemoveOptions,
+    ) -> MicrosandboxResult<super::CheckpointRemoveResult> {
+        self.backend
+            .snapshot_ops()
+            .remove_checkpoint(self, configure(Default::default()))
+            .await
+    }
+
+    /// Export this exact checkpoint with default archive controls.
+    pub async fn save(&self, out: impl AsRef<Path>) -> MicrosandboxResult<()> {
+        self.save_to(out.as_ref(), SaveOpts::default()).await
+    }
+
+    /// Export this exact checkpoint with portable or incremental archive controls.
+    pub async fn save_with(
+        &self,
+        out: impl AsRef<Path>,
+        configure: impl FnOnce(SaveOpts) -> SaveOpts,
+    ) -> MicrosandboxResult<()> {
+        self.save_to(out.as_ref(), configure(SaveOpts::default()))
+            .await
+    }
+
     /// Delete this captured snapshot identity through its retained context.
     /// Remote path snapshots return Unsupported until providers support conditional deletion.
     pub async fn destroy(&self, force: bool) -> MicrosandboxResult<()> {
@@ -124,7 +174,7 @@ impl Snapshot {
     /// Start configuring a snapshot named `name` using the active backend.
     ///
     /// The source sandbox is required:
-    /// `Snapshot::builder("clean").from_sandbox("box").create()`.
+    /// `Checkpoint::builder("clean").from_sandbox("box").create()`.
     ///
     /// Without a destination, local snapshots use the default snapshot store
     /// and cloud snapshots use managed storage. A destination selects a local
@@ -204,6 +254,16 @@ impl Snapshot {
         Ok(observed)
     }
 
+    /// Whether the checkpoint descriptor returned by this operation records portable defaults.
+    /// An unopened handle has no descriptor evidence and returns `None` without provider I/O.
+    pub fn has_portable_defaults(&self) -> Option<bool> {
+        self.loaded_manifest.as_ref().map(|manifest| {
+            manifest
+                .extensions
+                .contains_key(microsandbox_types::snapshot::saved_config::SAVED_CONFIG_EXTENSION)
+        })
+    }
+
     /// Internal restore preparation has already opened the descriptor under its storage lease.
     pub(crate) fn loaded_manifest(&self) -> MicrosandboxResult<&Manifest> {
         self.loaded_manifest.as_ref().ok_or_else(|| {
@@ -257,7 +317,7 @@ impl Snapshot {
     }
 
     /// Get a handle by the active backend's public snapshot identifier.
-    pub async fn get(name_or_digest: &str) -> MicrosandboxResult<Snapshot> {
+    pub async fn get(name_or_digest: &str) -> MicrosandboxResult<Checkpoint> {
         let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
@@ -266,13 +326,13 @@ impl Snapshot {
     }
 
     /// List snapshots visible through the active backend.
-    pub async fn list() -> MicrosandboxResult<Vec<Snapshot>> {
+    pub async fn list() -> MicrosandboxResult<Vec<Checkpoint>> {
         let backend = crate::context::configured_context();
         backend.snapshot_ops().list(backend.clone()).await
     }
 
     /// Remove a snapshot by a backend-relative string reference.
-    pub async fn remove(path_or_name: &str, force: bool) -> MicrosandboxResult<()> {
+    pub async fn remove_by_reference(path_or_name: &str, force: bool) -> MicrosandboxResult<()> {
         let reference = SnapshotReference::Auto(path_or_name.to_string());
         Self::remove_ref(reference, force).await
     }
@@ -291,7 +351,7 @@ impl Snapshot {
     }
 }
 
-impl Snapshot {
+impl Checkpoint {
     /// Verify this snapshot's recorded integrity.
     ///
     /// This artifact-file operation is currently local-only. Other backends
@@ -338,7 +398,7 @@ impl Snapshot {
     ///
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
-    pub async fn list_dir(dir: impl AsRef<Path>) -> MicrosandboxResult<Vec<Snapshot>> {
+    pub async fn list_dir(dir: impl AsRef<Path>) -> MicrosandboxResult<Vec<Checkpoint>> {
         let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
@@ -373,7 +433,11 @@ impl Snapshot {
     ///
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
-    pub async fn save(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()> {
+    pub async fn save_by_reference(
+        name_or_path: &str,
+        out: &Path,
+        opts: SaveOpts,
+    ) -> MicrosandboxResult<()> {
         let backend = crate::context::configured_context();
         let reference = SnapshotReference::Auto(name_or_path.to_string());
         backend.snapshot_ops().save(reference, out, opts).await
@@ -383,7 +447,7 @@ impl Snapshot {
     ///
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
-    pub async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Snapshot> {
+    pub async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Checkpoint> {
         let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
@@ -436,7 +500,7 @@ impl SnapshotReference {
     }
 }
 
-impl Snapshot {
+impl Checkpoint {
     /// Name alias (None for digest-only entries).
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
@@ -447,7 +511,7 @@ impl Snapshot {
         self.parent_digest.as_deref()
     }
 
-    /// Snapshot payload scope.
+    /// Checkpoint payload scope.
     pub fn scope(&self) -> SnapshotScope {
         self.scope
     }
@@ -497,7 +561,7 @@ impl Snapshot {
         self.migration_error_code.as_deref()
     }
 
-    /// Snapshot creation time (from manifest).
+    /// Checkpoint creation time (from manifest).
     pub fn created_at(&self) -> chrono::NaiveDateTime {
         self.created_at
     }
@@ -598,7 +662,7 @@ impl SnapshotBuilder {
     }
 
     /// Build and execute the snapshot in one step.
-    pub async fn create(self) -> MicrosandboxResult<Snapshot> {
+    pub async fn create(self) -> MicrosandboxResult<Checkpoint> {
         let context = self.context.clone();
         context
             .snapshot_ops()
@@ -607,7 +671,7 @@ impl SnapshotBuilder {
     }
 }
 
-impl Snapshot {
+impl Checkpoint {
     /// Stable portable identity, independent of the descriptor digest.
     ///
     /// Cloud legacy descriptors use the released legacy-import identity mapping;
@@ -640,7 +704,7 @@ impl Snapshot {
         path: &Path,
         dest: Option<&Path>,
         base: &str,
-    ) -> MicrosandboxResult<Snapshot> {
+    ) -> MicrosandboxResult<Checkpoint> {
         Self::load_with_options(
             path,
             LoadOpts {
@@ -652,12 +716,15 @@ impl Snapshot {
         .await
     }
     /// Import into a local group with explicit dependency and head policy.
-    pub async fn load_with_options(path: &Path, opts: LoadOpts) -> MicrosandboxResult<Snapshot> {
+    pub async fn load_with_options(path: &Path, opts: LoadOpts) -> MicrosandboxResult<Checkpoint> {
         let mut handles = Self::load_many(&[path.to_path_buf()], opts).await?;
         Ok(handles.remove(0))
     }
     /// Validate all inputs before publication and return their heads in input order.
-    pub async fn load_many(paths: &[PathBuf], opts: LoadOpts) -> MicrosandboxResult<Vec<Snapshot>> {
+    pub async fn load_many(
+        paths: &[PathBuf],
+        opts: LoadOpts,
+    ) -> MicrosandboxResult<Vec<Checkpoint>> {
         let backend = crate::context::configured_context();
         backend
             .snapshot_ops()
@@ -667,7 +734,7 @@ impl Snapshot {
     /// Read the selected snapshot ID. An existing headless group returns None.
     pub async fn group_head(group: &str) -> MicrosandboxResult<Option<SnapshotId>> {
         crate::context::configured_context()
-            .snapshots()
+            .checkpoints()
             .group_head(group)
             .await
     }
@@ -675,7 +742,7 @@ impl Snapshot {
     /// Select a member of the group by its stable ID.
     pub async fn set_group_head(group: &str, id: &SnapshotId) -> MicrosandboxResult<HeadUpdate> {
         crate::context::configured_context()
-            .snapshots()
+            .checkpoints()
             .set_group_head(group, id)
             .await
     }
@@ -711,7 +778,7 @@ impl Snapshot {
     }
 }
 
-impl Snapshot {
+impl Checkpoint {
     /// Local group captured at lookup or creation.
     pub fn group(&self) -> Option<&str> {
         self.group.as_deref()
@@ -796,10 +863,10 @@ impl<'a> From<&'a str> for SnapshotStateKind<'a> {
     }
 }
 
-impl fmt::Debug for Snapshot {
+impl fmt::Debug for Checkpoint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("Snapshot")
+            .debug_struct("Checkpoint")
             .field("reference", &self.reference)
             .field("digest", &self.digest)
             .field("name", &self.name)
@@ -807,8 +874,8 @@ impl fmt::Debug for Snapshot {
     }
 }
 
-impl From<&Snapshot> for SnapshotReference {
-    fn from(snapshot: &Snapshot) -> Self {
+impl From<&Checkpoint> for SnapshotReference {
+    fn from(snapshot: &Checkpoint) -> Self {
         snapshot.reference()
     }
 }

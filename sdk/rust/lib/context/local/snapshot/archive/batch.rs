@@ -1,17 +1,30 @@
 //! Local backend: One-pass archive staging and dependency resolution for a local group import.
 
-use super::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
+
 use microsandbox_image::snapshot::{Manifest, SnapshotId};
+
+use super::*;
+use crate::{SnapshotImportError, SnapshotImportOutcome};
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-struct StagedArchive {
-    source: PathBuf,
-    snapshots: tempfile::TempDir,
-    cache: tempfile::TempDir,
-    unpacked: UnpackedArchive,
+pub(super) struct StagedArchive {
+    pub(super) source: PathBuf,
+    pub(super) snapshots: tempfile::TempDir,
+    pub(super) cache: tempfile::TempDir,
+    pub(super) unpacked: UnpackedArchive,
+}
+
+struct ImportProgress {
+    operation_id: String,
+    group_path: Option<PathBuf>,
+    outcome: Arc<AtomicU8>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -22,7 +35,50 @@ pub(super) async fn load(
     local: &LocalContext,
     archives: &[PathBuf],
     opts: LoadOpts,
-) -> MicrosandboxResult<Vec<SnapshotHandle>> {
+) -> MicrosandboxResult<ImportedBatch> {
+    load_with_identities(local, archives, opts, None).await
+}
+
+pub(super) async fn load_with_identities(
+    local: &LocalContext,
+    archives: &[PathBuf],
+    opts: LoadOpts,
+    keys: Option<Arc<Vec<age::x25519::Identity>>>,
+) -> MicrosandboxResult<ImportedBatch> {
+    let mut progress = ImportProgress {
+        operation_id: format!("{:032x}", rand::random::<u128>()),
+        group_path: None,
+        outcome: Arc::new(AtomicU8::new(SnapshotImportOutcome::NotCommitted as u8)),
+    };
+    load_inner(local, archives, opts, keys, &mut progress)
+        .await
+        .map_err(|source| {
+            let phase = progress.outcome.load(Ordering::Acquire);
+            let outcome = if phase == SnapshotImportOutcome::NotCommitted as u8 {
+                SnapshotImportOutcome::NotCommitted
+            } else if phase == SnapshotImportOutcome::Committed as u8 {
+                SnapshotImportOutcome::Committed
+            } else {
+                SnapshotImportOutcome::Unknown
+            };
+            MicrosandboxError::SnapshotImport(Box::new(SnapshotImportError {
+                operation_id: progress.operation_id,
+                archives: archives.to_vec(),
+                group_path: progress.group_path,
+                outcome,
+                detail: source.to_string(),
+                source: Box::new(source),
+            }))
+        })
+}
+
+async fn load_inner(
+    local: &LocalContext,
+    archives: &[PathBuf],
+    opts: LoadOpts,
+    keys: Option<Arc<Vec<age::x25519::Identity>>>,
+    progress: &mut ImportProgress,
+) -> MicrosandboxResult<ImportedBatch> {
     if archives.is_empty() {
         return Err(MicrosandboxError::InvalidConfig(
             "snapshot load requires at least one archive".into(),
@@ -30,6 +86,12 @@ pub(super) async fn load(
     }
     let started = Instant::now();
     let snapshots_dir = opts.dest.clone().unwrap_or_else(|| local.snapshots_dir());
+    {
+        let destination = snapshots_dir.clone();
+        tokio::task::spawn_blocking(move || super::super::group::check_atomic_import(&destination))
+            .await
+            .map_err(|error| MicrosandboxError::Io(std::io::Error::other(error)))??;
+    }
     // Validate the requested namespace before doing expensive I/O. This read does not create a
     // group; a bad or incomplete batch must not publish any of its snapshot members.
     let existing = match opts.group.as_deref() {
@@ -43,7 +105,7 @@ pub(super) async fn load(
 
     let mut staged = Vec::with_capacity(archives.len());
     for archive in archives {
-        staged.push(unpack(archive, &snapshots_dir, &cache_tmp).await?);
+        staged.push(unpack(archive, &snapshots_dir, &cache_tmp, keys.clone()).await?);
     }
     let unpack_us = started.elapsed().as_micros();
     let has_dependencies = staged.iter().try_fold(false, |found, item| {
@@ -153,6 +215,7 @@ pub(super) async fn load(
     }
     // Keep all original source paths intact until every borrowing read is done. Materializing
     // file snapshots below consumes their archive-shared layer directories.
+    let mut verified_signers = std::collections::BTreeSet::new();
     let mut imported = Vec::new();
     let mut candidates = Vec::with_capacity(archives.len());
     let mut aliases = BTreeMap::new();
@@ -168,6 +231,14 @@ pub(super) async fn load(
                 &snapshots,
                 local.config().fs_state_limit(),
             )?;
+        }
+        if let Some(inventory) = &item.unpacked.inventory {
+            verified_signers.extend(encryption::import_credentials(
+                local,
+                inventory,
+                &snapshots,
+                keys.as_deref().map(Vec::as_slice),
+            )?);
         }
         let head_index = match item.unpacked.head.as_deref() {
             Some(head) => snapshots
@@ -237,13 +308,32 @@ pub(super) async fn load(
             let target = publication.path().join(snapshot.id().as_str());
             if !target.exists() {
                 tokio::fs::rename(snapshot.path(), target).await?;
+            } else {
+                // Identical descriptors can arrive from a plain and an encrypted
+                // archive in either order. Preserve the validated signer in this
+                // unpublished batch without touching an installed member.
+                #[cfg(feature = "net")]
+                {
+                    let name = microsandbox_runtime::checkpoint::tls_receipt::SIDECAR;
+                    let source = snapshot.path().join(name);
+                    let destination = target.join(name);
+                    if source.try_exists()? && !destination.try_exists()? {
+                        tokio::fs::rename(source, destination).await?;
+                    }
+                }
             }
         }
     }
-    let group_dir = super::super::group::ensure(&snapshots_dir, opts.group.as_deref()).await?;
+    let destination_group =
+        super::super::group::ensure_import(&snapshots_dir, opts.group.as_deref()).await?;
+    let group_dir = destination_group.directory.clone();
     // The member does not exist yet. Resolve its existing parent once so reservation,
     // publication, and completion retain the same catalog address across path aliases.
     let destination = group_dir.canonicalize()?;
+    progress.group_path = Some(destination.clone());
+    let db = local.db().await?.write().clone();
+    let writer = super::super::writer::WriterLease::acquire(&destination).await?;
+    super::super::publication::complete_batch(&db, &destination).await?;
     let mut publication_leases = Vec::new();
     for id in identities.keys() {
         publication_leases.push(
@@ -253,32 +343,41 @@ pub(super) async fn load(
             .await?,
         );
     }
-    let db = local.db().await?.write().clone();
     let publish_candidates = candidates.clone();
     let set_head = opts.set_head;
-    let update = tokio::spawn(async move {
+    let outcome = progress.outcome.clone();
+    let operation = progress.operation_id.clone();
+    let (mut publication, _writer) = tokio::spawn(async move {
         // Cancellation must not drop staging, image pins, or namespace pins while the
         // blocking group publisher is still moving members into their final names.
-        let _protection = (image_operations, publication_leases);
+        let _protection = (image_operations, publication_leases, destination_group);
         for snapshot in imported.iter().flatten() {
             let path = destination.join(snapshot.id().as_str());
             super::super::publication::prepare(&db, &path, snapshot.digest(), snapshot.manifest())
                 .await?;
         }
-        let update = super::super::group::publish_batch(
+        let mut publication = super::super::group::publish_batch_indexed_admitted(
             &destination,
             publication.path(),
             &aliases,
             &publish_candidates,
             set_head,
+            super::super::group::IndexedPublication {
+                operation,
+                outcome,
+                verified_signers,
+            },
+            writer.clone(),
         )
         .await?;
-        for snapshot in imported.iter().flatten() {
-            let path = destination.join(snapshot.id().as_str());
-            super::super::publication::complete(&db, &path, snapshot.digest(), snapshot.manifest())
-                .await?;
+        if let Some(warnings) =
+            super::super::publication::complete_batch_report(&db, &destination).await?
+        {
+            publication.warnings.extend(warnings);
         }
-        Ok::<_, MicrosandboxError>(update)
+        // Keep admission until the caller has projected every returned member. A
+        // concurrent remover must not turn a committed report into a missing-file race.
+        Ok::<_, MicrosandboxError>((publication, writer))
     })
     .await
     .map_err(|error| {
@@ -288,12 +387,36 @@ pub(super) async fn load(
         .file_name()
         .and_then(|name| name.to_str())
         .expect("validated group name");
-    let mut handles = Vec::with_capacity(candidates.len());
-    for id in &candidates {
+    let legacy_update = publication.head_update.clone();
+    let head_update = publication
+        .head_update
+        .take()
+        .unwrap_or_else(|| crate::HeadUpdate {
+            group: group.into(),
+            previous: None,
+            head: None,
+            reason: crate::HeadUpdateReason::AmbiguousCandidates,
+            changed: false,
+        });
+    let mut members = BTreeMap::new();
+    for id in identities.keys() {
         let path = group_dir.join(id.as_str());
         let snapshot = store::open_snapshot(local, path.to_string_lossy().as_ref()).await?;
-        handles.push(handle(&snapshot, group, update.clone())?);
+        members.insert(
+            id.to_string(),
+            handle(&snapshot, group, Some(head_update.clone()))?,
+        );
     }
+    // The legacy result is per input archive (including duplicates). The new report
+    // contains every unique supplied member, including bundled dependencies.
+    let heads = candidates
+        .iter()
+        .map(|id| {
+            let mut handle = members[id.as_str()].clone();
+            handle.head_update = legacy_update.clone();
+            handle
+        })
+        .collect();
     tracing::info!(
         target: "microsandbox_checkpoint_timing",
         operation = "snapshot_load_batch",
@@ -303,13 +426,23 @@ pub(super) async fn load(
         validate_us,
         "snapshot batch load timing"
     );
-    Ok(handles)
+    Ok(ImportedBatch {
+        operation_id: progress.operation_id.clone(),
+        group_path: group_dir,
+        heads,
+        members: members.into_values().collect(),
+        added: publication.added,
+        reused: publication.reused,
+        head_update,
+        warnings: publication.warnings,
+    })
 }
 
-async fn unpack(
+pub(super) async fn unpack(
     archive: &Path,
     root: &Path,
     cache_tmp: &Path,
+    keys: Option<std::sync::Arc<Vec<age::x25519::Identity>>>,
 ) -> MicrosandboxResult<StagedArchive> {
     let snapshots = tempfile::Builder::new()
         .prefix(".msb-snapshot-import-")
@@ -317,7 +450,16 @@ async fn unpack(
     let cache = tempfile::Builder::new()
         .prefix("snapshot-import-")
         .tempdir_in(cache_tmp)?;
-    let file = tokio::fs::File::open(archive).await?;
+    let file = if let Some(keys) = keys {
+        let path = archive.to_path_buf();
+        let tmp = cache_tmp.to_path_buf();
+        let plain = tokio::task::spawn_blocking(move || encryption::decrypt(&path, &keys, &tmp))
+            .await
+            .map_err(|e| MicrosandboxError::Custom(format!("archive decryption worker: {e}")))??;
+        tokio::fs::File::from_std(plain)
+    } else {
+        tokio::fs::File::open(archive).await?
+    };
     let mut reader = BufReader::with_capacity(1024 * 1024, file);
     let compressed = reader
         .fill_buf()
@@ -341,7 +483,7 @@ async fn unpack(
     })
 }
 
-async fn read_manifest(directory: &Path) -> MicrosandboxResult<Manifest> {
+pub(super) async fn read_manifest(directory: &Path) -> MicrosandboxResult<Manifest> {
     let bytes = tokio::fs::read(directory.join(DESCRIPTOR_FILENAME)).await?;
     Manifest::from_bytes(&bytes)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))
@@ -356,9 +498,8 @@ fn merge_aliases(
     inventory: &ArchiveInventory,
     head: &SnapshotId,
 ) -> MicrosandboxResult<()> {
-    let mut incoming: BTreeMap<String, String> = inventory
-        .extensions
-        .get("msb-snapshot-member-names")
+    let mut incoming: BTreeMap<String, String> = extensions::Extension::MemberNames
+        .resolve(&inventory.extensions, &inventory.requires)?
         .map(|value| serde_json::from_value(value.clone()))
         .transpose()?
         .unwrap_or_default();
@@ -485,5 +626,32 @@ mod tests {
             "{error}"
         );
         assert_eq!(aliases, original);
+
+        let mut canonical = inventory.clone();
+        let capability = extensions::Extension::MemberNames;
+        let payload = canonical
+            .extensions
+            .remove(capability.historical())
+            .unwrap();
+        canonical
+            .extensions
+            .insert(capability.canonical().into(), payload);
+        assert!(merge_aliases(&mut aliases, &canonical, &incoming).is_err());
+        assert_eq!(aliases, original);
+
+        canonical.extensions.insert(
+            capability.canonical().into(),
+            serde_json::json!({incoming.to_string(): "imported-name"}),
+        );
+        canonical.requires.push(capability.canonical().into());
+        merge_aliases(&mut aliases, &canonical, &incoming).unwrap();
+        assert_eq!(aliases.get(incoming.as_str()).unwrap(), "imported-name");
+        let before_conflict = aliases.clone();
+        canonical.extensions.insert(
+            capability.historical().into(),
+            serde_json::json!({incoming.to_string(): "conflicting-name"}),
+        );
+        assert!(merge_aliases(&mut aliases, &canonical, &incoming).is_err());
+        assert_eq!(aliases, before_conflict);
     }
 }

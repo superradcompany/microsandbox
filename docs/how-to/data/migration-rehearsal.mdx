@@ -85,13 +85,13 @@ msb stop migration-base
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap create postgres-before-migration \
+msb snap create migration-base --name postgres-before-migration \
   --sandbox migration-base \
   --integrity
 ```
 
 ```powershell Windows
-msb snap create postgres-before-migration `
+msb snap create migration-base --name postgres-before-migration `
   --sandbox migration-base `
   --integrity
 ```
@@ -101,7 +101,7 @@ Verify the captured snapshot:
 
 <CodeGroup>
 ```sh Shell
-msb snap verify migration-base:postgres-before-migration
+msb snap verify migration-base --checkpoint postgres-before-migration
 ```
 </CodeGroup>
 
@@ -115,14 +115,14 @@ Restore into an unused sandbox name, then start PostgreSQL explicitly. Dedicated
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap restore migration-base:postgres-before-migration --name migration-test \
+msb create --from-snapshot migration-base --checkpoint postgres-before-migration --name migration-test \
   --memory 1G -p 127.0.0.1:55432:5432
 msb exec --no-tty --user postgres migration-test -- \
   /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
 ```
 
 ```powershell Windows
-msb snap restore migration-base:postgres-before-migration --name migration-test `
+msb create --from-snapshot migration-base --checkpoint postgres-before-migration --name migration-test `
   --memory 1G -p 127.0.0.1:55432:5432
 msb exec --no-tty --user postgres migration-test -- `
   /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
@@ -180,14 +180,14 @@ After removing the stopped sandbox, restore a fresh copy under the same name and
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap restore migration-base:postgres-before-migration --name migration-test \
+msb create --from-snapshot migration-base --checkpoint postgres-before-migration --name migration-test \
   --memory 1G -p 127.0.0.1:55432:5432
 msb exec --no-tty --user postgres migration-test -- \
   /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
 ```
 
 ```powershell Windows
-msb snap restore migration-base:postgres-before-migration --name migration-test `
+msb create --from-snapshot migration-base --checkpoint postgres-before-migration --name migration-test `
   --memory 1G -p 127.0.0.1:55432:5432
 msb exec --no-tty --user postgres migration-test -- `
   /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
@@ -241,9 +241,11 @@ Remove the snapshot:
 
 <CodeGroup>
 ```sh Shell
-msb snap rm migration-base:postgres-before-migration
+msb snap rm migration-base --checkpoint postgres-before-migration
 ```
 </CodeGroup>
+
+This removes the checkpoint and keeps the `migration-base` history. To reuse the group name on a fresh run, first confirm it contains no checkpoints you need with `msb snap ls migration-base`, then remove it with `msb snap rm migration-base --all`.
 
 Clear the password from the host shell:
 

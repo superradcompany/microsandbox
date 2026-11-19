@@ -201,12 +201,12 @@ impl SandboxFsOps {
     pub(crate) async fn stat_prepared(
         sandbox: &Sandbox,
         path: &str,
-    ) -> MicrosandboxResult<FsMetadata> {
+    ) -> MicrosandboxResult<Result<FsMetadata, String>> {
         let operation = FsOperation {
             backend: sandbox.backend.clone(),
             runtime: Some(sandbox.prepared_runtime()?),
         };
-        agent::stat(&operation, sandbox.name(), path).await
+        agent::stat_answer(&operation, sandbox.name(), path).await
     }
 
     pub(crate) fn new(sandbox: &Sandbox) -> Self {
@@ -1860,12 +1860,32 @@ pub(crate) mod agent {
         stat_with_follow(backend, name, path, true).await
     }
 
+    pub(crate) async fn stat_answer(
+        backend: &(impl FsAgentSource + ?Sized),
+        name: &str,
+        path: &str,
+    ) -> MicrosandboxResult<Result<FsMetadata, String>> {
+        stat_with_follow_answer(backend, name, path, true).await
+    }
+
     pub(crate) async fn stat_with_follow(
         backend: &(impl FsAgentSource + ?Sized),
         name: &str,
         path: &str,
         follow_symlink: bool,
     ) -> MicrosandboxResult<FsMetadata> {
+        match stat_with_follow_answer(backend, name, path, follow_symlink).await? {
+            Ok(metadata) => Ok(metadata),
+            Err(message) => Err(MicrosandboxError::SandboxFsOps(message)),
+        }
+    }
+
+    async fn stat_with_follow_answer(
+        backend: &(impl FsAgentSource + ?Sized),
+        name: &str,
+        path: &str,
+        follow_symlink: bool,
+    ) -> MicrosandboxResult<Result<FsMetadata, String>> {
         let client = backend.fs_agent(name).await?;
         let req = FsRequest {
             op: FsOp::Stat {
@@ -1878,13 +1898,11 @@ pub(crate) mod agent {
         let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
-            return Err(MicrosandboxError::SandboxFsOps(
-                resp.error.unwrap_or_else(|| "unknown error".into()),
-            ));
+            return Ok(Err(resp.error.unwrap_or_else(|| "unknown error".into())));
         }
 
         match resp.data {
-            Some(FsResponseData::Stat(info)) => Ok(entry_info_to_metadata(&info)),
+            Some(FsResponseData::Stat(info)) => Ok(Ok(entry_info_to_metadata(&info))),
             _ => Err(MicrosandboxError::SandboxFsOps(
                 "unexpected response data for stat".into(),
             )),

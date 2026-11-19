@@ -3,7 +3,7 @@
 
 use microsandbox::sandbox::SandboxStatus;
 use microsandbox::{
-    Context, MicrosandboxError, MicrosandboxResult, RemoteContext, Sandbox, Snapshot, Volume,
+    Checkpoint, Context, MicrosandboxError, MicrosandboxResult, RemoteContext, Sandbox, Volume,
 };
 use serde_json::{Value, json};
 use std::{
@@ -133,7 +133,7 @@ async fn remote_api_live() {
     .unwrap();
     let s = Sandbox::remote().unwrap();
     let v = Volume::remote().unwrap();
-    let p = Snapshot::remote().unwrap();
+    let p = Checkpoint::remote().unwrap();
     let context = RemoteContext::from_env().unwrap();
     a.check("context_derivation", async {
         context.to_builder().build()?.sandboxes().list().await

@@ -60,6 +60,14 @@ Verify the installation:
 msb --version
 ```
 
+## Unreleased resize-observation dependencies
+
+The resize/telemetry branch pins native Rust crates through workspace Git patches and pins the guest firmware through `vendor/libkrunfw`. No package publication or version bump is needed to build these changes. Initialize the recorded submodule revision with `git submodule update --init vendor/libkrunfw` and explicitly run `just build-libkrunfw` after changing that revision, then rebuild the CLI/SDK artifacts. The ordinary dependency check accepts an existing firmware filename and does not prove it was built from the recorded source commit.
+
+Use the newly built firmware for local qualification (set `MSB_PATH` to the newly built runtime and `MSB_LIBKRUNFW_PATH` to the firmware’s absolute path), and use the matching newly built `agentd`. An older firmware can still run supported workloads, but it lacks authoritative guest-readiness observations; resize observation/wait must report unsupported instead of claiming completion. Never replace that refusal with a target-equals-current heuristic.
+
+The workspace Git patches do not propagate to downstream crates. Before publishing dependent packages, the maintainer must publish the native release and replace those patches with the released dependencies. Until then, qualify from this checkout and retain exact source/binary identities in test reports.
+
 ## Build & Install Loop
 
 The core development cycle is:

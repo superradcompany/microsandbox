@@ -6,7 +6,7 @@ from contextlib import suppress
 
 import pytest
 
-from integration.helpers import IMAGE, remove_sandbox, remove_snapshot
+from integration.helpers import IMAGE, remove_sandbox
 from microsandbox import MicrosandboxError, PullEventType, PullPolicy, Sandbox
 
 
@@ -166,10 +166,10 @@ async def test_restore_with_progress_returns_usable_sandbox_after_exit(
     base = await sandbox_factory("py-sdk-progress-base")
     restored_name = sandbox_name("py-sdk-progress-restored")
     await base.stop()
-    snapshot = await base.snapshot("saved")
+    capture = await base.snapshot(sandbox_name("py-progress-history"))
     restored = None
     try:
-        session = Sandbox.restore_with_progress(snapshot, name=restored_name)
+        session = Sandbox.restore_with_progress(capture.checkpoint, name=restored_name)
         async with session:
             pass
         restored = await session.result()
@@ -180,4 +180,4 @@ async def test_restore_with_progress_returns_usable_sandbox_after_exit(
             with suppress(Exception):
                 await restored.stop()
         await remove_sandbox(restored_name)
-        await remove_snapshot(f"{base.name}:saved")
+        await capture.snapshot.remove()

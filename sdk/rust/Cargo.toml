@@ -21,6 +21,7 @@ default = ["cloud", "download-binaries", "keyring", "local", "net"]
 # Exposes the archive walker to the fuzz harness (sdk/rust/fuzz). Never enabled in shipping builds.
 fuzzing = ["local"]
 local = [
+    "dep:age",
     "dep:astral-tokio-tar",
     "dep:async-compression",
     "dep:blake3",
@@ -36,12 +37,12 @@ local = [
     "dep:microsandbox-migration",
     "dep:microsandbox-runtime",
     "dep:nix",
-    "dep:rand",
     "dep:rayon",
     "dep:reqwest",
     "dep:sea-orm",
     "dep:socket2",
     "dep:tar",
+    "tokio-util/compat",
 ]
 cloud = [
     "dep:httpdate",
@@ -59,9 +60,10 @@ download-binaries = [
 embed-binaries = [
     "local",
 ]
-net = ["dep:microsandbox-network", "microsandbox-runtime?/net"]
+net = ["dep:microsandbox-network", "microsandbox-runtime?/encrypted-snapshot-identity"]
 
 [dependencies]
+age = { workspace = true, optional = true }
 microsandbox-filesystem = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 astral-tokio-tar = { workspace = true, optional = true }
@@ -95,7 +97,7 @@ nix = { workspace = true, features = ["process", "signal", "term"], optional = t
 notify.workspace = true
 object.workspace = true
 semver.workspace = true
-rand = { workspace = true, optional = true }
+rand.workspace = true
 rayon = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["query"], optional = true }
 rustls = { workspace = true, optional = true }

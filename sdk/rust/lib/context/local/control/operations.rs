@@ -154,6 +154,7 @@ impl ControlSession {
         checkpoint_id: String,
         record_integrity: bool,
         guest_flush: microsandbox_types::GuestFlush,
+        retain_configuration: bool,
     ) -> MicrosandboxResult<CheckpointCaptureOutcome> {
         let capabilities = self.capabilities();
         if !capabilities.checkpoint_create {
@@ -165,6 +166,20 @@ impl ControlSession {
             ));
         }
         let request = microsandbox_protocol::control::CheckpointCreate {
+            retain_configuration: retain_configuration.then_some(true),
+            retain_configuration_block_capacity: (retain_configuration
+                && capabilities.configuration_storage
+                && capabilities.configuration_block_capacity)
+                .then_some(true),
+            retain_configuration_exec_limits: (retain_configuration
+                && capabilities.configuration_exec_limits)
+                .then_some(true),
+            retain_configuration_freeze_resources: (retain_configuration
+                && capabilities.configuration_freeze_resources)
+                .then_some(true),
+            retain_configuration_storage: (retain_configuration
+                && capabilities.configuration_storage)
+                .then_some(true),
             guest_flush: Self::capture_flush_policy(Some(capabilities), guest_flush, false)?,
             record_integrity,
             checkpoint_id,
@@ -188,6 +203,7 @@ impl ControlSession {
         &self,
         checkpoint_id: String,
         guest_flush: microsandbox_types::GuestFlush,
+        retain_configuration: bool,
     ) -> MicrosandboxResult<microsandbox_runtime::control::DiskCheckpointControlState> {
         let capabilities = self.capabilities();
         if !capabilities.disk_checkpoint_create {
@@ -195,6 +211,20 @@ impl ControlSession {
                 UnsupportedReason::NotAvailable("this runtime does not support live disk-only snapshots; recreate the sandbox with the updated runtime".into())));
         }
         let request = microsandbox_protocol::control::DiskCheckpointCreate {
+            retain_configuration: retain_configuration.then_some(true),
+            retain_configuration_block_capacity: (retain_configuration
+                && capabilities.configuration_storage
+                && capabilities.configuration_block_capacity)
+                .then_some(true),
+            retain_configuration_exec_limits: (retain_configuration
+                && capabilities.configuration_exec_limits)
+                .then_some(true),
+            retain_configuration_freeze_resources: (retain_configuration
+                && capabilities.configuration_freeze_resources)
+                .then_some(true),
+            retain_configuration_storage: (retain_configuration
+                && capabilities.configuration_storage)
+                .then_some(true),
             checkpoint_id,
             guest_flush: Self::capture_flush_policy(Some(capabilities), guest_flush, true)?,
         };
@@ -203,6 +233,7 @@ impl ControlSession {
             .await
             .map_err(crate::MicrosandboxError::ControlClient)?;
         Ok(microsandbox_runtime::control::DiskCheckpointControlState {
+            configuration: response.configuration,
             checkpoint_id: response.checkpoint_id,
             path: response.path,
             disk: response.disk,
@@ -252,6 +283,7 @@ mod tests {
     fn checkpoint_reply(ok: bool) -> microsandbox_protocol::control::CheckpointResult {
         microsandbox_protocol::control::CheckpointResult {
             checkpoint: Some(microsandbox_protocol::control::CheckpointState {
+                configuration: None,
                 checkpoint_id: "checkpoint_test".into(),
                 checkpoint_root: format!("sha256:{}", "a".repeat(64)),
                 path: "/runtime/checkpoint_test".into(),
