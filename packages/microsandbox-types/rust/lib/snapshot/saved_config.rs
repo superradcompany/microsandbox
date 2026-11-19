@@ -48,7 +48,8 @@ pub use capture_controls::{
     RuntimeCaptureAction, RuntimeCaptureTarget, apply_runtime_capture_controls,
 };
 pub use document::{
-    SAVED_CONFIG_SCHEMA_VERSION, SavedActiveConfig, SavedCaptureProvenance, SavedSandboxConfig,
+    SAVED_CONFIG_EXTENSION, SAVED_CONFIG_SCHEMA_VERSION, SavedActiveConfig, SavedCaptureProvenance,
+    SavedSandboxConfig,
 };
 pub use execution::{
     SavedExecLimits, SavedExecutionConfig, SavedLifetimePolicy, SavedRlimit, SavedU64,

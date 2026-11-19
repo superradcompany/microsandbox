@@ -32,6 +32,12 @@ pub(crate) struct ControlSession {
     connection: ControlConnection,
 }
 
+pub(crate) struct LabelUpdateOwner {
+    boot_id: String,
+    config_delta: bool,
+    caller_overrides_delta: bool,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -46,7 +52,7 @@ impl ControlSession {
     }
 
     /// Read-only capability selection; never treat a mutation failure as a fallback signal.
-    pub(crate) async fn label_update_owner(&self) -> Result<Option<(String, bool)>, SharedError> {
+    pub(crate) async fn label_update_owner(&self) -> Result<Option<LabelUpdateOwner>, SharedError> {
         if self.connection.mode() == ControlMode::Json {
             return Ok(None);
         }
@@ -54,8 +60,13 @@ impl ControlSession {
             Ok(LabelsResponse::Supported {
                 runtime_boot_id,
                 config_delta,
+                caller_overrides_delta,
             }) if !runtime_boot_id.is_empty() && runtime_boot_id.len() <= 128 => {
-                Ok(Some((runtime_boot_id, config_delta)))
+                Ok(Some(LabelUpdateOwner {
+                    boot_id: runtime_boot_id,
+                    config_delta,
+                    caller_overrides_delta,
+                }))
             }
             Ok(_) => Err(Arc::new(ControlClientError::RuntimeChanged)),
             Err(error) => match error.as_ref() {
@@ -75,16 +86,23 @@ impl ControlSession {
 
     pub(crate) async fn update_labels(
         &self,
-        owner: (String, bool),
+        owner: LabelUpdateOwner,
         expected_active: &str,
-        expected_desired: &str,
-        desired_config_json: String,
+        stored: &crate::context::SandboxRecordLocalState,
+        config: &crate::SandboxConfig,
         set: BTreeMap<String, String>,
         remove: Vec<String>,
     ) -> Result<(), SharedError> {
-        let (runtime_boot_id, config_delta) = owner;
+        let runtime_boot_id = owner.boot_id;
+        let invalid = || {
+            Arc::new(ControlClientError::Wire(
+                microsandbox_protocol::wire::WireError::InvalidRecord,
+            ))
+        };
+        let expected_desired = &stored.config_json;
+        let desired_config_json = serde_json::to_string(config).map_err(|_| invalid())?;
         let expected_active_sha256 = hex::encode(Sha256::digest(expected_active.as_bytes()));
-        let request = if config_delta {
+        let request = if owner.config_delta {
             let desired_delta_json = microsandbox_protocol::labels_delta::between(
                 expected_desired,
                 &desired_config_json,
@@ -94,7 +112,32 @@ impl ControlSession {
                     microsandbox_protocol::wire::WireError::InvalidRecord,
                 ))
             })?;
+            let caller_overrides = if owner.caller_overrides_delta {
+                // The runtime stores the reconstructed JSON. Bind the evidence to those
+                // exact bytes, including object order, rather than SDK serialization.
+                let reconstructed = microsandbox_protocol::labels_delta::apply(
+                    expected_desired,
+                    &desired_delta_json,
+                )
+                .map_err(|_| invalid())?;
+                let next = config
+                    .caller_config_overrides_json(&reconstructed)
+                    .map_err(|_| invalid())?
+                    .ok_or_else(invalid)?;
+                let prior = stored.caller_config_overrides_json.as_deref();
+                Some(microsandbox_protocol::labels::CallerOverridesDelta {
+                    expected_sha256: prior.map(|json| hex::encode(Sha256::digest(json.as_bytes()))),
+                    delta_json: microsandbox_protocol::labels_delta::between(
+                        prior.unwrap_or("{}"),
+                        &next,
+                    )
+                    .map_err(|_| invalid())?,
+                })
+            } else {
+                None
+            };
             LabelsRequest::UpdateDelta {
+                caller_overrides,
                 runtime_boot_id: runtime_boot_id.clone(),
                 expected_active_sha256,
                 expected_desired_sha256: hex::encode(Sha256::digest(expected_desired.as_bytes())),

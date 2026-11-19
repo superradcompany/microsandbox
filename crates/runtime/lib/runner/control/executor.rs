@@ -290,6 +290,9 @@ impl RuntimeControlExecutor {
             } => (Some(runtime_boot_id), Some(id)),
             ResizeRequest::Apply {
                 runtime_boot_id, ..
+            }
+            | ResizeRequest::ApplyPair {
+                runtime_boot_id, ..
             } => (Some(runtime_boot_id), None),
             ResizeRequest::Current { runtime_boot_id } => (Some(runtime_boot_id), None),
         };
@@ -320,38 +323,42 @@ impl RuntimeControlExecutor {
         let operations = match request {
             ResizeRequest::Hello => Vec::new(),
             ResizeRequest::Apply { target, .. } => {
-                let id = format!("resize-{}", new_runtime_boot_id());
-                let command = match target {
-                    ResizeTarget::Cpus { online } => ControlRequest::CpuTarget { online },
-                    ResizeTarget::Memory { total_mib } => {
-                        ControlRequest::MemoryTarget { total_mib }
-                    }
-                };
-                let result = self.execute_locked(&mut state, command, Some(id.clone()));
-                if !result.ok {
-                    if result.error_code.as_deref() == Some("memory_pressure") {
-                        return Err(FramedControlError::rejected(
-                            "memory_pressure",
-                            result
-                                .error
-                                .unwrap_or_else(|| "insufficient available guest memory".into()),
-                        ));
-                    }
-                    return Err(FramedControlError {
-                        code: result.error_code.unwrap_or_else(|| "resize_failed".into()),
-                        message: result
-                            .error
-                            .unwrap_or_else(|| "resize was not accepted".into()),
-                        effect: microsandbox_protocol::control::ErrorEffect::Unknown,
-                    });
+                vec![self.apply_tracked_target(&mut state, target)?]
+            }
+            ResizeRequest::ApplyPair {
+                online, total_mib, ..
+            } => {
+                let cpu = ResizeTarget::Cpus { online };
+                let memory = ResizeTarget::Memory { total_mib };
+                if self.vm.cpu_state().is_none() || self.vm.memory_state().is_none() {
+                    return Err(FramedControlError::rejected(
+                        "resize_unavailable",
+                        "both devices must support live resize",
+                    ));
                 }
-                vec![
-                    state
-                        .resize
-                        .get(&id)
-                        .expect("successful resize is recorded before reply")
-                        .clone(),
-                ]
+                if !state.resize.admits(&cpu)
+                    || !state.resize.admits(&memory)
+                    || state.revision.checked_add(2).is_none()
+                {
+                    return Err(FramedControlError::rejected(
+                        "resize_generation_exhausted",
+                        "unable to record both resize operations",
+                    ));
+                }
+                // The memory setter checks fresh pressure before touching either device.
+                // Keep the lock through both admissions so no control request interleaves.
+                let memory = self.apply_tracked_target(&mut state, memory)?;
+                let cpu = self
+                    .apply_tracked_target(&mut state, cpu)
+                    .map_err(|mut error| {
+                        error.effect = microsandbox_protocol::control::ErrorEffect::Unknown;
+                        error.message = format!(
+                            "memory target was accepted before CPU update failed: {}",
+                            error.message
+                        );
+                        error
+                    })?;
+                vec![cpu, memory]
             }
             ResizeRequest::Read { id, .. } => {
                 if state.resize.get(&id).is_none() {
@@ -368,6 +375,41 @@ impl RuntimeControlExecutor {
             tracking: state.resize.tracking(),
             operations,
         })
+    }
+
+    fn apply_tracked_target(
+        &self,
+        state: &mut ExecutorState,
+        target: ResizeTarget,
+    ) -> Result<microsandbox_protocol::resize::ResizeOperation, FramedControlError> {
+        let id = format!("resize-{}", new_runtime_boot_id());
+        let command = match target {
+            ResizeTarget::Cpus { online } => ControlRequest::CpuTarget { online },
+            ResizeTarget::Memory { total_mib } => ControlRequest::MemoryTarget { total_mib },
+        };
+        let result = self.execute_locked(state, command, Some(id.clone()));
+        if !result.ok {
+            if result.error_code.as_deref() == Some("memory_pressure") {
+                return Err(FramedControlError::rejected(
+                    "memory_pressure",
+                    result
+                        .error
+                        .unwrap_or_else(|| "insufficient available guest memory".into()),
+                ));
+            }
+            return Err(FramedControlError {
+                code: result.error_code.unwrap_or_else(|| "resize_failed".into()),
+                message: result
+                    .error
+                    .unwrap_or_else(|| "resize was not accepted".into()),
+                effect: microsandbox_protocol::control::ErrorEffect::Unknown,
+            });
+        }
+        Ok(state
+            .resize
+            .get(&id)
+            .expect("successful resize is recorded before reply")
+            .clone())
     }
 
     /// Return the current immutable boot identity and mutation revision.

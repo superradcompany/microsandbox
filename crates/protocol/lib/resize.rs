@@ -88,6 +88,9 @@ pub struct ResizeTracking {
     pub runtime_boot_id: String,
     /// Maximum retained records, including the latest operation for each resource.
     pub max_retained: usize,
+    /// Both device targets can be admitted under one runtime mutation lock.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paired_targets: bool,
 }
 
 /// A capability-gated read or mutation. No legacy retry follows dispatch.
@@ -102,6 +105,15 @@ pub enum ResizeRequest {
         runtime_boot_id: String,
         /// Desired resource target.
         target: ResizeTarget,
+    },
+    /// Submit a combined CPU/memory change after the runtime advertises paired targets.
+    ApplyPair {
+        /// Intended runtime incarnation.
+        runtime_boot_id: String,
+        /// Desired online CPU count.
+        online: u32,
+        /// Desired total allocation in MiB.
+        total_mib: u64,
     },
     /// Re-read a retained operation. Missing history never means successful completion.
     Read {

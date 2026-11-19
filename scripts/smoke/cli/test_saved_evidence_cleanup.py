@@ -1,5 +1,6 @@
 """Failure evidence must survive cleanup timeouts and process interruption."""
 
+from contextlib import redirect_stderr
 import io
 import json
 import os
@@ -18,6 +19,31 @@ import lifecycle_evidence as evidence
 
 
 class SavedEvidenceCleanupTests(unittest.TestCase):
+    def test_create_timeout_removes_each_target_and_retains_catalog_if_removal_fails(self):
+        timeout = subprocess.TimeoutExpired("create", 150)
+        run = Mock(side_effect=[RuntimeError("unavailable"), None])
+        log = io.StringIO()
+        with tempfile.TemporaryDirectory() as parent, redirect_stderr(log):
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                with evidence.smoke_home("test-", parent) as home:
+                    marker = home / "catalog"
+                    marker.touch()
+                    with evidence.cleanup_sandbox(run, "source"), evidence.cleanup_sandbox(run, "restored"):
+                        raise timeout
+            self.assertIs(raised.exception, timeout)
+            self.assertEqual([call.args for call in run.call_args_list],
+                             [("rm", "--force", "restored"), ("rm", "--force", "source")])
+            self.assertTrue(marker.exists())
+            self.assertIn(str(home), log.getvalue())
+
+    def test_removed_sandbox_releases_its_temporary_home(self):
+        run = Mock()
+        with tempfile.TemporaryDirectory() as parent:
+            with evidence.smoke_home("test-", parent) as home, evidence.cleanup_sandbox(run, "source"):
+                (home / "catalog").touch()
+            run.assert_called_once_with("rm", "--force", "source")
+            self.assertFalse(home.exists())
+
     def test_success_requires_zero_cleanup_exits_and_successful_audit(self):
         for code, audit_error in [(0, None), (3, None), (0, RuntimeError("surviving VM"))]:
             with self.subTest(code=code, audit_error=audit_error), tempfile.TemporaryDirectory() as directory:

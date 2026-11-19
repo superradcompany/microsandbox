@@ -172,7 +172,7 @@ async fn fault_peer(listener: tokio::net::UnixListener, scenario: Arc<PeerScenar
                 }
                 operation.id = id;
                 let reply = ResizeResponse {
-                    tracking: ResizeTracking { runtime_boot_id: "boot".into(), max_retained: 256 },
+                    tracking: ResizeTracking { runtime_boot_id: "boot".into(), paired_targets: false, max_retained: 256 },
                     operations: vec![operation],
                 };
                 codec::write_raw_frame(&mut socket, &Envelope::new(2, microsandbox_protocol::resize::RESIZE_RESPONSE, &reply).unwrap().frame(frame.id, 1).unwrap()).await.unwrap();

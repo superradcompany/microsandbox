@@ -1,10 +1,15 @@
 """Shared process supervision and cleanup for lifecycle evidence harnesses."""
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
+from pathlib import Path
+import shutil
 import signal
 import subprocess
+import sys
+import tempfile
 import time
 import traceback
 
@@ -23,6 +28,42 @@ def environment(binary, firmware, home, agent=None):
     if agent:
         env["MSB_AGENTD_PATH"] = str(agent)
     return env
+
+
+@contextmanager
+def smoke_home(prefix, parent):
+    """Keep the catalog available for diagnosis and shutdown if the test fails."""
+    home = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    try:
+        yield home
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                shutil.rmtree(home)
+                break
+            except PermissionError as error:
+                # The exiting Windows runtime can briefly retain its SQLite mapping.
+                if getattr(error, "winerror", None) not in (5, 32) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.2)
+    except BaseException:
+        print(f"Retained smoke-test directory: {home}", file=sys.stderr, flush=True)
+        raise
+
+
+@contextmanager
+def cleanup_sandbox(run, name):
+    """Register removal before create, which can time out after the VM starts."""
+    try:
+        yield
+    except BaseException:
+        try:
+            run("rm", "--force", name)
+        except Exception as cleanup_error:
+            print(f"Cleanup of {name} failed: {cleanup_error}", file=sys.stderr, flush=True)
+        raise
+    else:
+        run("rm", "--force", name)
 
 
 def install_termination_handler():

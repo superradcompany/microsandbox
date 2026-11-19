@@ -5,8 +5,8 @@ use std::fmt;
 
 use microsandbox_types::snapshot::saved_config::{
     MAX_SAVED_CONFIG_BYTES, MAX_SAVED_CONFIG_ENTRIES, SavedBindingConsumer, SavedBindingUses,
-    SavedNetworkConfig, SavedOrigin, SavedRuntimeConfig, SavedSandboxConfig, SavedScript,
-    SavedScriptBacking, SavedValue, collect_binding_uses,
+    SavedNetworkConfig, SavedOrigin, SavedRuntimeConfig, SavedScript, SavedScriptBacking,
+    SavedValue, collect_binding_uses,
 };
 use microsandbox_types::{
     NetworkSpec, SandboxResources, SandboxResourcesPatch, SandboxSpec, SandboxSpecPatch,
@@ -69,9 +69,7 @@ pub struct SavedConfigurationClears {
 /// One preparation request. All sections use these same source, explicit input and mode
 /// values; independently prepared plans from different captures cannot be mixed together.
 pub struct SavedConfigurationRequest<'a> {
-    /// Immutable, integrity-associated source document.
-    pub saved: &'a SavedSandboxConfig,
-    /// Authoritative descriptor used to check duplicated legacy and storage projections.
+    /// Immutable descriptor containing the portable document and its legacy projections.
     pub manifest: &'a Manifest,
     /// Already resolved destination/image defaults, never a surviving source sandbox.
     pub lower: &'a SandboxSpec,
@@ -244,15 +242,28 @@ pub fn prepare_saved_configuration(
     request: SavedConfigurationRequest<'_>,
     bindings: BTreeMap<String, ConfigurationBindingInput>,
 ) -> MicrosandboxResult<SavedConfigurationPlan> {
-    request
-        .saved
-        .validate_legacy_projections(request.manifest)
+    // Select behavioral settings from the same descriptor that supplies the disk
+    // and checkpoint identity. A separately supplied document could come from another cut.
+    let document = request
+        .manifest
+        .saved_configuration()
         .map_err(|_| {
             error(
                 "SCFG_SCHEMA",
                 "invalid source document or legacy projection",
             )
+        })?
+        .ok_or_else(|| {
+            error(
+                "SCFG_SCHEMA",
+                "descriptor has no portable saved configuration",
+            )
         })?;
+    if let SavedConfigurationContext::Full { resources, .. } = &request.context
+        && let Some(recorded) = &document.provenance.construction_resources
+    {
+        super::resources::check_construction_geometry(recorded, resources)?;
+    }
     if bindings.len() > MAX_SAVED_CONFIG_ENTRIES {
         return Err(error("SCFG_LIMIT", "too many destination bindings"));
     }
@@ -266,7 +277,7 @@ pub fn prepare_saved_configuration(
             .ok_or_else(|| error("SCFG_LIMIT", "destination binding registry is too large"))?;
         value.account_bytes(&mut total_bytes)?;
     }
-    let saved = &request.saved.active;
+    let saved = &document.active;
     let explicit = request.explicit;
     let (full, starts_command, resource_mode, execution_mode, captured) = match request.context {
         SavedConfigurationContext::Disk { starts_command } => (

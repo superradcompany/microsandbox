@@ -310,6 +310,7 @@ mod unix {
                                         &LabelsResponse::Supported {
                                             runtime_boot_id: "labels-boot".into(),
                                             config_delta: mode >= 5,
+                                            caller_overrides_delta: false,
                                         },
                                     )
                                     .unwrap(),

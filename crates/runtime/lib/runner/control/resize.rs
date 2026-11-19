@@ -55,6 +55,7 @@ impl ResizeTracker {
         ResizeTracking {
             runtime_boot_id: self.runtime_boot_id.clone(),
             max_retained: MAX_RETAINED_RESIZES,
+            paired_targets: true,
         }
     }
 

@@ -7,10 +7,8 @@ import json
 from pathlib import Path
 import sqlite3
 import subprocess
-import tempfile
-import time
 
-from lifecycle_evidence import environment
+from lifecycle_evidence import cleanup_sandbox, environment, install_termination_handler, smoke_home
 
 
 def qualify(candidate, previous, firmware, home):
@@ -30,12 +28,12 @@ def qualify(candidate, previous, firmware, home):
             raise RuntimeError(f"{args!r} expected refusal {refusal!r}: {result.stderr}")
         return result.stdout.strip()
 
-    run("create", "--name", "source", "alpine:3.20")
-    try:
+    with cleanup_sandbox(run, "source"):
+        run("create", "--name", "source", "alpine:3.20")
         run("exec", "source", "--", "sh", "-ec", "echo captured >/root/source")
         run("snapshot", "create", "history", "--sandbox", "source")
-        run("create", "--from-snapshot", "history", "--name", "restored")
-        try:
+        with cleanup_sandbox(run, "restored"):
+            run("create", "--from-snapshot", "history", "--name", "restored")
             if run("exec", "restored", "--", "cat", "/root/source") != "captured":
                 raise RuntimeError("restored disk lost the source file")
             run("stop", "restored")
@@ -71,10 +69,6 @@ def qualify(candidate, previous, firmware, home):
             run("start", "restored")
             run("exec", "restored", "--", "touch", "/tmp/refused", cli=previous, refusal="binding")
             run("exec", "restored", "-e", "TOKEN=x", "--", "test", "!", "-e", "/tmp/refused")
-        finally:
-            run("rm", "--force", "restored")
-    finally:
-        run("rm", "--force", "source")
 
 
 if __name__ == "__main__":
@@ -83,19 +77,7 @@ if __name__ == "__main__":
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument("--temp-root", type=Path)
     args = parser.parse_args()
-    directory = tempfile.TemporaryDirectory(prefix="bg-", dir=args.temp_root)
-    try:
-        qualify(args.candidate.resolve(), args.previous.resolve(), args.firmware.resolve(), Path(directory.name))
-    finally:
-        # On Windows the exiting runtime can briefly retain the catalog's mapped WAL
-        # after sandbox removal. Bound the wait and surface a persistent cleanup failure.
-        deadline = time.monotonic() + 15
-        while True:
-            try:
-                directory.cleanup()
-                break
-            except PermissionError as error:
-                if getattr(error, "winerror", None) not in (5, 32) or time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.2)
+    install_termination_handler()
+    with smoke_home("bg-", args.temp_root) as home:
+        qualify(args.candidate.resolve(), args.previous.resolve(), args.firmware.resolve(), home)
     print("Passed restored-disk command admission, job admission, legacy runtime refusal and restart.")

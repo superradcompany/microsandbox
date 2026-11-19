@@ -278,19 +278,57 @@ pub(super) async fn apply_target(
     accepted_operation(tracking, target, response)
 }
 
+pub(super) async fn apply_pair(
+    session: &ControlSession,
+    tracking: &ResizeTracking,
+    online: u32,
+    total_mib: u64,
+) -> MicrosandboxResult<[ResizeOperation; 2]> {
+    let response = session
+        .request(&ManageResize(ResizeRequest::ApplyPair {
+            runtime_boot_id: tracking.runtime_boot_id.clone(),
+            online,
+            total_mib,
+        }))
+        .await
+        .map_err(MicrosandboxError::ControlClient)?;
+    let [cpu, memory]: [ResizeOperation; 2] = response
+        .operations
+        .try_into()
+        .map_err(|_| invalid_acceptance())?;
+    if response.tracking != *tracking || cpu.id == memory.id {
+        return Err(invalid_acceptance());
+    }
+    Ok([
+        validate_accepted(tracking, ResizeTarget::Cpus { online }, cpu)?,
+        validate_accepted(tracking, ResizeTarget::Memory { total_mib }, memory)?,
+    ])
+}
+
 fn accepted_operation(
     tracking: &ResizeTracking,
     target: ResizeTarget,
     response: ResizeResponse,
 ) -> MicrosandboxResult<ResizeOperation> {
-    let invalid = || {
-        MicrosandboxError::Runtime(
-        "resize may have been applied, but its operation identity was not valid; the request was not retried".into())
-    };
     if response.tracking != *tracking || response.operations.len() != 1 {
-        return Err(invalid());
+        return Err(invalid_acceptance());
     }
-    let operation = response.operations.into_iter().next().unwrap();
+    validate_accepted(
+        tracking,
+        target,
+        response.operations.into_iter().next().unwrap(),
+    )
+}
+
+fn invalid_acceptance() -> MicrosandboxError {
+    MicrosandboxError::Runtime("resize may have been applied, but its operation identity was not valid; the request was not retried".into())
+}
+
+fn validate_accepted(
+    tracking: &ResizeTracking,
+    target: ResizeTarget,
+    operation: ResizeOperation,
+) -> MicrosandboxResult<ResizeOperation> {
     let same_resource = matches!(
         (&target, &operation.accepted_target),
         (ResizeTarget::Cpus { .. }, ResizeTarget::Cpus { .. })
@@ -312,7 +350,7 @@ fn accepted_operation(
         || operation.outcome != ResizeOutcome::Pending
         || operation.status.state != ResourceConvergenceState::Accepted
     {
-        return Err(invalid());
+        return Err(invalid_acceptance());
     }
     Ok(operation)
 }
@@ -590,6 +628,7 @@ mod tests {
     fn apply_reply_requires_the_dispatched_target_and_a_fresh_pending_identity() {
         let tracking = ResizeTracking {
             runtime_boot_id: "boot".into(),
+            paired_targets: false,
             max_retained: 256,
         };
         let accepted = operation(ResizeOutcome::Pending, ResizeObservation::Unavailable);
@@ -671,6 +710,7 @@ mod tests {
         let reply = |records| ResizeResponse {
             tracking: ResizeTracking {
                 runtime_boot_id: "boot".into(),
+                paired_targets: false,
                 max_retained: 256,
             },
             operations: records,
@@ -703,6 +743,7 @@ mod tests {
             let response = ResizeResponse {
                 tracking: ResizeTracking {
                     runtime_boot_id: "boot".into(),
+                    paired_targets: false,
                     max_retained: 256,
                 },
                 operations: vec![operation(ResizeOutcome::Applied, observation)],

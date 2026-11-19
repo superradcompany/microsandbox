@@ -54,6 +54,43 @@ pub struct ResourceDefaultSelection {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Reject inconsistent construction records before using any optional defaults. CPUs and
+/// RAM observed after hotplug may differ from these boot dimensions and are not compared.
+pub(super) fn check_construction_geometry(
+    recorded: &SavedResourcesConfig,
+    captured: &SandboxResources,
+) -> MicrosandboxResult<()> {
+    for (field, recorded, actual) in [
+        (
+            "cpus",
+            concrete(&recorded.cpus).map(u64::from),
+            u64::from(captured.cpus),
+        ),
+        (
+            "max_cpus",
+            concrete(&recorded.max_cpus).map(u64::from),
+            u64::from(captured.max_cpus),
+        ),
+        (
+            "memory_mib",
+            concrete(&recorded.memory_mib).map(u64::from),
+            u64::from(captured.memory_mib),
+        ),
+        (
+            "max_memory_mib",
+            concrete(&recorded.max_memory_mib).map(u64::from),
+            u64::from(captured.max_memory_mib),
+        ),
+    ] {
+        if recorded.is_some_and(|value| value != actual) {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "SCFG_FULL_STATE: recorded construction {field} disagrees with checkpoint geometry"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Resolve resource precedence and full-state restrictions without host I/O.
 ///
 /// The caller must validate the complete active document first, including observation

@@ -26,6 +26,9 @@ use super::{
 /// Version belongs inside the record, never in the extension key.
 pub const SAVED_CONFIG_SCHEMA_VERSION: u32 = 1;
 
+/// Portable launch settings always require a reader that enforces their semantics.
+pub const SAVED_CONFIG_EXTENSION: &str = "microsandbox.sandbox-config";
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -108,6 +111,71 @@ pub struct SavedCaptureProvenance {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl Manifest {
+    /// Attach a sanitized document before computing the checkpoint digest. Existing
+    /// descriptor projections must already be present so disagreement is caught here.
+    pub fn with_saved_configuration(
+        mut self,
+        config: &SavedSandboxConfig,
+    ) -> SnapshotManifestResult<Self> {
+        config.validate_legacy_projections(&self)?;
+        if self.extensions.contains_key(SAVED_CONFIG_EXTENSION) {
+            return invalid(
+                "SCFG_IDENTITY",
+                "sandbox-config",
+                "configuration already attached",
+            );
+        }
+        let value = serde_json::to_value(config).map_err(|_| {
+            super::validation::error(
+                "SCFG_SCHEMA",
+                "sandbox-config",
+                "cannot encode configuration",
+            )
+        })?;
+        self.extensions.insert(SAVED_CONFIG_EXTENSION.into(), value);
+        if let Err(index) = self
+            .requires
+            .binary_search_by(|key| key.as_str().cmp(SAVED_CONFIG_EXTENSION))
+        {
+            self.requires.insert(index, SAVED_CONFIG_EXTENSION.into());
+        }
+        // Each part may fit alone while the combined descriptor exceeds its read limit.
+        if self.to_canonical_bytes()?.len() > crate::snapshot::manifest::MAX_DESCRIPTOR_BYTES {
+            return invalid(
+                "SCFG_LIMIT",
+                "sandbox-config",
+                "combined descriptor is too large",
+            );
+        }
+        Ok(self)
+    }
+
+    /// Decode configuration from this exact descriptor without consulting a source sandbox.
+    /// Reading metadata does not admit restore or satisfy other required extensions.
+    pub fn saved_configuration(&self) -> SnapshotManifestResult<Option<SavedSandboxConfig>> {
+        let required = self
+            .requires
+            .iter()
+            .any(|key| key == SAVED_CONFIG_EXTENSION);
+        let value = self.extensions.get(SAVED_CONFIG_EXTENSION);
+        if value.is_some() != required {
+            return invalid(
+                "SCFG_SCHEMA",
+                "sandbox-config",
+                "configuration and its required marker must appear together",
+            );
+        }
+        let Some(value) = value else { return Ok(None) };
+        let bytes = serde_json::to_vec(value).map_err(|_| {
+            super::validation::error("SCFG_SCHEMA", "sandbox-config", "cannot read configuration")
+        })?;
+        let config = SavedSandboxConfig::from_bytes(&bytes)?;
+        config.validate_legacy_projections(self)?;
+        Ok(Some(config))
+    }
+}
 
 impl SavedSandboxConfig {
     /// Decode and validate the whole bounded document before importing or resolving it.

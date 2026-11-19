@@ -466,21 +466,68 @@ pub(super) async fn apply(
         }
     }
 
-    let tracking = if track_resize
-        && !restart_required
-        && (live_cpu_target(&plan, &builder.patch).is_some()
-            || live_memory_target(&plan, &builder.patch).is_some())
+    let cpu = live_cpu_target(&plan, &builder.patch);
+    let memory = live_memory_target(&plan, &builder.patch);
+    let paired_targets = cpu.zip(memory);
+    let tracking = if !restart_required
+        && (paired_targets.is_some() || track_resize && (cpu.is_some() || memory.is_some()))
     {
         resize::begin_tracking(control_session(&session)?).await?
     } else {
         None
     };
-    let mut resize_operations = tracking.as_ref().map(|_| Vec::new());
+    let mut resize_operations = tracking
+        .as_ref()
+        .filter(|_| track_resize)
+        .map(|_| Vec::new());
     if restart_required {
         handle.stop().await?;
     }
-    if !restart_required && let Some(target) = live_cpu_target(&plan, &builder.patch) {
-        let accepted = if let Some(tracking) = &tracking {
+    let paired = if let (Some((cpus, memory_mib)), Some(tracking)) = (
+        paired_targets,
+        tracking.as_ref().filter(|t| t.paired_targets),
+    ) {
+        let [cpu, memory] = resize::apply_pair(
+            control_session(&session)?,
+            tracking,
+            u32::from(cpus),
+            u64::from(memory_mib),
+        )
+        .await?;
+        let (ResizeTarget::Cpus { online }, ResizeTarget::Memory { total_mib }) =
+            (&cpu.accepted_target, &memory.accepted_target)
+        else {
+            unreachable!("validated paired response")
+        };
+        if let Some(active) = active.as_mut() {
+            active.spec.resources.cpus = u8::try_from(*online).map_err(|_| {
+                MicrosandboxError::Runtime("accepted CPU target exceeds SDK range".into())
+            })?;
+            active.spec.resources.memory_mib = u32::try_from(*total_mib).map_err(|_| {
+                MicrosandboxError::Runtime("accepted memory target exceeds SDK range".into())
+            })?;
+            persist_active_config(
+                &builder.backend,
+                control_session(&session)?,
+                &mut active_json,
+                active,
+            )
+            .await?;
+        }
+        plan.resize_status
+            .extend([cpu.status.clone(), memory.status.clone()]);
+        if let Some(operations) = &mut resize_operations {
+            operations.extend([cpu, memory]);
+        }
+        true
+    } else {
+        false
+    };
+    if !restart_required
+        && !paired
+        && let Some(target) = cpu
+    {
+        let accepted = if let Some(tracking) = tracking.as_ref().filter(|_| track_resize) {
             let operation = resize::apply_target(
                 control_session(&session)?,
                 tracking,
@@ -531,8 +578,11 @@ pub(super) async fn apply(
             .await?;
         }
     }
-    if !restart_required && let Some(target_mib) = live_memory_target(&plan, &builder.patch) {
-        let accepted = if let Some(tracking) = &tracking {
+    if !restart_required
+        && !paired
+        && let Some(target_mib) = memory
+    {
+        let accepted = if let Some(tracking) = tracking.as_ref().filter(|_| track_resize) {
             let operation = resize::apply_target(
                 control_session(&session)?,
                 tracking,
@@ -668,8 +718,10 @@ pub(super) async fn apply(
                     .update_labels(
                         owner,
                         &expected_json,
-                        handle.config_json(),
-                        serde_json::to_string(&config)?,
+                        handle
+                            .local_state()
+                            .ok_or(MicrosandboxError::ControlStateChanged)?,
+                        &config,
                         builder.patch.labels.iter().cloned().collect(),
                         builder.patch.labels_remove.clone(),
                     )

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use microsandbox_db::DbWriteConnection;
 use microsandbox_protocol::control::ControlError;
-use microsandbox_protocol::labels::{LabelsRequest, LabelsResponse};
+use microsandbox_protocol::labels::{CallerOverridesDelta, LabelsRequest, LabelsResponse};
 use sea_orm::{ActiveValue::Set, ConnectionTrait, DbBackend, DbErr, EntityTrait, Statement};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -20,7 +20,11 @@ use crate::retention::{RetentionJournal, RetentionTransition, catalog_file_ident
 
 enum DesiredConfig<'a> {
     Complete(&'a str),
-    Delta { expected: &'a str, encoded: &'a str },
+    Delta {
+        expected: &'a str,
+        encoded: &'a str,
+        overrides: Option<&'a CallerOverridesDelta>,
+    },
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -39,6 +43,7 @@ impl RuntimeControlExecutor {
                 return Ok(LabelsResponse::Supported {
                     runtime_boot_id,
                     config_delta: true,
+                    caller_overrides_delta: true,
                 });
             }
             LabelsRequest::Update {
@@ -59,6 +64,7 @@ impl RuntimeControlExecutor {
                 expected_active_sha256,
                 expected_desired_sha256,
                 desired_delta_json,
+                caller_overrides,
                 set,
                 remove,
             } => (
@@ -67,6 +73,7 @@ impl RuntimeControlExecutor {
                 DesiredConfig::Delta {
                     expected: expected_desired_sha256,
                     encoded: desired_delta_json,
+                    overrides: caller_overrides.as_ref(),
                 },
                 set,
                 remove,
@@ -220,10 +227,21 @@ async fn update_labels_plan(
         owner.run_started_at.clone().into(),
         (std::process::id() as i64).into(),
     ];
+    let overrides_column = if matches!(
+        desired_plan,
+        DesiredConfig::Delta {
+            overrides: Some(_),
+            ..
+        }
+    ) {
+        ", s.caller_config_overrides"
+    } else {
+        ""
+    };
     let row = db
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
-            format!("SELECT s.active_config, s.config FROM sandbox s WHERE {predicate}"),
+            format!("SELECT s.active_config, s.config{overrides_column} FROM sandbox s WHERE {predicate}"),
             identity.clone(),
         ))
         .await
@@ -259,9 +277,13 @@ async fn update_labels_plan(
     }
     // Resolve against the exact desired document selected by the SDK, not a typed
     // reconstruction. The transaction repeats this guard so old writers cannot be lost.
-    let (desired_config_json, desired_before) = match desired_plan {
-        DesiredConfig::Complete(json) => (json.to_owned(), None),
-        DesiredConfig::Delta { expected, encoded } => {
+    let (desired_config_json, desired_before, overrides_update) = match desired_plan {
+        DesiredConfig::Complete(json) => (json.to_owned(), None, None),
+        DesiredConfig::Delta {
+            expected,
+            encoded,
+            overrides,
+        } => {
             let before: String = row.try_get("", "config").map_err(|_| {
                 error(
                     "configuration_not_applied",
@@ -276,7 +298,46 @@ async fn update_labels_plan(
             }
             let json = microsandbox_protocol::labels_delta::apply(&before, encoded)
                 .map_err(|_| error("invalid_request", "invalid desired configuration delta"))?;
-            (json, Some(before))
+            let update = if let Some(overrides) = overrides {
+                let prior: Option<String> =
+                    row.try_get("", "caller_config_overrides").map_err(|_| {
+                        error("configuration_not_applied", "cannot read caller overrides")
+                    })?;
+                if prior
+                    .as_ref()
+                    .map(|s| hex::encode(Sha256::digest(s.as_bytes())))
+                    != overrides.expected_sha256
+                {
+                    return Err(error(
+                        "configuration_not_applied",
+                        "caller overrides changed before label update",
+                    ));
+                }
+                let next = microsandbox_protocol::labels_delta::apply(
+                    prior.as_deref().unwrap_or("{}"),
+                    &overrides.delta_json,
+                )
+                .map_err(|_| error("invalid_request", "invalid caller overrides delta"))?;
+                let envelope: Value = serde_json::from_str(&next)
+                    .map_err(|_| error("invalid_request", "invalid caller overrides"))?;
+                if envelope.get("config_digest")
+                    != Some(&serde_json::json!(
+                        Sha256::digest(json.as_bytes()).as_slice()
+                    ))
+                    || !envelope
+                        .get("caller_config_overrides")
+                        .is_some_and(Value::is_object)
+                {
+                    return Err(error(
+                        "invalid_request",
+                        "caller overrides do not match resulting configuration",
+                    ));
+                }
+                Some((prior, next))
+            } else {
+                None
+            };
+            (json, Some(before), update)
         }
     };
     // Keep the existing SDK transaction boundary: the full validated desired plan,
@@ -345,11 +406,23 @@ async fn update_labels_plan(
         )
     })?;
     let mut values = vec![after_json.into(), desired_config_json.to_owned().into()];
+    let overrides_set = if let Some((_, next)) = &overrides_update {
+        values.push(next.clone().into());
+        ", caller_config_overrides = ?"
+    } else {
+        ""
+    };
     values.extend(identity);
     values.push(before.into());
     let desired_predicate = if let Some(before) = desired_before {
         values.push(before.into());
         " AND s.config = ?"
+    } else {
+        ""
+    };
+    let overrides_predicate = if let Some((prior, _)) = overrides_update {
+        values.push(prior.into());
+        " AND s.caller_config_overrides IS ?"
     } else {
         ""
     };
@@ -359,7 +432,7 @@ async fn update_labels_plan(
         let predicate = predicate.to_owned();
         async move {
             let changed = txn.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
-                format!("UPDATE sandbox AS s SET active_config = ?, config = ?, updated_at = CURRENT_TIMESTAMP WHERE {predicate} AND s.active_config = ?{desired_predicate}"), values)).await?;
+                format!("UPDATE sandbox AS s SET active_config = ?, config = ?{overrides_set}, updated_at = CURRENT_TIMESTAMP WHERE {predicate} AND s.active_config = ?{desired_predicate}{overrides_predicate}"), values)).await?;
             if changed.rows_affected() != 1 {
                 return Ok((txn, false));
             }

@@ -83,10 +83,16 @@ pub(super) fn prepare(
         tls_enabled: false,
         intercepted_ports: vec![],
     };
+    // Some cases exercise malformed or contradictory input, as an external archive can.
+    let mut descriptor = storage_tests::manifest(full);
+    let key = microsandbox_types::snapshot::saved_config::SAVED_CONFIG_EXTENSION;
+    descriptor.requires.push(key.into());
+    descriptor
+        .extensions
+        .insert(key.into(), serde_json::to_value(saved).unwrap());
     prepare_saved_configuration(
         SavedConfigurationRequest {
-            saved,
-            manifest: &storage_tests::manifest(full),
+            manifest: &descriptor,
             lower: &lower,
             lower_resources: &SandboxResourcesPatch::new(),
             explicit,
@@ -391,6 +397,53 @@ fn full_fresh_preserves_independent_captured_only_bindings_and_geometry() {
     assert!(plan.runtime().inputs().requires_full_identity);
     assert!(plan.storage().selection().requires_full_identity);
     assert!(plan.gateway().selection().requires_full_compatibility);
+}
+
+#[test]
+fn full_resume_checks_recorded_construction_against_the_checkpoint_even_in_fresh_mode() {
+    let geometry = SandboxResources {
+        cpus: 2,
+        max_cpus: 4,
+        memory_mib: 512,
+        max_memory_mib: 2048,
+        ..Default::default()
+    };
+    let captured = SavedBindingUses::new();
+    let context = || SavedConfigurationContext::Full {
+        resources: &geometry,
+        exec_limits: None,
+        security: SecurityProfile::default(),
+        bindings: &captured,
+    };
+    for mode in [SnapshotConfigMode::Saved, SnapshotConfigMode::Fresh] {
+        let mut saved = document(json!({}), json!({}));
+        for (field, correct, wrong) in [
+            ("cpus", 2, 1),
+            ("max_cpus", 4, 8),
+            ("memory_mib", 512, 1024),
+            ("max_memory_mib", 2048, 4096),
+        ] {
+            for (value, matches) in [(correct, true), (wrong, false)] {
+                saved.provenance.construction_resources =
+                    Some(serde_json::from_value(json!({(field): known(json!(value))})).unwrap());
+                let result = prepare(
+                    &saved,
+                    &SandboxSpecPatch::new(),
+                    mode,
+                    context(),
+                    BTreeMap::new(),
+                );
+                if matches {
+                    assert_eq!(
+                        result.unwrap().resources().resources().unwrap().memory_mib,
+                        512
+                    );
+                } else {
+                    fails(result, "SCFG_FULL_STATE");
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -779,8 +832,9 @@ fn network_assembly_fresh_mode_keeps_destination_policy_container_presence() {
     };
     let plan = prepare_saved_configuration(
         SavedConfigurationRequest {
-            saved: &saved,
-            manifest: &storage_tests::manifest(false),
+            manifest: &storage_tests::manifest(false)
+                .with_saved_configuration(&saved)
+                .unwrap(),
             lower: &lower,
             lower_resources: &SandboxResourcesPatch::new(),
             explicit: &explicit,

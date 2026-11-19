@@ -1,6 +1,6 @@
 # Saved configuration implementation notes
 
-This is an internal PR3 implementation stage, not an enabled capture or restore feature. The approved contract is `planning/microsandbox/todo/lifecycle-saved-config-design.md`. The complete PR must implement that contract's other policy families, capture provenance and exclusions, mode-specific resolution, destination binding enforcement, CLI/SDK controls and live qualification before advertising `microsandbox.sandbox-config` in `SUPPORTED_REQUIRES`. No existing writer, descriptor reader, launch protocol or persisted sandbox configuration is changed by this module.
+This is an internal PR3 implementation stage, not an enabled capture or restore feature. The approved contract is `planning/microsandbox/todo/lifecycle-saved-config-design.md`. The complete PR must implement that contract's other policy families, capture provenance and exclusions, mode-specific resolution, destination binding enforcement, CLI/SDK controls and live qualification before advertising `microsandbox.sandbox-config` in `SUPPORTED_REQUIRES`. The descriptor reader requires a must-understand marker whenever this key appears. `Manifest::saved_configuration` reads the document from that descriptor and checks its existing projections. `Manifest::with_saved_configuration` validates the complete descriptor size and inserts the required marker before digest computation. Production capture and launch integration remain pending.
 
 ## Runtime representation
 

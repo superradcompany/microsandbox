@@ -302,8 +302,9 @@ fn destination_inputs_pin_destination_identity_and_ownership_at_preparation() {
     };
     let plan = prepare_saved_configuration(
         SavedConfigurationRequest {
-            saved: &saved,
-            manifest: &storage_tests::manifest(false),
+            manifest: &storage_tests::manifest(false)
+                .with_saved_configuration(&saved)
+                .unwrap(),
             lower: &lower,
             lower_resources: &SandboxResourcesPatch::new(),
             explicit: &explicit,

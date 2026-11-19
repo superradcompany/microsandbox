@@ -20,6 +20,16 @@ pub const LABELS_RESPONSE: &str = "control.labels.result";
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Fenced patch to the private caller-intent record. Large unchanged scripts stay in the catalog.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallerOverridesDelta {
+    /// Digest of the exact column selected by the SDK, or None for a SQL NULL.
+    pub expected_sha256: Option<String>,
+    /// Structural edits from the selected envelope (or an empty object) to the new envelope.
+    pub delta_json: String,
+}
+
 /// The caller must complete discovery before dispatching a mutation.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -51,6 +61,9 @@ pub enum LabelsRequest {
         expected_desired_sha256: String,
         /// Private structural delta, never included in diagnostics.
         desired_delta_json: String,
+        /// Sent only after the runtime advertises atomic caller-intent persistence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_overrides: Option<CallerOverridesDelta>,
         /// Active labels to set.
         set: BTreeMap<String, String>,
         /// Active labels to remove.
@@ -70,6 +83,9 @@ pub enum LabelsResponse {
         /// Optional capability; older responses imply the original full update only.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         config_delta: bool,
+        /// A compact update can atomically replace the corresponding caller-intent envelope.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        caller_overrides_delta: bool,
     },
     /// Active configuration and its durable confirmation were written.
     Updated {
@@ -136,6 +152,7 @@ mod tests {
         let encoded = serde_json::to_string(&LabelsResponse::Supported {
             runtime_boot_id: "boot".into(),
             config_delta: true,
+            caller_overrides_delta: true,
         })
         .unwrap();
         let OriginalResponse::Supported { runtime_boot_id } =

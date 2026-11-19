@@ -16,6 +16,46 @@ use super::*;
 //--------------------------------------------------------------------------------------------------
 
 #[test]
+fn portable_configuration_is_required_and_bound_to_the_descriptor_digest() {
+    let base = descriptor();
+    let before = base.digest().unwrap();
+    assert!(base.saved_configuration().unwrap().is_none());
+    let source = parse(&document());
+    let saved = base.with_saved_configuration(&source).unwrap();
+    assert_ne!(saved.digest().unwrap(), before);
+    assert!(
+        saved
+            .unsupported_requires()
+            .contains(&SAVED_CONFIG_EXTENSION)
+    );
+    let mut decoded = Manifest::from_bytes(&saved.to_canonical_bytes().unwrap()).unwrap();
+    assert!(decoded.saved_configuration().unwrap().unwrap() == source);
+    assert!(decoded.clone().with_saved_configuration(&source).is_err());
+    decoded.requires.retain(|key| key != SAVED_CONFIG_EXTENSION);
+    assert!(decoded.saved_configuration().is_err());
+    assert!(decoded.validate().is_err());
+}
+
+#[test]
+fn reading_portable_configuration_checks_the_exact_descriptor_and_combined_size() {
+    let mut raw = document();
+    raw["active"]["runtime"]["guest_clock"] = saved(json!("sync"));
+    let source = parse(&raw);
+    let mut encoded = descriptor().with_saved_configuration(&source).unwrap();
+    encoded.set_guest_clock(GuestClockPolicy::Off).unwrap();
+    assert!(encoded.saved_configuration().is_err());
+    assert!(descriptor().saved_configuration().unwrap().is_none());
+
+    let mut oversized = descriptor();
+    oversized.extensions.insert(
+        "example.padding".into(),
+        "x".repeat(crate::snapshot::manifest::MAX_DESCRIPTOR_BYTES)
+            .into(),
+    );
+    assert!(oversized.with_saved_configuration(&source).is_err());
+}
+
+#[test]
 fn allocations_reject_zero_and_conflicting_maxima_without_inventing_unknown_values() {
     for (current, maximum) in [("cpus", "max_cpus"), ("memory_mib", "max_memory_mib")] {
         for value in [

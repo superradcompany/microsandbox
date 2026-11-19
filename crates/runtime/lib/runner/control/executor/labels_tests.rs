@@ -304,6 +304,7 @@ async fn compact_label_update_preserves_large_scripts_and_commits_mixed_desired_
         DesiredConfig::Delta {
             expected: &expected_desired,
             encoded: &delta,
+            overrides: None,
         },
         &BTreeMap::from([("added".into(), "PRIVATE_LABEL".into())]),
         &["remove".into()],
@@ -349,6 +350,7 @@ async fn compact_label_update_refuses_changed_desired_state_before_journaling() 
         DesiredConfig::Delta {
             expected: &expected,
             encoded: &delta,
+            overrides: None,
         },
         &BTreeMap::from([("added".into(), "PRIVATE_LABEL".into())]),
         &[],
@@ -359,4 +361,67 @@ async fn compact_label_update_refuses_changed_desired_state_before_journaling() 
     assert_eq!(error.code, "configuration_not_applied");
     assert_eq!(f.journal.record().generation, generation);
     assert_eq!(f.active().await, f.before);
+}
+
+#[tokio::test]
+async fn caller_overrides_and_labels_commit_together_only_for_the_selected_document() {
+    let mut f = Fixture::new().await;
+    f.db.execute_unprepared("ALTER TABLE sandbox ADD COLUMN caller_config_overrides TEXT")
+        .await
+        .unwrap();
+    let desired = r#"{"labels":{"added":"new"}}"#;
+    let delta = microsandbox_protocol::labels_delta::between("{}", desired).unwrap();
+    let next = serde_json::json!({
+        "config_digest": Sha256::digest(desired.as_bytes()).as_slice(),
+        "caller_config_overrides": {"workdir":null, "labels":{"added":"new"}}
+    })
+    .to_string();
+    let mut overrides = CallerOverridesDelta {
+        expected_sha256: Some("not-the-selected-source".into()),
+        delta_json: microsandbox_protocol::labels_delta::between("{}", &next).unwrap(),
+    };
+    let before = f.digest();
+    let generation = f.journal.record().generation;
+    let expected = hex::encode(Sha256::digest(b"{}"));
+    let set = BTreeMap::from([("added".into(), "new".into())]);
+    for stale in [true, false] {
+        if !stale {
+            overrides.expected_sha256 = None;
+        }
+        let result = update_labels_plan(
+            &mut f.journal,
+            &f.db,
+            &before,
+            DesiredConfig::Delta {
+                expected: &expected,
+                encoded: &delta,
+                overrides: Some(&overrides),
+            },
+            &set,
+            &[],
+            |journal, source| journal.confirm(source),
+        )
+        .await;
+        if stale {
+            assert_eq!(result.unwrap_err().code, "configuration_not_applied");
+            assert_eq!(f.journal.record().generation, generation);
+            assert_eq!(f.active().await, f.before);
+        } else {
+            result.unwrap();
+        }
+    }
+    let row =
+        f.db.query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT config, caller_config_overrides FROM sandbox",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "config").unwrap(), desired);
+    let stored: String = row.try_get("", "caller_config_overrides").unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&stored).unwrap(),
+        serde_json::from_str::<Value>(&next).unwrap()
+    );
 }
