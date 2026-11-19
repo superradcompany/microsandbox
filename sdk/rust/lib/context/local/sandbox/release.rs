@@ -6,15 +6,85 @@ use std::path::Path;
 #[cfg(unix)]
 use microsandbox_runtime::ipc::SandboxSocketPaths;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::process_record::ProcessRecord;
 use super::{LocalContext, sandbox_entity};
 use crate::sandbox::SandboxConfig;
 use crate::{MicrosandboxError, MicrosandboxResult};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use microsandbox_db::pool::DbPools;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement};
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl LocalContext {
+    /// Inspection can finish bookkeeping for runtimes that exited without an SDK
+    /// stop call. Failure to acquire a fence leaves the evidence intact.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) async fn retire_stopped_process_records(
+        pools: &DbPools,
+        model: &sandbox_entity::Model,
+        run_dir: &Path,
+        sandboxes_dir: &Path,
+        transition_owned: bool,
+    ) -> MicrosandboxResult<()> {
+        if pools
+            .read()
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT id FROM run WHERE sandbox_id = ? AND process_identity IS NOT NULL LIMIT 1",
+                [model.id.into()],
+            ))
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let _transition = if transition_owned {
+            None
+        } else {
+            let Some(guard) =
+                microsandbox_runtime::ipc::try_acquire_transition_guard(run_dir, &model.name)?
+            else {
+                return Ok(());
+            };
+            Some(guard)
+        };
+        // The observation may predate a completed restart or configuration edit.
+        // Re-read under transition ownership before selecting this run's disk fences.
+        let Some(model) = sandbox_entity::Entity::find_by_id(model.id)
+            .one(pools.read())
+            .await?
+        else {
+            return Ok(());
+        };
+        if !matches!(
+            model.status,
+            crate::sandbox::SandboxStatus::Created
+                | crate::sandbox::SandboxStatus::Stopped
+                | crate::sandbox::SandboxStatus::Crashed
+        ) {
+            return Ok(());
+        }
+        let Some(_lifecycle) =
+            microsandbox_runtime::ipc::try_acquire_lifecycle_guard(run_dir, &model.name)?
+        else {
+            return Ok(());
+        };
+        let _disks =
+            match Self::released_runtime_disks(run_dir, &sandboxes_dir.join(&model.name), &model)
+                .await
+            {
+                Ok(disks) => disks,
+                Err(MicrosandboxError::SandboxStillRunning(_)) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+        ProcessRecord::retire_finished(pools, model.id).await
+    }
+
     /// An active launcher owns the transition lock. Without one, an ambiguous
     /// recorded PID must fail preparation rather than leave the caller waiting forever.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
