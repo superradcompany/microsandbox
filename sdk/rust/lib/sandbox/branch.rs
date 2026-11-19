@@ -478,6 +478,7 @@ pub(crate) async fn capture_child(
     config: &mut SandboxConfig,
     source: &super::identity::BranchSource,
     child: &CreationStorage,
+    child_id: i32,
 ) -> MicrosandboxResult<Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>> {
     crate::runtime::protected_state::require_running(local, &source.name)?;
     if let Some(capture) = source.batch.as_ref().and_then(|batch| batch.get()) {
@@ -487,7 +488,15 @@ pub(crate) async fn capture_child(
         crate::snapshot::stage_local_branch_closure(capture.staging.path(), &closure)?;
         config.snapshot_parent = capture.snapshot_parent.clone();
         capture.state.validate_files(&closure)?;
-        return adopt_capture(config, child, closure, &capture.state, capture.pin.clone()).await;
+        return adopt_capture(
+            config,
+            child,
+            (&local.config().home(), source.run.sandbox_id, child_id),
+            closure,
+            &capture.state,
+            capture.pin.clone(),
+        )
+        .await;
     }
     reclaim_abandoned_memory(&local.cache_dir().join("memory"));
     let record_integrity = source.record_integrity;
@@ -607,17 +616,42 @@ pub(crate) async fn capture_child(
         MicrosandboxError::Runtime(format!("branch reservation cleanup: {error}"))
     })??;
 
-    adopt_capture(config, child, closure, &state, pin).await
+    adopt_capture(
+        config,
+        child,
+        (&local.config().home(), source.run.sandbox_id, child_id),
+        closure,
+        &state,
+        pin,
+    )
+    .await
 }
 
 #[cfg(feature = "local")]
 async fn adopt_capture(
     config: &mut SandboxConfig,
     child: &CreationStorage,
+    identities: (&std::path::Path, i32, i32),
     closure: std::path::PathBuf,
     state: &LocalBranchState,
     pin: Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>,
 ) -> MicrosandboxResult<Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>> {
+    #[cfg(feature = "net")]
+    if config.restore_resources.inherit
+        && let Some(tls) = &mut config.spec.network.tls
+        && let Some(owned) = microsandbox_runtime::checkpoint::tls_identity::inherit_for_child(
+            identities.0,
+            identities.1,
+            identities.2,
+            &tls.intercept_ca,
+            &state.resources,
+        )
+        .map_err(MicrosandboxError::Runtime)?
+    {
+        tls.intercept_ca = owned;
+    }
+    #[cfg(not(feature = "net"))]
+    let _ = identities;
     // Every sibling must retain the captured owned inventory, not just the child
     // that established the batch. External-resource choices cannot replace it.
     crate::snapshot::validate_owned_inventory(&config.spec.mounts, &state.owned_volumes)?;

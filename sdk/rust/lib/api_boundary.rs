@@ -70,17 +70,17 @@ pub(crate) struct ExplicitContextSurface;
 /// ```
 pub(crate) struct UnifiedVolumeSurface;
 
-/// Snapshots have one public resource type, including lightweight lookup and list results.
+/// A snapshot names a history. Looking up a member returns an immutable checkpoint.
 ///
 /// ```no_run
-/// use microsandbox::{MicrosandboxResult, Snapshot};
+/// use microsandbox::{Checkpoint, MicrosandboxResult, Snapshot};
 /// async fn snapshots() -> MicrosandboxResult<()> {
-///     let snapshot: Snapshot = Snapshot::get("group:member").await?;
+///     let group = Snapshot::get("group").await?;
 ///     let listed: Vec<Snapshot> = Snapshot::list().await?;
-///     let manifest = snapshot.manifest().await?;
-///     let state = snapshot.state().await?;
-///     snapshot.destroy(false).await?;
-///     Snapshot::remove("another:member", false).await?;
+///     let member: Checkpoint = group.get_checkpoint("member").await?;
+///     let manifest = member.manifest().await?;
+///     let state = member.state().await?;
+///     member.remove().await?;
 ///     Ok(())
 /// }
 /// ```

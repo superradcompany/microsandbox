@@ -52,6 +52,13 @@ pub trait Context: Send + Sync + 'static {
         }
     }
 
+    /// Bind individual checkpoint operations to this context without performing I/O.
+    fn checkpoints(&self) -> super::Checkpoints {
+        super::Checkpoints {
+            context: self.clone_shared(),
+        }
+    }
+
     /// Return the kind of backend this is (`Local` or `Remote`).
     fn kind(&self) -> ContextKind;
 

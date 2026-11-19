@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::collections::HashMap;
 
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
@@ -6,8 +6,10 @@ use microsandbox::sandbox::{
 };
 use microsandbox::{LogLevel, RegistryAuth, SnapshotReference};
 use microsandbox_network::dns::Nameserver;
+use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDelta, PyDict, PyInt, PyList, PyModule};
+use std::time::Duration;
 
 use crate::snapshot::PySnapshot;
 
@@ -81,6 +83,14 @@ pub(crate) trait ResourceBuilder: Sized {
     fn vsock_dgram(self, path: impl AsRef<std::path::Path>, port: u32) -> Self;
 }
 
+/// Keep proxy authentication parsing identical for ordinary creation and snapshot spawning.
+trait ProxyDestination: Sized {
+    fn proxy<P: OutboundProxyConfig>(
+        self,
+        configure: impl FnOnce(OutboundProxyBuilder) -> P,
+    ) -> Self;
+}
+
 /// Tuple returned by [`parse_init_kwarg`]: `(cmd, args, env)`.
 type ParsedInit = (String, Vec<String>, Vec<(String, String)>);
 
@@ -139,6 +149,28 @@ impl RootDiskSpec {
             }
             d
         })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl ProxyDestination for SandboxBuilder {
+    fn proxy<P: OutboundProxyConfig>(
+        self,
+        configure: impl FnOnce(OutboundProxyBuilder) -> P,
+    ) -> Self {
+        SandboxBuilder::proxy(self, configure)
+    }
+}
+
+impl ProxyDestination for microsandbox::sandbox::RestoreBuilder {
+    fn proxy<P: OutboundProxyConfig>(
+        self,
+        configure: impl FnOnce(OutboundProxyBuilder) -> P,
+    ) -> Self {
+        microsandbox::sandbox::RestoreBuilder::proxy(self, configure)
     }
 }
 
@@ -211,6 +243,78 @@ pub(crate) fn restore_builder_with_context(
             })?;
         SnapshotReference::path(path)
     };
+    restore_builder_from_reference(context, snapshot, name, kwargs)
+}
+
+fn parse_pull_policy(value: &Bound<'_, PyAny>) -> PyResult<PullPolicy> {
+    let pp = extract_str_enum(value, "PullPolicy")?;
+    let policy = match pp.as_str() {
+        "always" => PullPolicy::Always,
+        "if-missing" => PullPolicy::IfMissing,
+        "never" => PullPolicy::Never,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid pull_policy: {pp}. Expected: always, if-missing, never"
+            )));
+        }
+    };
+    Ok(policy)
+}
+
+fn apply_outbound_proxy<B: ProxyDestination>(
+    mut builder: B,
+    proxy: &Bound<'_, PyAny>,
+) -> PyResult<B> {
+    let proxy = config_dict(proxy, "OutboundProxy")?;
+    let protocol = extract_required::<String>(&proxy, "protocol")?;
+    let address = extract_required::<String>(&proxy, "address")?;
+    let credentials = parse_proxy_credentials(&proxy)?;
+    builder = match protocol.as_str() {
+        "http_connect" => builder.proxy(move |p| {
+            let proxy = p.http_connect(address);
+            match credentials {
+                Some((username, password)) => proxy.credentials(username, password),
+                None => proxy,
+            }
+        }),
+        "socks4" => {
+            if credentials.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "credentials are only supported for SOCKS5 and HTTP CONNECT proxies",
+                ));
+            }
+            let user_id = extract_opt::<String>(&proxy, "user_id")?;
+            builder.proxy(move |p| {
+                let proxy = p.socks4(address);
+                match user_id {
+                    Some(user_id) => proxy.user_id(user_id),
+                    None => proxy,
+                }
+            })
+        }
+        "socks5" => builder.proxy(move |p| {
+            let proxy = p.socks5(address);
+            match credentials {
+                Some((username, password)) => proxy.credentials(username, password),
+                None => proxy,
+            }
+        }),
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported outbound proxy protocol {protocol:?}"
+            )));
+        }
+    };
+    Ok(builder)
+}
+
+/// Apply destination options without allowing them to replace a receiver-selected source.
+pub(crate) fn restore_builder_from_reference(
+    context: std::sync::Arc<dyn microsandbox::Context>,
+    snapshot: SnapshotReference,
+    name: String,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<microsandbox::sandbox::RestoreBuilder> {
     let mut builder = context.sandboxes().restore_ref(snapshot).name(name);
     let Some(kwargs) = kwargs else {
         return Ok(builder);
@@ -220,7 +324,17 @@ pub(crate) fn restore_builder_with_context(
         if ![
             "cpus",
             "memory",
+            "max_cpus",
+            "max_memory",
+            "labels",
+            "workdir",
+            "shell",
+            "entrypoint",
+            "cmd",
+            "env",
             "network_policy",
+            "pull_policy",
+            "proxy",
             "max_connections",
             "max_tcp_connections",
             "max_udp_connections",
@@ -228,10 +342,13 @@ pub(crate) fn restore_builder_with_context(
             "security",
             "max_duration",
             "idle_timeout",
+            "guest_clock",
             "cow_memory",
             "forked",
             "disk_only",
             "snapshot_base",
+            "init",
+            "hostname",
             "log_level",
             "user",
             "volumes",
@@ -257,6 +374,37 @@ pub(crate) fn restore_builder_with_context(
     if let Some(memory) = extract_memory_mib(kwargs, "memory")? {
         builder = builder.memory(memory);
     }
+    if let Some(max_cpus) = extract_opt::<u8>(kwargs, "max_cpus")? {
+        builder = builder.max_cpus(max_cpus);
+    }
+    if let Some(max_memory) = extract_opt::<u32>(kwargs, "max_memory")? {
+        builder = builder.max_memory(max_memory);
+    }
+    if let Some(value) = extract_opt::<HashMap<String, String>>(kwargs, "labels")? {
+        builder = builder.labels(value);
+    }
+    if let Some(value) = extract_opt::<String>(kwargs, "workdir")? {
+        builder = builder.workdir(value);
+    }
+    if let Some(value) = extract_opt::<String>(kwargs, "shell")? {
+        builder = builder.shell(value);
+    }
+    if let Some(value) = extract_opt::<Vec<String>>(kwargs, "entrypoint")? {
+        builder = builder.entrypoint(value);
+    }
+    if let Some(value) = extract_opt::<Vec<String>>(kwargs, "cmd")? {
+        builder = builder.cmd(value);
+    }
+    if let Some(value) = extract_opt::<HashMap<String, String>>(kwargs, "env")? {
+        builder = builder.envs(value);
+    }
+    if let Some(value) = kwargs.get_item("init")?.filter(|v| !v.is_none()) {
+        let (cmd, args, env) = parse_init_kwarg(&value)?;
+        builder = builder.init_with(cmd, |init| init.args(args).envs(env));
+    }
+    if let Some(hostname) = extract_opt::<String>(kwargs, "hostname")? {
+        builder = builder.hostname(hostname);
+    }
     if let Some(value) = kwargs.get_item("network_policy")?.filter(|v| !v.is_none()) {
         // Accept only the existing policy value, not a Network config that could alter bootstrap.
         let policy = config_dict(&value, "NetworkPolicy")?;
@@ -265,6 +413,12 @@ pub(crate) fn restore_builder_with_context(
         if let Some(policy) = parse_network_policy(&net)? {
             builder = builder.network_policy(policy);
         }
+    }
+    if let Some(proxy) = kwargs.get_item("proxy")?.filter(|v| !v.is_none()) {
+        builder = apply_outbound_proxy(builder, &proxy)?;
+    }
+    if let Some(value) = kwargs.get_item("pull_policy")?.filter(|v| !v.is_none()) {
+        builder = builder.pull_policy(parse_pull_policy(&value)?);
     }
     let legacy = extract_opt::<usize>(kwargs, "max_connections")?;
     let tcp = extract_opt::<usize>(kwargs, "max_tcp_connections")?;
@@ -312,6 +466,17 @@ pub(crate) fn restore_builder_with_context(
     }
     if let Some(duration) = lifetime_duration(kwargs, "idle_timeout")? {
         builder = builder.idle_timeout(duration);
+    }
+    if let Some(policy) = extract_opt::<String>(kwargs, "guest_clock")? {
+        builder = builder.guest_clock(match policy.as_str() {
+            "sync" => microsandbox::sandbox::GuestClockPolicy::Sync,
+            "off" => microsandbox::sandbox::GuestClockPolicy::Off,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "guest_clock must be sync or off",
+                ));
+            }
+        });
     }
     let legacy_cow = extract_opt::<bool>(kwargs, "forked")?;
     if legacy_cow.is_some() {
@@ -692,20 +857,8 @@ pub(crate) fn sandbox_builder_with_context(
         }
     }
 
-    // Pull policy.
-    if let Some(pp_obj) = kwargs.get_item("pull_policy")?.filter(|v| !v.is_none()) {
-        let pp = extract_str_enum(&pp_obj, "PullPolicy")?;
-        let policy = match pp.as_str() {
-            "always" => PullPolicy::Always,
-            "if-missing" => PullPolicy::IfMissing,
-            "never" => PullPolicy::Never,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "invalid pull_policy: {pp}. Expected: always, if-missing, never"
-                )));
-            }
-        };
-        builder = builder.pull_policy(policy);
+    if let Some(value) = kwargs.get_item("pull_policy")?.filter(|v| !v.is_none()) {
+        builder = builder.pull_policy(parse_pull_policy(&value)?);
     }
 
     // Log level.
@@ -800,50 +953,8 @@ pub(crate) fn sandbox_builder_with_context(
         builder = builder.intercept_tls();
     }
 
-    // Outbound proxy.
-    if let Some(proxy) = kwargs.get_item("proxy")?
-        && !proxy.is_none()
-    {
-        let proxy = config_dict(&proxy, "OutboundProxy")?;
-        let protocol = extract_required::<String>(&proxy, "protocol")?;
-        let address = extract_required::<String>(&proxy, "address")?;
-        let credentials = parse_proxy_credentials(&proxy)?;
-        builder = match protocol.as_str() {
-            "http_connect" => builder.proxy(move |p| {
-                let proxy = p.http_connect(address);
-                match credentials {
-                    Some((username, password)) => proxy.credentials(username, password),
-                    None => proxy,
-                }
-            }),
-            "socks4" => {
-                if credentials.is_some() {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "credentials are only supported for SOCKS5 and HTTP CONNECT proxies",
-                    ));
-                }
-                let user_id = extract_opt::<String>(&proxy, "user_id")?;
-                builder.proxy(move |p| {
-                    let proxy = p.socks4(address);
-                    match user_id {
-                        Some(user_id) => proxy.user_id(user_id),
-                        None => proxy,
-                    }
-                })
-            }
-            "socks5" => builder.proxy(move |p| {
-                let proxy = p.socks5(address);
-                match credentials {
-                    Some((username, password)) => proxy.credentials(username, password),
-                    None => proxy,
-                }
-            }),
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unsupported outbound proxy protocol {protocol:?}"
-                )));
-            }
-        };
+    if let Some(proxy) = kwargs.get_item("proxy")?.filter(|v| !v.is_none()) {
+        builder = apply_outbound_proxy(builder, &proxy)?;
     }
 
     // Secrets.

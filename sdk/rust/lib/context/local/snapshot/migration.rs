@@ -253,6 +253,12 @@ async fn reconcile_paths(
     preflight_target_collisions(db, &planned).await?;
     for candidate in &planned {
         journal_planned(db, candidate).await?;
+        #[cfg(test)]
+        super::historical_recovery_tests::boundary(
+            &candidate.inspected.pinned.path,
+            "upgrade",
+            "planned",
+        );
     }
 
     for candidate in &planned {
@@ -264,11 +270,31 @@ async fn reconcile_paths(
             return Ok(report);
         }
         journal_phase(db, &candidate.inspected.pinned.path, "descriptor_published").await?;
+        #[cfg(test)]
+        super::historical_recovery_tests::boundary(
+            &candidate.inspected.pinned.path,
+            "upgrade",
+            "descriptor_published",
+        );
     }
 
     publish_index_component(db, &planned).await?;
+    #[cfg(test)]
+    for candidate in &planned {
+        super::historical_recovery_tests::boundary(
+            &candidate.inspected.pinned.path,
+            "upgrade",
+            "index_published",
+        );
+    }
     for candidate in &planned {
         retire_legacy_descriptor(candidate)?;
+        #[cfg(test)]
+        super::historical_recovery_tests::boundary(
+            &candidate.inspected.pinned.path,
+            "upgrade",
+            "legacy_retired",
+        );
         journal_complete(db, &candidate.inspected.pinned.path).await?;
         report.migrated += 1;
     }

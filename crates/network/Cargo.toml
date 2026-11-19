@@ -12,7 +12,9 @@ path = "lib/lib.rs"
 
 [features]
 default = ["engine"]
+intercept-identity = ["dep:rcgen", "dep:rustls", "dep:sha2", "dep:hex", "dep:x509-parser"]
 engine = [
+    "intercept-identity",
     "dep:base64",
     "dep:bytes",
     "dep:core-foundation",
@@ -29,7 +31,6 @@ engine = [
     "dep:parking_lot",
     "dep:pem",
     "dep:percent-encoding",
-    "dep:rcgen",
     "dep:resolv-conf",
     "dep:rustls",
     "dep:rustls-native-certs",
@@ -47,6 +48,8 @@ engine = [
 ]
 
 [dependencies]
+hex = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 bytes = { workspace = true, optional = true }
 crossbeam-queue = { workspace = true, optional = true }
@@ -99,6 +102,7 @@ tokio = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 tokio-socks = { workspace = true, optional = true }
 tracing.workspace = true
+x509-parser = { version = "0.18", optional = true }
 zeroize = { workspace = true }
 
 # macOS reads DNS servers from SystemConfiguration / SCDynamicStore rather

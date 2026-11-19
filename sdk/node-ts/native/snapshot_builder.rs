@@ -1,4 +1,4 @@
-use microsandbox::snapshot::{Snapshot as RustSnapshot, SnapshotBuilder as RustSnapshotBuilder};
+use microsandbox::snapshot::{Checkpoint as RustSnapshot, SnapshotBuilder as RustSnapshotBuilder};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 

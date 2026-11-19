@@ -851,6 +851,10 @@ mod tests {
                 .unwrap(),
             serde_json::to_value(test_support::fixtures::decode(&original).unwrap()).unwrap()
         );
+        // This checks pre-launch validation and preservation, not registry availability.
+        // An empty disposable directory is enough: the invalid hostname must fail before boot.
+        let rootfs = home.path().join("rootfs");
+        std::fs::create_dir(&rootfs).unwrap();
         let backend: Arc<dyn crate::context::Context> = local;
         let result = async {
             let destination: std::sync::Arc<dyn crate::Context> = backend;
@@ -858,7 +862,7 @@ mod tests {
             destination
                 .sandboxes()
                 .builder("preserved")
-                .image("alpine:3.21")
+                .image(rootfs)
                 .hostname("x".repeat(65))
                 .replace()
                 .create()

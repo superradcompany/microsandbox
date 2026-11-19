@@ -17,17 +17,22 @@ mod lifetime;
 mod readiness;
 mod state;
 #[cfg(feature = "local")]
-pub(crate) use builder::prepare_local_snapshot_restore;
+pub(crate) use builder::{apply_portable_snapshot_defaults, prepare_local_snapshot_restore};
 mod caller_config_overrides;
 #[cfg(feature = "cloud")]
 mod cloud;
+pub(crate) mod command_provenance;
 mod compact;
 pub(crate) mod config;
 #[cfg(test)]
 mod control_pipe;
+#[cfg(feature = "local")]
+mod creation_cleanup;
+mod environment_provenance;
 pub mod exec;
 #[cfg(feature = "local")]
 mod exit;
+mod field_presence;
 #[cfg(feature = "local")]
 pub(crate) mod flat_rootfs;
 pub mod fs;
@@ -35,10 +40,18 @@ mod fs_handle;
 mod handle;
 pub(crate) mod identity;
 pub mod init;
+pub(crate) mod init_provenance;
 pub mod jobs;
 pub(crate) mod metrics;
 #[cfg(any(feature = "local", feature = "cloud"))]
 mod modify;
+mod mount_presence;
+#[cfg(all(test, feature = "local"))]
+mod mount_presence_tests;
+mod network_policy_presence;
+pub(crate) mod network_presence;
+#[cfg(all(test, feature = "local"))]
+mod network_presence_tests;
 #[cfg(feature = "local")]
 mod patch;
 #[cfg(feature = "local")]
@@ -54,8 +67,11 @@ pub(crate) mod pause;
 mod reap;
 #[cfg(not(feature = "local"))]
 mod remote_only;
+#[cfg(feature = "local")]
+mod resize;
 mod restore_builder;
 pub(crate) mod restore_resources;
+mod snapshot;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 // Windows-only in shipping builds, but kept compiled under `test` so the
@@ -227,6 +243,12 @@ pub(crate) use external_mounts::{
     external_bind_guest_paths, require_guest_mounts, require_recorded_mounts,
     resolve_external_mounts,
 };
+#[cfg(feature = "local")]
+pub use microsandbox_protocol::resize::{
+    ResizeObservation, ResizeOperation, ResizeOutcome, ResizeTarget, ResizeTracking,
+};
+#[cfg(feature = "local")]
+pub use modify::SandboxModificationResult;
 #[cfg(any(feature = "local", feature = "cloud"))]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
@@ -235,6 +257,8 @@ pub use modify::{
     SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind, SecretModificationPatch,
     SecretPatchBuilder, SecretPlannedChange, SecretSource,
 };
+#[cfg(feature = "local")]
+pub use resize::DEFAULT_RESIZE_READ_TIMEOUT;
 #[cfg(feature = "ssh")]
 pub use ssh::{
     DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSshOps, SftpClient, SshAttachOptionsBuilder,
@@ -1077,20 +1101,6 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Creation cleanup owns this exact process and must not reacquire its transition lock.
-    #[cfg(feature = "local")]
-    pub(crate) async fn terminate_creation_owner(&self) {
-        if let Some(local) = self.local_state()
-            && let Some(handle) = &local.handle
-        {
-            let mut handle = handle.lock().await;
-            if matches!(handle.try_wait(), Ok(None)) {
-                let _ = handle.kill();
-                let _ = tokio::time::timeout(DEFAULT_KILL_TIMEOUT, handle.wait()).await;
-            }
-        }
-    }
-
     fn is_local_ephemeral(&self) -> bool {
         #[cfg(feature = "local")]
         {
@@ -1326,6 +1336,9 @@ pub(super) async fn remove_local_persisted_sandbox(
     name: &str,
     expected_id: i32,
 ) -> MicrosandboxResult<()> {
+    // An internal recovery alias may be visible to a mixed-version catalog reader.
+    // It cannot own a user operation, including deletion of TLS keys by numeric ID.
+    validate_sandbox_name(name)?;
     let _transition_guard =
         LocalContext::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
             .await?;
@@ -1414,6 +1427,11 @@ pub(super) async fn remove_local_persisted_sandbox(
 
     let _storage = CreationStorage::acquire(local_backend, name)?;
     local_backend.remove_socket_artifacts(name)?;
+    microsandbox_runtime::checkpoint::remove_sandbox_identity(
+        &local_backend.config().home(),
+        expected_id,
+    )
+    .map_err(crate::MicrosandboxError::Runtime)?;
     remove_dir_if_exists(&local_backend.sandboxes_dir().join(name))?;
     sandbox_entity::Entity::delete_by_id(expected_id)
         .exec(pools.write())
