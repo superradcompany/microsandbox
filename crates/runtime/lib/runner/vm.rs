@@ -807,7 +807,13 @@ fn run(
             config.sandbox_db_connect_timeout_secs,
         );
         let (mut relay, db) = tokio::try_join!(relay, db)?;
-        let (run_db_id, bindings) = insert_run(&db, config.sandbox_id, pid).await?;
+        let (run_db_id, bindings, exec_limits) = insert_run(&db, config.sandbox_id, pid).await?;
+        if let Some(limits) = exec_limits {
+            // Old SDKs may send ordinary bootstrap defaults on restart. The catalog owns
+            // this sandbox's policy; require the same Ready on both cold and full boots.
+            config.vm.bootstrap.exec_limits = Some(limits);
+            relay.required_exec_limits = Some(limits);
+        }
         relay.install_command_bindings(bindings, &boot_id);
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
@@ -3550,6 +3556,7 @@ async fn insert_run(
 ) -> RuntimeResult<(
     i32,
     Option<microsandbox_protocol::exec_bindings::DeferredCommandBindings>,
+    Option<microsandbox_types::ExecLimits>,
 )> {
     let now = chrono::Utc::now().naive_utc();
     let record = run_entity::ActiveModel {
@@ -3563,11 +3570,15 @@ async fn insert_run(
         let record = record.clone();
         async move {
             let policy = crate::command_bindings::admit(&txn, sandbox_id).await?;
+            let limits = crate::restored_exec_limits::admit(&txn, sandbox_id).await?;
             let result = run_entity::Entity::insert(record).exec(&txn).await?;
+            if limits.is_some() {
+                crate::restored_exec_limits::set_admitting(&txn, sandbox_id, false).await?;
+            }
             if policy.is_some() {
                 crate::command_bindings::set_admitting(&txn, sandbox_id, false).await?;
             }
-            Ok((txn, (result.last_insert_id, policy)))
+            Ok((txn, (result.last_insert_id, policy, limits)))
         }
     })
     .await

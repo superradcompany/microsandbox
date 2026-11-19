@@ -74,7 +74,6 @@ use microsandbox_protocol::transport::{
 use microsandbox_protocol::transport::{RelayClientConnected, RelayClientDisconnectedAck};
 use microsandbox_protocol::wire::Envelope;
 
-#[cfg(test)]
 use microsandbox_types::ExecLimits;
 #[cfg(unix)]
 use microsandbox_utils::wake_pipe::WakePipe;
@@ -507,6 +506,7 @@ struct GuestFrameMerger {
 /// clients and the guest agent without decoding.
 pub struct AgentRelay {
     binding_boot_id: Option<String>,
+    pub(super) required_exec_limits: Option<ExecLimits>,
     idle_state: Arc<RelayIdleState>,
     restored_input: RestoreInput,
     /// Shared ring buffers + wake pipes for console backend communication.
@@ -1290,6 +1290,7 @@ impl AgentRelay {
 
         Ok(Self {
             binding_boot_id: None,
+            required_exec_limits: None,
             idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
@@ -1323,6 +1324,7 @@ impl AgentRelay {
     ) -> Self {
         Self {
             binding_boot_id: None,
+            required_exec_limits: None,
             idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
@@ -1658,6 +1660,11 @@ impl AgentRelay {
 
     /// Match the readiness capability to the physical binding or retain combined fallback.
     fn select_ready_transport(&mut self, ready: &Ready) -> RuntimeResult<()> {
+        if self.required_exec_limits.is_some() && self.required_exec_limits != ready.exec_limits {
+            return Err(RuntimeError::Custom(
+                "guest cannot confirm the retained execution limits".into(),
+            ));
+        }
         self.range_lease_active = ready
             .relay_lease
             .as_ref()
@@ -9417,6 +9424,33 @@ mod tests {
             assert!(shared.workload_control.admit(false, 100).unwrap());
             assert!(!shared.workload_control.admit(false, 1).unwrap());
         }
+    }
+
+    #[test]
+    fn retained_execution_limits_require_exact_guest_confirmation() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let path = test_agent_endpoint("restore-ready-exec-limits");
+        let mut relay = AgentRelay::new_deferred(&path, shared, None);
+        let policy = ExecLimits {
+            max_executions: 2,
+            ..Default::default()
+        };
+        relay.required_exec_limits = Some(policy);
+        let mut restored = restored_agent("limits");
+        for offered in [None, Some(ExecLimits::default())] {
+            restored.ready.public.exec_limits = offered;
+            assert!(
+                relay
+                    .install_restored_ready(&restored)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot confirm")
+            );
+            assert!(relay.ready_frame.is_none());
+        }
+        restored.ready.public.exec_limits = Some(policy);
+        relay.install_restored_ready(&restored).unwrap();
+        assert!(relay.ready_frame.is_some());
     }
 
     #[tokio::test]

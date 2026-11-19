@@ -511,7 +511,10 @@ impl LocalContext {
 
         // Persist ownership before any deterministic sandbox path is created. An interrupted
         // insert can leave a row, but never untracked storage.
-        let reserved_config = config.clone_for_persistence();
+        let mut reserved_config = config.clone_for_persistence();
+        // Persistence strips the captured agent advertisement. Carry its selected policy
+        // to the reservation transaction separately from the legacy configuration JSON.
+        reserved_config.restored_exec_limits = config.retained_exec_limits();
         let reserved_config_json = serde_json::to_string(&reserved_config)?;
         let sandbox_id = Self::insert_with_replacement(
             db.write(),
@@ -2513,6 +2516,7 @@ impl LocalContext {
                 let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
                 let sandbox_id = result.last_insert_id;
                 microsandbox_runtime::command_bindings::install(&txn, sandbox_id, &config.deferred_command_bindings).await?;
+                microsandbox_runtime::restored_exec_limits::install(&txn, sandbox_id, config.retained_exec_limits()).await?;
                 if reserve {
                     txn.execute_raw(Statement::from_sql_and_values(
                         DatabaseBackend::Sqlite,
@@ -3601,6 +3605,71 @@ esac
         assert!(
             sandbox_entity::Entity::find()
                 .filter(sandbox_entity::Column::Name.eq("bound"))
+                .one(db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_execution_limits_guard_only_the_restored_sandbox() {
+        use microsandbox_types::ExecLimits;
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("limits.db")).await;
+        let db = pools.write();
+        let mut config = test_config("limited");
+        config.restored_exec_limits = Some(ExecLimits {
+            max_executions: 2,
+            ..Default::default()
+        });
+        let limited = LocalContext::insert_sandbox_record(db, &config)
+            .await
+            .unwrap();
+        let try_legacy_start = |id| {
+            run_entity::Entity::insert(run_entity::ActiveModel {
+                sandbox_id: Set(id),
+                status: Set(run_entity::RunStatus::Running),
+                ..Default::default()
+            })
+            .exec(db)
+        };
+        assert!(
+            try_legacy_start(limited)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("saved execution limits")
+        );
+
+        let mut ordinary = test_config("ordinary");
+        ordinary.restored_exec_limits = Some(ExecLimits::default());
+        let id = LocalContext::insert_sandbox_record(db, &ordinary)
+            .await
+            .unwrap();
+        try_legacy_start(id).await.unwrap();
+        LocalContext::delete_sandbox_record(db, limited)
+            .await
+            .unwrap();
+        let any_policy = db
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT 1 FROM sandbox_restored_exec_limits LIMIT 1",
+            ))
+            .await
+            .unwrap();
+        assert!(any_policy.is_none());
+
+        config.restored_exec_limits.as_mut().unwrap().max_executions = 0;
+        assert!(
+            LocalContext::insert_sandbox_record(db, &config)
+                .await
+                .is_err()
+        );
+        assert!(
+            sandbox_entity::Entity::find()
+                .filter(sandbox_entity::Column::Name.eq("limited"))
                 .one(db)
                 .await
                 .unwrap()

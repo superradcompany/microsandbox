@@ -634,7 +634,8 @@ pub(crate) async fn validate_runtime_config(
     network.secrets.validate().map_err(|error| {
         MicrosandboxError::InvalidConfig(format!("invalid secret configuration: {error}"))
     })?;
-    let needs_guard = !config.deferred_command_bindings.is_empty();
+    let needs_bindings = !config.deferred_command_bindings.is_empty();
+    let needs_guard = needs_bindings || config.retained_exec_limits().is_some();
     let runtime = match crate::setup::resolve_runtime(global) {
         Ok(runtime) => runtime,
         #[cfg(feature = "embed-binaries")]
@@ -663,7 +664,14 @@ pub(crate) async fn validate_runtime_config(
     if needs_guard {
         let advertisement: serde_json::Value =
             serde_json::from_slice(&bounded_probe(&runtime.msb_path, "__launch-protocol").await?)?;
-        if advertisement["deferred_command_bindings"].as_bool() != Some(true) {
+        if config.retained_exec_limits().is_some()
+            && advertisement["restored_exec_limits"].as_bool() != Some(true)
+        {
+            return Err(MicrosandboxError::Runtime(upgrade_required(
+                "retained execution limits",
+            )));
+        }
+        if needs_bindings && advertisement["deferred_command_bindings"].as_bool() != Some(true) {
             return Err(MicrosandboxError::Runtime(upgrade_required(
                 "deferred command bindings",
             )));

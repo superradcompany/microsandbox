@@ -25,7 +25,7 @@ pub use client::memory_handoff;
 #[cfg(feature = "client")]
 pub use client::{
     boot_error, command_bindings, compat, control, ipc, jobs, launch, logging, maintenance,
-    retention, startup_progress,
+    restored_exec_limits, retention, startup_progress,
 };
 #[cfg(feature = "runner")]
 pub use runner::{console, cpu, exec_log, heartbeat, metrics, policy, relay, vm};

@@ -44,7 +44,7 @@ impl RuntimeCaptureSource<'_> {
         bindings: StorageCaptureBindings,
         manifest: &Manifest,
     ) -> MicrosandboxResult<SavedStorageConfig> {
-        self.project_storage_sections(bindings, Some(manifest), true)
+        self.project_storage_sections(bindings, Some(manifest), true, None)
     }
 
     /// Preserve next-start requirements without claiming that requested owned storage
@@ -76,7 +76,7 @@ impl RuntimeCaptureSource<'_> {
                 }
             }
         }
-        self.project_storage_sections(bindings, None, complete)
+        self.project_storage_sections(bindings, None, complete, None)
     }
 
     fn complete_mount_inventory(&self, pending: bool) -> bool {
@@ -189,7 +189,7 @@ impl RuntimeCaptureSource<'_> {
         }
         bindings.routes = selection.routes;
         self.complete_socket_bindings(&mut bindings, "active.storage.routes")?;
-        self.project_storage_sections(bindings, Some(manifest), complete)
+        self.project_storage_sections(bindings, Some(manifest), complete, observed)
     }
 
     /// A complete socket declaration establishes the guest port and type. Its private
@@ -218,6 +218,7 @@ impl RuntimeCaptureSource<'_> {
         mut bindings: StorageCaptureBindings,
         manifest: Option<&Manifest>,
         mount_evidence_available: bool,
+        observed: Option<&MountedStorageEvidence>,
     ) -> MicrosandboxResult<SavedStorageConfig> {
         if bindings.mounts.len() > MAX_SAVED_CONFIG_ENTRIES
             || bindings.routes.len() > MAX_SAVED_CONFIG_ENTRIES
@@ -245,7 +246,21 @@ impl RuntimeCaptureSource<'_> {
                             return SavedMount::requested_owned_from_source(source)
                                 .map_err(manifest_error);
                         }
-                        SavedMount::from_source(source, external).map_err(manifest_error)
+                        let mut mount =
+                            SavedMount::from_source(source, external).map_err(manifest_error)?;
+                        if let SavedMount::Bind {
+                            guest, quota_mib, ..
+                        } = &mut mount
+                            && let Some(receipt) = observed
+                        {
+                            // Only active storage uses the applied budget. The pending
+                            // declaration continues to distinguish an omitted caller quota.
+                            *quota_mib =
+                                Some(observed_bind_quota(receipt, guest).ok_or_else(|| {
+                                    error("SCFG_IDENTITY", "missing observed bind quota")
+                                })?);
+                        }
+                        Ok(mount)
                     })
                     .collect::<MicrosandboxResult<Vec<_>>>()?;
                 // Guest paths must already be canonical (validated by from_source). Sort only
@@ -327,7 +342,8 @@ fn observed_external_mount(
         VolumeMount::DiskImage { .. } => SavedExternalMountCapture::DiskImage { binding },
         VolumeMount::Bind { quota_mib, .. } => {
             let actual = backing?;
-            if actual.quota_bytes != quota_mib.map(|mib| u64::from(mib) * MIB) {
+            let applied = observed_bind_quota(observed?, mount.guest())?;
+            if quota_mib.is_some_and(|requested| requested != applied) {
                 return None;
             }
             let root_kind = match actual.kind {
@@ -359,6 +375,17 @@ fn observed_external_mount(
         }
         VolumeMount::Owned { .. } | VolumeMount::Tmpfs { .. } => return None,
     })
+}
+
+/// A bind quota in the portable format is an exact MiB budget. Its omitted form
+/// selects a host default, so it cannot express a confirmed unlimited backend.
+fn observed_bind_quota(receipt: &MountedStorageEvidence, guest: &str) -> Option<u32> {
+    const MIB: u64 = 1024 * 1024;
+    let bytes = receipt.get(guest)?.quota_bytes?;
+    if !bytes.is_multiple_of(MIB) {
+        return None;
+    }
+    u32::try_from(bytes / MIB).ok()
 }
 
 fn complete_mount(raw: &Value, ownership_known: bool) -> bool {

@@ -249,6 +249,53 @@ fn captured_mounts_use_receipt_geometry_and_never_reopen_the_source() {
 }
 
 #[test]
+fn omitted_bind_quota_captures_only_an_exact_active_budget() {
+    let mut raw = source();
+    raw["mounts"][1]["quota_mib"] = Value::Null;
+    let source = RuntimeCaptureSource::from_recorded(&raw, None, None).unwrap();
+    let quota = |storage: &SavedStorageConfig| {
+        storage
+            .mounts
+            .as_ref()?
+            .value()?
+            .iter()
+            .find_map(|mount| match mount {
+                SavedMount::Bind { quota_mib, .. } => Some(*quota_mib),
+                _ => None,
+            })
+    };
+    let pending = source.project_pending_storage(bindings()).unwrap();
+    assert_eq!(quota(&pending), Some(None));
+    for (bytes, expected) in [
+        (json!(4096_u64 << 20), Some(4096)),
+        (json!(0), Some(0)),
+        (Value::Null, None),
+        (json!(16385), None),
+        (json!(1u64 << 52), None),
+    ] {
+        let receipt = serde_json::from_value(json!({
+            "/data":{"kind":"directory","quota_bytes":bytes},
+            "/named":{"capacity_bytes":134217728}
+        }))
+        .unwrap();
+        let mut descriptor = manifest(false);
+        descriptor.set_owned_volumes(vec![owned("/owned")]).unwrap();
+        let active = source
+            .project_observed_storage(
+                Some(&receipt),
+                &descriptor,
+                StorageCaptureBindings::default(),
+            )
+            .unwrap();
+        if let Some(mib) = expected {
+            assert_eq!(quota(&active), Some(Some(mib)));
+        } else {
+            assert!(unknown(&active.mounts));
+        }
+    }
+}
+
+#[test]
 fn pending_storage_records_requests_without_borrowing_active_owned_payloads() {
     let raw = source();
     let original = raw.clone();

@@ -140,6 +140,9 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) deferred_command_bindings:
         microsandbox_protocol::exec_bindings::DeferredCommandBindings,
+    /// Reservation input; the destination's guarded catalog row owns the durable copy.
+    #[serde(skip)]
+    pub(crate) restored_exec_limits: Option<microsandbox_types::ExecLimits>,
     /// Preserve omission through catalog round trips. Older SDKs may omit this additive hint;
     /// absent historical HTTP documents are implicit, while concrete HTTP choices stay strict.
     #[serde(default, skip_serializing_if = "http_defaults_are_not_implicit")]
@@ -644,6 +647,7 @@ impl SandboxConfig {
         self.resumed_from_full_snapshot = false;
         self.snapshot_upper_source = None;
         self.restore_resources.clear_captured();
+        self.restored_exec_limits = None;
     }
 
     /// Apply the composed patches, then resolve sandbox defaults that depend on the final values.
@@ -959,14 +963,22 @@ impl SandboxConfig {
         self.resumed_from_full_snapshot
     }
 
-    /// Effective execution policy: a resumed guest keeps its captured policy,
-    /// everything else uses the built-in defaults.
+    /// A full resume uses the immutable guest advertisement. A disk restore may
+    /// select observed policy through saved-config admission. Ordinary boots use defaults.
     pub(crate) fn exec_limits(&self) -> microsandbox_types::ExecLimits {
         self.restore_resources
             .agent_ready
             .as_ref()
             .and_then(|ready| ready.exec_limits)
+            .or(self.restored_exec_limits)
             .unwrap_or_default()
+    }
+
+    /// A nondefault execution policy needs an independent restart guard. Its source
+    /// may be either disk restore admission or a full checkpoint's captured Ready.
+    pub(crate) fn retained_exec_limits(&self) -> Option<microsandbox_types::ExecLimits> {
+        let policy = self.exec_limits();
+        (policy != microsandbox_types::ExecLimits::default()).then_some(policy)
     }
 
     /// Apply OCI image config as defaults. User-provided values take precedence.
@@ -1468,6 +1480,7 @@ impl Default for SandboxConfig {
             http_defaults_implicit: None,
             init_provenance: None,
             deferred_command_bindings: Default::default(),
+            restored_exec_limits: None,
             init_provenance_unknown: false,
             command_provenance: None,
             command_provenance_unknown: false,

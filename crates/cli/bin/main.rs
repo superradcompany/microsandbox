@@ -434,6 +434,7 @@ fn main() {
                 })
                 .expect("serialize capabilities");
             capabilities["deferred_command_bindings"] = true.into();
+            capabilities["restored_exec_limits"] = true.into();
             println!("{capabilities}");
             return;
         }

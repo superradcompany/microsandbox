@@ -28,6 +28,11 @@ impl SavedDestinationInputs {
     pub(super) fn new(spec: SandboxSpec, plan: SavedConfigurationPlan) -> Self {
         let mut config = crate::SandboxConfig::from(spec);
         config.deferred_command_bindings = plan.runtime().inputs().deferred_command_bindings();
+        config.restored_exec_limits = plan
+            .execution()
+            .selection()
+            .exec_limits
+            .filter(|policy| *policy != microsandbox_types::ExecLimits::default());
         Self { config, plan }
     }
 

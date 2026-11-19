@@ -921,3 +921,7 @@ Disk snapshots captured with confirmed last-active guest-clock policy now use th
 ## Concurrent catalog sidecar teardown
 
 Catalog hardening retries up to 16 complete inspections when SQLite sidecar teardown exposes an unlinked inode or the path changes during inspection. Every attempt repeats the ownership, link and permission checks; symlinks, hardlinks and untrusted access remain rejected. Continued churn returns an error. No SQLite schema, migration guard, lock protocol or runtime format changes.
+
+### Restarting a snapshot with execution limits
+
+A snapshot destination with a retained nondefault execution policy needs a runtime advertising `restored_exec_limits`. Initial creation checks this before replacing an existing sandbox. A later start on an older runtime fails with `saved execution limits require a runtime that can enforce them`. Use a capable runtime to restart it, including with an older SDK. The catalog remains readable and other sandboxes can start. Removing the destination removes its execution policy.
