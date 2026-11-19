@@ -207,11 +207,20 @@ async fn run_started(
     // Resolve the command with exec semantics: an explicit command runs
     // directly, while omitted commands can still fall back to the sandbox's
     // configured image command/default shell.
-    let (cmd, cmd_args) = match super::common::resolve_exec_command(
-        sandbox.config().await?.runtime(),
-        args.command,
-        interactive,
-    )? {
+    // An explicit command does not use the image defaults. Avoid a remote
+    // config request here, but keep execution's identity/status revalidation
+    // in prepare_runtime: skipping that check could target a replaced sandbox.
+    let resolved = if args.command.is_empty() {
+        super::common::resolve_exec_command(
+            sandbox.config().await?.runtime(),
+            args.command,
+            interactive,
+        )?
+    } else {
+        let mut command = args.command.into_iter();
+        (command.next(), command.collect())
+    };
+    let (cmd, cmd_args) = match resolved {
         (Some(cmd), cmd_args) => (cmd, cmd_args),
         (None, _) => return Ok(0),
     };

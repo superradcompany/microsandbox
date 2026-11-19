@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 // diagnostics) while refreshing N-API's exported names and declaration file.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const loader = resolve(root, "native/index.cjs");
+// Windows checkouts may use CRLF; locate the export line without changing either loader's bytes.
 const boundary = /^module\.exports = nativeBinding\r?$/m;
 const before = await readFile(loader, "utf8");
 const split = before.search(boundary);
