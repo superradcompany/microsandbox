@@ -56,3 +56,27 @@ func TestGroupImportRetainsCallerDirectory(t *testing.T) {
 		t.Fatalf("absolute import depended on cwd: %q, %v", dir, err)
 	}
 }
+
+func TestCaptureDirectoryRemainsAnchoredAfterChdir(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := "target"
+	if filepath.Separator == '/' {
+		input = "link/../target"
+	}
+	got, err := anchorSnapshotDirectory(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	if got != cwd+string(os.PathSeparator)+input {
+		t.Fatalf("capture directory changed: %q", got)
+	}
+	if empty, err := anchorSnapshotDirectory(""); err != nil || empty != "" {
+		t.Fatalf("default directory: %q, %v", empty, err)
+	}
+}

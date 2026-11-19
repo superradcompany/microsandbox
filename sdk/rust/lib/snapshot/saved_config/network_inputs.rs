@@ -16,6 +16,7 @@ pub(super) struct NetworkInputShape {
     dns: bool,
     tls: bool,
     secrets: bool,
+    rate_limiter: bool,
     interface: Option<InterfaceOverrides>,
 }
 
@@ -43,6 +44,17 @@ impl NetworkInputShape {
                 || (retain_lower_policy && lower.tls.is_some()),
             secrets: saved.secrets.as_ref().and_then(SavedValue::value).is_some()
                 || explicit.secrets.is_some(),
+            rate_limiter: explicit.rate_limiter.is_some()
+                || if retain_lower_policy {
+                    lower.rate_limiter.is_some()
+                } else {
+                    saved
+                        .rate_limiter
+                        .as_ref()
+                        .and_then(SavedValue::value)
+                        .is_some()
+                        || (saved.rate_limiter.is_none() && lower.rate_limiter.is_some())
+                },
             // Slot/guest identity never comes from portable defaults. Preserve resolved
             // destination defaults beneath sparse explicit inputs; allocation and captured
             // identity admission still happen later.
@@ -86,6 +98,11 @@ pub(super) fn assemble(
     }
     if !shape.tls {
         network.tls = None;
+    }
+    // The native limiter requires at least one direction. The builtin value is
+    // an absent limiter, even though its individual direction defaults are empty.
+    if !shape.rate_limiter {
+        network.rate_limiter = None;
     }
     network.secrets = shape.secrets.then_some(secrets);
     Ok(network)

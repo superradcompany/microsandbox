@@ -1428,6 +1428,7 @@ impl<'de> Deserialize<'de> for SandboxConfig {
                     .flatten()
             });
         if let Some(presence) = &mut presence {
+            presence.retain_recorded_boot_defaults(&value);
             presence.retain_recorded_mounts(value.get("mounts"));
         }
         // Historical records without positive presence evidence can still need a

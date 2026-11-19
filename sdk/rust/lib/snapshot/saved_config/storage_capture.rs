@@ -101,6 +101,15 @@ impl RuntimeCaptureSource<'_> {
     }
 
     fn complete_route_inventory(&self) -> bool {
+        if self.recorded.get("vsock").is_none()
+            && self
+                .config
+                .field_presence
+                .as_ref()
+                .is_some_and(|hint| hint.knows_empty_vsock(&self.config.spec))
+        {
+            return true;
+        }
         self.recorded
             .pointer("/vsock/routes")
             .and_then(Value::as_array)

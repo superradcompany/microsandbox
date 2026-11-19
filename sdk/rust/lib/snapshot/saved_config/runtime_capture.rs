@@ -244,7 +244,17 @@ impl<'a> RuntimeCaptureSource<'a> {
             init: self.init_input(),
             hostname,
             user: self.recorded_option("/runtime/user", user.as_deref()),
-            guest_clock: self.recorded_option("/runtime/guest_clock", *guest_clock),
+            guest_clock: if self.recorded.pointer("/runtime/guest_clock").is_none()
+                && self
+                    .config
+                    .field_presence
+                    .as_ref()
+                    .is_some_and(|hint| hint.knows_default_guest_clock(&self.config.spec))
+            {
+                Some(SavedValue::Default {})
+            } else {
+                self.recorded_option("/runtime/guest_clock", *guest_clock)
+            },
         }
     }
 

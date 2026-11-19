@@ -315,6 +315,22 @@ func prepareGroupImportPaths(files []string, opts SnapshotImportOptions) ([]stri
 	return files, opts, cwd, nil
 }
 
+// Anchor before a native future can run on another goroutine. On Unix a symlink
+// followed by .. must be resolved by the filesystem, so preserve its spelling.
+func anchorSnapshotDirectory(path string) (string, error) {
+	if path == "" || filepath.IsAbs(path) {
+		return path, nil
+	}
+	if filepath.Separator == '\\' {
+		return filepath.Abs(path)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(cwd, string(os.PathSeparator)) + string(os.PathSeparator) + path, nil
+}
+
 // Open reopens an explicit local history directory without default-store lookup.
 func (s *Snapshots) Open(ctx context.Context, path string) (*SnapshotGroup, error) {
 	owner, err := s.root()
@@ -324,19 +340,9 @@ func (s *Snapshots) Open(ctx context.Context, path string) (*SnapshotGroup, erro
 	if path == "" {
 		return nil, fmt.Errorf("snapshot group path cannot be empty")
 	}
-	// Do not filepath.Clean/Abs: collapsing .. across a symlink changes its target.
-	if filepath.Separator == '\\' {
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			return nil, err
-		}
-		path = absolute
-	} else if !filepath.IsAbs(path) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-		path = strings.TrimRight(cwd, string(os.PathSeparator)) + string(os.PathSeparator) + path
+	path, err = anchorSnapshotDirectory(path)
+	if err != nil {
+		return nil, err
 	}
 	var wire snapshotGroupWire
 	data, err := owner.Call(ctx, map[string]any{"op": "open_group", "directory": path})
@@ -451,6 +457,13 @@ func (sandbox *Sandbox) Snapshot(ctx context.Context, name string, opts ...Snaps
 	options := SnapshotCaptureConfig{}
 	for _, configure := range opts {
 		configure(&options)
+	}
+	if sandbox.ContextKind() == ContextLocal {
+		directory, err := anchorSnapshotDirectory(options.Destination)
+		if err != nil {
+			return nil, err
+		}
+		options.Destination = directory
 	}
 	owner := sandbox.inner.SnapshotRoot()
 	var result snapshotCaptureWire

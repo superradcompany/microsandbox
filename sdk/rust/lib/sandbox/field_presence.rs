@@ -58,6 +58,11 @@ pub(crate) enum AbsentNetworkField {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct FieldPresence {
     thp: Option<TransparentHugePagePolicy>,
+    // Private positive evidence for values the public spec serializer omits.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    empty_vsock: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    default_guest_clock: bool,
     absent_network: BTreeSet<AbsentNetworkField>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     default_mount_ownership: BTreeSet<DefaultMountOwnership>,
@@ -115,6 +120,8 @@ impl FieldPresence {
             .collect();
         Self {
             thp: Some(spec.resources.thp),
+            empty_vsock: spec.vsock.is_empty(),
+            default_guest_clock: spec.runtime.guest_clock.is_none(),
             absent_network,
             nested_network: NetworkDefault::declared(&spec.network),
             secret_policy_unrecorded: false,
@@ -135,6 +142,8 @@ impl FieldPresence {
         if other.thp.is_some() {
             self.thp = other.thp;
         }
+        self.empty_vsock |= other.empty_vsock;
+        self.default_guest_clock |= other.default_guest_clock;
         self.absent_network.extend(other.absent_network);
         self.nested_network.extend(other.nested_network);
         self.secret_policy_unrecorded |= other.secret_policy_unrecorded;
@@ -240,7 +249,24 @@ impl FieldPresence {
             .any(|field| field.key() == key && field.is_absent(&spec.network))
     }
 
+    pub(crate) fn knows_empty_vsock(&self, spec: &SandboxSpec) -> bool {
+        self.empty_vsock && spec.vsock.is_empty()
+    }
+
+    pub(crate) fn knows_default_guest_clock(&self, spec: &SandboxSpec) -> bool {
+        self.default_guest_clock && spec.runtime.guest_clock.is_none()
+    }
+
+    pub(crate) fn retain_recorded_boot_defaults(&mut self, record: &Value) {
+        // A malformed, present parent cannot become certified empty after a typed round trip.
+        self.empty_vsock &= record.get("vsock").is_none()
+            || record.pointer("/vsock/routes").is_some_and(Value::is_array);
+        self.default_guest_clock &= record.get("runtime").is_some_and(Value::is_object);
+    }
+
     pub(crate) fn retain_matching(&mut self, spec: &SandboxSpec) {
+        self.empty_vsock &= spec.vsock.is_empty();
+        self.default_guest_clock &= spec.runtime.guest_clock.is_none();
         if !self.knows_thp(spec) {
             self.thp = None;
         }
@@ -360,6 +386,38 @@ mod tests {
             .project_resources(ResourceCaptureObservation::default())
             .unwrap()
             .thp
+    }
+
+    #[test]
+    fn omitted_clock_and_empty_routes_require_current_evidence() {
+        let record = raw(&build());
+        assert!(record.get("vsock").is_none());
+        assert!(record.pointer("/runtime/guest_clock").is_none());
+        let check = |record: &Value, has_clock: bool, has_routes: bool| {
+            let source = RuntimeCaptureSource::from_recorded(record, None, None).unwrap();
+            assert_eq!(
+                matches!(source.input().guest_clock, Some(SavedValue::Default {})),
+                has_clock
+            );
+            let routes = source
+                .project_pending_storage(StorageCaptureBindings::default())
+                .unwrap()
+                .vsock;
+            assert_eq!(
+                routes.and_then(|routes| routes.value().map(Vec::is_empty)),
+                has_routes.then_some(true)
+            );
+        };
+        check(&record, true, true);
+        let mut historical = record.clone();
+        historical.as_object_mut().unwrap().remove("field_presence");
+        check(&historical, false, false);
+
+        let mut partial = record;
+        partial["vsock"] = json!({});
+        partial.as_object_mut().unwrap().remove("runtime");
+        let rerecorded = raw(&serde_json::from_value(partial).unwrap());
+        check(&rerecorded, false, false);
     }
 
     #[test]

@@ -560,6 +560,27 @@ fn network_assembly_preserves_absent_and_explicit_empty_containers() {
 }
 
 #[test]
+fn builtin_rate_limiter_restores_without_allocating_an_empty_device() {
+    let saved = document(
+        json!({"network": {
+            "rate_limiter":{"state":"default"}, "tls":{"state":"default"},
+            "secrets":{"state":"default"}, "dns":{"state":"default"},
+            "ports":{"state":"default"}, "outbound_proxy":{"state":"default"}, "guest_trust":{"state":"default"}
+        }}),
+        json!({}),
+    );
+    let plan = prepare(
+        &saved,
+        &SandboxSpecPatch::new(),
+        SnapshotConfigMode::Saved,
+        disk(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(plan.network_inputs().unwrap().rate_limiter.is_none());
+}
+
+#[test]
 fn network_assembly_keeps_policy_resources_and_all_admission_obligations_together() {
     let saved = document(
         json!({"network":{

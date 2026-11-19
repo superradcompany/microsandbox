@@ -740,6 +740,7 @@ fn capture_document_missing_pending_sections_stay_unknown_without_active_fallbac
         "security_profile",
         "rlimits",
         "lifecycle",
+        "field_presence", // Historical input has no positive evidence for omitted defaults.
         "command_provenance",
         "environment_provenance",
     ] {
