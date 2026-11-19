@@ -85,7 +85,7 @@ impl Sandbox {
             }
             // Cleanup control is independent of the process wait lock, so a
             // pending wait never blocks detaching the shared group.
-            cleanup.disarm()?;
+            cleanup.disarm_retained(local.handle.as_ref())?;
         }
         Ok(())
     }
