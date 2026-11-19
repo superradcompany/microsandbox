@@ -15,6 +15,7 @@ def run(command, *, env=None):
 PROBE = r"""
 import asyncio, importlib, json, os, tempfile, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 import microsandbox_core as core
 from microsandbox_core.errors import JobError
 import microsandbox_local as local
@@ -67,18 +68,19 @@ async def probe():
         page = await retained.list()
         assert isinstance(page.sandboxes[0], core.Sandbox)
         assert await sb.wait_for_status('stopped') is None
-        os.environ.update(
+        # Compare default bindings later under the same configuration as before
+        # the probe. While remote is selected, the retained local context wins.
+        with patch.dict(os.environ,
             MSB_BACKEND="remote",
             MSB_API_URL=f"http://127.0.0.1:{server.server_port}",
             MSB_API_KEY="key",
-        )
-        assert (await core.Sandbox.get("task")).id == sb.id
-        # The explicit local collection still uses its original provider.
-        before = len(requests)
-        try: await destination.sandboxes.get('missing')
-        except core.MicrosandboxError: pass
-        else: raise AssertionError('missing local sandbox unexpectedly exists')
-        assert len(requests) == before
+        ):
+            assert (await core.Sandbox.get("task")).id == sb.id
+            before = len(requests)
+            try: await destination.sandboxes.get('missing')
+            except core.MicrosandboxError: pass
+            else: raise AssertionError('missing local sandbox unexpectedly exists')
+            assert len(requests) == before
 try: asyncio.run(probe())
 finally:
     server.shutdown()
