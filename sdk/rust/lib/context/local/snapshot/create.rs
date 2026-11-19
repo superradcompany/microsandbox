@@ -1547,6 +1547,15 @@ fn new_file_manifest_with_id(
         requires: Vec::new(),
         extensions: BTreeMap::new(),
     };
+    // Both installed and archive-only disk captures use this manifest. Only the
+    // configuration tied to this disk cut can establish the source clock policy.
+    if let Some(clock) = disk
+        .configuration
+        .as_ref()
+        .and_then(|capture| capture.configuration().spec.runtime.guest_clock)
+    {
+        manifest.set_guest_clock(clock)?;
+    }
     manifest.set_owned_volumes(disk.owned_volumes.clone())?;
     manifest
         .validate()

@@ -909,3 +909,5 @@ still validates paired IDs and rejects owners on non-directory mounts. Earlier
 server deployments might ignore these optional fields; there are no self-hosted
 deployments in the user's supported fleet and this is an approved server-support
 requirement. Local runtime capability checks are unchanged.
+
+Disk snapshots captured with confirmed last-active guest-clock policy now use the existing clock descriptor extension. A recorded `off` survives group and archive restores unless the destination explicitly overrides it. Sync, historical descriptors and captures without clock evidence retain the existing fallback. Earlier readers without the required clock extension refuse a newly recorded off policy.

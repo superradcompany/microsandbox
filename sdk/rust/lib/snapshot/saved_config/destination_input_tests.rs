@@ -213,6 +213,7 @@ fn destination_inputs_full_resume_preserves_cold_boot_init_without_replaying_it(
         &SandboxSpecPatch::new(),
         SnapshotConfigMode::Saved,
         SavedConfigurationContext::Full {
+            exec_limits: None,
             resources: &resources,
             security: SecurityProfile::default(),
             bindings: &captured,
@@ -257,6 +258,7 @@ fn destination_inputs_full_resume_retains_unavailable_future_init() {
         &SandboxSpecPatch::new(),
         SnapshotConfigMode::Saved,
         SavedConfigurationContext::Full {
+            exec_limits: None,
             resources: &resources,
             security: SecurityProfile::default(),
             bindings: &captured,

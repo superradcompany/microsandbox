@@ -360,6 +360,7 @@ fn full_fresh_preserves_independent_captured_only_bindings_and_geometry() {
         ..Default::default()
     };
     let context = || SavedConfigurationContext::Full {
+        exec_limits: None,
         resources: &geometry,
         security: SecurityProfile::default(),
         bindings: &captured,
@@ -694,6 +695,7 @@ fn network_assembly_keeps_destination_interface_and_caps_without_claiming_full_c
         &explicit,
         SnapshotConfigMode::Fresh,
         SavedConfigurationContext::Full {
+            exec_limits: None,
             resources: &resources,
             security: SecurityProfile::default(),
             bindings: &captured,

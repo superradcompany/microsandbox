@@ -50,7 +50,9 @@ pub use capture_controls::{
 pub use document::{
     SAVED_CONFIG_SCHEMA_VERSION, SavedActiveConfig, SavedCaptureProvenance, SavedSandboxConfig,
 };
-pub use execution::{SavedExecutionConfig, SavedLifetimePolicy, SavedRlimit, SavedU64};
+pub use execution::{
+    SavedExecLimits, SavedExecutionConfig, SavedLifetimePolicy, SavedRlimit, SavedU64,
+};
 pub use gateway_capture::SavedTlsCaptureBindings;
 pub use inventory::{
     SavedBindingConsumer, SavedBindingKind, SavedBindingUse, SavedBindingUses,

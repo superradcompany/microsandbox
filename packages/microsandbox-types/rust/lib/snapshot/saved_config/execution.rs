@@ -5,7 +5,9 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{Rlimit, RlimitResource, SandboxPolicy, SecurityProfile, SnapshotManifestResult};
+use crate::{
+    ExecLimits, Rlimit, RlimitResource, SandboxPolicy, SecurityProfile, SnapshotManifestResult,
+};
 
 use super::SavedValue;
 use super::validation::{MAX_NAME_BYTES, MAX_TEXT_BYTES, count, decode, encoded_size, invalid};
@@ -40,6 +42,13 @@ pub struct SavedExecutionConfig {
         deserialize_with = "deserialize_present"
     )]
     pub rlimits: Option<SavedValue<Vec<SavedRlimit>>>,
+    /// Guest agent policy from the same capture cut. Absence means no recorded observation.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub exec_limits: Option<SavedValue<SavedExecLimits>>,
     /// Duration policy only; elapsed counters and ephemeral ownership are never inherited.
     #[serde(
         default,
@@ -47,6 +56,23 @@ pub struct SavedExecutionConfig {
         deserialize_with = "deserialize_present"
     )]
     pub lifecycle: Option<SavedValue<SavedLifetimePolicy>>,
+}
+
+/// An observed guest policy uses the normal wire keys, but all five must be present.
+/// The bootstrap decoder permits partial inputs and fills them with defaults, which
+/// would turn a historical omission into invented evidence in a portable snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SavedExecLimits(#[serde(with = "ObservedExecLimits")] pub ExecLimits);
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ExecLimits", deny_unknown_fields)]
+struct ObservedExecLimits {
+    max_executions: u32,
+    input_limit: u32,
+    output_limit: u32,
+    stdin_chunk_size: u32,
+    output_chunk_size: u32,
 }
 
 /// Exact unsigned 64-bit quantity encoded as canonical decimal text.
@@ -131,6 +157,24 @@ impl SavedExecutionConfig {
     /// Validate identities and ranges without applying saved permissions or timers.
     pub fn validate(&self) -> SnapshotManifestResult<()> {
         encoded_size(self, "active.execution")?;
+        match &self.exec_limits {
+            Some(SavedValue::Value {
+                value,
+                origin: super::SavedOrigin::Observed,
+            }) => {
+                if let Err(reason) = value.0.validate() {
+                    return invalid("SCFG_VALUE", "active.execution.exec_limits", reason);
+                }
+            }
+            Some(SavedValue::Default {} | SavedValue::Value { .. }) => {
+                return invalid(
+                    "SCFG_IDENTITY",
+                    "active.execution.exec_limits",
+                    "guest policy requires observed evidence",
+                );
+            }
+            Some(SavedValue::Unknown { .. }) | None => {}
+        }
         if let Some(labels) = self.labels.as_ref().and_then(SavedValue::value) {
             count(labels.len(), "active.execution.labels")?;
             for (key, value) in labels {

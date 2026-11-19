@@ -23,6 +23,7 @@ fn known<T>(value: T) -> Option<SavedValue<T>> {
 
 fn source() -> SavedExecutionConfig {
     SavedExecutionConfig {
+        exec_limits: None,
         labels: known(BTreeMap::from([
             ("team.a".into(), "SENTINEL_SOURCE".into()),
             ("team".into(), "keep".into()),
@@ -379,6 +380,7 @@ fn unknown_security_requires_explicit_disk_choice_but_verified_full_evidence_is_
         &[],
         SnapshotConfigMode::Fresh,
         ExecutionRestoreMode::Full {
+            captured_exec_limits: None,
             captured_security: SecurityProfile::Restricted,
         },
         policy(),
@@ -394,6 +396,7 @@ fn unknown_security_requires_explicit_disk_choice_but_verified_full_evidence_is_
 fn full_security_preserves_existing_override_refusal_and_does_not_waive_evidence_or_policy() {
     for mode in [SnapshotConfigMode::Saved, SnapshotConfigMode::Fresh] {
         let full = ExecutionRestoreMode::Full {
+            captured_exec_limits: None,
             captured_security: SecurityProfile::Restricted,
         };
         for (explicit, clears) in [
@@ -414,6 +417,7 @@ fn full_security_preserves_existing_override_refusal_and_does_not_waive_evidence
             );
         }
         let full = ExecutionRestoreMode::Full {
+            captured_exec_limits: None,
             captured_security: SecurityProfile::Default,
         };
         assert!(
@@ -502,4 +506,76 @@ fn execution_selection_is_bounded_and_unknown_label_maps_require_whole_field_cle
         .to_string()
         .contains("SCFG_LIMIT")
     );
+}
+
+#[test]
+fn agent_policy_is_optional_on_disk_and_must_match_independent_full_state() {
+    use microsandbox_types::ExecLimits;
+    use microsandbox_types::snapshot::saved_config::SavedExecLimits;
+
+    let limits = ExecLimits {
+        max_executions: 7,
+        ..Default::default()
+    };
+    let mut saved = source();
+    saved.exec_limits = Some(SavedValue::Value {
+        value: SavedExecLimits(limits),
+        origin: SavedOrigin::Observed,
+    });
+    let resolve = |mode, restore_mode| {
+        select_execution_defaults(
+            &saved,
+            &SandboxSpecPatch::default(),
+            &[],
+            mode,
+            restore_mode,
+            policy(),
+        )
+    };
+    assert_eq!(
+        resolve(SnapshotConfigMode::Saved, ExecutionRestoreMode::Disk)
+            .unwrap()
+            .exec_limits,
+        Some(limits)
+    );
+    assert_eq!(
+        resolve(SnapshotConfigMode::Fresh, ExecutionRestoreMode::Disk)
+            .unwrap()
+            .exec_limits,
+        None
+    );
+    for mode in [SnapshotConfigMode::Fresh, SnapshotConfigMode::Saved] {
+        let full = |captured_exec_limits| ExecutionRestoreMode::Full {
+            captured_security: SecurityProfile::Restricted,
+            captured_exec_limits,
+        };
+        assert_eq!(
+            resolve(mode, full(Some(limits))).unwrap().exec_limits,
+            Some(limits)
+        );
+        assert!(resolve(mode, full(None)).is_err());
+        assert!(resolve(mode, full(Some(ExecLimits::default()))).is_err());
+    }
+}
+
+#[test]
+fn portable_agent_policy_refuses_partial_defaulted_and_unknown_fields() {
+    let valid = serde_json::to_value(microsandbox_types::ExecLimits::default()).unwrap();
+    let decode = |policy| {
+        SavedExecutionConfig::from_bytes(&serde_json::to_vec(
+        &serde_json::json!({"exec_limits":{"state":"value","origin":"observed","value":policy}})
+    ).unwrap())
+    };
+    assert!(decode(valid.clone()).is_ok());
+    for field in valid.as_object().unwrap().keys() {
+        let mut partial = valid.clone();
+        partial.as_object_mut().unwrap().remove(field);
+        assert!(decode(partial).is_err(), "{field}");
+    }
+    let mut unknown = valid.clone();
+    unknown["future"] = 1.into();
+    assert!(decode(unknown).is_err());
+    let mut invalid = valid;
+    invalid["output_chunk_size"] = 0.into();
+    assert!(decode(invalid).is_err());
 }

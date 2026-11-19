@@ -46,6 +46,8 @@ pub enum SavedConfigurationContext<'a> {
         resources: &'a SandboxResources,
         /// Independently checked captured guest policy.
         security: SecurityProfile,
+        /// Captured Ready policy, if recorded by the source guest.
+        exec_limits: Option<microsandbox_types::ExecLimits>,
         /// Captured requirements, including ones masked by optional-default selection.
         bindings: &'a SavedBindingUses,
     },
@@ -277,6 +279,7 @@ pub fn prepare_saved_configuration(
         SavedConfigurationContext::Full {
             resources,
             security,
+            exec_limits,
             bindings,
         } => (
             true,
@@ -284,6 +287,7 @@ pub fn prepare_saved_configuration(
             ResourceRestoreMode::Full(resources),
             ExecutionRestoreMode::Full {
                 captured_security: security,
+                captured_exec_limits: exec_limits,
             },
             Some(bindings),
         ),

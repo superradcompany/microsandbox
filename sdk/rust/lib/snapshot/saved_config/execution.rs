@@ -30,7 +30,11 @@ pub enum ExecutionRestoreMode {
     /// A new guest boot may select its security profile.
     Disk,
     /// The caller obtained this policy from authoritative captured execution evidence.
-    Full { captured_security: SecurityProfile },
+    Full {
+        captured_security: SecurityProfile,
+        /// Effective policy independently read from the checkpoint's Ready resource.
+        captured_exec_limits: Option<microsandbox_types::ExecLimits>,
+    },
 }
 
 /// Optional execution defaults that can be discarded before explicit inputs apply.
@@ -65,6 +69,8 @@ pub struct LifetimeDefaultSelection {
 /// Captured processes and elapsed counters are never modified by this pure result.
 #[derive(Debug)]
 pub struct ExecutionDefaultSelection {
+    /// Policy for the destination agent, subject to runtime capability checks before launch.
+    pub exec_limits: Option<microsandbox_types::ExecLimits>,
     /// Remaining saved labels, excluding keys supplied by the destination.
     pub labels: Option<SavedValue<BTreeMap<String, String>>>,
     /// Optional saved resource-limit list; explicit lists replace it in full.
@@ -99,6 +105,7 @@ pub fn select_execution_defaults(
         .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
     // A new portable execution field must receive a selection rule here.
     let SavedExecutionConfig {
+        exec_limits: observed_limits,
         labels: source_labels,
         rlimits: source_rlimits,
         lifecycle,
@@ -166,7 +173,36 @@ pub fn select_execution_defaults(
         lifetime.idle_timeout_secs = None;
     }
 
+    let recorded = observed_limits
+        .as_ref()
+        .and_then(SavedValue::value)
+        .map(|value| value.0);
+    let exec_limits = match restore_mode {
+        ExecutionRestoreMode::Disk if config_mode == SnapshotConfigMode::Saved => recorded,
+        ExecutionRestoreMode::Disk => None,
+        ExecutionRestoreMode::Full {
+            captured_exec_limits,
+            ..
+        } => {
+            // Full resume keeps the guest policy even in fresh mode. The portable
+            // document can corroborate that policy but cannot supply its authority.
+            if recorded.is_some() && recorded != captured_exec_limits {
+                return invalid(
+                    "SCFG_IDENTITY",
+                    "execution.exec_limits",
+                    "saved policy disagrees with checkpoint evidence",
+                );
+            }
+            captured_exec_limits
+        }
+    };
     let unknown_fields = [
+        (
+            "execution.exec_limits",
+            exec_limits.is_none()
+                && config_mode == SnapshotConfigMode::Saved
+                && matches!(observed_limits, Some(SavedValue::Unknown { .. })),
+        ),
         (
             "execution.labels",
             matches!(labels, Some(SavedValue::Unknown { .. })),
@@ -188,6 +224,7 @@ pub fn select_execution_defaults(
     .filter_map(|(path, unknown)| unknown.then_some(path))
     .collect();
     Ok(ExecutionDefaultSelection {
+        exec_limits,
         labels,
         rlimits,
         lifetime,
@@ -206,7 +243,9 @@ fn select_security(
 ) -> MicrosandboxResult<SecurityProfile> {
     let clear = clears.contains(&ExecutionDefaultClear::Security);
     let profile = match restore_mode {
-        ExecutionRestoreMode::Full { captured_security } => {
+        ExecutionRestoreMode::Full {
+            captured_security, ..
+        } => {
             if clear || explicit.security_profile.is_some() {
                 return invalid(
                     "SCFG_FULL_STATE",

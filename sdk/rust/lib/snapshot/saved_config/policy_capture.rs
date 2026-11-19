@@ -179,6 +179,8 @@ impl RuntimeCaptureSource<'_> {
             Some(unknown())
         };
         let result = SavedExecutionConfig {
+            // Only the guest receipt can supply this observation.
+            exec_limits: None,
             labels,
             security_profile: Some(recorded(
                 self.recorded.get("security_profile").is_some(),

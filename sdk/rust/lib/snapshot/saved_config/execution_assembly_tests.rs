@@ -356,6 +356,7 @@ fn full_guest_security_and_mandatory_destination_policy_remain_admission_require
         ..Default::default()
     };
     let full = ExecutionRestoreMode::Full {
+        captured_exec_limits: None,
         captured_security: SecurityProfile::Restricted,
     };
     let mut target = SandboxSpec::default();

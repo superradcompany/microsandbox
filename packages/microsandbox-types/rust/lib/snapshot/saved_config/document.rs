@@ -136,6 +136,13 @@ impl SavedSandboxConfig {
         merge_binding_uses(&mut uses, self.active.storage.binding_uses()?)?;
         let mut script_bytes = self.active.inline_script_bytes();
         if let Some(pending) = &self.pending {
+            if pending.execution.exec_limits.is_some() {
+                return invalid(
+                    "SCFG_IDENTITY",
+                    "pending.execution.exec_limits",
+                    "an observed guest policy cannot be next-start intent",
+                );
+            }
             if pending.script_backing.is_some() {
                 return invalid(
                     "SCFG_IDENTITY",

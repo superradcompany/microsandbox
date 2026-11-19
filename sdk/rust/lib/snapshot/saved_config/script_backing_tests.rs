@@ -92,6 +92,7 @@ fn prepare_full_scripts(
         patch,
         SnapshotConfigMode::Fresh,
         SavedConfigurationContext::Full {
+            exec_limits: None,
             resources: &resources,
             security: Default::default(),
             bindings: &captured,

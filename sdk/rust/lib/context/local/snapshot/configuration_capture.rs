@@ -14,7 +14,8 @@ use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
 use microsandbox_types::snapshot::saved_config::{
     MAX_SAVED_CONFIG_ENTRIES, MAX_SAVED_SCRIPT_BYTES, MAX_SAVED_SCRIPTS_BYTES,
-    SavedBindingReference, SavedOrigin, SavedSandboxConfig, SavedValue,
+    SavedBindingReference, SavedExecLimits, SavedOrigin, SavedSandboxConfig, SavedUnknownReason,
+    SavedValue,
 };
 
 use crate::context::{ControlSession, LocalContext};
@@ -214,14 +215,26 @@ impl CapturedSandboxConfiguration {
             .source
             .as_ref()
             .ok_or_else(|| invalid("capture has no recorded source"))?;
-        RuntimeCaptureSource::from_recorded(raw, self.init.as_ref(), self.scripts.as_ref())?
-            .project_document(
-                request,
-                SavedValue::Value {
-                    value: self.source.generation.to_string(),
-                    origin: SavedOrigin::Observed,
-                },
-            )
+        let mut document =
+            RuntimeCaptureSource::from_recorded(raw, self.init.as_ref(), self.scripts.as_ref())?
+                .project_document(
+                    request,
+                    SavedValue::Value {
+                        value: self.source.generation.to_string(),
+                        origin: SavedOrigin::Observed,
+                    },
+                )?;
+        document.active.execution.exec_limits = Some(match self.exec_limits {
+            Some(value) => SavedValue::Value {
+                value: SavedExecLimits(value),
+                origin: SavedOrigin::Observed,
+            },
+            None => SavedValue::Unknown {
+                reason: SavedUnknownReason::NotObserved,
+            },
+        });
+        document.validate()?;
+        Ok(document)
     }
 
     fn validate_init_observation(&self) -> MicrosandboxResult<()> {
