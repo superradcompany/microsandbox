@@ -348,11 +348,11 @@ func exercisePersistentResources(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, "disk.ext4"), []byte("data"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := first.Snapshots().Open(ctx, directory)
+	snapshot, err := first.Checkpoints().Open(ctx, directory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fetchedSnapshot, err := snapshot.Context().Snapshots().Get(ctx, snapshot.ID())
+	fetchedSnapshot, err := snapshot.Context().Checkpoints().Get(ctx, snapshot.ID())
 	if err != nil {
 		t.Fatal(err)
 	}

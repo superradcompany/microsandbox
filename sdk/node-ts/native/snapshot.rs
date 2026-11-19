@@ -5,7 +5,7 @@ use microsandbox::snapshot::{
     HeadUpdateReason, LoadOpts as RustLoadOpts, SaveOpts as RustSaveOpts,
 };
 use microsandbox::{
-    Snapshot as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
+    Checkpoint as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
     SnapshotFormat as RustSnapshotFormat, SnapshotScope as RustSnapshotScope,
     UpperIntegrity as RustUpperIntegrity, UpperVerifyStatus as RustUpperVerifyStatus,
 };
@@ -42,6 +42,8 @@ pub struct JsSnapshotMetadata {
 #[derive(Default)]
 #[napi(object, js_name = "SaveOpts")]
 pub struct JsSaveOpts {
+    /// Explicit archive reader target: current or 0.7.8.
+    pub compatibility: Option<String>,
     /// Walk the parent chain and include each ancestor in the archive.
     pub with_parents: Option<bool>,
     /// Bundle the OCI image cache for offline transport.
@@ -73,7 +75,7 @@ pub struct JsLoadOpts {
 pub struct HeadUpdate {
     pub group: String,
     pub previous: Option<String>,
-    pub head: String,
+    pub head: Option<String>,
     pub reason: String,
     pub changed: bool,
 }
@@ -91,6 +93,9 @@ pub struct JsSnapshotVerifyReport {
     pub upper_digest: Option<String>,
     /// Verified composite-checkpoint root, when the artifact is full.
     pub checkpoint_root: Option<String>,
+    /// Coverage of every required payload, independent of the head-only upper projection.
+    pub coverage_kind: String,
+    pub unrecorded: Vec<String>,
 }
 
 /// Options for `Snapshot.remove()` (instance and static).
@@ -106,6 +111,46 @@ pub struct JsSnapshotRemoveOpts {
 
 #[napi]
 impl JsSnapshot {
+    /// Consume destination options; the receiver always selects the source and backend.
+    ///
+    /// # Safety
+    /// The destination builder is consumed before suspension and must not be reused.
+    #[napi]
+    pub async unsafe fn spawn_sandbox_with_builder(
+        &self,
+        builder: &mut crate::restore_builder::JsRestoreBuilder,
+    ) -> Result<crate::sandbox::Sandbox> {
+        let options = builder.take_inner()?;
+        Ok(crate::sandbox::Sandbox::from_rust(
+            self.inner
+                .spawn_sandbox_with(|_| options)
+                .await
+                .map_err(to_napi_error)?,
+        ))
+    }
+
+    /// Consume destination options and return progress for the receiver-selected source.
+    ///
+    /// # Safety
+    /// The destination builder is consumed before suspension and must not be reused.
+    #[napi]
+    pub async unsafe fn spawn_sandbox_with_progress_builder(
+        &self,
+        builder: &mut crate::restore_builder::JsRestoreBuilder,
+    ) -> Result<crate::sandbox_builder::JsPullProgressCreate> {
+        let options = builder.take_inner()?;
+        let (progress, task) = self
+            .inner
+            .spawn_sandbox_with_progress_with(|_| options)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(crate::sandbox_builder::JsPullProgressCreate {
+            stream: crate::pull_progress::JsPullProgressStream::from_creation(progress),
+            abort: task.abort_handle(),
+            task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
+        })
+    }
+
     /// Return the retained destination without selecting a new one.
     #[napi]
     pub fn context(&self) -> Result<crate::context::JsContext> {
@@ -146,67 +191,103 @@ impl JsSnapshot {
         opts: Option<JsSnapshotRemoveOpts>,
     ) -> Result<()> {
         let force = opts.and_then(|o| o.force).unwrap_or(false);
-        RustSnapshot::remove(&path_or_name, force)
+        RustSnapshot::remove_by_reference(&path_or_name, force)
             .await
             .map_err(to_napi_error)
     }
 
-    #[napi]
-    pub async fn load(
+    #[napi(ts_return_type = "Promise<Snapshot>")]
+    pub fn load<'env>(
+        env: &'env Env,
         archive: String,
         dest: Option<String>,
         base: Option<String>,
-    ) -> Result<JsSnapshot> {
-        let dest = dest.map(PathBuf::from);
-        let h = if let Some(base) = base {
-            RustSnapshot::load_with_base(&PathBuf::from(archive), dest.as_deref(), &base).await
-        } else {
-            RustSnapshot::load(&PathBuf::from(archive), dest.as_deref()).await
-        }
-        .map_err(to_napi_error)?;
-        Ok(JsSnapshot::from_rust(h))
+    ) -> Result<PromiseRaw<'env, JsSnapshot>> {
+        let prepared = microsandbox::snapshot::PreparedSnapshotImport::new(
+            vec![archive.into()],
+            RustLoadOpts {
+                dest: dest.map(Into::into),
+                base,
+                ..Default::default()
+            },
+        );
+        env.spawn_future(async move {
+            Ok(JsSnapshot::from_rust(
+                prepared
+                    .map_err(to_napi_error)?
+                    .legacy_checkpoint()
+                    .await
+                    .map_err(to_napi_error)?,
+            ))
+        })
     }
 
-    #[napi(js_name = "loadWithOptions")]
-    pub async fn load_with_options(
+    #[napi(js_name = "loadWithOptions", ts_return_type = "Promise<Snapshot>")]
+    pub fn load_with_options<'env>(
+        env: &'env Env,
         archive: String,
         opts: Option<JsLoadOpts>,
-    ) -> Result<JsSnapshot> {
+    ) -> Result<PromiseRaw<'env, JsSnapshot>> {
         let opts = opts.unwrap_or_default();
-        let h = RustSnapshot::load_with_options(
-            &PathBuf::from(archive),
+        let prepared = microsandbox::snapshot::PreparedSnapshotImport::new(
+            vec![archive.into()],
             RustLoadOpts {
-                dest: opts.dest.map(PathBuf::from),
+                dest: opts.dest.map(Into::into),
                 base: opts.base,
                 group: opts.group,
                 set_head: opts.set_head.unwrap_or(false),
             },
-        )
-        .await
-        .map_err(to_napi_error)?;
-        Ok(JsSnapshot::from_rust(h))
+        );
+        env.spawn_future(async move {
+            Ok(JsSnapshot::from_rust(
+                prepared
+                    .map_err(to_napi_error)?
+                    .checkpoint()
+                    .await
+                    .map_err(to_napi_error)?,
+            ))
+        })
     }
 
-    /// Import archives together, resolving dependencies within the batch and destination group.
-    #[napi(js_name = "loadMany")]
-    pub async fn load_many(
+    /// Import archives together, retaining their call-time path interpretation.
+    #[napi(js_name = "loadMany", ts_return_type = "Promise<Snapshot[]>")]
+    pub fn load_many<'env>(
+        env: &'env Env,
         archives: Vec<String>,
         opts: Option<JsLoadOpts>,
-    ) -> Result<Vec<JsSnapshot>> {
+    ) -> Result<PromiseRaw<'env, Vec<JsSnapshot>>> {
         let opts = opts.unwrap_or_default();
-        let paths = archives.into_iter().map(PathBuf::from).collect::<Vec<_>>();
-        let handles = RustSnapshot::load_many(
-            &paths,
+        let prepared = microsandbox::snapshot::PreparedSnapshotImport::new(
+            archives.into_iter().map(Into::into).collect(),
             RustLoadOpts {
-                dest: opts.dest.map(PathBuf::from),
+                dest: opts.dest.map(Into::into),
                 base: opts.base,
                 group: opts.group,
                 set_head: opts.set_head.unwrap_or(false),
             },
-        )
-        .await
-        .map_err(to_napi_error)?;
-        Ok(handles.into_iter().map(JsSnapshot::from_rust).collect())
+        );
+        env.spawn_future(async move {
+            Ok(prepared
+                .map_err(to_napi_error)?
+                .checkpoints()
+                .await
+                .map_err(to_napi_error)?
+                .into_iter()
+                .map(JsSnapshot::from_rust)
+                .collect())
+        })
+    }
+
+    /// Preserve the legacy selector while the read-only collection method stays separate.
+    #[napi(js_name = "groupHead")]
+    pub async fn select_group_head(selector: String) -> Result<HeadUpdate> {
+        let context = microsandbox::configured_context();
+        let update = context
+            .snapshot_ops()
+            .group_head_selector(&selector)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(head_update_to_js(&update))
     }
 
     #[napi(js_name = "readGroupHead")]
@@ -393,9 +474,13 @@ impl JsSnapshot {
     /// Bundle a snapshot into a `.tar.zst` archive.
     #[napi]
     pub async fn save(name_or_path: String, out: String, opts: Option<JsSaveOpts>) -> Result<()> {
-        RustSnapshot::save(&name_or_path, &PathBuf::from(out), save_opts_to_rust(opts)?)
-            .await
-            .map_err(to_napi_error)
+        RustSnapshot::save_by_reference(
+            &name_or_path,
+            &PathBuf::from(out),
+            save_opts_to_rust(opts)?,
+        )
+        .await
+        .map_err(to_napi_error)
     }
 
     /// Bundle this snapshot into a `.tar.zst` archive.
@@ -414,6 +499,17 @@ impl JsSnapshot {
     #[napi(js_name = "copyTo")]
     pub fn copy_to(&self, output_archive_path: String) -> JsSnapshotCopyBuilder {
         JsSnapshotCopyBuilder::from_rust(self.inner.copy_to(output_archive_path))
+    }
+
+    /// Remove this exact retained checkpoint and serialize its operation-owned result.
+    #[napi(js_name = "removeCheckpoint")]
+    pub async fn remove_checkpoint(&self, force: bool) -> Result<String> {
+        let checkpoint = self.inner.clone();
+        let result = checkpoint
+            .remove_with(|options| if force { options.force() } else { options })
+            .await
+            .map_err(to_napi_error)?;
+        serde_json::to_string(&result).map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     /// Verify this snapshot's recorded payload integrity.
@@ -468,6 +564,12 @@ impl JsSnapshot {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+/// Explicit export options must not be silently ignored by an older native library.
+#[napi]
+pub fn snapshot_archive_compatibility_targets() -> Vec<String> {
+    vec!["current".into(), "0.7.8".into()]
+}
+
 fn format_str(f: RustSnapshotFormat) -> &'static str {
     match f {
         RustSnapshotFormat::Raw => "raw",
@@ -478,6 +580,12 @@ fn format_str(f: RustSnapshotFormat) -> &'static str {
 fn save_opts_to_rust(opts: Option<JsSaveOpts>) -> Result<RustSaveOpts> {
     let opts = opts.unwrap_or_default();
     Ok(RustSaveOpts {
+        compatibility: opts
+            .compatibility
+            .as_deref()
+            .unwrap_or("current")
+            .parse()
+            .map_err(to_napi_error)?,
         with_parents: opts.with_parents.unwrap_or(false),
         with_image: opts.with_image.unwrap_or(false),
         plain_tar: opts.plain_tar.unwrap_or(false),
@@ -511,6 +619,8 @@ pub(crate) fn head_update_to_js(update: &microsandbox::snapshot::HeadUpdate) -> 
         HeadUpdateReason::Diverged => "diverged",
         HeadUpdateReason::UnknownAncestry => "unknown_ancestry",
         HeadUpdateReason::AmbiguousCandidates => "ambiguous_candidates",
+        HeadUpdateReason::Cleared => "cleared",
+        HeadUpdateReason::ParentSelected => "parent_selected",
     };
     HeadUpdate {
         group: update.group.clone(),
@@ -524,6 +634,16 @@ pub(crate) fn head_update_to_js(update: &microsandbox::snapshot::HeadUpdate) -> 
 fn verify_report_to_js(
     report: microsandbox::snapshot::SnapshotVerifyReport,
 ) -> JsSnapshotVerifyReport {
+    let (coverage_kind, unrecorded) = match report.coverage {
+        microsandbox::snapshot::SnapshotVerifyCoverage::Complete => ("complete", Vec::new()),
+        microsandbox::snapshot::SnapshotVerifyCoverage::Incomplete { unrecorded } => (
+            "incomplete",
+            unrecorded
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        ),
+    };
     let checkpoint_root = report.checkpoint.map(|checkpoint| checkpoint.root);
     let (kind, algorithm, digest) = match report.upper {
         RustUpperVerifyStatus::NotRecorded => ("notRecorded".to_string(), None, None),
@@ -538,6 +658,8 @@ fn verify_report_to_js(
         upper_algorithm: algorithm,
         upper_digest: digest,
         checkpoint_root,
+        coverage_kind: coverage_kind.into(),
+        unrecorded,
     }
 }
 

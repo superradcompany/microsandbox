@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { it } from "vitest";
 
-it("returns operational Snapshots and loads descriptor state lazily", async () => {
+it("returns operational Checkpoints and loads descriptor state lazily", async () => {
   const home = await mkdtemp(join(tmpdir(), "msb-snapshot-sdk-"));
   try {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("MSB_")));
@@ -18,7 +18,7 @@ it("returns operational Snapshots and loads descriptor state lazily", async () =
       import { join } from 'node:path';
       const sdk = await import(${JSON.stringify(entry)});
       const native = (await import(${JSON.stringify(nativeEntry)})).default;
-      const { Snapshot } = sdk;
+      const { Checkpoint } = sdk;
       assert.equal('SnapshotHandle' in sdk, false);
       assert.equal('SnapshotHandle' in native, false);
       const path = join(process.env.MSB_HOME, 'snapshots', 'fixture');
@@ -33,13 +33,13 @@ it("returns operational Snapshots and loads descriptor state lazily", async () =
       });
       await writeFile(descriptor, bytes);
       await writeFile(join(path, 'disk.ext4'), 'data');
-      const opened = await Snapshot.open(path);
+      const opened = await Checkpoint.open(path);
       const identity = opened.id;
       await unlink(descriptor);
-      const fetched = await Snapshot.get(identity);
-      const listed = (await Snapshot.list()).find(item => item.id === identity);
+      const fetched = await Checkpoint.get(identity);
+      const listed = (await Checkpoint.list()).find(item => item.id === identity);
       for (const resource of [opened, fetched, listed]) {
-        assert.ok(resource instanceof Snapshot);
+        assert.ok(resource instanceof Checkpoint);
         assert.equal(resource.id, identity);
         assert.equal(typeof resource.id, 'string');
         await assert.rejects(() => resource.state());
@@ -57,7 +57,7 @@ it("returns operational Snapshots and loads descriptor state lazily", async () =
       assert.deepEqual(await opened.labels(), [['revision', 'new']]);
       await listed.destroy();
       await assert.rejects(() => opened.manifest());
-      assert.deepEqual(await Snapshot.list(), []);
+      assert.deepEqual(await Checkpoint.list(), []);
     `;
     await promisify(execFile)(process.execPath, ["--input-type=module", "-e", script], {
       env: { ...env, MSB_HOME: home }, timeout: 30_000,

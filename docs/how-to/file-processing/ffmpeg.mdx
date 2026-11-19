@@ -92,7 +92,7 @@ Capture the prepared toolchain:
 
 <CodeGroup>
 ```sh Shell
-msb snap create ffmpeg-tools --sandbox ffmpeg-base --integrity
+msb snap create ffmpeg-base --name ffmpeg-tools --sandbox ffmpeg-base --integrity
 ```
 </CodeGroup>
 
@@ -100,7 +100,7 @@ Verify the snapshot before using it:
 
 <CodeGroup>
 ```sh Shell
-msb snap verify ffmpeg-base:ffmpeg-tools
+msb snap verify ffmpeg-base --checkpoint ffmpeg-tools
 ```
 </CodeGroup>
 
@@ -112,14 +112,14 @@ Restore boots an idle detached sandbox with the requested security, network, res
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap restore ffmpeg-base:ffmpeg-tools --name ffmpeg-worker \
+msb create --from-snapshot ffmpeg-base --checkpoint ffmpeg-tools --name ffmpeg-worker \
   --cpus 2 --memory 2G \
   --user media --security restricted \
   --no-net --max-duration 10m
 ```
 
 ```powershell Windows
-msb snap restore ffmpeg-base:ffmpeg-tools --name ffmpeg-worker `
+msb create --from-snapshot ffmpeg-base --checkpoint ffmpeg-tools --name ffmpeg-worker `
   --cpus 2 --memory 2G `
   --user media --security restricted `
   --no-net --max-duration 10m
@@ -261,9 +261,11 @@ Remove the reusable toolchain snapshot:
 
 <CodeGroup>
 ```sh Shell
-msb snap rm ffmpeg-base:ffmpeg-tools
+msb snap rm ffmpeg-base --checkpoint ffmpeg-tools
 ```
 </CodeGroup>
+
+This removes the checkpoint and keeps the `ffmpeg-base` history. To reuse the group name on a fresh run, first confirm it contains no checkpoints you need with `msb snap ls ffmpeg-base`, then remove it with `msb snap rm ffmpeg-base --all`.
 
 The checked output remains in the artifact directory configured above until you remove it.
 

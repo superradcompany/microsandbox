@@ -542,7 +542,7 @@ async fn status_wait_rejects_replacement_and_failed_observation() {
 }
 
 #[tokio::test]
-async fn retained_snapshot_rejects_replaced_source_before_capture() {
+async fn retained_checkpoint_rejects_replaced_source_before_capture() {
     let (context, server) = provider(vec![
         (
             "GET",
@@ -559,7 +559,7 @@ async fn retained_snapshot_rejects_replaced_source_before_capture() {
     ])
     .await;
     let resource = context.sandboxes().get("task").await.unwrap();
-    let result = resource.snapshot("saved").await;
+    let result = resource.checkpoint("saved").await;
     assert!(
         matches!(result, Err(MicrosandboxError::SandboxReplaced { .. })),
         "{result:?}"

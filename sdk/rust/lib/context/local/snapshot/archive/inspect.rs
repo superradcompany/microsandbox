@@ -54,7 +54,9 @@ impl SandboxConfig {
             .read_metadata(archive)
             .await?;
 
-        let unsupported = manifest.unsupported_requires();
+        self.validate_restore_options(manifest.scope, self.snapshot_restore_mode)?;
+        crate::sandbox::apply_portable_snapshot_defaults(self, &manifest)?;
+        let unsupported = self.restore_resources.unsupported_for_restore(&manifest);
         if !unsupported.is_empty() {
             return Err(MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
@@ -64,8 +66,6 @@ impl SandboxConfig {
                 )),
             ));
         }
-
-        self.validate_restore_options(manifest.scope, self.snapshot_restore_mode)?;
 
         self.spec.image = RootfsSource::oci(manifest.image.reference.clone());
         if self.spec.runtime.user.is_none() {
@@ -82,18 +82,20 @@ impl SandboxConfig {
             (SnapshotState::Checkpoint(state), Some(checkpoint)) => {
                 validate_checkpoint_owned_inventory(&manifest, &checkpoint)?;
 
+                if checkpoint.architecture != std::env::consts::ARCH {
+                    return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                        "checkpoint architecture {} cannot restore on {}",
+                        checkpoint.architecture,
+                        std::env::consts::ARCH
+                    )));
+                }
+
                 if self.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
                     crate::sandbox::require_guest_mounts(
                         self,
                         crate::sandbox::external_bind_guest_paths(&checkpoint.resources)?,
                     )?;
                 } else {
-                    if checkpoint.architecture != std::env::consts::ARCH {
-                        return Err(MicrosandboxError::SnapshotIntegrity(
-                            "checkpoint architecture cannot restore on this host".into(),
-                        ));
-                    }
-
                     crate::sandbox::apply_checkpoint_restore_constraints(self, state, &checkpoint)?;
                     self.suppress_launch_for_full_restore();
                 }

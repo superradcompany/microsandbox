@@ -11,8 +11,13 @@
 
 mod batch;
 mod delta;
+mod encryption;
+mod extensions;
 mod inspect;
+pub(super) mod launch;
 mod owned;
+#[cfg(test)]
+mod writer_tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 #[cfg(windows)]
@@ -57,6 +62,7 @@ use super::{
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+const MAX_INVENTORY_BYTES: u64 = 4 * 1024 * 1024;
 const ARCHIVE_MEMBER_TRANSPORT_ALGORITHM: &str = "msb-archive-member-blake3-v1";
 const ARCHIVE_MEMBER_TRANSPORT_DOMAIN: &[u8] = b"msb-archive-member-blake3-v1\0";
 const TAR_BLOCK: u64 = 512;
@@ -68,6 +74,18 @@ const GNU_EXT_SPARSE_SLOTS: usize = 21;
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Operation-owned import facts; legacy callers still receive their archive-head handles.
+pub(super) struct ImportedBatch {
+    pub(super) operation_id: String,
+    pub(super) group_path: PathBuf,
+    pub(super) heads: Vec<SnapshotHandle>,
+    pub(super) members: Vec<SnapshotHandle>,
+    pub(super) added: Vec<crate::snapshot::SnapshotId>,
+    pub(super) reused: Vec<crate::snapshot::SnapshotId>,
+    pub(super) head_update: crate::HeadUpdate,
+    pub(super) warnings: Vec<String>,
+}
 
 struct UnpackedArchive {
     manifest_dirs: Vec<PathBuf>,
@@ -383,7 +401,22 @@ impl LocalContext {
             ));
         }
 
-        let unsupported = manifest.unsupported_requires();
+        // Bind authorization to the descriptor that supplied the destination settings.
+        // The archive may have changed between inspection and extraction.
+        if choices.portable_defaults_applied
+            && choices
+                .archive_manifest
+                .as_ref()
+                .map(|m| m.digest())
+                .transpose()?
+                .as_ref()
+                != Some(&descriptor_digest)
+        {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "snapshot archive changed after configuration was built".into(),
+            ));
+        }
+        let unsupported = choices.unsupported_for_restore(&manifest);
         if !unsupported.is_empty() {
             return Err(MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
@@ -587,7 +620,8 @@ impl ArchiveInventory {
         if self.requires.windows(2).any(|pair| pair[0] >= pair[1])
             || self.requires.iter().any(|requirement| {
                 requirement != ARCHIVE_MEMBER_TRANSPORT_ALGORITHM
-                    && requirement != delta::REQUIREMENT
+                    && !extensions::Extension::Dependencies.recognizes(requirement)
+                    && !extensions::Extension::MemberNames.recognizes(requirement)
                     && requirement != GUEST_CLOCK_EXTENSION
             })
         {
@@ -600,6 +634,7 @@ impl ArchiveInventory {
             ));
         }
 
+        extensions::Extension::MemberNames.resolve(&self.extensions, &self.requires)?;
         delta::validate(self)?;
 
         Ok(())
@@ -768,6 +803,17 @@ pub(crate) async fn save_snapshot_expected(
     opts: SaveOpts,
     expected: Option<&str>,
 ) -> MicrosandboxResult<()> {
+    save_archive(local, name_or_path, out, opts, expected, None).await
+}
+
+pub(super) async fn save_archive(
+    local: &LocalContext,
+    name_or_path: &str,
+    out: &Path,
+    opts: SaveOpts,
+    expected: Option<&str>,
+    recipients: Option<&[String]>,
+) -> MicrosandboxResult<()> {
     let total_started = Instant::now();
     let resolve_started = Instant::now();
     // Collect the artifact dirs we need to ship: the head snapshot
@@ -807,7 +853,13 @@ pub(crate) async fn save_snapshot_expected(
 
     let mut snapshots = parents;
     snapshots.push(head.clone());
+    extensions::validate_export(&snapshots, opts.compatibility)?;
 
+    let encryptor = recipients.map(encryption::encryptor).transpose()?;
+    let credentials = match recipients {
+        Some(keys) => encryption::export_credentials(local, &snapshots, keys)?,
+        None => BTreeMap::new(),
+    };
     // Optional image cache bundling.
     let mut cache_files: Vec<(PathBuf, String)> = Vec::new();
     let mut admitted_metadata = None;
@@ -896,6 +948,18 @@ pub(crate) async fn save_snapshot_expected(
         .await?;
     let write_started = Instant::now();
     let write_result: MicrosandboxResult<()> = async {
+        use tokio_util::compat::{FuturesAsyncWriteCompatExt, TokioAsyncWriteCompatExt};
+        // Compression precedes encryption. Closing the outer writer also
+        // finalizes the last authenticated chunk before publishing the file.
+        let out_file: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = match encryptor {
+            Some(cipher) => Box::new(
+                cipher
+                    .wrap_async_output(out_file.compat_write())
+                    .await?
+                    .compat_write(),
+            ),
+            None => Box::new(out_file),
+        };
         if opts.plain_tar {
             let mut builder = Builder::new(out_file);
             // Entry writers retain hashing and sparse-I/O buffers across await
@@ -904,9 +968,9 @@ pub(crate) async fn save_snapshot_expected(
                 &mut builder,
                 &snapshots,
                 &cache_files,
-                &head,
                 &opts,
                 dependencies.as_ref(),
+                credentials,
                 local.config().fs_state_limit(),
             ))
             .await?;
@@ -919,9 +983,9 @@ pub(crate) async fn save_snapshot_expected(
                 &mut builder,
                 &snapshots,
                 &cache_files,
-                &head,
                 &opts,
                 dependencies.as_ref(),
+                credentials,
                 local.config().fs_state_limit(),
             ))
             .await?;
@@ -1502,7 +1566,9 @@ pub(super) async fn load_snapshot_with_options(
     archive: &Path,
     opts: LoadOpts,
 ) -> MicrosandboxResult<SnapshotHandle> {
-    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts).await?;
+    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts)
+        .await?
+        .heads;
     Ok(loaded.remove(0))
 }
 
@@ -1512,7 +1578,26 @@ pub(super) async fn load_snapshots(
     archives: &[PathBuf],
     opts: LoadOpts,
 ) -> MicrosandboxResult<Vec<SnapshotHandle>> {
+    Ok(batch::load(local, archives, opts).await?.heads)
+}
+
+/// Import with complete operation-specific membership and head reporting.
+pub(super) async fn load_group(
+    local: &LocalContext,
+    archives: &[PathBuf],
+    opts: LoadOpts,
+) -> MicrosandboxResult<ImportedBatch> {
     batch::load(local, archives, opts).await
+}
+
+pub(super) async fn load_encrypted(
+    local: &LocalContext,
+    archives: &[PathBuf],
+    opts: LoadOpts,
+    identity: &Path,
+) -> MicrosandboxResult<ImportedBatch> {
+    let keys = encryption::read_identities(identity)?;
+    batch::load_with_identities(local, archives, opts, Some(keys)).await
 }
 
 /// Consume a current archive directly into a child sandbox's staging directory.
@@ -1588,20 +1673,31 @@ async fn write_archive_entries<W>(
     builder: &mut Builder<W>,
     snapshots: &[Snapshot],
     cache_files: &[(PathBuf, String)],
-    head: &Snapshot,
     opts: &SaveOpts,
     dependencies: Option<&delta::Dependencies>,
+    credentials: BTreeMap<String, String>,
     fs_state_limit: usize,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
+    // The export resolves parents first and appends its selected head last.
+    let head = snapshots
+        .last()
+        .ok_or_else(|| MicrosandboxError::InvalidConfig("archive has no snapshots".into()))?;
     let checkpoint_members = collect_checkpoint_archive_members(snapshots, fs_state_limit)?;
     let mut inventory =
         build_archive_inventory(snapshots, cache_files, head, opts, &checkpoint_members).await?;
+    if !credentials.is_empty() {
+        inventory.extensions.insert(
+            encryption::CREDENTIALS.into(),
+            serde_json::to_value(credentials)?,
+        );
+    }
     if let Some(dependencies) = dependencies {
         delta::apply(&mut inventory, dependencies)?;
     }
+    extensions::write_dialect(&mut inventory, opts.compatibility)?;
 
     // The inventory is also the write allowlist. Never sweep artifact
     // directories: migration backups, locks, journals and unknown files are
@@ -1730,6 +1826,11 @@ where
     let inventory_bytes = serde_json::to_vec(&inventory).map_err(|error| {
         MicrosandboxError::Custom(format!("serialize archive inventory: {error}"))
     })?;
+    if inventory_bytes.len() as u64 > MAX_INVENTORY_BYTES {
+        return Err(MicrosandboxError::InvalidConfig(
+            "archive inventory exceeds the import size limit".into(),
+        ));
+    }
     append_bytes(builder, "archive.json", &inventory_bytes).await?;
     Ok(())
 }
@@ -3190,7 +3291,6 @@ async fn validate_archive_inventory(
     snapshots_dir: &Path,
     cache_dir: &Path,
 ) -> MicrosandboxResult<Option<ArchiveInventory>> {
-    const MAX_INVENTORY_BYTES: u64 = 4 * 1024 * 1024;
     let metadata = tokio::fs::metadata(path).await?;
     if metadata.len() > MAX_INVENTORY_BYTES {
         return Err(MicrosandboxError::Custom(
@@ -4530,6 +4630,34 @@ mod tests {
                 error.to_string().contains("injected catalog failure"),
                 "{error}"
             );
+            let MicrosandboxError::SnapshotImport(details) = &error else {
+                panic!("import discarded publication context: {error}");
+            };
+            assert_eq!(
+                details.outcome,
+                if block_prepare {
+                    crate::SnapshotImportOutcome::NotCommitted
+                } else {
+                    crate::SnapshotImportOutcome::Committed
+                }
+            );
+            assert_eq!(details.archives, vec![archive.clone()]);
+            let group = details.group_path.as_ref().unwrap();
+            if block_prepare {
+                assert!(!group.join(super::super::group::GROUP_FILENAME).exists());
+                assert!(
+                    store::list_dir(&destination, &destination.snapshots_dir())
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            } else {
+                let journal: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(group.join(".group-transaction/intent.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(journal["operation"], details.operation_id);
+            }
             let rows = crate::db::entity::snapshot::Entity::find()
                 .all(db.read())
                 .await
@@ -4577,6 +4705,20 @@ mod tests {
             if let Some(snapshot) = repaired.first() {
                 assert_eq!(snapshot.availability, "ready");
             }
+            // A failed first import must not strand its name as an empty visible group;
+            // both pre-commit failure and lost post-commit completion are safe to retry.
+            let retry = load_snapshot_with_options(
+                &destination,
+                &archive,
+                LoadOpts {
+                    group: Some(group.file_name().unwrap().to_str().unwrap().to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(retry.artifact_path.join(DESCRIPTOR_FILENAME).exists());
+            assert_eq!(store::list_indexed(&destination).await.unwrap().len(), 1);
         }
     }
 
@@ -4929,7 +5071,7 @@ mod tests {
         );
     }
 
-    fn grouped_archive_manifest(id: u128, parent: Option<&Manifest>) -> Manifest {
+    pub(super) fn grouped_archive_manifest(id: u128, parent: Option<&Manifest>) -> Manifest {
         let layer_id = DiskLayerId::new(format!("layer_{id:032x}")).unwrap();
         Manifest {
             schema: SCHEMA.into(),
@@ -4968,7 +5110,7 @@ mod tests {
         }
     }
 
-    fn write_grouped_archive_fixture(path: &Path, manifest: &Manifest) {
+    pub(super) fn write_grouped_archive_fixture(path: &Path, manifest: &Manifest) {
         std::fs::create_dir_all(path).unwrap();
         std::fs::write(
             path.join(DESCRIPTOR_FILENAME),
@@ -4982,6 +5124,172 @@ mod tests {
             let payload = path.join(state.layer_path(layer));
             std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
             std::fs::write(payload, vec![42; layer.virtual_size as usize]).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn public_import_reports_bundled_members_reuse_and_its_own_head_decision() {
+        let home = tempfile::tempdir().unwrap();
+        let local = std::sync::Arc::new(
+            crate::test_support::local_backend_builder(home.path())
+                .build()
+                .unwrap(),
+        );
+        let parent = grouped_archive_manifest(71, None);
+        let child = grouped_archive_manifest(72, Some(&parent));
+        let source = super::super::group::ensure(&local.snapshots_dir(), Some("source"))
+            .await
+            .unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        for manifest in [&parent, &child] {
+            write_grouped_archive_fixture(
+                &stage.path().join(manifest.snapshot_id.as_str()),
+                manifest,
+            );
+        }
+        super::super::group::publish(
+            &source,
+            stage.path(),
+            &BTreeMap::new(),
+            &child.snapshot_id,
+            false,
+        )
+        .await
+        .unwrap();
+        let archive = home.path().join("history.msb");
+        save_snapshot(
+            &local,
+            "source",
+            &archive,
+            SaveOpts::default().with_parents(),
+        )
+        .await
+        .unwrap();
+        let external = home.path().join("external");
+        {
+            use crate::Context as _;
+            let files = vec![archive.clone(), archive.clone()];
+            let first = local
+                .snapshots()
+                .load_with("received", &files, |load| load.dest_dir(&external))
+                .await
+                .unwrap();
+            assert_eq!(first.snapshot.name(), "received");
+            assert_eq!(
+                first.added,
+                vec![parent.snapshot_id.clone(), child.snapshot_id.clone()]
+            );
+            assert!(first.reused.is_empty());
+            assert_eq!(
+                first.checkpoints.len(),
+                2,
+                "bundled dependencies must appear exactly once"
+            );
+            assert_eq!(
+                first.head_update.head.as_deref(),
+                Some(child.snapshot_id.as_str())
+            );
+            assert_eq!(
+                first.head_update.reason,
+                crate::HeadUpdateReason::Initialized
+            );
+            assert!(!first.operation_id.is_empty());
+            assert!(first.warnings.is_empty());
+            let retry = local
+                .snapshots()
+                .load_with("received", &files, |load| load.dest_dir(&external))
+                .await
+                .unwrap();
+            assert_ne!(first.operation_id, retry.operation_id);
+            assert!(retry.added.is_empty());
+            assert_eq!(retry.reused, first.added);
+            assert_eq!(retry.head_update.reason, crate::HeadUpdateReason::Unchanged);
+            assert!(!retry.head_update.changed);
+            retry.snapshot.clear_head().await.unwrap();
+            assert!(retry.snapshot.head().await.unwrap().is_none());
+            assert_eq!(
+                first.head_update.head.as_deref(),
+                Some(child.snapshot_id.as_str()),
+                "a result must not reread mutable head state"
+            );
+            let invalid = home.path().join("broken.msb");
+            std::fs::write(&invalid, b"not an archive").unwrap();
+            let error = local
+                .snapshots()
+                .load_with("received", &[archive, invalid], |load| {
+                    load.dest_dir(&external)
+                })
+                .await
+                .unwrap_err();
+            let MicrosandboxError::SnapshotImport(details) = error else {
+                panic!("expected structured import error")
+            };
+            assert_eq!(details.outcome, crate::SnapshotImportOutcome::NotCommitted);
+            assert!(retry.snapshot.head().await.unwrap().is_none());
+            assert_eq!(retry.snapshot.checkpoints().await.unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn public_import_reports_ambiguous_headless_success_without_changing_legacy_results() {
+        let home = tempfile::tempdir().unwrap();
+        let local = std::sync::Arc::new(
+            crate::test_support::local_backend_builder(home.path())
+                .build()
+                .unwrap(),
+        );
+        let mut files = Vec::new();
+        for id in [81, 82] {
+            let artifact = home.path().join(format!("artifact-{id}"));
+            write_grouped_archive_fixture(&artifact, &grouped_archive_manifest(id, None));
+            let archive = home.path().join(format!("archive-{id}.msb"));
+            save_snapshot(
+                &local,
+                artifact.to_str().unwrap(),
+                &archive,
+                SaveOpts::default(),
+            )
+            .await
+            .unwrap();
+            files.push(archive);
+        }
+        let legacy = load_snapshots(
+            &local,
+            &files,
+            LoadOpts {
+                group: Some("legacy".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(legacy.iter().all(|handle| handle.head_update().is_none()));
+        files.reverse();
+        {
+            use crate::Context as _;
+            let result = local.snapshots().load("branches", &files).await.unwrap();
+            assert_eq!(result.checkpoints.len(), 2);
+            assert_eq!(result.added.len(), 2);
+            assert!(result.head_update.head.is_none());
+            assert!(result.head_update.previous.is_none());
+            assert_eq!(
+                result.head_update.reason,
+                crate::HeadUpdateReason::AmbiguousCandidates
+            );
+            assert!(!result.head_update.changed);
+            assert!(result.snapshot.head().await.unwrap().is_none());
+            assert!(
+                result.snapshot.checkpoint().await.is_err(),
+                "import must not bind a source"
+            );
+            assert!(
+                local
+                    .snapshots()
+                    .load_with("forced", &files, |load| load.set_head())
+                    .await
+                    .is_err()
+            );
+            assert!(local.snapshots().get("forced").await.is_err());
         }
     }
 
@@ -5049,6 +5357,62 @@ mod tests {
                 .id(),
             child.snapshot_id.as_str()
         );
+    }
+
+    #[tokio::test]
+    async fn encrypted_batch_authenticates_all_inputs_before_publication() {
+        use age::secrecy::ExposeSecret;
+        let root = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .unwrap();
+        let identity = age::x25519::Identity::generate();
+        let identity_path = root.path().join("identity");
+        std::fs::write(&identity_path, identity.to_string().expose_secret()).unwrap();
+        let manifest = grouped_archive_manifest(17, None);
+        let artifact = root.path().join("source");
+        write_grouped_archive_fixture(&artifact, &manifest);
+        let archive = root.path().join("backup.msb");
+        for plain_tar in [false, true] {
+            save_archive(
+                &local,
+                artifact.to_str().unwrap(),
+                &archive,
+                SaveOpts {
+                    plain_tar,
+                    ..Default::default()
+                },
+                None,
+                Some(&[identity.to_public().to_string()]),
+            )
+            .await
+            .unwrap();
+            let bytes = std::fs::read(&archive).unwrap();
+            assert!(bytes.starts_with(b"age-encryption.org/v1\n"));
+            let truncated = root.path().join("truncated.msb");
+            std::fs::write(&truncated, &bytes[..bytes.len() - 1]).unwrap();
+            let group = format!("restored-{plain_tar}");
+            let opts = LoadOpts {
+                group: Some(group.clone()),
+                ..Default::default()
+            };
+            assert!(
+                load_encrypted(
+                    &local,
+                    &[archive.clone(), truncated],
+                    opts.clone(),
+                    &identity_path
+                )
+                .await
+                .is_err()
+            );
+            assert!(!local.snapshots_dir().join(group).exists());
+            let imported =
+                load_encrypted(&local, std::slice::from_ref(&archive), opts, &identity_path)
+                    .await
+                    .unwrap();
+            assert_eq!(imported.heads[0].id(), manifest.snapshot_id.as_str());
+        }
     }
 
     #[tokio::test]

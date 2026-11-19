@@ -1139,6 +1139,58 @@ char *msb_resource_operation(uint64_t cancel_id,
 char *msb_provider_info(void);
 
 /**
+ * Read live resize status for the sandbox `expected_id` names.
+ * Output: a `ResourceResizeStatus` JSON array.
+ */
+char *msb_sandbox_handle_resize_status(uint64_t cancel_id,
+                                       const char *name,
+                                       const char *expected_id,
+                                       unsigned char *buf,
+                                       uintptr_t buf_len);
+
+/**
+ * Wait for live resizes on the sandbox `expected_id` names to settle.
+ * `u64::MAX` waits without a deadline; 0 checks once.
+ */
+char *msb_sandbox_handle_wait_until_resized(uint64_t cancel_id,
+                                            const char *name,
+                                            const char *expected_id,
+                                            uint64_t timeout_ms,
+                                            unsigned char *buf,
+                                            uintptr_t buf_len);
+
+/**
+ * Read live resize status. Output: a `ResourceResizeStatus` JSON array.
+ */
+char *msb_sandbox_resize_status(uint64_t cancel_id,
+                                Handle handle,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
+/**
+ * Wait for live resizes to settle. `u64::MAX` waits without a deadline; 0 checks once.
+ */
+char *msb_sandbox_wait_until_resized(uint64_t cancel_id,
+                                     Handle handle,
+                                     uint64_t timeout_ms,
+                                     unsigned char *buf,
+                                     uintptr_t buf_len);
+
+/**
+ * Apply with tracking, read current operations, or wait on supplied identities.
+ * A nonzero handle retains its backend; zero uses the supplied name. Reads and waits require
+ * the expected sandbox identity. Modify preserves the existing fresh-by-name planning contract.
+ * The optional symbol itself advertises support; no mutation is replayed through an older ABI.
+ */
+char *msb_sandbox_resize_operations(uint64_t cancel_id,
+                                    Handle handle,
+                                    const char *name,
+                                    const char *expected_id,
+                                    const char *request_json,
+                                    unsigned char *buf,
+                                    uintptr_t buf_len);
+
+/**
  * Wait against the registered receiver, retaining destination and ownership.
  */
 char *msb_sandbox_resource_wait_for_status(uint64_t cancel_id,
@@ -1252,6 +1304,51 @@ char *msb_runtime_setup(uint64_t cancel_id,
                         const char *options_json,
                         unsigned char *buf,
                         uintptr_t buf_len);
+
+/**
+ * Advertise retained receivers from the `create_artifact` and `list_dir` producers.
+ *
+ * The symbol is optional for older Go clients. Receiver dispatch alone does not
+ * imply these operations exist, and clients must select capture before mutation.
+ */
+void msb_supports_snapshot_artifact_receivers(void);
+
+/**
+ * A provider-aware caller must select its receiver ABI before dispatching a mutation.
+ */
+void msb_supports_context_snapshot_objects(void);
+
+/**
+ * Advertise explicit group-directory lookup separately from older group receivers.
+ */
+void msb_supports_snapshot_group_paths(void);
+
+/**
+ * Execute only the explicitly tagged operation against a retained receiver.
+ */
+char *msb_snapshot_object(uint64_t cancel_id,
+                          uint64_t handle,
+                          const char *request,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+/**
+ * Execute once and transfer an allocated JSON response, without a fixed buffer limit.
+ *
+ * # Safety
+ * `request` must point to a readable NUL-terminated string. `out_ptr` and `out_len`
+ * must point to writable slots. Free successful output with `msb_agent_free_bytes`.
+ */
+char *msb_snapshot_object_owned(uint64_t cancel_id,
+                                uint64_t handle,
+                                const char *request,
+                                unsigned char **out_ptr,
+                                uintptr_t *out_len);
+
+/**
+ * Release a receiver, without deleting its persistent artifact or group.
+ */
+void msb_snapshot_object_close(uint64_t handle);
 
 /**
  * Observe one live sandbox through its retained native backend and stable identity.

@@ -91,6 +91,7 @@ impl LocalContext {
         let _transition_guard =
             Self::acquire_sandbox_transition_guard(&self.config().run_dir(), name).await?;
         let pools = self.db().await?;
+        self.recover_replacement(name, None).await?;
         let write_db = pools.write();
         let model = self.load_sandbox_record_reconciled(pools, name).await?;
         ensure_local_identity(name, expected_id, model.id)?;
@@ -283,10 +284,10 @@ impl LocalContext {
                 )
                 .await?
                 {
-                    sandbox.terminate_creation_owner().await;
-                    return Err(crate::MicrosandboxError::Runtime(format!(
+                    let error = crate::MicrosandboxError::Runtime(format!(
                         "sandbox {name:?} lost its Starting state before readiness publication"
-                    )));
+                    ));
+                    return Err(sandbox.creation_failure(error).await);
                 }
                 if let Err(err) = Self::update_sandbox_active_config(
                     write_db,
@@ -295,8 +296,7 @@ impl LocalContext {
                 )
                 .await
                 {
-                    sandbox.terminate_creation_owner().await;
-                    return Err(err);
+                    return Err(sandbox.creation_failure(err).await);
                 }
                 if matches!(mode, SpawnMode::Detached) {
                     sandbox.finish_detached_creation().await?;
@@ -418,6 +418,23 @@ impl LocalContext {
         };
 
         if all_dead {
+            // SIGKILL skips the runtime's exit observer. Reconcile under the already-held
+            // transition guard before clearing active_config, so the latest dead run gets
+            // its terminal receipt and cannot lose last-active provenance on force-stop.
+            let pools = self.db().await?;
+            if let Err(error) = Self::reconcile_sandbox_runtime_state_owned(
+                pools,
+                model.clone(),
+                Some((&self.config().run_dir(), &self.sandboxes_dir())),
+                true,
+            )
+            .await
+            {
+                // Preserve the existing kill cleanup policy: unavailable evidence stays
+                // unknown and must not strand an already terminated sandbox.
+                tracing::warn!(sandbox = %name, %error, "post-kill reconciliation incomplete");
+            }
+            let db = pools.write();
             #[cfg(unix)]
             {
                 let _ownership = crate::runtime::acquire_sandbox_lifecycle_guard(
@@ -430,7 +447,6 @@ impl LocalContext {
                     &self.sandboxes_dir().join(name),
                 )?;
             }
-            let db = self.db().await?.write();
             if let Err(e) = Self::update_sandbox_status(db, model.id, SandboxStatus::Stopped).await
             {
                 tracing::warn!(sandbox = %name, error = %e, "failed to update sandbox status after kill");
@@ -558,7 +574,9 @@ impl LocalContext {
         query: &SandboxListBuilder,
     ) -> MicrosandboxResult<(Vec<(sandbox_entity::Model, Option<i32>)>, Option<String>)> {
         let pools = self.db().await?;
-        let mut select = microsandbox_db::catalog::sandbox_query(pools.read()).await?;
+        let mut select = microsandbox_db::catalog::sandbox_query(pools.read())
+            .await?
+            .filter(sandbox_entity::Column::Name.not_like(".msb-retained-%"));
 
         if let Some(cursor) = query.cursor.as_deref() {
             select = select.filter(sandbox_entity::Column::Id.lt(decode_list_cursor(cursor)?));
@@ -913,6 +931,21 @@ impl LocalContext {
         }
 
         if let Some((run_dir, sandboxes_dir)) = socket_roots {
+            // Preserve last-active provenance while lifecycle ownership is held, before
+            // stale-state cleanup clears active_config. Missing older-runtime evidence is
+            // unknown; recording failure must not strand an already dead sandbox.
+            if let Err(error) = microsandbox_runtime::retention::seal_terminal(
+                pools.write(),
+                &sandboxes_dir.join(&sandbox.name),
+                sandbox.id,
+                run.id,
+                None,
+                microsandbox_runtime::retention::RetentionTerminalOrigin::ReconciledDeath,
+            )
+            .await
+            {
+                tracing::warn!(%error, "reconciled configuration evidence unavailable");
+            }
             crate::runtime::remove_socket_artifacts_at(run_dir, sandboxes_dir, &sandbox.name)?;
         }
         let (terminal_status, reason) = Self::stale_runtime_terminal_state(sandbox.status);
@@ -1324,6 +1357,7 @@ impl SandboxOps for LocalContext {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<SandboxRecord>> {
         Box::pin(async move {
+            self.recover_replacement_for_lookup(name).await?;
             let (mut model, pid) = self.sandbox_handle_state(name, None).await?;
             model.status = crate::sandbox::pause::projected_status(self, name, model.status).await;
             Ok(SandboxRecord::from_local_model(backend, model, pid))
@@ -2114,20 +2148,57 @@ mod tests {
                 .await
                 .is_err()
         );
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
-        let pid = child.id() as i32;
-        run_entity::Entity::insert(run_entity::ActiveModel {
+        let run_id = run_entity::Entity::insert(run_entity::ActiveModel {
             sandbox_id: Set(id),
-            pid: Set(Some(pid)),
+            pid: Set(None),
+            started_at: Set(Some(chrono::Utc::now().naive_utc())),
             status: Set(run_entity::RunStatus::Running),
             ..Default::default()
         })
         .exec(pools.write())
         .await
-        .unwrap();
+        .unwrap()
+        .last_insert_id;
         LocalContext::update_sandbox_status(pools.write(), id, SandboxStatus::Running)
             .await
             .unwrap();
+        let source = test_config("kill-start");
+        LocalContext::update_sandbox_active_config(pools.write(), id, &source)
+            .await
+            .unwrap();
+        let owner = microsandbox_runtime::retention::RetentionOwner::for_run(
+            pools.write(),
+            &home.path().join("db/msb.db"),
+            id,
+            run_id,
+            "killed-runtime".into(),
+        )
+        .await
+        .unwrap();
+        let directory = backend.sandboxes_dir().join("kill-start");
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut journal =
+            microsandbox_runtime::retention::RetentionJournal::begin_start(&directory, owner)
+                .unwrap();
+        journal
+            .confirm(Some(serde_json::to_value(&source).unwrap()))
+            .unwrap();
+        // Finish fallible evidence setup before spawning the disposable process.
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let published = run_entity::Entity::update_many()
+            .col_expr(
+                run_entity::Column::Pid,
+                sea_orm::sea_query::Expr::value(Some(pid)),
+            )
+            .filter(run_entity::Column::Id.eq(run_id))
+            .exec(pools.write())
+            .await;
+        if let Err(error) = published {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("publish fixture process: {error}");
+        }
         drop(transition);
         let result = tokio::time::timeout(Duration::from_secs(6), kill).await;
         // Ensure assertion failures never leave the helper process behind.
@@ -2143,6 +2214,29 @@ mod tests {
                 .status,
             SandboxStatus::Stopped
         );
+        let run = run_entity::Entity::find_by_id(run_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, run_entity::RunStatus::Terminated);
+        assert!(run.terminated_at.is_some());
+        let guard = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+            &backend.config().run_dir(),
+            "kill-start",
+        )
+        .unwrap()
+        .unwrap();
+        let selected = microsandbox_runtime::retention::select_stopped_configuration(
+            pools.write(),
+            &directory,
+            id,
+            &guard,
+        )
+        .await
+        .unwrap()
+        .expect("kill must seal evidence before clearing active config");
+        assert_eq!(selected.source, Some(serde_json::to_value(source).unwrap()));
     }
 
     #[tokio::test]
