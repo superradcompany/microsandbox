@@ -479,7 +479,7 @@ Before raising it, consider memory use, especially when restoring imported snaps
 
 <Tooltip tip="Local runtime placement only; microsandbox cloud applies its own DNS settings."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Set `dns.nameservers` to a list of resolver IP addresses. The runtime queries them on port 53.
+Multi-tenant sandboxes use the operator's `dns.nameservers` list. Set a nonempty list of resolver IP addresses, queried on port 53.
 
 ```json
 {
@@ -490,10 +490,11 @@ Set `dns.nameservers` to a list of resolver IP addresses. The runtime queries th
 }
 ```
 
-- **Single-tenant:** A sandbox's own nameserver list takes precedence. If neither list contains any addresses, the runtime uses host DNS.
-- **Multi-tenant:** The operator's list takes precedence over any sandbox list. Choose resolvers that cannot answer private infrastructure names. An omitted, null, or empty list uses `1.1.1.1` and `1.0.0.1` on supporting runtimes. Older runtimes use host DNS and require an upgrade to accept an explicit operator list.
+Choose resolvers that cannot answer private infrastructure names. An omitted or null list uses `1.1.1.1` and `1.0.0.1` on supporting runtimes. An explicit list requires runtime support. Older runtimes use host DNS when the list is omitted.
 
-Restart running sandboxes after changing the list.
+Single-tenant sandboxes use their existing per-sandbox DNS configuration and overlay precedence. The operator's list applies only in multi-tenant mode.
+
+Restart multi-tenant sandboxes after changing the list.
 
 ## `profiles`
 

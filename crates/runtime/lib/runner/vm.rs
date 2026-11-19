@@ -28,7 +28,9 @@ use microsandbox_filesystem::{
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 #[cfg(feature = "net")]
-use microsandbox_network::{ResolvedNetworkConfig, network::SmoltcpNetwork};
+use microsandbox_network::{
+    ResolvedNetworkConfig, config::MultiTenantConfig, network::SmoltcpNetwork,
+};
 use microsandbox_protocol::{
     FS_STATE_LIMIT_MAX_MIB, FS_STATE_LIMIT_MIN_MIB,
     bootstrap::{BootstrapBlockRoot, GuestBootstrap},
@@ -414,6 +416,10 @@ pub struct VmConfig {
     /// Host-runtime isolation profile enforced by the network backend.
     #[cfg(feature = "net")]
     pub deployment_profile: DeploymentProfile,
+
+    /// Operator-owned settings enforced by the multi-tenant network backend.
+    #[cfg(feature = "net")]
+    pub multi_tenant: MultiTenantConfig,
 
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
@@ -2818,9 +2824,14 @@ fn build_vm(
             .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
         let rate_limiters = to_krun_network_rate_limiters(vm.network.config());
 
-        let mut network =
-            SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot, vm.deployment_profile)
-                .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
+        let mut network = SmoltcpNetwork::new(
+            vm.network.clone(),
+            vm.sandbox_slot,
+            vm.deployment_profile,
+            &vm.multi_tenant,
+        )
+        .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
+
         if let Some(restore) = &vm.checkpoint_restore {
             let gateway = restore.network_gateway_mac.ok_or_else(|| {
                 RuntimeError::Custom(
@@ -4613,6 +4624,8 @@ mod tests {
             network: Default::default(),
             #[cfg(feature = "net")]
             deployment_profile: Default::default(),
+            #[cfg(feature = "net")]
+            multi_tenant: Default::default(),
             #[cfg(feature = "net")]
             sandbox_slot: 1,
             checkpoint_restore: None,

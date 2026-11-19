@@ -21,7 +21,7 @@ use microsandbox_types::{
 };
 use msb_krun::backends::net::NetBackend;
 
-use crate::config::{ConnectionLimit, PortProtocol, ResolvedNetworkConfig};
+use crate::config::{ConnectionLimit, MultiTenantConfig, PortProtocol, ResolvedNetworkConfig};
 use crate::dns::Nameserver;
 use crate::engine::tls::state::{TlsState, TlsStateError};
 use crate::netstack::{
@@ -43,7 +43,9 @@ const DEFAULT_MULTI_TENANT_MAX_TCP_CONNECTIONS: NonZeroUsize = NonZeroUsize::new
 /// Default UDP cap for multi-tenant deployments; explicit settings override it.
 const DEFAULT_MULTI_TENANT_MAX_UDP_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
-/// Public upstreams for multi-tenant deployments without an operator override.
+/// Public resolvers used by multi-tenant deployments unless the operator
+/// overrides them. Multi-tenant sandboxes never use the host's own resolvers,
+/// which may answer for private infrastructure names.
 const DEFAULT_MULTI_TENANT_NAMESERVERS: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
     IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
@@ -246,6 +248,24 @@ impl HostRoutes {
     }
 }
 
+impl MultiTenantConfig {
+    /// Use the operator's resolver list, or the built-in public resolvers.
+    fn resolve_nameservers(&self) -> Result<Vec<Nameserver>, NetworkInitError> {
+        let addresses = self
+            .nameservers
+            .as_deref()
+            .unwrap_or(&DEFAULT_MULTI_TENANT_NAMESERVERS);
+        if addresses.is_empty() {
+            return Err(NetworkInitError::EmptyMultiTenantNameservers);
+        }
+
+        Ok(addresses
+            .iter()
+            .map(|ip| Nameserver::Addr(SocketAddr::new(*ip, MULTI_TENANT_DNS_PORT)))
+            .collect())
+    }
+}
+
 impl SmoltcpNetwork {
     /// Gateway identity for an ordinary cold boot in the given host slot.
     pub fn default_gateway_mac(slot: u16) -> [u8; 6] {
@@ -276,8 +296,8 @@ impl SmoltcpNetwork {
     /// remains separate and is intersected with the platform's public-network
     /// policy by the poll loop.
     ///
-    /// Multi-tenant DNS uses the operator's list in the resolved configuration
-    /// or the built-in public resolvers.
+    /// `multi_tenant` carries operator-owned settings. Default settings use
+    /// public DNS resolvers. These settings are ignored for `SingleTenant`.
     ///
     /// # Errors
     ///
@@ -287,17 +307,25 @@ impl SmoltcpNetwork {
         config: ResolvedNetworkConfig,
         slot: u16,
         deployment_profile: DeploymentProfile,
+        multi_tenant: &MultiTenantConfig,
     ) -> Result<Self, NetworkInitError> {
-        Self::build(config, slot, deployment_profile, HostRoutes::detect())
+        Self::build(
+            config,
+            slot,
+            deployment_profile,
+            multi_tenant,
+            HostRoutes::detect(),
+        )
     }
 
     fn build(
         mut config: ResolvedNetworkConfig,
         slot: u16,
         deployment_profile: DeploymentProfile,
+        multi_tenant: &MultiTenantConfig,
         host_routes: HostRoutes,
     ) -> Result<Self, NetworkInitError> {
-        enforce_deployment_profile(&mut config, deployment_profile)?;
+        enforce_deployment_profile(&mut config, deployment_profile, multi_tenant)?;
         let platform_policy = Self::platform_policy(deployment_profile);
         let resolved_config = config;
         let config = resolved_config.config();
@@ -747,15 +775,16 @@ impl MetricsHandle {
 /// the platform public-network policy and the tenant policy independently so a
 /// broad tenant allow can never outrank the platform floor, while a tenant deny
 /// still remains effective.
+///
+/// `multi_tenant` contains the operator-owned settings.
 fn enforce_deployment_profile(
     config: &mut ResolvedNetworkConfig,
     profile: DeploymentProfile,
+    multi_tenant: &MultiTenantConfig,
 ) -> Result<(), NetworkInitError> {
     if profile == DeploymentProfile::SingleTenant {
         return Ok(());
     }
-
-    let nameservers = resolve_multi_tenant_nameservers(config.multi_tenant_nameservers())?;
 
     config.clear_outbound_proxy();
 
@@ -783,7 +812,7 @@ fn enforce_deployment_profile(
     let had_outbound_proxy = config.outbound_proxy.is_some();
     config.interface = Default::default();
     config.ports.clear();
-    config.dns.nameservers = nameservers;
+    config.dns.nameservers = multi_tenant.resolve_nameservers()?;
     config.dns.rebind_protection = true;
     config.trust_host_cas = false;
     if interface_overridden
@@ -805,21 +834,6 @@ fn enforce_deployment_profile(
     }
 
     Ok(())
-}
-
-/// Resolve the upstream DNS resolvers for a multi-tenant deployment.
-fn resolve_multi_tenant_nameservers(
-    configured_nameservers: Option<&[IpAddr]>,
-) -> Result<Vec<Nameserver>, NetworkInitError> {
-    let addresses = configured_nameservers.unwrap_or(&DEFAULT_MULTI_TENANT_NAMESERVERS);
-    if addresses.is_empty() {
-        return Err(NetworkInitError::EmptyMultiTenantNameservers);
-    }
-
-    Ok(addresses
-        .iter()
-        .map(|ip| Nameserver::Addr(SocketAddr::new(*ip, MULTI_TENANT_DNS_PORT)))
-        .collect())
 }
 
 /// Derive a guest MAC address from the sandbox slot.
@@ -965,6 +979,7 @@ mod tests {
             resolved(source_config),
             7,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(true, true),
         )
         .unwrap();
@@ -977,6 +992,7 @@ mod tests {
                 resolved(config.clone()),
                 slot,
                 DeploymentProfile::SingleTenant,
+                &MultiTenantConfig::default(),
                 routes(true, true),
             )
             .unwrap()
@@ -998,6 +1014,7 @@ mod tests {
                 resolved(NetworkConfig::default()),
                 8,
                 DeploymentProfile::SingleTenant,
+                &MultiTenantConfig::default(),
                 routes(true, true),
             )
             .unwrap();
@@ -1014,6 +1031,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(true, false),
         )
         .unwrap();
@@ -1074,7 +1092,12 @@ mod tests {
         config.policy = NetworkPolicy::allow_all();
         let mut resolved = resolved(config);
 
-        enforce_deployment_profile(&mut resolved, DeploymentProfile::MultiTenant).unwrap();
+        enforce_deployment_profile(
+            &mut resolved,
+            DeploymentProfile::MultiTenant,
+            &MultiTenantConfig::default(),
+        )
+        .unwrap();
         let config = resolved.config();
 
         assert!(config.interface.mac.is_none());
@@ -1097,16 +1120,17 @@ mod tests {
 
     #[test]
     fn multi_tenant_profile_uses_operator_nameservers() {
-        let operator = vec!["9.9.9.9".parse().unwrap(), "2620:fe::fe".parse().unwrap()];
-        let config = resolved(NetworkConfig::default());
-        let serialized = serde_json::to_value(&config).unwrap();
-        let mut config = config.with_multi_tenant_nameservers(Some(operator));
+        let operator = MultiTenantConfig {
+            nameservers: Some(vec![
+                "9.9.9.9".parse().unwrap(),
+                "2620:fe::fe".parse().unwrap(),
+            ]),
+        };
+        let mut config = NetworkConfig::default();
+        config.dns.nameservers = vec!["10.0.0.53".parse().unwrap()];
+        let mut config = resolved(config);
 
-        // Operator settings travel in a separate launch field. Adding them
-        // to the resolved config must leave its serialized form unchanged.
-        assert_eq!(serde_json::to_value(&config).unwrap(), serialized);
-
-        enforce_deployment_profile(&mut config, DeploymentProfile::MultiTenant).unwrap();
+        enforce_deployment_profile(&mut config, DeploymentProfile::MultiTenant, &operator).unwrap();
 
         assert_eq!(
             config.config().dns.nameservers,
@@ -1119,7 +1143,10 @@ mod tests {
 
     #[test]
     fn multi_tenant_nameservers_reject_an_empty_operator_list() {
-        let result = resolve_multi_tenant_nameservers(Some(&[]));
+        let config = MultiTenantConfig {
+            nameservers: Some(vec![]),
+        };
+        let result = config.resolve_nameservers();
 
         assert!(matches!(
             result,
@@ -1140,7 +1167,8 @@ mod tests {
                 let mut config = resolved(config);
                 // Exercise the serialized runtime launch boundary as well.
                 config = serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
-                enforce_deployment_profile(&mut config, profile).unwrap();
+                enforce_deployment_profile(&mut config, profile, &MultiTenantConfig::default())
+                    .unwrap();
                 let expected = requested
                     .or(match profile {
                         DeploymentProfile::SingleTenant => None,
@@ -1155,7 +1183,8 @@ mod tests {
                     expected
                 );
                 // Applying the profile again must preserve the resolved value.
-                enforce_deployment_profile(&mut config, profile).unwrap();
+                enforce_deployment_profile(&mut config, profile, &MultiTenantConfig::default())
+                    .unwrap();
                 assert_eq!(
                     config
                         .config()
@@ -1185,9 +1214,11 @@ mod tests {
                         DeploymentProfile::MultiTenant => Some(1024),
                     })
                     .map(ConnectionLimit::from);
-                enforce_deployment_profile(&mut config, profile).unwrap();
+                enforce_deployment_profile(&mut config, profile, &MultiTenantConfig::default())
+                    .unwrap();
                 assert_eq!(config.config().max_udp_connections, expected);
-                enforce_deployment_profile(&mut config, profile).unwrap();
+                enforce_deployment_profile(&mut config, profile, &MultiTenantConfig::default())
+                    .unwrap();
                 assert_eq!(config.config().max_udp_connections, expected);
             }
         }
@@ -1198,6 +1229,7 @@ mod tests {
         let mut config = NetworkConfig::default();
         config.interface.mtu = Some(9000);
         config.dns.rebind_protection = false;
+        config.dns.nameservers = vec!["dns.example:5353".parse().unwrap()];
         config.trust_host_cas = true;
         config.outbound_proxy = Some(crate::proxy::OutboundProxy::Socks5 {
             address: "127.0.0.1:1080".parse().unwrap(),
@@ -1205,11 +1237,19 @@ mod tests {
         });
 
         let mut resolved = resolved(config);
-        enforce_deployment_profile(&mut resolved, DeploymentProfile::SingleTenant).unwrap();
+        let operator = MultiTenantConfig {
+            nameservers: Some(vec!["9.9.9.9".parse().unwrap()]),
+        };
+        enforce_deployment_profile(&mut resolved, DeploymentProfile::SingleTenant, &operator)
+            .unwrap();
         let config = resolved.config();
 
         assert_eq!(config.interface.mtu, Some(9000));
         assert!(!config.dns.rebind_protection);
+        assert_eq!(
+            config.dns.nameservers,
+            ["dns.example:5353".parse::<Nameserver>().unwrap()]
+        );
         assert!(config.trust_host_cas);
         assert!(config.outbound_proxy.is_some());
     }
@@ -1324,6 +1364,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(true, false),
         )
         .unwrap();
@@ -1344,6 +1385,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(true, true),
         )
         .unwrap();
@@ -1363,6 +1405,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(true, false),
         )
         .unwrap();
@@ -1377,6 +1420,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(false, true),
         )
         .unwrap();
@@ -1396,6 +1440,7 @@ mod tests {
             resolved(config),
             0,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(true, false),
         )
         .unwrap();
@@ -1482,7 +1527,14 @@ mod tests {
                     host_bind,
                 });
             }
-            let network = SmoltcpNetwork::build(resolved(config), 7, profile, host_routes).unwrap();
+            let network = SmoltcpNetwork::build(
+                resolved(config),
+                7,
+                profile,
+                &MultiTenantConfig::default(),
+                host_routes,
+            )
+            .unwrap();
             let bootstrap = network.guest_bootstrap_network();
 
             assert_eq!(bootstrap.ipv4.is_some(), expected_ipv4);
@@ -1505,6 +1557,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(false, false),
         )
         .unwrap();
@@ -1521,6 +1574,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             7,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(true, true),
         )
         .unwrap();
@@ -1541,6 +1595,7 @@ mod tests {
             resolved(NetworkConfig::default()),
             0,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(false, false),
         )
         .unwrap();
@@ -1561,6 +1616,7 @@ mod tests {
                 resolved(config),
                 0,
                 DeploymentProfile::MultiTenant,
+                &MultiTenantConfig::default(),
                 routes(true, false),
             );
             assert!(net.is_ok(), "large explicit cap should allow startup");
@@ -1587,6 +1643,7 @@ mod tests {
             resolved(config),
             0,
             DeploymentProfile::SingleTenant,
+            &MultiTenantConfig::default(),
             routes(true, false),
         ) {
             Ok(_) => panic!("empty rate limiter should fail"),

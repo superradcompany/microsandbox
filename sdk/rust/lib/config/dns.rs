@@ -3,8 +3,6 @@
 use std::net::IpAddr;
 
 use microsandbox_types::ConfigPatch;
-#[cfg(all(feature = "local", feature = "net"))]
-use microsandbox_types::DeploymentProfile;
 use serde::{Deserialize, Serialize};
 
 //--------------------------------------------------------------------------------------------------
@@ -17,32 +15,9 @@ use serde::{Deserialize, Serialize};
 #[derive(ConfigPatch)]
 #[config_patch(serde)]
 pub struct HostDnsConfig {
-    /// Operator DNS resolvers, as IP addresses queried on port 53. An omitted
-    /// or empty list uses the profile default.
+    /// Upstream resolvers for multi-tenant sandboxes, queried on port 53.
+    /// An omitted list uses the built-in public resolvers. Ignored in single-tenant mode.
     pub nameservers: Option<Vec<IpAddr>>,
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods
-//--------------------------------------------------------------------------------------------------
-
-#[cfg(all(feature = "local", feature = "net"))]
-impl HostDnsConfig {
-    /// An explicit host override, with an empty list treated as unset.
-    pub(crate) fn nameserver_override(&self) -> Option<&[IpAddr]> {
-        self.nameservers
-            .as_deref()
-            .filter(|servers| !servers.is_empty())
-    }
-
-    /// The trusted resolver override for a multi-tenant launch.
-    pub(crate) fn multi_tenant_nameservers(&self, profile: DeploymentProfile) -> Option<&[IpAddr]> {
-        if profile == DeploymentProfile::MultiTenant {
-            self.nameserver_override()
-        } else {
-            None
-        }
-    }
 }
 
 //--------------------------------------------------------------------------------------------------

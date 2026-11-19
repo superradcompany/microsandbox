@@ -52,8 +52,7 @@ use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 #[cfg(feature = "net")]
 use microsandbox_network::{
     ResolvedNetworkConfig,
-    config::{EnvNetworkSecretResolver, NetworkConfig},
-    dns::Nameserver,
+    config::{EnvNetworkSecretResolver, MultiTenantConfig},
 };
 use microsandbox_protocol::{
     bootstrap::{
@@ -78,8 +77,6 @@ use super::protected_state::{self, StoragePreparation};
 #[cfg(windows)]
 use super::sockets::ensure_agent_pipe_unclaimed;
 use super::sockets::remove_socket_artifacts_at;
-#[cfg(feature = "net")]
-use crate::config::HostDnsConfig;
 use crate::context::local::creation::CreationStorage;
 use crate::context::local::volume::ResolvedNamedVolume;
 #[cfg(not(target_os = "linux"))]
@@ -303,6 +300,10 @@ impl LocalContext {
         mode: SpawnMode,
         lifecycle_guard: Option<SandboxLifecycleGuard>,
     ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
+        // Durable configuration stores only host-side source references. Resolve
+        // them into the private runtime configuration before the sandbox process
+        // is spawned.
+
         // Resolve the already-layered runtime paths as one compatible pair before launch.
         let global = self.config();
         #[cfg(feature = "embed-binaries")]
@@ -327,11 +328,10 @@ impl LocalContext {
         launch_contract.validate_launch_intent(config)?;
         #[cfg(feature = "net")]
         let resolved_network = {
-            let mut network = launch_network_config(config, &global.dns)?;
+            let mut network = config.local_network_config()?;
             network.http =
                 launch_contract::select_http_deny_response(&resolved_runtime.msb_path, config)
                     .await?;
-            // Resolve durable host-side secret sources only for this launch.
             network
                 .resolve(&EnvNetworkSecretResolver)
                 .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
@@ -339,13 +339,11 @@ impl LocalContext {
         launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
+
         #[cfg(feature = "net")]
-        launch_contract::validate_multi_tenant_nameservers(
-            &resolved_runtime.msb_path,
-            config,
-            global,
-        )
-        .await?;
+        launch_contract::validate_multi_tenant_config(&resolved_runtime.msb_path, config, global)
+            .await?;
+
         launch_contract::validate_nested_virt(&resolved_runtime.msb_path, config, launch_contract)
             .await?;
         if config.checkpoint_restore.as_ref().is_some_and(|restore| {
@@ -2229,24 +2227,6 @@ pub(crate) fn guest_mount_tag(guest_path: &str) -> String {
     out
 }
 
-#[cfg(feature = "net")]
-fn launch_network_config(
-    config: &SandboxConfig,
-    dns: &HostDnsConfig,
-) -> MicrosandboxResult<NetworkConfig> {
-    let mut network = config.local_network_config()?;
-    // The single-tenant host list is a default. Multi-tenant policy receives
-    // the host list separately through the trusted launch field.
-    if config.spec.deployment_profile == DeploymentProfile::SingleTenant
-        && network.dns.nameservers.is_empty()
-        && let Some(nameservers) = dns.nameserver_override()
-    {
-        network.dns.nameservers = nameservers.iter().copied().map(Nameserver::from).collect();
-    }
-
-    Ok(network)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn machine_cli_args(
     local: &LocalContext,
@@ -2364,12 +2344,16 @@ fn machine_cli_args(
         }),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
+
         #[cfg(feature = "net")]
-        multi_tenant_nameservers: local
-            .config()
-            .dns
-            .multi_tenant_nameservers(config.spec.deployment_profile)
-            .map(<[_]>::to_vec),
+        multi_tenant: if config.spec.deployment_profile == DeploymentProfile::MultiTenant {
+            MultiTenantConfig {
+                nameservers: local.config().dns.nameservers.clone(),
+            }
+        } else {
+            MultiTenantConfig::default()
+        },
+
         bootstrap: guest_bootstrap(config),
         ..Default::default()
     };
@@ -3533,40 +3517,6 @@ mod tests {
                 "SIGCHLD handler should run on the alternate signal stack"
             );
         }
-    }
-
-    #[cfg(feature = "net")]
-    #[test]
-    fn single_tenant_launch_uses_host_nameservers_only_without_a_sandbox_override() {
-        use microsandbox_network::dns::Nameserver;
-
-        use super::launch_network_config;
-        use crate::config::HostDnsConfig;
-
-        let mut sandbox = SandboxConfig::default();
-        let host = HostDnsConfig {
-            nameservers: Some(vec!["9.9.9.9".parse().unwrap()]),
-        };
-        let system_default = HostDnsConfig {
-            nameservers: Some(vec![]),
-        };
-
-        let launch = launch_network_config(&sandbox, &system_default).unwrap();
-        assert!(launch.dns.nameservers.is_empty());
-
-        let launch = launch_network_config(&sandbox, &host).unwrap();
-        assert_eq!(
-            launch.dns.nameservers,
-            ["9.9.9.9:53".parse::<Nameserver>().unwrap()]
-        );
-
-        let sandbox_resolver = "8.8.8.8:5353".parse::<Nameserver>().unwrap();
-        let mut network = sandbox.local_network_config().unwrap();
-        network.dns.nameservers = vec![sandbox_resolver.clone()];
-        sandbox.set_local_network_config(network).unwrap();
-
-        let launch = launch_network_config(&sandbox, &host).unwrap();
-        assert_eq!(launch.dns.nameservers, [sandbox_resolver]);
     }
 
     //----------------------------------------------------------------------------------------------

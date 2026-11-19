@@ -369,12 +369,11 @@ pub fn run(args: MachineArgs) -> ! {
         exec_path: launch.exec_path,
         exec_args: launch.exec_args,
         #[cfg(feature = "net")]
-        network: launch
-            .network
-            .unwrap_or_default()
-            .with_multi_tenant_nameservers(launch.multi_tenant_nameservers),
+        network: launch.network.unwrap_or_default(),
         #[cfg(feature = "net")]
         deployment_profile: launch.deployment_profile,
+        #[cfg(feature = "net")]
+        multi_tenant: launch.multi_tenant,
         #[cfg(feature = "net")]
         sandbox_slot: launch.sandbox_slot,
         checkpoint_restore: launch.checkpoint_restore,

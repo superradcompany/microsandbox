@@ -137,6 +137,14 @@ pub struct NetworkConfig {
     pub outbound_proxy: Option<OutboundProxy>,
 }
 
+/// Operator-owned settings enforced for multi-tenant sandboxes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MultiTenantConfig {
+    /// Upstream resolver IPs queried on port 53. Omission uses the public defaults.
+    pub nameservers: Option<Vec<IpAddr>>,
+}
+
 /// Network configuration whose runtime-only values have been resolved.
 #[doc(hidden)]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -148,11 +156,6 @@ pub struct ResolvedNetworkConfig {
     /// Fully resolved outbound proxy, including runtime authentication
     /// material when configured.
     outbound_proxy: Option<ResolvedOutboundProxy>,
-
-    // Attached by the runtime after decoding the separate, host-owned launch
-    // field. The serialized sandbox network configuration cannot supply it.
-    #[serde(skip)]
-    multi_tenant_nameservers: Option<Vec<IpAddr>>,
 }
 
 /// Optional overrides for the guest interface.
@@ -268,6 +271,13 @@ impl TcpAcceptQueueSize {
     }
 }
 
+impl MultiTenantConfig {
+    /// Whether every operator setting uses its built-in default.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 impl ResolvedNetworkConfig {
     /// Creates a runtime configuration from its declarative configuration and
     /// fully resolved outbound proxy.
@@ -276,21 +286,7 @@ impl ResolvedNetworkConfig {
         Self {
             config,
             outbound_proxy,
-            multi_tenant_nameservers: None,
         }
-    }
-
-    /// Attach the operator's DNS settings from the host launch settings.
-    #[doc(hidden)]
-    pub fn with_multi_tenant_nameservers(mut self, nameservers: Option<Vec<IpAddr>>) -> Self {
-        self.multi_tenant_nameservers = nameservers;
-        self
-    }
-
-    /// Returns the host-owned resolver override for the multi-tenant network floor.
-    #[cfg(feature = "engine")]
-    pub(crate) fn multi_tenant_nameservers(&self) -> Option<&[IpAddr]> {
-        self.multi_tenant_nameservers.as_deref()
     }
 
     /// Returns the declarative configuration with resolved injection values applied.

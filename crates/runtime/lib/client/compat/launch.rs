@@ -200,7 +200,7 @@ impl PreviousLaunch {
             deployment_profile: self.deployment_profile,
             // Previous launch formats always used the built-in resolvers.
             #[cfg(feature = "net")]
-            multi_tenant_nameservers: None,
+            multi_tenant: Default::default(),
             #[cfg(feature = "net")]
             sandbox_slot: self.sandbox_slot,
             vsock: self.vsock,
