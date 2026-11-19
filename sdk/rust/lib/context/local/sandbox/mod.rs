@@ -2121,6 +2121,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn kill_waits_for_start_publication_and_terminates_the_created_run() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = Arc::new(
             crate::test_support::local_backend_builder(home.path())
@@ -2183,8 +2185,30 @@ mod tests {
         journal
             .confirm(Some(serde_json::to_value(&source).unwrap()))
             .unwrap();
-        // Finish fallible evidence setup before spawning the disposable process.
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        // The published process must carry the same ownership descriptor as a
+        // real runtime. A plain sleep PID is deliberately protected from kill.
+        let lifecycle = microsandbox_runtime::ipc::acquire_lifecycle_guard(
+            &backend.config().run_dir(),
+            "kill-start",
+        )
+        .unwrap();
+        let lifecycle_fd = lifecycle.as_raw_fd();
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        unsafe {
+            command.pre_exec(move || {
+                // Duplicate first in case the source already uses the fixed FD.
+                let copy = libc::fcntl(lifecycle_fd, libc::F_DUPFD_CLOEXEC, 200);
+                if copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(copy, microsandbox_runtime::vm::LIFECYCLE_LOCK_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
         let pid = child.id() as i32;
         let published = run_entity::Entity::update_many()
             .col_expr(
@@ -2199,12 +2223,22 @@ mod tests {
             let _ = child.wait();
             panic!("publish fixture process: {error}");
         }
+        // Startup publishes the run before handing ownership to the child.
+        drop(lifecycle);
         drop(transition);
         let result = tokio::time::timeout(Duration::from_secs(6), kill).await;
+        let status_before_cleanup = child.try_wait();
         // Ensure assertion failures never leave the helper process behind.
         let _ = child.kill();
         child.wait().unwrap();
         result.unwrap().unwrap().unwrap();
+        assert_eq!(
+            status_before_cleanup
+                .unwrap()
+                .and_then(|status| status.signal()),
+            Some(libc::SIGKILL),
+            "kill must terminate the runtime before fixture cleanup"
+        );
         assert_eq!(
             backend
                 .sandbox_handle_state("kill-start", Some(id))

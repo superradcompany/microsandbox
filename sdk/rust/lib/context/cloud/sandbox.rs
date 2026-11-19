@@ -1714,7 +1714,7 @@ mod tests {
 
         let server = FakeServer::start(respond(201, None, CLOUD_SANDBOX_RESPONSE_FIXTURE)).await;
         let backend = server.backend();
-        tokio::time::timeout(
+        let _sandbox = tokio::time::timeout(
             Duration::from_secs(5),
             backend
                 .sandboxes()
