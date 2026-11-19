@@ -377,9 +377,10 @@ impl SharedState {
         self.sni_renewed_hostnames.write().remove(&key, now);
     }
 
-    /// Accept `addr` for connections whose SNI is `domain` for `ttl`, if an
-    /// earlier DNS answer bound it within the last [`REVALIDATION_GRACE`]
-    /// beyond that answer's TTL.
+    /// Accept `addr` for connections whose SNI is `domain`, if an earlier DNS
+    /// answer bound it within the last [`REVALIDATION_GRACE`] beyond that
+    /// answer's TTL. The acceptance lasts for `ttl`, but never beyond the end
+    /// of that grace period.
     ///
     /// SNI revalidation calls this only after a fresh policy-filtered answer
     /// for `domain` succeeded without `addr`, so the name still resolves and is
@@ -401,9 +402,10 @@ impl SharedState {
 
         let now = Instant::now();
         let recent = self.recent_hostnames.read();
-        if !recent.member_matches(&addr, now, |candidate| candidate == &key) {
+        let Some(grace_ends_at) = recent.expires_at(&key, &addr, now) else {
             return false;
-        }
+        };
+        let ttl = ttl.min(grace_ends_at.saturating_duration_since(now));
 
         let mut renewed = self.sni_renewed_hostnames.write();
         let capacity = Self::binding_capacity(&mut renewed, &key.hostname, now);
@@ -791,6 +793,32 @@ mod tests {
             bound,
             Duration::from_secs(30),
         ));
+    }
+
+    #[test]
+    fn renewals_end_with_the_original_grace_period() {
+        let grace = Duration::from_millis(50);
+        let state = SharedState::new(4).with_revalidation_grace(grace);
+        let bound: IpAddr = "198.51.100.23".parse().unwrap();
+
+        state.cache_resolved_hostname(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            [bound],
+            Duration::ZERO,
+        );
+        // A long-lived fresh answer must not stretch the renewal past the
+        // grace period of the answer that originally returned the address.
+        assert!(state.renew_recent_resolved_hostname(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            bound,
+            Duration::from_secs(86_400),
+        ));
+        assert!(state.sni_renewed_hostname(bound, "pool.example"));
+
+        std::thread::sleep(grace + Duration::from_millis(20));
+        assert!(!state.sni_renewed_hostname(bound, "pool.example"));
     }
 
     #[test]
