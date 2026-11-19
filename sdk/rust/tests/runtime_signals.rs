@@ -1,7 +1,8 @@
 //! Real-VM signal dispatch through independent SDK lookups on Linux and macOS.
 //! Run with `cargo test -p microsandbox --test runtime_signals -- --ignored`.
 
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+// These fixtures exercise local runtime processes and require the local SDK surface.
+#![cfg(all(feature = "local", any(target_os = "linux", target_os = "macos")))]
 
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
