@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::backend::Backend;
+use crate::context::Context;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -44,16 +44,31 @@ pub(crate) struct FakeServer {
 impl FakeServer {
     /// Listen on a loopback port and answer every connection with `reply`.
     pub(crate) async fn start(reply: Reply) -> Self {
+        let reply = Arc::new(reply);
+        Self::serve(move || reply.clone()).await
+    }
+
+    /// Answer requests in order, returning an error for any unexpected extra request.
+    pub(crate) async fn scripted(replies: Vec<Reply>) -> Self {
+        let mut replies = replies.into_iter();
+        Self::serve(move || {
+            Arc::new(replies.next().unwrap_or_else(|| {
+                respond(500, None, r#"{"error":{"message":"unexpected request"}}"#)
+            }))
+        })
+        .await
+    }
+
+    async fn serve(mut next_reply: impl FnMut() -> Arc<Reply> + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let reply = Arc::new(reply);
         let captured = requests.clone();
         let task = tokio::spawn(async move {
             let mut connections = JoinSet::new();
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
-                connections.spawn(answer(stream, reply.clone(), captured.clone()));
+                connections.spawn(answer(stream, next_reply(), captured.clone()));
             }
         });
         Self {
@@ -64,7 +79,7 @@ impl FakeServer {
     }
 
     /// A cloud backend pointed at this server.
-    pub(crate) fn backend(&self) -> Arc<dyn Backend> {
+    pub(crate) fn backend(&self) -> Arc<dyn Context> {
         Arc::new(super::cloud_backend(&self.url, "test-key").unwrap())
     }
 

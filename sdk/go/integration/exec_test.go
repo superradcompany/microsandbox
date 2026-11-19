@@ -496,3 +496,44 @@ func TestShellStream(t *testing.T) {
 		}
 	}
 }
+
+// Output exceeds the legacy 1 MiB JSON buffer. Neither direct execution nor
+// collection may rerun the command to retrieve a result that already completed.
+func TestCollectedLargeOutputAndRepeatableCompletion(t *testing.T) {
+	sb := newTestSandbox(t)
+	ctx := integrationCtx(t)
+	const size = 2 * 1024 * 1024
+	command := "echo x >> /tmp/large-output-runs; head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2; exit 7"
+	output, err := sb.Shell(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output.Stdout()) != size || len(output.Stderr()) != size || output.ExitCode() != 7 {
+		t.Fatalf("direct output: %d/%d exit=%d", len(output.Stdout()), len(output.Stderr()), output.ExitCode())
+	}
+	execution, err := sb.ShellStream(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	collected, err := execution.Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(collected.Stdout()) != size || len(collected.Stderr()) != size || collected.ExitCode() != 7 {
+		t.Fatalf("collected output: %d/%d exit=%d", len(collected.Stdout()), len(collected.Stderr()), collected.ExitCode())
+	}
+	for range 2 {
+		status, err := execution.Wait(ctx)
+		if err != nil || status != 7 {
+			t.Fatalf("retained completion: %d, %v", status, err)
+		}
+	}
+	count, err := sb.Shell(ctx, "wc -l < /tmp/large-output-runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(count.Stdout()) != "2" {
+		t.Fatalf("execution replayed: %q", count.Stdout())
+	}
+}

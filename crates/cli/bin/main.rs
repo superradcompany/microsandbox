@@ -2,6 +2,7 @@
 
 mod embedded_version;
 
+use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -70,6 +71,14 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     styles = microsandbox_cli::styles::styles()
 )]
 struct Cli {
+    /// Select remote for sandbox, volume, snapshot or context inspection commands.
+    #[arg(long, global = true, conflicts_with = "local")]
+    remote: bool,
+
+    /// Select local for sandbox, volume, snapshot or context inspection commands.
+    #[arg(long, global = true, conflicts_with = "remote")]
+    local: bool,
+
     #[command(flatten)]
     tree: microsandbox_cli::tree::TreeArgs,
 
@@ -269,6 +278,72 @@ impl HelpStyles {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Clap validates conflicts at one command level; inherited flags can occur on
+/// different levels, so check the final propagated values before dispatch too.
+fn selected_destination(cli: &Cli) -> Result<Option<microsandbox::ContextKind>, clap::Error> {
+    if cli.local && cli.remote {
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--local and --remote cannot be used together",
+        ));
+    }
+    Ok(if cli.remote {
+        Some(microsandbox::ContextKind::Remote)
+    } else if cli.local {
+        Some(microsandbox::ContextKind::Local)
+    } else {
+        None
+    })
+}
+
+fn parse_cli_args(mut argv: Vec<OsString>) -> Result<(Cli, bool), clap::Error> {
+    let legacy_launch = microsandbox_cli::launch_compat::route_legacy_launch(&mut argv);
+    normalize_sandbox_bools(&mut argv);
+    Ok((Cli::try_parse_from(argv)?, legacy_launch))
+}
+
+fn normalize_sandbox_bools(argv: &mut Vec<OsString>) {
+    // Locate the command path, ignoring leading global flags. A resource named
+    // "run" on another command must never trigger sandbox option parsing.
+    let mut path = argv
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take_while(|(_, arg)| *arg != "--")
+        .filter(|(_, arg)| !arg.as_encoded_bytes().starts_with(b"-"));
+    let mut command = path.next();
+    if matches!(
+        command.and_then(|(_, arg)| arg.to_str()),
+        Some("sandbox" | "sbx")
+    ) {
+        command = path.next();
+    }
+    let Some((index, name)) = command else { return };
+    if name != "run" && name != "create" {
+        return;
+    }
+
+    // Clap keeps require_equals so a bare flag cannot consume the image.
+    // Only join a separate, exact boolean on the host side of the separator.
+    let mut i = index + 1;
+    while i < argv.len() {
+        match argv[i].to_str() {
+            Some("--") => break,
+            // This option consumes even flag-shaped values as literal init argv.
+            Some("--init-arg") => i += 2,
+            Some("--net-strict" | "--nested-virt")
+                if argv.get(i + 1).is_some_and(|v| v == "true" || v == "false") =>
+            {
+                let value = argv.remove(i + 1);
+                argv[i].push("=");
+                argv[i].push(value);
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
 fn main() {
     // Ensure terminal echo is restored even if a panic aborts the process
     // (release profile sets `panic = "abort"`, so Drop impls don't run).
@@ -295,12 +370,21 @@ fn main() {
         return;
     }
 
-    let mut argv: Vec<_> = std::env::args_os().collect();
-    let legacy_launch = microsandbox_cli::launch_compat::route_legacy_launch(&mut argv);
-    let cli = Cli::parse_from(argv);
+    let (cli, legacy_launch) =
+        parse_cli_args(std::env::args_os().collect()).unwrap_or_else(|error| error.exit());
     let log_level = cli.logs.selected_level();
 
-    let exit_code = match cli.command.into_canonical() {
+    let selected = match selected_destination(&cli) {
+        Ok(selected) => selected,
+        Err(error) => error.exit(),
+    };
+    let command = cli.command.into_canonical();
+    // Reject selectors on maintenance/internal commands before any side effects.
+    if selected.is_some() && !supports_destination_selector(&command) {
+        Cli::command().error(clap::error::ErrorKind::ArgumentConflict,
+            "--local/--remote apply only to sandbox, volume, snapshot and context inspection commands").exit();
+    }
+    let exit_code = match command {
         Commands::LaunchProtocol => {
             println!(
                 "{}",
@@ -368,7 +452,7 @@ fn main() {
             // built-in detection.
             let ansi = std::io::stderr().is_terminal() && console::colors_enabled_stderr();
             log_args::init_tracing(log_level, ansi);
-            match run_async_command_anyhow(command, log_level) {
+            match run_async_command_anyhow(command, log_level, selected) {
                 Ok(()) => 0,
                 Err(e) => render_anyhow_error(&e),
             }
@@ -667,6 +751,7 @@ fn extract_quoted_token_str(s: &str) -> Option<String> {
 fn run_async_command_anyhow(
     command: Commands,
     log_level: Option<microsandbox::LogLevel>,
+    selected: Option<microsandbox::ContextKind>,
 ) -> anyhow::Result<()> {
     // Internal maintenance commands do not execute sandbox operations and
     // must remain usable while diagnosing an invalid backend configuration.
@@ -699,17 +784,16 @@ fn run_async_command_anyhow(
         // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
         // reaper here.
         if !is_backend_independent_command(&command) {
-            // Resolve once, fallibly, before backend-dependent dispatch. Unlike
-            // the SDK's ambient convenience fallback, the CLI must not run a
-            // sandbox operation locally after an invalid explicit cloud selection.
-            let backend = microsandbox::resolve_default_backend()?;
+            // Resolve once before dispatch so an invalid selection fails before any
+            // command can touch a local catalog or contact a remote provider.
+            let backend = microsandbox::context::resolve_cli_context(selected)?;
             if requires_current_catalog(&command)
                 && let Some(local) = backend.as_local()
             {
                 local.prepare_cli_catalog().await?;
             }
             cleanup_backend = Some(backend.clone());
-            microsandbox::set_default_backend(backend);
+            microsandbox_cli::commands::common::set_cli_context(backend)?;
         }
 
         let result = match command {
@@ -794,6 +878,19 @@ fn requires_current_catalog(command: &Commands) -> bool {
     }
 }
 
+/// Limit explicit selection to commands that operate through retained resource contexts.
+fn supports_destination_selector(command: &Commands) -> bool {
+    match command {
+        Commands::Sandbox(_)
+        | Commands::Volume(_)
+        | Commands::Volumes(_)
+        | Commands::Snapshot(_)
+        | Commands::Snapshots(_) => true,
+        Commands::Context(args) => args.command.is_none(),
+        _ => false,
+    }
+}
+
 /// Return whether a command can run without constructing the selected backend.
 ///
 /// These commands are deliberately available even when backend configuration is
@@ -816,6 +913,113 @@ fn is_backend_independent_command(command: &Commands) -> bool {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+
+    fn parse_sandbox(args: &[&str]) -> SandboxCommands {
+        let argv = std::iter::once("msb")
+            .chain(args.iter().copied())
+            .map(OsString::from)
+            .collect();
+        let (cli, _) = parse_cli_args(argv).unwrap();
+        let Commands::Sandbox(group) = cli.command.into_canonical() else {
+            panic!("expected sandbox command")
+        };
+        group.command
+    }
+
+    #[test]
+    fn sandbox_bool_forms_preserve_image_and_omission() {
+        for cmd in ["run", "create"] {
+            for flag in [
+                #[cfg(feature = "net")]
+                "--net-strict",
+                "--nested-virt",
+            ] {
+                let equals_false = format!("{flag}=false");
+                let equals_true = format!("{flag}=true");
+                for (args, image, expected) in [
+                    (vec![cmd, "alpine"], "alpine", None),
+                    (vec![cmd, flag, "false", "alpine"], "alpine", Some(false)),
+                    (vec![cmd, "alpine", flag, "true"], "alpine", Some(true)),
+                    (vec![cmd, flag, "alpine"], "alpine", Some(true)),
+                    (vec![cmd, flag, "TRUE"], "TRUE", Some(true)),
+                    (vec![cmd, &equals_false, "alpine"], "alpine", Some(false)),
+                    (vec![cmd, &equals_true, "false"], "false", Some(true)),
+                    (
+                        vec!["--local", "sbx", cmd, "alpine", flag, "false"],
+                        "alpine",
+                        Some(false),
+                    ),
+                ] {
+                    let (opts, parsed_image) = match parse_sandbox(&args) {
+                        SandboxCommands::Run(run) => (run.sandbox, run.image),
+                        SandboxCommands::Create(create) => (create.sandbox, create.image),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(parsed_image.as_deref(), Some(image), "{args:?}");
+                    let value = match flag {
+                        #[cfg(feature = "net")]
+                        "--net-strict" => opts.net_strict,
+                        _ => opts.nested_virt,
+                    };
+                    assert_eq!(value, expected, "{args:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_bool_flags_preserve_guest_and_init_arguments() {
+        for flag in [
+            #[cfg(feature = "net")]
+            "--net-strict",
+            "--nested-virt",
+        ] {
+            let SandboxCommands::Run(run) =
+                parse_sandbox(&["run", "alpine", "--", "echo", flag, "false"])
+            else {
+                unreachable!()
+            };
+            assert_eq!(run.command, ["echo", flag, "false"]);
+            let SandboxCommands::Exec(exec) =
+                parse_sandbox(&["exec", "run", "--", "echo", flag, "true"])
+            else {
+                unreachable!()
+            };
+            assert_eq!(exec.command, ["echo", flag, "true"]);
+            let SandboxCommands::Create(create) =
+                parse_sandbox(&["create", "--init", "auto", "--init-arg", flag, "false"])
+            else {
+                unreachable!()
+            };
+            assert_eq!(create.sandbox.init_arg, [flag]);
+            assert_eq!(create.image.as_deref(), Some("false"));
+        }
+    }
+
+    #[test]
+    fn destination_flags_parse_on_resource_commands_and_do_not_consume_guest_flags() {
+        for arguments in [
+            vec!["msb", "run", "--remote", "python", "--", "echo", "ok"],
+            vec!["msb", "create", "python", "--name", "worker", "--remote"],
+            vec!["msb", "exec", "--remote", "worker", "--", "echo", "ok"],
+            vec!["msb", "sandbox", "list", "--local"],
+            vec!["msb", "volume", "list", "--remote"],
+            vec!["msb", "volumes", "--remote"],
+            vec!["msb", "vols", "--local"],
+            vec!["msb", "--local", "volumes"],
+            vec!["msb", "--remote", "vols"],
+            vec!["msb", "snapshot", "list", "--local"],
+        ] {
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            assert!(cli.local || cli.remote);
+            assert!(supports_destination_selector(&cli.command.into_canonical()));
+        }
+        let cli = Cli::try_parse_from(["msb", "exec", "worker", "--", "echo", "--remote"]).unwrap();
+        assert!(!cli.remote);
+        assert!(!cli.local);
+        let conflicting = Cli::try_parse_from(["msb", "--local", "list", "--remote"]).unwrap();
+        assert!(selected_destination(&conflicting).is_err());
+    }
 
     #[test]
     fn storage_reader_capability_matches_the_actual_embedded_protocol() {

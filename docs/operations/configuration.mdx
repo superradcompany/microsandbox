@@ -34,9 +34,7 @@ same value, the later layer wins.
       </Step>
 
       <Step title="Sandbox configuration files">
-        Root files are passed with `--conf`. Scoped files are passed with
-        `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`,
-        `--secret-conf`, or `--script-conf`.
+        Start with `--file Sandboxfile`. To layer more settings on top, pass another root file with `--file` or its alias `--conf`, or use a scoped flag such as `--net-conf` or `--resource-conf`.
 
         These files are used by the CLI only and are never auto-discovered.
         Every file must be named explicitly. Multiple files are applied from
@@ -65,7 +63,7 @@ same value, the later layer wins.
       </Step>
 
       <Step title="Global sandbox defaults">
-        Local and cloud backends automatically load `sandbox_defaults` from
+        Local and remote contexts automatically load `sandbox_defaults` from
         `~/.microsandbox/config.json`, subject to backend support.
 
         [Global sandbox defaults reference](/configuration#sandbox_defaults)
@@ -83,10 +81,7 @@ same value, the later layer wins.
     </Steps>
 
     <Note>
-      Sandbox YAML is a CLI configuration surface. SDKs do not load
-      `sandbox.yaml`, root configuration files, or scoped configuration files.
-      For typed sparse patches, see the
-      [Rust configuration reference](/sdk/rust/configuration#sandbox-configuration-patches).
+      The CLI loads YAML from a `Sandboxfile` or scoped configuration files. SDKs accept configuration through their APIs. See the [Rust configuration reference](/sdk/rust/configuration#sandbox-configuration-patches) for typed sparse patches.
     </Note>
   </Tab>
 </Tabs>
@@ -117,9 +112,9 @@ Some settings resolve outside the sandbox precedence rules above.
   weakened by a sandbox file, CLI flag, or SDK option.
 </Warning>
 
-Local or cloud selection resolves across explicit SDK selection, environment
-variables, profiles, and the local default. See the
-[selection precedence](/operations/backends#precedence).
+The CLI chooses a local or remote connection from environment variables,
+profiles, and the local default. See [selection precedence](/cloud/connect#precedence).
+Unqualified SDK calls follow the same backend and profile settings as the CLI, with local as the fallback. Explicit resource selectors override that choice and respect managed restrictions.
 
 Registry authentication resolves across explicit secret names, environment
 variables, and the operating-system keyring. See the

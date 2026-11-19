@@ -6,7 +6,7 @@ icon: "hard-drive"
 ---
 
 <Note>
-  **On microsandbox cloud:** Volumes use fast block storage managed by the platform. Every organization automatically gets an undeletable **host volume**: think of it as the disk of the one computer all its sandboxes run on, and it is what bind and disk-image mounts resolve against.
+  **On our managed cloud:** Each organization has a **host volume** that you cannot delete. Bind mounts and disk-image paths refer to files there, rather than files on your computer.
 </Note>
 
 Volumes give a sandbox persistent or shared storage by mounting host data, managed storage, disk images, or in-memory filesystems into the guest. Mounts provide direct filesystem access and are significantly faster than the [filesystem API](/sandboxes/filesystem), which transfers files individually, so they are preferable for anything beyond ad-hoc reads and writes.
@@ -21,7 +21,7 @@ For OCI sandboxes with a disk-backed root, `/tmp` uses the root disk unless you
 explicitly mount another filesystem there. Large package downloads and build
 files therefore consume disk capacity and leave guest RAM available for build
 processes.
-For a new Cloud OCI sandbox that omits disk size, the writable-disk default
+For a new managed cloud OCI sandbox that omits disk size, the writable-disk default
 matches requested RAM, bounded to 4–16 GiB. Explicit disk sizes and restored
 snapshot sizes take precedence.
 
@@ -35,28 +35,38 @@ retain it on restart. OCI roots explicitly configured as tmpfs keep their bounde
 
 ## Cloud default volume
 
-<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available only on managed cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Every cloud organization has an always-present default volume. You can read and write it directly without starting a sandbox:
 
 <CodeGroup>
 ```typescript TypeScript
-const volume = await Volume.getDefault();
+const remote = RemoteContext.fromEnv();
+const volume = await remote.volumes.getDefault();
 await volume.fs().write("state.json", JSON.stringify({ ready: true }));
 ```
 
 ```rust Rust
-let volume = Volume::get_default().await?;
+let remote = RemoteContext::from_env()?;
+let volume = remote.volumes().get_default().await?;
 volume.fs().write("state.json", br#"{"ready":true}"#).await?;
 ```
 
 ```python Python
-volume = await Volume.get_default()
-await volume.fs().write("state.json", b'{"ready": true}')
+remote = RemoteContext.from_env()
+volume = await remote.volumes.get_default()
+await volume.fs.write("state.json", b'{"ready": true}')
 ```
 
 ```go Go
-volume, err := m.GetDefaultVolume(ctx)
+remote, err := m.RemoteContextFromEnv()
+if err != nil {
+    return err
+}
+volume, err := remote.Volumes().GetDefault(ctx)
+if err != nil {
+    return err
+}
 err = volume.FS().WriteString(ctx, "state.json", `{"ready":true}`)
 ```
 </CodeGroup>
@@ -65,7 +75,9 @@ microsandbox isolates the default volume to the authenticated cloud organization
 
 ## Bind mounts
 
-<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 Mount a directory from the host directly into the sandbox. Changes inside the sandbox are reflected on the host, and vice versa.
 
@@ -190,7 +202,7 @@ Owned-directory snapshots retain platform-specific filesystem metadata and canno
 
 ## Named volumes
 
-<Tooltip tip="On microsandbox cloud, create named volumes before mounting them; create-on-mount, disk-kind volumes, and size are not available, and quota must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="The cloud backend supports default ensure-exists mounts. Inline creation settings and disk-kind volumes are not available; quota on a separate volume-create call must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 microsandbox manages named volumes and stores them by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox, so you can create a volume, populate it, and mount it into different sandboxes over time.
 
@@ -378,7 +390,9 @@ If local volume creation is interrupted, remove it with `msb volume rm <name>` o
 
 ## Disk-image volumes
 
-<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 Disk-image volumes attach a host disk image as a virtio-blk device and mount its inner filesystem at a guest path. Use them when you want persistent state isolated from ordinary host filesystem metadata, or when distributing a prebuilt filesystem image. The disk format defaults from the file extension (`.qcow2`, `.raw`, `.vmdk`; otherwise raw). microsandbox auto-detects the inner filesystem type unless you set `fstype`.
 
@@ -486,7 +500,7 @@ For stronger in-guest hardening, create the sandbox with the restricted security
 
 Bind mounts and directory-backed named volumes normally present host files without a per-file metadata override using the sandbox user's fallback identity. Set a mount owner when those files should consistently appear as another guest `(uid, gid)` pair. This changes only the guest view: it does not `chown` the host files or create per-file metadata overrides, and an existing per-file override still takes precedence.
 
-Both IDs are required together and may range from `0` through `4294967295`. Mount owners require stat virtualization, so they cannot be combined with `stat-virt=off`, tmpfs, host disk images, or disk-backed named volumes. The local backend supports this policy; the cloud backend currently rejects it until ownership capability negotiation is available.
+Both IDs are required together and may range from `0` through `4294967295`. Mount owners require stat virtualization, so they cannot be combined with `stat-virt=off`, tmpfs, host disk images, or disk-backed named volumes. Local contexts and managed cloud support this policy. On managed cloud, it changes the guest view of files in the organization volume; it does not change host ownership or permissions.
 
 ### CLI syntax and flags
 

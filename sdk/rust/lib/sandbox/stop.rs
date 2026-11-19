@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::{Backend, sandbox::SandboxIdentity};
+use crate::context::{Context, sandbox::SandboxIdentity};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -11,7 +11,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 //--------------------------------------------------------------------------------------------------
 
 pub(super) async fn stop(
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     name: &str,
     identity: SandboxIdentity,
     _ephemeral: bool,
@@ -37,7 +37,7 @@ pub(super) async fn stop(
         }
         // The cloud control-plane's terminal status is its completion authority. Local process
         // locks have no meaning there; keep the backend identity checks on every observation.
-        let handle = backend.sandboxes().get(backend.clone(), name).await?;
+        let handle = backend.sandbox_ops().get(backend.clone(), name).await?;
         if handle.identity() != identity {
             return Err(MicrosandboxError::SandboxReplaced {
                 name: name.to_string(),

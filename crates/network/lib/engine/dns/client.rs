@@ -20,6 +20,8 @@ use hickory_net::runtime::TokioRuntimeProvider;
 use hickory_net::tcp::TcpClientStream;
 use hickory_net::udp::UdpClientStream;
 use rustls::ClientConfig;
+#[cfg(windows)]
+use rustls_platform_verifier::BuilderVerifierExt;
 
 use super::common::transport::Transport;
 
@@ -89,7 +91,13 @@ pub(super) async fn build_dot_client(
             return None;
         }
     };
-    let client_config = dot_upstream_client_config();
+    let client_config = match dot_upstream_client_config() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(upstream = %addr, %error, "failed to configure DoT certificate verification");
+            return None;
+        }
+    };
     let (stream_future, sender) = tls_client_connect(
         addr,
         server_name,
@@ -136,38 +144,46 @@ pub(super) async fn build_direct_client(
 //--------------------------------------------------------------------------------------------------
 
 /// Build the rustls `ClientConfig` for upstream DoT connections.
-/// Loads the host's native root certificates so we validate public DoT
-/// resolvers (Cloudflare, Google, Quad9, etc.) against the same trust
-/// anchors the host uses. Cached in a `OnceLock` — cert parsing is
-/// non-trivial and the config is immutable once built.
-fn dot_upstream_client_config() -> Arc<ClientConfig> {
+/// Uses native Windows chain validation, including automatic trusted-root retrieval.
+/// Other platforms retain the existing native-root snapshot. Cache only successful
+/// initialization; a verifier setup error must fail closed without poisoning later calls.
+fn dot_upstream_client_config() -> Result<Arc<ClientConfig>, rustls::Error> {
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut root_store = rustls::RootCertStore::empty();
-            let certs = rustls_native_certs::load_native_certs();
-            if !certs.errors.is_empty() {
-                tracing::warn!(
-                    count = certs.errors.len(),
-                    "errors loading native certificates for DoT upstream"
-                );
-            }
-            for cert in certs.certs {
-                let _ = root_store.add(cert);
-            }
-            if root_store.is_empty() {
-                tracing::error!(
-                    "no native root certificates loaded — DoT upstream will fail to verify any resolver"
-                );
-            }
+    if let Some(config) = CONFIG.get() {
+        return Ok(Arc::clone(config));
+    }
 
-            let client_config = ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
+    // Enumerating Windows' root store sees only cached roots. The native chain engine
+    // can retrieve an approved root on first use while still enforcing host trust policy.
+    #[cfg(windows)]
+    let client_config = ClientConfig::builder()
+        .with_platform_verifier()?
+        .with_no_client_auth();
 
-            Arc::new(client_config)
-        })
-        .clone()
+    #[cfg(not(windows))]
+    let client_config = {
+        let mut root_store = rustls::RootCertStore::empty();
+        let certs = rustls_native_certs::load_native_certs();
+        if !certs.errors.is_empty() {
+            tracing::warn!(
+                count = certs.errors.len(),
+                "errors loading native certificates for DoT upstream"
+            );
+        }
+        for cert in certs.certs {
+            let _ = root_store.add(cert);
+        }
+        if root_store.is_empty() {
+            tracing::error!(
+                "no native root certificates loaded — DoT upstream will fail to verify any resolver"
+            );
+        }
+
+        ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
+    Ok(Arc::clone(CONFIG.get_or_init(|| Arc::new(client_config))))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -181,8 +197,77 @@ mod tests {
     use hickory_net::proto::op::{DnsRequest, Message, MessageType, OpCode, Query};
     use hickory_net::proto::rr::{Name, RecordType};
     use hickory_net::xfer::DnsHandle;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
     use std::time::Instant;
     use tokio::io::AsyncReadExt;
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+    #[tokio::test]
+    async fn dot_upstream_rejects_untrusted_certificate() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            TlsAcceptor::from(Arc::new(server_config))
+                .accept(socket)
+                .await
+        });
+        let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let connector = TlsConnector::from(dot_upstream_client_config().unwrap());
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            connector.connect(ServerName::try_from("localhost").unwrap(), socket),
+        )
+        .await
+        .expect("local TLS handshake must finish");
+        // The socket connected and the server presented a certificate for the right name.
+        // Reject its untrusted issuer without modifying the machine's trusted root store.
+        assert!(result.is_err(), "DoT must reject an untrusted certificate");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires access to the public DoT resolver at 1.1.1.1:853"]
+    async fn dot_upstream_verifies_live_resolver_hostname() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let address = "1.1.1.1:853".parse().unwrap();
+        let timeout = Duration::from_secs(15);
+        // First establish that this exact resolver is reachable and its chain is trusted,
+        // so the negative assertion cannot pass merely because the network is unavailable.
+        let accepted = tokio::time::timeout(
+            timeout,
+            build_dot_client(address, "1.1.1.1".to_owned(), timeout),
+        )
+        .await
+        .unwrap();
+        assert!(accepted.is_some(), "valid resolver certificate must verify");
+        let rejected = tokio::time::timeout(
+            timeout,
+            build_dot_client(address, "wrong-resolver.invalid".to_owned(), timeout),
+        )
+        .await
+        .unwrap();
+        assert!(rejected.is_none(), "DoT must reject a mismatched hostname");
+    }
 
     fn example_query() -> Message {
         let mut msg = Message::new(0x4242, MessageType::Query, OpCode::Query);

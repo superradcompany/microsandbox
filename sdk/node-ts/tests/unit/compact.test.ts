@@ -3,8 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 // CI runs these tests from build artifacts without the TypeScript source tree.
 import { compactionResultFromJson, type DiskCompactionOptions } from "../../dist/compact.js";
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
-import type { NapiSandbox, NapiSandboxHandle } from "../../dist/internal/napi.js";
+import type { NapiSandbox } from "../../dist/internal/napi.js";
 
 describe("disk compaction contract", () => {
   it("retains per-disk outcomes alongside aggregate metrics", () => {
@@ -30,7 +29,7 @@ describe("disk compaction contract", () => {
     await sandbox.compact({ layers: 99, disk: "/data", rootDiskOnly: true, dryRun: true });
     expect(compact).toHaveBeenCalledWith(99, true, "/data", true);
 
-    const handle = new SandboxHandle({ compact } as unknown as NapiSandboxHandle);
+    const handle = new Sandbox({ compact } as unknown as NapiSandbox);
     await handle.compact({ disk: "/" });
     expect(compact).toHaveBeenLastCalledWith(undefined, undefined, "/", undefined);
     await handle.compact();

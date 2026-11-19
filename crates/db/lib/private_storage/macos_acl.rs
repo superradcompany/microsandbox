@@ -116,6 +116,30 @@ impl Drop for Acl {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(test)]
+pub(super) fn acl_bytes(path: &Path) -> Vec<u8> {
+    unsafe extern "C" {
+        fn acl_size(acl: *mut c_void) -> libc::ssize_t;
+        fn acl_copy_ext(
+            buffer: *mut c_void,
+            acl: *mut c_void,
+            size: libc::ssize_t,
+        ) -> libc::ssize_t;
+    }
+
+    // The external representation records trustee UUIDs. ls may render the
+    // same UUID as a name on one call and a literal UUID on the next.
+    let path = c_path(path).unwrap();
+    let acl = Acl::checked(unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) }).unwrap();
+    let size = unsafe { acl_size(acl.0) };
+    let mut bytes = vec![0u8; usize::try_from(size).unwrap()];
+    assert_eq!(
+        unsafe { acl_copy_ext(bytes.as_mut_ptr().cast(), acl.0, size) },
+        size
+    );
+    bytes
+}
+
 pub(super) fn clear_directory(directory: &File) -> io::Result<()> {
     let fd = directory.as_raw_fd();
     let acl = Acl::read(unsafe { acl_get_fd_np(fd, ACL_TYPE_EXTENDED) })?;

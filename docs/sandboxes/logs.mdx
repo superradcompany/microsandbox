@@ -4,7 +4,7 @@ description: Capture, read, and diagnose sandbox output
 icon: "scroll"
 ---
 
-<Tooltip tip="Live SDK log following and msb logs -f work on microsandbox cloud; historical and bounded reads are not yet available. Persist followed output externally when you need retention."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Live SDK log following and msb logs -f work on our managed cloud; historical and bounded reads are not yet available. Persist followed output externally when you need retention."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Local sandboxes record captured output to disk so you can read it later, even after the sandbox stops or crashes. Use `msb logs <name>` from the CLI or `logs()` from the SDK. For a running cloud sandbox, use `msb logs -f <name>` or the SDK's live log stream; bounded cloud history is not yet available.
 
@@ -54,7 +54,7 @@ entries, err := handle.Logs(ctx, m.LogOptions{})
 
 ```ruby Ruby
 # Ruby reads logs through a connection to a running local sandbox.
-sb = Microsandbox::Sandbox.get("web").connect
+sb = Microsandbox::Sandbox.get("web")
 entries = sb.logs
 ```
 </CodeGroup>

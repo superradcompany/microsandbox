@@ -6,14 +6,14 @@ use microsandbox_types::ConfigPatch;
 use serde::Serialize;
 
 use super::{GlobalConfigPatch, layers::BackendConfig, persistence::ManagedConfig};
-use crate::backend::{BackendInfo, BackendKind, BackendSelectionSource, Profile, ProfileBackend};
+use crate::context::{ContextInfo, ContextKind, ContextSelectionSource, Profile, ProfileKind};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Backend identity after applying selection precedence, without resolving credentials.
+/// Context identity after applying selection precedence, without resolving credentials.
 ///
 /// Keeping selection separate from backend construction makes the safety
 /// invariant testable: credentials configure Cloud, but never select it.
@@ -30,7 +30,7 @@ pub struct BackendContext {
     /// Profiles sorted by name, including prohibited and incomplete entries.
     pub profiles: Vec<ContextProfile>,
     /// Selected identity, even when policy prohibits using it. Absent if selection itself failed.
-    pub selected: Option<BackendInfo>,
+    pub selected: Option<ContextInfo>,
     /// Why the selected backend cannot be used. Credentials are not probed by this inspection.
     pub selection_error: Option<String>,
     /// Saved user preference, before environment and managed selection are applied.
@@ -38,7 +38,7 @@ pub struct BackendContext {
     /// Whether environment or managed settings override the saved preference.
     pub preference_overridden: bool,
     /// Effective restriction; absent means both backend kinds are permitted.
-    pub allowed_backends: Option<Vec<BackendKind>>,
+    pub allowed_backends: Option<Vec<ContextKind>>,
 }
 
 /// Public profile metadata. Credential values and references are never included.
@@ -46,8 +46,8 @@ pub struct BackendContext {
 pub struct ContextProfile {
     /// Profile name used by `msb context use`.
     pub name: String,
-    /// Backend selected by this profile.
-    pub kind: BackendKind,
+    /// Context selected by this profile.
+    pub kind: ContextKind,
     /// Whether effective device policy permits this backend.
     pub allowed: bool,
     /// Whether this SDK build includes the backend.
@@ -65,7 +65,7 @@ struct SelectionConfig {
     profile: Option<String>,
     #[config_patch(merge)]
     profiles: HashMap<String, Profile>,
-    source: BackendSelectionSource,
+    source: ContextSelectionSource,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -73,28 +73,23 @@ struct SelectionConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl BackendSelection {
-    /// Resolve identity and configuration for inspection without probing cloud credentials.
-    #[cfg(feature = "local")]
-    pub(crate) fn inspect(
-        user_path: &Path,
-    ) -> MicrosandboxResult<(Self, BackendSelectionSource, BackendConfig)> {
-        let global = GlobalConfigPatch::load_from(user_path)?;
+    pub(crate) fn configured_kind() -> MicrosandboxResult<ContextKind> {
+        let user = GlobalConfigPatch::load_from(&super::config_path())?;
         let managed = ManagedConfig::load(None)?.overrides;
-        let (selection, source) = Self::describe(
-            &global,
+        let (selection, _) = Self::describe(
+            &user,
             &managed,
             std::env::var("MSB_BACKEND").ok(),
             std::env::var("MSB_PROFILE").ok(),
             std::env::var("MSB_API_KEY").ok().as_deref(),
         )?;
-        let config = BackendConfig::new(global, managed).with_source_files(user_path, None)?;
-        Ok((selection, source, config))
+        Ok(selection.kind())
     }
 
     pub(crate) fn resolve(
         user_path: &Path,
         managed_path: Option<&Path>,
-    ) -> MicrosandboxResult<(BackendSelection, BackendSelectionSource, BackendConfig)> {
+    ) -> MicrosandboxResult<(BackendSelection, ContextSelectionSource, BackendConfig)> {
         let managed = ManagedConfig::load(managed_path)?.overrides;
         let backend = std::env::var("MSB_BACKEND").ok();
         let profile = std::env::var("MSB_PROFILE").ok();
@@ -118,7 +113,7 @@ impl BackendSelection {
         profile: Option<String>,
         api_key: Option<&str>,
         load: impl FnOnce() -> MicrosandboxResult<GlobalConfigPatch>,
-    ) -> MicrosandboxResult<(BackendSelection, BackendSelectionSource, BackendConfig)> {
+    ) -> MicrosandboxResult<(BackendSelection, ContextSelectionSource, BackendConfig)> {
         let global = load()?;
         let (selection, source) = Self::describe(&global, &managed, backend, profile, api_key)?;
         let config =
@@ -131,7 +126,7 @@ impl BackendSelection {
     fn validate(
         &self,
         config: &BackendConfig,
-        source: BackendSelectionSource,
+        source: ContextSelectionSource,
         api_key: Option<&str>,
     ) -> MicrosandboxResult<()> {
         config.require_backend(self.kind(), Some(source))?;
@@ -140,7 +135,7 @@ impl BackendSelection {
             && api_key.is_none_or(|key| key.trim().is_empty())
         {
             return Err(MicrosandboxError::InvalidConfig(
-                "MSB_BACKEND=cloud requires a non-empty MSB_API_KEY or a cloud profile".into(),
+                "MSB_BACKEND=remote requires a non-empty MSB_API_KEY or a remote profile".into(),
             ));
         }
         Ok(())
@@ -153,15 +148,15 @@ impl BackendSelection {
         backend: Option<String>,
         profile: Option<String>,
         api_key: Option<&str>,
-    ) -> MicrosandboxResult<(Self, BackendSelectionSource)> {
+    ) -> MicrosandboxResult<(Self, ContextSelectionSource)> {
         let mut overrides = SelectionConfigPatch::new();
         if let Some(profile) = profile.filter(|value| !value.trim().is_empty()) {
             overrides.profile_mut(profile.trim().to_owned());
-            overrides.source_mut(BackendSelectionSource::MsbProfile);
+            overrides.source_mut(ContextSelectionSource::MsbProfile);
         }
         if let Some(backend) = backend {
             overrides.backend_mut(backend);
-            overrides.source_mut(BackendSelectionSource::MsbBackend);
+            overrides.source_mut(ContextSelectionSource::MsbBackend);
         }
 
         overrides.profiles = managed.profiles.clone();
@@ -175,7 +170,7 @@ impl BackendSelection {
                 overrides.set_backend_mut(None);
             }
             if named || overrides.backend.is_none() {
-                overrides.source_mut(BackendSelectionSource::ActiveProfile);
+                overrides.source_mut(ContextSelectionSource::ActiveProfile);
             }
         }
 
@@ -186,9 +181,9 @@ impl BackendSelection {
             .and_then(Option::as_deref)
             .is_some_and(|name| !name.trim().is_empty())
         {
-            BackendSelectionSource::ActiveProfile
+            ContextSelectionSource::ActiveProfile
         } else {
-            BackendSelectionSource::Default
+            ContextSelectionSource::Default
         };
 
         let mut saved = SelectionConfigPatch::new().source(source);
@@ -208,10 +203,10 @@ impl BackendSelection {
         Ok((backend, selection.source))
     }
 
-    fn kind(&self) -> BackendKind {
+    fn kind(&self) -> ContextKind {
         match self {
-            Self::Local { .. } => BackendKind::Local,
-            Self::Cloud { .. } => BackendKind::Cloud,
+            Self::Local { .. } => ContextKind::Local,
+            Self::Cloud { .. } => ContextKind::Remote,
         }
     }
 
@@ -222,32 +217,32 @@ impl BackendSelection {
     }
 
     /// Parse an explicit backend kind without treating credentials as routing.
-    fn parse_kind(value: Option<&str>) -> MicrosandboxResult<Option<ProfileBackend>> {
+    fn parse_kind(value: Option<&str>) -> MicrosandboxResult<Option<ProfileKind>> {
         let Some(value) = value else {
             return Ok(None);
         };
         match value.trim().to_ascii_lowercase().as_str() {
-            "local" => Ok(Some(ProfileBackend::Local)),
-            "cloud" => Ok(Some(ProfileBackend::Cloud)),
+            "local" => Ok(Some(ProfileKind::Local)),
+            "remote" | "cloud" => Ok(Some(ProfileKind::Remote)),
             other => Err(MicrosandboxError::InvalidConfig(format!(
-                "MSB_BACKEND must be 'local' or 'cloud', got {other:?}"
+                "MSB_BACKEND must be 'local', 'remote' or legacy 'cloud', got {other:?}"
             ))),
         }
     }
 
     /// Apply the ambient selection ladder to already-loaded values.
     fn select(
-        backend_kind: Option<ProfileBackend>,
+        backend_kind: Option<ProfileKind>,
         api_key: Option<&str>,
         profile: Option<&str>,
         profiles: &HashMap<String, Profile>,
     ) -> MicrosandboxResult<Self> {
-        if backend_kind == Some(ProfileBackend::Local) {
+        if backend_kind == Some(ProfileKind::Local) {
             return Ok(Self::Local { profile: None });
         }
 
         let has_api_key = api_key.is_some_and(|key| !key.trim().is_empty());
-        if backend_kind == Some(ProfileBackend::Cloud) && has_api_key {
+        if backend_kind == Some(ProfileKind::Remote) && has_api_key {
             return Ok(Self::Cloud { profile: None });
         }
 
@@ -258,24 +253,22 @@ impl BackendSelection {
                     "active profile {name:?} not found in global config"
                 ))
             })?;
-            if backend_kind == Some(ProfileBackend::Cloud)
-                && profile.backend != ProfileBackend::Cloud
-            {
+            if backend_kind == Some(ProfileKind::Remote) && profile.kind != ProfileKind::Remote {
                 return Err(MicrosandboxError::InvalidConfig(format!(
-                    "MSB_BACKEND=cloud cannot select local profile {name:?}"
+                    "MSB_BACKEND=remote cannot select local profile {name:?}"
                 )));
             }
-            return Ok(match profile.backend {
-                ProfileBackend::Local => Self::Local {
+            return Ok(match profile.kind {
+                ProfileKind::Local => Self::Local {
                     profile: Some(name.to_string()),
                 },
-                ProfileBackend::Cloud => Self::Cloud {
+                ProfileKind::Remote => Self::Cloud {
                     profile: Some(name.to_string()),
                 },
             });
         }
 
-        if backend_kind == Some(ProfileBackend::Cloud) {
+        if backend_kind == Some(ProfileKind::Remote) {
             return Ok(Self::Cloud { profile: None });
         }
 
@@ -324,8 +317,8 @@ impl BackendContext {
             let profile = config.resolved_config().profiles.get(name).ok_or_else(|| {
                 MicrosandboxError::InvalidConfig(format!("profile {name:?} not found in config"))
             })?;
-            let kind = BackendKind::from(profile.backend);
-            config.require_backend(kind, Some(BackendSelectionSource::Profile))?;
+            let kind = ContextKind::from(profile.kind);
+            config.require_backend(kind, Some(ContextSelectionSource::Profile))?;
             kind.require_available()?;
             user.active_profile_mut(name.to_owned());
         } else {
@@ -350,13 +343,13 @@ impl BackendContext {
             .profiles
             .iter()
             .map(|(name, profile)| {
-                let kind = BackendKind::from(profile.backend);
+                let kind = ContextKind::from(profile.kind);
                 ContextProfile {
                     name: name.clone(),
                     kind,
                     allowed: config.require_backend(kind, None).is_ok(),
                     available: kind.is_available(),
-                    credentials_configured: kind == BackendKind::Local
+                    credentials_configured: kind == ContextKind::Local
                         || profile.api_key_ref.is_some(),
                 }
             })
@@ -378,7 +371,7 @@ impl BackendContext {
                     .validate(&config, source, api_key.as_deref())
                     .err()
                     .map(|error| error.to_string());
-                let info = BackendInfo {
+                let info = ContextInfo {
                     kind,
                     api_url: None,
                     source,
@@ -416,7 +409,7 @@ impl Default for SelectionConfig {
             backend: None,
             profile: None,
             profiles: HashMap::new(),
-            source: BackendSelectionSource::Default,
+            source: ContextSelectionSource::Default,
         }
     }
 }
@@ -439,7 +432,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let managed = GlobalConfigPatch::new().allowed_backends(vec![BackendKind::Local]);
+        let managed = GlobalConfigPatch::new().allowed_backends(vec![ContextKind::Local]);
         let error = BackendSelection::resolve_from(
             Path::new("config.json"),
             Some(Path::new("managed.json")),
@@ -453,7 +446,7 @@ mod tests {
         .unwrap()
         .to_string();
         assert!(
-            error.contains("cloud backend selected by active_profile is disabled"),
+            error.contains("remote backend selected by active_profile is disabled"),
             "{error}"
         );
         assert!(error.contains("managed config"));
@@ -601,14 +594,14 @@ mod tests {
             BackendContext::from_configs(user, Default::default(), &user_path, Some(&managed_path))
                 .unwrap();
         assert!(context.preference_overridden);
-        assert_eq!(context.selected.unwrap().kind, BackendKind::Local);
+        assert_eq!(context.selected.unwrap().kind, ContextKind::Local);
     }
 
     #[test]
     fn selection_rejects_backends_missing_from_this_build() {
         for (kind, available) in [
             ("local", cfg!(feature = "local")),
-            ("cloud", cfg!(feature = "cloud")),
+            ("remote", cfg!(feature = "cloud")),
         ] {
             let result = BackendSelection::resolve_from(
                 Path::new("config.json"),
@@ -681,7 +674,7 @@ mod tests {
                 selection,
                 BackendSelection::Local { profile: None }
             ));
-            assert_eq!(source, BackendSelectionSource::ActiveProfile);
+            assert_eq!(source, ContextSelectionSource::ActiveProfile);
             assert!(
                 BackendSelection::resolve_from(
                     Path::new("config.json"),
@@ -760,10 +753,10 @@ mod tests {
             selection,
             BackendSelection::Local { profile: Some(name) } if name == "work"
         ));
-        assert_eq!(source, BackendSelectionSource::ActiveProfile);
+        assert_eq!(source, ContextSelectionSource::ActiveProfile);
         assert_eq!(
-            global.resolved_config().profiles["work"].backend,
-            ProfileBackend::Local
+            global.resolved_config().profiles["work"].kind,
+            ProfileKind::Local
         );
         assert_eq!(global.resolved_config().profiles["work"].api_key_ref, None);
     }
@@ -788,7 +781,7 @@ mod tests {
                 selection,
                 BackendSelection::Cloud { profile: None }
             ));
-            assert_eq!(source, BackendSelectionSource::MsbBackend);
+            assert_eq!(source, ContextSelectionSource::MsbBackend);
         }
     }
 
@@ -860,7 +853,7 @@ mod tests {
             selection,
             BackendSelection::Local { profile: None }
         ));
-        let backend = crate::backend::LocalBackend::from_backend_config(
+        let backend = crate::context::LocalContext::from_backend_config(
             layers
                 .prepare_for_local_backend(Default::default())
                 .unwrap(),
@@ -890,7 +883,7 @@ mod tests {
                 ("local", BackendSelection::Local { profile: None })
                     | ("cloud", BackendSelection::Cloud { profile: None })
             ));
-            assert_eq!(source, BackendSelectionSource::MsbBackend);
+            assert_eq!(source, ContextSelectionSource::MsbBackend);
         }
         let (selection, source, _) = BackendSelection::resolve_from(
             Path::new("config.json"),
@@ -911,7 +904,7 @@ mod tests {
             selection,
             BackendSelection::Local { profile: Some(name) } if name == "env-profile"
         ));
-        assert_eq!(source, BackendSelectionSource::MsbProfile);
+        assert_eq!(source, ContextSelectionSource::MsbProfile);
     }
 
     fn select_backend(
@@ -1091,8 +1084,8 @@ mod tests {
         }
         let (name, source, cloud) = cloud.unwrap().expect("expected resolved cloud settings");
         assert_eq!(name, "work");
-        assert_eq!(source, BackendSelectionSource::ActiveProfile);
-        assert_eq!(cloud.unwrap().url(), crate::backend::DEFAULT_CLOUD_API_URL);
+        assert_eq!(source, ContextSelectionSource::ActiveProfile);
+        assert_eq!(cloud.unwrap().url(), crate::context::DEFAULT_CLOUD_API_URL);
     }
 
     #[cfg(feature = "cloud")]

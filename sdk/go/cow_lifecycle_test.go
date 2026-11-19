@@ -63,13 +63,13 @@ func TestBranchMany(t *testing.T) {
 			if outcome.Sandbox.ID() == "" {
 				t.Fatal("batch child lost its persisted identity")
 			}
-			// These methods use the returned stable identity rather than the native handle.
-			observed, err := outcome.Sandbox.WaitForStatus(ctx, SandboxStatusRunning)
-			if err != nil {
+			// Waiting uses the retained receiver and never returns another resource.
+			if err := outcome.Sandbox.WaitForStatus(ctx, SandboxStatusRunning); err != nil {
 				t.Fatalf("cannot observe batch child by identity: %v", err)
 			}
-			if observed.ID() != outcome.Sandbox.ID() {
-				t.Fatal("batch child identity differs from persisted sandbox")
+			observed, err := outcome.Sandbox.Info(ctx)
+			if err != nil || observed.ID != outcome.Sandbox.ID() {
+				t.Fatalf("batch child identity differs from persisted sandbox: %v", err)
 			}
 			result, err := outcome.Sandbox.Exec(ctx, "cat", []string{"/dev/shm/batch-marker"})
 			if err != nil || strings.TrimSpace(result.Stdout()) != "original" {
@@ -141,7 +141,7 @@ func TestCowResidentCapture(t *testing.T) {
 	if strings.TrimSpace(branchResult.Stdout()) != "source" {
 		t.Fatal("branch lost captured RAM")
 	}
-	snapshot, err := Snapshot.Create(ctx, SnapshotCreateOptions{Name: name + "-full", FromSandbox: name, Full: true})
+	snapshot, err := CreateSnapshot(ctx, SnapshotCreateOptions{Name: name + "-full", FromSandbox: name, Full: true})
 	if err != nil {
 		t.Fatal(err)
 	}

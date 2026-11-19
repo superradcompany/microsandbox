@@ -53,4 +53,4 @@ var _ interface {
 	Stop(context.Context, ...StopOption) error
 	StopWithTimeout(context.Context, time.Duration) error
 	RequestStop(context.Context) error
-} = (*SandboxHandle)(nil)
+} = (*Sandbox)(nil)

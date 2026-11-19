@@ -302,6 +302,15 @@ export type CloudSandboxComputeResources = {
   memory_mib: number;
 };
 
+export type CloudCompute = {
+  /**
+   * The kind of machine the sandbox runs on.
+   */
+  type: CloudComputeType;
+};
+
+export type CloudComputeType = "standard" | "shared";
+
 export type CloudRootfsSource = {
   "type": "bind";
   /**
@@ -763,16 +772,16 @@ export type CloudCreateSandboxResponse = {
    */
   slug: string;
   /**
-   * Current lifecycle status.
+   * Current lifecycle status. A status this SDK does not recognize arrives as its own string.
    */
-  status: CloudSandboxStatus;
+  status: CloudSandboxStatus | (string & {});
   /**
    * Why the sandbox is not running yet, when known. Only present while
    * `status` is `starting`.
    */
   status_reason: CloudSandboxStatusReason | null;
   /**
-   * Curated resolved-spec projection returned by the control plane, when
+   * Curated resolved-spec projection returned by the cloud API, when
    * available. Lifecycle and agent operations intentionally do not depend
    * on reconstructing the create request from this server-owned view.
    */
@@ -804,8 +813,12 @@ export type CloudSandboxStatus =
   | "starting"
   | "running"
   | "stopping"
+  | "saving_state"
+  | "temporarily_unavailable"
+  | "recovery_decision_required"
   | "stopped"
-  | "failed";
+  | "failed"
+  | "unknown";
 
 export type CloudSandboxStatusReason = "scheduling" | "insufficient_capacity";
 

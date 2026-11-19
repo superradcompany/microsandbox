@@ -177,7 +177,7 @@ async fn dispatch(sandbox_handle: u64, value: Value) -> Result<Value, FfiError> 
             let live = get(sandbox_handle)?;
             let handle = live
                 .backend()
-                .sandboxes()
+                .sandbox_ops()
                 .get(live.backend().clone(), live.name())
                 .await
                 .map_err(FfiError::from)?;
@@ -189,7 +189,7 @@ async fn dispatch(sandbox_handle: u64, value: Value) -> Result<Value, FfiError> 
             }
             handle
         } else {
-            let sb = microsandbox::Sandbox::get(text(&value, "name")?)
+            let sb = super::sandbox_record(text(&value, "name")?)
                 .await
                 .map_err(FfiError::from)?;
             if sb.id().to_string() != text(&value, "sandbox_id")? {

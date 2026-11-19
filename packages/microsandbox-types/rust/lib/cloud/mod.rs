@@ -212,6 +212,30 @@ pub struct CloudSandboxResources {
     pub disk_size_mib: Option<u32>,
 }
 
+/// Compute options chosen when a sandbox is created.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct CloudCompute {
+    /// The kind of machine the sandbox runs on.
+    #[serde(rename = "type", default)]
+    pub compute_type: CloudComputeType,
+}
+
+/// The kind of machine a sandbox runs on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum CloudComputeType {
+    /// Dedicated CPU capacity.
+    #[default]
+    Standard,
+    /// CPU capacity shared with other sandboxes.
+    Shared,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Types: Response
 //--------------------------------------------------------------------------------------------------
@@ -229,13 +253,14 @@ pub struct CloudCreateSandboxResponse {
     pub name: String,
     /// Canonical, resolved SSH username token.
     pub slug: String,
-    /// Current lifecycle status.
+    /// Current lifecycle status. A status this SDK does not recognize arrives as its own string.
+    #[cfg_attr(feature = "ts", ts(type = "CloudSandboxStatus | (string & {})"))]
     pub status: CloudSandboxStatus,
     /// Why the sandbox is not running yet, when known. Only present while
     /// `status` is `starting`.
     #[serde(default)]
     pub status_reason: Option<CloudSandboxStatusReason>,
-    /// Curated resolved-spec projection returned by the control plane, when
+    /// Curated resolved-spec projection returned by the cloud API, when
     /// available. Lifecycle and agent operations intentionally do not depend
     /// on reconstructing the create request from this server-owned view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,11 +284,12 @@ pub struct CloudCreateSandboxResponse {
     pub last_failure_message: Option<String>,
 }
 
-/// Sandbox lifecycle status returned by the cloud control plane.
+/// Sandbox lifecycle status returned by the cloud API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CloudSandboxStatus {
     /// Created in the database but not yet started.
     Created,
@@ -273,10 +299,19 @@ pub enum CloudSandboxStatus {
     Running,
     /// Stop request has been submitted.
     Stopping,
+    /// The sandbox has stopped; its state is still being saved and it cannot start yet.
+    SavingState,
+    /// The sandbox is unreachable for now and may come back on its own.
+    TemporarilyUnavailable,
+    /// The sandbox cannot run again until a recovery decision is made.
+    RecoveryDecisionRequired,
     /// Sandbox is stopped.
     Stopped,
     /// Sandbox failed.
     Failed,
+    /// The cloud API returned a status this SDK does not recognize.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Reason a sandbox start is still in progress. Only meaningful while
