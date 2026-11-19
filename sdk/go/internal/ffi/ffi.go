@@ -129,6 +129,7 @@ typedef char *(*msb_sandbox_stop_gracefully_fn)(uint64_t cancel_id, uint64_t han
 typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef bool (*msb_sandbox_modify_mounts_supported_fn)(void);
 typedef char *(*msb_sandbox_pause_with_guest_flush_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *expected_id, const char *policy, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_with_options_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len);
@@ -493,6 +494,13 @@ bool provider_has_secret_policy_modification(msb_library *library) {
     return library->handle && dlsym(library->handle, "msb_supports_secret_policy_modification") != NULL;
 }
 bool has_secret_policy_modification(void) { return provider_has_secret_policy_modification(&default_library); }
+
+bool provider_has_modify_mounts(msb_library *library) {
+    if (!library->handle) return false;
+    msb_sandbox_modify_mounts_supported_fn supported = (msb_sandbox_modify_mounts_supported_fn)dlsym(library->handle, "msb_sandbox_modify_mounts_supported");
+    return supported != NULL && supported();
+}
+bool has_modify_mounts(void) { return provider_has_modify_mounts(&default_library); }
 
 // Loader errors are owned by the selected table until copied by its caller.
 
@@ -5175,6 +5183,10 @@ func RequireSecretPolicyModification() error {
 	return defaultLibrary().RequireSecretPolicyModification()
 }
 
+// ModifyMountsSupported reports whether the native library's modify patch
+// understands mounts; older libraries silently ignore the unknown fields.
+func ModifyMountsSupported() (bool, error) { return defaultLibrary().ModifyMountsSupported() }
+
 func (receiver *Sandbox) lib() *Library {
 	if receiver.library != nil {
 		return receiver.library
@@ -7067,4 +7079,11 @@ func (library *Library) RequireSecretPolicyModification() error {
 		return fmt.Errorf("secret policy modification requires an updated native library")
 	}
 	return nil
+}
+
+func (library *Library) ModifyMountsSupported() (bool, error) {
+	if err := library.ensureLoaded(); err != nil {
+		return false, err
+	}
+	return bool(C.provider_has_modify_mounts(library.table)), nil
 }

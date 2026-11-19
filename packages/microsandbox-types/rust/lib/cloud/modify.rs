@@ -515,6 +515,8 @@ fn project_secrets(
         ports,
         ports_remove,
         workdir,
+        mounts,
+        mounts_remove,
         secrets,
         secrets_remove,
     } = patch;
@@ -554,6 +556,12 @@ fn project_secrets(
     }
     if workdir.is_some() {
         return unsupported("workdir");
+    }
+    if !mounts.is_empty() {
+        return unsupported("mounts");
+    }
+    if !mounts_remove.is_empty() {
+        return unsupported("mounts_remove");
     }
 
     let secrets = secrets

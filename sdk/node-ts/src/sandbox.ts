@@ -16,6 +16,7 @@ import {
 } from "./compact.js";
 import {
   modificationPlanFromJson,
+  assertModifyMountsSupported,
   modifyOptionsToNapi,
   requireModifyCapabilities,
   type ModifyOptions,
@@ -680,7 +681,9 @@ export class Sandbox implements AsyncDisposable {
    * computed without applying anything.
    */
   async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
-    requireModifyCapabilities(opts, bindingFor(this.inner, napi));
+    const native = bindingFor(this.inner, napi);
+    assertModifyMountsSupported(opts, native);
+    requireModifyCapabilities(opts, native);
     const raw = await withMappedErrors(() =>
       this.inner.modify(modifyOptionsToNapi(opts)),
     );

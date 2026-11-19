@@ -507,6 +507,8 @@ class Sandbox:
         workdir: str | None = None,
         secrets: Mapping[str, SecretModifySpec] | None = None,
         secrets_rm: builtins.list[str] | None = None,
+        mounts: Mapping[str, MountConfig] | None = None,
+        mounts_rm: builtins.list[str] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
         ports_rm: Sequence[PortEndpoint] | None = None,
         policy: ModificationPolicy | None = None,

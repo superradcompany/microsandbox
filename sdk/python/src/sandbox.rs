@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use microsandbox::sandbox::VolumeMount;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
@@ -11,8 +12,9 @@ use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
 use crate::helpers::{
-    apply_fork_volumes, extract_str_enum, is_exact_sdk_type, parse_violation_action_obj,
-    prepare_fork_volumes, restore_builder_from_args, sandbox_builder_from_args, str_enum_member,
+    apply_fork_volumes, extract_str_enum, is_exact_sdk_type, parse_mount_patches,
+    parse_violation_action_obj, prepare_fork_volumes, restore_builder_from_args,
+    sandbox_builder_from_args, str_enum_member,
 };
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
@@ -1046,6 +1048,10 @@ impl PySandbox {
     /// `"env"` / `"value"` / `"store"`, plus optional placeholder, allowed
     /// hosts, substitution, violation action, TLS identity requirement, and
     /// `"allow_placeholder_for"` hosts. `secrets_rm` removes secrets by name.
+    ///
+    /// `mounts` maps guest paths to `MountConfig` values and replaces any
+    /// mount already at that path; `mounts_rm` removes mounts by guest path.
+    /// Mount changes take effect on the next start.
     #[pyo3(signature = (
         *,
         cpus = None,
@@ -1060,6 +1066,8 @@ impl PySandbox {
         workdir = None,
         secrets = None,
         secrets_rm = None,
+        mounts = None,
+        mounts_rm = None,
         ports = None,
         ports_rm = None,
         policy = None,
@@ -1081,6 +1089,8 @@ impl PySandbox {
         workdir: Option<String>,
         secrets: Option<HashMap<String, HashMap<String, Py<PyAny>>>>,
         secrets_rm: Option<Vec<String>>,
+        mounts: Option<Py<PyAny>>,
+        mounts_rm: Option<Vec<String>>,
         ports: Option<Py<PyAny>>,
         ports_rm: Option<Py<PyAny>>,
         policy: Option<Py<PyAny>>,
@@ -1096,6 +1106,7 @@ impl PySandbox {
             .transpose()?;
         let inner = self.inner.clone();
         let secrets = build_secret_patches(py, secrets)?;
+        let mounts = parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)), self.local_backend)?;
         let mut patch = build_modify_patch(
             cpus,
             max_cpus,
@@ -1109,6 +1120,8 @@ impl PySandbox {
             workdir,
             secrets,
             secrets_rm,
+            mounts,
+            mounts_rm,
         );
         patch.ports = crate::helpers::modify_ports(ports.as_ref().map(|value| value.bind(py)))?;
         patch.ports_remove =
@@ -1749,6 +1762,8 @@ pub(crate) fn build_modify_patch(
     workdir: Option<String>,
     secrets: Vec<microsandbox::sandbox::SecretModificationPatch>,
     secrets_rm: Option<Vec<String>>,
+    mounts: Vec<VolumeMount>,
+    mounts_rm: Option<Vec<String>>,
 ) -> microsandbox::sandbox::SandboxModificationPatch {
     let mut env_pairs: Vec<_> = env.unwrap_or_default().into_iter().collect();
     env_pairs.sort();
@@ -1771,6 +1786,8 @@ pub(crate) fn build_modify_patch(
         workdir,
         secrets,
         secrets_remove: secrets_rm.unwrap_or_default(),
+        mounts,
+        mounts_remove: mounts_rm.unwrap_or_default(),
         ..Default::default()
     }
 }
@@ -2940,7 +2957,7 @@ pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Durat
 
 #[cfg(test)]
 mod tests {
-    use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
+    use microsandbox::sandbox::{MountBuilder, SecretModificationPatch, SecretSource};
 
     use super::*;
 
@@ -3130,9 +3147,20 @@ mod tests {
                 secret_patch("STRIPE_KEY", None, "sk_test_123"),
             ],
             Some(vec!["OLD".to_string()]),
+            vec![
+                MountBuilder::new("/data")
+                    .bind("/srv/data")
+                    .readonly()
+                    .build()
+                    .expect("build mount"),
+            ],
+            Some(vec!["/old".to_string()]),
         );
 
         let json = serde_json::to_value(&patch).expect("serialize patch");
+        assert_eq!(json["mounts"][0]["type"], "Bind");
+        assert_eq!(json["mounts"][0]["guest"], "/data");
+        assert_eq!(json["mounts_remove"][0], "/old");
         assert_eq!(json["root_disk_size_mib"], 8192);
         let secrets = json["secrets"].as_array().expect("secrets array");
         assert_eq!(secrets.len(), 3);
@@ -3365,6 +3393,8 @@ mod tests {
                 None,
                 secrets,
                 Some(vec!["OLD".to_string(), "OLD".to_string()]),
+                Vec::new(),
+                None,
             );
             assert_eq!(patch.secrets_remove, ["OLD", "OLD"]);
         });

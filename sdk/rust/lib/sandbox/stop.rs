@@ -29,7 +29,7 @@ pub(super) async fn stop(
     let operation = async {
         #[cfg(feature = "local")]
         if let (Some(local), SandboxIdentity::Local(id)) = (backend.as_local(), &identity) {
-            return local.stop_complete(name, *id, _ephemeral).await;
+            return local.stop_complete(name, *id, _ephemeral, None).await;
         }
         #[cfg(feature = "cloud")]
         if let (Some(cloud), SandboxIdentity::Cloud(id)) = (backend.as_cloud(), &identity) {

@@ -36,6 +36,7 @@ export interface NativeBindings {
   readonly Context: new (optionsJson: string) => NapiContext;
   readonly supportsPortModification?: () => boolean;
   readonly supportsSecretPolicyModification?: () => boolean;
+  readonly supportsModifyMounts?: () => boolean;
   readonly setPackagedMsbPath: (path: string) => void;
   readonly setRuntimeMsbPath?: (path: string) => void;
   readonly setRuntimeLibkrunfwPath?: (path: string) => void;
@@ -408,6 +409,8 @@ export interface NapiSandboxModifyOptions {
   workdir?: string;
   secrets?: Record<string, NapiSecretModifySpec>;
   secretsRemove?: string[];
+  mounts?: NapiVolumeMount[];
+  mountsRemove?: string[];
   policy?: string;
   dryRun?: boolean;
 }

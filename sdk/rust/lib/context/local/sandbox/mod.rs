@@ -48,6 +48,7 @@ use crate::db::entity::{
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::runtime::SpawnMode;
 use crate::runtime::protected_state::StoragePreparation;
+use crate::runtime::spawn::DiskReservations;
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
     RootfsSource, Sandbox, SandboxConfig, SandboxListBuilder, SandboxRecord, SandboxStatus,
@@ -72,19 +73,29 @@ impl LocalContext {
     /// `backend` must be the `Arc<dyn Context>` wrapping `self`: the trait
     /// impl forwards the Arc it was handed so the returned [`Sandbox`] routes
     /// follow-up calls through this same backend.
-    async fn start_sandbox(
+    ///
+    /// `transition_timeout` bounds only the wait for name transition ownership; `None` waits
+    /// indefinitely. `disk_reservations` holds disks locked before this start; the runtime
+    /// receives those locks instead of new ones.
+    pub(crate) async fn start_sandbox(
         &self,
         backend: Arc<dyn Context>,
         name: &str,
         expected_id: Option<i32>,
         mode: SpawnMode,
+        transition_timeout: Option<Duration>,
+        disk_reservations: DiskReservations,
     ) -> MicrosandboxResult<Sandbox> {
         tracing::debug!(sandbox = name, ?mode, "start_local: loading record");
         // Serialize the state decision and launcher-to-runtime handoff by name. The database CAS
         // below remains the authoritative start claim; this guard also protects deterministic
         // host resources that are outside SQLite.
-        let _transition_guard =
-            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), name).await?;
+        let _transition_guard = Self::acquire_sandbox_transition_guard_with_timeout(
+            &self.config().run_dir(),
+            name,
+            transition_timeout,
+        )
+        .await?;
         let pools = self.db().await?;
         let write_db = pools.write();
         let model = self.load_sandbox_record_reconciled(pools, name).await?;
@@ -259,7 +270,7 @@ impl LocalContext {
             let storage = CreationStorage::acquire(self, name)?;
             self.prepare_sandbox_launch(&config, &storage, StoragePreparation::Existing)
                 .await?;
-            self.create_sandbox_inner(config, model.id, mode, lifecycle_guard)
+            self.create_sandbox_inner(config, model.id, mode, lifecycle_guard, disk_reservations)
                 .await
         }
         .await;
@@ -1262,8 +1273,15 @@ impl SandboxOps for LocalContext {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
-            self.start_sandbox(backend, name, None, SpawnMode::Attached)
-                .await
+            self.start_sandbox(
+                backend,
+                name,
+                None,
+                SpawnMode::Attached,
+                None,
+                DiskReservations::default(),
+            )
+            .await
         })
     }
 
@@ -1273,8 +1291,15 @@ impl SandboxOps for LocalContext {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
-            self.start_sandbox(backend, name, None, SpawnMode::Detached)
-                .await
+            self.start_sandbox(
+                backend,
+                name,
+                None,
+                SpawnMode::Detached,
+                None,
+                DiskReservations::default(),
+            )
+            .await
         })
     }
 
@@ -1286,8 +1311,15 @@ impl SandboxOps for LocalContext {
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
             let expected_id = local_identity(identity)?;
-            self.start_sandbox(backend, name, Some(expected_id), SpawnMode::Attached)
-                .await
+            self.start_sandbox(
+                backend,
+                name,
+                Some(expected_id),
+                SpawnMode::Attached,
+                None,
+                DiskReservations::default(),
+            )
+            .await
         })
     }
 
@@ -1299,8 +1331,15 @@ impl SandboxOps for LocalContext {
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
             let expected_id = local_identity(identity)?;
-            self.start_sandbox(backend, name, Some(expected_id), SpawnMode::Detached)
-                .await
+            self.start_sandbox(
+                backend,
+                name,
+                Some(expected_id),
+                SpawnMode::Detached,
+                None,
+                DiskReservations::default(),
+            )
+            .await
         })
     }
 
@@ -1603,7 +1642,7 @@ mod tests {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use super::{SpawnMode, sandbox_entity};
+    use super::{DiskReservations, SpawnMode, sandbox_entity};
     use crate::config::layers::BackendConfig;
     use crate::context::{Context, ContextSelectionSource, LocalContext, SandboxOps};
     use crate::logs::{LogOptions, LogSource};
@@ -1896,6 +1935,8 @@ mod tests {
                 "identity-replacement",
                 Some(stale_id),
                 SpawnMode::Attached,
+                None,
+                DiskReservations::default(),
             )
             .await
         {

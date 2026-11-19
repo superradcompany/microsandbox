@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use microsandbox_types::{Patch, RootDisk, RootfsSource, VolumeMount};
 
+use crate::config::GlobalConfig;
+use crate::runtime::launch_contract;
+use crate::setup;
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig, snapshot::SnapshotReference};
 
 #[cfg(test)]
@@ -52,6 +55,24 @@ pub(crate) fn resolve_host_paths(config: &mut SandboxConfig) -> MicrosandboxResu
         }
         Ok(())
     })
+}
+
+/// Whether bind mount roots must be checked with
+/// [`check_bind_roots_do_not_follow_symlinks`] before the sandbox is persisted.
+///
+/// Runtimes from v0.6.7 refuse a symlinked root and earlier ones follow it. Without an
+/// installed runtime the check still applies: the runtime installed later will refuse it.
+pub(crate) async fn runtime_refuses_symlinked_bind_roots(
+    global: &GlobalConfig,
+) -> MicrosandboxResult<bool> {
+    let runtime = match setup::resolve_runtime(global) {
+        Ok(runtime) => runtime,
+        Err(MicrosandboxError::RuntimeNotInstalled(_)) => return Ok(true),
+        Err(error) => return Err(error),
+    };
+
+    let contract = launch_contract::resolve(&runtime.msb_path).await?;
+    Ok(contract.refuses_symlinked_bind_roots())
 }
 
 /// Report a symlinked bind mount root now instead of when the sandbox boots.
