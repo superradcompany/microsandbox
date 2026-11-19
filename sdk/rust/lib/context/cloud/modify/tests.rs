@@ -796,14 +796,23 @@ async fn in_progress_then_a_slow_answer_fits_within_the_budget() {
 }
 
 #[tokio::test]
-async fn in_progress_until_the_deadline_returns_the_409() {
+async fn in_progress_without_retry_budget_returns_the_409() {
     let mock = MockCloud::replies(vec![Reply::Json(
         409,
         error_json(CLOUD_MODIFICATION_IN_PROGRESS, "busy"),
     )])
     .await;
 
-    let error = apply_within(&mock.backend(), &value_patch(VALUE), short_budget(600))
+    // Leave ample time to receive the response, but no room for the required retry delay.
+    // Repeating near a wall-clock deadline can instead time out an in-flight request, whose
+    // correct outcome is ModificationNotConfirmed rather than the last received 409.
+    let mut budget = short_budget(3_000);
+    budget.in_progress = Backoff {
+        first: budget.total,
+        max: budget.total,
+        jitter: false,
+    };
+    let error = apply_within(&mock.backend(), &value_patch(VALUE), budget)
         .await
         .unwrap_err();
 
@@ -815,7 +824,7 @@ async fn in_progress_until_the_deadline_returns_the_409() {
         ),
         "{error:?}"
     );
-    assert!(mock.requests().len() > 1);
+    assert_eq!(mock.requests().len(), 1);
 }
 
 #[tokio::test]
