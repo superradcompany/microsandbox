@@ -952,10 +952,12 @@ async fn endpoint_answers(path: &Path) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    // These are local runtime paths. Inspect them directly so a busy Tokio
-    // filesystem pool cannot consume the liveness budget before connect starts.
+    // These are local runtime paths. Keep metadata inspection on Tokio's
+    // blocking pool so a slow filesystem cannot stall an async worker. The
+    // caller's deadline treats a queued or slow inspection conservatively as
+    // potentially live.
     // Keep inspection errors distinct from connection errors for diagnostics.
-    match std::fs::symlink_metadata(path) {
+    match tokio::fs::symlink_metadata(path).await {
         Ok(_) => {}
         Err(error)
             if error.kind() == ErrorKind::NotFound
@@ -1142,19 +1144,27 @@ mod tests {
         });
         started.recv().unwrap();
 
-        // Filesystem work elsewhere in the process must not turn an absent
-        // endpoint into a live owner or prevent a real listener being detected.
-        let absent = runtime.block_on(paths.may_be_live());
+        // A queued metadata check must not stall the async worker. Until the
+        // blocking pool is available, the probe conservatively retains the
+        // start rather than declaring the endpoint absent.
+        let started = Instant::now();
+        let blocked = runtime.block_on(paths.may_be_live());
+        let elapsed = started.elapsed();
+
         std::fs::create_dir_all(paths.fallback_agent.parent().unwrap()).unwrap();
         let listener = std::os::unix::net::UnixListener::bind(&paths.fallback_agent).unwrap();
-        let live = runtime.block_on(paths.may_be_live());
 
         release.send(()).unwrap();
         runtime.block_on(blocker).unwrap();
         assert!(
-            !absent.unwrap(),
-            "absent endpoints were treated as a live runtime"
+            blocked.unwrap(),
+            "uncertain endpoint state must be retained"
         );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "probe exceeded its budget"
+        );
+        let live = runtime.block_on(paths.may_be_live());
         assert!(live.unwrap(), "a live listener was missed");
         listener.set_nonblocking(true).unwrap();
         listener
