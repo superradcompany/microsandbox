@@ -21,6 +21,7 @@ import lifecycle_evidence as evidence
 class SavedEvidenceCleanupTests(unittest.TestCase):
     def test_create_timeout_removes_each_target_and_retains_catalog_if_removal_fails(self):
         timeout = subprocess.TimeoutExpired("create", 150)
+        create = Mock(side_effect=timeout)
         run = Mock(side_effect=[RuntimeError("unavailable"), None])
         log = io.StringIO()
         with tempfile.TemporaryDirectory() as parent, redirect_stderr(log):
@@ -29,7 +30,7 @@ class SavedEvidenceCleanupTests(unittest.TestCase):
                     marker = home / "catalog"
                     marker.touch()
                     with evidence.cleanup_sandbox(run, "source"), evidence.cleanup_sandbox(run, "restored"):
-                        raise timeout
+                        create()
             self.assertIs(raised.exception, timeout)
             self.assertEqual([call.args for call in run.call_args_list],
                              [("rm", "--force", "restored"), ("rm", "--force", "source")])
