@@ -71,18 +71,14 @@ impl PyExecOutput {
 
     /// Stdout as UTF-8 string.
     #[getter]
-    fn stdout_text(&self) -> PyResult<String> {
-        self.inner
-            .stdout()
-            .map_err(|e| pyo3::exceptions::PyUnicodeDecodeError::new_err(e.to_string()))
+    fn stdout_text(&self, py: Python<'_>) -> PyResult<String> {
+        decode_output(py, self.inner.stdout_bytes())
     }
 
     /// Stderr as UTF-8 string.
     #[getter]
-    fn stderr_text(&self) -> PyResult<String> {
-        self.inner
-            .stderr()
-            .map_err(|e| pyo3::exceptions::PyUnicodeDecodeError::new_err(e.to_string()))
+    fn stderr_text(&self, py: Python<'_>) -> PyResult<String> {
+        decode_output(py, self.inner.stderr_bytes())
     }
 
     /// Stdout as raw bytes.
@@ -147,6 +143,7 @@ impl PyExecHandle {
     }
 
     /// Wait for the process to exit and return (code, success).
+    /// Reuses a terminal outcome already observed by wait, collect, or recv.
     fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -157,6 +154,7 @@ impl PyExecHandle {
     }
 
     /// Wait for completion and collect all output.
+    /// Retains completion for later waits without retaining output for replay.
     fn collect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -297,5 +295,83 @@ fn convert_exec_event(event: microsandbox::ExecEvent) -> PyExecEvent {
             data: Some(payload.message.into_bytes()),
             code: payload.errno,
         },
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Output decoding
+//--------------------------------------------------------------------------------------------------
+
+fn decode_output(py: Python<'_>, bytes: &[u8]) -> PyResult<String> {
+    // Preserve the offending bytes and exact range in Python's structured error.
+    // A UnicodeDecodeError cannot be constructed from a message alone.
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|error| {
+            pyo3::exceptions::PyUnicodeDecodeError::new_err_from_utf8(py, bytes, error)
+        })
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::exceptions::PyUnicodeDecodeError;
+
+    #[test]
+    fn output_decoding_preserves_valid_unicode_and_nul() {
+        Python::initialize();
+        Python::attach(|py| {
+            let text = "hello\0世界";
+            assert_eq!(decode_output(py, text.as_bytes()).unwrap(), text);
+            assert_eq!(decode_output(py, b"").unwrap(), "");
+        });
+    }
+
+    #[test]
+    fn output_decoding_reports_bytes_and_invalid_or_incomplete_range() {
+        Python::initialize();
+        Python::attach(|py| {
+            for (bytes, end) in [(&b"ok\xffx"[..], 3usize), (&b"ok\xe2\x82"[..], 4)] {
+                let error = decode_output(py, bytes).unwrap_err();
+                assert!(error.is_instance_of::<PyUnicodeDecodeError>(py));
+                let value = error.value(py);
+                assert_eq!(
+                    value
+                        .getattr("encoding")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    "utf-8"
+                );
+                assert_eq!(
+                    value
+                        .getattr("object")
+                        .unwrap()
+                        .extract::<Vec<u8>>()
+                        .unwrap(),
+                    bytes
+                );
+                assert_eq!(
+                    value.getattr("start").unwrap().extract::<usize>().unwrap(),
+                    2
+                );
+                assert_eq!(
+                    value.getattr("end").unwrap().extract::<usize>().unwrap(),
+                    end
+                );
+                assert!(
+                    !value
+                        .getattr("reason")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        });
     }
 }

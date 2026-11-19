@@ -120,11 +120,11 @@ Use an absolute path to keep a location elsewhere. Programmatic SDK paths and en
   "active_profile": "prod",
   "profiles": {
     "prod": {
-      "backend": "cloud",
+      "kind": "remote",
       "api_key_ref": "env:MSB_API_KEY"
     },
     "local": {
-      "backend": "local"
+      "kind": "local"
     }
   }
 }
@@ -162,12 +162,12 @@ See [Managed deployment](/enterprise/managed-configuration) for deployment, prec
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `snapshots` | [reference](#snapshots) | Full snapshot capture and restore limits |
 | `active_profile` | `null` | Default [backend profile](#profiles) name |
-| `allowed_backends` | `null` | Permitted backends: `["local"]`, `["cloud"]`, or both; `null` allows both and an empty list is invalid |
-| `profiles` | [reference](#profiles) | Named [backend profiles](/operations/backends#profiles) |
+| `allowed_backends` | `null` | Permitted backends: `["local"]`, `["remote"]`, or both; `null` allows both and an empty list is invalid |
+| `profiles` | [reference](#profiles) | Named [backend profiles](/cloud/connect#profiles) |
 
 ## `deployment_profile`
 
-<Tooltip tip="Local runtime placement only; microsandbox cloud applies its platform deployment profile."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Local runtime placement only; managed cloud applies its platform deployment profile."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Set `deployment_profile` when the local host must enforce one deployment policy for every sandbox:
 
@@ -179,24 +179,24 @@ Set `deployment_profile` when the local host must enforce one deployment policy 
 ```
 </CodeGroup>
 
-`single-tenant` preserves the network configuration requested by each sandbox. `multi-tenant` applies the host-runtime isolation floor for shared infrastructure. The configured value is authoritative on create and restart, so a per-sandbox CLI or SDK option cannot weaken or replace it. A [programmatic backend override](/sdk/rust/configuration#deployment_profile) takes precedence over the user file. When the field is absent or `null`, each sandbox selects its own profile and defaults to `single-tenant`.
+`single-tenant` preserves the network configuration requested by each sandbox. `multi-tenant` applies the host-runtime isolation floor for shared infrastructure. This setting applies on create and restart. Per-sandbox CLI or SDK options cannot weaken or replace it. A [programmatic backend override](/sdk/rust/configuration#deployment_profile) takes precedence over the user file. When the field is absent or `null`, each sandbox selects its own profile and defaults to `single-tenant`.
 
 The parser also accepts the internal wire spellings `single_tenant` and `multi_tenant` for compatibility, but the kebab-case values above are canonical in this human-edited file.
 
 ## `database`
 
-<Tooltip tip="Configures the local runtime database; microsandbox cloud stores state in the control plane."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Configures the local runtime database; managed cloud stores state in the control plane."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `url` | `null` | Database URL. Uses SQLite under `home` when null |
 | `max_connections` | `5` | Maximum connection pool size |
 | `connect_timeout_secs` | `30` | Timeout when acquiring a database connection from the pool |
-| `busy_timeout_secs` | `30` | SQLite busy timeout before a contended write surfaces as an error |
+| `busy_timeout_secs` | `30` | How long SQLite waits for a write lock before returning an error |
 
 ## `paths`
 
-<Tooltip tip="Configures files used by the local runtime; these paths do not apply to microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Configures files used by the local runtime; these paths do not apply to managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 All path fields are optional. Runtime pairs resolve from environment overrides, SDK-provided paths, explicit configuration, then the install under `home`. Other unset paths resolve relative to `home`; runtime resolution does not search `PATH` or debug build directories.
 
@@ -230,7 +230,7 @@ The timeout applies to host-side SSH sessions created by `msb ssh`, `msb ssh ser
 
 <Accordion title="SSH precedence and configuration lifetime">
 
-Explicit CLI or SDK options override the user-configured value; a managed timeout takes precedence over both. The setting is resolved when a client or server endpoint is prepared using the backend's retained configuration, so file changes do not alter existing connections. Programmatic local backends can [override the persisted timeout](/sdk/rust/configuration#ssh_inactivity_timeout_secs).
+Explicit CLI or SDK options override the user-configured value; a managed timeout takes precedence over both. The setting is resolved when a client or server endpoint is prepared using the backend's saved settings, so file changes do not alter existing connections. Programmatic local backends can [override the persisted timeout](/sdk/rust/configuration#ssh_inactivity_timeout_secs).
 
 </Accordion>
 
@@ -323,7 +323,7 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 ## `runtime`
 
-<Tooltip tip="Host runtime placement and block-device writeback settings do not apply to microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Host runtime placement and block-device writeback settings do not apply to managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -456,7 +456,7 @@ For local pulls without managed `auth`, microsandbox resolves credentials in thi
 
 ## `metrics`
 
-<Tooltip tip="SDK metrics methods and msb metrics are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods and msb metrics are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -478,13 +478,13 @@ Before raising it, consider memory use, especially when restoring imported snaps
 
 ## `profiles`
 
-Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in local or cloud selection, including the full precedence order, is documented in [Local or cloud](/operations/backends).
+Save local or remote connections by name. `active_profile` selects the CLI connection; SDK code loads profiles explicitly. See [remote connections](/cloud/connect) for examples and CLI precedence.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `backend` | required | `local` or `cloud` |
-| `api_key_ref` | none | Credential reference; required for `cloud` profiles |
-| `url` | `https://api.microsandbox.dev` | Cloud endpoint override for development, self-hosted, or on-prem control planes |
+| `kind` | required | `local` or `remote`; readers also accept legacy `backend` and `cloud` |
+| `api_key_ref` | none | Credential reference; required for `remote` profiles |
+| `url` | `https://api.microsandbox.dev` | URL of another compatible remote API |
 
 Supported credential references for `api_key_ref`:
 

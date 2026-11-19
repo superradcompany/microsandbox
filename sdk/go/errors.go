@@ -300,8 +300,8 @@ type Error struct {
 	Changed ChangeState
 }
 
-// PublishedSnapshotArtifact names an artifact published despite source recovery failure.
-type PublishedSnapshotArtifact struct {
+// PublishedSnapshot names an artifact published despite source recovery failure.
+type PublishedSnapshot struct {
 	Kind       string
 	Path       string
 	SnapshotID string
@@ -315,7 +315,7 @@ type SnapshotSourceRecoveryDetails struct {
 	CheckpointID     string
 	CheckpointRoot   string
 	CheckpointPath   string
-	Artifact         *PublishedSnapshotArtifact
+	Artifact         *PublishedSnapshot
 	Detail           string
 	PublicationError *string
 }
@@ -450,7 +450,7 @@ func wrapFFI(err error) error {
 				Detail: r.Detail, PublicationError: cloneStringPtr(r.PublicationError),
 			}
 			if a := r.Artifact; a != nil {
-				recovery.Artifact = &PublishedSnapshotArtifact{
+				recovery.Artifact = &PublishedSnapshot{
 					Kind: a.Kind, Path: a.Path, SnapshotID: a.SnapshotID, Digest: a.Digest,
 				}
 			}

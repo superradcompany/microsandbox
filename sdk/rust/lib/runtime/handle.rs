@@ -7,6 +7,10 @@ use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::ExitStatus;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[cfg(unix)]
 use nix::{
@@ -51,16 +55,16 @@ pub struct ProcessHandle {
     pub(crate) startup_reader: Option<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>>,
 
     /// When true, the Drop impl will NOT send SIGTERM.
-    detached: bool,
+    cleanup: Arc<CleanupControl>,
 
     /// Writer side of the attached-parent watchdog pipe. Keeping this open
     /// lets the child detect when the owner process disappears.
     #[cfg(unix)]
-    parent_watchdog: Option<OwnedFd>,
+    parent_watchdog: Option<Arc<OwnedFd>>,
 
     /// Windows job object that owns the sandbox process tree.
     #[cfg(windows)]
-    job: Option<WindowsJob>,
+    job: Option<Arc<WindowsJob>>,
 
     /// Best-effort cleanup token for a metrics slot that may still be in
     /// `Reserved` if the runtime exits before activation.
@@ -69,6 +73,20 @@ pub struct ProcessHandle {
     /// Startup-owned Windows locks, cleared after duplication into the exact runtime process.
     /// Unix transfers these at spawn. Established handles must not retain parent lock copies.
     _disk_locks: Vec<File>,
+}
+
+/// Shared cleanup control independent of the child-process wait lock.
+///
+/// Only owning resources retain this token. Idle non-owning helpers must not
+/// retain its watchdog or job, which are themselves lifetime authorities.
+pub(crate) struct CleanupControl {
+    detached: AtomicBool,
+    finished: AtomicBool,
+    transition: std::sync::Mutex<()>,
+    #[cfg(unix)]
+    watchdog: Option<Arc<OwnedFd>>,
+    #[cfg(windows)]
+    job: Option<Arc<WindowsJob>>,
 }
 
 /// Cancellation owner for a process whose startup has not completed.
@@ -96,6 +114,11 @@ pub(crate) struct WindowsJob {
 
 #[cfg(windows)]
 unsafe impl Send for WindowsJob {}
+
+// Windows job handles support concurrent queries/updates; the handle itself is
+// immutable and closes only after the final Arc is released.
+#[cfg(windows)]
+unsafe impl Sync for WindowsJob {}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -236,6 +259,19 @@ impl ProcessHandle {
             drop(disk_locks);
             Vec::new()
         };
+        #[cfg(unix)]
+        let parent_watchdog = parent_watchdog.map(Arc::new);
+        #[cfg(windows)]
+        let job = job.map(Arc::new);
+        let cleanup = Arc::new(CleanupControl {
+            detached: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            transition: std::sync::Mutex::new(()),
+            #[cfg(unix)]
+            watchdog: parent_watchdog.clone(),
+            #[cfg(windows)]
+            job: job.clone(),
+        });
         Self {
             pid,
             #[cfg(windows)]
@@ -243,7 +279,7 @@ impl ProcessHandle {
             sandbox_name,
             child,
             startup_reader: None,
-            detached: false,
+            cleanup,
             _disk_locks: disk_locks,
             #[cfg(unix)]
             parent_watchdog,
@@ -309,6 +345,7 @@ impl ProcessHandle {
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
         tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "waiting for exit");
         let status = self.child.wait().await?;
+        self.cleanup.finished.store(true, Ordering::Release);
         self._disk_locks.clear();
         tracing::debug!(pid = self.pid, ?status, "process exited");
         self.cleanup_metrics_reservation();
@@ -319,6 +356,7 @@ impl ProcessHandle {
     pub fn try_wait(&mut self) -> MicrosandboxResult<Option<ExitStatus>> {
         let status = self.child.try_wait()?;
         if status.is_some() {
+            self.cleanup.finished.store(true, Ordering::Release);
             // Also release startup-owned copies on failed handoff. Cleanup may retain this
             // ProcessHandle while deleting the sandbox directory containing the sidecars.
             self._disk_locks.clear();
@@ -359,21 +397,14 @@ impl ProcessHandle {
 
     /// Disarm the SIGTERM safety net so the sandbox keeps running after
     /// this handle is dropped. Used by detached sandbox flows.
-    pub fn disarm(&mut self) {
-        self.detached = true;
+    pub fn disarm(&mut self) -> MicrosandboxResult<()> {
+        // An already reaped child has no live Unix watchdog to notify.
+        self.try_wait()?;
+        self.cleanup.disarm()
+    }
 
-        #[cfg(unix)]
-        {
-            if let Some(parent_watchdog) = &self.parent_watchdog
-                && let Err(err) = send_parent_watchdog_detach(parent_watchdog)
-            {
-                tracing::debug!(
-                    error = %err,
-                    sandbox = %self.sandbox_name,
-                    "failed to send parent-watch detach"
-                );
-            }
-        }
+    pub(crate) fn cleanup_control(&self) -> Arc<CleanupControl> {
+        self.cleanup.clone()
     }
 
     fn cleanup_metrics_reservation(&mut self) {
@@ -381,6 +412,37 @@ impl ProcessHandle {
             return;
         };
         metrics_reservation.release_reserved(&self.sandbox_name);
+    }
+}
+
+impl CleanupControl {
+    pub(crate) fn is_armed(&self) -> bool {
+        !self.detached.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn disarm(&self) -> MicrosandboxResult<()> {
+        // This lock covers only the synchronous one-byte notification/job update,
+        // never child wait, guest work, or an await. Concurrent detaches share it.
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.is_armed() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        if !self.finished.load(Ordering::Acquire)
+            && let Some(watchdog) = &self.watchdog
+        {
+            send_parent_watchdog_detach(watchdog)?;
+        }
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            job.disarm()?;
+        }
+        // A failed notification leaves authority armed and the receiver usable.
+        self.detached.store(true, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -431,6 +493,25 @@ impl MetricsReservationCleanup {
 
 #[cfg(windows)]
 impl WindowsJob {
+    /// Keep the existing job and process identity, but remove automatic termination.
+    fn disarm(&self) -> std::io::Result<()> {
+        let mut limits = unsafe { std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
+        // This SDK creates the job with only KILL_ON_JOB_CLOSE. Clear that flag
+        // before publishing detach; closing the retained job must no longer kill it.
+        let result = unsafe {
+            SetInformationJobObject(
+                self.handle,
+                JobObjectExtendedLimitInformation,
+                (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Create an unnamed job object that terminates its process tree when the
     /// final job handle closes.
     pub(crate) fn new_kill_on_close() -> std::io::Result<Self> {
@@ -522,7 +603,7 @@ impl Drop for StartupProcess {
 
 impl Drop for ProcessHandle {
     fn drop(&mut self) {
-        if self.detached {
+        if !self.cleanup.is_armed() {
             return;
         }
 
@@ -954,9 +1035,13 @@ mod windows_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("disk.lock");
         let mut process = child(directory.path(), vec![open_lock(&path)]);
+        let job = WindowsJob::new_kill_on_close().unwrap();
+        job.assign_pid(process.pid()).unwrap();
+        process.job = Some(Arc::new(job));
+        Arc::get_mut(&mut process.cleanup).unwrap().job = process.job.clone();
         process.handoff_disk_locks().await.unwrap();
         ready(directory.path()).await;
-        process.disarm();
+        process.disarm().unwrap();
         drop(process);
         assert!(!available(&path));
         std::fs::write(directory.path().join("exit"), b"exit").unwrap();

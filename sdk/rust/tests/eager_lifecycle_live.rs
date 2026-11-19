@@ -4,12 +4,14 @@
 
 #![cfg(feature = "local")]
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use microsandbox::sandbox::SandboxStatus;
 use microsandbox::{CreationProgress, MicrosandboxError, Sandbox, StartupPhase};
 use microsandbox_db::entity::sandbox as sandbox_row;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -69,15 +71,22 @@ async fn wait_for_injection(event: &str) -> Value {
     .expect("scoped shim never reached the real VMM's checkpoint-object read")
 }
 
-#[cfg(target_os = "linux")]
+// Compile this API consumer on macOS too; only the Linux injected tests call it.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 async fn prove_runtime_cleanup(name: &str, pid: u64) {
-    let backend = microsandbox::backend::default_backend();
+    let backend = microsandbox::context::default_local_context();
     let local = backend.as_local().unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             // Observe/reconcile before taking the test's lease. Holding that lease during
             // get() could make the test itself appear to be a still-live runtime owner.
-            let handle = Sandbox::get(name).await;
+            let handle = async {
+                let resource = Sandbox::get(name).await?;
+                let status = resource.status().await?;
+                Ok::<_, MicrosandboxError>((resource, status))
+            }
+            .await;
             let ownership = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
                 &local.config().run_dir(),
                 name,
@@ -85,15 +94,9 @@ async fn prove_runtime_cleanup(name: &str, pid: u64) {
             .unwrap();
             if ownership.is_some() && !PathBuf::from(format!("/proc/{pid}")).exists() {
                 match handle {
-                    Ok(handle)
-                        if matches!(
-                            handle.status_snapshot(),
-                            microsandbox::sandbox::SandboxStatus::Stopped
-                                | microsandbox::sandbox::SandboxStatus::Crashed
-                        ) =>
-                    {
+                    Ok((handle, SandboxStatus::Stopped | SandboxStatus::Crashed)) => {
                         drop(ownership);
-                        handle.remove().await.unwrap();
+                        handle.destroy().await.unwrap();
                         break;
                     }
                     Err(MicrosandboxError::SandboxNotFound(_)) => break,
@@ -303,7 +306,7 @@ async fn portable_eager_forked_progress_and_stop_completion() {
             .await
             .unwrap();
         assert!(checksum.status().success);
-        let backend = microsandbox::backend::default_backend();
+        let backend = microsandbox::context::default_local_context();
         let local = backend.as_local().unwrap();
         // Open the existing catalog before timing Stop, without a reconciling handle lookup.
         let pools = local.db().await.unwrap();

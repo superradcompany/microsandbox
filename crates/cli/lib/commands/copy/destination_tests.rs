@@ -4,11 +4,9 @@ use std::{env, fs, path::Path, process::Command, sync::Arc, time::Duration};
 
 use futures::future::BoxFuture;
 use microsandbox::{
-    LocalBackend, MicrosandboxResult,
+    LocalContext, MicrosandboxResult,
     agent::AgentClient,
-    backend::{
-        Backend, BackendKind, SandboxBackend, ServiceBackend, SnapshotBackend, VolumeBackend,
-    },
+    context::{Context, ContextKind, SandboxOps, ServiceOps, SnapshotOps, VolumeOps},
     sandbox::SandboxFsOps,
 };
 use microsandbox_protocol::{
@@ -32,30 +30,35 @@ const COPY_CONTENT: &[u8] = b"copied sandbox content\n";
 //--------------------------------------------------------------------------------------------------
 
 /// Use the SDK's filesystem dispatch with an in-memory agent instead of a VM.
-struct CopyBackend(LocalBackend);
+#[derive(Clone)]
+struct CopyBackend(LocalContext);
 
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl Backend for CopyBackend {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Local
+impl Context for CopyBackend {
+    fn clone_shared(&self) -> Arc<dyn Context> {
+        Arc::new(self.clone())
     }
 
-    fn sandboxes(&self) -> &dyn SandboxBackend {
+    fn kind(&self) -> ContextKind {
+        ContextKind::Local
+    }
+
+    fn sandbox_ops(&self) -> &dyn SandboxOps {
         &self.0
     }
 
-    fn volumes(&self) -> &dyn VolumeBackend {
+    fn volume_ops(&self) -> &dyn VolumeOps {
         &self.0
     }
 
-    fn snapshots(&self) -> &dyn SnapshotBackend {
+    fn snapshot_ops(&self) -> &dyn SnapshotOps {
         &self.0
     }
 
-    fn services(&self) -> &dyn ServiceBackend {
+    fn service_ops(&self) -> &dyn ServiceOps {
         &self.0
     }
 
@@ -215,10 +218,10 @@ async fn copy_destination_child() {
     };
     let destination = env::var("MSB_TEST_COPY_DESTINATION").unwrap();
     let cwd = env::current_dir().unwrap();
-    let local = LocalBackend::builder()
+    let local = LocalContext::builder()
         .config_path(cwd.join("config.json"))
         .home(cwd.join("home"))
-        .build_lazy()
+        .build()
         .unwrap();
     let backend = Arc::new(CopyBackend(local));
     let fs = SandboxFsOps::with_backend(backend, "copy-fixture");

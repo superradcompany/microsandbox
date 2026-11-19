@@ -55,14 +55,14 @@ fn rust_ssh_compat_export_stays_available() {
 
 #[test]
 fn rust_identity_and_generated_patch_surface_is_backend_neutral() {
-    use microsandbox::sandbox::{DestroyOptions, RestartOptions, SandboxHandle, SandboxId};
+    use microsandbox::sandbox::{DestroyOptions, RestartOptions, SandboxId, SandboxRecord};
 
     let _: Option<SandboxId> = None;
-    let _ = SandboxHandle::id;
-    let _ = SandboxHandle::connect_or_start;
-    let _ = SandboxHandle::wait_for_status;
-    let _ = SandboxHandle::restart;
-    let _ = SandboxHandle::destroy;
+    let _ = SandboxRecord::id;
+    let _ = SandboxRecord::connect_or_start;
+    let _ = SandboxRecord::wait_for_status;
+    let _ = SandboxRecord::restart;
+    let _ = SandboxRecord::destroy;
     let _ = (RestartOptions::default(), DestroyOptions::default());
     let _ = microsandbox::SandboxConfigPatch::new().spec(
         microsandbox::SandboxSpecPatch::new()
@@ -73,8 +73,8 @@ fn rust_identity_and_generated_patch_surface_is_backend_neutral() {
 #[test]
 fn rust_service_surface_stays_available() {
     use microsandbox::{
-        ChangeState, MicrosandboxError, Operation, Service, ServiceBackend, ServiceBuilder,
-        ServiceError, ServiceListBuilder, ServicePage, ServiceTarget, ServiceUpdate,
+        ChangeState, MicrosandboxError, Operation, Service, ServiceBuilder, ServiceError,
+        ServiceListBuilder, ServiceOps, ServicePage, ServiceTarget, ServiceUpdate,
     };
 
     let _ = Service::get;
@@ -89,7 +89,7 @@ fn rust_service_surface_stays_available() {
         .sandbox("web-1")
         .cursor("c2hvcA")
         .limit(20);
-    let _: Option<(ServicePage, ServiceTarget, &dyn ServiceBackend)> = None;
+    let _: Option<(ServicePage, ServiceTarget, &dyn ServiceOps)> = None;
     let _ = [
         Operation::ServiceCreate,
         Operation::ServiceGet,
@@ -115,7 +115,7 @@ fn rust_service_surface_stays_available() {
 
 #[allow(dead_code)]
 async fn rust_sandbox_fs_handle_api_stays_available(
-    fs: &microsandbox::sandbox::SandboxFsOps<'_>,
+    fs: &microsandbox::sandbox::SandboxFsOps,
     entry: microsandbox::sandbox::FsEntry,
     metadata: microsandbox::sandbox::FsMetadata,
 ) -> microsandbox::MicrosandboxResult<()> {
@@ -125,21 +125,21 @@ async fn rust_sandbox_fs_handle_api_stays_available(
     let file = fs.open_file("/tmp/file", FsOpenOptions::default()).await?;
     let dir = fs.open_dir("/tmp").await?;
 
-    let _ = fs.read_handle(file, 0, None).await?;
-    let mut read_stream = fs.read_handle_stream(file, 0, Some(1)).await?;
+    let _ = fs.read_handle(&file, 0, None).await?;
+    let mut read_stream = fs.read_handle_stream(&file, 0, Some(1)).await?;
     let _ = read_stream.recv().await?;
 
-    fs.write_handle(file, 0, b"hello").await?;
-    let write_stream = fs.write_handle_stream(file, 0, None).await?;
+    fs.write_handle(&file, 0, b"hello").await?;
+    let write_stream = fs.write_handle_stream(&file, 0, None).await?;
     write_stream.close().await?;
 
-    let _ = fs.read_dir_handle(dir, None).await?;
-    let _ = fs.read_dir(dir, None).await?;
+    let _ = fs.read_dir_handle(&dir, None).await?;
+    let _ = fs.read_dir(&dir, None).await?;
 
-    let _ = fs.stat_handle(file).await?;
-    let _ = fs.fstat(file).await?;
-    fs.set_stat_handle(file, FsSetAttrs::default()).await?;
-    fs.fset_stat(file, FsSetAttrs::default()).await?;
+    let _ = fs.stat_handle(&file).await?;
+    let _ = fs.fstat(&file).await?;
+    fs.set_stat_handle(&file, FsSetAttrs::default()).await?;
+    fs.fset_stat(&file, FsSetAttrs::default()).await?;
 
     let _ = fs.real_path(".").await?;
     fs.remove_empty_dir("/tmp/empty").await?;
@@ -192,7 +192,7 @@ fn boot_error_reason_is_preserved_in_every_backend_build() {
 #[cfg(feature = "cloud")]
 fn rust_modify_surface_is_available_on_cloud_builds() {
     let _ = microsandbox::Sandbox::modify;
-    let _ = microsandbox::sandbox::SandboxHandle::modify;
+    let _ = microsandbox::sandbox::SandboxRecord::modify;
     let _ = microsandbox::SandboxModificationBuilder::dry_run;
     let _ = microsandbox::SandboxModificationBuilder::apply;
     let _: Option<microsandbox::SandboxModificationPlan> = None;

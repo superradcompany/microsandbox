@@ -8,7 +8,7 @@ import pytest
 from microsandbox import MicrosandboxError, StopTimeoutError
 
 
-@pytest.mark.parametrize("class_name", ["Sandbox", "SandboxHandle"])
+@pytest.mark.parametrize("class_name", ["Sandbox"])
 def test_stub_has_indefinite_and_explicit_timeout_methods(class_name):
     source = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
     cls = next(node for node in ast.parse(source.read_text()).body

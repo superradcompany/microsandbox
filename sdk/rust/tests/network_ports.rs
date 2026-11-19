@@ -3,6 +3,8 @@
 //! These tests require KVM (or libkrun on macOS). The `#[msb_test]` attribute
 //! marks them `#[ignore]`, so plain `cargo test --workspace` skips them.
 
+#![cfg(feature = "net")]
+
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
