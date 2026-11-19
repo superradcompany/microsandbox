@@ -67,9 +67,12 @@ if __name__ == "__main__":
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--temp-root", type=Path, default=Path(tempfile.gettempdir()))
     args = parser.parse_args()
+    # Guest commands execute from the disposable home. Anchor all fixture paths first.
+    for name, path in vars(args).items():
+        setattr(args, name, path.resolve(strict=True))
     for case, binary, agent in (
         ("current", args.candidate, args.agent),
         ("previous-guest", args.candidate, args.previous_agent),
         ("previous-host", args.previous, args.agent),
     ):
-        qualify(args, case, binary.resolve(), agent.resolve())
+        qualify(args, case, binary, agent)
