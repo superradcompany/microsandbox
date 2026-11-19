@@ -124,7 +124,7 @@ impl Default for InstallOptions {
 /// Resolve a complete `msb` and `libkrunfw` pair without network access.
 ///
 /// Uses the already-layered runtime paths, followed by the resolved home and then
-/// automatically discovered SDK package binaries. Backend construction captures
+/// automatically discovered SDK package binaries. Context construction captures
 /// environment and SDK overrides below administrator policy.
 ///
 /// This operation never creates directories, extracts archives, or accesses

@@ -5,6 +5,7 @@ description: Create snapshots, fork sandboxes, and restore snapshots with the Py
 keywords: ["Python SDK", "Python snapshots", "microsandbox snapshots"]
 ---
 
+
 <Tooltip tip="Cloud supports disk capture from stopped persistent sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
@@ -23,7 +24,7 @@ A paused disk capture needs a matching prior flush; cloud rejects non-Auto polic
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
+<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a></p>
 
 Create, open, and manage snapshots. See [properties](#snapshot-properties) for returned metadata.
 
@@ -178,7 +179,7 @@ Open an existing artifact by group head, `group:member`, or path. This validates
 
 ```python
 @staticmethod
-async def get(name_or_digest: str) -> SnapshotHandle
+async def get(name_or_digest: str) -> Snapshot
 ```
 
 <Accordion title="Example">
@@ -205,8 +206,8 @@ Look up a handle by group head, `group:member`, stable snapshot ID, descriptor d
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">SnapshotHandle</a></div>
-    <div className="msb-param-desc">Lightweight handle returned by the active backend.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Snapshot</a></div>
+    <div className="msb-param-desc">Operational snapshot with metadata loaded on demand.</div>
   </div>
 </div>
 
@@ -214,7 +215,7 @@ Look up a handle by group head, `group:member`, stable snapshot ID, descriptor d
 
 ```python
 @staticmethod
-async def list() -> list[SnapshotHandle]
+async def list() -> list[Snapshot]
 ```
 
 <Accordion title="Example">
@@ -234,8 +235,8 @@ reference.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">list[SnapshotHandle]</a></div>
-    <div className="msb-param-desc">Indexed snapshot handles.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">list[Snapshot]</a></div>
+    <div className="msb-param-desc">Indexed snapshot resources.</div>
   </div>
 </div>
 
@@ -423,7 +424,7 @@ async def load(
     base: str | None = None,
     group: str | None = None,
     set_head: bool = False,
-) -> SnapshotHandle
+) -> Snapshot
 ```
 
 Unpack a snapshot archive (`.msb` or `.tar`) into the selected or generated group. The returned handle's `group` identifies the group and `head_update` reports the head selection outcome. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
@@ -445,7 +446,7 @@ Unpack a snapshot archive (`.msb` or `.tar`) into the selected or generated grou
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">SnapshotHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Snapshot</a></div>
     <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
@@ -471,7 +472,7 @@ async def load_many(
     base: str | None = None,
     group: str | None = None,
     set_head: bool = False,
-) -> list[SnapshotHandle]
+) -> list[Snapshot]
 ```
 
 Import archives as one batch. Returns handles in input order. Dependencies resolve from the batch, the named group, or an explicit base; input order does not matter. All members are validated before publication.
@@ -479,10 +480,11 @@ Import archives as one batch. Returns handles in input order. Dependencies resol
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">group_head()</span>
 
 ```python
-async def group_head(selector: str) -> dict[str, str | bool | None]
+async def group_head(group: str) -> str | None
+async def set_group_head(group: str, id: str) -> dict[str, str | bool | None]
 ```
 
-Read a group’s head, or select an exact member with `group:member`. Returns the group, previous and current snapshot IDs, reason, and whether the head changed. See [group selection](/sandboxes/snapshots#snapshot-groups).
+Read the selected ID from a local group, or explicitly set it to an installed member’s stable ID. A headless group returns an absent ID. A missing group or qualified group name raises an error. The write returns the previous and current IDs, reason and change flag. See [group selection](/sandboxes/snapshots#snapshot-groups).
 
 <span id="snapshot-groups" />
 
@@ -593,46 +595,19 @@ The report shape:
 }
 ```
 
-## SnapshotHandle methods
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">destroy()</span>
 
 ```python
-async def open(self) -> Snapshot
+async def destroy(self, *, force: bool = False) -> None
 ```
+
+Instance deletion of a remote path-based snapshot returns `Unsupported` until the provider supports atomic conditional deletion. Explicit path-selected static removal remains available. Managed remote snapshot deletion uses its captured server ID; local deletion retains its identity checks. Force does not bypass this restriction.
 
 <Accordion title="Example">
 
 ```python
 h = await Snapshot.get("baseline:deps")
-snap = await h.open()
-print(snap.fstype)
-```
-
-</Accordion>
-
-Load the full [`Snapshot`](#snapshot) metadata for this handle. Metadata-validated only; does not read the upper file.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Snapshot</a></div>
-    <div className="msb-param-desc">The opened snapshot.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
-
-```python
-async def remove(self, *, force: bool = False) -> None
-```
-
-<Accordion title="Example">
-
-```python
-h = await Snapshot.get("baseline:deps")
-await h.remove(force=False)
+await h.destroy(force=False)
 ```
 
 </Accordion>
@@ -668,7 +643,7 @@ Cloud raises `UnsupportedError`.
 
 <span id="take-a-snapshot" />
 
-## SandboxHandle
+## Sandbox
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
@@ -676,7 +651,7 @@ Cloud raises `UnsupportedError`.
 async def snapshot(self, name: str) -> Snapshot
 ```
 
-Snapshot this sandbox into its default group with the given member name. Local live disk captures preserve the source's running or paused state. Cloud requires a stopped persistent source. Use the returned artifact path or `sandbox:member` to open it later. Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
+Snapshot this sandbox into its default group with the given member name. Local live disk captures preserve the source's running or paused state. Cloud requires a stopped persistent source. Use the returned artifact path or `sandbox:member` to open it later. Called on a [`Sandbox`](/sdk/python/sandbox#sandbox), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
 
 <p className="msb-label">Parameters</p>
 
@@ -711,7 +686,7 @@ print(snap.digest)
 
 ## Forking
 
-Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `SandboxHandle` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
+Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
 
 ### fork()
 
@@ -782,7 +757,7 @@ child = await Sandbox.restore("api:baseline", name="api-restored", cow_memory=Tr
 | `disk_only=True` | Boot only the saved disk. |
 | `snapshot_base` | Supply an archive dependency. |
 | `Sandbox.restore()` | Return the restored sandbox. |
-| `Sandbox.restore_with_progress()` | Return a `PullSession`; await its result. |
+| `Sandbox.restore_with_progress()` | Claim the restored sandbox inside or after the [progress scope](/sdk/python/sandbox#pullsession). |
 
 Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 
@@ -804,7 +779,7 @@ Restore rejects missing external filesystems (and, for full restore, additional 
 | `dangerously_inherit_resources` | Explicitly inherit host resources. Disabled by default. |
 | `external_mount_policy` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
-Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy`, not `Network`. `captured_volumes` contains guest paths.
+Omitted controls retain destination defaults. Lifetime limits accept numeric seconds or `datetime.timedelta` and require non-negative whole seconds. Network policy accepts `NetworkPolicy`, not `Network`. `captured_volumes` contains guest paths.
 
 </Accordion>
 
@@ -873,9 +848,9 @@ Results include aggregate counts and per-disk entries keyed by `guest_path`. `ma
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
+<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a></p>
 
-A fully parsed backend-neutral snapshot. Properties are read-only attributes.
+Creation, lookup, listing and import return the same context-bound resource. Descriptor metadata loads when awaited.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
@@ -886,20 +861,99 @@ A fully parsed backend-neutral snapshot. Properties are read-only attributes.
 | <span id="snapshot-digest" />`digest` | `str` | Canonical descriptor digest (`sha256:hex`), separate from the stable ID |
 | <span id="snapshot-size_bytes" />`size_bytes` | `int \| None` | Backend-reported stored payload size in bytes |
 | <span id="snapshot-image_ref" />`image_ref` | `str` | Image reference the snapshot was taken from |
-| <span id="snapshot-image_manifest_digest" />`image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
+| <span id="snapshot-image_manifest_digest" />`image_manifest_digest()` | `Awaitable[str]` | OCI manifest digest of the pinned image |
 | <span id="snapshot-state_kind" />`state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
 | <span id="snapshot-format" />`format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
 | <span id="snapshot-scope" />`scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
 | <span id="snapshot-fstype" />`fstype` | `str \| None` | Filesystem type for file-backed state (e.g. `"ext4"`) |
-| <span id="snapshot-checkpoint_id" />`checkpoint_id` | `str \| None` | Checkpoint identifier for checkpoint-backed state |
+| <span id="snapshot-checkpoint_id" />`checkpoint_id()` | `Awaitable[str \| None]` | Checkpoint identifier for checkpoint-backed state |
 | <span id="snapshot-checkpoint_manifest_digest" />`checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
 | <span id="snapshot-parent" />`parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
 | <span id="snapshot-created_at" />`created_at` | `str` | RFC 3339 timestamp |
-| <span id="snapshot-labels" />`labels` | `dict[str, str]` | User-supplied labels |
-| <span id="snapshot-source_sandbox" />`source_sandbox` | `str \| None` | Best-effort source-sandbox name |
+| <span id="snapshot-labels" />`labels()` | `Awaitable[dict[str, str]]` | User-supplied labels |
+| <span id="snapshot-source_sandbox" />`source_sandbox()` | `Awaitable[str \| None]` | Best-effort source-sandbox name |
 | `save_to(...)` | `Awaitable[None]` | Bundle through the backend retained by this snapshot |
 | `copy_to(path)` | [`SnapshotCopyBuilder`](#snapshotcopybuilder) | Configure a copied archive with replacement metadata |
 | `verify()` | `Awaitable[dict[str, Any]]` | Recompute and check the upper-layer integrity hash. See [`verify()`](#snap-verify) |
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">manifest()</span>
+
+```python
+async def manifest(self) -> dict[str, Any]
+```
+
+Fetch the full normalized descriptor and validate the captured identity.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">state()</span>
+
+```python
+async def state(self) -> dict[str, Any]
+```
+
+Fetch and return the descriptor state. Missing or replaced artifacts raise errors; there is no stale fallback.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">name</span>
+
+```python
+@property
+def name(self) -> str | None
+```
+
+Captured index metadata from resource selection.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">group</span>
+
+```python
+@property
+def group(self) -> str | None
+```
+
+Captured index metadata from resource selection.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">parent_digest</span>
+
+```python
+@property
+def parent_digest(self) -> str | None
+```
+
+Captured index metadata from resource selection.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">locality</span>
+
+```python
+@property
+def locality(self) -> str
+```
+
+Captured index metadata from resource selection.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">availability</span>
+
+```python
+@property
+def availability(self) -> str
+```
+
+Captured index metadata from resource selection.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">migration_state</span>
+
+```python
+@property
+def migration_state(self) -> str
+```
+
+Captured index metadata from resource selection.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">migration_error_code</span>
+
+```python
+@property
+def migration_error_code(self) -> str | None
+```
+
+Captured index metadata from resource selection.
 
 ### SnapshotCopyBuilder
 
@@ -912,42 +966,9 @@ return it so calls can be chained.
 | `record_integrity(bool)` | `SnapshotCopyBuilder` | Compute integrity when true, or omit it when false |
 | `save()` | `Awaitable[None]` | Write the configured archive |
 
-### SnapshotHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
-
-<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a> · <a href="#snapshot-list">Snapshot.list()</a> · <a href="#snapshot-load">Snapshot.load()</a></p>
-
-Lightweight handle returned by the active backend. Properties are read-only.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| `id` | `str` | Stable opaque snapshot identity |
-| `path` | `str` | Local artifact directory; raises `UnsupportedError` on cloud |
-| `digest` | `str` | Canonical descriptor digest, separate from the stable ID |
-| `name` | `str \| None` | Convenience alias |
-| `parent_digest` | `str \| None` | Parent snapshot digest, or `None` for a root |
-| `image_ref` | `str` | Image the snapshot was taken from |
-| `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
-| `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
-| `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
-| `fstype` | `str \| None` | Filesystem type for file-backed state |
-| `checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
-| `size_bytes` | `int \| None` | Backend-reported stored payload size, when known |
-| `locality` | `str` | Artifact locality reported by the index |
-| `availability` | `str` | Artifact availability reported by the index |
-| `migration_state` | `str` | Current migration state |
-| `migration_error_code` | `str \| None` | Migration error code, when migration failed |
-| `created_at` | `float` | ms since Unix epoch |
-| `reference` | `str` | Stable backend-relative restore reference |
-| `reference_kind` | `Literal["id", "path"]` | How the selected backend resolves the reference |
-| `open()` | `Awaitable[`[`Snapshot`](#snapshot)`]` | Load full metadata. See [`open()`](#handle-open) |
-| `remove(force=False)` | `Awaitable[None]` | Delete the artifact and its index row. See [`remove()`](#handle-remove) |
-| `save_to(...)` | `Awaitable[None]` | Bundle through the backend retained by this handle |
-
 ### SnapshotStateKind
 
-<p className="msb-backref">Returned by <a href="#snapshot">Snapshot.state_kind</a> · <a href="#snapshothandle">SnapshotHandle.state_kind</a></p>
+<p className="msb-backref">Returned by <a href="#snapshot">Snapshot.state_kind</a> · <a href="#snapshot">Snapshot.state_kind</a></p>
 
 Snapshot state representation.
 
@@ -958,7 +979,7 @@ Snapshot state representation.
 
 ### SnapshotFormat
 
-<p className="msb-backref">Returned by <a href="#snapshot">Snapshot.format</a> · <a href="#snapshothandle">SnapshotHandle.format</a></p>
+<p className="msb-backref">Returned by <a href="#snapshot">Snapshot.format</a> · <a href="#snapshot">Snapshot.format</a></p>
 
 On-disk format for file-backed snapshot state.
 
@@ -969,7 +990,7 @@ On-disk format for file-backed snapshot state.
 
 ### SnapshotScope
 
-<p className="msb-backref">Returned by <a href="#snapshot">Snapshot.scope</a> · <a href="#snapshothandle">SnapshotHandle.scope</a></p>
+<p className="msb-backref">Returned by <a href="#snapshot">Snapshot.scope</a> · <a href="#snapshot">Snapshot.scope</a></p>
 
 Captured snapshot state scope.
 

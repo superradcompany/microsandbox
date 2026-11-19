@@ -1,0 +1,25 @@
+---
+title: Limitations
+description: Current limits when running workloads on our managed cloud
+icon: circle-info
+---
+
+Create sandboxes, run commands, copy files, and use outbound network rules and secrets with the same SDKs and CLI you use locally. These are the current limitations to plan for.
+
+<Note>
+We’re working toward full compatibility between local execution and our managed cloud. Expect this list to shrink as we close the gaps.
+</Note>
+
+| Feature | Limitation |
+|---|---|
+| Filesystem handles | Low-level open-handle operations are local-only. |
+| Named volumes | Disk-backed named volumes and creating a named volume while mounting it are local-only. Create managed cloud volumes before mounting them. |
+| Background jobs | Retained jobs, job history, and reconnectable job attachments are local-only. |
+| Custom networking | Published ports, custom nameservers, interface overrides, rate limiters, host-CA trust, and custom TLS settings are local-only. This does not restrict the default TLS interception flag used by secrets. |
+| Logs | Historical and bounded reads are local-only. Save live log output externally when you need retention. |
+| SSH | `msb ssh serve` is local-only. Reusable SDK servers require explicit keys. |
+| Image management | Local cache commands, plain-HTTP registries, and custom registry CAs are local-only. |
+| Reconfiguration | Only secrets can be changed. Values, allowed hosts, and removal can apply live; other secret changes need the next-start policy. Recreate the sandbox to change CPU, memory, mounts, or other settings. |
+| Snapshots | Capture requires a stopped persistent sandbox. Live capture, full checkpoints, forking, groups, and client-local archive import/export are local-only. |
+| Metrics clients | SDK metrics methods, `msb metrics`, and `msb-metrics` exporters are local-only. Use the [dashboard](https://dashboard.microsandbox.dev) or [REST API](/api-reference/endpoints/sandboxes/get-sandbox-metrics). |
+| Process controls | Pause/resume, force kill, drain, ping, and touch are local-only. |

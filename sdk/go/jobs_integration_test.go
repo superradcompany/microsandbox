@@ -18,11 +18,7 @@ func TestManagedJobIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	handle, err := GetSandbox(ctx, name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sb, err := handle.Connect(ctx)
+	sb, err := GetSandbox(ctx, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +51,7 @@ func TestManagedJobIntegration(t *testing.T) {
 	if err := attachment.Detach(ctx); err != nil {
 		t.Fatal(err)
 	}
-	found, err := handle.GetJob(ctx, job.ID())
+	found, err := sb.GetJob(ctx, job.ID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,12 +77,15 @@ func TestManagedJobIntegration(t *testing.T) {
 	if err != nil || !status.Success {
 		t.Fatalf("wait: %#v %v", status, err)
 	}
-	logs, err := found.Logs(ctx, JobLogOptions{})
+	logs, err := found.Logs(ctx, JobLogOptions{Sources: []JobOutputSource{JobOutputStdout}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var bytes []byte
 	for _, entry := range logs {
+		if entry.Source != JobOutputStdout {
+			t.Fatalf("unexpected job log source %q", entry.Source)
+		}
 		bytes = append(bytes, entry.Data...)
 	}
 	if string(bytes) != string(append([]byte{255, 0, 10}, []byte("reattached\n")...)) {
@@ -120,11 +119,7 @@ func TestExecStreamDeadlineIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	handle, err := GetSandbox(ctx, name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sb, err := handle.Connect(ctx)
+	sb, err := GetSandbox(ctx, name)
 	if err != nil {
 		t.Fatal(err)
 	}

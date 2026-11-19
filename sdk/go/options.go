@@ -9,9 +9,8 @@ import (
 
 // SandboxConfig holds configuration for creating a sandbox.
 //
-// Most callers construct a sandbox via CreateSandbox with functional options;
-// SandboxConfig is exported for callers that prefer to build a config value
-// directly and pass it via WithConfig.
+// Pass functional options such as WithImage to CreateSandbox. The SDK applies
+// them in order to the SandboxConfig before creating the sandbox.
 type SandboxConfig struct {
 	Name        string
 	Image       string
@@ -81,11 +80,11 @@ type SandboxConfig struct {
 	Volumes             map[string]MountConfig // guest path → mount config
 }
 
-// SnapshotSeed is accepted by RestoreSandbox. Passing a SnapshotArtifact or
-// SnapshotHandle preserves its typed reference; a string remains a
+// SnapshotSeed is accepted by RestoreSandbox. Passing a Snapshot or
+// passing the resource preserves its typed reference; a string remains a
 // backend-relative compatibility reference.
 type SnapshotSeed interface {
-	string | *SnapshotArtifact | *SnapshotHandle
+	string | *Snapshot
 }
 
 // SandboxOption is a functional option for configuring a sandbox.
@@ -909,13 +908,13 @@ func WithPullPolicy(p PullPolicy) SandboxOption {
 }
 
 // WithMaxDuration caps the sandbox's total runtime. Zero means unlimited.
-// Sub-second precision is rounded up to whole seconds.
+// The duration must be a non-negative whole number of seconds.
 func WithMaxDuration(d time.Duration) SandboxOption {
 	return func(o *SandboxConfig) { o.MaxDuration = d }
 }
 
 // WithIdleTimeout stops the sandbox after a period without exec activity.
-// Zero means unlimited. Sub-second precision is rounded up to whole seconds.
+// Zero means unlimited. The duration must be a non-negative whole number of seconds.
 func WithIdleTimeout(d time.Duration) SandboxOption {
 	return func(o *SandboxConfig) { o.IdleTimeout = d }
 }
@@ -1795,8 +1794,8 @@ type MountConfig struct {
 
 	Bind      string
 	Named     string
-	NamedMode string
-	NamedKind string
+	NamedMode NamedVolumeMode
+	NamedKind VolumeKind
 	Owned     string
 	QuotaMiB  uint32
 	Tmpfs     bool
@@ -1876,10 +1875,19 @@ type MountOptions struct {
 	QuotaMiB uint32
 }
 
+// NamedVolumeMode selects how a sandbox acquires a named volume.
+type NamedVolumeMode string
+
+const (
+	NamedVolumeExisting     NamedVolumeMode = "existing"
+	NamedVolumeCreate       NamedVolumeMode = "create"
+	NamedVolumeEnsureExists NamedVolumeMode = "ensure-exists"
+)
+
 // NamedVolumeOptions tunes sandbox-time named volume provisioning.
 type NamedVolumeOptions struct {
-	Mode     string // "existing", "create", or "ensure-exists"; empty means existing.
-	Kind     string // "dir" or "disk"; empty means dir.
+	Mode     NamedVolumeMode // The zero value uses an existing volume.
+	Kind     VolumeKind      // The zero value selects directory storage.
 	SizeMiB  uint32
 	QuotaMiB uint32
 }

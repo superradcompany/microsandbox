@@ -13,8 +13,8 @@ use futures::{StreamExt, future::Either, stream};
 #[cfg(any(feature = "local", test))]
 use tokio::sync::Notify;
 
-use crate::backend::Backend;
-use crate::backend::sandbox::SandboxIdentity;
+use crate::context::Context;
+use crate::context::sandbox::SandboxIdentity;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::SandboxConfig;
@@ -88,7 +88,7 @@ impl<T> CaptureSlot<T> {
 
 #[cfg(not(feature = "local"))]
 pub(super) async fn branch_many(
-    _backend: Arc<dyn Backend>,
+    _backend: Arc<dyn Context>,
     _source: &str,
     _identity: SandboxIdentity,
     _options: SandboxConfig,
@@ -103,7 +103,7 @@ pub(super) async fn branch_many(
 
 #[cfg(feature = "local")]
 pub(super) async fn branch_many(
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     source: &str,
     identity: SandboxIdentity,
     mut options: SandboxConfig,
@@ -119,7 +119,7 @@ pub(super) async fn branch_many(
     // locked reservation: preflight cannot promise atomicity against another process.
     for name in &names {
         local.validate_sandbox_name_for_runtime(name)?;
-        match backend.sandboxes().get(backend.clone(), name).await {
+        match backend.sandbox_ops().get(backend.clone(), name).await {
             Ok(_) => return Err(MicrosandboxError::SandboxAlreadyExists(name.clone())),
             Err(MicrosandboxError::SandboxNotFound(_)) => (),
             Err(error) => return Err(error),
@@ -152,7 +152,9 @@ pub(super) async fn branch_many(
             // the same completed capture; no sibling can enter the producer path.
             let mut config = template.clone();
             config.spec.name = names[index].clone();
-            backend.sandboxes().create_detached(backend.clone(), config)
+            backend
+                .sandbox_ops()
+                .create_detached(backend.clone(), config)
         })
         .await?;
     Ok(names

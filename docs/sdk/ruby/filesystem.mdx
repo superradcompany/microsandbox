@@ -14,7 +14,7 @@ See [Filesystem](/sandboxes/filesystem) for usage examples.
 sandbox.fs # => Microsandbox::Filesystem
 ```
 
-Get the filesystem helper for this sandbox.
+Get a filesystem helper without starting the sandbox or keeping it alive. Each operation connects to or starts the sandbox and uses that run for the call. After you release the original sandbox handles, get a new Sandbox before starting more work. Explicit stop can interrupt active I/O.
 
 <p className="msb-label">Returns</p>
 
