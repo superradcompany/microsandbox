@@ -3,8 +3,8 @@
 use std::os::raw::{c_char, c_uchar};
 use std::time::Duration;
 
+use microsandbox::Storage;
 use microsandbox::storage::MemoryPruneOptions;
-use microsandbox::{MicrosandboxError, Operation, Storage};
 
 use crate::{FfiError, cstr, get, run_c};
 
@@ -36,27 +36,7 @@ pub unsafe extern "C" fn msb_sandbox_storage_usage(
     run_c(cancel_id, buf, buf_len, || {
         let sandbox = get(handle)?;
         Ok(Box::pin(async move {
-            let backend = sandbox.backend();
-            // Refuse remote accounting before any catalog lookup or host filesystem access.
-            if backend.as_local().is_none() {
-                return Err(FfiError::from(MicrosandboxError::local_only(
-                    Operation::StorageUsage,
-                )));
-            }
-            let current = backend
-                .sandboxes()
-                .get(backend.clone(), sandbox.name())
-                .await
-                .map_err(FfiError::from)?;
-            if current.id() != sandbox.id() {
-                return Err(FfiError::from(MicrosandboxError::SandboxReplaced {
-                    name: sandbox.name().to_owned(),
-                    expected: sandbox.id().to_string(),
-                    actual: current.id().to_string(),
-                }));
-            }
-            // The bound handle revalidates identity under its transition guard for the scan.
-            let report = current.storage_usage().await.map_err(FfiError::from)?;
+            let report = sandbox.storage_usage().await.map_err(FfiError::from)?;
             serde_json::to_string(&report).map_err(|error| FfiError::internal(error.to_string()))
         }))
     })
@@ -85,22 +65,34 @@ pub unsafe extern "C" fn msb_storage_prune(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
-    run_c(cancel_id, buf, buf_len, || {
-        let options: PruneOptions =
-            serde_json::from_str(&unsafe { cstr(options_json) }?).map_err(|error| {
-                FfiError::invalid_argument(format!("invalid storage prune options: {error}"))
-            })?;
-        Ok(Box::pin(async move {
-            let options = MemoryPruneOptions {
-                dry_run: options.dry_run,
-                older_than: Duration::from_secs(options.older_than_seconds),
-                max_entries: None,
-                ..Default::default()
-            };
-            let report = Storage::prune(&options).await.map_err(FfiError::from)?;
-            serde_json::to_string(&report).map_err(|error| FfiError::internal(error.to_string()))
-        }))
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            Err(FfiError::from(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::StoragePrune,
+            )))
+        })
+    }
+    #[cfg(feature = "local")]
+    {
+        run_c(cancel_id, buf, buf_len, || {
+            let options: PruneOptions = serde_json::from_str(&unsafe { cstr(options_json) }?)
+                .map_err(|error| {
+                    FfiError::invalid_argument(format!("invalid storage prune options: {error}"))
+                })?;
+            Ok(Box::pin(async move {
+                let options = MemoryPruneOptions {
+                    dry_run: options.dry_run,
+                    older_than: Duration::from_secs(options.older_than_seconds),
+                    max_entries: None,
+                    ..Default::default()
+                };
+                let report = Storage::prune(&options).await.map_err(FfiError::from)?;
+                serde_json::to_string(&report)
+                    .map_err(|error| FfiError::internal(error.to_string()))
+            }))
+        })
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

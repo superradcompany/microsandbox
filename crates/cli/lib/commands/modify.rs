@@ -4,9 +4,8 @@ use clap::Args;
 use console::style;
 use microsandbox::sandbox::{
     ChangeKind, ConfigPlannedChange, ModificationDisposition, ModificationWarning, PlannedChange,
-    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
-    SandboxModificationBuilder, SandboxModificationPlan, SecretChangeKind, SecretPlannedChange,
-    SecretSource,
+    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, SandboxModificationBuilder,
+    SandboxModificationPlan, SecretChangeKind, SecretPlannedChange, SecretSource,
 };
 
 use super::common;
@@ -146,7 +145,7 @@ pub struct ModifyArgs {
 /// Execute the `msb modify` command.
 pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
     let json = args.format == Some(OutputFormat::Json);
-    let handle = Sandbox::get(&args.name).await?;
+    let handle = crate::commands::common::sandbox_record(&args.name).await?;
     if args.compact {
         let mut compact = handle.compact();
         if let Some(layers) = args.layers {

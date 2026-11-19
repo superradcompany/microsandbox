@@ -658,11 +658,11 @@ func TestAnchorModifyMountsCapturesLocalHostPathsOnly(t *testing.T) {
 		"/abs":  {Bind: absolute},
 	}}
 
-	local, err := anchorModifyMounts(opts, BackendLocal)
+	local, err := anchorModifyMounts(opts, ContextLocal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	remote, err := anchorModifyMounts(opts, BackendCloud)
+	remote, err := anchorModifyMounts(opts, ContextRemote)
 	if err != nil {
 		t.Fatal(err)
 	}

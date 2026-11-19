@@ -4,6 +4,7 @@
 //! All inter-thread communication flows through [`SharedState`], which holds
 //! lock-free frame queues and cross-platform [`WakePipe`] notifications.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -12,7 +13,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
-use ipnetwork::Ipv6Network;
+use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_types::HttpConfig;
 use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
 pub use microsandbox_utils::wake_pipe::WakePipe;
@@ -89,20 +90,30 @@ pub struct SharedState {
     /// Per-sandbox gateway IPv6. Set once at boot. See `gateway_ipv4`.
     gateway_ipv6: OnceLock<Ipv6Addr>,
 
+    /// Host interface addresses and on-link IPv6 networks used by the
+    /// default destination policy. Set once before the network starts.
+    host_ipv4: OnceLock<Vec<Ipv4Addr>>,
+    host_ipv4_networks: OnceLock<Vec<Ipv4Network>>,
+    host_ipv6: OnceLock<Vec<Ipv6Addr>>,
+    host_ipv6_networks: OnceLock<Vec<Ipv6Network>>,
+
     /// NAT64 `/96` prefixes used by policy classification.
     nat64_prefixes: OnceLock<Vec<Ipv6Network>>,
 
-    /// Aggregate network byte counters at the guest/runtime boundary.
+    /// Aggregate network counters at the guest/runtime boundary.
     metrics: NetworkMetrics,
 
     /// HTTP denial settings installed before the network starts.
     http: OnceLock<HttpConfig>,
 }
 
-/// Aggregate network byte counters shared with the runtime metrics sampler.
+/// Aggregate network counters shared with the runtime metrics sampler.
 pub struct NetworkMetrics {
     tx_bytes: AtomicU64,
     rx_bytes: AtomicU64,
+    inbound_tcp_rejected: AtomicU64,
+    outbound_tcp_rejected: AtomicU64,
+    outbound_udp_evicted: AtomicU64,
 }
 
 /// Address family for resolved hostname entries.
@@ -139,6 +150,10 @@ impl SharedState {
             resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
             gateway_ipv4: OnceLock::new(),
             gateway_ipv6: OnceLock::new(),
+            host_ipv4: OnceLock::new(),
+            host_ipv4_networks: OnceLock::new(),
+            host_ipv6: OnceLock::new(),
+            host_ipv6_networks: OnceLock::new(),
             nat64_prefixes: OnceLock::new(),
             metrics: NetworkMetrics::default(),
             http: OnceLock::new(),
@@ -164,6 +179,42 @@ impl SharedState {
     /// Gateway IPv6 address, if set.
     pub fn gateway_ipv6(&self) -> Option<Ipv6Addr> {
         self.gateway_ipv6.get().copied()
+    }
+
+    /// Set host addresses and on-link IPv6 networks used by policy matching.
+    pub fn set_host_networks(
+        &self,
+        ipv4: Vec<Ipv4Addr>,
+        ipv4_networks: Vec<Ipv4Network>,
+        ipv6: Vec<Ipv6Addr>,
+        ipv6_networks: Vec<Ipv6Network>,
+    ) {
+        let _ = self.host_ipv4.set(ipv4);
+        let _ = self.host_ipv4_networks.set(ipv4_networks);
+        let _ = self.host_ipv6.set(ipv6);
+        let _ = self.host_ipv6_networks.set(ipv6_networks);
+    }
+
+    pub fn host_ipv4(&self) -> &[Ipv4Addr] {
+        self.host_ipv4.get().map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn host_ipv6(&self) -> &[Ipv6Addr] {
+        self.host_ipv6.get().map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn host_ipv4_networks(&self) -> &[Ipv4Network] {
+        self.host_ipv4_networks
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn host_ipv6_networks(&self) -> &[Ipv6Network] {
+        self.host_ipv6_networks
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Install HTTP denial settings. The first call wins.
@@ -305,6 +356,18 @@ impl SharedState {
             .member_matches(&addr, Instant::now(), |key| predicate(&key.hostname))
     }
 
+    /// Snapshot live hostname bindings for a DNS range authorization decision.
+    /// Holding one read lock prevents a concurrent DNS answer from introducing
+    /// an unsampled hostname-policy exception halfway through that decision.
+    pub(crate) fn resolved_hostname_snapshot(&self) -> HashMap<IpAddr, Vec<String>> {
+        let mut result: HashMap<IpAddr, Vec<String>> = HashMap::new();
+        let index = self.resolved_hostnames.read();
+        index.visit_live_bindings(Instant::now(), |key, addr| {
+            result.entry(*addr).or_default().push(key.hostname.clone());
+        });
+        result
+    }
+
     /// Best-effort expiry maintenance for resolved hostnames.
     ///
     /// This runs outside the hot egress read path. If the index is currently
@@ -350,6 +413,42 @@ impl SharedState {
         true
     }
 
+    /// Count a published TCP connection rejected by the admission queue.
+    pub(crate) fn record_inbound_tcp_rejection(&self) {
+        self.metrics
+            .inbound_tcp_rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Cumulative published TCP connections rejected by the admission queue.
+    pub fn inbound_tcp_rejected(&self) -> u64 {
+        self.metrics.inbound_tcp_rejected.load(Ordering::Relaxed)
+    }
+
+    /// Publish the outbound tracker's cumulative active-cap rejection count.
+    pub(crate) fn set_outbound_tcp_rejected(&self, total: u64) {
+        self.metrics
+            .outbound_tcp_rejected
+            .store(total, Ordering::Relaxed);
+    }
+
+    /// Outbound TCP connections rejected by the active connection cap.
+    pub fn outbound_tcp_rejected(&self) -> u64 {
+        self.metrics.outbound_tcp_rejected.load(Ordering::Relaxed)
+    }
+
+    /// Count an outbound UDP session evicted to enforce the session cap.
+    pub(crate) fn record_outbound_udp_eviction(&self) {
+        self.metrics
+            .outbound_udp_evicted
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Outbound UDP sessions evicted to enforce the session cap.
+    pub fn outbound_udp_evicted(&self) -> u64 {
+        self.metrics.outbound_udp_evicted.load(Ordering::Relaxed)
+    }
+
     /// Total bytes transmitted by the guest into the runtime.
     pub fn tx_bytes(&self) -> u64 {
         self.metrics.tx_bytes.load(Ordering::Relaxed)
@@ -366,6 +465,9 @@ impl Default for NetworkMetrics {
         Self {
             tx_bytes: AtomicU64::new(0),
             rx_bytes: AtomicU64::new(0),
+            inbound_tcp_rejected: AtomicU64::new(0),
+            outbound_tcp_rejected: AtomicU64::new(0),
+            outbound_udp_evicted: AtomicU64::new(0),
         }
     }
 }

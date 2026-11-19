@@ -4,9 +4,9 @@ description: Resize a running sandbox and update its configuration without repla
 icon: "pen-to-square"
 ---
 
-<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-You do not need to replace a running sandbox just because its workload changes. `modify` can resize the VM, update host-side metadata, rotate existing secrets, and change the defaults used by future commands while the sandbox stays up.
+Use `modify` to resize a local sandbox, update its metadata, rotate secrets, or change defaults for future commands. On our managed cloud, `modify` changes secrets only; recreate the sandbox for other configuration changes.
 
 <span id="what-can-modify-change" />
 
@@ -30,7 +30,7 @@ When a change takes effect depends on the setting:
 
 The default policy applies only changes that can complete without restarting. If a patch contains one restart-required change, microsandbox rejects the whole patch and the old configuration stays intact.
 
-On microsandbox cloud, `modify` changes secrets only. A secret's value, allowed hosts, and removal can apply live; any other secret change applies at the next start, so use the next-start policy, then stop and start the sandbox. The restart policy cannot apply those changes on cloud. On a running sandbox, a live change reads `live` or fails with a [not-confirmed error](/sdk/errors#modification-not-confirmed); it reads `next start` only when the sandbox is stopped or the next-start policy is used.
+On our managed cloud, `modify` changes secrets only. A secret's value, allowed hosts, and removal can apply live; any other secret change applies at the next start, so use the next-start policy, then stop and start the sandbox. The restart policy cannot apply those changes on cloud. On a running sandbox, a live change reads `live` or fails with a [not-confirmed error](/sdk/errors#modification-not-confirmed); it reads `next start` only when the sandbox is stopped or the next-start policy is used.
 
 <span id="modify-a-running-sandbox" />
 

@@ -68,11 +68,12 @@ use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 use super::lifecycle::acquire_sandbox_lifecycle_guard;
 #[cfg(feature = "net")]
 use super::network_slot::NetworkSlot;
+use super::protected_state::{self, StoragePreparation};
 #[cfg(windows)]
 use super::sockets::ensure_agent_pipe_unclaimed;
 use super::sockets::remove_socket_artifacts_at;
-use crate::backend::local::creation::CreationStorage;
-use crate::backend::local::volume::ResolvedNamedVolume;
+use crate::context::local::creation::CreationStorage;
+use crate::context::local::volume::ResolvedNamedVolume;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
 #[cfg(windows)]
@@ -82,8 +83,8 @@ use crate::runtime::launch_contract;
 use crate::sandbox::SecurityProfile;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    backend::LocalBackend,
     config::{BlockWritebackConfig, RuntimeConfig},
+    context::LocalContext,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
         DiskImageFormat, HostPermissions, MountOptions, RootfsSource, SandboxConfig,
@@ -195,12 +196,13 @@ pub enum SpawnMode {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl LocalBackend {
+impl LocalContext {
     /// Complete filesystem preparation while its storage owner is still held.
     pub(crate) async fn prepare_sandbox_launch(
         &self,
         config: &SandboxConfig,
         storage: &CreationStorage,
+        preparation: StoragePreparation<'_>,
     ) -> MicrosandboxResult<()> {
         if storage.path() != self.sandboxes_dir().join(&config.spec.name) {
             return Err(MicrosandboxError::Runtime(
@@ -222,7 +224,7 @@ impl LocalBackend {
         #[cfg(not(feature = "embed-binaries"))]
         crate::setup::resolve_runtime(self.config())?;
         launch_contract::validate_runtime_config(config, self.config()).await?;
-        super::protected_state::prepare(self, config, storage).await?;
+        protected_state::prepare_launch(self, config, storage, preparation).await?;
         let runtime_storage = storage.clone();
         let scripts = config.spec.runtime.scripts.clone();
 
@@ -294,7 +296,8 @@ impl LocalBackend {
             ),
         };
         let storage = CreationStorage::acquire(self, &config.spec.name)?;
-        self.prepare_sandbox_launch(config, &storage).await?;
+        self.prepare_sandbox_launch(config, &storage, StoragePreparation::Existing)
+            .await?;
         self.launch_sandbox(
             config,
             sandbox_id,
@@ -670,13 +673,20 @@ impl LocalBackend {
             cmd.creation_flags(flags);
         }
         cmd.args(visible);
+        if config.storage_reader.is_some() {
+            // An old executable rejects this argument during CLI parsing, before opening a disk,
+            // even if an installation changes after the SDK's earlier capability probe.
+            cmd.arg("--require-storage-reader");
+        }
 
         // Agentd selection is process-wide for the VMM. Forward the explicit
         // path from the resolved backend config into the child environment.
         // Managed clears also remove inherited overrides. The child validates and eagerly
         // reads the selected payload before constructing any filesystem.
         cmd.env_remove("MSB_AGENTD_PATH");
-        if let Some(path) = &global.paths.agentd {
+        if config.storage_reader.is_none()
+            && let Some(path) = &global.paths.agentd
+        {
             cmd.env("MSB_AGENTD_PATH", path);
         }
 
@@ -1017,9 +1027,9 @@ impl Drop for StdioInheritGuard {
 
 /// Spawn a sandbox through the supplied local backend.
 ///
-/// Delegates to [`LocalBackend::spawn_sandbox`].
+/// Delegates to [`LocalContext::spawn_sandbox`].
 pub async fn spawn_sandbox(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &SandboxConfig,
     sandbox_id: i32,
     mode: SpawnMode,
@@ -1348,7 +1358,7 @@ async fn prepare_oci_upper(
 }
 
 fn reserve_metrics_slot(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &SandboxConfig,
     sandbox_id: i32,
 ) -> Option<MetricsReservation> {
@@ -1720,7 +1730,7 @@ fn patch_sigchld_handler_uses_alt_stack() {
 /// the start to lock again, including one whose read-only mode changes. A disk attached
 /// twice in `prospective` is refused here, before anything is stopped.
 pub(crate) async fn reserve_added_disks(
-    local: &LocalBackend,
+    local: &LocalContext,
     running: &SandboxConfig,
     prospective: &SandboxConfig,
 ) -> MicrosandboxResult<DiskReservations> {
@@ -2313,7 +2323,7 @@ pub(crate) fn guest_mount_tag(guest_path: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn machine_cli_args(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &SandboxConfig,
     sandbox_id: i32,
     #[cfg(feature = "net")] network_slot: NetworkSlot,
@@ -2770,6 +2780,7 @@ fn machine_cli_args(
 /// Build guest settings shared by launch preflight and the final payload.
 pub(crate) fn guest_bootstrap(config: &SandboxConfig) -> GuestBootstrap {
     GuestBootstrap {
+        storage_preview_oci: config.storage_reader == Some(true),
         exec_limits: Some(config.exec_limits()),
         hostname: Some(
             config
@@ -2907,8 +2918,8 @@ mod tests {
     use crate::db::entity::volume as volume_entity;
     use crate::{
         LogLevel,
-        backend::LocalBackend,
         config::{BlockWritebackConfig, RuntimeConfig},
+        context::LocalContext,
         sandbox::{
             DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, RlimitResource,
             RootfsSource, SandboxBuilder, SandboxConfig, StatVirtualization, VolumeMount,
@@ -2916,7 +2927,7 @@ mod tests {
         volume::VolumeKind,
     };
     use crate::{
-        SandboxConfigPatch, backend::BackendSelectionSource, config::layers::BackendConfig,
+        SandboxConfigPatch, config::layers::BackendConfig, context::ContextSelectionSource,
     };
 
     #[test]
@@ -3604,12 +3615,12 @@ mod tests {
 
     /// Use isolated configuration for pure `machine_cli_args` rendering tests.
     /// The database remains unopened.
-    fn test_local_backend() -> LocalBackend {
-        LocalBackend::from_backend_config(
+    fn test_local_backend() -> LocalContext {
+        LocalContext::from_backend_config(
             BackendConfig::new(Default::default(), Default::default())
                 .prepare_for_local_backend(Default::default())
                 .unwrap(),
-            BackendSelectionSource::Programmatic,
+            ContextSelectionSource::Programmatic,
             None,
         )
     }
@@ -4568,7 +4579,7 @@ mod tests {
 
         super::prepare_oci_upper(
             &config,
-            &crate::backend::local::creation::CreationStorage::for_test(temp.path()),
+            &crate::context::local::creation::CreationStorage::for_test(temp.path()),
         )
         .await
         .unwrap();
@@ -4626,7 +4637,7 @@ mod tests {
 
         let error = super::prepare_oci_upper(
             &config,
-            &crate::backend::local::creation::CreationStorage::for_test(temp.path()),
+            &crate::context::local::creation::CreationStorage::for_test(temp.path()),
         )
         .await
         .unwrap_err();
@@ -5136,12 +5147,11 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_named_volumes_recovers_disk_metadata_from_store() {
         let temp = tempdir().unwrap();
-        let local = LocalBackend::builder()
+        let local = LocalContext::builder()
             .config_path(temp.path().join("config.json"))
             .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
-            .await
             .unwrap();
         let pools = local.db().await.unwrap();
         volume_entity::ActiveModel {

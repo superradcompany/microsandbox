@@ -250,6 +250,18 @@ build mode="debug": (build-msb mode) _ensure-libkrunfw
 [windows]
 build mode="debug": (build-msb mode) _ensure-libkrunfw
 
+# Check the msb CLI, the SDK, and the engine library test targets compile for a Windows target. Requires: rustup and zig.
+[linux]
+check-windows-target: _check-windows-target-unix
+
+# Check the msb CLI, the SDK, and the engine library test targets compile for a Windows target. Requires: rustup and zig.
+[macos]
+check-windows-target: _check-windows-target-unix
+
+# Shared cross-target check used by Linux and macOS.
+_check-windows-target-unix:
+    ./scripts/check-windows-target.sh
+
 # Run snapshot/archive/group and checkpoint logic tests without starting VMs.
 test-snapshot:
     cargo test -p microsandbox --lib snapshot::

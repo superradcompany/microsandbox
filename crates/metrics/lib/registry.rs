@@ -17,10 +17,11 @@ use chrono::{DateTime, TimeZone, Utc};
 use crate::layout::{
     DEFAULT_CAPACITY, HEADER_SIZE, HEADER_STATE_INITIALIZING, HEADER_STATE_READY,
     HEADER_STATE_UNINIT, Header, NAME_BYTES, REGISTRY_MAGIC, REGISTRY_VERSION, SAMPLE_FLAG_CPU,
-    SAMPLE_FLAG_MEMORY_AVAILABLE, SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SAMPLE_FLAG_MEMORY_LIMIT_LIVE,
-    SAMPLE_FLAG_MEMORY_USED, SAMPLE_FLAG_UPPER_FREE, SAMPLE_FLAG_UPPER_HOST_ALLOCATED,
-    SAMPLE_FLAG_UPPER_USED, SLOT_ACTIVE, SLOT_FREE, SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot,
-    registry_size,
+    SAMPLE_FLAG_INBOUND_TCP_REJECTED, SAMPLE_FLAG_MEMORY_AVAILABLE,
+    SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SAMPLE_FLAG_MEMORY_LIMIT_LIVE, SAMPLE_FLAG_MEMORY_USED,
+    SAMPLE_FLAG_OUTBOUND_TCP_REJECTED, SAMPLE_FLAG_OUTBOUND_UDP_EVICTED, SAMPLE_FLAG_UPPER_FREE,
+    SAMPLE_FLAG_UPPER_HOST_ALLOCATED, SAMPLE_FLAG_UPPER_USED, SLOT_ACTIVE, SLOT_FREE,
+    SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot, registry_size,
 };
 use crate::snapshot::{LiveMetric, LiveMetricState};
 use crate::{MetricsError, MetricsResult};
@@ -111,6 +112,12 @@ pub struct SampleWrite {
     pub net_rx_bytes: u64,
     /// Cumulative network bytes transmitted.
     pub net_tx_bytes: u64,
+    /// Published TCP admission rejections; absent on older runtimes.
+    pub net_inbound_tcp_rejected: Option<u64>,
+    /// Outbound TCP cap rejections; absent on older runtimes.
+    pub net_outbound_tcp_rejected: Option<u64>,
+    /// Outbound UDP session-cap evictions; absent on older runtimes.
+    pub net_outbound_udp_evicted: Option<u64>,
     /// Guest-visible OCI upper filesystem used bytes when available.
     pub upper_used_bytes: Option<u64>,
     /// Guest-visible OCI upper filesystem free bytes when available.
@@ -738,6 +745,9 @@ impl MetricsRegistry {
             let disk_r = slot.disk_read_bytes.load(Ordering::Relaxed);
             let disk_w = slot.disk_write_bytes.load(Ordering::Relaxed);
             let net_rx = slot.net_rx_bytes.load(Ordering::Relaxed);
+            let inbound_rejected = slot.net_inbound_tcp_rejected.load(Ordering::Relaxed);
+            let outbound_rejected = slot.net_outbound_tcp_rejected.load(Ordering::Relaxed);
+            let outbound_evicted = slot.net_outbound_udp_evicted.load(Ordering::Relaxed);
             let net_tx = slot.net_tx_bytes.load(Ordering::Relaxed);
             let upper_used = slot.upper_used_bytes.load(Ordering::Relaxed);
             let upper_free = slot.upper_free_bytes.load(Ordering::Relaxed);
@@ -804,6 +814,21 @@ impl MetricsRegistry {
                 disk_write_bytes: disk_w,
                 net_rx_bytes: net_rx,
                 net_tx_bytes: net_tx,
+                net_inbound_tcp_rejected: flag_value(
+                    sample_flags,
+                    SAMPLE_FLAG_INBOUND_TCP_REJECTED,
+                    inbound_rejected,
+                ),
+                net_outbound_tcp_rejected: flag_value(
+                    sample_flags,
+                    SAMPLE_FLAG_OUTBOUND_TCP_REJECTED,
+                    outbound_rejected,
+                ),
+                net_outbound_udp_evicted: flag_value(
+                    sample_flags,
+                    SAMPLE_FLAG_OUTBOUND_UDP_EVICTED,
+                    outbound_evicted,
+                ),
                 upper_used_bytes: flag_value(sample_flags, SAMPLE_FLAG_UPPER_USED, upper_used),
                 upper_free_bytes: flag_value(sample_flags, SAMPLE_FLAG_UPPER_FREE, upper_free),
                 upper_host_allocated_bytes: flag_value(
@@ -877,6 +902,15 @@ impl MetricsSlotWriter {
         if sample.memory_limit_bytes.is_some() {
             sample_flags |= SAMPLE_FLAG_MEMORY_LIMIT_LIVE;
         }
+        if sample.net_inbound_tcp_rejected.is_some() {
+            sample_flags |= SAMPLE_FLAG_INBOUND_TCP_REJECTED;
+        }
+        if sample.net_outbound_tcp_rejected.is_some() {
+            sample_flags |= SAMPLE_FLAG_OUTBOUND_TCP_REJECTED;
+        }
+        if sample.net_outbound_udp_evicted.is_some() {
+            sample_flags |= SAMPLE_FLAG_OUTBOUND_UDP_EVICTED;
+        }
         slot.sample_flags.store(sample_flags, Ordering::Relaxed);
         if let Some(limit) = sample.memory_limit_bytes {
             slot.memory_limit_bytes.store(limit, Ordering::Relaxed);
@@ -905,6 +939,18 @@ impl MetricsSlotWriter {
             .store(sample.net_rx_bytes, Ordering::Relaxed);
         slot.net_tx_bytes
             .store(sample.net_tx_bytes, Ordering::Relaxed);
+        slot.net_inbound_tcp_rejected.store(
+            sample.net_inbound_tcp_rejected.unwrap_or(0),
+            Ordering::Relaxed,
+        );
+        slot.net_outbound_tcp_rejected.store(
+            sample.net_outbound_tcp_rejected.unwrap_or(0),
+            Ordering::Relaxed,
+        );
+        slot.net_outbound_udp_evicted.store(
+            sample.net_outbound_udp_evicted.unwrap_or(0),
+            Ordering::Relaxed,
+        );
         slot.upper_used_bytes
             .store(sample.upper_used_bytes.unwrap_or(0), Ordering::Relaxed);
         slot.upper_free_bytes
@@ -1361,6 +1407,9 @@ fn write_reservation_fields(slot: &Slot, spec: &ReserveSlot<'_>, generation: u64
     slot.disk_write_bytes.store(0, Ordering::Relaxed);
     slot.net_rx_bytes.store(0, Ordering::Relaxed);
     slot.net_tx_bytes.store(0, Ordering::Relaxed);
+    slot.net_inbound_tcp_rejected.store(0, Ordering::Relaxed);
+    slot.net_outbound_tcp_rejected.store(0, Ordering::Relaxed);
+    slot.net_outbound_udp_evicted.store(0, Ordering::Relaxed);
     slot.upper_used_bytes.store(0, Ordering::Relaxed);
     slot.upper_free_bytes.store(0, Ordering::Relaxed);
     slot.upper_host_allocated_bytes.store(0, Ordering::Relaxed);
@@ -1378,8 +1427,8 @@ fn write_name(slot: &Slot, name: &str) {
     for (i, byte) in bytes.iter().take(len).enumerate() {
         slot.name_bytes[i].store(*byte, Ordering::Relaxed);
     }
-    for i in len..NAME_BYTES {
-        slot.name_bytes[i].store(0, Ordering::Relaxed);
+    for byte in &slot.name_bytes[len..] {
+        byte.store(0, Ordering::Relaxed);
     }
     slot.name_len.store(len as u16, Ordering::Relaxed);
 }
@@ -1530,7 +1579,7 @@ fn _assert_atomic_traits() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Barrier;
+    use std::sync::{Barrier, mpsc};
     use std::thread;
 
     use super::*;
@@ -1591,6 +1640,9 @@ mod tests {
             disk_write_bytes: 8192,
             net_rx_bytes: 100,
             net_tx_bytes: 200,
+            net_inbound_tcp_rejected: Some(37),
+            net_outbound_tcp_rejected: Some(41),
+            net_outbound_udp_evicted: Some(43),
             upper_used_bytes: Some(64 * 1024),
             upper_free_bytes: Some(128 * 1024),
             upper_host_allocated_bytes: Some(16 * 1024),
@@ -1614,6 +1666,9 @@ mod tests {
         assert_eq!(item.disk_write_bytes, 8192);
         assert_eq!(item.net_rx_bytes, 100);
         assert_eq!(item.net_tx_bytes, 200);
+        assert_eq!(item.net_inbound_tcp_rejected, Some(37));
+        assert_eq!(item.net_outbound_tcp_rejected, Some(41));
+        assert_eq!(item.net_outbound_udp_evicted, Some(43));
         assert_eq!(item.upper_used_bytes, Some(64 * 1024));
         assert_eq!(item.upper_free_bytes, Some(128 * 1024));
         assert_eq!(item.upper_host_allocated_bytes, Some(16 * 1024));
@@ -1646,6 +1701,9 @@ mod tests {
             disk_write_bytes: 0,
             net_rx_bytes: 0,
             net_tx_bytes: 0,
+            net_inbound_tcp_rejected: None,
+            net_outbound_tcp_rejected: None,
+            net_outbound_udp_evicted: None,
             upper_used_bytes: None,
             upper_free_bytes: None,
             upper_host_allocated_bytes: None,
@@ -1757,6 +1815,9 @@ mod tests {
                 disk_write_bytes: 8192,
                 net_rx_bytes: 100,
                 net_tx_bytes: 200,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -1812,6 +1873,9 @@ mod tests {
                     disk_write_bytes: counter,
                     net_rx_bytes: counter,
                     net_tx_bytes: counter,
+                    net_inbound_tcp_rejected: None,
+                    net_outbound_tcp_rejected: None,
+                    net_outbound_udp_evicted: None,
                     upper_used_bytes: None,
                     upper_free_bytes: None,
                     upper_host_allocated_bytes: None,
@@ -1875,31 +1939,51 @@ mod tests {
         const ITERATIONS: u64 = 4_000;
         let barrier = Arc::new(Barrier::new(WRITERS + 1));
         let mut handles = Vec::new();
+        let mut stop_senders = Vec::new();
         for worker in 0..WRITERS {
             let writer = writer.clone();
             let barrier = Arc::clone(&barrier);
+            let (stop_sender, stop_receiver) = mpsc::channel::<()>();
+            stop_senders.push(stop_sender);
             handles.push(thread::spawn(move || {
-                barrier.wait();
-                for n in 0..ITERATIONS {
+                for n in 0_u64.. {
                     let counter = ((worker as u64) << 48) | n | 1;
-                    writer
-                        .write_sample(SampleWrite {
-                            sampled_at: Utc::now(),
-                            cpu_percent: Some((counter % 100) as f32),
-                            vcpu_time_ns: Some(counter),
-                            memory_bytes: Some(counter),
-                            memory_available_bytes: Some(counter),
-                            memory_host_resident_bytes: Some(counter),
-                            memory_limit_bytes: None,
-                            disk_read_bytes: counter,
-                            disk_write_bytes: counter,
-                            net_rx_bytes: counter,
-                            net_tx_bytes: counter,
-                            upper_used_bytes: None,
-                            upper_free_bytes: None,
-                            upper_host_allocated_bytes: None,
-                        })
-                        .unwrap();
+                    let result = writer.write_sample(SampleWrite {
+                        sampled_at: Utc::now(),
+                        cpu_percent: Some((counter % 100) as f32),
+                        vcpu_time_ns: Some(counter),
+                        memory_bytes: Some(counter),
+                        memory_available_bytes: Some(counter),
+                        memory_host_resident_bytes: Some(counter),
+                        memory_limit_bytes: None,
+                        disk_read_bytes: counter,
+                        disk_write_bytes: counter,
+                        net_rx_bytes: counter,
+                        net_tx_bytes: counter,
+                        net_inbound_tcp_rejected: None,
+                        net_outbound_tcp_rejected: None,
+                        net_outbound_udp_evicted: None,
+                        upper_used_bytes: None,
+                        upper_free_bytes: None,
+                        upper_host_allocated_bytes: None,
+                    });
+                    if n == 0 {
+                        // Publish before releasing the reader, even on a single CPU.
+                        // Keep Result checking after the barrier so an ordinary
+                        // write error cannot strand the reader at the barrier.
+                        barrier.wait();
+                    }
+                    result.unwrap();
+                    // Writers remain active until reading finishes. Dropping
+                    // senders also releases them if a reader assertion panics.
+                    if n + 1 >= ITERATIONS
+                        && matches!(
+                            stop_receiver.try_recv(),
+                            Err(mpsc::TryRecvError::Disconnected)
+                        )
+                    {
+                        break;
+                    }
                     if n % 64 == 0 {
                         thread::yield_now();
                     }
@@ -1909,7 +1993,7 @@ mod tests {
 
         barrier.wait();
         let mut successful_reads = 0;
-        while handles.iter().any(|handle| !handle.is_finished()) {
+        for _ in 0..10_000 {
             let snap = reg.snapshot().unwrap();
             if let Some(item) = snap.first() {
                 assert_eq!(item.memory_bytes, item.disk_read_bytes);
@@ -1922,6 +2006,7 @@ mod tests {
             }
             thread::yield_now();
         }
+        drop(stop_senders);
         for handle in handles {
             handle.join().unwrap();
         }
@@ -2020,6 +2105,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2062,6 +2150,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2138,6 +2229,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2210,6 +2304,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2239,6 +2336,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2311,12 +2411,26 @@ mod tests {
                 disk_write_bytes: 1,
                 net_rx_bytes: 1,
                 net_tx_bytes: 1,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
             })
             .unwrap();
 
+        // Older v3 writers never initialized this reserved tail field. Its
+        // presence flag, not the bytes left by a previous owner, is authoritative.
+        reg.slot(res.slot)
+            .net_inbound_tcp_rejected
+            .store(999, Ordering::Relaxed);
+        reg.slot(res.slot)
+            .net_outbound_tcp_rejected
+            .store(777, Ordering::Relaxed);
+        reg.slot(res.slot)
+            .net_outbound_udp_evicted
+            .store(555, Ordering::Relaxed);
         let live = reg.get_by_run_id(1).unwrap().unwrap();
         assert_eq!(live.cpu_percent, 0.0);
         assert_eq!(live.vcpu_time_ns, 0);
@@ -2328,6 +2442,9 @@ mod tests {
         assert_eq!(live.disk_write_bytes, 1);
         assert_eq!(live.net_rx_bytes, 1);
         assert_eq!(live.net_tx_bytes, 1);
+        assert_eq!(live.net_inbound_tcp_rejected, None);
+        assert_eq!(live.net_outbound_tcp_rejected, None);
+        assert_eq!(live.net_outbound_udp_evicted, None);
         assert!(reg.get_by_sandbox_id(1).unwrap().is_some());
 
         writer
@@ -2343,6 +2460,9 @@ mod tests {
                 disk_write_bytes: 1,
                 net_rx_bytes: 1,
                 net_tx_bytes: 1,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2402,6 +2522,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2444,6 +2567,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2506,6 +2632,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2554,6 +2683,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2598,6 +2730,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2647,6 +2782,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,
@@ -2677,6 +2815,9 @@ mod tests {
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
                 net_tx_bytes: 0,
+                net_inbound_tcp_rejected: None,
+                net_outbound_tcp_rejected: None,
+                net_outbound_udp_evicted: None,
                 upper_used_bytes: None,
                 upper_free_bytes: None,
                 upper_host_allocated_bytes: None,

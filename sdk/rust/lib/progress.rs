@@ -2,7 +2,7 @@
 
 use tokio::sync::mpsc;
 
-pub use microsandbox_runtime::startup_progress::{StartupPhase, StartupProgress};
+pub use microsandbox_types::startup_progress::{StartupPhase, StartupProgress};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -13,7 +13,7 @@ pub use microsandbox_runtime::startup_progress::{StartupPhase, StartupProgress};
 #[serde(tag = "kind", content = "progress", rename_all = "snake_case")]
 pub enum CreationProgress {
     /// Existing per-layer image preparation progress.
-    Pull(microsandbox_image::PullProgress),
+    Pull(microsandbox_types::pull_progress::PullProgress),
     /// Runtime preparation or activation progress.
     Startup(StartupProgress),
 }
@@ -63,21 +63,21 @@ mod tests {
     #[tokio::test]
     async fn ignored_full_or_dropped_progress_never_blocks_the_producer() {
         let (mut events, sender) = channel();
-        let weak = Some(sender.downgrade());
+        let weak = sender.downgrade();
         for _ in 0..10000 {
             report(
-                &weak,
+                &Some(weak.clone()),
                 CreationProgress::Startup(StartupProgress::phase(StartupPhase::Activating)),
             );
         }
         assert!(events.recv().await.is_some());
         drop(events);
         report(
-            &weak,
+            &Some(weak.clone()),
             CreationProgress::Startup(StartupProgress::phase(StartupPhase::Activating)),
         );
         drop(sender);
-        assert!(weak.unwrap().upgrade().is_none());
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]

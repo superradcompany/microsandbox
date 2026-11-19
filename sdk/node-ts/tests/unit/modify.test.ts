@@ -9,9 +9,8 @@ import {
 } from "../../dist/modify.js";
 import { UnsupportedOperationError } from "../../dist/errors.js";
 import { napi } from "../../dist/internal/napi.js";
-import type { NapiSandbox, NapiSandboxHandle } from "../../dist/internal/napi.js";
+import type { NapiSandbox } from "../../dist/internal/napi.js";
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
 
 describe("modifyOptionsToNapi", () => {
   it("returns undefined for omitted options", () => {
@@ -156,7 +155,7 @@ describe("secret policy capability gate", () => {
     return {
       modify,
       sandbox: new Sandbox({ modify } as unknown as NapiSandbox, "api"),
-      handle: new SandboxHandle({ modify } as unknown as NapiSandboxHandle),
+      handle: new Sandbox({ modify } as unknown as NapiSandbox),
     };
   }
 
@@ -278,7 +277,7 @@ describe("modify mounts native capability", () => {
     native.supportsModifyMounts = undefined;
     const modify = vi.fn(async () => plan);
     const sandbox = new Sandbox({ modify } as unknown as NapiSandbox, "api");
-    const handle = new SandboxHandle({ modify } as unknown as NapiSandboxHandle);
+    const handle = new Sandbox({ modify } as unknown as NapiSandbox);
     const mixed = { env: { A: "1" }, mounts: [mount] };
     const removal = { env: { A: "1" }, mountsRemove: ["/old"] };
 

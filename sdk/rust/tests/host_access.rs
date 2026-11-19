@@ -1,5 +1,7 @@
 //! Integration tests for the `host.microsandbox.internal` alias.
 
+#![cfg(feature = "net")]
+
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;

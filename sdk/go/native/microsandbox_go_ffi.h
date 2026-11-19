@@ -93,7 +93,7 @@ char *msb_sandbox_start(uint64_t cancel_id,
                         uintptr_t buf_len);
 
 /**
- * Identity-safe lifecycle dispatch for Go `SandboxHandle` receivers.
+ * Identity-safe lifecycle dispatch for Go `SandboxRecord` receivers.
  */
 char *msb_sandbox_handle_lifecycle(uint64_t cancel_id,
                                    const char *name,
@@ -1069,6 +1069,25 @@ char *msb_sandbox_attach_shell(uint64_t cancel_id,
                                unsigned char *buf,
                                uintptr_t buf_len);
 
+/**
+ * Creation is local configuration capture, not a remote lookup or runtime launch.
+ */
+char *msb_context_create(uint64_t cancel_id,
+                         const char *options,
+                         unsigned char *buf,
+                         uintptr_t len);
+
+/**
+ * Release the registry reference. Existing collections and native resources retain their Arcs.
+ */
+void msb_context_release(Handle handle);
+
+char *msb_context_operation(uint64_t cancel_id,
+                            Handle handle,
+                            const char *request,
+                            unsigned char *buf,
+                            uintptr_t len);
+
 char *msb_creation_progress_open(unsigned char *buf, uintptr_t len);
 
 char *msb_creation_progress_recv(uint64_t cancel_id,
@@ -1087,6 +1106,22 @@ char *msb_sandbox_shell_path(uint64_t cancel_id,
                              uintptr_t buf_len);
 
 /**
+ * Return JSON in an owned byte allocation, released by this library's
+ * msb_agent_free_bytes. Existing fixed-buffer entry points remain ABI-compatible.
+ *
+ * # Safety
+ * Strings must be valid C strings. Output slots must be writable and must not
+ * alias each other or any input; the caller must release a successful allocation.
+ */
+char *msb_execution_result(uint64_t cancel_id,
+                           Handle handle,
+                           const char *operation,
+                           const char *command,
+                           const char *options,
+                           unsigned char **out_ptr,
+                           uintptr_t *out_len);
+
+/**
  * Run a cancellable managed-job operation. Cancellation never terminates a job.
  * The caller supplies borrowed request text and a writable output buffer.
  */
@@ -1096,6 +1131,45 @@ char *msb_jobs(uint64_t cancel_id,
                unsigned char *buf,
                uintptr_t buf_len);
 
+void msb_resource_release(Handle handle);
+
+char *msb_resource_operation(uint64_t cancel_id,
+                             Handle handle,
+                             const char *request,
+                             unsigned char *buf,
+                             uintptr_t len);
+
+/**
+ * Provider metadata is owned by this library and freed through msb_free_string.
+ */
+char *msb_provider_info(void);
+
+/**
+ * Wait against the registered receiver, retaining destination and ownership.
+ */
+char *msb_sandbox_resource_wait_for_status(uint64_t cancel_id,
+                                           Handle handle,
+                                           const char *status,
+                                           unsigned char *buf,
+                                           uintptr_t buf_len);
+
+/**
+ * Receiver-based operations never resolve the current ambient destination.
+ */
+char *msb_sandbox_resource_operation(uint64_t cancel_id,
+                                     Handle handle,
+                                     const char *operation,
+                                     unsigned char *buf,
+                                     uintptr_t buf_len);
+
+/**
+ * Resource listing has a distinct symbol so older metadata consumers keep their ABI.
+ */
+char *msb_sandbox_resource_list(uint64_t cancel_id,
+                                const char *filter_json,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
 /**
  * Restore a detached sandbox through a dedicated C entry point.
  */
@@ -1104,6 +1178,73 @@ char *msb_sandbox_restore(uint64_t cancel_id,
                           const char *opts_json,
                           unsigned char *buf,
                           uintptr_t buf_len);
+
+/**
+ * Create a Service from `{"slug", "target"}` JSON and return it once committed.
+ */
+char *msb_service_create(uint64_t cancel_id,
+                         const char *request_json,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Get a Service by slug.
+ */
+char *msb_service_get(uint64_t cancel_id, const char *slug, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * List one page of Services from `{"sandbox", "cursor", "limit"}` JSON.
+ */
+char *msb_service_list(uint64_t cancel_id,
+                       const char *options_json,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+/**
+ * Send one target change and return the Service once committed.
+ */
+char *msb_service_update(uint64_t cancel_id,
+                         uint64_t handle,
+                         const char *request_json,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Enable a Service and return it once committed.
+ */
+char *msb_service_enable(uint64_t cancel_id,
+                         uint64_t handle,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Disable a Service and return it once committed.
+ */
+char *msb_service_disable(uint64_t cancel_id,
+                          uint64_t handle,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+/**
+ * Remove a Service and release the slug.
+ */
+char *msb_service_remove(uint64_t cancel_id,
+                         uint64_t handle,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Get a Service through the backend retained by its handle.
+ */
+char *msb_service_refresh(uint64_t cancel_id,
+                          uint64_t handle,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+/**
+ * Release a Service handle. The Service itself is not changed.
+ */
+char *msb_service_close(uint64_t cancel_id, uint64_t handle, unsigned char *buf, uintptr_t buf_len);
 
 /**
  * Resolve, install, or ensure a runtime pair, returning its JSON description.

@@ -15,12 +15,17 @@ pub mod compat;
 mod guest_flush;
 #[doc(hidden)]
 pub mod helpers;
+pub mod memory_cache;
 pub mod modify;
+#[doc(hidden)]
+#[cfg(feature = "progress")]
+pub mod pull_progress;
 mod registry;
 mod secret;
 #[doc(hidden)]
 pub mod secret_plan;
 pub mod snapshot;
+pub mod startup_progress;
 mod validation;
 
 #[cfg(feature = "ts")]
@@ -34,21 +39,22 @@ pub use microsandbox_types_macros::ConfigPatch;
 
 pub use cloud::{
     CLOUD_MODIFICATION_FAILED, CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_REFUSED,
-    CLOUD_MODIFICATION_UNSUPPORTED, CloudChangeKind, CloudConfigPlannedChange,
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
-    CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
-    CloudMessageResponse, CloudModificationConflict, CloudModificationDisposition,
-    CloudModificationRejection, CloudModificationWarning, CloudNetworkSpec, CloudPaginated,
-    CloudPatch, CloudPlannedChange, CloudPullPolicy, CloudResourceConvergenceState,
-    CloudResourceKind, CloudResourceResizeStatus, CloudRlimit, CloudRlimitResource,
-    CloudRootfsSource, CloudSandboxComputeResources, CloudSandboxModificationApplyRequest,
-    CloudSandboxModificationPlan, CloudSandboxModificationPlanRequest, CloudSandboxResources,
-    CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason,
-    CloudSecretApplyEntry, CloudSecretChangeKind, CloudSecretEntry, CloudSecretMaterial,
-    CloudSecretPlanEntry, CloudSecretPlannedChange, CloudSecretSource, CloudSecretValue,
-    CloudSecretsConfig, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,
-    CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
-    CloudViolationAction, CloudVolumeMount,
+    CLOUD_MODIFICATION_UNSUPPORTED, CloudChangeKind, CloudCompute, CloudComputeType,
+    CloudConfigPlannedChange, CloudCreateSandboxRequest, CloudCreateSandboxResponse,
+    CloudCreateServiceRequest, CloudCreateSnapshotRequest, CloudDiskImageFormat, CloudErrorBody,
+    CloudErrorDetails, CloudHostPattern, CloudMessageResponse, CloudModificationConflict,
+    CloudModificationDisposition, CloudModificationRejection, CloudModificationWarning,
+    CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPlannedChange, CloudPullPolicy,
+    CloudResourceConvergenceState, CloudResourceKind, CloudResourceResizeStatus, CloudRlimit,
+    CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlan,
+    CloudSandboxModificationPlanRequest, CloudSandboxResources, CloudSandboxRuntimeOptions,
+    CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason, CloudSecretApplyEntry,
+    CloudSecretChangeKind, CloudSecretEntry, CloudSecretMaterial, CloudSecretPlanEntry,
+    CloudSecretPlannedChange, CloudSecretSource, CloudSecretValue, CloudSecretsConfig,
+    CloudService, CloudServiceStatus, CloudServiceTarget, CloudSnapshot, CloudSnapshotDetails,
+    CloudSnapshotKind, CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus,
+    CloudSnapshotSpec, CloudUpdateServiceRequest, CloudViolationAction, CloudVolumeMount,
 };
 #[doc(hidden)]
 pub use command::{CommandResolutionError, ResolvedCommand, resolve_default_command};

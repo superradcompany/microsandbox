@@ -89,7 +89,13 @@ Required review should include golden encoded payload bytes when serialization c
 
 ### Execution output backpressure
 
-Execution limits are fixed at sandbox creation and advertised in `Ready.exec_limits`: 128 executions, 64 KiB stdin allowance, 1 MiB combined stdout/stderr allowance, and 16 KiB stdin and output chunks. The values are built-in defaults, not user configuration; clients obey the advertised values, so the defaults can change between releases without a lockstep upgrade. The SDK has no stdin staging queue. Generation-10 cumulative `.stdin.ack` and `.output.ack` messages replenish consumed allowance. Released older SDKs retain legacy behavior outside the buffering guarantee; new SDKs fall back to historical buffering when Ready lacks limits. Existing sandboxes require no restart. Intermediate unreleased generation-10 builds are not compatibility targets. No new snapshot-manifest extension is required. Disk-only restores use the current built-in defaults, while memory restores preserve the guest limits from captured Ready; restoring a memory snapshot that captured limits requires the launch capability `exec_limits`. Disk and catalog formats are unchanged. Older relay and cross-version launch coverage must be validated separately from same-version tests.
+Execution limits are fixed at sandbox creation and advertised in `Ready.exec_limits`: 128 executions, 1 MiB stdin allowance, 4 MiB combined stdout/stderr allowance, and 16 KiB stdin and output chunks. These allowances total at most 640 MiB across admitted executions before transport, allocator, and kernel-pipe overhead; they are not preallocated. Earlier guests advertise 64 KiB stdin and 1 MiB output limits, which newer clients continue to honor. The values are built-in defaults, not user configuration; clients obey the advertised values, so the defaults can change between releases without a lockstep upgrade. The SDK has no stdin staging queue. Generation-10 cumulative `.stdin.ack` and `.output.ack` messages replenish consumed allowance. Released older SDKs retain legacy behavior outside the buffering guarantee; new SDKs fall back to historical buffering when Ready lacks limits. Existing sandboxes remain compatible without a restart, but only a new guest boot with the updated runtime selects the larger defaults. Intermediate unreleased generation-10 builds are not compatibility targets. No new snapshot-manifest extension is required. Disk-only restores use the current built-in defaults, while memory restores preserve the guest limits from captured Ready; restoring a memory snapshot that captured limits requires the launch capability `exec_limits`. Disk and catalog formats are unchanged. Older relay and cross-version launch coverage must be validated separately from same-version tests.
+
+### PTY leader completion
+
+PTY completion follows the tracked process's exit rather than waiting for every descendant to close its inherited slave descriptor (issue #2089). The agent observes exit concurrently with output, wakes the reader through a private close-on-exec pipe, and delivers queued output before the existing `ExecExited` event. Final draining retains output-window acknowledgements and has no elapsed-time cutoff. Its 1 MiB post-exit byte bound exceeds Linux's standard PTY flip-buffer budget (640 KiB) plus the N_TTY queue (4 KiB), preventing an ongoing descendant writer from delaying completion indefinitely; this is not a total command-output limit. Revisit that bound if the bundled kernel changes PTY buffering. The agent adds no descendant kill signal; terminal hangup and explicit process-group signal semantics remain in effect. Pipe-mode execution is unchanged.
+
+No wire fields, protocol versions, SDK signatures, or persisted layouts change. Older SDKs can observe the corrected completion through the existing event; newer SDKs still encounter the bug when the running guest uses an unpatched agent. Deploying the corrected guest agent requires a new guest boot; replacing the SDK alone or restoring a memory snapshot containing the old agent does not apply the fix. Validation includes the released 0.7.15 SDK/runtime with the patched agent and the revamp SDK with that runtime, plus legacy and flow-controlled agent tests. `scripts/smoke/managed-job-pty-exit.mjs` verifies normal exit, explicit kill, repeatable waits, exact final output, and descendant survival in a disposable local home.
 
 ## 2. Bootstrap, Init, and Guest Runtime Contract
 
@@ -172,6 +178,8 @@ User-supplied OCI writable uppers (`RootfsSource::Oci` with `RootDisk::DiskImage
 
 On Linux, stop and kill also pin the departing runtime with a process pidfd, validating its inherited lifecycle descriptor before following it. This waits for the whole thread group rather than treating a zombie leader or lifecycle-lock release as completed disk teardown, and does not wait on a later sandbox's attachment to the same external disk. It does not reap the SDK's child or change descriptor handoff. This path requires `pidfd_open` (Linux 5.3 or later) and permission to inspect the runtime's `/proc` descriptors; unsupported or denied probes return an error rather than silently claiming completion. Already-exited or stale PIDs without the matching inherited lifecycle descriptor retain the existing lifecycle/resource reconciliation path.
 
+Linux SDK child collection uses pidfd notifications and `try_wait()`, with polling when pidfds are unavailable. Detached resources are observed while retained and after release; unfinished collection transfers to one process-wide reaper thread when the Tokio runtime shuts down. Collection never terminates a detached VM and preserves the owned child's exit status for later waits. These SDK-internal changes do not alter launch descriptors, watchdog acknowledgements, runtime/agent protocols, storage, or older-runtime compatibility. A live but undriven current-thread runtime can delay its async observers until driven or shut down.
+
 On macOS, stop and kill observe the departing process through a `kqueue` exit registration, checking its process birth identity and existing lifecycle descriptor. Exit notification follows file-table teardown, unlike lifecycle-lock release alone. If registration races an already-exiting process, birth-identified `kern.proc.pid` observation waits for zombie/disappearance rather than treating a failed process lookup as completed cleanup. Observation does not reap the child, unlock its disks, or wait for a subsequent disk owner. Inspection failures remain errors. This changes host-side completion timing only; launch descriptors, lock paths, agent messages, and persisted state are unchanged in both SDK/runtime directions. It cannot release lock copies retained by an older SDK process.
 
 Sources: [`crates/runtime/lib/client/launch.rs`](crates/runtime/lib/client/launch.rs), [`crates/runtime/lib/runner/vm.rs`](crates/runtime/lib/runner/vm.rs), [`sdk/rust/lib/runtime/spawn.rs`](sdk/rust/lib/runtime/spawn.rs), and [`crates/cli/lib/machine_cmd.rs`](crates/cli/lib/machine_cmd.rs).
@@ -224,6 +232,12 @@ Runtime SDK and environment path inputs are captured when a local backend is con
 
 `Backend::info()` and `default_backend_info()` now return `MicrosandboxResult<BackendInfo>`. Rust callers add `?` or handle errors; custom trait implementations update their return type. A failed default-backend resolution reports its original configuration error instead of misleading cloud/programmatic metadata. Python, Node, Go, and Ruby diagnostics propagate errors through their existing language error mechanisms; successful shapes are unchanged. The standalone CLI can now select and dispatch to cloud; previous standalone builds rejected cloud selection. New `context list`, `use`, and `reset` subcommands inspect profiles or save a sparse preference without resolving credentials; plain `context` still resolves a backend. Preference writes retain the existing unknown-field-discard behavior.
 
+The unreleased SDK context revamp replaces the public backend/handle surfaces described in the historical notes above. LocalContext construction captures configuration synchronously and opens the catalog lazily. Resource identities, runtime launch and agent/control wire formats, catalog schemas, snapshot artifact formats and serialized sandbox configuration remain unchanged by that revamp. Unqualified SDK calls use the same configured destination as the CLI and default to local. Explicit resource selectors override that destination. Builders and resources retain the context they captured. See [SDK migration](docs/migrations/sdk-contexts.mdx) for application-source changes.
+
+Profile serialization is the accepted exception: new writers emit `kind: "local"` or `kind: "remote"`; readers accept legacy `backend` and `cloud` aliases. An older SDK/CLI reading a profile rewritten by the new writer may reject it. This does not authorize rewriting resource records or relaxing runtime compatibility. Keep a copy of the old profile configuration before sharing it with older clients, and use separate configuration files when both reader generations must continue operating. Reader/writer alias fixtures and profile preference persistence tests cover the new format; they do not establish compatibility of older readers with rewritten profiles.
+
+Selected native providers validate binding ABI 1, exact SDK version and supported local/remote capability before use. Their allocation, result-release and cancellation operations stay with the library that created the object. This wrapper/native version requirement is independent of SDK-to-runtime compatibility: choosing a selected provider does not waive the supported historical runtime boundaries. Local qualification uses released v0.7.15 runtime fixtures and does not claim a complete v0.6.x runtime matrix.
+
 The SQLite database under `MSB_HOME` is a durable protocol between releases. Host and runtime processes must also agree on WAL, busy timeout, foreign-key, synchronous, and writer settings.
 
 On Unix, catalog identity checks read filesystem metadata without opening an extra descriptor. Control and metrics lookups share one database identity per backend. On macOS, that identity retains a dedicated read-only SQLite connection, including after ordinary pool connections expire. SQLite owns that connection's close so verification and identity teardown preserve other connections' POSIX locks. Linux retains its `O_PATH` handles and Windows retains its file handles. Database replacement detection, schemas, journal modes, and SDK/runtime protocols are unchanged.
@@ -274,7 +288,15 @@ The existing unknown-migration admission rule still applies: older SDKs and CLIs
 
 The protected-layout security exception requires a patched SDK/CLI and a runtime advertising `protected_guest_state` for every new VM launch, including restart and restore. Missing capability or a failed probe produces an upgrade-required error before layout migration. The existing catalog admission rule excludes old SDKs/CLIs from an upgraded home; old tools remain usable in eligible unupgraded homes. Stop old SDK/CLI applications sharing a home during its upgrade. Already-running VMs retain their existing database contract and gain the new boundary only after restart. New SDKs refuse live storage capture and maintenance until that restart; exec and stop remain available.
 
-Only `sbx/guest-state/` is exported as `/.msb`; authoritative root/owned-disk journals, checkpoints, object stores, and growth/compaction staging live in the host-managed sandbox namespace. Simple legacy state is reconstructed from host configuration under lifecycle ownership; ambiguous chains and checkpoints require recovery. A host-side preparation record supports crash-forward retry. Catalog protection is recorded before filesystem admission, and downgrade refuses while any protected or preparing sandbox remains. Legacy journal and heartbeat guards reject old runtime startup; they do not isolate an already-exploited process running as the same host user.
+Only `sbx/guest-state/` is exported as `/.msb`; authoritative root/owned-disk journals, checkpoints, object stores, and growth/compaction staging live in the host-managed sandbox namespace. Legacy parsing proposes disk views within independently established host-configured roles; it never authorizes a new path. Migration pins regular no-follow sources, accounts for aliases and excludes related writers, then captures independent clone/sparse copies. Explicit external disks retain their write-through binding. Ambiguous complete views require explicit identity-bound selection; missing dependencies and unauthorized sources remain rejected.
+
+Capture holds per-file read leases on Linux and deny-write/delete handles on Windows, rejecting existing writable handles or mappings. A broken lease invalidates the capture epoch. macOS requires explicit maintenance recovery with an operator confirmation that legacy VMs across all homes are stopped and old-tool launches or writes to the selected storage are prevented until completion. Same-home transition/lifecycle checks remain defense in depth; one catalog cannot prove global writer quiescence. New creation and ready-layout operations bypass these migration-only gates. A durable group certificate follows capture of every selected disk and a final source-identity/lease audit in one protected epoch; full metadata validation still precedes Ready publication. Uncertified partial captures are discarded and recaptured together on resume; certified internal captures no longer depend on retained originals, while external write-through disks still require their original identity and writer protection.
+
+The existing explicit storage-preview API captures complete alternatives into private staging before admitting the sandbox. It shares copies of common layers and materializes each requested view separately. A dedicated runtime capability and guest reader are required for filesystem inspection. The reader receives detached, read-only disks. For a managed OCI root it combines the captured upper with the image's matching lower. Confirming a choice revalidates the disk group and binds the selected layers to their reviewed contents through transaction recovery. Cancellation before admission discards the session without changing the sandbox's protection or active disks. Normal interactive repair imports the validated existing selection without invoking this preview API or asking the user to choose a disk version. Unresolved layouts are reported for maintainer investigation. The CLI accepts `--sandbox` for diagnosis and repair while retaining positional targets. CLI safety confirmations are interactive; noninteractive repair returns a blocker when consent or investigation is required. JSON output and explicit SDK recovery APIs remain available. Its multi-sandbox interface runs each repair through the same lifecycle and writer checks, records partial actions, and never uploads diagnostic reports.
+
+Legacy admission also validates destination namespace authority without repairing permissions. Execution retains Windows no-delete handles on stable publication parents through completion; Unix traversal exemptions require a verified private ancestor. A shared 256 MiB budget bounds estimated eager parser metadata across the selected root and owned-disk group before full parsing. This is not an RSS or total VM memory bound. Recheck the accounting when changing the pinned parser dependency. These checks do not inventory new or already-ready storage.
+
+Read-only inspection precedes backend initialization and permits only SQLite's ordinary WAL/SHM read-lock coordination. Windows legacy import also checks catalog permissions without repairing them before deriving disk authority. Fresh initialization requires the live creation call's reservation identity and saved configuration, not a catalog flag alone. Admission validates before registering protection. The private `.storage-migration/operation.json` freezes the operation, configuration identity, original journals and selected objects. Its distinct in-progress schema is also published at `state-layout.json`, where schema-1 readers reject it. Durable catalog protection and both legacy-path guards precede capture; every required disk journal is published before the schema-1 ready marker. Interrupted admission resumes forward, never by removing guards or rediscovering a different head. Already-ready sandboxes skip migration inventory, capture and admission writes. Legacy journal and heartbeat guards reject old runtime startup; they do not isolate an already-exploited process running as the same host user.
 
 ## 7. Home and Runtime Path Layout
 
@@ -283,6 +305,8 @@ Directory names under `MSB_HOME` and the runtime directory are durable locators 
 Sources: [`crates/utils/lib/lib.rs`](crates/utils/lib/lib.rs) and [`crates/runtime/lib/client/ipc.rs`](crates/runtime/lib/client/ipc.rs).
 
 Renaming a directory or file requires migration or old-location probing. Preserve atomic publication and cleanup ordering, and never infer that an unrecognized old path is safe to delete.
+
+Unix FUSE initialization preserves the runtime process umask. Guest creation modes still use the guest request and mask; new host-managed files and directories request `0600` and `0700` and clear inherited ACLs. Explicit repair of stopped, protected sandboxes tightens recognized host state and clears its ACLs, including intentional sharing on that state; guest-state and directory-volume contents, external mounts, shared caches, and unknown paths remain excluded. Repair leaves already-private snapshot hardlinks unchanged and refuses non-private links outside the recognized set or objects replaced since inspection. No catalog, journal, launch, or guest-protocol format changes; Windows ready-storage repair remains a no-op.
 
 ## 8. Disk and Filesystem Image Formats
 
@@ -384,6 +408,8 @@ Bind mounts and volumes persist virtual Linux stat information outside the guest
 
 Compatibility-sensitive elements include xattr, ADS, and sidecar names; payload version, width, and byte order; uid, gid, mode, and rdev interpretation; symlink representation; path encoding; hidden-metadata filtering; reserved inode/handle values; and whiteout immunity.
 
+Guest xattr access on Unix passthrough host mounts is limited to user.* attributes outside Microsandbox's reserved user.msb and OverlayFS's user.overlay namespaces. New runtimes hide other host xattr namespaces and reject guest reads, writes, and removals; older runtimes retain their previous behavior. Existing host xattrs are not rewritten or removed.
+
 Sources: [`crates/filesystem/lib/backends/shared/stat_override.rs`](crates/filesystem/lib/backends/shared/stat_override.rs), [`crates/filesystem/lib/backends/passthroughfs/windows`](crates/filesystem/lib/backends/passthroughfs/windows), and [`crates/filesystem/lib/backends/shared/init_binary.rs`](crates/filesystem/lib/backends/shared/init_binary.rs).
 
 New metadata layouts require a new decoder version and, when old writers must consume the state, a migration or clean refusal before mutation.
@@ -396,13 +422,19 @@ Sources: [`Cargo.toml`](Cargo.toml), [`crates/filesystem/build.rs`](crates/files
 
 Do not independently substitute or upgrade one component because its upstream ABI appears compatible. Verify the release bundle as a unit on every supported OS and architecture, including the embedded matching agentd, firmware/kernel, library soname, device behavior, and package-version checks.
 
+The bundled Linux 6.12.118 kernel requires the virtio-fs completion-length fix in `msb_krun` 0.1.46. Ship the runtime and firmware together: older hosts report zero used-ring lengths and fail the kernel's response validation before guest initialization. The updated host also supports the previous 6.12.117 kernel. Full memory snapshots retain their captured kernel; installing new firmware does not add multigrain timestamps to those snapshots or already-running guests. A fresh guest boot uses the updated kernel. The backport improves observed nanosecond mtime/ctime updates on guest tmpfs, ext4, XFS and Btrfs without changing the timer frequency; it does not guarantee unique millisecond-rounded timestamps or change host-shared virtio-fs timestamp behavior.
+
 Normal x86 boot now declares `krun.poweroff=i8042` in libkrun's default kernel command line. Matching libkrunfw registers a low-priority final poweroff handler that sends the existing i8042 exit byte after orderly Linux shutdown. Generic KVM identity is not enough to enable it. Without both the host declaration and the new kernel, Linux may halt without releasing VMM ownership; StopWithTimeout reports expiry without killing. Existing running guests and full snapshots retain their captured kernel and require a fresh boot/recapture to acquire the handler. ARM platform poweroff, explicit custom command-line replacement and SEV/TDX built-in overrides are unchanged; they are not implicitly qualified by the normal Linux x86 test.
 
 ## 13. Networking, DNS, Published Ports, and Secret Substitution
 
+Gateway DNS rebinding protection also gates local-network discovery. `.local` requires broad native `Private` access; reverse zones containing restricted addresses require authorization of the whole zone, including ordered denies and the platform floor. A single allowed private subnet no longer enables all `.local` discovery. Response owners, embedded names and addresses are checked before caching, including configured NAT64 translations. Restricted ancillary RRsets may be removed from independently complete successful answers; incomplete replies are refused. Removing restricted records clears AD and whole-message signatures and removes signatures covering discarded RRsets. Clients depending on that metadata may fail validation. Explicit guest-selected resolvers retain their answer-address filtering and routing contract, and rebind-off remains an opt-out. No launch, agent, SDK, or persisted schema changes are introduced; older running runtimes retain their previous DNS behavior until restarted with the patched runtime.
+
 Strict hostname policy is enabled by default. The v0.6.0–v0.6.17 launch gate rejects strict policies containing outbound hostname allow rules, including domain suffixes and rules applying in both directions. Policies without those rules retain their existing behavior on older runtimes because strict enforcement is unused. Explicit `strict: false` remains supported.
 
 Observable network behavior is an effective compatibility contract. It includes default MTU, sandbox-slot address derivation, IPv4 subnet sizing, guest and gateway offsets, IPv6 prefixes, deterministic MAC addresses, interface name `eth0`, `host.microsandbox.internal`, DNS UDP and TCP behavior, DNS-over-TLS, TLS interception and trust paths, published-port binding, TCP half-close, UDP peer lifetime, destination policy, and host-side secret placeholder substitution.
+
+TLS reconnects may use SNI to revalidate an expired DNS binding. A fresh policy-filtered answer must contain the chosen IP before connection policy is rechecked; no prior guest lookup is required. Deferring SYN admission never dials upstream. Non-SNI connections, UDP, ICMP, and ingress still require live bindings. No launch fields, persisted formats, protocols, SDK contracts, or agent/kernel requirements change. Older runtimes retain their previous TTL-expiry behavior.
 
 Omitted HTTP denial settings now default to enabled + JSON, including in older payloads and saved configs. Denied requests may return `403` instead of a connection error; callers must check status. Set `deny_response: false` for silent closure or `deny_response_format: text` for legacy bodies and `{host}` substitution. JSON requires the `http_deny_json` runtime capability. Cloud behavior is unchanged. See [denial responses](docs/networking/overview.mdx#what-a-denied-http-request-sees) for message settings and protocol limits.
 
@@ -423,6 +455,8 @@ Compatibility-sensitive elements include vsock port and route configuration, str
 Sources: [`crates/vsock/lib/stream.rs`](crates/vsock/lib/stream.rs), [`crates/vsock/lib/dgram.rs`](crates/vsock/lib/dgram.rs), [`crates/runtime/lib/runner/vm.rs`](crates/runtime/lib/runner/vm.rs), and [`sdk/rust/lib/sandbox/ssh.rs`](sdk/rust/lib/sandbox/ssh.rs).
 
 Use standards-compliant clients in tests and exercise connections against older running agentd versions when changing the adapter-to-agent mapping.
+
+The SDK-hosted SSH adapter maps negative agent exec codes, including `-1` for signal termination or a lost exit notification, to SSH exit status `1`. Nonnegative codes are preserved. SDK SSH clients map standard exit signals to `128 +` the Linux signal number and reject exec channels closed without a termination outcome. These corrections require no agent payload, version, or runtime capability change and apply to existing running guests. They do not identify an unknown signal or prove OOM, and the separately deployed cloud SSH gateway requires its own fix.
 
 ## 15. Metrics Shared-Memory ABI
 
@@ -558,6 +592,7 @@ Apply these guidelines when implementing an approved compatibility change:
 | Cloud dispatch | The types crate's `compat/cloud.rs`. |
 | SDK executable discovery, contract selection, preflight, and outgoing encoding | `sdk/rust/lib/runtime/launch_contract.rs`; `launch_input.rs` holds previous environment-encoding helpers. |
 | Runtime incoming launch readers | `crates/runtime/lib/client/compat/launch.rs` selects readers and shares previous launch fields and conversion; `network.rs` shares network compatibility decoding. |
+| Legacy storage formats | `crates/runtime/lib/checkpoint/compat/v0_7_0` decodes historical root and owned journals; `checkpoint/migration` owns shared validation, capture and forward recovery. The SDK owns catalog admission and related-writer exclusion. Parsing never bypasses these checks. |
 
 Known destination releases use `semver::Version` across CLI downgrade and SDK launch selection; each compatibility layer owns its own release boundaries. Each versioned `to_previous_version` adapter prepares that contract or rejects settings it cannot preserve; the DB's v0.7.0 adapter returns no rewrite for supported records.
 
@@ -566,3 +601,58 @@ Incoming unversioned launch/cloud requests retain detection of previous formats.
 The runtime dispatcher selects the current reader when `execution` is present, `v0_6_10/launch.rs` when `bootstrap` is present, and `v0_5_9/launch.rs` otherwise. `client/launch.rs` contains both `LaunchConfig` and the `LaunchCapabilities` probe response. The launch type remains in the runtime crate to avoid a dependency cycle. SDK tests exercise its encoder against the runtime decoder; runtime tests also consume independently captured release payloads.
 
 Launch and cloud requests reject duplicate recognized fields and conflicting previous/current spellings. Previous saved-format decoding and the duplicate-key JSON fixture reader in the SDK are test-only.
+
+## Remote context compute selection
+
+The SDK exposes `ComputeType`; `CloudComputeType` remains a deprecated SDK
+re-export for existing callers. The shared HTTP contract type and its serialized
+values are unchanged.
+
+Remote contexts optionally capture `ComputeType` for new sandbox creates
+and snapshot restores. The HTTP create body sends `compute: {"type": "standard"}`
+or `compute: {"type": "shared"}` beside the nested `spec`. Unset contexts omit
+`compute`, preserving the server default. Derivation retains the captured choice
+unless explicitly overridden. Existing sandboxes, local launch contracts, saved
+sandbox configuration, catalogs, and snapshot formats are unchanged.
+
+This uses #2058's nested create contract, already supported by the Cloud request
+reader alongside previous flat requests. Servers that only accept flat requests
+cannot accept this candidate's nested create body; deploy the matching server
+first. There is no retry with a flat request or silently omitted compute choice.
+Binding JSON accepts only `standard` and `shared` and rejects compute options on
+local contexts. Older native bindings reject the new `computeType` option as an
+unknown field rather than dropping it. Local SDK/runtime compatibility is
+unaffected by this option; historical runtime validation is separate from the
+HTTP request tests.
+
+## Remote destination naming
+
+By explicit user direction, `remote` is the canonical `MSB_BACKEND` value,
+serialized `ContextKind`, CLI diagnostic kind, and `allowed_backends` value.
+Readers continue accepting `cloud` as an alias. Profile writers already use
+`kind: "remote"`; their existing `backend`/`cloud` reader aliases remain.
+Older SDKs and CLIs may reject newly written `remote` policy values or the new
+CLI spelling. Upgrade those consumers before sharing rewritten settings.
+This approved configuration/API naming change does not alter sandbox launch,
+agent protocols, catalogs, snapshots, or the HTTP API's `Cloud*` type names.
+
+## Managed Cloud root sources and mount owners
+
+The SDK now forwards bind-directory and disk-image root sources already handled
+by the Cloud API resolver and worker. Paths belong to the organization's host
+volume and are never resolved against the SDK client's filesystem. A bind root
+request to follow symlinks still refuses, because the Cloud source contract does
+not represent it and the worker deliberately disables it.
+
+By explicit user direction, remote mount owner IDs are enabled against current
+Managed Cloud support. The resolver and worker preserve `MountOptions` owner
+IDs and force strict stat virtualization for directory mounts. IDs change the
+guest metadata fallback, not host ownership or tenant path authority. The SDK
+still validates paired IDs and rejects owners on non-directory mounts. Earlier
+server deployments might ignore these optional fields; there are no self-hosted
+deployments in the user's supported fleet and this is an approved server-support
+requirement. Local runtime capability checks are unchanged.
+
+## Concurrent catalog sidecar teardown
+
+Catalog hardening retries up to 16 complete inspections when SQLite sidecar teardown exposes an unlinked inode or the path changes during inspection. Every attempt repeats the ownership, link and permission checks; symlinks, hardlinks and untrusted access remain rejected. Continued churn returns an error. No SQLite schema, migration guard, lock protocol or runtime format changes.

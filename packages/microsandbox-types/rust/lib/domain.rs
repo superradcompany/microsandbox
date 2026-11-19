@@ -959,7 +959,7 @@ pub struct SnapshotSpec {
 // Types: Sandbox Specs
 //--------------------------------------------------------------------------------------------------
 
-/// Backend-neutral sandbox task description.
+/// Context-neutral sandbox task description.
 ///
 /// This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, ConfigPatch)]

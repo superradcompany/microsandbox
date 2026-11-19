@@ -4,6 +4,10 @@
 //! process and [`spawn_sandbox`] for starting one from a
 //! [`crate::sandbox::SandboxConfig`].
 
+#[cfg(target_os = "linux")]
+mod child_exit;
+#[cfg(target_os = "linux")]
+mod child_reaper;
 pub(crate) mod handle;
 pub(crate) mod launch_contract;
 mod launch_input;
@@ -20,6 +24,7 @@ pub(crate) mod protected_state;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) mod reap;
 pub(crate) mod spawn;
+pub(crate) mod storage_aliases;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports

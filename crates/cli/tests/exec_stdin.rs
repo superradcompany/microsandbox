@@ -48,9 +48,131 @@ fn host_input_pair(terminal: bool) -> (std::fs::File, std::fs::File) {
     }
 }
 
+/// Run `msb` with `input` on stdin, closing it after the last byte.
+async fn msb_with_input(args: &[&str], input: &[u8]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_msb"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn msb");
+    let mut stdin = child.stdin.take().expect("child stdin");
+
+    let (write_result, output) = timeout(Duration::from_secs(60), async {
+        let writer = async {
+            let result = stdin.write_all(input).await;
+            drop(stdin);
+            result
+        };
+        tokio::join!(writer, child.wait_with_output())
+    })
+    .await
+    .expect("msb failed to finish after EOF");
+
+    // A command may stop reading before the host finishes writing.
+    if let Err(error) = write_result {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "write input");
+    }
+    output.expect("wait for msb")
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[msb_test]
+async fn run_forwards_piped_input() {
+    // More than one forwarding chunk, including NUL and invalid UTF-8.
+    let input: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+
+    let output = msb_with_input(
+        &[
+            "run",
+            "--quiet",
+            "--cpus",
+            "1",
+            "--memory",
+            "512M",
+            "mirror.gcr.io/library/alpine",
+            "--",
+            "cat",
+        ],
+        &input,
+    )
+    .await;
+
+    assert!(output.status.success(), "stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, input);
+}
+
+#[msb_test]
+async fn run_stops_forwarding_when_the_command_stops_reading() {
+    let input = vec![b'x'; 1 << 20];
+
+    let output = msb_with_input(
+        &[
+            "run",
+            "--quiet",
+            "mirror.gcr.io/library/alpine",
+            "--",
+            "sh",
+            "-c",
+            "head -c 10 > /dev/null; exec 0<&-; sleep 0.2; printf done",
+        ],
+        &input,
+    )
+    .await;
+
+    assert!(output.status.success(), "stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"done");
+}
+
+#[msb_test]
+async fn tty_commands_see_the_end_of_piped_input() {
+    let name = "cli-tty-stdin-eof";
+    let sandbox = Sandbox::builder(name)
+        .image("mirror.gcr.io/library/alpine")
+        .cpus(1)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let mut results = Vec::new();
+    for input in [&b"with-newline\n"[..], &b"no-newline"[..]] {
+        let exec = msb_with_input(&["exec", "--quiet", "--tty", name, "--", "cat"], input).await;
+        let run = msb_with_input(
+            &[
+                "run",
+                "--quiet",
+                "--tty",
+                "mirror.gcr.io/library/alpine",
+                "--",
+                "cat",
+            ],
+            input,
+        )
+        .await;
+        results.push((input, exec));
+        results.push((input, run));
+    }
+
+    sandbox.stop().await.expect("stop sandbox");
+    Sandbox::remove(name).await.expect("remove sandbox");
+
+    for (input, output) in results {
+        let text = input.strip_suffix(b"\n").unwrap_or(input);
+        assert!(output.status.success(), "stderr: {:?}", output.stderr);
+        assert!(
+            output.stdout.windows(text.len()).any(|chunk| chunk == text),
+            "stdout: {:?}",
+            output.stdout
+        );
+    }
+}
 
 #[msb_test]
 async fn exec_exits_before_host_stdin_closes() {

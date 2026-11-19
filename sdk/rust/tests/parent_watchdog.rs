@@ -12,10 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use microsandbox::{
-    Sandbox,
-    sandbox::{SandboxHandle, SandboxStatus},
-};
+use microsandbox::{Sandbox, sandbox::SandboxStatus};
 use test_utils::msb_test;
 use tokio::time::sleep;
 
@@ -27,7 +24,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 async fn cleanup(name: &str) {
     if let Ok(h) = Sandbox::get(name).await {
         let _ = h.kill().await;
-        let _ = h.remove().await;
+        let _ = h.destroy().await;
     }
 }
 
@@ -43,17 +40,20 @@ async fn assert_shell_ok(sandbox: &Sandbox, command: &str, expected: &str) {
     assert_eq!(stdout.trim(), expected);
 }
 
-async fn wait_for_status(name: &str, expected: SandboxStatus, timeout: Duration) -> SandboxHandle {
+async fn wait_for_status(name: &str, expected: SandboxStatus, timeout: Duration) -> Sandbox {
     let deadline = Instant::now() + timeout;
 
     loop {
         match Sandbox::get(name).await {
-            Ok(handle) if handle.status_snapshot() == expected => return handle,
             Ok(handle) => {
+                let status = handle.status().await.expect("inspect sandbox");
+                if status == expected {
+                    return handle;
+                }
                 assert!(
                     Instant::now() < deadline,
                     "sandbox `{name}` stayed {:?}; expected {expected:?}",
-                    handle.status_snapshot()
+                    status
                 );
             }
             Err(err) => {
@@ -107,12 +107,16 @@ async fn detach_disarms_parent_watchdog_for_attached_sandbox() {
         .await
         .expect("create sandbox");
 
-    sandbox.detach().await;
+    sandbox.detach().await.expect("detach sandbox");
+    assert!(!sandbox.owns_lifecycle());
+    assert_shell_ok(&sandbox, "echo still-usable", "still-usable").await;
+    drop(sandbox);
 
     sleep(Duration::from_secs(2)).await;
 
     let handle = wait_for_status(name, SandboxStatus::Running, Duration::from_secs(30)).await;
-    let connected = handle.connect().await.expect("connect after detach");
+    handle.ensure_running().await.expect("prepare after detach");
+    let connected = handle;
     assert_shell_ok(&connected, "echo detached-ok", "detached-ok").await;
 
     let _ = connected.stop().await;
@@ -185,7 +189,9 @@ async fn parent_exit_stops_but_preserves_named_sandbox() {
     let _ = child.wait().expect("wait child test process");
 
     let handle = wait_for_status(name, SandboxStatus::Stopped, Duration::from_secs(90)).await;
-    let restarted = handle.start().await.expect("restart stopped sandbox");
+    let restarted = Sandbox::start(handle.name())
+        .await
+        .expect("restart stopped sandbox");
     assert_shell_ok(&restarted, "echo restarted-ok", "restarted-ok").await;
 
     let _ = restarted.stop().await;

@@ -1,7 +1,6 @@
 //! Runtime-owned serialization and fencing for host control mutations.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -852,13 +851,10 @@ fn checkpoint_response(
 }
 
 fn persist_runtime_boot_id(runtime_dir: &Path, boot_id: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(runtime_dir)?;
+    microsandbox_utils::private_file::create_private_dir_all(runtime_dir)?;
     let target = runtime_dir.join(RUNTIME_BOOT_ID_FILE);
     let temporary = unique_temporary_path(runtime_dir, RUNTIME_BOOT_ID_FILE);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
     file.write_all(boot_id.as_bytes())?;
     file.write_all(b"\n")?;
     // This file is diagnostic/live discovery, not a restart journal. Fencing uses the new

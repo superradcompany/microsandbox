@@ -21,6 +21,7 @@ engine = [
     "dep:hickory-net",
     "dep:httlib-hpack",
     "dep:httparse",
+    "dep:if-addrs",
     "dep:libc",
     "dep:lru",
     "dep:msb_krun",
@@ -33,6 +34,7 @@ engine = [
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:rustls-pki-types",
+    "dep:rustls-platform-verifier",
     "dep:serde_json",
     "dep:socket2",
     "dep:smoltcp",
@@ -54,6 +56,7 @@ futures = { workspace = true, optional = true }
 # crypto provider, so no new dependency is introduced.
 hickory-net = { workspace = true, features = ["tls-ring"], optional = true }
 hickory-proto = { workspace = true }
+if-addrs = { workspace = true, optional = true }
 httlib-hpack = { workspace = true, optional = true }
 httparse = { version = "1", optional = true }
 ipnetwork = { workspace = true }
@@ -108,6 +111,7 @@ core-foundation = { version = "0.9", optional = true }
 system-configuration = { version = "0.7", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+rustls-platform-verifier = { workspace = true, optional = true }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns", "Win32_System_LibraryLoader"], optional = true }
 
 [dev-dependencies]

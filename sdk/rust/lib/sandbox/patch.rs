@@ -29,7 +29,7 @@ use tokio::io::AsyncReadExt;
 
 use super::types::{Patch, RootfsSource};
 use crate::MicrosandboxResult;
-use crate::backend::local::creation::CreationStorage;
+use crate::context::local::creation::CreationStorage;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -2373,9 +2373,12 @@ mod tests {
         symlink(&actual_root, &linked_root).unwrap();
         let patch = text_patch("/allowed.txt", "hello");
 
-        let error = apply_patches(&bind_root(linked_root.clone(), false), &[patch.clone()])
-            .await
-            .unwrap_err();
+        let error = apply_patches(
+            &bind_root(linked_root.clone(), false),
+            std::slice::from_ref(&patch),
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("follow_root_symlinks"));
         assert!(!actual_root.join("allowed.txt").exists());
 
@@ -3723,7 +3726,7 @@ mod tests {
             content: "more".into(),
         });
         assert!(
-            build_upper_tree(&patches, &[lower_path.clone()])
+            build_upper_tree(&patches, std::slice::from_ref(&lower_path))
                 .await
                 .is_err()
         );
@@ -3788,7 +3791,7 @@ mod tests {
             },
             text_patch("/data/sub/new.txt", "new"),
         ];
-        let tree = build_upper_tree(&patches, &[lower_path.clone()])
+        let tree = build_upper_tree(&patches, std::slice::from_ref(&lower_path))
             .await
             .unwrap();
         assert_eq!(
@@ -3956,7 +3959,7 @@ mod tests {
                 },
             ],
             &[base_path, top_path],
-            &crate::backend::local::creation::CreationStorage::for_test(&spool_path),
+            &crate::context::local::creation::CreationStorage::for_test(&spool_path),
         )
         .await
         .unwrap();

@@ -12,7 +12,7 @@ use super::{
     SecretModificationPatch, SecretSource,
 };
 use crate::MicrosandboxResult;
-use crate::backend::{Backend, SandboxIdentity};
+use crate::context::{Context, SandboxIdentity};
 #[cfg(not(feature = "local"))]
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
@@ -26,7 +26,7 @@ use crate::size::Mebibytes;
 /// [`dry_run`](Self::dry_run) plans the patch; [`apply`](Self::apply) applies it.
 #[derive(Clone)]
 pub struct SandboxModificationBuilder {
-    pub(super) backend: Arc<dyn Backend>,
+    pub(super) backend: Arc<dyn Context>,
     pub(super) name: String,
     pub(super) patch: SandboxModificationPatch,
     pub(super) policy: ModificationPolicy,
@@ -53,7 +53,7 @@ pub struct SecretPatchBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxModificationBuilder {
-    pub(crate) fn new(backend: Arc<dyn Backend>, name: impl Into<String>) -> Self {
+    pub(crate) fn new(backend: Arc<dyn Context>, name: impl Into<String>) -> Self {
         Self {
             backend,
             name: name.into(),
@@ -344,7 +344,7 @@ impl SandboxModificationBuilder {
     fn cloud_sandbox_id(&self) -> MicrosandboxResult<&str> {
         self.cloud_id.as_deref().ok_or_else(|| {
             crate::MicrosandboxError::Runtime(format!(
-                "sandbox {:?} has no cloud id to modify; take the builder from its Sandbox or SandboxHandle",
+                "sandbox {:?} has no cloud id to modify; take the builder from its Sandbox or SandboxRecord",
                 self.name
             ))
         })
@@ -493,7 +493,7 @@ mod tests {
     fn cloud_sandbox(url: &str) -> crate::sandbox::Sandbox {
         crate::sandbox::Sandbox::from_cloud_state(
             Arc::new(crate::test_support::cloud_backend(url, "test-key").unwrap()),
-            crate::backend::SandboxCloudState {
+            crate::context::SandboxRemoteState {
                 id: SANDBOX_ID.to_owned(),
                 org_id: "test-org".to_owned(),
                 created_at: chrono::Utc::now(),
@@ -547,9 +547,27 @@ mod tests {
         assert_eq!(plan.sandbox, "agent-1");
         assert_eq!(
             *lines.lock().unwrap(),
-            [format!(
-                "POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1"
-            )]
+            [format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1")]
+        );
+
+        // Secret material must never become part of the request URL, including
+        // through the public fluent builder that carries both transport and patch.
+        cloud_sandbox(&url)
+            .modify()
+            .secret(|secret| {
+                secret
+                    .env("API_KEY")
+                    .value("synthetic-url-canary/?token=value")
+            })
+            .apply()
+            .await
+            .unwrap();
+        assert_eq!(
+            *lines.lock().unwrap(),
+            [
+                format!("POST /v1/sandboxes/{SANDBOX_ID}/plan HTTP/1.1"),
+                format!("PATCH /v1/sandboxes/{SANDBOX_ID} HTTP/1.1"),
+            ]
         );
 
         let unbound = SandboxModificationBuilder::new(
@@ -560,6 +578,6 @@ mod tests {
             unbound.dry_run().await,
             Err(MicrosandboxError::Runtime(_))
         ));
-        assert_eq!(lines.lock().unwrap().len(), 1);
+        assert_eq!(lines.lock().unwrap().len(), 2);
     }
 }
