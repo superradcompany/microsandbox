@@ -175,6 +175,74 @@ impl ProcessIdentity {
         }
         self.verify()
     }
+
+    /// Whether signals reach this process instance through a kernel process handle, so a PID
+    /// that changes hands after the identity check can never receive them.
+    #[cfg(target_os = "linux")]
+    pub fn signals_through_handle(&self) -> bool {
+        self.handle.is_some()
+    }
+
+    /// Whether this process instance has exited. A recycled PID is an exit, never a survivor.
+    #[cfg(unix)]
+    pub fn has_exited(&self) -> std::io::Result<bool> {
+        #[cfg(target_os = "linux")]
+        if let Some(handle) = &self.handle {
+            // A zombie leader can leave worker threads and disk owners alive. The
+            // pinned pidfd, not control-connection validity, proves group exit.
+            let mut poll = libc::pollfd {
+                fd: handle.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut poll, 1, 0) } < 0 {
+                let error = std::io::Error::last_os_error();
+                return if error.kind() == std::io::ErrorKind::Interrupted {
+                    Ok(false)
+                } else {
+                    Err(error)
+                };
+            }
+            if poll.revents & libc::POLLNVAL != 0 {
+                return Err(std::io::Error::other("invalid runtime process handle"));
+            }
+            return Ok(poll.revents & (libc::POLLIN | libc::POLLHUP) != 0);
+        }
+        match self.verify() {
+            Ok(()) => Ok(false),
+            Err(ControlClientError::RuntimeChanged) => Ok(true),
+            Err(error) => Err(std::io::Error::other(error.to_string())),
+        }
+    }
+
+    /// Deliver `signal` to this process instance.
+    ///
+    /// Linux signals through the pidfd captured with the identity, so there is no window
+    /// between the identity check and delivery. Without a pidfd (Darwin) the birth token is
+    /// re-verified immediately before `kill(2)`; the residual window is the gap between those
+    /// two syscalls. A process that already exited is not an error.
+    #[cfg(unix)]
+    pub fn signal(&self, signal: libc::c_int) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(handle) = &self.handle {
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    handle.as_raw_fd(),
+                    signal,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                )
+            };
+            return signal_result(result == 0);
+        }
+        match self.verify() {
+            Ok(()) => {}
+            Err(ControlClientError::RuntimeChanged) => return Ok(()),
+            Err(error) => return Err(std::io::Error::other(error.to_string())),
+        }
+        signal_result(unsafe { libc::kill(self.pid, signal) } == 0)
+    }
 }
 
 impl DatabaseIdentity {
@@ -381,6 +449,19 @@ fn file_id(file: &File) -> ControlClientResult<(u64, u64, u64)> {
 #[cfg(target_os = "linux")]
 fn invalid() -> ControlClientError {
     ClientError::new(ErrorKind::InvalidData).into()
+}
+
+#[cfg(unix)]
+fn signal_result(delivered: bool) -> std::io::Result<()> {
+    if delivered {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    // The process finished between the identity check and delivery: nothing left to signal.
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error)
 }
 
 //--------------------------------------------------------------------------------------------------

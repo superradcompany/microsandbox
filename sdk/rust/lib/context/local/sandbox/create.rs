@@ -31,6 +31,8 @@
 
 mod cleanup;
 mod restore;
+#[cfg(all(test, unix))]
+mod safety_tests;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -1227,6 +1229,25 @@ impl LocalContext {
         )
         .await?;
         let mut startup_process = StartupProcess::new(handle);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let process_identity = {
+            let identity = super::super::control::identity::ProcessIdentity::capture(
+                startup_process.handle_mut().pid() as i32,
+            )
+            .map_err(|error| {
+                MicrosandboxError::Runtime(format!(
+                    "cannot capture launched process identity: {error}"
+                ))
+            })?;
+            // A combined reaper may already have collected a fast-exiting child.
+            // Check its owned handle after capture so a recycled PID is never recorded.
+            if startup_process.handle_mut().try_wait()?.is_some() {
+                return Err(MicrosandboxError::Runtime(
+                    "runtime exited before identity capture".into(),
+                ));
+            }
+            identity
+        };
         let log_dir = self.sandboxes_dir().join(&config.spec.name).join("logs");
         if let Err(error) = startup_process
             .handle_mut()
@@ -1314,6 +1335,13 @@ impl LocalContext {
         let run = Self::load_latest_run(self.db().await?.read(), sandbox_id)
             .await?
             .ok_or_else(|| MicrosandboxError::Runtime("ready runtime has no run record".into()))?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        super::process_record::ProcessRecord::publish(
+            self.db().await?.write(),
+            &run,
+            &process_identity,
+        )
+        .await?;
         #[cfg(windows)]
         if let Some((process, lifecycle_lock)) = &startup_process.handle_mut().ownership {
             process.publish(
@@ -1854,9 +1882,17 @@ impl LocalContext {
                 model.status,
                 SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
             );
+            let lifecycle =
+                microsandbox_runtime::ipc::lifecycle_lock_path(run_dir, &config.spec.name);
             if active {
-                Self::stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout)
-                    .await?;
+                Self::stop_sandbox_for_replacement(
+                    pools,
+                    &model,
+                    run_dir,
+                    sandbox_dir,
+                    config.replace_with_timeout,
+                )
+                .await?;
             }
 
             let _lineage =
@@ -1867,26 +1903,22 @@ impl LocalContext {
                 std::time::Duration::from_secs(5),
             )
             .await?;
-            if Self::load_latest_run(pools.read(), model.id)
+            // A recycled PID must not block replacement, but one that may still be the
+            // runtime must: its storage cannot be removed from under it.
+            let latest = Self::load_latest_run(pools.read(), model.id).await?;
+            if Self::recorded_runtime(pools.read(), latest.as_ref(), &lifecycle)
                 .await?
-                .and_then(|run| run.pid)
-                .is_some_and(Self::pid_is_alive)
+                .is_live()
             {
-                return Err(MicrosandboxError::SandboxStillRunning(format!(
+                return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
                     "cannot replace sandbox {:?}: its recorded runtime process is still alive",
                     config.spec.name
                 )));
             }
 
-            // Recheck under this lifecycle guard: reconciliation released its guard,
-            // and legacy runtimes do not participate in lifecycle locking.
-            #[cfg(unix)]
-            if model.status == SandboxStatus::Starting && socket_paths.may_be_live().await? {
-                return Err(MicrosandboxError::SandboxStillRunning(format!(
-                    "cannot replace sandbox {:?}: a runtime endpoint may still be live",
-                    config.spec.name
-                )));
-            }
+            // A free lifecycle lock or exited leader does not prove disk teardown.
+            // Keep every owned-disk guard until the old namespace has been removed.
+            let _disks = Self::released_runtime_disks(run_dir, sandbox_dir, &model).await?;
 
             socket_paths.runtime.remove_artifacts()?;
             remove_dir_if_exists(sandbox_dir)?;
@@ -1952,46 +1984,69 @@ impl LocalContext {
     /// when we're the parent, or the foreign parent's own `waitpid`).
     /// Replaces the previous "wait 30s and give up" behavior, which spun
     /// the full timeout when libkrun's SIGTERM handler did a slow
-    /// graceful shutdown.
+    /// graceful shutdown. Only the identity-checked runtime is signalled;
+    /// a recycled PID is left alone, and one whose identity cannot be proven
+    /// fails with `SandboxStillRunning` before anything is signalled. With
+    /// nothing to signal, the row is marked stopped only while no runtime
+    /// owns the name's lifecycle lock.
     async fn stop_sandbox_for_replacement(
         pools: &DbPools,
         sandbox: &sandbox_entity::Model,
+        run_dir: &Path,
+        sandbox_dir: &Path,
         grace: std::time::Duration,
     ) -> MicrosandboxResult<()> {
-        let run = Self::load_active_run(pools.read(), sandbox.id).await?;
-        let pids: Vec<i32> = run
-            .as_ref()
-            .and_then(|model| model.pid)
-            .filter(|pid| Self::pid_is_alive(*pid))
-            .into_iter()
-            .collect();
+        let run = Self::load_latest_run(pools.read(), sandbox.id).await?;
+        let lifecycle = microsandbox_runtime::ipc::lifecycle_lock_path(run_dir, &sandbox.name);
+        let process = Self::recorded_runtime(pools.read(), run.as_ref(), &lifecycle).await?.signallable(|pid| {
+            crate::MicrosandboxError::SandboxStillRunning(format!(
+                "cannot replace sandbox {:?}: cannot prove that recorded PID {pid} is still its runtime; refusing to signal it",
+                sandbox.name
+            ))
+        })?;
 
-        if !pids.is_empty() {
-            // Polite phase: SIGTERM and wait up to `grace` for graceful exit.
-            if !grace.is_zero() {
-                for pid in &pids {
-                    let _ = Self::terminate_pid_gracefully(*pid);
+        match process {
+            Some(process) => {
+                // Polite phase: SIGTERM and wait up to `grace` for graceful exit.
+                if !grace.is_zero() {
+                    let _ = process.signal(super::RuntimeSignal::Terminate);
+                    Self::wait_for_runtime_exit(&process, grace).await;
                 }
-                Self::wait_for_pids_to_exit(&pids, grace).await;
-            }
 
-            // SIGKILL anything still alive, then prove every recorded owner
-            // exited before deterministic sockets or storage can be reused.
-            for pid in pids.iter().copied().filter(|p| Self::pid_is_alive(*p)) {
-                if let Err(error) = Self::kill_pid(pid)
-                    && Self::pid_is_alive(pid)
+                // SIGKILL anything still alive, then prove the recorded owner exited
+                // before deterministic sockets or storage can be reused. Windows has
+                // no exited-instance no-op, so an instance that exited meanwhile is
+                // skipped, and a failure only matters while it is still running.
+                if !process.has_exited()
+                    && let Err(error) = process.signal(super::RuntimeSignal::Kill)
+                    && !process.has_exited()
                 {
                     return Err(error);
                 }
+                Self::wait_for_runtime_exit(&process, std::time::Duration::from_secs(5)).await;
+                if !process.has_exited() {
+                    return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                        "cannot replace sandbox {:?}: runtime did not exit after SIGKILL",
+                        sandbox.name
+                    )));
+                }
             }
-            Self::wait_for_pids_to_exit(&pids, std::time::Duration::from_secs(5)).await;
-            if pids.iter().any(|pid| !Self::pid_has_exited(*pid)) {
-                return Err(MicrosandboxError::SandboxStillRunning(format!(
-                    "cannot replace sandbox {:?}: runtime did not exit after SIGKILL",
+            None if !Self::lifecycle_is_unowned(run_dir, &sandbox.name)? => {
+                return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                    "cannot replace sandbox {:?}: its lifecycle lock is held by a runtime the recorded run does not identify",
                     sandbox.name
                 )));
             }
+            None => {}
         }
+
+        let _owner = crate::runtime::acquire_sandbox_lifecycle_guard(
+            run_dir,
+            &sandbox.name,
+            std::time::Duration::from_secs(5),
+        )
+        .await?;
+        let _disks = Self::released_runtime_disks(run_dir, sandbox_dir, sandbox).await?;
 
         Self::mark_sandbox_stopped_for_replacement(
             pools.write(),
@@ -2047,24 +2102,6 @@ impl LocalContext {
             Ok((txn, ()))
         })
         .await
-    }
-
-    /// Poll until every pid has exited or `timeout` elapses.
-    async fn wait_for_pids_to_exit(pids: &[i32], timeout: std::time::Duration) {
-        let start = std::time::Instant::now();
-        let poll_interval = std::time::Duration::from_millis(50);
-
-        loop {
-            if pids.iter().all(|pid| Self::pid_has_exited(*pid)) {
-                return;
-            }
-
-            if start.elapsed() >= timeout {
-                return;
-            }
-
-            tokio::time::sleep(poll_interval).await;
-        }
     }
 
     /// Insert the sandbox record in the database and return its ID.
@@ -2151,13 +2188,26 @@ impl LocalContext {
         if !creation::pending(pools.write(), model.id).await? {
             return Ok(());
         }
-        Self::stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout).await?;
+        Self::stop_sandbox_for_replacement(
+            pools,
+            &model,
+            &self.config().run_dir(),
+            &self.sandboxes_dir().join(&model.name),
+            config.replace_with_timeout,
+        )
+        .await?;
         let _lineage =
             crate::snapshot::lineage::lock_source(&self.config().run_dir(), &model.name).await?;
         let _runtime = crate::runtime::acquire_sandbox_lifecycle_guard(
             &self.config().run_dir(),
             &model.name,
             std::time::Duration::from_secs(5),
+        )
+        .await?;
+        let _disks = Self::released_runtime_disks(
+            &self.config().run_dir(),
+            &self.sandboxes_dir().join(&model.name),
+            &model,
         )
         .await?;
         self.remove_incomplete_sandbox(model.id, &model.name, creation::RemovalMode::Recovery)
@@ -4110,16 +4160,19 @@ esac
             .await
             .unwrap();
 
-        let child = Command::new("sleep").arg("30").spawn().unwrap();
-        let live_pid = child.id() as i32;
-        let waiter = std::thread::spawn(move || {
-            let mut child = child;
-            child.wait().unwrap()
+        let run_dir = temp.path().join("run");
+        let child =
+            super::super::runtime_identity::test_support::spawn_owned_child(&run_dir, "running");
+        let mut child = scopeguard::guard(child, |mut child| {
+            super::super::runtime_identity::test_support::cleanup_child(&mut child);
         });
+        let live_pid = child.id() as i32;
         let run = run_entity::ActiveModel {
             sandbox_id: Set(sandbox_id),
             pid: Set(Some(live_pid)),
             status: Set(run_entity::RunStatus::Running),
+            // The runtime records its start moments after it is spawned.
+            started_at: Set(Some(chrono::Utc::now().naive_utc())),
             ..Default::default()
         };
         run_entity::Entity::insert(run)
@@ -4135,7 +4188,11 @@ esac
             .await
             .unwrap();
 
-        waiter.join().unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert!(matches!(
+            child.wait().unwrap().signal(),
+            Some(libc::SIGTERM | libc::SIGKILL)
+        ));
 
         assert!(!LocalContext::pid_is_alive(live_pid));
         assert!(!sandbox_dir.exists());
@@ -4146,6 +4203,112 @@ esac
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Outcome of replacing a Running sandbox whose run row records a fresh child process.
+    #[cfg(unix)]
+    struct RecordedPidReplacement {
+        result: crate::MicrosandboxResult<()>,
+        /// Whether the sandbox directory and row were both removed.
+        replaced: bool,
+        /// Whether the recorded child survived.
+        survived: bool,
+    }
+
+    /// Replace a Running sandbox whose run row records a fresh child process as its runtime,
+    /// with `started_at` set `started_offset` from the moment the child was spawned, or unset.
+    /// The child runs the `msb` binary when `msb` is set, and plain `sleep` otherwise.
+    #[cfg(unix)]
+    async fn replace_running_sandbox_with_recorded_pid(
+        name: &str,
+        msb: bool,
+        started_offset: Option<chrono::TimeDelta>,
+    ) -> RecordedPidReplacement {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let sandbox_dir = temp.path().join("sandboxes").join(name);
+        fs::create_dir_all(&sandbox_dir).unwrap();
+        let sandbox_id = LocalContext::insert_sandbox_record(pools.write(), &test_config(name))
+            .await
+            .unwrap();
+
+        let (mut child, _bin) = if msb {
+            let (child, bin) = super::super::runtime_identity::test_support::spawn_msb_child();
+            (child, Some(bin))
+        } else {
+            (Command::new("sleep").arg("30").spawn().unwrap(), None)
+        };
+        let started_at = started_offset.map(|offset| (chrono::Utc::now() + offset).naive_utc());
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            pid: Set(Some(child.id() as i32)),
+            status: Set(run_entity::RunStatus::Running),
+            started_at: Set(started_at),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+
+        let mut forced = test_config(name);
+        forced.replace_existing = true;
+        let run_dir = temp.path().join("run");
+        let result =
+            LocalContext::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir).await;
+
+        let row_gone = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.write())
+            .await
+            .unwrap()
+            .is_none();
+        let replaced = row_gone && !sandbox_dir.exists();
+        // Give a signalled child a moment to be reaped; a spared child simply keeps sleeping.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while result.is_ok()
+            && child.try_wait().unwrap().is_none()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let survived = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        RecordedPidReplacement {
+            result,
+            replaced,
+            survived,
+        }
+    }
+
+    /// A name or timestamp is not sufficient evidence for destructive recovery.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_prepare_create_target_refuses_heuristic_identity() {
+        for (name, msb, offset) in [
+            ("old-row", false, -chrono::TimeDelta::hours(1)),
+            ("msb-name", true, chrono::TimeDelta::zero()),
+        ] {
+            let outcome = replace_running_sandbox_with_recorded_pid(name, msb, Some(offset)).await;
+            assert!(outcome.result.is_err());
+            assert!(!outcome.replaced);
+            assert!(outcome.survived);
+        }
+    }
+
+    /// A recorded PID whose identity cannot be proven either way is neither signalled nor
+    /// replaced: the sandbox's storage and row stay behind a still-running error.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_prepare_create_target_force_replace_refuses_an_unverified_pid() {
+        let outcome = replace_running_sandbox_with_recorded_pid("unverified", true, None).await;
+        assert!(matches!(
+            outcome.result,
+            Err(crate::MicrosandboxError::SandboxStillRunning(_))
+        ));
+        assert!(!outcome.replaced);
+        assert!(outcome.survived, "an unverified PID must not be signalled");
     }
 
     #[tokio::test]

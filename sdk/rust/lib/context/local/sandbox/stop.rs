@@ -16,7 +16,7 @@ use tokio::sync::watch;
 
 use crate::db::entity::run;
 use crate::sandbox::SandboxStatus;
-use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::LocalContext;
 
@@ -309,19 +309,15 @@ impl LocalContext {
                 // Both guards fence cooperative restart/removal. Legacy Windows additionally
                 // requires the retained process object to exit; its unused lock proves nothing.
                 let _disk_guards = if let Some(model) = model.as_ref() {
-                    let config: crate::sandbox::SandboxConfig =
-                        serde_json::from_str::<SandboxConfig>(&model.config)?;
-                    match crate::runtime::owned_volumes::try_acquire_disk_guards(
-                        &self.sandboxes_dir().join(name),
-                        &config.spec.mounts,
-                    )? {
-                        Some(guards) => guards,
-                        None => {
+                    match self.released_sandbox_resources(model).await {
+                        Ok(guards) => guards,
+                        Err(MicrosandboxError::SandboxStillRunning(_)) => {
                             drop(_ownership);
                             drop(transition);
-                            tokio::time::sleep(Duration::from_millis(1)).await;
+                            tokio::time::sleep(Duration::from_millis(50)).await;
                             continue;
                         }
+                        Err(error) => return Err(error),
                     }
                 } else {
                     Vec::new()
@@ -865,7 +861,7 @@ mod tests {
             .unwrap();
         let run_id = run::Entity::insert(run::ActiveModel {
             sandbox_id: Set(id),
-            // A visible PID cannot substitute for the runtime's ownership lock.
+            // Model a recycled PID with exact persisted evidence below.
             pid: Set(Some(std::process::id() as i32)),
             status: Set(run::RunStatus::Terminated),
             ..Default::default()
@@ -874,6 +870,11 @@ mod tests {
         .await
         .unwrap()
         .last_insert_id;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let run = backend.latest_stop_run(id).await.unwrap().unwrap();
+            super::super::process_record::tests::model_reused_pid(&backend, &run).await;
+        }
         #[cfg(windows)]
         {
             // This fixture models a current runtime whose lifecycle lock is authoritative.
@@ -1114,7 +1115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ownership_release_reconciles_a_stale_run_despite_a_visible_pid() {
+    async fn ownership_release_reconciles_a_proven_recycled_pid() {
         let (_home, backend, id, run_id) = fixture("stale-run").await;
         run::Entity::update_many()
             .col_expr(
@@ -1145,6 +1146,68 @@ mod tests {
         assert_eq!(
             backend.latest_stop_run(id).await.unwrap().unwrap().status,
             run::RunStatus::Terminated
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn stop_and_removal_refuse_unverified_terminal_pid() {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        let (_home, backend, id, _) = fixture("unknown-owner").await;
+        backend
+            .db()
+            .await
+            .unwrap()
+            .write()
+            .execute_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "UPDATE run SET process_identity = NULL",
+            ))
+            .await
+            .unwrap();
+        let directory = backend.sandboxes_dir().join("unknown-owner");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("marker"), "preserve").unwrap();
+        let stop = backend
+            .stop_complete("unknown-owner", id, false)
+            .await
+            .unwrap_err();
+        assert!(stop.to_string().contains("unverified ownership"));
+        // A stale Starting row must not make implicit preparation wait forever.
+        LocalContext::update_sandbox_status(
+            backend.db().await.unwrap().write(),
+            id,
+            SandboxStatus::Starting,
+        )
+        .await
+        .unwrap();
+        let sandbox = crate::Sandbox::ctx(&backend)
+            .get("unknown-owner")
+            .await
+            .unwrap();
+        let prepare = tokio::time::timeout(Duration::from_secs(2), sandbox.ensure_running())
+            .await
+            .expect("ambiguous preparation must return promptly")
+            .unwrap_err();
+        assert!(prepare.to_string().contains("unverified ownership"));
+        LocalContext::update_sandbox_status(
+            backend.db().await.unwrap().write(),
+            id,
+            SandboxStatus::Stopped,
+        )
+        .await
+        .unwrap();
+        let remove = crate::sandbox::remove_local_persisted_sandbox(&backend, "unknown-owner", id)
+            .await
+            .unwrap_err();
+        assert!(remove.to_string().contains("unverified ownership"));
+        assert!(directory.join("marker").exists());
+        assert!(
+            sandbox::Entity::find_by_id(id)
+                .one(backend.db().await.unwrap().read())
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 

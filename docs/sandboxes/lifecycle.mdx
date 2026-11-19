@@ -736,3 +736,7 @@ Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to r
 ## Reference
 
 For exact lifecycle APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), [Go](/sdk/go/sandbox), or [Ruby](/sdk/ruby/sandbox). For lifecycle commands and the REST surface, see [Sandbox commands](/cli/sandbox-commands) and the [Cloud API](/api-reference/overview).
+
+## Unverified local process ownership
+
+On Linux and macOS, a recorded PID alone does not prove that a process belongs to a sandbox. Recovery checks the saved process identity and waits for lifecycle, endpoint and disk ownership to be released. If ownership cannot be established, destructive operations return an error and preserve the sandbox. Do not kill a process solely because its PID appears in the catalog or delete ownership metadata to force recovery.

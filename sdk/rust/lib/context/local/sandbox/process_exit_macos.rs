@@ -23,7 +23,6 @@ pub(super) struct RuntimeExit {
     queue: Option<OwnedFd>,
     pid: i32,
     identity: ProcessState,
-    signal_proven: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -70,7 +69,6 @@ impl RuntimeExit {
             queue,
             pid,
             identity,
-            signal_proven: true,
         };
         // The PID may have disappeared/recycled between the identity read and registration.
         // Never wait for a new occupant, even if it later opens the same lifecycle file.
@@ -99,7 +97,6 @@ impl RuntimeExit {
             // edge. Use the birth-identified late-exit path instead of awaiting that edge.
             return Ok(Some(Self {
                 queue: None,
-                signal_proven: false,
                 ..observer
             }));
         }
@@ -136,27 +133,6 @@ impl RuntimeExit {
         Ok(process_state(self.pid)?.is_none_or(|state| {
             state.birth != self.identity.birth || state.status == libc::SZOMB as u8
         }))
-    }
-
-    pub(super) fn send_signal(&self, signal: libc::c_int) -> io::Result<bool> {
-        if !self.signal_proven
-            || process_state(self.pid)?.is_none_or(|state| {
-                state.birth != self.identity.birth || state.status == libc::SZOMB as u8
-            })
-        {
-            return Ok(false);
-        }
-        // Darwin signals by PID; this check narrows but cannot close the reuse race.
-        let result = unsafe { libc::kill(self.pid, signal) };
-        if result < 0 {
-            let error = io::Error::last_os_error();
-            return if error.raw_os_error() == Some(libc::ESRCH) {
-                Ok(false)
-            } else {
-                Err(error)
-            };
-        }
-        Ok(true)
     }
 }
 
@@ -207,7 +183,11 @@ fn register_exit(pid: i32) -> io::Result<Option<OwnedFd>> {
     }
 }
 
-fn lifecycle_matches(pid: i32, lifecycle: &Path) -> io::Result<bool> {
+/// Whether `pid` holds the sandbox's lifecycle lock file on the runtime's inherited descriptor.
+///
+/// Only the live runtime of this sandbox name holds that exclusive lock, so a match identifies
+/// the process beyond its PID. A missing process or descriptor is `false`.
+pub(super) fn lifecycle_matches(pid: i32, lifecycle: &Path) -> io::Result<bool> {
     let mut info = std::mem::MaybeUninit::<VnodeFdInfo>::zeroed();
     let size = std::mem::size_of::<VnodeFdInfo>();
     let result = unsafe {
@@ -243,6 +223,12 @@ fn lifecycle_matches(pid: i32, lifecycle: &Path) -> io::Result<bool> {
         u64::from(info.vnode.vi_stat.vst_dev),
         info.vnode.vi_stat.vst_ino,
     ) == (expected.dev(), expected.ino()))
+}
+
+/// Darwin reports a zombie only after its process resources have been released.
+/// Failed or denied inspection remains an error, never evidence of completion.
+pub(super) fn pid_has_exited(pid: i32) -> io::Result<bool> {
+    Ok(process_state(pid)?.is_none_or(|state| state.status == libc::SZOMB as u8))
 }
 
 fn process_state(pid: i32) -> io::Result<Option<ProcessState>> {
@@ -313,6 +299,7 @@ mod tests {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
+    use super::super::super::control::identity::ProcessIdentity;
     use super::super::signal_tests::{child_lines, cleanup_child, expect_line};
     use super::*;
 
@@ -496,7 +483,6 @@ mod tests {
             queue: None,
             pid: barrier.pid,
             identity: barrier.identity,
-            signal_proven: barrier.signal_proven,
         };
         assert!(!late.has_exited().unwrap());
         drop(lifecycle);
@@ -531,39 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn unproven_exit_observer_cannot_signal() {
-        let mut child = scopeguard::guard(
-            Command::new("/bin/sleep").arg("5").spawn().unwrap(),
-            |mut child| {
-                let _ = child.kill();
-                let _ = child.wait();
-            },
-        );
-        let pid = child.id() as i32;
-        let identity = process_state(pid).unwrap().unwrap();
-        let observer = RuntimeExit {
-            queue: None,
-            pid,
-            identity,
-            signal_proven: false,
-        };
-
-        observer.send_signal(libc::SIGKILL).unwrap();
-        assert!(child.try_wait().unwrap().is_none());
-
-        let stale = RuntimeExit {
-            signal_proven: true,
-            identity: ProcessState {
-                birth: (identity.birth.0 - 1, identity.birth.1),
-                ..identity
-            },
-            ..observer
-        };
-        stale.send_signal(libc::SIGKILL).unwrap();
-        assert!(child.try_wait().unwrap().is_none());
-    }
-
-    #[test]
     fn process_identity_layout_matches_libproc_and_recycled_identity_completes() {
         let pid = std::process::id() as i32;
         let state = process_state(pid).unwrap().unwrap();
@@ -593,7 +546,6 @@ mod tests {
             queue: None,
             pid,
             identity,
-            signal_proven: false,
         };
         assert!(stale.has_exited().unwrap());
         // Frozen public proc-info wrapper ABI, independently checked against the SDK headers.
@@ -613,14 +565,11 @@ mod tests {
             |mut child| cleanup_child(&mut child),
         );
         expect_line(&child_lines(child.stdout.take().unwrap()), "ready");
-        let mut observer = RuntimeExit::capture(
-            Some(child.id() as i32),
-            &microsandbox_runtime::ipc::lifecycle_lock_path(home.path(), "identity"),
-        )
-        .unwrap()
-        .unwrap();
-        observer.identity.birth.0 += 1;
-        assert!(!observer.send_signal(libc::SIGKILL).unwrap());
+        // Dispatch now belongs to the shared recorded-process identity, not
+        // the observer. Exercise the actual dispatch guard after integration.
+        let mut identity = ProcessIdentity::capture(child.id() as i32).unwrap();
+        identity.start.0 += 1;
+        identity.signal(libc::SIGKILL).unwrap();
         assert!(child.try_wait().unwrap().is_none());
     }
 }

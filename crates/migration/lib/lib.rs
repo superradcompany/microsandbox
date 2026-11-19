@@ -33,6 +33,7 @@ mod m20261022_000001_sandbox_caller_config_overrides;
 mod m20261024_000001_sandbox_creation;
 mod m20261029_000001_volume_creation;
 mod m20261030_000001_protected_sandbox_state;
+mod m20261119_000001_run_process_identity;
 pub mod schema_metadata;
 
 use sea_orm_migration::prelude::*;
@@ -95,6 +96,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261024_000001_sandbox_creation::Migration),
             Box::new(m20261029_000001_volume_creation::Migration),
             Box::new(m20261030_000001_protected_sandbox_state::Migration),
+            Box::new(m20261119_000001_run_process_identity::Migration),
         ]
     }
 }

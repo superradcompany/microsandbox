@@ -76,6 +76,9 @@ pub const VOLUME_CREATION_MIGRATION_ID: &str = "m20261029_000001_volume_creation
 /// Migration that excludes old tools from protected sandbox state.
 pub const PROTECTED_SANDBOX_STATE_MIGRATION_ID: &str = "m20261030_000001_protected_sandbox_state";
 
+/// Migration that retains exact SDK-observed run process identity.
+pub const RUN_PROCESS_IDENTITY_MIGRATION_ID: &str = "m20261119_000001_run_process_identity";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -336,6 +339,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: true,
         summary: "refuse downgrade while protected or migrating sandboxes remain",
     },
+    MigrationMetadata {
+        id: RUN_PROCESS_IDENTITY_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: true,
+        summary: "retain process identity evidence until the owning sandboxes are safely removed",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -422,6 +432,7 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            RUN_PROCESS_IDENTITY_MIGRATION_ID,
             PROTECTED_SANDBOX_STATE_MIGRATION_ID,
             VOLUME_CREATION_MIGRATION_ID,
             SANDBOX_CREATION_MIGRATION_ID,
@@ -520,6 +531,7 @@ mod tests {
                 SANDBOX_CREATION_MIGRATION_ID,
                 VOLUME_CREATION_MIGRATION_ID,
                 PROTECTED_SANDBOX_STATE_MIGRATION_ID,
+                RUN_PROCESS_IDENTITY_MIGRATION_ID,
             ],
         );
         assert!(canonical_applied_prefix(released).is_some());
