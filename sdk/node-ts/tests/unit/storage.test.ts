@@ -3,11 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const native = vi.hoisted(() => ({ storageUsage: vi.fn(), storagePrune: vi.fn() }));
 vi.mock("../../dist/internal/napi.js", () => ({ napi: native }));
 
+import { Sandbox } from "../../dist/sandbox.js";
 import { Storage } from "../../dist/storage.js";
 import { IoError, UnsupportedError, UnsupportedOperationError } from "../../dist/errors.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
 import { Snapshot } from "../../dist/snapshot.js";
-import { SnapshotHandle } from "../../dist/snapshot-handle.js";
 
 const category = () => ({
   count: undefined, inUse: undefined, logicalBytes: undefined,
@@ -138,9 +137,8 @@ describe("Storage", () => {
   });
 
   it.each([
-    ["SandboxHandle", (inner: never) => new SandboxHandle(inner)],
+    ["Sandbox", (inner: never) => new Sandbox(inner)],
     ["Snapshot", (inner: never) => new Snapshot(inner)],
-    ["SnapshotHandle", (inner: never) => new SnapshotHandle(inner)],
   ] as const)("observes %s through its native receiver", async (_name, wrap) => {
     const item = {
       name: "artifact", path: "/captured/artifact", logicalBytes: 2n ** 64n - 1n,
@@ -161,15 +159,11 @@ describe("Storage", () => {
     await expect(handle.storageUsage()).rejects.toBeInstanceOf(UnsupportedError);
   });
 
-  it("rejects unsupported old handles and metadata-only snapshot list records", async () => {
-    await expect(new SandboxHandle({} as never).storageUsage())
+  it("rejects unsupported old native objects", async () => {
+    await expect(new Sandbox({} as never).storageUsage())
       .rejects.toBeInstanceOf(UnsupportedOperationError);
     await expect(new Snapshot({} as never).storageUsage())
       .rejects.toBeInstanceOf(UnsupportedOperationError);
-    await expect(new SnapshotHandle({ open: vi.fn() } as never).storageUsage())
-      .rejects.toThrow("upgrade or rebuild");
-    await expect(new SnapshotHandle({} as never).storageUsage())
-      .rejects.toThrow("Snapshot.get()");
     expect(native.storageUsage).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,4 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
-import { mapAsyncIterable } from "./internal/async-iter.js";
 import type {
   NapiFsEntry,
   NapiFsMetadata,
@@ -23,7 +22,7 @@ export class FsReadStream
   async recv(): Promise<Uint8Array | null> {
     if (this.done) return null;
     const buf = await withMappedErrors(() => this.inner.recv());
-    if (buf === null) {
+    if (this.done || buf === null) {
       this.done = true;
       return null;
     }
@@ -49,11 +48,12 @@ export class FsReadStream
     return out;
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
-    return mapAsyncIterable<Buffer, Uint8Array>(
-      { recv: () => this.inner.recv() },
-      (buf) => new Uint8Array(buf),
-    )[Symbol.asyncIterator]();
+  async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+    for (;;) {
+      const item = await this.recv();
+      if (this.done || item === null) return;
+      yield item;
+    }
   }
 
   async [Symbol.asyncDispose](): Promise<void> {

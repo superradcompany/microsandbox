@@ -51,6 +51,8 @@ Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB
   </div>
 </div>
 
+Filesystem operations connect to an existing run or start a stopped sandbox when needed. Creating a helper does not start the sandbox or keep its handle open. `Sandbox.Close` releases that handle and invalidates idle helpers. After you release the original sandbox handles, get a new Sandbox before starting more work. Active I/O and streams keep using the selected local run until they finish or are cleaned up. Explicit stop can still interrupt them.
+
 #### <span className="msb-recv">fs.</span><span className="msb-hn">ReadString()</span>
 
 ```go

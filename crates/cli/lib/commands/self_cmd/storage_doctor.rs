@@ -61,7 +61,12 @@ pub async fn run_doctor_command(mut args: DoctorArgs) -> anyhow::Result<()> {
         (None, true) => StorageSelection::All,
         _ => anyhow::bail!("choose --sandbox SANDBOX or --all"),
     };
-    let report = microsandbox::setup::diagnose_storage(Default::default(), selection).await?;
+    let report = microsandbox::setup::diagnose_storage_in(
+        crate::commands::common::selected_context()?.as_ref(),
+        Default::default(),
+        selection,
+    )
+    .await?;
     if args.format == Some(OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

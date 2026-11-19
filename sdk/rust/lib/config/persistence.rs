@@ -456,7 +456,7 @@ mod tests {
         let saved = GlobalConfigPatch::read_json(&path).unwrap();
         assert!(saved.get("sandbox_defaults").is_none());
         assert!(saved.get("paths").is_none());
-        assert_eq!(saved["profiles"]["keep"]["backend"], "local");
+        assert_eq!(saved["profiles"]["keep"]["kind"], "local");
         assert!(saved["profiles"]["keep"].get("future").is_none());
         assert!(saved["profiles"].get("remove").is_none());
         assert_eq!(saved["registries"]["hosts"]["keep"]["insecure"], true);
@@ -688,7 +688,16 @@ mod tests {
             .unwrap(),
         );
         let value = GlobalConfigPatch::read_json(&path).unwrap();
-        let profiles = value["profiles"].clone();
+        // Legacy files remain readable; saving uses the accepted current spelling.
+        let mut profiles = value["profiles"].clone();
+        for profile in profiles.as_object_mut().unwrap().values_mut() {
+            let profile = profile.as_object_mut().unwrap();
+            let mut kind = profile.remove("backend").unwrap();
+            if kind == "cloud" {
+                kind = "remote".into();
+            }
+            profile.insert("kind".into(), kind);
+        }
         let mut config = GlobalConfigPatch::load_from(&path).unwrap();
         assert_eq!(config.sandbox_defaults.cpus, Some(2));
         config.save_to(&path).unwrap();
@@ -855,8 +864,8 @@ mod tests {
         assert_eq!(cfg.profiles["user"].url, None);
         assert_eq!(cfg.profiles["user"].api_key_ref, None);
         assert!(matches!(
-            cfg.profiles["user"].backend,
-            crate::backend::ProfileBackend::Local
+            cfg.profiles["user"].kind,
+            crate::context::ProfileKind::Local
         ));
     }
 }

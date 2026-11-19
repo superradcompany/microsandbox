@@ -3,6 +3,8 @@
 //! These tests require KVM (or libkrun on macOS). The [`msb_test`] attribute
 //! marks them ignored for ordinary workspace test runs.
 
+#![cfg(feature = "net")]
+
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 

@@ -1,7 +1,6 @@
 //! `msb start` command — start/resume an existing stopped sandbox.
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
 
 use crate::ui;
 
@@ -44,9 +43,13 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
             ui::Spinner::start("Starting", name)
         };
 
-        match Sandbox::start_detached(name).await {
+        match crate::commands::common::selected_context()?
+            .sandboxes()
+            .start_detached(name)
+            .await
+        {
             Ok(sandbox) => {
-                sandbox.detach().await;
+                sandbox.detach().await?;
                 spinner.finish_success("Started");
             }
             Err(e) => {

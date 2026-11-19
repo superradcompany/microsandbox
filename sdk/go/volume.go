@@ -3,6 +3,7 @@ package microsandbox
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,176 +15,169 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
-// Volume is persistent storage. Local volumes carry a host-side path; Cloud
-// volumes carry an immutable server identity. Lookups yield richer
-// VolumeHandle values.
-//
-// There is no Rust-side resource to release — Remove deletes the on-disk
-// state and DB record.
+// Volume is persistent storage with retained destination and stable identity.
+// Create, Get and List return this same type. Garbage collection never deletes storage.
 type Volume struct {
-	name     string
-	path     string
-	fsTarget string
+	inner     *ffi.PersistentResource
+	id        string
+	name      string
+	path      string
+	kind      VolumeKind
+	isDefault bool
 }
 
-// Name returns the volume's name.
-func (v *Volume) Name() string { return v.name }
-
-// Path returns the host filesystem path of the volume's data directory.
-func (v *Volume) Path() string { return v.path }
-
-// FS returns direct filesystem operations for this volume.
-func (v *Volume) FS() *VolumeFs { return &VolumeFs{root: v.path, target: v.fsTarget} }
-
-// Remove deletes this volume. All sandboxes using it must be stopped.
-func (v *Volume) Remove(ctx context.Context) error {
-	return RemoveVolume(ctx, v.name)
+// VolumeInfo is one live backend observation. Unknown usage remains nil.
+type VolumeInfo struct {
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Kind          VolumeKind        `json:"kind"`
+	IsDefault     bool              `json:"is_default"`
+	QuotaMiB      *uint32           `json:"quota_mib"`
+	UsedBytes     *uint64           `json:"used_bytes"`
+	CapacityBytes *uint64           `json:"capacity_bytes"`
+	DiskFormat    *string           `json:"disk_format"`
+	DiskFstype    *string           `json:"disk_fstype"`
+	Labels        map[string]string `json:"-"`
+	CreatedAt     *time.Time        `json:"created_at"`
 }
 
-// CreateVolume creates a named volume and returns a populated handle (with
-// path and metadata).
-func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volume, error) {
-	o := VolumeConfig{}
-	for _, opt := range opts {
-		opt(&o)
+func volumeFromResource(inner *ffi.PersistentResource) (*Volume, error) {
+	var captured struct {
+		ID        string     `json:"id"`
+		Name      string     `json:"name"`
+		Path      string     `json:"path"`
+		Kind      VolumeKind `json:"kind"`
+		IsDefault bool       `json:"is_default"`
 	}
-	info, err := ffi.CreateVolume(ctx, name, ffi.VolumeCreateOptions{
-		QuotaMiB: o.QuotaMiB,
-		Kind:     string(o.Kind),
-		SizeMiB:  o.SizeMiB,
-		Labels:   o.Labels,
-	})
+	if err := json.Unmarshal(inner.Observation, &captured); err != nil {
+		return nil, err
+	}
+	return &Volume{inner: inner, id: captured.ID, name: captured.Name, path: captured.Path, kind: captured.Kind, isDefault: captured.IsDefault}, nil
+}
+func (v *Volume) ID() string       { return v.id }
+func (v *Volume) Name() string     { return v.name }
+func (v *Volume) Path() string     { return v.path }
+func (v *Volume) Kind() VolumeKind { return v.kind }
+func (v *Volume) IsDefault() bool  { return v.isDefault }
+func (v *Volume) Context() Context { return contextFromNative(v.inner.Context()) }
+func (v *Volume) FS() *VolumeFs    { return &VolumeFs{root: v.path, resource: v.inner} }
+func (v *Volume) Info(ctx context.Context) (*VolumeInfo, error) {
+	var result struct {
+		VolumeInfo
+		LabelPairs [][2]string `json:"labels"`
+	}
+	if err := v.inner.Operation(ctx, "info", nil, &result); err != nil {
+		return nil, wrapFFI(err)
+	}
+	// Older and current native inspections serialize Rust's variant names.
+	switch result.Kind {
+	case "Directory":
+		result.Kind = VolumeKindDir
+	case "Disk":
+		result.Kind = VolumeKindDisk
+	}
+	result.Labels = make(map[string]string, len(result.LabelPairs))
+	for _, pair := range result.LabelPairs {
+		result.Labels[pair[0]] = pair[1]
+	}
+	return &result.VolumeInfo, nil
+}
+
+// Destroy deletes only the captured identity. A same-name replacement is untouched.
+func (v *Volume) Destroy(ctx context.Context) error {
+	if v.isDefault {
+		return &Error{Kind: ErrUnsupportedOperation, Message: "the default volume cannot be removed"}
+	}
+	return wrapFFI(v.inner.Operation(ctx, "destroy", nil, nil))
+}
+
+// Volumes selects persistent storage operations in one destination.
+type Volumes struct{ selected Context }
+
+func VolumeCtx(selected Context) *Volumes { return &Volumes{selected: selected} }
+func (v *Volumes) Context() Context       { return v.selected }
+func (v *Volumes) operation(ctx context.Context, operation, name string, args any) ([]*Volume, error) {
+	destination, err := nativeDestination(v.selected)
+	if err != nil {
+		return nil, err
+	}
+	resources, err := destination.Resources(ctx, operation, name, args)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	return &Volume{name: info.Name, path: info.Path, fsTarget: volumeFsTarget(info)}, nil
-}
-
-// ListVolumes returns metadata for every named volume on the host.
-func ListVolumes(ctx context.Context) ([]*VolumeHandle, error) {
-	infos, err := ffi.ListVolumes(ctx)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	out := make([]*VolumeHandle, len(infos))
-	for i, info := range infos {
-		out[i] = volumeHandleFromInfo(info)
-	}
-	return out, nil
-}
-
-// RemoveVolume removes a volume by name.
-func RemoveVolume(ctx context.Context, name string) error {
-	return wrapFFI(ffi.RemoveVolume(ctx, name))
-}
-
-// ---------------------------------------------------------------------------
-// VolumeHandle — metadata reference returned by GetVolume / ListVolumes
-// ---------------------------------------------------------------------------
-
-// VolumeHandle carries metadata for a named volume. Obtain via GetVolume or
-// ListVolumes.
-type VolumeHandle struct {
-	name          string
-	fsTarget      string
-	isDefault     bool
-	path          string
-	kind          VolumeKind
-	quotaMiB      *uint32
-	usedBytes     uint64
-	capacityBytes *uint64
-	diskFormat    *string
-	diskFstype    *string
-	labels        map[string]string
-	createdAtUnix *int64
-}
-
-func volumeHandleFromInfo(info *ffi.VolumeHandleInfo) *VolumeHandle {
-	return &VolumeHandle{
-		name:          info.Name,
-		fsTarget:      volumeFsTarget(info),
-		isDefault:     info.IsDefault,
-		path:          info.Path,
-		kind:          VolumeKind(info.Kind),
-		quotaMiB:      info.QuotaMiB,
-		usedBytes:     info.UsedBytes,
-		capacityBytes: info.CapacityBytes,
-		diskFormat:    info.DiskFormat,
-		diskFstype:    info.DiskFstype,
-		labels:        info.Labels,
-		createdAtUnix: info.CreatedAtUnix,
-	}
-}
-
-// Name returns the volume name.
-func (h *VolumeHandle) Name() string { return h.name }
-
-// IsDefault reports whether this is the cloud account's default volume.
-func (h *VolumeHandle) IsDefault() bool { return h.isDefault }
-
-// Path returns the host filesystem path of the volume's data directory.
-func (h *VolumeHandle) Path() string { return h.path }
-
-// Kind returns the volume storage kind.
-func (h *VolumeHandle) Kind() VolumeKind { return h.kind }
-
-// QuotaMiB returns the quota in MiB, or nil if unlimited.
-func (h *VolumeHandle) QuotaMiB() *uint32 { return h.quotaMiB }
-
-// UsedBytes returns the amount of space used by the volume in bytes.
-func (h *VolumeHandle) UsedBytes() uint64 { return h.usedBytes }
-
-// CapacityBytes returns disk capacity in bytes for disk volumes.
-func (h *VolumeHandle) CapacityBytes() *uint64 { return h.capacityBytes }
-
-// DiskFormat returns the disk image format for disk volumes.
-func (h *VolumeHandle) DiskFormat() *string { return h.diskFormat }
-
-// DiskFstype returns the inner filesystem for disk volumes.
-func (h *VolumeHandle) DiskFstype() *string { return h.diskFstype }
-
-// Labels returns the labels attached to this volume.
-func (h *VolumeHandle) Labels() map[string]string { return h.labels }
-
-// CreatedAt returns the creation timestamp, or the zero value if unknown.
-func (h *VolumeHandle) CreatedAt() time.Time {
-	if h.createdAtUnix == nil {
-		return time.Time{}
-	}
-	return time.Unix(*h.createdAtUnix, 0)
-}
-
-// FS returns direct filesystem operations for this volume.
-func (h *VolumeHandle) FS() *VolumeFs { return &VolumeFs{root: h.path, target: h.fsTarget} }
-
-// Remove deletes this volume. All sandboxes using it must be stopped.
-func (h *VolumeHandle) Remove(ctx context.Context) error {
-	if h.isDefault {
-		return &Error{
-			Kind:    ErrUnsupportedOperation,
-			Message: "the default volume cannot be removed",
+	volumes := make([]*Volume, len(resources))
+	for i, resource := range resources {
+		volumes[i], err = volumeFromResource(resource)
+		if err != nil {
+			return nil, err
 		}
 	}
-	return RemoveVolume(ctx, h.name)
+	return volumes, nil
+}
+func oneVolume(volumes []*Volume, err error) (*Volume, error) {
+	if err != nil {
+		return nil, err
+	}
+	if len(volumes) != 1 {
+		return nil, fmt.Errorf("native lookup did not return one volume")
+	}
+	return volumes[0], nil
+}
+func (v *Volumes) Create(ctx context.Context, name string, opts ...VolumeOption) (*Volume, error) {
+	config := VolumeConfig{}
+	for _, apply := range opts {
+		apply(&config)
+	}
+	return oneVolume(v.operation(ctx, "volume_create", name, ffi.VolumeCreateOptions{QuotaMiB: config.QuotaMiB, Kind: string(config.Kind), SizeMiB: config.SizeMiB, Labels: config.Labels}))
+}
+func (v *Volumes) Get(ctx context.Context, name string) (*Volume, error) {
+	return oneVolume(v.operation(ctx, "volume_get", name, nil))
+}
+func (v *Volumes) GetDefault(ctx context.Context) (*Volume, error) {
+	return oneVolume(v.operation(ctx, "volume_get_default", "", nil))
+}
+func (v *Volumes) List(ctx context.Context) ([]*Volume, error) {
+	return v.operation(ctx, "volume_list", "", nil)
+}
+func (v *Volumes) Remove(ctx context.Context, name string) error {
+	_, err := v.operation(ctx, "volume_remove", name, nil)
+	return err
 }
 
-// GetVolume looks up a volume by name and returns its metadata.
-func GetVolume(ctx context.Context, name string) (*VolumeHandle, error) {
-	info, err := ffi.GetVolume(ctx, name)
+func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volume, error) {
+	selected, err := configuredContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	return volumeHandleFromInfo(info), nil
+	return selected.Volumes().Create(ctx, name, opts...)
 }
-
-// GetDefaultVolume returns the cloud account's always-present default volume.
-// Local backends return ErrUnsupportedOperation rather than exposing the host filesystem.
-func GetDefaultVolume(ctx context.Context) (*VolumeHandle, error) {
-	info, err := ffi.GetDefaultVolume(ctx)
+func GetVolume(ctx context.Context, name string) (*Volume, error) {
+	selected, err := configuredContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	return volumeHandleFromInfo(info), nil
+	return selected.Volumes().Get(ctx, name)
+}
+func GetDefaultVolume(ctx context.Context) (*Volume, error) {
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	return selected.Volumes().GetDefault(ctx)
+}
+func ListVolumes(ctx context.Context) ([]*Volume, error) {
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	return selected.Volumes().List(ctx)
+}
+func RemoveVolume(ctx context.Context, name string) error {
+	selected, err := configuredContext()
+	if err != nil {
+		return err
+	}
+	return selected.Volumes().Remove(ctx, name)
 }
 
 // ---------------------------------------------------------------------------
@@ -192,14 +186,15 @@ func GetDefaultVolume(ctx context.Context) (*VolumeHandle, error) {
 
 // VolumeFs provides direct file operations on a volume. Local operations use
 // the host directory; Cloud operations use the authenticated Cloud API.
-// Obtain via Volume.FS() or VolumeHandle.FS().
+// Obtain via Volume.FS().
 //
 // All path arguments are relative to the volume root. Paths that would
 // escape the root via "..", absolute components, or symlink chains are
 // rejected with ErrPathEscape.
 type VolumeFs struct {
-	root   string
-	target string
+	resource *ffi.PersistentResource
+	root     string
+	target   string
 }
 
 func volumeFsTarget(info *ffi.VolumeHandleInfo) string {
@@ -300,7 +295,12 @@ func (fs *VolumeFs) call(ctx context.Context, op, relPath string, args map[strin
 		// Preserve the old lexical destination, but reject ambiguous symlink/.. paths.
 		args["clean_path"] = filepath.Clean(relPath)
 	}
-	err := ffi.VolumeFsOp(ctx, target, op, args, result)
+	var err error
+	if fs.resource != nil {
+		err = fs.resource.Operation(ctx, "fs_"+strings.TrimPrefix(op, "local_"), args, result)
+	} else {
+		err = ffi.VolumeFsOp(ctx, target, op, args, result)
+	}
 	if fs.root != "" {
 		return wrapLocalVolumeError(err, strings.TrimPrefix(op, "local_"), relPath)
 	}

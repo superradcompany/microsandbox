@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, SandboxStatus};
+use microsandbox::Context;
+use microsandbox::sandbox::{SandboxRecord, SandboxStatus};
 
 use crate::ui;
 
@@ -81,11 +82,13 @@ async fn restart_one(
     timeout_secs: Option<u64>,
     quiet: bool,
 ) -> anyhow::Result<()> {
-    let handle = Sandbox::get(name).await?;
+    let context = common::selected_context()?;
+    let handle = context.sandbox_ops().get(context.clone(), name).await?;
 
     match restart_action(handle.status_snapshot()) {
         RestartAction::StopThenStart => {
-            stop_for_restart(name, force, timeout_secs, quiet).await?;
+            let budget = graceful_stop_budget(context.as_ref(), timeout_secs);
+            stop_for_restart(&handle, force, budget, quiet).await?;
             start_for_restart(&handle, name, quiet).await
         }
         RestartAction::StartOnly => start_for_restart(&handle, name, quiet).await,
@@ -96,25 +99,22 @@ async fn restart_one(
 }
 
 async fn stop_for_restart(
-    name: &str,
+    handle: &SandboxRecord,
     force: bool,
-    timeout_secs: Option<u64>,
+    budget: Duration,
     quiet: bool,
 ) -> anyhow::Result<()> {
     let spinner = if quiet {
         ui::Spinner::quiet()
     } else {
-        ui::Spinner::start("Stopping", name)
+        ui::Spinner::start("Stopping", handle.name())
     };
 
-    let handle = Sandbox::get(name).await?;
-    // Expiry must not start a replacement or force-kill.
+    // A stop timeout must leave the same sandbox available for inspection.
     let result = if force {
         handle.kill().await
     } else {
-        handle
-            .stop_with_timeout(graceful_stop_budget(timeout_secs))
-            .await
+        handle.stop_with_timeout(budget).await
     };
 
     match result {
@@ -129,11 +129,7 @@ async fn stop_for_restart(
     }
 }
 
-async fn start_for_restart(
-    handle: &microsandbox::sandbox::SandboxHandle,
-    name: &str,
-    quiet: bool,
-) -> anyhow::Result<()> {
+async fn start_for_restart(handle: &SandboxRecord, name: &str, quiet: bool) -> anyhow::Result<()> {
     let spinner = if quiet {
         ui::Spinner::quiet()
     } else {
@@ -142,7 +138,7 @@ async fn start_for_restart(
 
     match handle.start_detached().await {
         Ok(sandbox) => {
-            sandbox.detach().await;
+            sandbox.detach().await?;
             spinner.finish_success("Started");
             Ok(())
         }
@@ -155,13 +151,10 @@ async fn start_for_restart(
 
 /// Restart always bounds the stop phase, unlike standalone Stop. Without `--timeout` it uses
 /// the active backend's budget.
-fn graceful_stop_budget(timeout_secs: Option<u64>) -> Duration {
-    match timeout_secs {
-        Some(timeout_secs) => Duration::from_secs(timeout_secs),
-        None => microsandbox::backend::default_backend()
-            .sandboxes()
-            .default_stop_timeout(),
-    }
+fn graceful_stop_budget(context: &dyn Context, timeout_secs: Option<u64>) -> Duration {
+    timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| context.sandbox_ops().default_stop_timeout())
 }
 
 fn restart_action(status: SandboxStatus) -> RestartAction {
@@ -185,7 +178,7 @@ fn restart_action(status: SandboxStatus) -> RestartAction {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use microsandbox::Backend;
+    use microsandbox::RemoteContext;
     use microsandbox::sandbox::DEFAULT_STOP_TIMEOUT;
 
     use super::*;
@@ -265,19 +258,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn stop_budget_defaults_to_the_active_backends_budget() {
-        let cloud = microsandbox::CloudBackend::new("http://127.0.0.1:1", "msb_test_key").unwrap();
-        let cloud_default = cloud.sandboxes().default_stop_timeout();
-        assert!(cloud_default > DEFAULT_STOP_TIMEOUT);
-
-        let (defaulted, explicit) = microsandbox::with_backend(cloud, async {
-            (graceful_stop_budget(None), graceful_stop_budget(Some(30)))
-        })
-        .await;
-
-        assert_eq!(defaulted, cloud_default);
-        assert_eq!(explicit, Duration::from_secs(30));
+    #[test]
+    fn stop_budget_defaults_to_the_selected_contexts_budget() {
+        let remote = RemoteContext::with_url("http://127.0.0.1:1", "msb_test_key").unwrap();
+        let remote_default = remote.sandbox_ops().default_stop_timeout();
+        assert!(remote_default > DEFAULT_STOP_TIMEOUT);
+        assert_eq!(graceful_stop_budget(&remote, None), remote_default);
+        assert_eq!(
+            graceful_stop_budget(&remote, Some(30)),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]

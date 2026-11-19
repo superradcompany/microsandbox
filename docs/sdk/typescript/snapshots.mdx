@@ -5,6 +5,7 @@ description: Create snapshots, fork sandboxes, and restore snapshots with the Ty
 keywords: ["TypeScript SDK", "TypeScript snapshots", "microsandbox snapshots"]
 ---
 
+
 <Tooltip tip="Cloud supports disk capture from stopped persistent sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
@@ -123,7 +124,7 @@ Open an existing snapshot artifact by group head, `group:member`, or path. Cheap
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">get()</span>
 
 ```typescript
-static get(nameOrDigest: string): Promise<SnapshotHandle>
+static get(nameOrDigest: string): Promise<Snapshot>
 ```
 
 <Accordion title="Example">
@@ -136,7 +137,7 @@ console.log(h.digest, h.createdAt);
 </Accordion>
 
 Look up a snapshot through the active backend and return a lightweight
-[`SnapshotHandle`](#snapshothandle).
+[`Snapshot`](#snapshot).
 
 <p className="msb-label">Parameters</p>
 
@@ -151,15 +152,15 @@ Look up a snapshot through the active backend and return a lightweight
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Promise&lt;SnapshotHandle&gt;</a></div>
-    <div className="msb-param-desc">Lightweight handle returned by the active backend.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-desc">Operational snapshot with metadata loaded on demand.</div>
   </div>
 </div>
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list()</span>
 
 ```typescript
-static list(): Promise<SnapshotHandle[]>
+static list(): Promise<Snapshot[]>
 ```
 
 <Accordion title="Example">
@@ -179,8 +180,8 @@ snapshots; host-volume artifacts are opened explicitly by reference.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Promise&lt;SnapshotHandle[]&gt;</a></div>
-    <div className="msb-param-desc">All indexed snapshot handles.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot[]&gt;</a></div>
+    <div className="msb-param-desc">All indexed snapshot resources.</div>
   </div>
 </div>
 
@@ -323,7 +324,7 @@ await Snapshot.save("baseline:deps", "./baseline.msb", {
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
-static load(archive: string, dest?: string, base?: string): Promise<SnapshotHandle>
+static load(archive: string, dest?: string, base?: string): Promise<Snapshot>
 ```
 
 Unpack a snapshot archive (`.msb` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
@@ -345,7 +346,7 @@ Unpack a snapshot archive (`.msb` or `.tar`) into the snapshots directory. Struc
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Promise&lt;SnapshotHandle&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
     <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
@@ -364,7 +365,7 @@ console.log("loaded", h.digest);
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">loadWithOptions()</span>
 
 ```typescript
-static loadWithOptions(archive: string, opts?: LoadOpts): Promise<SnapshotHandle>
+static loadWithOptions(archive: string, opts?: LoadOpts): Promise<Snapshot>
 ```
 
 Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
@@ -372,7 +373,7 @@ Import an archive with an explicit dependency base or destination group. See [im
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">loadMany()</span>
 
 ```typescript
-static loadMany(archives: string[], opts?: LoadOpts): Promise<SnapshotHandle[]>
+static loadMany(archives: string[], opts?: LoadOpts): Promise<Snapshot[]>
 ```
 
 Import archives as one batch. Returns handles in input order. Dependencies resolve from the batch, the named group, or an explicit base; input order does not matter. All members are validated before publication.
@@ -380,10 +381,11 @@ Import archives as one batch. Returns handles in input order. Dependencies resol
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">groupHead()</span>
 
 ```typescript
-static groupHead(selector: string): Promise<HeadUpdate>
+static groupHead(group: string): Promise<string | null>
+static setGroupHead(group: string, id: string): Promise<HeadUpdate>
 ```
 
-Read a group’s head, or select an exact member with `group:member`. Returns the group, previous and current snapshot IDs, reason, and whether the head changed. See [group selection](/sandboxes/snapshots#snapshot-groups).
+Read the selected ID from a local group, or explicitly set it to an installed member’s stable ID. A headless group returns an absent ID. A missing group or qualified group name raises an error. The write returns the previous and current IDs, reason and change flag. See [group selection](/sandboxes/snapshots#snapshot-groups).
 
 <span id="snapshot-groups" />
 
@@ -402,7 +404,7 @@ Options for `LoadOpts`.
 
 With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
 
-## SandboxHandle
+## Sandbox
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
@@ -410,7 +412,7 @@ With divergent tips, the existing head stays selected; a new group has no head. 
 snapshot(name: string): Promise<Snapshot>
 ```
 
-Snapshot this sandbox into its default group with the given member name. Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). Local live disk captures preserve the source's running or paused state. Cloud requires a stopped persistent source. Use the returned artifact path or `sandbox:member` to open it later.
+Snapshot this sandbox into its default group with the given member name. Called on a [`Sandbox`](/sdk/typescript/sandbox#sandbox). Local live disk captures preserve the source's running or paused state. Cloud requires a stopped persistent source. Use the returned artifact path or `sandbox:member` to open it later.
 
 <p className="msb-label">Parameters</p>
 
@@ -444,9 +446,22 @@ const snap = await h.snapshot("deps");
 
 ## Snapshot instance members {#snapshot-instance}
 
-A `Snapshot` represents a backend-neutral snapshot and retains the backend
-that created or opened it. Returned by [`Snapshot.builder().create()`](#snapshotbuilder),
-[`Snapshot.open()`](#snapshot-open), and [`handle.snapshot()`](#handle-snapshot).
+#### <span className="msb-recv">snap.</span><span className="msb-hn">state()</span>
+
+```typescript
+state(): Promise<SnapshotState>
+```
+
+Fetch a fresh descriptor and project its file or checkpoint state. Lookup and list results support this method directly.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">manifest()</span>
+
+```typescript
+manifest(): Promise<Readonly<Record<string, unknown>>>
+```
+
+Fetch the full normalized descriptor as a detached observation. This checks the captured identity and fails for missing or replaced artifacts. `state()` uses one descriptor observation; neither method silently returns cached data.
+
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">id</span>
 
@@ -490,9 +505,11 @@ Backend-reported stored payload size in bytes, or `null` when unavailable.
 
 Image reference the snapshot was taken from.
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">imageManifestDigest</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">imageManifestDigest()</span>
 
-`string`
+```typescript
+imageManifestDigest(): Promise<string>
+```
 
 OCI manifest digest of the pinned image.
 
@@ -526,15 +543,17 @@ Manifest digest of the parent snapshot, or `null` for a root.
 
 RFC 3339 timestamp when the snapshot was created.
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">labels</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">labels()</span>
 
-`ReadonlyArray<readonly [string, string]>`
+`labels(): Promise<ReadonlyArray<readonly [string, string]>>`
 
 User-supplied labels (sorted by key in canonical form), as `[key, value]` pairs.
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">sourceSandbox</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">sourceSandbox()</span>
 
-`string \| null`
+```typescript
+sourceSandbox(): Promise<string | null>
+```
 
 Best-effort source-sandbox name, if recorded. `null` when the manifest has no source recorded.
 
@@ -608,119 +627,30 @@ Verify the snapshot's complete state closure. File state recomputes recorded upp
   </div>
 </div>
 
-## SnapshotHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
-
-
-A metadata and lifecycle handle for an existing snapshot.
-
-<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">digest</span>
-
-`string`
-
-Descriptor digest (`sha256:hex`), separate from the stable snapshot ID.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">name</span>
+#### <span className="msb-recv">snap.</span><span className="msb-hn">name</span>
 
 `string \| null`
 
 Member name within its group, or `null` when no alias is recorded.
 
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">parentDigest</span>
-
-`string \| null`
-
-Parent snapshot's manifest digest, or `null` for a root.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">scope</span>
-
-[`SnapshotScope`](#snapshotscope-type)
-
-Snapshot payload scope (`"disk"` today).
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">imageRef</span>
-
-`string`
-
-Image reference the snapshot was taken from.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">format</span>
-
-`"raw" \| "qcow2"`
-
-On-disk format of the upper layer.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">sizeBytes</span>
-
-`bigint \| null`
-
-Apparent size of the upper file at index time.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">createdAt</span>
-
-`Date`
-
-Snapshot creation time (from manifest).
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">path</span>
-
-`string`
-
-Local artifact directory path.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">open()</span> {#snapshothandleopen}
+#### <span className="msb-recv">snap.</span><span className="msb-hn">destroy()</span> {#snapshot-destroy}
 
 ```typescript
-open(): Promise<Snapshot>
+destroy(opts?: { force?: boolean }): Promise<void>
 ```
 
-Open and metadata-validate the underlying artifact. Throws if this handle is read-only (came from [`Snapshot.list()`](#snapshot-list)); fetch a live handle via [`Snapshot.get()`](#snapshot-get) first.
+Instance deletion of a remote path-based snapshot returns `Unsupported` until the provider supports atomic conditional deletion. Explicit path-selected static removal remains available. Managed remote snapshot deletion uses its captured server ID; local deletion retains its identity checks. Force does not bypass this restriction.
 
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">remove()</span> {#snapshothandleremove}
-
-```typescript
-remove(opts?: { force?: boolean }): Promise<void>
-```
-
-Remove this installed snapshot copy and its index row using the handle's stored artifact path. Other groups containing the same snapshot ID or digest remain unchanged. Refuses if the snapshot has indexed children unless `force` is set. Throws if this handle is read-only.
+Remove this installed snapshot copy and its index row using the handle's stored artifact path. Other groups containing the same snapshot ID or digest remain unchanged. Refuses if the snapshot has indexed children unless `force` is set.
 
 <Accordion title="Example">
 
 ```typescript
 const h = await Snapshot.get("baseline:deps");
-const snap = await h.open();          // metadata-validated
-await h.remove({ force: false });     // refuse if it has children
+await h.destroy({ force: false });     // refuse if it has children
 ```
 
 </Accordion>
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">reference</span>
-
-`string`
-
-Backend-relative snapshot reference.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">referenceKind</span>
-
-`"id" \| "path"`
-
-How the backend resolves the reference.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">saveTo()</span> {#snapshothandlesaveto}
-
-```typescript
-saveTo(out: string, opts?: SaveOpts): Promise<void>
-```
-
-Bundle the referenced snapshot through the backend retained by the handle.
-Handles returned by `Snapshot.list()` are metadata-only; fetch a live handle
-with `Snapshot.get()` first. Cloud returns `UnsupportedError`.
-
----
-
-
 ## SnapshotBuilder
 
 Fluent builder for a snapshot, returned by [`Snapshot.builder(name)`](#snapshotbuilder). Every setter mutates in place and returns `this`, so calls chain. The source sandbox is required: call [`.fromSandbox()`](#fromsandbox) before [`.create()`](#create).
@@ -874,7 +804,7 @@ and returns `this`.
 
 ## Forking
 
-Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `SandboxHandle` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
+Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
 
 ### fork()
 
@@ -971,14 +901,14 @@ Restore rejects missing external filesystems (and, for full restore, additional 
 | `maxConnections()` | Concurrent TCP limit; zero means unlimited. |
 | `disableNetwork()` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
-| `maxDuration(), idleTimeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
+| `maxDurationSeconds(), idleTimeoutSeconds()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
 | `port(), portBind(), portUdp(), portUdpBind()` | Bind destination TCP or UDP ports. |
 | `vsock(), vsockDgram()` | Bind destination vsock endpoints. |
 | `user(), logLevel()` | Default user for new execs and host runtime log level. |
 | `dangerouslyInheritResources()` | Explicitly inherit host resources. Disabled by default. |
 | `externalMountPolicy()` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
-Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy` or `NetworkPolicyBuilder`. Use `v => v.captured()` for a private captured volume.
+Omitted controls retain destination defaults. Lifetime limits take non-negative safe integers in seconds. Network policy accepts `NetworkPolicy` or `NetworkPolicyBuilder`. Use `v => v.captured()` for a private captured volume.
 
 </Accordion>
 
@@ -1054,7 +984,7 @@ Bundle options for [`Snapshot.save()`](#snapshot-save) and instance `saveTo()` m
 
 Scope of what a snapshot captures: `"disk"` for filesystem state or `"full"` for disk plus VM execution state.
 
-<p className="msb-backref">Returned by <a href="#snap-scope">snap.scope</a> · <a href="#snapshothandle">SnapshotHandle.scope</a></p>
+<p className="msb-backref">Returned by <a href="#snap-scope">snap.scope</a> · <a href="#snapshot">Snapshot.scope</a></p>
 
 ```typescript
 type SnapshotScope = "disk" | "full";

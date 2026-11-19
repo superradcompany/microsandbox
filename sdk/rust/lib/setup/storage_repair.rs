@@ -7,7 +7,8 @@ use std::time::Duration;
 use sea_orm::sqlx::{self, Connection, Row, SqliteConnection};
 
 use super::{
-    MAX_SANDBOXES, diagnostic_error, inspection_config, open_catalog, storage_alias_catalog,
+    MAX_SANDBOXES, diagnostic_error, inspection_config, inspection_config_in, open_catalog,
+    storage_alias_catalog,
 };
 use crate::config::GlobalConfigPatch;
 use crate::{MicrosandboxError, MicrosandboxResult, Sandbox};
@@ -39,14 +40,32 @@ impl Sandbox {
     pub async fn stop_storage_repair_blocker(
         blocker: &StorageRepairBlocker,
     ) -> MicrosandboxResult<()> {
-        let blockers =
-            storage_repair_blockers(GlobalConfigPatch::default(), &blocker.target).await?;
+        crate::context::configured_context()
+            .sandboxes()
+            .stop_storage_repair_blocker(blocker)
+            .await
+    }
+}
+
+impl crate::Sandboxes {
+    /// Stop the observed repair blocker using the retained local destination.
+    #[doc(hidden)]
+    pub async fn stop_storage_repair_blocker(
+        &self,
+        blocker: &StorageRepairBlocker,
+    ) -> MicrosandboxResult<()> {
+        let blockers = storage_repair_blockers_in(
+            self.context.as_ref(),
+            GlobalConfigPatch::default(),
+            &blocker.target,
+        )
+        .await?;
         if !blockers.contains(blocker) {
             return Err(diagnostic_error(
                 "the selected blocker changed; inspect storage again",
             ));
         }
-        let backend = crate::backend::default_backend();
+        let backend = self.context.clone();
         backend.info()?;
         let local = backend
             .as_local()
@@ -169,8 +188,18 @@ pub async fn storage_repair_blockers(
     options: GlobalConfigPatch,
     name: &str,
 ) -> MicrosandboxResult<Vec<StorageRepairBlocker>> {
+    storage_repair_blockers_in(crate::context::configured_context().as_ref(), options, name).await
+}
+
+/// Revalidate repair blockers in the captured destination without changing its catalog.
+#[doc(hidden)]
+pub async fn storage_repair_blockers_in(
+    context: &dyn crate::Context,
+    options: GlobalConfigPatch,
+    name: &str,
+) -> MicrosandboxResult<Vec<StorageRepairBlocker>> {
     crate::sandbox::validate_sandbox_name(name)?;
-    let sources = inspection_config(options)?;
+    let sources = inspection_config_in(context, options)?;
     blockers_resolved(sources.resolved_config(), name).await
 }
 

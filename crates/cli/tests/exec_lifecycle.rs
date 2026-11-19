@@ -36,7 +36,7 @@ async fn msb(args: &[&str]) -> Output {
 async fn cleanup(name: &str) {
     if let Ok(handle) = Sandbox::get(name).await {
         let _ = handle.kill().await;
-        let _ = handle.remove().await;
+        let _ = handle.destroy().await;
     }
 }
 
@@ -77,7 +77,9 @@ async fn invalid_options_do_not_start_stopped_sandbox() {
     let status = Sandbox::get(name)
         .await
         .expect("get sandbox after invalid exec options")
-        .status_snapshot();
+        .status()
+        .await
+        .unwrap();
     cleanup(name).await;
 
     assert!(!output.status.success(), "invalid rlimit must fail");
@@ -121,7 +123,9 @@ async fn exec_errors_restore_the_previous_lifecycle() {
     let running_status = Sandbox::get(name)
         .await
         .expect("get running sandbox after failed exec")
-        .status_snapshot();
+        .status()
+        .await
+        .unwrap();
 
     sandbox.stop().await.expect("stop sandbox between cases");
     drop(sandbox);
@@ -139,7 +143,9 @@ async fn exec_errors_restore_the_previous_lifecycle() {
     let stopped_status = Sandbox::get(name)
         .await
         .expect("get stopped sandbox after failed exec")
-        .status_snapshot();
+        .status()
+        .await
+        .unwrap();
     cleanup(name).await;
 
     assert!(

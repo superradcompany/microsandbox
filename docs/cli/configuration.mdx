@@ -5,7 +5,11 @@ description: Configure sandbox resources, networking, and storage with reusable 
 icon: "file-code"
 ---
 
-Save the settings for one sandbox in a YAML file named `Sandboxfile`. The CLI loads it when you pass `--file Sandboxfile`. You can also pass another filename.
+Save reusable settings in a YAML file and load it with `--file Sandboxfile`. You can use another filename and include only the fields you need. Explicit CLI arguments override the file. See [configuration precedence](/operations/configuration#precedence) for global defaults.
+
+<Note>
+Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Published ports, custom networking, flat OCI roots, full snapshots, replace behavior, and several runtime fields are unavailable on our managed cloud.
+</Note>
 
 <CodeGroup>
 ```yaml Sandboxfile
