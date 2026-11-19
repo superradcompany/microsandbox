@@ -1,5 +1,7 @@
 //! Live acceptance coverage for sandbox-owned execution flow control.
 
+#![cfg(feature = "local")]
+
 use std::time::Duration;
 
 use microsandbox::{Sandbox, agent::AgentClient};
