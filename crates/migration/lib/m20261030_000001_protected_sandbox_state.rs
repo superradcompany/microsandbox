@@ -65,7 +65,13 @@ mod tests {
     #[tokio::test]
     async fn protection_blocks_downgrade_until_owned_storage_is_removed() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let position = Migrator::migrations()
+            .iter()
+            .position(|migration| migration.name() == Migration.name())
+            .unwrap();
+        Migrator::up(&db, Some((position + 1) as u32))
+            .await
+            .unwrap();
         db.execute_unprepared("INSERT INTO sandbox (id, name, config, status, ephemeral) VALUES (1, 'protected', '{}', 'Stopped', 0);
             INSERT INTO protected_sandbox_state VALUES (1, 1);").await.unwrap();
         assert!(

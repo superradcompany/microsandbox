@@ -89,7 +89,13 @@ Required review should include golden encoded payload bytes when serialization c
 
 ### Execution output backpressure
 
-Execution limits are fixed at sandbox creation and advertised in `Ready.exec_limits`: 128 executions, 64 KiB stdin allowance, 1 MiB combined stdout/stderr allowance, and 16 KiB stdin and output chunks. The values are built-in defaults, not user configuration; clients obey the advertised values, so the defaults can change between releases without a lockstep upgrade. The SDK has no stdin staging queue. Generation-10 cumulative `.stdin.ack` and `.output.ack` messages replenish consumed allowance. Released older SDKs retain legacy behavior outside the buffering guarantee; new SDKs fall back to historical buffering when Ready lacks limits. Existing sandboxes require no restart. Intermediate unreleased generation-10 builds are not compatibility targets. No new snapshot-manifest extension is required. Disk-only restores use the current built-in defaults, while memory restores preserve the guest limits from captured Ready; restoring a memory snapshot that captured limits requires the launch capability `exec_limits`. Disk and catalog formats are unchanged. Older relay and cross-version launch coverage must be validated separately from same-version tests.
+Execution limits are fixed at sandbox creation and advertised in `Ready.exec_limits`: 128 executions, 1 MiB stdin allowance, 4 MiB combined stdout/stderr allowance, and 16 KiB stdin and output chunks. These allowances total at most 640 MiB across admitted executions before transport, allocator, and kernel-pipe overhead; they are not preallocated. Earlier guests advertise 64 KiB stdin and 1 MiB output limits, which newer clients continue to honor. The values are built-in defaults, not user configuration; clients obey the advertised values, so the defaults can change between releases without a lockstep upgrade. The SDK has no stdin staging queue. Generation-10 cumulative `.stdin.ack` and `.output.ack` messages replenish consumed allowance. Released older SDKs retain legacy behavior outside the buffering guarantee; new SDKs fall back to historical buffering when Ready lacks limits. Existing sandboxes remain compatible without a restart, but only a new guest boot with the updated runtime selects the larger defaults. Intermediate unreleased generation-10 builds are not compatibility targets. No new snapshot-manifest extension is required. Disk-only restores use the current built-in defaults, while memory restores preserve the guest limits from captured Ready; restoring a memory snapshot that captured limits requires the launch capability `exec_limits`. Disk and catalog formats are unchanged. Older relay and cross-version launch coverage must be validated separately from same-version tests.
+
+### PTY leader completion
+
+PTY completion follows the tracked process's exit rather than waiting for every descendant to close its inherited slave descriptor (issue #2089). The agent observes exit concurrently with output, wakes the reader through a private close-on-exec pipe, and delivers queued output before the existing `ExecExited` event. Final draining retains output-window acknowledgements and has no elapsed-time cutoff. Its 1 MiB post-exit byte bound exceeds Linux's standard PTY flip-buffer budget (640 KiB) plus the N_TTY queue (4 KiB), preventing an ongoing descendant writer from delaying completion indefinitely; this is not a total command-output limit. Revisit that bound if the bundled kernel changes PTY buffering. The agent adds no descendant kill signal; terminal hangup and explicit process-group signal semantics remain in effect. Pipe-mode execution is unchanged.
+
+No wire fields, protocol versions, SDK signatures, or persisted layouts change. Older SDKs can observe the corrected completion through the existing event; newer SDKs still encounter the bug when the running guest uses an unpatched agent. Deploying the corrected guest agent requires a new guest boot; replacing the SDK alone or restoring a memory snapshot containing the old agent does not apply the fix. Validation includes the released 0.7.15 SDK/runtime with the patched agent and the revamp SDK with that runtime, plus legacy and flow-controlled agent tests. `scripts/smoke/managed-job-pty-exit.mjs` verifies normal exit, explicit kill, repeatable waits, exact final output, and descendant survival in a disposable local home.
 
 ## 2. Bootstrap, Init, and Guest Runtime Contract
 
@@ -224,6 +230,12 @@ Runtime SDK and environment path inputs are captured when a local backend is con
 
 `Backend::info()` and `default_backend_info()` now return `MicrosandboxResult<BackendInfo>`. Rust callers add `?` or handle errors; custom trait implementations update their return type. A failed default-backend resolution reports its original configuration error instead of misleading cloud/programmatic metadata. Python, Node, Go, and Ruby diagnostics propagate errors through their existing language error mechanisms; successful shapes are unchanged. The standalone CLI can now select and dispatch to cloud; previous standalone builds rejected cloud selection. New `context list`, `use`, and `reset` subcommands inspect profiles or save a sparse preference without resolving credentials; plain `context` still resolves a backend. Preference writes retain the existing unknown-field-discard behavior.
 
+The unreleased SDK context revamp replaces the public backend/handle surfaces described in the historical notes above. LocalContext construction captures configuration synchronously and opens the catalog lazily. Resource identities, runtime launch and agent/control wire formats, catalog schemas, snapshot artifact formats and serialized sandbox configuration remain unchanged by that revamp. Unqualified SDK calls use the same configured destination as the CLI and default to local. Explicit resource selectors override that destination. Builders and resources retain the context they captured. See [SDK migration](docs/migrations/sdk-contexts.mdx) for application-source changes.
+
+Profile serialization is the accepted exception: new writers emit `kind: "local"` or `kind: "remote"`; readers accept legacy `backend` and `cloud` aliases. An older SDK/CLI reading a profile rewritten by the new writer may reject it. This does not authorize rewriting resource records or relaxing runtime compatibility. Keep a copy of the old profile configuration before sharing it with older clients, and use separate configuration files when both reader generations must continue operating. Reader/writer alias fixtures and profile preference persistence tests cover the new format; they do not establish compatibility of older readers with rewritten profiles.
+
+Selected native providers validate binding ABI 1, exact SDK version and supported local/remote capability before use. Their allocation, result-release and cancellation operations stay with the library that created the object. This wrapper/native version requirement is independent of SDK-to-runtime compatibility: choosing a selected provider does not waive the supported historical runtime boundaries. Local qualification uses released v0.7.15 runtime fixtures and does not claim a complete v0.6.x runtime matrix.
+
 The SQLite database under `MSB_HOME` is a durable protocol between releases. Host and runtime processes must also agree on WAL, busy timeout, foreign-key, synchronous, and writer settings.
 
 On Unix, catalog identity checks read filesystem metadata without opening an extra descriptor. Control and metrics lookups share one database identity per backend. On macOS, that identity retains a dedicated read-only SQLite connection, including after ordinary pool connections expire. SQLite owns that connection's close so verification and identity teardown preserve other connections' POSIX locks. Linux retains its `O_PATH` handles and Windows retains its file handles. Database replacement detection, schemas, journal modes, and SDK/runtime protocols are unchanged.
@@ -245,6 +257,10 @@ Sources: [`crates/db/lib/pool.rs`](crates/db/lib/pool.rs), [`crates/migration/li
 Local startup serializes database opening, migration, and snapshot reconciliation using the existing `msb.db.migration.lock` file and shared process-lock helper (`flock` on Unix, `LockFileEx` on Windows). This replaces the former Windows no-op without changing database schemas, lease semantics, or the lock path. Genuine exclusive install/downgrade operations still refuse normal startup. Older Windows binaries that bypass this lock do not participate in the serialization; do not initialize the same home concurrently with them. The shared helper creates owner-only lock files on Unix and refuses symlink lock paths.
 
 Tests should open copies of real older databases, migrate them, exercise the affected behavior, and test every supported reverse migration or refusal path.
+
+The unreleased PID-recovery migration adds nullable `run.process_identity`, written only by the SDK for a launch it still owns. It records the sandbox/run IDs, PID, kernel birth token and boot identity. The shared runtime ORM and launch protocol do not change: older running runtimes can keep using named-column SQL, and a newer runtime can operate on an older SDK's schema. Older SDK catalog opens still refuse a newer migration history. Existing runs remain NULL; a live PID without sufficient independent ownership evidence refuses destructive operations. Linux requires a pinned process handle for signaling; macOS rechecks the kernel birth token immediately before signaling, with a remaining check-to-signal race.
+
+Rollback of this migration refuses while any run retains identity metadata, including terminal runs: terminal status alone does not prove teardown. Retain the newer SDK, or safely remove the owning sandboxes before downgrade; do not manually clear metadata to bypass this check.
 
 SDK and user-facing CLI catalog opens apply pending recognized migrations under the migration lock and install lease, including while older runtime processes remain active. Pending SQL migrations commit together. Fresh homes use the current SDK/CLI schema independently of the selected VM executable. Private `msb machine` launches still open runtime pools without performing migrations. Already-running VMs must retain working lifecycle writes, exit recording and resource cleanup; upgrade does not restart them or reinterpret their live configuration.
 
@@ -587,3 +603,54 @@ Incoming unversioned launch/cloud requests retain detection of previous formats.
 The runtime dispatcher selects the current reader when `execution` is present, `v0_6_10/launch.rs` when `bootstrap` is present, and `v0_5_9/launch.rs` otherwise. `client/launch.rs` contains both `LaunchConfig` and the `LaunchCapabilities` probe response. The launch type remains in the runtime crate to avoid a dependency cycle. SDK tests exercise its encoder against the runtime decoder; runtime tests also consume independently captured release payloads.
 
 Launch and cloud requests reject duplicate recognized fields and conflicting previous/current spellings. Previous saved-format decoding and the duplicate-key JSON fixture reader in the SDK are test-only.
+
+## Remote context compute selection
+
+The SDK exposes `ComputeType`; `CloudComputeType` remains a deprecated SDK
+re-export for existing callers. The shared HTTP contract type and its serialized
+values are unchanged.
+
+Remote contexts optionally capture `ComputeType` for new sandbox creates
+and snapshot restores. The HTTP create body sends `compute: {"type": "standard"}`
+or `compute: {"type": "shared"}` beside the nested `spec`. Unset contexts omit
+`compute`, preserving the server default. Derivation retains the captured choice
+unless explicitly overridden. Existing sandboxes, local launch contracts, saved
+sandbox configuration, catalogs, and snapshot formats are unchanged.
+
+This uses #2058's nested create contract, already supported by the Cloud request
+reader alongside previous flat requests. Servers that only accept flat requests
+cannot accept this candidate's nested create body; deploy the matching server
+first. There is no retry with a flat request or silently omitted compute choice.
+Binding JSON accepts only `standard` and `shared` and rejects compute options on
+local contexts. Older native bindings reject the new `computeType` option as an
+unknown field rather than dropping it. Local SDK/runtime compatibility is
+unaffected by this option; historical runtime validation is separate from the
+HTTP request tests.
+
+## Remote destination naming
+
+By explicit user direction, `remote` is the canonical `MSB_BACKEND` value,
+serialized `ContextKind`, CLI diagnostic kind, and `allowed_backends` value.
+Readers continue accepting `cloud` as an alias. Profile writers already use
+`kind: "remote"`; their existing `backend`/`cloud` reader aliases remain.
+Older SDKs and CLIs may reject newly written `remote` policy values or the new
+CLI spelling. Upgrade those consumers before sharing rewritten settings.
+This approved configuration/API naming change does not alter sandbox launch,
+agent protocols, catalogs, snapshots, or the HTTP API's `Cloud*` type names.
+
+## Managed Cloud root sources and mount owners
+
+The SDK now forwards bind-directory and disk-image root sources already handled
+by the Cloud API resolver and worker. Paths belong to the organization's host
+volume and are never resolved against the SDK client's filesystem. A bind root
+request to follow symlinks still refuses, because the Cloud source contract does
+not represent it and the worker deliberately disables it.
+
+By explicit user direction, remote mount owner IDs are enabled against current
+Managed Cloud support. The resolver and worker preserve `MountOptions` owner
+IDs and force strict stat virtualization for directory mounts. IDs change the
+guest metadata fallback, not host ownership or tenant path authority. The SDK
+still validates paired IDs and rejects owners on non-directory mounts. Earlier
+server deployments might ignore these optional fields; there are no self-hosted
+deployments in the user's supported fleet and this is an approved server-support
+requirement. Local runtime capability checks are unchanged.

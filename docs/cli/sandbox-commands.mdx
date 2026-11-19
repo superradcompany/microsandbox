@@ -6,6 +6,8 @@ description: Create, run, connect to, and remove microVM sandboxes with the micr
 icon: "cube"
 ---
 
+Use mutually exclusive `--local` / `--remote` to select a destination for this command. Explicit flags override profile/environment selection while preserving managed backend restrictions; see [selection and credentials](/cloud/connect#explicit-cli-selection).
+
 Use the short form, such as `msb run`. `msb sandbox run` and `msb sbx run` accept the same arguments.
 
 <span id="cli-management" />
@@ -16,7 +18,7 @@ Aliases include `ls`, `ps`, `rm`, `cp`, and `mod`. See [SSH](/cli/ssh-commands),
 
 ## msb run
 
-<Tooltip tip="The core run workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="The core run workflow works on our managed cloud, but replace-on-create, published ports, custom DNS and interfaces, flat OCI roots, full snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Create a sandbox and run its image command. Arguments after `--` replace CMD but preserve ENTRYPOINT. Unnamed sandboxes are removed when the command finishes; named sandboxes persist. Piped input is forwarded to the command; use `--no-stdin` to leave it for the calling script.
 
@@ -72,7 +74,7 @@ Common flags:
 | `--max-cpus` | Boot-time maximum possible virtual CPUs for future resize capacity |
 | `-m`, `--memory` | Memory limit, such as `512M` or `1G` |
 | `--max-memory` | Boot-time maximum hotpluggable memory, such as `2G` or `8G` |
-| `--nested-virt`, `--nested-virt=false` | Enable or disable local nested virtualization. Defaults to off unless configured. See [requirements](/sandboxes/snapshots#nested-vm-snapshots). |
+| `--nested-virt`, `--nested-virt false` | Enable or disable local nested virtualization. Defaults to off unless configured. See [requirements](/sandboxes/snapshots#nested-vm-snapshots). |
 | `--thp` | Guest transparent huge-page policy: `always`, `madvise` (default), or `never` |
 | `--guest-clock` | `sync` (default) follows host time; `off` stops host clock updates after boot. Local-only. See [guest clock](/sandboxes/snapshots#keep-the-guest-clock) |
 | `--root-disk` | OCI root storage, such as `8G`, `tmpfs:2G`, `flat:8G,clone=auto`, or `./rootfs.qcow2:format=qcow2,fstype=ext4` |
@@ -99,7 +101,7 @@ Common flags:
 | `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
 | `--net-nat64-prefix` | Add a NAT64 `/96` prefix for network policy classification |
-| `--net-strict[=BOOL]` | Enabled by default; use `--net-strict=false` to opt out. Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
+| `--net-strict[=BOOL]` | Enabled by default; use `--net-strict false` to opt out. Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
 | `--proxy` | Route eligible outbound traffic through an `http://IP:PORT`, `socks4://IP:PORT`, or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
 | `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
 | `--socks5-username`, `--socks5-password-env` | SOCKS5 username and the host environment variable containing its password. Both flags are required together |
@@ -108,7 +110,7 @@ Common flags:
 | `--secret-violation-action` | Set `block`, `block-and-log`, or `block-and-terminate` for blocked placeholders |
 | `--tmpfs` | Mount an in-memory filesystem |
 | `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, `--rm` | Patch the rootfs before boot |
-| `--conf` | Load a sparse [sandbox configuration](/cli/configuration). Repeatable |
+| `--file`, `--conf` | Load a [Sandboxfile](/cli/configuration). Repeat to layer configuration files in order |
 | `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, `--script-conf` | Load an unwrapped, concern-specific [scoped config](/cli/configuration#scoped-config-files). Repeatable |
 
 Use `msb run --help` for the full flag list.
@@ -117,7 +119,7 @@ Pass configuration files explicitly. Files merge left to right; explicit CLI arg
 
 ### Flat OCI rootfs
 
-<Tooltip tip="Flat OCI roots use host-local image artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Flat OCI roots use host-local image artifacts and are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Use a complete ext4 root instead of the default layered root. Each sandbox gets a private copy of the cached base.
 
@@ -134,7 +136,7 @@ Flat roots support pre-boot patches and local snapshots. Patches change only the
 
 ### Published ports
 
-<Tooltip tip="Published ports bind on the computer running the local backend and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Published ports bind on the computer running the local backend and are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Ports bind to `127.0.0.1` by default. Use an explicit address to expose them beyond localhost. Windows may prompt for firewall access.
 
@@ -173,7 +175,7 @@ The host kernel caps the queue at its own limit: `net.core.somaxconn` on Linux (
 
 ### VSock
 
-<Tooltip tip="VSock routes connect to IPC on the computer running the local backend and are unavailable on microsandbox cloud or multi-tenant deployments."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="VSock routes connect to IPC on the computer running the local backend and are unavailable on our managed cloud or multi-tenant deployments."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Use the repeatable `--vsock HOST_PATH:PORT[/stream|/dgram]` flag to expose a host Unix socket or local Windows named pipe on guest host CID `2`. Stream is the default. Datagram routes preserve message boundaries and are unavailable on Windows.
 
@@ -181,7 +183,7 @@ See [Host sockets](/networking/host-sockets) for guest connection details, limit
 
 ### Network profiles
 
-<Tooltip tip="On microsandbox cloud, the host profile targets endpoints reachable from the cloud worker, not the machine running the CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, the host profile targets endpoints reachable from the cloud worker, not the machine running the CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 `--net` is repeatable and accepts comma-separated profiles. `public`, `private`, and `host` compose; DNS through the sandbox gateway is enabled automatically and only once. `all` and `none` are terminal policies and cannot be mixed with the three positive profiles.
 
@@ -200,7 +202,7 @@ NAT64 destinations inside the well-known `64:ff9b::/96` prefix are classified by
 
 ### Outbound proxy
 
-<Tooltip tip="User-configured outbound proxies are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="User-configured outbound proxies are not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Use `--proxy` with `msb run` or `msb create` to configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy:
 
@@ -280,7 +282,7 @@ msb run alpine --net public --net-rule "deny@dns"
 
 ## msb create
 
-<Tooltip tip="The core create workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="The core create workflow works on our managed cloud, but replace-on-create, published ports, custom DNS and interfaces, flat OCI roots, full snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Create and boot a sandbox without running a command. Takes the same flags as `msb run` (except `--detach`).
 
@@ -389,7 +391,7 @@ msb start --label app=engine          # Start every sandbox labeled app=engine
 
 ## msb stop
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; explicit force mode is unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Graceful stop works on our managed cloud; explicit force mode is unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
 ```bash Shell
@@ -478,7 +480,7 @@ Batch forking captures once. Results follow input order; failed children produce
 
 ## msb restart
 
-<Tooltip tip="Graceful restart works on microsandbox cloud; explicit force mode is unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Graceful restart works on our managed cloud; explicit force mode is unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Stop and start one or more sandboxes. Running, draining, and paused sandboxes are stopped first, then started from their persisted configuration. Stopped, crashed, and created sandboxes skip the stop phase and are started directly.
 
@@ -544,7 +546,7 @@ terminal state was observed.
 
 ## msb ping
 
-<Tooltip tip="Not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not yet available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Check whether running sandboxes respond. Add `--touch` to refresh the idle timer on success.
 
@@ -568,7 +570,7 @@ msb ping api --touch
 
 ## msb touch
 
-<Tooltip tip="Not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not yet available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Refresh the idle timer for one or more running sandboxes.
 
@@ -589,7 +591,7 @@ msb touch --label app=engine
 
 ## msb modify
 
-<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 `msb mod` is a shorter alias for `msb modify`.
 
@@ -745,7 +747,7 @@ Stopped sandboxes start temporarily, as with [`msb exec`](#msb-exec). Alias: `ms
 
 ## msb logs
 
-<Tooltip tip="On microsandbox cloud, use msb logs -f for a live stream. Bounded and historical reads remain local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, use msb logs -f for a live stream. Bounded and historical reads remain local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Read output from running or stopped local sandboxes. On cloud, use `--follow` to stream a running sandbox; historical reads and time filters are unavailable.
 
@@ -870,7 +872,7 @@ msb ps --format json      # JSON output
 
 ## msb metrics
 
-<Tooltip tip="msb metrics is local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="msb metrics is local-only. On our managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Show live CPU, memory, disk, network, and optional upper disk metrics for running sandboxes.
 
@@ -912,7 +914,7 @@ Limits reflect live resizes. One-shot output samples twice to calculate rates. J
 
 ## msb inspect
 
-<Tooltip tip="On microsandbox cloud, text output omits parsed configuration details; use --format json to view the raw cloud specification."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, text output omits parsed configuration details; use --format json to view the raw cloud specification."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Show detailed configuration and status.
 
@@ -996,7 +998,7 @@ Run `project-shell` from any folder to open it at `/workspace` inside the sandbo
 | `--no-pull` | Don't pull the image before installing |
 | `--tmp` | Create a fresh sandbox on every invocation and remove it on exit; host-mounted files persist |
 | `-l`, `--list` | List all installed sandbox commands |
-| `--conf` | Load an explicit sparse [sandbox configuration](/cli/configuration). Repeatable |
+| `--file`, `--conf` | Load a [Sandboxfile](/cli/configuration). Repeat to layer configuration files in order |
 | `--net-conf`<br />`--resource-conf`<br />`--runtime-conf`<br />`--fs-conf`<br />`--secret-conf`<br />`--script-conf` | Load an explicit [scoped config](/cli/configuration#scoped-config-files). Repeatable |
 
 ## msb uninstall

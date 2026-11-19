@@ -1,7 +1,7 @@
 //! `msb status` command — show sandbox status.
 
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxStatus};
+use microsandbox::sandbox::{SandboxConfig, SandboxRecord, SandboxStatus};
 
 use crate::ui::{self, OutputFormat};
 
@@ -52,8 +52,8 @@ struct StatusRow {
 /// Execute the `msb status` command.
 pub async fn run(args: PsArgs) -> anyhow::Result<()> {
     let single = args.name.is_some();
-    let handles: Vec<SandboxHandle> = if let Some(name) = args.name.as_deref() {
-        vec![Sandbox::get(name).await?]
+    let handles: Vec<SandboxRecord> = if let Some(name) = args.name.as_deref() {
+        vec![crate::commands::common::sandbox_record(name).await?]
     } else {
         let mut sandboxes = common::list_sandboxes(&args.label).await?;
         if !args.all {
@@ -104,7 +104,7 @@ pub async fn run(args: PsArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_json(handles: &[SandboxHandle], single: bool) -> anyhow::Result<()> {
+fn print_json(handles: &[SandboxRecord], single: bool) -> anyhow::Result<()> {
     if single {
         let row = handles
             .first()
@@ -119,7 +119,7 @@ fn print_json(handles: &[SandboxHandle], single: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn status_row(handle: &SandboxHandle) -> StatusRow {
+fn status_row(handle: &SandboxRecord) -> StatusRow {
     let config = serde_json::from_str::<SandboxConfig>(handle.config_json()).ok();
     let image = config
         .as_ref()
@@ -151,7 +151,7 @@ fn status_row(handle: &SandboxHandle) -> StatusRow {
     }
 }
 
-fn status_json(handle: &SandboxHandle) -> serde_json::Value {
+fn status_json(handle: &SandboxRecord) -> serde_json::Value {
     let config = serde_json::from_str::<SandboxConfig>(handle.config_json()).ok();
     let status = format!("{:?}", handle.status_snapshot());
     let resources = resource_config(handle, config.as_ref());
@@ -175,7 +175,7 @@ fn status_json(handle: &SandboxHandle) -> serde_json::Value {
 /// the active-config snapshot for running sandboxes (tracks live resizes),
 /// falling back to the desired config.
 fn resource_config(
-    handle: &SandboxHandle,
+    handle: &SandboxRecord,
     desired: Option<&SandboxConfig>,
 ) -> Option<SandboxConfig> {
     handle

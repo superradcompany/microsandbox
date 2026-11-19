@@ -18,6 +18,7 @@ required-features = ["ts"]
 
 [features]
 default = []
+progress = ["dep:tokio"]
 # Derive `utoipa::ToSchema` on the wire types an HTTP API (the cloud control
 # plane) exposes. Off by default so runtime/SDK builds never pull utoipa.
 utoipa = ["dep:utoipa"]
@@ -32,12 +33,13 @@ ts = [
 ]
 
 [dependencies]
+tokio = { workspace = true, optional = true }
 chrono.workspace = true
 dprint-plugin-typescript = { version = "=0.95", optional = true }
 hex.workspace = true
 ipnetwork.workspace = true
 microsandbox-types-macros.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

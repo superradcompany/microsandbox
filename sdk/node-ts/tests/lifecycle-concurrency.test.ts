@@ -10,6 +10,7 @@ import { Sandbox, SandboxNotFoundError } from "../dist/index.js";
 
 const native: typeof import("../native/index.js") = createRequire(import.meta.url)("../native/index.cjs");
 const consumed = /Sandbox handle has been consumed/;
+const released = /sandbox receiver .* has been released/;
 
 async function bounded<T>(promise: Promise<T>, label: string, timeoutMs = 2_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -30,7 +31,7 @@ async function fixture(label: string, run: (source: Sandbox, observer: Sandbox) 
   const source = await Sandbox.builder(name).image("alpine").rootDisk(512).memory(256).create();
   let observer: Sandbox | undefined;
   try {
-    observer = await (await Sandbox.get(name)).connect();
+    observer = await Sandbox.getRunning(name);
     await run(source, observer);
   } finally {
     // A separate handle can recover a paused VM even if the tested wrapper is
@@ -40,7 +41,7 @@ async function fixture(label: string, run: (source: Sandbox, observer: Sandbox) 
       throw error;
     });
     if (handle) {
-      if (handle.status === "paused") await handle.resume();
+      if (await handle.status() === "paused") await handle.resume();
       await handle.stop();
       await Sandbox.remove(name);
     }
@@ -70,7 +71,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
         let started = performance.now();
         await bounded(source.pause(), "pause during exec");
         pauses.push(performance.now() - started);
-        expect((await Sandbox.get(source.name)).status).toBe("paused");
+        expect(await observer.status()).toBe("paused");
         started = performance.now();
         await bounded(source.resume(), "resume during exec");
         resumes.push(performance.now() - started);
@@ -102,14 +103,16 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
     });
   });
 
-  it("detach consumes new calls and existing filesystem facades without draining exec", async () => {
+  it("detach preserves new calls and existing filesystem facades without draining exec", async () => {
     await fixture("detach", async (source, observer) => {
       const fs = source.fs();
       const { pending } = await gatedExec(source, observer);
       await bounded(source.detach(), "detach during exec");
-      await expect(source.pause()).rejects.toThrow(consumed);
-      await expect(source.exec("true")).rejects.toThrow(consumed);
-      await expect(fs.exists("/dev/shm/started")).rejects.toThrow(consumed);
+      expect(source.ownsLifecycle).toBe(false);
+      await bounded(source.pause(), "pause after detach");
+      await bounded(source.resume(), "resume after detach");
+      expect((await source.exec("true")).status.success).toBe(true);
+      expect(await fs.exists("/dev/shm/started")).toBe(true);
       await source.detach(); // Detach remains idempotent.
       await observer.fs().write("/dev/shm/release", "go");
       expect((await bounded(pending, "detached exec completion")).stdout().trim()).toBe("completed");
@@ -130,7 +133,9 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
       const writer = await open(fifo, "w");
       let closed = false;
       try {
-        await writer.writeFile("initial ");
+        // Pass the inline probe and deliver a full bulk record while keeping EOF pending.
+        const prefix = "x".repeat(4 * 1024 * 1024);
+        await writer.writeFile(prefix);
         await bounded((async () => {
           while (true) {
             try {
@@ -144,12 +149,12 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
         await bounded(source.pause(), "pause during upload");
         await bounded(source.resume(), "resume during upload");
         await bounded(source.detach(), "detach during upload");
-        await expect(fs.exists("/tmp")).rejects.toThrow(consumed);
+        expect(await bounded(fs.exists("/tmp"), "filesystem after detach")).toBe(true);
         await writer.writeFile("private upload payload");
         await writer.close();
         closed = true;
         await bounded(upload, "admitted upload after detach");
-        expect(await observer.fs().readToString("/dev/shm/uploaded")).toBe("initial private upload payload");
+        expect(await observer.fs().readToString("/dev/shm/uploaded")).toBe(prefix + "private upload payload");
       } finally {
         if (!closed) await writer.close();
         await unlink(fifo);
@@ -160,7 +165,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
 
   it("removal consumes its wrapper while exec is pending, independently of lifecycle locking", async () => {
     await fixture("remove", async (source, observer) => {
-      const raw = await (await native.Sandbox.get(source.name)).connect();
+      const raw = await native.Sandbox.getRunning(source.name);
       const fs = raw.fs();
       const pending = raw.exec("sh", ["-c", "touch /dev/shm/started; while [ ! -e /dev/shm/release ]; do sleep 0.02; done; echo completed"]);
       void pending.catch(() => undefined);
@@ -170,7 +175,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
       const removal = raw.removePersisted().then(() => ({ removed: true }), error => ({ error }));
       await delay(50);
       await expect(bounded(raw.pause(), "consumed pause")).rejects.toThrow(consumed);
-      await expect(bounded(fs.exists("/dev/shm/started"), "consumed filesystem")).rejects.toThrow(consumed);
+      expect(() => raw.fs()).toThrow(consumed);
       await expect(raw.removePersisted()).rejects.toThrow(consumed);
       await observer.fs().write("/dev/shm/release", "go");
       expect((await bounded(pending, "exec after failed removal")).success).toBe(true);
@@ -185,6 +190,8 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
         expect("removed" in result).toBe(true);
       }
       if ("error" in result) expect(String(result.error)).toMatch(/running|stopped|lock|timed out/i);
+      // Existing helpers use the receiver group until its final admitted operation releases it.
+      await expect(fs.exists("/dev/shm/started")).rejects.toThrow(released);
     });
   });
 
@@ -200,7 +207,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
       await bounded(waiter, "terminal-state observation");
       await raw.removePersisted();
       await expect(raw.resume()).rejects.toThrow(consumed);
-      await expect(fs.exists("/tmp")).rejects.toThrow(consumed);
+      await expect(fs.exists("/tmp")).rejects.toThrow(released);
       await expect(native.Sandbox.get(name)).rejects.toThrow();
     } finally {
       // Successful removal already deleted the record; only recover a fixture

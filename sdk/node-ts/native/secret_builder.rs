@@ -68,74 +68,74 @@ impl JsSecretBuilder {
 
     /// Environment variable to expose the placeholder under (required).
     #[napi]
-    pub fn env(&mut self, env_var: String) -> &Self {
-        let prev = self.take_inner();
+    pub fn env(&mut self, env_var: String) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.env(env_var));
-        self
+        Ok(self)
     }
 
     /// Secret value (required).
     #[napi]
-    pub fn value(&mut self, value: String) -> &Self {
-        let prev = self.take_inner();
+    pub fn value(&mut self, value: String) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.value(value));
-        self
+        Ok(self)
     }
 
     /// Custom placeholder. Auto-generated as `$MSB_<env>` when unset.
     #[napi]
-    pub fn placeholder(&mut self, placeholder: String) -> &Self {
-        let prev = self.take_inner();
+    pub fn placeholder(&mut self, placeholder: String) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.placeholder(placeholder));
-        self
+        Ok(self)
     }
 
     /// Add a host allowed to receive the substituted secret value.
     #[napi]
-    pub fn allow(&mut self, host: String) -> &Self {
-        let prev = self.take_inner();
+    pub fn allow(&mut self, host: String) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.allow(host));
-        self
+        Ok(self)
     }
 
     /// Allow any host. **Dangerous** — secret can be exfiltrated.
     /// Pass `true` to opt in.
     #[napi(js_name = "allowAnyHostDangerous")]
-    pub fn allow_any_host_dangerous(&mut self, i_understand: bool) -> &Self {
-        let prev = self.take_inner();
+    pub fn allow_any_host_dangerous(&mut self, i_understand: bool) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.allow_any_host_dangerous(i_understand));
-        self
+        Ok(self)
     }
 
     /// Require verified TLS identity before substituting (default: true).
     #[napi(js_name = "requireTlsIdentity")]
-    pub fn require_tls_identity(&mut self, enabled: bool) -> &Self {
-        let prev = self.take_inner();
+    pub fn require_tls_identity(&mut self, enabled: bool) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.require_tls_identity(enabled));
-        self
+        Ok(self)
     }
 
     /// Allow a host to receive the unchanged placeholder where substitution does not apply.
     /// Enabled substitution locations still receive the real secret on allowed hosts.
     #[napi(js_name = "allowPlaceholderFor")]
-    pub fn allow_placeholder_for(&mut self, host: String) -> &Self {
-        let prev = self.take_inner();
+    pub fn allow_placeholder_for(&mut self, host: String) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.allow_placeholder_for(host));
-        self
+        Ok(self)
     }
 
     /// @deprecated Use allowPlaceholderFor instead.
     #[napi(js_name = "allowPassthroughFor")]
-    pub fn allow_passthrough_for(&mut self, host: String) -> &Self {
+    pub fn allow_passthrough_for(&mut self, host: String) -> Result<&Self> {
         self.allow_placeholder_for(host)
     }
 
     /// Configure header substitution (default: true).
     #[napi(js_name = "substituteInHeaders")]
-    pub fn substitute_in_headers(&mut self, enabled: bool) -> &Self {
-        let prev = self.take_inner();
+    pub fn substitute_in_headers(&mut self, enabled: bool) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.substitute_in_headers(enabled));
-        self
+        Ok(self)
     }
 
     /// Enable header substitution but restrict it to the given header fields.
@@ -145,40 +145,38 @@ impl JsSecretBuilder {
     /// in every header lets an untrusted guest place the placeholder in a
     /// header the upstream host reflects back, leaking the real secret.
     #[napi(js_name = "substituteInHeaderFields")]
-    pub fn substitute_in_header_fields(&mut self, fields: Vec<String>) -> &Self {
-        let prev = self.take_inner();
+    pub fn substitute_in_header_fields(&mut self, fields: Vec<String>) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.substitute_in_header_fields(fields));
-        self
+        Ok(self)
     }
 
     /// Configure URL query parameter substitution (default: false).
     #[napi(js_name = "substituteInQuery")]
-    pub fn substitute_in_query(&mut self, enabled: bool) -> &Self {
-        let prev = self.take_inner();
+    pub fn substitute_in_query(&mut self, enabled: bool) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.substitute_in_query(enabled));
-        self
+        Ok(self)
     }
 
     /// Configure request body substitution (default: false).
     #[napi(js_name = "substituteInBody")]
-    pub fn substitute_in_body(&mut self, enabled: bool) -> &Self {
-        let prev = self.take_inner();
+    pub fn substitute_in_body(&mut self, enabled: bool) -> Result<&Self> {
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.substitute_in_body(enabled));
-        self
+        Ok(self)
     }
 
     /// Configure the blocking action for this secret.
     #[napi(js_name = "violationAction")]
     pub fn violation_action(&mut self, action: String) -> Result<&Self> {
         let action = parse_violation_action(&action)?;
-        let prev = self.take_inner();
+        let prev = self.take_inner_builder()?;
         self.inner = Some(prev.violation_action(action));
         Ok(self)
     }
 
-    /// Materialize into a `SecretEntry`. Panics if required fields are not
-    /// set (matches the underlying Rust builder's contract; surface as a
-    /// typed error here).
+    /// Validate the declaration and materialize a secret entry.
     #[napi]
     pub fn build(&mut self) -> Result<JsSecretEntry> {
         let entry = self.take_built()?;
@@ -187,16 +185,7 @@ impl JsSecretBuilder {
 }
 
 impl JsSecretBuilder {
-    fn take_inner(&mut self) -> RustSecretBuilder {
-        self.inner
-            .take()
-            .expect("SecretBuilder used after .build() consumed it")
-    }
-
-    /// Internal: extract the underlying Rust builder. Used by
-    /// `NetworkBuilder.secret()` to route through the core SDK closure.
-    #[allow(dead_code)]
-    pub(crate) fn take_inner_builder(&mut self) -> Result<RustSecretBuilder> {
+    fn take_inner_builder(&mut self) -> Result<RustSecretBuilder> {
         self.inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("SecretBuilder already consumed"))
@@ -208,18 +197,8 @@ impl JsSecretBuilder {
         let b = self.inner.take().ok_or_else(|| {
             napi::Error::from_reason("SecretBuilder.build() called more than once")
         })?;
-        // Rust .build() panics if env/value missing; catch via unwind so
-        // we can surface a typed error instead of crashing the process.
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.build())).map_err(|p| {
-            let msg = if let Some(s) = p.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else if let Some(s) = p.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "SecretBuilder: missing required field".to_string()
-            };
-            napi::Error::from_reason(msg)
-        })
+        b.build()
+            .map_err(|error| crate::error::to_napi_error(error.into()))
     }
 }
 

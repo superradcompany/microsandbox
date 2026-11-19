@@ -1,5 +1,7 @@
 """Restore is a distinct operation, never a create call with an ignored field."""
 
+from datetime import timedelta
+
 import pytest
 
 from microsandbox import Network, NetworkPolicy, Sandbox, SecurityProfile
@@ -72,7 +74,8 @@ async def test_restore_accepts_explicit_destination_controls(tmp_path):
             tmp_path / "missing", name="restore-controls", disk_only=True,
             cpus=2, memory=512, network_policy=NetworkPolicy.none(),
             max_tcp_connections=0, max_udp_connections=7,
-            disable_network=True, security=SecurityProfile.DEFAULT, max_duration=0, idle_timeout=0,
+            disable_network=True, security=SecurityProfile.DEFAULT,
+            max_duration=timedelta(0), idle_timeout=timedelta(minutes=1),
         )
 
 
@@ -167,9 +170,20 @@ def test_restore_duration_rejects_invalid_values(option, value):
 
 
 def test_fork_public_surface_and_outcome_alias():
-    from microsandbox import BranchOutcome, ForkOutcome, SandboxHandle
+    from microsandbox import BranchOutcome, ForkOutcome
 
     assert BranchOutcome is ForkOutcome
-    for cls in (Sandbox, SandboxHandle):
+    for cls in (Sandbox,):
         for method in ("fork", "fork_many", "branch", "branch_many"):
             assert callable(getattr(cls, method))
+
+
+@pytest.mark.parametrize("field", ["max_duration", "idle_timeout"])
+@pytest.mark.parametrize("value", [1.5, 1e-20, timedelta(microseconds=1), timedelta.max])
+def test_create_and_restore_reject_fractional_lifetimes(field, value):
+    for method, kwargs in [
+        (Sandbox.create, {"image": "alpine"}),
+        (Sandbox.restore, {"name": "restored"}),
+    ]:
+        with pytest.raises(ValueError, match=f"{field} must be a whole number of seconds"):
+            method("worker", **kwargs, **{field: value})
