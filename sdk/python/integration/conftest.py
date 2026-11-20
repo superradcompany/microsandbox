@@ -47,7 +47,6 @@ async def sandbox_factory() -> Any:
             "image": IMAGE,
             "cpus": 1,
             "memory": 512,
-            "replace": True,
         }
         config.update(kwargs)
         try:

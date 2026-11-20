@@ -19,22 +19,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     baseline.stop().await?;
 
     let h = Sandbox::get("snapshot-baseline").await?;
-    let snap = h.snapshot("snapshot-baseline-state").await?;
-    println!("created snapshot: {}", snap.digest());
+    let created = h.snapshot("snapshot-baseline-state").await?;
+    let snap = created.checkpoint;
+    println!("created checkpoint: {}", snap.id());
     println!("        reference: {}", snap.reference().value());
 
-    let fork = Sandbox::restore_ref(snap.reference())
-        .name("snapshot-fork")
-        .restore()
+    let fork = snap
+        .spawn_sandbox_with(|options| options.name("snapshot-fork"))
         .await?;
     let output = fork.shell("cat /root/marker.txt").await?;
+    assert_eq!(output.stdout()?.trim(), "shipped via snapshot");
     println!("fork sees: {}", output.stdout()?.trim());
 
     fork.stop().await?;
 
     Sandbox::remove("snapshot-baseline").await?;
     Sandbox::remove("snapshot-fork").await?;
-    microsandbox::Snapshot::remove_ref(snap.reference(), false).await?;
+    created.snapshot.remove().await?;
 
     Ok(())
 }

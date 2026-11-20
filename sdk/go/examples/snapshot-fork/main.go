@@ -32,14 +32,19 @@ func main() {
 	baseName := fmt.Sprintf("go-sdk-snapshot-base-%d", suffix)
 	forkName := fmt.Sprintf("go-sdk-snapshot-fork-%d", suffix)
 	snapshotName := fmt.Sprintf("go-sdk-snapshot-%d", suffix)
-	snapshotSelector := baseName + ":" + snapshotName
+	snapshotSelector := ""
+	snapshotGroupName := ""
 
 	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage("alpine:3.19"))
 	if err != nil {
 		log.Fatalf("CreateSandbox base: %v", err)
 	}
 	defer cleanupSandbox(baseName)
-	defer cleanupSnapshot(snapshotSelector)
+	defer func() {
+		if snapshotGroupName != "" {
+			cleanupSnapshot(snapshotGroupName)
+		}
+	}()
 
 	payload := fmt.Sprintf("created by %s\n", baseName)
 	if err := base.FS().WriteString(ctx, markerPath, payload); err != nil {
@@ -49,16 +54,14 @@ func main() {
 	if err := base.Stop(ctx); err != nil {
 		log.Fatalf("Stop base: %v", err)
 	}
-	if err := base.Close(); err != nil {
-		log.Fatalf("Close base: %v", err)
-	}
-
-	artifact, err := microsandbox.CreateSnapshot(ctx, microsandbox.SnapshotCreateOptions{
-		FromSandbox: baseName, Name: snapshotName,
-	})
+	created, err := base.Snapshot(ctx, snapshotName, microsandbox.WithSnapshotCaptureConfig(microsandbox.SnapshotCaptureConfig{Name: "base", RecordIntegrity: true}))
 	if err != nil {
 		log.Fatalf("Snapshot: %v", err)
 	}
+	artifact := created.Checkpoint
+	snapshotGroupName = created.Snapshot.Name()
+	snapshotSelector = snapshotName + ":" + artifact.ID()
+
 	size := "unknown"
 	sizeBytes, err := artifact.SizeBytes(ctx)
 	if err != nil {
@@ -73,7 +76,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Snapshot Verify: %v", err)
 	}
-	fmt.Printf("snapshot verified: upper=%s\n", report.Upper.Kind)
+	if report.Coverage.Kind != "complete" {
+		log.Fatalf("Snapshot Verify: incomplete coverage %q", report.Coverage.Kind)
+	}
+	fmt.Printf("snapshot verified: coverage=%s upper=%s\n", report.Coverage.Kind, report.Upper.Kind)
 
 	handle, err := microsandbox.GetSnapshot(ctx, snapshotSelector)
 	if err != nil {
@@ -85,7 +91,7 @@ func main() {
 	}
 	fmt.Printf("snapshot index entry: name=%s digest=%s\n", name, handle.Digest())
 
-	fork, err := microsandbox.RestoreSandbox(ctx, snapshotSelector, forkName)
+	fork, err := artifact.SpawnSandbox(ctx, forkName)
 	if err != nil {
 		log.Fatalf("RestoreSandbox fork: %v", err)
 	}
@@ -121,5 +127,13 @@ func cleanupSandbox(name string) {
 }
 
 func cleanupSnapshot(name string) {
-	_ = microsandbox.RemoveSnapshot(context.Background(), name, true)
+	ctx := context.Background()
+	provider, err := microsandbox.NewLocalContext(microsandbox.LocalOptions{})
+	if err != nil {
+		return
+	}
+	group, err := provider.Snapshots().Get(ctx, name)
+	if err == nil {
+		_, _ = group.Remove(ctx)
+	}
 }

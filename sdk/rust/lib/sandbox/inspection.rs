@@ -54,10 +54,10 @@ impl Sandbox {
     }
 
     /// Capture this exact sandbox without replacing its captured destination or identity.
-    pub async fn snapshot(&self, name: &str) -> MicrosandboxResult<crate::Snapshot> {
+    pub async fn checkpoint(&self, name: &str) -> MicrosandboxResult<crate::Checkpoint> {
         let context = self.context().clone_shared();
         let config = context
-            .snapshots()
+            .checkpoints()
             .builder(name)
             .from_sandbox(self.name())
             .build()?;

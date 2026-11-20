@@ -238,9 +238,17 @@ impl ExporterWorker {
     /// configured timeout, and on failure restore the batch so the next flush
     /// retries it.
     async fn run_export(&mut self) -> MetricsCollectorResult<()> {
-        let Some(batch) = self.take_batch() else {
+        let Some(mut batch) = self.take_batch() else {
             return Ok(());
         };
+        // A valid read may expire in this exporter's buffer or during backoff.
+        // Recheck on every attempt, while preserving the original receipt.
+        let now = microsandbox_metrics::guest_memory_clock();
+        for collection in &mut batch.collections {
+            for snapshot in &mut collection.sandboxes {
+                snapshot.metrics.expire_guest_memory_at(now);
+            }
+        }
         let batch_arc = Arc::new(batch);
         let result = tokio::time::timeout(
             self.config.export_timeout,
@@ -316,6 +324,53 @@ mod tests {
         let mut w = worker_with_cap(8);
         w.config.flush_interval = interval;
         w
+    }
+
+    #[tokio::test]
+    async fn buffered_and_retried_guest_samples_keep_original_receipt_and_expire() {
+        use super::super::mocks::RecordingExporter;
+        use microsandbox_metrics::GuestMemoryObservation;
+        use std::sync::atomic::Ordering;
+
+        let recorder = Arc::new(RecordingExporter::default());
+        let mut worker = worker_with_cap(4);
+        worker.exporter = Arc::new(recorder.clone());
+        let mut pending = collection(1);
+        let report = GuestMemoryObservation {
+            total_bytes: 100,
+            available_bytes: 20,
+            received_at: Duration::ZERO,
+            reporting_interval: Duration::from_secs(1),
+        };
+        pending.sandboxes[0].metrics.memory_total_bytes = Some(100);
+        pending.sandboxes[0].metrics.guest_memory_observation = Some(report);
+        worker.buffer_collection(pending);
+        // Expired before dispatch, then retained through a failed transport and retry.
+        recorder.fail_exports.store(true, Ordering::Release);
+        assert!(worker.run_export().await.is_err());
+        let restored = &worker.buffer[0].sandboxes[0].metrics;
+        assert_eq!(restored.guest_memory_observation, Some(report));
+        assert!(!restored.memory_bytes_reported);
+        assert_eq!(restored.memory_total_bytes, None);
+        assert_eq!(restored.memory_available_bytes, None);
+        recorder.fail_exports.store(false, Ordering::Release);
+        worker.run_export().await.unwrap();
+        let batches = recorder.batches();
+        let exported = &batches[0].collections[0].sandboxes[0].metrics;
+        assert_eq!(exported.guest_memory_observation, Some(report));
+        assert!(!exported.memory_bytes_reported);
+        assert_eq!(exported.memory_host_resident_bytes, Some(3));
+        assert_eq!(exported.disk_read_bytes, 3);
+        assert_eq!(exported.memory_limit_bytes, 2);
+
+        // Legacy reports have no receipt metadata and retain existing behavior.
+        worker.buffer_collection(collection(2));
+        worker.run_export().await.unwrap();
+        assert!(
+            recorder.batches()[1].collections[0].sandboxes[0]
+                .metrics
+                .memory_bytes_reported
+        );
     }
 
     #[test]

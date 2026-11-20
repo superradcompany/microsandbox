@@ -72,12 +72,12 @@ Capture the downloaded provider:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap create terraform-runtime \
+msb snap create terraform-base --name terraform-runtime \
   --sandbox terraform-base --integrity
 ```
 
 ```powershell Windows
-msb snap create terraform-runtime `
+msb snap create terraform-base --name terraform-runtime `
   --sandbox terraform-base --integrity
 ```
 </CodeGroup>
@@ -86,7 +86,7 @@ Verify the snapshot before using it:
 
 <CodeGroup>
 ```sh Shell
-msb snap verify terraform-base:terraform-runtime
+msb snap verify terraform-base --checkpoint terraform-runtime
 ```
 </CodeGroup>
 
@@ -100,7 +100,7 @@ Restore applies the offline policy and restricted guest profile before boot. It 
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap restore terraform-base:terraform-runtime --name terraform-vet \
+msb create --from-snapshot terraform-base --checkpoint terraform-runtime --name terraform-vet \
   --user 65534:65534 --cpus 1 --memory 512M \
   --no-net --security restricted --max-duration 1m
 msb exec --workdir /workspace --user 65534:65534 --env HOME=/tmp \
@@ -110,7 +110,7 @@ msb stop terraform-vet
 ```
 
 ```powershell Windows
-msb snap restore terraform-base:terraform-runtime --name terraform-vet `
+msb create --from-snapshot terraform-base --checkpoint terraform-runtime --name terraform-vet `
   --user 65534:65534 --cpus 1 --memory 512M `
   --no-net --security restricted --max-duration 1m
 msb exec --workdir /workspace --user 65534:65534 --env HOME=/tmp `
@@ -140,9 +140,11 @@ Remove the reusable snapshot:
 
 <CodeGroup>
 ```sh Shell
-msb snap rm terraform-base:terraform-runtime
+msb snap rm terraform-base --checkpoint terraform-runtime
 ```
 </CodeGroup>
+
+This removes the checkpoint and keeps the `terraform-base` history. To reuse the group name on a fresh run, first confirm it contains no checkpoints you need with `msb snap ls terraform-base`, then remove it with `msb snap rm terraform-base --all`.
 
 </Step>
 

@@ -102,7 +102,7 @@ impl PyLogStream {
 
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.stream.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut guard = stream.lock().await;
             match guard.next().await {
                 Some(Ok(entry)) => Ok(convert_entry(entry)),

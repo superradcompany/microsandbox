@@ -25,6 +25,7 @@ nix = { workspace = true, features = [
     "fs",
     "hostname",
     "mount",
+    "net",
     "process",
     "signal",
     "term",

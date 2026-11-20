@@ -424,101 +424,108 @@
             "icon": "arrow-right-arrow-left",
             "pages": [
               "migrations/overview",
-              "migrations/v0.7",
-              "migrations/sdk-contexts",
-              "migrations/sdk-distributions"
-            ]
-          },
-          {
-            "group": "Repair guides",
-            "icon": "wrench",
-            "pages": [
-              "repairs/sandbox-storage",
-              "repairs/file-permissions"
+              "migrations/v0.8",
+              "migrations/v0.7"
             ]
           },
           {
             "group": "Releases",
             "icon": "tag",
             "pages": [
-              "changelog/v0.7.8",
-              "changelog/v0.7.7",
-              "changelog/v0.7.6",
-              "changelog/v0.7.5",
-              "changelog/v0.7.4",
-              "changelog/v0.7.3",
-              "changelog/v0.7.2",
-              "changelog/v0.7.1",
-              "changelog/v0.7.0"
-            ]
-          },
-          {
-            "group": "Past updates",
-            "icon": "clock-rotate-left",
-            "pages": [
+              "changelog/v0.8.0",
               {
-                "group": "September 2026",
+                "group": "v0.7",
                 "expanded": false,
                 "pages": [
-                  "changelog/2026-09-25",
-                  "changelog/2026-09-11",
-                  "changelog/2026-09-04"
-                ]
+                  "changelog/v0.7.16",
+                  "changelog/v0.7.15",
+                  "changelog/v0.7.14",
+                  "changelog/v0.7.13",
+                  "changelog/v0.7.12",
+                  "changelog/v0.7.11",
+                  "changelog/v0.7.10",
+                  "changelog/v0.7.9",
+                  "changelog/v0.7.8",
+                  "changelog/v0.7.7",
+                  "changelog/v0.7.6",
+                  "changelog/v0.7.5",
+                  "changelog/v0.7.4",
+                  "changelog/v0.7.3",
+                  "changelog/v0.7.2",
+                  "changelog/v0.7.1",
+                  "changelog/v0.7.0"
+                ],
+                "icon": "bolt"
               },
               {
-                "group": "August 2026",
-                "expanded": false,
+                "group": "Past updates",
+                "icon": "clock-rotate-left",
                 "pages": [
-                  "changelog/2026-08-28",
-                  "changelog/2026-08-26",
-                  "changelog/2026-08-21",
-                  "changelog/2026-08-14",
-                  "changelog/2026-08-07"
-                ]
-              },
-              {
-                "group": "July 2026",
-                "expanded": false,
-                "pages": [
-                  "changelog/2026-07-31",
-                  "changelog/2026-07-24",
-                  "changelog/2026-07-17",
-                  "changelog/2026-07-10",
-                  "changelog/2026-07-05"
-                ]
-              },
-              {
-                "group": "June 2026",
-                "expanded": false,
-                "pages": [
-                  "changelog/2026-06-26",
-                  "changelog/2026-06-19",
-                  "changelog/2026-06-12",
-                  "changelog/2026-06-05"
-                ]
-              },
-              {
-                "group": "May 2026",
-                "expanded": false,
-                "pages": [
-                  "changelog/2026-05-29",
-                  "changelog/2026-05-22",
-                  "changelog/2026-05-15",
-                  "changelog/2026-05-01"
-                ]
-              },
-              {
-                "group": "April 2026",
-                "expanded": false,
-                "pages": [
-                  "changelog/2026-04-24",
-                  "changelog/2026-04-17",
-                  "changelog/2026-04-10",
-                  "changelog/2026-04-03"
-                ]
+                  {
+                    "group": "September 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-09-25",
+                      "changelog/2026-09-11",
+                      "changelog/2026-09-04"
+                    ]
+                  },
+                  {
+                    "group": "August 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-08-28",
+                      "changelog/2026-08-26",
+                      "changelog/2026-08-21",
+                      "changelog/2026-08-14",
+                      "changelog/2026-08-07"
+                    ]
+                  },
+                  {
+                    "group": "July 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-07-31",
+                      "changelog/2026-07-24",
+                      "changelog/2026-07-17",
+                      "changelog/2026-07-10",
+                      "changelog/2026-07-05"
+                    ]
+                  },
+                  {
+                    "group": "June 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-06-26",
+                      "changelog/2026-06-19",
+                      "changelog/2026-06-12",
+                      "changelog/2026-06-05"
+                    ]
+                  },
+                  {
+                    "group": "May 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-05-29",
+                      "changelog/2026-05-22",
+                      "changelog/2026-05-15",
+                      "changelog/2026-05-01"
+                    ]
+                  },
+                  {
+                    "group": "April 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-04-24",
+                      "changelog/2026-04-17",
+                      "changelog/2026-04-10",
+                      "changelog/2026-04-03"
+                    ]
+                  }
+                ],
+                "expanded": false
               }
-            ],
-            "expanded": false
+            ]
           }
         ]
       }
@@ -540,10 +547,6 @@
     {
       "source": "/cloud/supported-features",
       "destination": "/cloud/limitations"
-    },
-    {
-      "source": "/migrations/sandbox-storage",
-      "destination": "/repairs/sandbox-storage"
     },
     {
       "source": "/getting-started/installation",
@@ -784,6 +787,26 @@
     {
       "source": "/recipes/:slug*",
       "destination": "/examples/:slug*"
+    },
+    {
+      "source": "/migrations/sdk-contexts",
+      "destination": "/migrations/v0.8#sdk-api-migration"
+    },
+    {
+      "source": "/migrations/sdk-distributions",
+      "destination": "/migrations/v0.8#sdk-distribution-migration"
+    },
+    {
+      "source": "/repairs/sandbox-storage",
+      "destination": "/migrations/v0.7#sandbox-storage-migration"
+    },
+    {
+      "source": "/repairs/file-permissions",
+      "destination": "/migrations/v0.7#repair-file-permissions"
+    },
+    {
+      "source": "/migrations/sandbox-storage",
+      "destination": "/migrations/v0.7#sandbox-storage-migration"
     }
   ],
   "integrations": {

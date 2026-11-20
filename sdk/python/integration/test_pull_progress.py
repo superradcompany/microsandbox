@@ -6,7 +6,7 @@ from contextlib import suppress
 
 import pytest
 
-from integration.helpers import IMAGE, remove_sandbox, remove_snapshot
+from integration.helpers import IMAGE, remove_sandbox
 from microsandbox import MicrosandboxError, PullEventType, PullPolicy, Sandbox
 
 
@@ -20,7 +20,6 @@ async def test_create_with_progress_emits_events_and_returns_sandbox(sandbox_nam
         image=IMAGE,
         cpus=1,
         memory=512,
-        replace=True,
         pull_policy=PullPolicy.ALWAYS,
     )
 
@@ -65,7 +64,6 @@ async def test_create_with_progress_result_rejects_on_second_call(sandbox_name):
         image=IMAGE,
         cpus=1,
         memory=512,
-        replace=True,
     )
 
     sandbox = None
@@ -96,7 +94,6 @@ async def test_create_with_progress_detached_returns_detached_sandbox(sandbox_na
         image=IMAGE,
         cpus=1,
         memory=512,
-        replace=True,
         detached=True,
     )
 
@@ -152,7 +149,6 @@ async def test_create_with_progress_failure_surfaces_from_result(sandbox_name):
         image="sdk-nonexistent-image-xyz789:never",
         cpus=1,
         memory=512,
-        replace=True,
         pull_policy=PullPolicy.NEVER,
     )
 
@@ -170,10 +166,10 @@ async def test_restore_with_progress_returns_usable_sandbox_after_exit(
     base = await sandbox_factory("py-sdk-progress-base")
     restored_name = sandbox_name("py-sdk-progress-restored")
     await base.stop()
-    snapshot = await base.snapshot("saved")
+    capture = await base.snapshot(sandbox_name("py-progress-history"))
     restored = None
     try:
-        session = Sandbox.restore_with_progress(snapshot, name=restored_name)
+        session = Sandbox.restore_with_progress(capture.checkpoint, name=restored_name)
         async with session:
             pass
         restored = await session.result()
@@ -184,4 +180,4 @@ async def test_restore_with_progress_returns_usable_sandbox_after_exit(
             with suppress(Exception):
                 await restored.stop()
         await remove_sandbox(restored_name)
-        await remove_snapshot(f"{base.name}:saved")
+        await capture.snapshot.remove()

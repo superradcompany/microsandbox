@@ -204,3 +204,32 @@ fn rust_modify_surface_is_available_on_cloud_builds() {
         "the change did not complete as asked: the running sandbox does not hold the secret"
     );
 }
+
+#[test]
+#[cfg(any(feature = "local", feature = "cloud"))]
+fn provider_binding_lifecycle_surface_stays_available() {
+    use microsandbox::sandbox::{
+        DEFAULT_RESIZE_READ_TIMEOUT, ResizeOperation, SandboxModificationBuilder,
+        SandboxModificationResult, SandboxRecord,
+    };
+    use microsandbox::{Checkpoint, Sandbox, Snapshot};
+
+    // Native SDKs use this same API in both lean provider builds. A workspace
+    // build can unify `local` into a remote crate and hide missing exports.
+    let _: Option<(ResizeOperation, SandboxModificationResult)> = None;
+    assert!(!DEFAULT_RESIZE_READ_TIMEOUT.is_zero());
+    let _ = SandboxModificationBuilder::apply_with_resize_tracking;
+    let _ = Sandbox::resize_status;
+    let _ = Sandbox::resize_operations;
+    let _ = Sandbox::wait_for_resize_operations;
+    let _ = Sandbox::wait_until_resized;
+    let _ = Sandbox::wait_until_resized_with_timeout;
+    let _ = SandboxRecord::resize_status;
+    let _ = SandboxRecord::resize_operations;
+    let _ = SandboxRecord::wait_for_resize_operations;
+    let _ = SandboxRecord::check_resize_operations_with_budget;
+    let _ = SandboxRecord::wait_until_resized;
+    let _ = SandboxRecord::wait_until_resized_with_timeout;
+    let _ = Checkpoint::spawn_sandbox_with_progress;
+    let _ = Snapshot::spawn_sandbox_with_progress;
+}

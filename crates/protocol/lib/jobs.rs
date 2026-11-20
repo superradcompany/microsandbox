@@ -172,6 +172,21 @@ pub enum JobOperation {
         /// Host-enforced elapsed execution limit in milliseconds.
         timeout_ms: Option<u64>,
     },
+    /// Start with caller origin evidence negotiated on this runtime's relay.
+    StartWithBindings {
+        /// Idempotency key shared by all retries of this request.
+        id: JobId,
+        /// Ordinary command passed to the guest after admission.
+        command: ExecRequest,
+        /// Explicit caller overrides before defaults were merged.
+        binding_overrides: crate::exec_bindings::ExecBindingOverrides,
+        /// Close stdin after confirmed spawn.
+        no_stdin: bool,
+        /// Optional finite pipe input.
+        input_base64: Option<String>,
+        /// Host execution timeout.
+        timeout_ms: Option<u64>,
+    },
     /// List active or all retained jobs.
     List {
         /// Include terminal records.
