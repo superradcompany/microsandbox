@@ -1,0 +1,20 @@
+---
+title: "v0.8.0 (upcoming)"
+sidebarTitle: "v0.8.0 (upcoming)"
+description: "Prepare for SDK contexts, unified resources, and optional smaller SDK packages."
+icon: "bolt"
+---
+
+<Note>
+v0.8.0 has not been published. This page summarizes the merged upgrade changes; release availability and final notes will accompany publication.
+</Note>
+
+## Prepare your application
+
+v0.8 introduces explicit SDK contexts, usable resource objects from lookups, and fresh asynchronous inspection. Snapshot histories and individual checkpoints have separate resource types. Local and remote distributions let applications install only the native provider they need; full packages remain available.
+
+Follow [Migrating from v0.7 to v0.8](/migrations/v0.8) before upgrading. The detailed [SDK API migration](/migrations/sdk-contexts) and [distribution guide](/migrations/sdk-distributions) cover exact calls and package names.
+
+Running sandboxes retain their runtime and guest agent until restarted. Update independently installed runtime pairs and test restart as well as existing connections.
+
+For shipped fixes and features, see the [v0.7 release history](/changelog/v0.7.16).

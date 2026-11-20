@@ -1,0 +1,56 @@
+---
+title: "Migrating from v0.7 to v0.8"
+sidebarTitle: "v0.7 to v0.8"
+description: "Prepare SDK applications, local runtime versions, and snapshot workflows for v0.8."
+---
+
+<Note>
+v0.8.0 is upcoming. These instructions describe the changes merged for that release; the latest published release is v0.7.16.
+</Note>
+
+v0.8 changes how SDK applications select a destination, access resources, and inspect their state. Start with the full SDK package you already use. Smaller local-only and remote-only packages are optional.
+
+## Before upgrading
+
+1. **Review your SDK calls.** Follow [SDK contexts and unified resources](/migrations/sdk-contexts) for language-specific replacements.
+2. **Update SDK applications and CLI jobs that share a local home together.** Keep a backup of important data. Stop a sandbox while copying its disks so that the backup is consistent.
+3. **Check the selected runtime.** Updating an SDK does not replace the runtime in an already-running VM. Independent or pinned runtime installations need a compatible SDK/runtime pair. See [runtime setup](/sdk/setup).
+4. **Test your normal lifecycle.** Create or start a sandbox, execute a command, stop it, restart it, and verify application data before updating the rest of your installation.
+
+Already-running VMs can continue during a catalog upgrade. They keep their original runtime and guest agent until restarted. Do not assume that a working connection to an existing VM proves that the same SDK can launch its runtime.
+
+Cloud users do not perform local catalog or storage migration. Update SDK code against the capabilities supported by the service.
+
+## Update destination and resource access
+
+Use an explicit local or remote context when a workflow must keep one destination. Resources returned by a context retain it. Unqualified resource calls still follow configured backend selection, with local as the fallback; an API key alone does not select remote execution.
+
+Resource lookups return usable objects. Looking up a stopped sandbox does not start it; execution and filesystem operations prepare it when needed. Use `get_running` for an explicit lookup-and-start operation, or `ensure_running` to prepare a resource you already hold.
+
+Inspection is live and fallible. Keep a returned inspection value yourself when you need to reuse one observation. Review cleanup ownership when replacing explicit connection code: connecting to a running sandbox does not give that client ownership of its shutdown.
+
+See [SDK contexts and unified resources](/migrations/sdk-contexts) for exact APIs, configuration result shapes, Python memory units, and timeout changes.
+
+## Update snapshot workflows
+
+`Snapshot` now represents a history; `Checkpoint` represents one immutable capture. Use snapshot collections for histories and checkpoint collections for individual captures. Existing checkpoint IDs still identify the same artifacts.
+
+On the CLI, create a history with `msb snapshot create` and append captures with `msb snapshot checkpoint`. Review scripts using the older snapshot command structure against the [snapshot command reference](/cli/snapshot-commands).
+
+Keep an untouched copy of important archives before testing imports or restores. Do not assume a newer archive or rewritten catalog can be opened by an older release. See [snapshots](/sandboxes/snapshots) for restore modes and external resource bindings.
+
+## Choose SDK packages
+
+Keep the full package unless you want to change what gets installed. Local-only and remote-only distributions expose the same resource model, but omit runtime executables and firmware. Local execution still needs a compatible runtime installation. Lean Go packages also require explicit native-library setup.
+
+See [SDK distribution choices](/migrations/sdk-distributions) for package names, imports, and setup commands.
+
+## Existing local storage
+
+The protected storage layout was introduced in v0.7.12. It is not a new v0.8 migration. If an older sandbox cannot start because its storage needs attention, use [Sandbox storage migration](/repairs/sandbox-storage). Do not recreate the sandbox or remove migration records to bypass a refusal.
+
+## Returning to an older release
+
+Keep the original backup and runtime pair until the upgrade is verified. Older tools may refuse the catalog, saved settings, or snapshots written by a newer release. Follow the CLI's compatibility checks; replacing a binary alone does not convert stored data.
+
+A released v0.7.16 CLI refuses a v0.8.0 runtime with `no tested sandbox launch contract for runtime 0.8.0`. Use matching versions or a launcher update that explicitly supports the selected runtime. Do not change version metadata to bypass the check.

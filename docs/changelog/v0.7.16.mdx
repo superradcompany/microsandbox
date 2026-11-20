@@ -1,0 +1,16 @@
+---
+title: "v0.7.16"
+sidebarTitle: "v0.7.16"
+description: "Manage Services through the CLI and SDKs, with runtime and network reliability fixes."
+icon: "bolt"
+---
+
+November 18, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.16) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.15...v0.7.16)
+
+## Highlights
+
+Services are available through the CLI and SDKs. See [Services](/sandboxes/services) for supported operations.
+
+## Fixes
+
+The network stack revalidates SNI DNS bindings on reconnect. SDKs decode every cloud sandbox status, cloud modifications use canonical endpoints, and guest bulk-cleanup bursts no longer stop the guest. The release also updates libkrun and firmware and repairs Rust toolchain checks.
