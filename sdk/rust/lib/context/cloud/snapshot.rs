@@ -18,8 +18,8 @@ use super::http::{cloud_io_error, decode_json, ensure_success, urlencoding};
 use crate::context::{Context, SnapshotOps};
 use crate::sandbox::{FsEntryKind, SandboxConfig};
 use crate::snapshot::{
-    DESCRIPTOR_FILENAME, Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotReference,
-    SnapshotVerifyReport,
+    Checkpoint as Snapshot, DESCRIPTOR_FILENAME, Manifest, SaveOpts, SnapshotConfig,
+    SnapshotReference, SnapshotVerifyReport,
 };
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
@@ -770,6 +770,20 @@ mod tests {
             .unwrap();
             assert_eq!(handle.reference(), reference);
             assert_eq!(handle.id(), snapshot.id());
+            if matches!(reference, SnapshotReference::Path(_)) {
+                let result = handle
+                    .spawn_sandbox_with(|_| panic!("mutable path reached launch configuration"))
+                    .await;
+                assert!(matches!(result, Err(MicrosandboxError::Unsupported { .. })));
+                // The progress entry point must preserve the same exact-source guard
+                // in remote-only builds before invoking user configuration or I/O.
+                let result = handle
+                    .spawn_sandbox_with_progress_with(|_| {
+                        panic!("mutable path reached progress launch configuration")
+                    })
+                    .await;
+                assert!(matches!(result, Err(MicrosandboxError::Unsupported { .. })));
+            }
             assert_eq!(handle.digest(), digest);
             if matches!(reference, SnapshotReference::Path(_)) {
                 for force in [false, true] {

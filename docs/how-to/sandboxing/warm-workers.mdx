@@ -78,13 +78,13 @@ When the command exits, `agent-base` is stopped and ready to snapshot.
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap create coding-agent-base \
+msb snap create agent-base --name coding-agent-base \
   --sandbox agent-base \
   --integrity
 ```
 
 ```powershell Windows
-msb snap create coding-agent-base `
+msb snap create agent-base --name coding-agent-base `
   --sandbox agent-base `
   --integrity
 ```
@@ -94,7 +94,7 @@ Verify the captured snapshot before using it:
 
 <CodeGroup>
 ```sh Shell
-msb snap verify agent-base:coding-agent-base
+msb snap verify agent-base --checkpoint coding-agent-base
 ```
 </CodeGroup>
 
@@ -112,13 +112,13 @@ Restore creates an idle detached sandbox with its security, resource, and lifeti
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap restore agent-base:coding-agent-base --name coding-worker-1 \
+msb create --from-snapshot agent-base --checkpoint coding-agent-base --name coding-worker-1 \
   --cpus 2 --memory 2G \
   --user node --security restricted --max-duration 1h
 ```
 
 ```powershell Windows
-msb snap restore agent-base:coding-agent-base --name coding-worker-1 `
+msb create --from-snapshot agent-base --checkpoint coding-agent-base --name coding-worker-1 `
   --cpus 2 --memory 2G `
   --user node --security restricted --max-duration 1h
 ```
@@ -188,7 +188,7 @@ Create more workers by changing the sandbox name:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap restore agent-base:coding-agent-base --name coding-worker-2 \
+msb create --from-snapshot agent-base --checkpoint coding-agent-base --name coding-worker-2 \
   --user node --security restricted --max-duration 1m
 msb exec --user node --timeout 1m \
   --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
@@ -197,7 +197,7 @@ msb stop coding-worker-2
 ```
 
 ```powershell Windows
-msb snap restore agent-base:coding-agent-base --name coding-worker-2 `
+msb create --from-snapshot agent-base --checkpoint coding-agent-base --name coding-worker-2 `
   --user node --security restricted --max-duration 1m
 msb exec --user node --timeout 1m `
   --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 `
@@ -205,6 +205,17 @@ msb exec --user node --timeout 1m `
 msb stop coding-worker-2
 ```
 </CodeGroup>
+
+</Step>
+
+<Step title="Refresh the baseline (optional)">
+
+To keep a second baseline, update packages in the original `agent-base` sandbox, stop it, and append a checkpoint to its existing group. Select `coding-agent-base-v2` when creating workers from the update.
+
+```sh
+msb snap checkpoint agent-base --name coding-agent-base-v2 --integrity
+msb snap verify agent-base --checkpoint coding-agent-base-v2
+```
 
 </Step>
 
@@ -224,27 +235,16 @@ Remove-Item prepare-worker.sh, verify-worker.sh
 ```
 </CodeGroup>
 
-Remove the reusable snapshot only when you no longer need it:
+When you no longer need either baseline, remove the tutorial group and its checkpoints:
 
 <CodeGroup>
 ```sh Shell
-msb snap rm agent-base:coding-agent-base
+msb snap rm agent-base --all
 ```
 </CodeGroup>
 
 </Step>
 
 </Steps>
-
-## Refresh the baseline
-
-Installed snapshot members are immutable. To update packages, recreate `agent-base`, then capture a new member name and use its group-qualified selector for future workers:
-
-<CodeGroup>
-```sh Shell
-msb snap create coding-agent-base-v2 --sandbox agent-base --integrity
-msb snap verify agent-base:coding-agent-base-v2
-```
-</CodeGroup>
 
 See [Snapshots](/sandboxes/snapshots) for archive, integrity, and portability details.

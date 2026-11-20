@@ -18,12 +18,38 @@ type snapshotCopier interface {
 }
 
 var (
-	_ snapshotSaver  = (*Snapshot)(nil)
-	_ snapshotCopier = (*Snapshot)(nil)
+	_ snapshotSaver  = (*Checkpoint)(nil)
+	_ snapshotCopier = (*Checkpoint)(nil)
 )
 
+func TestSnapshotVerificationCoveragePreservesUncertainty(t *testing.T) {
+	for _, test := range []struct{ body, want string }{
+		{`{"upper":{"kind":"verified"}}`, "unknown"},
+		{`{"coverage":{"kind":"complete"}}`, "complete"},
+		{`{"upper":{"kind":"verified"},"coverage":{"kind":"incomplete","unrecorded":["base.raw"]}}`, "incomplete"},
+	} {
+		var native ffi.SnapshotVerifyReport
+		if err := json.Unmarshal([]byte(test.body), &native); err != nil {
+			t.Fatal(err)
+		}
+		report := snapshotVerifyReportFromInfo(&native)
+		if report.Coverage.Kind != test.want {
+			t.Fatalf("coverage = %q, want %q", report.Coverage.Kind, test.want)
+		}
+		if test.want == "incomplete" {
+			if report.Upper.Kind != "verified" || len(report.Coverage.Unrecorded) != 1 || report.Coverage.Unrecorded[0] != "base.raw" {
+				t.Fatalf("lost coverage or head: %+v", report)
+			}
+			native.Coverage.Unrecorded[0] = "changed"
+			if report.Coverage.Unrecorded[0] != "base.raw" {
+				t.Fatal("report aliases native path slice")
+			}
+		}
+	}
+}
+
 func TestSnapshotCopyBuilderCopiesMutableInput(t *testing.T) {
-	snapshot := &Snapshot{reference: "/snapshots/example", referenceKind: "path"}
+	snapshot := &Checkpoint{reference: "/snapshots/example", referenceKind: "path"}
 	labels := map[string]string{"environment": "test"}
 	builder := snapshot.CopyTo("/tmp/copied.tar.zst").Labels(labels).RecordIntegrity(true)
 	labels["environment"] = "changed"
@@ -127,7 +153,7 @@ func TestFFIWireShape_SnapshotHeadUpdate(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"group":"work","previous":null,"head":"baseline","reason":"initialized","changed":true}`), &update); err != nil {
 		t.Fatal(err)
 	}
-	if update.Group != "work" || update.Previous != nil || update.Head != "baseline" || update.Reason != "initialized" || !update.Changed {
+	if update.Group != "work" || update.Previous != nil || (update.Head == nil || *update.Head != "baseline") || update.Reason != "initialized" || !update.Changed {
 		t.Fatalf("unexpected head update: %#v", update)
 	}
 }
@@ -172,11 +198,11 @@ func TestSnapshotStateProjectionDistinguishesMissingAndMerkleIntegrity(t *testin
 
 func TestSnapshotPathIsFallibleForRemoteResources(t *testing.T) {
 	localPath := "/local/snapshot"
-	local := &Snapshot{path: &localPath}
+	local := &Checkpoint{path: &localPath}
 	if path, err := local.Path(); err != nil || path != localPath {
 		t.Fatalf("Path() = %q, %v", path, err)
 	}
-	remote := &Snapshot{reference: "/remote/snapshot", referenceKind: "path"}
+	remote := &Checkpoint{reference: "/remote/snapshot", referenceKind: "path"}
 	if _, err := remote.Path(); !IsKind(err, ErrUnsupportedOperation) {
 		t.Fatalf("remote Path() = %v", err)
 	}
@@ -196,5 +222,21 @@ func TestSnapshotStateKindPreservesUnknownTags(t *testing.T) {
 		if info.StateKind != kind || state.Kind != kind || (state.File != nil) != (kind == SnapshotStateFile) || (state.Checkpoint != nil) != (kind == SnapshotStateCheckpoint) {
 			t.Fatalf("incorrect indexed or artifact state for %q: %q, %+v", kind, info.StateKind, state)
 		}
+	}
+}
+
+func TestClearedHeadIsDistinctFromEmptyIdentifier(t *testing.T) {
+	var update ffi.SnapshotHeadUpdate
+	if err := json.Unmarshal([]byte(`{"group":"work","previous":"base","head":null,"reason":"cleared","changed":true}`), &update); err != nil {
+		t.Fatal(err)
+	}
+	result := snapshotHeadUpdateFromInfo(&update)
+	if result.Head != nil || result.Previous == nil || *result.Previous != "base" || !result.Changed {
+		t.Fatalf("lost clear outcome: %#v", result)
+	}
+	clone := cloneSnapshotHeadUpdate(result)
+	*clone.Previous = "different"
+	if *result.Previous != "base" {
+		t.Fatal("clone shares mutable previous head")
 	}
 }

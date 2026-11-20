@@ -202,6 +202,14 @@ async fn generation_one_rejects_generation_two_operations_before_writing() {
             if error.kind == ErrorKind::UnsupportedOperation
                 && error.delivery == Delivery::NotSent
     ));
+    let error = client
+        .request_typed(&ManageResize(
+            microsandbox_protocol::resize::ResizeRequest::Hello,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ControlClientError::Client(error)
+        if error.kind == ErrorKind::UnsupportedOperation && error.delivery == Delivery::NotSent));
     client.close().await;
     peer.await.unwrap();
 }
@@ -377,6 +385,11 @@ fn all_checked_operations_use_shared_records_and_full_width_values() {
 #[test]
 fn generation_two_checked_operations_use_stable_names_and_typed_results() {
     let checkpoint = CreateCheckpoint(CheckpointCreate {
+        retain_configuration: None,
+        retain_configuration_block_capacity: None,
+        retain_configuration_exec_limits: None,
+        retain_configuration_freeze_resources: None,
+        retain_configuration_storage: None,
         guest_flush: None,
         record_integrity: true,
         checkpoint_id: "full-1".into(),
@@ -388,6 +401,11 @@ fn generation_two_checked_operations_use_stable_names_and_typed_results() {
     );
     assert_eq!(
         CreateDiskCheckpoint(DiskCheckpointCreate {
+            retain_configuration: None,
+            retain_configuration_block_capacity: None,
+            retain_configuration_exec_limits: None,
+            retain_configuration_freeze_resources: None,
+            retain_configuration_storage: None,
             guest_flush: None,
             checkpoint_id: "disk-1".into(),
         })
@@ -541,4 +559,32 @@ fn partial_secret_progress_is_preserved_and_inconsistent_or_duplicate_records_re
         request.decode(malformed),
         Err(ControlClientError::InvalidResponse { .. })
     ));
+}
+
+#[test]
+fn resize_extension_is_opt_in_and_has_no_legacy_mutation_fallback() {
+    use microsandbox_protocol::resize::{ResizeRequest, ResizeTarget};
+    let legacy: RuntimeCapabilities =
+        serde_json::from_str(r#"{"cpu_resize":true,"memory_resize":true,"secrets_update":false}"#)
+            .unwrap();
+    assert!(!legacy.resize_operations);
+    assert!(
+        serde_json::to_value(legacy)
+            .unwrap()
+            .get("resize_operations")
+            .is_none()
+    );
+    let request = ManageResize(ResizeRequest::Apply {
+        runtime_boot_id: "boot".into(),
+        target: ResizeTarget::Memory {
+            total_mib: u64::MAX,
+        },
+    });
+    assert_eq!(request.message().unwrap().message_type, "control.resize");
+    assert!(matches!(
+        request.compatibility_json_bytes(),
+        Err(ControlClientError::UnsupportedMode)
+    ));
+    let decoded: ResizeRequest = wire::decode_record(&request.message().unwrap().payload).unwrap();
+    assert_eq!(decoded, request.0);
 }

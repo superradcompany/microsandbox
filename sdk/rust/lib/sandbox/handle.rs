@@ -16,6 +16,8 @@ use crate::{
     error::Operation,
 };
 
+#[cfg(feature = "local")]
+use super::ResourceResizeStatus;
 #[cfg(any(feature = "local", feature = "cloud"))]
 use super::SandboxModificationBuilder;
 use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult};
@@ -303,6 +305,94 @@ impl SandboxRecord {
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
             .bound_to(self.identity())
+    }
+
+    /// Read the current live CPU and memory resize status.
+    ///
+    /// Returns an error when the sandbox is not running, and
+    /// `Unsupported` when its runtime cannot report resize status.
+    #[cfg(feature = "local")]
+    pub async fn resize_status(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::resize_status(&self.backend, &self.name, &self.identity()).await
+    }
+
+    /// Read latest per-resource operation identities and evidence without applying a target.
+    #[cfg(feature = "local")]
+    pub async fn resize_operations(&self) -> MicrosandboxResult<Vec<super::ResizeOperation>> {
+        super::resize::resize_operations(&self.backend, &self.name, &self.identity()).await
+    }
+
+    /// Wait for exact operations returned by `apply_with_resize_tracking`.
+    ///
+    /// A replaced runtime, expired operation or supersession is an error. `None`
+    /// waits without a deadline; timing out does not undo the resize.
+    #[cfg(feature = "local")]
+    pub async fn wait_for_resize_operations(
+        &self,
+        operations: &[super::ResizeOperation],
+        timeout: Option<std::time::Duration>,
+    ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_for_operations(
+            &self.backend,
+            &self.name,
+            &self.identity(),
+            Some(operations),
+            timeout,
+        )
+        .await
+    }
+
+    /// Binding hook for one check after identity lookup has consumed part of its budget.
+    ///
+    /// The remaining setup/read budget never enables polling. Timeout errors retain each
+    /// completed resource reply and report the original zero-timeout single-check request.
+    #[doc(hidden)]
+    #[cfg(feature = "local")]
+    pub async fn check_resize_operations_with_budget(
+        &self,
+        operations: Option<&[super::ResizeOperation]>,
+        budget: std::time::Duration,
+    ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_for_operations_with_budget(
+            &self.backend,
+            &self.name,
+            &self.identity(),
+            operations,
+            Some(std::time::Duration::ZERO),
+            Some(budget),
+        )
+        .await
+    }
+
+    /// Wait for the initially selected operations to be guest-confirmed.
+    ///
+    /// Returns an error when the sandbox is not running, and
+    /// `Unsupported` when its runtime cannot report resize status. Keeps polling
+    /// while a guest never converges; use `wait_until_resized_with_timeout` to
+    /// bound the wait.
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_until_resized(&self.backend, &self.name, &self.identity(), None).await
+    }
+
+    /// Wait for the initially selected operations to be guest-confirmed within `timeout`.
+    ///
+    /// Returns an error when the sandbox is not running, and
+    /// `Unsupported` when its runtime cannot report resize status. Expiry returns
+    /// [`MicrosandboxError::ResizeTimeout`] with the last observed status, which is empty when no read
+    /// completed before the deadline.
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_until_resized(
+            &self.backend,
+            &self.name,
+            &self.identity(),
+            Some(timeout),
+        )
+        .await
     }
 
     /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.
@@ -699,25 +789,25 @@ impl SandboxRecord {
         self.connect().await?.touch().await
     }
 
-    /// Snapshot this sandbox under a bare name using the handle's backend.
-    ///
-    /// Captures disk only with automatic guest writeback for live sources. A paused
-    /// source must already have a matching flushed boundary; it is never resumed
-    /// implicitly. Use `Snapshot::builder` to choose another guest-flush policy.
-    /// Cloud uses managed storage and its own disk-capture admission rules.
-    pub async fn snapshot(
+    /// Create a new source-bound history and its initial disk checkpoint.
+    pub async fn snapshot(&self, group: &str) -> MicrosandboxResult<crate::SnapshotCreateResult> {
+        self.snapshot_with(group, |capture| capture).await
+    }
+
+    /// Configure initial capture. An existing group cannot turn this call into append.
+    pub async fn snapshot_with(
         &self,
-        name: &str,
-    ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
-        use super::super::snapshot::Snapshot;
-        let config = Snapshot::ctx(self.backend.as_ref())
-            .builder(name)
-            .from_sandbox(&self.name)
-            .build()?;
-        self.backend
-            .snapshot_ops()
-            .create_from(self.backend.clone(), config, &self.id())
-            .await
+        group: &str,
+        configure: impl FnOnce(crate::SnapshotCaptureOptions) -> crate::SnapshotCaptureOptions,
+    ) -> MicrosandboxResult<crate::SnapshotCreateResult> {
+        crate::Snapshot::create_for(
+            self.backend.clone(),
+            &self.name,
+            self.id(),
+            group,
+            configure(crate::SnapshotCaptureOptions::default()),
+        )
+        .await
     }
 
     /// Request graceful shutdown and wait indefinitely for this run's runtime ownership release.

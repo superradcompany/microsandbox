@@ -39,6 +39,7 @@ export interface NativeBindings {
   readonly setPackagedMsbPath: (path: string) => void;
   readonly setRuntimeMsbPath?: (path: string) => void;
   readonly setRuntimeLibkrunfwPath?: (path: string) => void;
+  readonly snapshotArchiveCompatibilityTargets?: () => string[];
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly RestoreBuilder: new (snapshot: string, referenceKind?: "auto" | "id" | "path") => NapiRestoreBuilder;
@@ -46,6 +47,7 @@ export interface NativeBindings {
   readonly VolumeBuilder: NapiVolumeBuilderCtor;
   readonly Service: NapiServiceStatic;
   readonly Snapshot: NapiSnapshotStatic;
+  readonly SnapshotGroup: NapiSnapshotGroupStatic;
   readonly SnapshotBuilder: NapiSnapshotBuilderCtor;
   readonly ExecOptionsBuilder: NapiExecOptionsBuilderCtor;
   readonly InitOptionsBuilder: NapiInitOptionsBuilderCtor;
@@ -250,10 +252,34 @@ export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
 
 /** Restore exposes destination controls, never image or startup-command selection. */
 export interface NapiRestoreBuilderSetters {
+  /** Control retrieval of the snapshot's pinned base image. */
+  pullPolicy(policy: string): this;
+  /** Select the destination proxy before disk boot or full resume. */
+  proxy(configure: (arg: NapiOutboundProxyBuilder) => NapiHttpConnectProxyBuilder | NapiSocks4ProxyBuilder | NapiSocks5ProxyBuilder): this;
+  /** Defaults for new commands only; no startup execution or modification of captured processes. */
+  workdir(path: string): this;
+  shell(shell: string): this;
+  entrypoint(argv: string[]): this;
+  cmd(argv: string[]): this;
+  env(key: string, value: string): this;
+  envs(values: Record<string, string>): this;
+  guestClock(mode: string): this;
   name(name: string): this;
   /** Full execution restore requires captured CPU and memory geometry. */
   cpus(count: number): this;
   memory(mib: number): this;
+  /** Disk-boot ceilings; full resume requires the captured maxima. */
+  maxCpus(count: number): this;
+  maxMemory(mib: number): this;
+  /** Disk boot only; full resume rejects every explicit policy. */
+  /** Destination labels; source snapshot labels are unchanged. */
+  label(key: string, value: string): this;
+  labels(labels: Record<string, string>): this;
+  init(cmd: string, args?: string[]): this;
+  /** Guest PID 1 with arguments and environment, for disk boot only. */
+  initWith(cmd: string, configure: (b: NapiInitOptionsBuilder) => NapiInitOptionsBuilder): this;
+  /** Disk boot only; must be nonempty and fit within 64 UTF-8 bytes. */
+  hostname(name: string): this;
   /** Host policy only: does not configure DNS, TLS, or guest bootstrap. */
   networkPolicy(policy: NetworkPolicy | NapiNetworkPolicyBuilder): this;
   /** @deprecated Use maxTcpConnections instead. */
@@ -310,7 +336,8 @@ export interface NapiSandboxDestroyOptions {
 }
 
 export interface NapiSandbox {
-  snapshot(name: string): Promise<NapiSnapshot>;
+  snapshot(group: string, options?: NapiSnapshotCaptureOptions): Promise<NapiSnapshotCreateResult>;
+  checkpoint(name: string): Promise<NapiSnapshot>;
   storageUsage?(): Promise<NapiStorageItemUsage>;
   context(): NapiContext;
   readonly name: string;
@@ -341,6 +368,11 @@ export interface NapiSandbox {
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
+  modifyWithResizeTracking?(opts?: NapiSandboxModifyOptions): Promise<string>;
+  resizeOperations?(): Promise<string>;
+  waitForResizeOperations?(operationsJson: string, timeoutMs?: number): Promise<string>;
+  resizeStatus(): Promise<string>;
+  waitUntilResized(timeoutMs?: number): Promise<string>;
   compact(layers?: number, dryRun?: boolean, disk?: string, rootDiskOnly?: boolean): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
   attachDefault(): Promise<number>;
@@ -638,6 +670,7 @@ export interface NapiService {
 //-----------------------------------------------------------------------------
 
 export interface NapiSnapshotStatic {
+  supportsImportBudget?(): boolean;
   open(pathOrName: string): Promise<NapiSnapshot>;
   get(nameOrDigest: string): Promise<NapiSnapshot>;
   list(): Promise<NapiSnapshot[]>;
@@ -648,6 +681,7 @@ export interface NapiSnapshotStatic {
   load(archive: string, dest?: string, base?: string): Promise<NapiSnapshot>;
   loadWithOptions(archive: string, opts?: NapiLoadOpts): Promise<NapiSnapshot>;
   loadMany(archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshot[]>;
+  groupHead(selector: string): Promise<NapiHeadUpdate>;
   readGroupHead(group: string): Promise<string | null>;
   setGroupHead(group: string, id: string): Promise<NapiHeadUpdate>;
 }
@@ -657,12 +691,13 @@ export interface NapiLoadOpts {
   base?: string;
   group?: string;
   setHead?: boolean;
+  maximumDiskBytes?: number;
 }
 
 export interface NapiHeadUpdate {
   readonly group: string;
   readonly previous: string | null | undefined;
-  readonly head: string;
+  readonly head: string | null;
   readonly reason: string;
   readonly changed: boolean;
 }
@@ -703,6 +738,9 @@ export interface NapiSnapshotCopyBuilder
 }
 
 export interface NapiSnapshot {
+  removeCheckpoint?(force: boolean): Promise<string>;
+  spawnSandboxWithBuilder(builder: NapiRestoreBuilder): Promise<NapiSandbox>;
+  spawnSandboxWithProgressBuilder(builder: NapiRestoreBuilder): Promise<NapiPullProgressCreate>;
   context(): NapiContext;
   storageUsage?(): Promise<NapiStorageItemUsage>;
   readonly id: string;
@@ -757,6 +795,7 @@ export interface NapiSnapshotMetadata {
 }
 
 export interface NapiSaveOpts {
+  compatibility?: "current" | "0.7.8";
   since?: string;
   lastLayers?: number;
   withParents?: boolean;
@@ -775,6 +814,8 @@ export interface NapiSnapshotVerifyReport {
   readonly upperAlgorithm: string | null | undefined;
   readonly upperDigest: string | null | undefined;
   readonly checkpointRoot: string | null | undefined;
+  readonly coverageKind?: string;
+  readonly unrecorded?: readonly string[];
 }
 
 export interface NapiImageHandle {
@@ -1457,6 +1498,61 @@ export interface NapiMemoryCacheReport {
   readonly truncated: boolean;
 }
 
+
+export interface NapiSnapshotCaptureOptions {
+  name?: string;
+  destDir?: string;
+  full?: boolean;
+  recordIntegrity?: boolean;
+  guestFlush?: "auto" | "required" | "skip";
+  labels?: Record<string, string>;
+}
+
+export interface NapiSnapshotGroupStatic {
+  open?(path: string): Promise<NapiSnapshotGroup>;
+  load(group: string, archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshotImportResult>;
+  get(name: string): Promise<NapiSnapshotGroup>;
+  list(): Promise<NapiSnapshotGroup[]>;
+}
+
+export interface NapiSnapshotGroup {
+  context(): NapiContext;
+  inspectJson?(): Promise<string>;
+  removeGroup?(): Promise<string>;
+  verifyJson(): Promise<string>;
+  spawnSandboxWithBuilder(builder: NapiRestoreBuilder): Promise<NapiSandbox>;
+  spawnSandboxWithProgressBuilder(builder: NapiRestoreBuilder): Promise<NapiPullProgressCreate>;
+  readonly name: string;
+  head(): Promise<NapiSnapshot | null | undefined>;
+  checkpoints(): Promise<NapiSnapshot[]>;
+  getCheckpoint(member: string): Promise<NapiSnapshot>;
+  setHead(member: string): Promise<NapiHeadUpdate>;
+  clearHead(): Promise<NapiHeadUpdate>;
+  checkpoint(options?: NapiSnapshotCaptureOptions): Promise<NapiCheckpointCaptureResult>;
+  spawnSandbox(): Promise<NapiSandbox>;
+}
+
+export interface NapiSnapshotCreateResult {
+  snapshot: NapiSnapshotGroup;
+  checkpoint: NapiSnapshot;
+  headUpdate: NapiHeadUpdate;
+}
+
+export interface NapiCheckpointCaptureResult {
+  checkpoint: NapiSnapshot;
+  headUpdate: NapiHeadUpdate;
+}
+
+export interface NapiSnapshotImportResult {
+  operationId: string;
+  snapshot: NapiSnapshotGroup;
+  checkpoints: NapiSnapshot[];
+  added: string[];
+  reused: string[];
+  headUpdate: NapiHeadUpdate;
+  warnings: string[];
+}
+
 export interface NapiContext {
   deriveRemote(optionsJson: string): NapiContext;
   sandboxRestore(snapshot: string, kind?: "auto" | "id" | "path"): NapiRestoreBuilder;
@@ -1477,5 +1573,9 @@ export interface NapiContext {
   snapshotGroupHead(group: string): Promise<string | null>;
   snapshotSetGroupHead(group: string, id: string): Promise<NapiHeadUpdate>;
   snapshotList(): Promise<NapiSnapshot[]>;
+  snapshotGroupOpen(path: string): Promise<NapiSnapshotGroup>;
+  snapshotGroupLoad(group: string, archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshotImportResult>;
+  snapshotGroupGet(name: string): Promise<NapiSnapshotGroup>;
+  snapshotGroupList(): Promise<NapiSnapshotGroup[]>;
   snapshotRemove(reference: string, force: boolean): Promise<void>;
 }

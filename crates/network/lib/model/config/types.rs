@@ -137,6 +137,14 @@ pub struct NetworkConfig {
     pub outbound_proxy: Option<OutboundProxy>,
 }
 
+/// Operator-owned settings enforced for multi-tenant sandboxes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MultiTenantConfig {
+    /// Upstream resolver IPs queried on port 53. Omission uses the public defaults.
+    pub nameservers: Option<Vec<IpAddr>>,
+}
+
 /// Network configuration whose runtime-only values have been resolved.
 #[doc(hidden)]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -260,6 +268,13 @@ impl TcpAcceptQueueSize {
     /// Return the requested size.
     pub const fn get(self) -> u32 {
         self.0.get()
+    }
+}
+
+impl MultiTenantConfig {
+    /// Whether every operator setting uses its built-in default.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 

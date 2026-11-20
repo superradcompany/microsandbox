@@ -32,6 +32,11 @@ struct RubySnapshots {
     inner: Arc<dyn Context>,
 }
 
+#[magnus::wrap(class = "Microsandbox::Checkpoints", size)]
+struct RubyCheckpoints {
+    inner: Arc<dyn Context>,
+}
+
 #[magnus::wrap(class = "Microsandbox::SnapshotBuilder", size)]
 struct RubySnapshotBuilder {
     inner: RefCell<Option<SnapshotBuilder>>,
@@ -85,6 +90,11 @@ impl RubyContext {
     }
     fn snapshots(&self) -> RubySnapshots {
         RubySnapshots {
+            inner: self.inner.clone(),
+        }
+    }
+    fn checkpoints(&self) -> RubyCheckpoints {
+        RubyCheckpoints {
             inner: self.inner.clone(),
         }
     }
@@ -171,8 +181,50 @@ impl RubyVolumes {
 }
 
 impl RubySnapshots {
+    fn load(
+        ruby: &Ruby,
+        this: &Self,
+        args: &[Value],
+    ) -> Result<crate::snapshot_group::RubySnapshotImportResult, Error> {
+        crate::snapshot_group::load_in(ruby, this.inner.snapshots(), args)
+    }
+
+    fn get(
+        ruby: &Ruby,
+        this: &Self,
+        name: String,
+    ) -> Result<crate::snapshot_group::RubyGroup, Error> {
+        let groups = this.inner.snapshots();
+        Ok(crate::snapshot_group::RubyGroup {
+            inner: crate::run(ruby, async move { groups.get(&name).await })?,
+        })
+    }
+
+    fn list(ruby: &Ruby, this: &Self) -> Result<magnus::RArray, Error> {
+        let groups = this.inner.snapshots();
+        let values = crate::run(ruby, async move { groups.list().await })?;
+        let result = ruby.ary_new_capa(values.len());
+        for inner in values {
+            result.push(crate::snapshot_group::RubyGroup { inner })?;
+        }
+        Ok(result)
+    }
+
+    fn open(
+        ruby: &Ruby,
+        this: &Self,
+        path: String,
+    ) -> Result<crate::snapshot_group::RubyGroup, Error> {
+        let future = this.inner.snapshots().open(path);
+        Ok(crate::snapshot_group::RubyGroup {
+            inner: crate::run(ruby, future)?,
+        })
+    }
+}
+
+impl RubyCheckpoints {
     fn group_head(ruby: &Ruby, this: &Self, group: String) -> Result<Option<String>, Error> {
-        let collection = this.inner.snapshots();
+        let collection = this.inner.checkpoints();
         Ok(
             crate::run(ruby, async move { collection.group_head(&group).await })?
                 .map(|id| id.to_string()),
@@ -185,7 +237,7 @@ impl RubySnapshots {
         group: String,
         id: String,
     ) -> Result<magnus::RHash, Error> {
-        let collection = this.inner.snapshots();
+        let collection = this.inner.checkpoints();
         let id = microsandbox_core::snapshot::SnapshotId::new(id)
             .map_err(|e| crate::argument_error(ruby, e.to_string()))?;
         let update = crate::run(
@@ -199,6 +251,8 @@ impl RubySnapshots {
         let reason = match update.reason {
             HeadUpdateReason::Initialized => "initialized",
             HeadUpdateReason::FastForwarded => "fast_forwarded",
+            HeadUpdateReason::Cleared => "cleared",
+            HeadUpdateReason::ParentSelected => "parent_selected",
             HeadUpdateReason::Selected => "selected",
             HeadUpdateReason::Unchanged => "unchanged",
             HeadUpdateReason::Diverged => "diverged",
@@ -241,7 +295,7 @@ impl RubySnapshots {
     }
     fn builder(&self, name: String) -> RubySnapshotBuilder {
         RubySnapshotBuilder {
-            inner: RefCell::new(Some(self.inner.snapshots().builder(name))),
+            inner: RefCell::new(Some(self.inner.checkpoints().builder(name))),
         }
     }
 }
@@ -318,7 +372,7 @@ fn snapshot_context(this: &RubySnapshot) -> RubyContext {
 }
 fn snapshot_builder(name: String) -> RubySnapshotBuilder {
     RubySnapshotBuilder {
-        inner: RefCell::new(Some(microsandbox_core::Snapshot::builder(name))),
+        inner: RefCell::new(Some(microsandbox_core::Checkpoint::builder(name))),
     }
 }
 fn sandbox_ctx(context: &RubyContext) -> RubySandboxes {
@@ -327,8 +381,16 @@ fn sandbox_ctx(context: &RubyContext) -> RubySandboxes {
 fn volume_ctx(context: &RubyContext) -> RubyVolumes {
     context.volumes()
 }
-fn snapshot_ctx(context: &RubyContext) -> RubySnapshots {
+fn group_ctx(context: &RubyContext) -> RubySnapshots {
     context.snapshots()
+}
+fn group_context(this: &crate::snapshot_group::RubyGroup) -> RubyContext {
+    RubyContext {
+        inner: this.inner.context().clone_shared(),
+    }
+}
+fn snapshot_ctx(context: &RubyContext) -> RubyCheckpoints {
+    context.checkpoints()
 }
 
 pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
@@ -346,6 +408,15 @@ pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     context.define_method("sandboxes", method!(RubyContext::sandboxes, 0))?;
     context.define_method("volumes", method!(RubyContext::volumes, 0))?;
     context.define_method("snapshots", method!(RubyContext::snapshots, 0))?;
+    let groups = module.define_class("Snapshots", ruby.class_object())?;
+    groups.define_method("get", method!(RubySnapshots::get, 1))?;
+    groups.define_method("list", method!(RubySnapshots::list, 0))?;
+    groups.define_method("load", method!(RubySnapshots::load, -1))?;
+    let group_class: magnus::RClass = module.const_get("Snapshot")?;
+    group_class.define_singleton_method("ctx", function!(group_ctx, 1))?;
+    group_class.define_method("context", method!(group_context, 0))?;
+    groups.define_method("open", method!(RubySnapshots::open, 1))?;
+    context.define_method("checkpoints", method!(RubyContext::checkpoints, 0))?;
     let collection = module.define_class("Sandboxes", ruby.class_object())?;
     collection.define_method("context", method!(RubySandboxes::context, 0))?;
     collection.define_method("builder", method!(RubySandboxes::builder, 1))?;
@@ -371,16 +442,19 @@ pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     let resource: magnus::RClass = module.const_get("Volume")?;
     resource.define_singleton_method("ctx", function!(volume_ctx, 1))?;
     resource.define_method("context", method!(volume_context, 0))?;
-    let collection = module.define_class("Snapshots", ruby.class_object())?;
-    collection.define_method("context", method!(RubySnapshots::context, 0))?;
-    collection.define_method("builder", method!(RubySnapshots::builder, 1))?;
-    collection.define_method("open", method!(RubySnapshots::open, -1))?;
-    collection.define_method("group_head", method!(RubySnapshots::group_head, 1))?;
-    collection.define_method("set_group_head", method!(RubySnapshots::set_group_head, 2))?;
-    collection.define_method("get", method!(RubySnapshots::get, -1))?;
-    collection.define_method("list", method!(RubySnapshots::list, -1))?;
-    collection.define_method("remove", method!(RubySnapshots::remove, -1))?;
-    let resource: magnus::RClass = module.const_get("Snapshot")?;
+    let collection = module.define_class("Checkpoints", ruby.class_object())?;
+    collection.define_method("context", method!(RubyCheckpoints::context, 0))?;
+    collection.define_method("builder", method!(RubyCheckpoints::builder, 1))?;
+    collection.define_method("open", method!(RubyCheckpoints::open, -1))?;
+    collection.define_method("group_head", method!(RubyCheckpoints::group_head, 1))?;
+    collection.define_method(
+        "set_group_head",
+        method!(RubyCheckpoints::set_group_head, 2),
+    )?;
+    collection.define_method("get", method!(RubyCheckpoints::get, -1))?;
+    collection.define_method("list", method!(RubyCheckpoints::list, -1))?;
+    collection.define_method("remove", method!(RubyCheckpoints::remove, -1))?;
+    let resource: magnus::RClass = module.const_get("Checkpoint")?;
     resource.define_singleton_method("ctx", function!(snapshot_ctx, 1))?;
     resource.define_method("context", method!(snapshot_context, 0))?;
     resource.define_singleton_method("builder", function!(snapshot_builder, 1))?;

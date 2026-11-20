@@ -849,6 +849,22 @@ async fn reconcile_stale_active(
         return Ok(false);
     }
 
+    // A killed runtime cannot run its exit observer. Preserve matching active evidence before
+    // clearing the catalog, under both transition and lifecycle ownership. Missing journals
+    // on older runtimes remain unknown and do not change their cleanup behavior.
+    if let Err(error) = crate::retention::seal_terminal(
+        db,
+        &sandboxes_dir.join(&sandbox.name),
+        sandbox.id,
+        run.id,
+        None,
+        crate::retention::RetentionTerminalOrigin::ReconciledDeath,
+    )
+    .await
+    {
+        tracing::warn!(%error, "reconciled configuration evidence unavailable");
+    }
+
     // Runtime artifacts are part of reaping this specific dead process. Do
     // this before the terminal transition so a failure leaves the row in the
     // active maintenance query and therefore retryable.
@@ -1563,7 +1579,7 @@ mod tests {
             eprintln!("skipping permission-denial test as root");
             return;
         }
-        for deny_directory_search in [true, false] {
+        for deny_directory in [true, false] {
             let (dir, db) = test_db().await;
             let run_dir = dir.path().join("run");
             let sandbox_dir = dir.path().join("uncertain");
@@ -1581,7 +1597,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let restricted = if deny_directory_search {
+            let restricted = if deny_directory {
                 fallback_dir
             } else {
                 &paths.fallback_agent
@@ -1600,8 +1616,8 @@ mod tests {
             };
             assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
             let message = error.to_string();
-            // Direct connection probes report both inaccessible directories and
-            // socket permissions at the connect step; neither permits cleanup.
+            // Direct connect reports both parent traversal and socket-access
+            // denials; either must preserve the row and every runtime artifact.
             assert!(
                 message.contains("connect to runtime endpoint"),
                 "missing operation: {message}"

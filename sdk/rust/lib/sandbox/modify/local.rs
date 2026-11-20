@@ -6,6 +6,10 @@ use std::{
     sync::Arc,
 };
 
+use microsandbox_control_client::{
+    GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
+};
+use microsandbox_protocol::resize::ResizeTarget;
 use microsandbox_types::secret_plan::{
     self, DesiredSecret, RunningSecret, SecretPlanCapability, SecretPlanInput, SecretPlanStatus,
     SecretSettings,
@@ -18,16 +22,15 @@ use crate::context::local::creation::{self, CreationStorage};
 use crate::context::{Context, ControlSession};
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
+use crate::sandbox::resize;
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_control_client::{
-    GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
-};
 
 use super::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
     ResourceResizeStatus, SandboxModificationBuilder, SandboxModificationPatch,
-    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretSource,
+    SandboxModificationPlan, SandboxModificationResult, SecretChangeKind, SecretModificationPatch,
+    SecretSource,
 };
 use crate::sandbox::{SandboxConfig, SandboxStatus};
 
@@ -375,7 +378,8 @@ pub(super) async fn dry_run(
 /// persisted config, then a restart when the policy asks for one.
 pub(super) async fn apply(
     builder: SandboxModificationBuilder,
-) -> MicrosandboxResult<SandboxModificationPlan> {
+    track_resize: bool,
+) -> MicrosandboxResult<SandboxModificationResult> {
     let handle = builder
         .backend
         .sandbox_ops()
@@ -420,6 +424,19 @@ pub(super) async fn apply(
         ports::preflight(&config, active.as_ref(), &builder.patch, status)?;
     }
     let restart_required = plan_requires_restart(&plan) && running_status(status);
+    // Resolve ownership before the first mutation. A failed dispatched label update
+    // may already have applied and must never be retried through the catalog path.
+    let label_owner = if !restart_required && has_live_label_change(&plan) {
+        match &session {
+            Some(session) => session
+                .label_update_owner()
+                .await
+                .map_err(MicrosandboxError::ControlClient)?,
+            None => None,
+        }
+    } else {
+        None
+    };
     if running_status(status)
         && !restart_required
         && builder.policy == ModificationPolicy::NoRestart
@@ -449,31 +466,109 @@ pub(super) async fn apply(
         }
     }
 
+    let cpu = live_cpu_target(&plan, &builder.patch);
+    let memory = live_memory_target(&plan, &builder.patch);
+    let paired_targets = cpu.zip(memory);
+    let tracking = if !restart_required
+        && (paired_targets.is_some() || track_resize && (cpu.is_some() || memory.is_some()))
+    {
+        resize::begin_tracking(control_session(&session)?).await?
+    } else {
+        None
+    };
+    let mut resize_operations = tracking
+        .as_ref()
+        .filter(|_| track_resize)
+        .map(|_| Vec::new());
     if restart_required {
         handle.stop().await?;
     }
-    if !restart_required && let Some(target) = live_cpu_target(&plan, &builder.patch) {
-        let state = control_session(&session)?
-            .request(&SetCpuTarget::new(u32::from(target)))
-            .await
-            .map_err(crate::MicrosandboxError::ControlClient)?;
-        plan.resize_status.push(ResourceResizeStatus {
-            resource: ResourceKind::Cpus,
-            requested: target.to_string(),
-            actual: state.actual_online.to_string(),
-            enforced: state.enforced.to_string(),
-            state: if state.actual_online == u32::from(target) {
-                ResourceConvergenceState::Applied
-            } else {
-                ResourceConvergenceState::Converging
-            },
-        });
+    let paired = if let (Some((cpus, memory_mib)), Some(tracking)) = (
+        paired_targets,
+        tracking.as_ref().filter(|t| t.paired_targets),
+    ) {
+        let [cpu, memory] = resize::apply_pair(
+            control_session(&session)?,
+            tracking,
+            u32::from(cpus),
+            u64::from(memory_mib),
+        )
+        .await?;
+        let (ResizeTarget::Cpus { online }, ResizeTarget::Memory { total_mib }) =
+            (&cpu.accepted_target, &memory.accepted_target)
+        else {
+            unreachable!("validated paired response")
+        };
+        if let Some(active) = active.as_mut() {
+            active.spec.resources.cpus = u8::try_from(*online).map_err(|_| {
+                MicrosandboxError::Runtime("accepted CPU target exceeds SDK range".into())
+            })?;
+            active.spec.resources.memory_mib = u32::try_from(*total_mib).map_err(|_| {
+                MicrosandboxError::Runtime("accepted memory target exceeds SDK range".into())
+            })?;
+            persist_active_config(
+                &builder.backend,
+                control_session(&session)?,
+                &mut active_json,
+                active,
+            )
+            .await?;
+        }
+        plan.resize_status
+            .extend([cpu.status.clone(), memory.status.clone()]);
+        if let Some(operations) = &mut resize_operations {
+            operations.extend([cpu, memory]);
+        }
+        true
+    } else {
+        false
+    };
+    if !restart_required
+        && !paired
+        && let Some(target) = cpu
+    {
+        let accepted = if let Some(tracking) = tracking.as_ref().filter(|_| track_resize) {
+            let operation = resize::apply_target(
+                control_session(&session)?,
+                tracking,
+                ResizeTarget::Cpus {
+                    online: u32::from(target),
+                },
+            )
+            .await?;
+            let ResizeTarget::Cpus { online } = operation.accepted_target else {
+                unreachable!("validated CPU response")
+            };
+            let accepted = u8::try_from(online).map_err(|_| {
+                MicrosandboxError::Runtime(
+                    "resize was accepted but its CPU target cannot be represented by this SDK"
+                        .into(),
+                )
+            })?;
+            plan.resize_status.push(operation.status.clone());
+            resize_operations.as_mut().unwrap().push(operation);
+            accepted
+        } else {
+            let state = control_session(&session)?
+                .request(&SetCpuTarget::new(u32::from(target)))
+                .await
+                .map_err(MicrosandboxError::ControlClient)?;
+            plan.resize_status.push(ResourceResizeStatus {
+                resource: ResourceKind::Cpus,
+                requested: target.to_string(),
+                actual: state.actual_online.to_string(),
+                enforced: state.enforced.to_string(),
+                // A target acknowledgement is not operation-bound guest completion.
+                state: ResourceConvergenceState::Accepted,
+            });
+            target
+        };
         // The running VM changed: refresh the active snapshot with the
         // enforced target so inspect does not report the already-live
         // change as pending. The guest driver converges asynchronously;
         // enforcement applies immediately either way.
         if let Some(active) = active.as_mut() {
-            active.spec.resources.cpus = target;
+            active.spec.resources.cpus = accepted;
             persist_active_config(
                 &builder.backend,
                 control_session(&session)?,
@@ -483,29 +578,53 @@ pub(super) async fn apply(
             .await?;
         }
     }
-    if !restart_required && let Some(target_mib) = live_memory_target(&plan, &builder.patch) {
-        let state = control_session(&session)?
-            .request(&SetMemoryTarget {
-                total_mib: u64::from(target_mib),
-            })
-            .await
-            .map_err(crate::MicrosandboxError::ControlClient)?;
-        plan.resize_status.push(ResourceResizeStatus {
-            resource: ResourceKind::Memory,
-            requested: format_mib(target_mib),
-            actual: format_mib(state.current_mib as u32),
-            enforced: format_mib(state.target_mib as u32),
-            state: if state.current_mib >= state.target_mib {
-                ResourceConvergenceState::Applied
-            } else {
-                ResourceConvergenceState::Converging
-            },
-        });
+    if !restart_required
+        && !paired
+        && let Some(target_mib) = memory
+    {
+        let accepted = if let Some(tracking) = tracking.as_ref().filter(|_| track_resize) {
+            let operation = resize::apply_target(
+                control_session(&session)?,
+                tracking,
+                ResizeTarget::Memory {
+                    total_mib: u64::from(target_mib),
+                },
+            )
+            .await?;
+            let ResizeTarget::Memory { total_mib } = operation.accepted_target else {
+                unreachable!("validated memory response")
+            };
+            let accepted = u32::try_from(total_mib).map_err(|_| {
+                MicrosandboxError::Runtime(
+                    "resize was accepted but its memory target cannot be represented by this SDK"
+                        .into(),
+                )
+            })?;
+            plan.resize_status.push(operation.status.clone());
+            resize_operations.as_mut().unwrap().push(operation);
+            accepted
+        } else {
+            let state = control_session(&session)?
+                .request(&SetMemoryTarget {
+                    total_mib: u64::from(target_mib),
+                })
+                .await
+                .map_err(MicrosandboxError::ControlClient)?;
+            plan.resize_status.push(ResourceResizeStatus {
+                resource: ResourceKind::Memory,
+                requested: format_mib(target_mib),
+                actual: format_mib(state.current_mib as u32),
+                enforced: format_mib(state.target_mib as u32),
+                // Plugged capacity alone does not establish guest-ready completion.
+                state: ResourceConvergenceState::Accepted,
+            });
+            state.target_mib as u32
+        };
         // Refresh the active snapshot with the accepted target so inspect
         // does not report the already-live change as pending. Convergence
         // (plugging blocks) continues asynchronously in the guest.
         if let Some(active) = active.as_mut() {
-            active.spec.resources.memory_mib = state.target_mib as u32;
+            active.spec.resources.memory_mib = accepted;
             persist_active_config(
                 &builder.backend,
                 control_session(&session)?,
@@ -588,25 +707,48 @@ pub(super) async fn apply(
     if !plan.changes.is_empty() {
         config.apply_modification(&builder.patch);
         config.update_secrets(&builder.patch)?;
+        let labels_persisted_by_runtime = label_owner.is_some();
         let active_labels = if !restart_required && has_live_label_change(&plan) {
             let (Some(active), Some(expected_json)) = (active.as_mut(), active_json.clone()) else {
                 return Err(MicrosandboxError::ControlStateChanged);
             };
             active.update_labels(&builder.patch);
-            Some(ActiveLabelsUpdate {
-                expected_json,
-                active_config_json: serde_json::to_string(active)?,
-            })
+            if let Some(owner) = label_owner {
+                control_session(&session)?
+                    .update_labels(
+                        owner,
+                        &expected_json,
+                        handle
+                            .local_state()
+                            .ok_or(MicrosandboxError::ControlStateChanged)?,
+                        &config,
+                        builder.patch.labels.iter().cloned().collect(),
+                        builder.patch.labels_remove.clone(),
+                    )
+                    .await
+                    .map_err(MicrosandboxError::ControlClient)?;
+                None
+            } else {
+                Some(ActiveLabelsUpdate {
+                    expected_json,
+                    active_config_json: serde_json::to_string(active)?,
+                })
+            }
         } else {
             None
         };
-        persist_config(&builder.backend, &handle, &config, active_labels).await?;
+        if !labels_persisted_by_runtime {
+            persist_config(&builder.backend, &handle, &config, active_labels).await?;
+        }
     }
     if restart_required {
         start_after_modify(&handle).await?;
     }
     plan.applied = true;
-    Ok(plan)
+    Ok(SandboxModificationResult {
+        plan,
+        resize_operations,
+    })
 }
 
 /// Classify requested changes as live, deferred, or conflicting without applying them.
@@ -882,7 +1024,9 @@ async fn live_control(
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
 ) -> MicrosandboxResult<(LiveControl, Option<ControlSession>)> {
-    let needs_control = patch.root_disk_size_mib.is_some()
+    let needs_control = !patch.labels.is_empty()
+        || !patch.labels_remove.is_empty()
+        || patch.root_disk_size_mib.is_some()
         || patch.cpus.is_some()
         || patch.memory_mib.is_some()
         || !patch.secrets.is_empty()
@@ -2178,6 +2322,11 @@ mod tests {
             .unwrap()
             .set_len(1024 * 1024)
             .unwrap();
+        // A real modify request receives the decoded catalog config, including historical
+        // omission evidence. Use that same baseline when checking for a concurrent edit.
+        let config =
+            SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())
+                .unwrap();
         (home, local, config, model.id)
     }
 
@@ -2260,7 +2409,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
             let backend: Arc<dyn Context> = local.clone();
-            let pending = tokio::spawn(async move {
+            let mut pending = tokio::spawn(async move {
                 grow_root_disk_now(&backend, "growth", id, &config, 1).await
             });
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2297,10 +2446,12 @@ mod tests {
                             break;
                         }
                     }
-                    assert!(
-                        !pending.is_finished(),
-                        "growth ended before reserving storage"
-                    );
+                    if pending.is_finished() {
+                        panic!(
+                            "growth ended before reserving storage: {:?}",
+                            (&mut pending).await
+                        );
+                    }
                     tokio::task::yield_now().await;
                 }
             })
@@ -2726,6 +2877,7 @@ mod tests {
                 "first-checkpoint".into(),
                 false,
                 microsandbox_types::GuestFlush::Auto,
+                false,
             )
             .await
             .unwrap();
@@ -2737,6 +2889,7 @@ mod tests {
                 "second-checkpoint".into(),
                 true,
                 microsandbox_types::GuestFlush::Auto,
+                false,
             )
             .await
             .unwrap();
@@ -2819,6 +2972,133 @@ mod tests {
         .exec(db.write())
         .await
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accepted_resize_never_infers_guest_completion_from_legacy_setter_quantities() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // Pending shrink, equal plugged target, and pending growth are all acceptance
+        // acknowledgements. Even equality cannot attest to online guest memory pages.
+        for (current_mib, track) in [512_u64, 256, 128]
+            .into_iter()
+            .flat_map(|mib| [(mib, false), (mib, true)])
+        {
+            let home = tempfile::tempdir_in("/tmp").unwrap();
+            let local = crate::test_support::local_backend_builder(home.path())
+                .build()
+                .unwrap();
+            seed_control_run(&local, "api").await;
+            let mut active = config(1, if current_mib == 128 { 128 } else { 512 });
+            active.spec.resources.max_cpus = 4;
+            active.spec.resources.max_memory_mib = 1024;
+            let json = serde_json::to_string(&active).unwrap();
+            sandbox_entity::Entity::update_many()
+                .col_expr(sandbox_entity::Column::Config, Expr::value(json.clone()))
+                .col_expr(sandbox_entity::Column::ActiveConfig, Expr::value(json))
+                .filter(sandbox_entity::Column::Name.eq("api"))
+                .exec(local.db().await.unwrap().write())
+                .await
+                .unwrap();
+
+            let agent = local.agent_socket_paths("api").remove(0);
+            let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            let server = tokio::spawn(async move {
+                let mut operations = Vec::new();
+                for index in 0..5 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    operations.push(request["op"].as_str().unwrap().to_owned());
+                    let response = match index {
+                        0 => serde_json::json!({"ok": true, "capabilities": {
+                            "cpu_resize": true, "memory_resize": true, "secrets_update": false
+                        }}),
+                        1 | 4 => serde_json::json!({"ok": true, "pause": {
+                            "paused": false, "recovery_required": false
+                        }}),
+                        2 => {
+                            assert_eq!(request["online"], 2, "unexpected request: {request}");
+                            serde_json::json!({"ok": true, "cpu": {
+                                "possible": 4, "requested_online": 2,
+                                "actual_online": 2, "enforced": 2
+                            }})
+                        }
+                        _ => {
+                            assert_eq!(request["total_mib"], 256);
+                            serde_json::json!({"ok": true, "memory": {
+                                "boot_mib": 128, "target_mib": 256,
+                                "current_mib": current_mib, "max_mib": 1024
+                            }})
+                        }
+                    };
+                    stream
+                        .get_mut()
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                operations
+            });
+            let backend: Arc<dyn Context> = Arc::new(local);
+            let plan = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let builder = SandboxModificationBuilder::new(backend.clone(), "api")
+                    .cpus(2)
+                    .memory(256_u32)
+                    // Saving labels must use the snapshot refreshed by both setters.
+                    .label("resize", "accepted");
+                if track {
+                    let result = builder.apply_with_resize_tracking().await?;
+                    assert!(result.resize_operations.is_none());
+                    Ok(result.plan)
+                } else {
+                    builder.apply().await
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(plan.applied);
+            assert_eq!(plan.resize_status.len(), 2);
+            for status in &plan.resize_status {
+                assert_eq!(status.state, ResourceConvergenceState::Accepted);
+            }
+            assert_eq!(plan.resize_status[0].actual, "2");
+            assert_eq!(plan.resize_status[1].actual, format_mib(current_mib as u32));
+            assert_eq!(plan.resize_status[1].enforced, format_mib(256));
+            // Supported legacy mutations still update both desired and active settings;
+            // only the existing pause-state projection accompanies the target requests.
+            let handle = backend
+                .sandbox_ops()
+                .get(backend.clone(), "api")
+                .await
+                .unwrap();
+            assert_eq!(handle.config().unwrap().spec.resources.memory_mib, 256);
+            assert_eq!(handle.config().unwrap().spec.labels["resize"], "accepted");
+            assert_eq!(
+                handle.active_config().unwrap().unwrap().spec.labels["resize"],
+                "accepted"
+            );
+            assert_eq!(
+                handle.active_config().unwrap().unwrap().spec.resources.cpus,
+                2
+            );
+            assert_eq!(
+                server.await.unwrap(),
+                [
+                    "capabilities",
+                    "pause_state",
+                    "cpu_target",
+                    "memory_target",
+                    "pause_state"
+                ]
+            );
+        }
     }
 
     async fn label_backend(home: &std::path::Path) -> (Arc<LocalContext>, Arc<dyn Context>) {
@@ -4826,7 +5106,11 @@ mod tests {
         };
         assert_eq!(change.field, SECRET_FIELD);
         assert_eq!(change.change, SecretChangeKind::Added);
+        #[cfg(feature = "net")]
         assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+        // A build without network support must still redact a refused secret plan.
+        #[cfg(not(feature = "net"))]
+        assert_eq!(change.disposition, ModificationDisposition::Unsupported);
     }
 
     //----------------------------------------------------------------------------------------------

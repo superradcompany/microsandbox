@@ -34,6 +34,11 @@ describe("native Sandbox lifecycle contract", () => {
       "ping",
       "touch",
       "modify",
+      "modifyWithResizeTracking",
+      "resizeOperations",
+      "waitForResizeOperations",
+      "resizeStatus",
+      "waitUntilResized",
       "execDefault",
       "execDefaultWithBuilder",
       "execDefaultStream",
@@ -72,6 +77,17 @@ describe("native Sandbox lifecycle contract", () => {
     expect(() => builder.networkPolicyJson(JSON.stringify({ tls: {} })))
       .toThrow("restore network policy accepts only default actions and rules");
     expect(() => builder.cpus(256)).toThrow("cpus out of u8 range");
+    expect(() => builder.maxCpus(256)).toThrow("max_cpus out of u8 range");
+    for (const value of [-1, 1.5, NaN, Infinity, -Infinity, 2 ** 32]) {
+      expect(() => builder.maxCpus(value)).toThrow();
+      expect(() => builder.maxMemory(value)).toThrow();
+    }
+    // Numeric refusal must leave the deferred builder reusable. Zero remains
+    // explicit here; core resource validation rejects it at the terminal call.
+    expect(builder.maxCpus(0).maxMemory(0).maxCpus(2).maxMemory(512)).toBe(builder);
+    expect(builder.label("team", "first").labels({ team: "last" })).toBe(builder);
+    expect(builder.workdir("/root").shell("/bin/ash").entrypoint([]).cmd([])
+      .env("EMPTY", "").envs({ DEST: "value" })).toBe(builder);
     expect(() => builder.security("invalid" as never)).toThrow("invalid security profile");
     for (const value of [-1, NaN, Infinity, -Infinity, 0.5, 1.5, Number.MIN_VALUE, 2 ** 53]) {
       expect(() => builder.maxDurationSeconds(value)).toThrow("must be a non-negative safe integer");
@@ -81,26 +97,11 @@ describe("native Sandbox lifecycle contract", () => {
     for (const value of [0, -0, 1, Number.MAX_SAFE_INTEGER]) {
       expect(builder.maxDurationSeconds(value).idleTimeoutSeconds(value)).toBe(builder);
     }
-    for (const method of ["image", "network", "cmd", "entrypoint", "replace", "create"]) {
+    for (const method of ["image", "network", "foregroundCommand", "backgroundCommand", "replace", "create"]) {
       expect((builder as unknown as Record<string, unknown>)[method], method).toBeUndefined();
     }
   });
 
-  it("exports the handle health methods used by the TS wrapper", () => {
-    const proto = napi.Sandbox.prototype as Record<string, unknown>;
-
-    for (const method of [
-      "ping",
-      "touch",
-      "modify",
-      "ensureRunning",
-      "waitForStatus",
-      "restart",
-      "destroy",
-    ]) {
-      expect(typeof proto[method], method).toBe("function");
-    }
-  });
 });
 
 describe("native ExecHandle contract", () => {
@@ -161,4 +162,9 @@ describe("native storage contract", () => {
     expect(typeof napi.storageUsage).toBe("function");
     expect(typeof napi.storagePrune).toBe("function");
   });
+});
+
+it("refuses a conflicting legacy group before reading archives", async () => {
+  await expect(napi.SnapshotGroup.load("selected", ["missing.msb"], { group: "other" }))
+    .rejects.toThrow("different destination group");
 });

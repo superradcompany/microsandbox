@@ -373,11 +373,14 @@ pub fn run(args: MachineArgs) -> ! {
         #[cfg(feature = "net")]
         deployment_profile: launch.deployment_profile,
         #[cfg(feature = "net")]
+        multi_tenant: launch.multi_tenant,
+        #[cfg(feature = "net")]
         sandbox_slot: launch.sandbox_slot,
         checkpoint_restore: launch.checkpoint_restore,
     };
 
     let config = Config {
+        retention_source: launch.retention_source,
         agent_transport: args.agent_transport,
         sandbox_name: args.sandbox_name,
         sandbox_id: args.sandbox_id,
