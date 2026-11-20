@@ -439,7 +439,7 @@ impl DirectoryCapture {
                 "owned generation cannot be written inside its source namespace",
             ));
         }
-        fs::create_dir(destination)?;
+        microsandbox_utils::private_file::create_private_directory(destination)?;
         let mut capture = Self {
             source: source.into(),
             destination: destination.into(),
@@ -452,7 +452,7 @@ impl DirectoryCapture {
             identities: BTreeMap::new(),
             published: false,
         };
-        fs::create_dir(destination.join("files"))?;
+        microsandbox_utils::private_file::create_private_directory(&destination.join("files"))?;
         capture.walk(source, Vec::new())?;
         Ok(capture)
     }
@@ -479,10 +479,10 @@ impl DirectoryCapture {
 
     pub(super) fn finish(mut self) -> io::Result<OwnedDirectorySnapshot> {
         let bytes = self.snapshot.descriptor_bytes()?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(self.destination.join(DESCRIPTOR))?;
+        // This descriptor is host-managed checkpoint metadata. Guest modes live in its
+        // serialized objects and are restored separately; they do not govern this file.
+        let mut file =
+            microsandbox_utils::private_file::create_new(&self.destination.join(DESCRIPTOR))?;
         file.write_all(&bytes)?;
         file.sync_all()?;
         sync_directory(&self.destination.join("files"))?;
@@ -761,7 +761,7 @@ fn poisoned<T>(error: std::sync::PoisonError<T>) -> io::Error {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::os::unix::fs::{FileExt, MetadataExt};
+    use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 
     use super::*;
 
@@ -775,18 +775,51 @@ mod tests {
         file.set_len(8 * 1024 * 1024).unwrap();
         file.write_all_at(b"tail", 8 * 1024 * 1024 - 4).unwrap();
         file.sync_all().unwrap();
+        fs::set_permissions(
+            source.join("nested/data"),
+            fs::Permissions::from_mode(0o751),
+        )
+        .unwrap();
+        #[cfg(target_os = "macos")]
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "everyone allow read"])
+                .arg(source.join("nested/data"))
+                .status()
+                .unwrap()
+                .success()
+        );
         let source_blocks = file.metadata().unwrap().blocks();
         fs::hard_link(source.join("nested/data"), source.join("alias")).unwrap();
         std::os::unix::fs::symlink("/never-follow-this", source.join("link")).unwrap();
         let generation = temporary.path().join("generation");
         let captured = OwnedDirectorySnapshot::capture(&source, &generation).unwrap();
         let expected = captured.digest().unwrap();
+        for payload in fs::read_dir(generation.join("files")).unwrap() {
+            let file = File::open(payload.unwrap().path()).unwrap();
+            microsandbox_utils::private_file::verify(&file).unwrap();
+        }
+        assert_eq!(
+            fs::metadata(source.join("nested/data")).unwrap().mode() & 0o777,
+            0o751
+        );
+        for path in [&generation, &generation.join("files")] {
+            assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o700);
+        }
+        assert_eq!(
+            fs::metadata(generation.join(DESCRIPTOR)).unwrap().mode() & 0o777,
+            0o600
+        );
         fs::remove_dir_all(&source).unwrap();
         let snapshot = OwnedDirectorySnapshot::open_expected(&generation, &expected).unwrap();
         let child = temporary.path().join("child");
         let sibling = temporary.path().join("sibling");
         snapshot.materialize(&generation, &child).unwrap();
         snapshot.materialize(&generation, &sibling).unwrap();
+        assert_eq!(
+            fs::metadata(child.join("nested/data")).unwrap().mode() & 0o777,
+            0o751
+        );
         assert_eq!(
             fs::metadata(child.join("alias")).unwrap().ino(),
             fs::metadata(child.join("nested/data")).unwrap().ino()

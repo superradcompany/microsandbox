@@ -9,15 +9,32 @@ use crate::error::to_py_err;
 /// Resolve an existing runtime pair without installing host binaries.
 #[pyfunction]
 pub fn resolve_runtime(config_json: String) -> PyResult<String> {
-    let config = microsandbox::setup::binding_runtime_config(&config_json).map_err(to_py_err)?;
-    let runtime = microsandbox::setup::resolve_runtime(&config).map_err(to_py_err)?;
-    serialize_runtime(runtime)
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_py_err(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::RuntimeSetup,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let config =
+            microsandbox::setup::binding_runtime_config(&config_json).map_err(to_py_err)?;
+        let runtime = microsandbox::setup::resolve_runtime(&config).map_err(to_py_err)?;
+        serialize_runtime(runtime)
+    }
 }
 
 /// Check whether a complete runtime pair resolves.
 #[pyfunction]
 pub fn is_runtime_installed(config_json: String) -> bool {
-    resolve_runtime(config_json).is_ok()
+    #[cfg(not(feature = "local"))]
+    {
+        false
+    }
+    #[cfg(feature = "local")]
+    {
+        resolve_runtime(config_json).is_ok()
+    }
 }
 
 /// Install a runtime pair from the explicitly selected source.
@@ -27,14 +44,25 @@ pub fn install_runtime<'py>(
     config_json: String,
     options_json: String,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let config = microsandbox::setup::binding_runtime_config(&config_json).map_err(to_py_err)?;
-    let options = microsandbox::setup::binding_install_options(&options_json).map_err(to_py_err)?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let runtime = microsandbox::setup::install_runtime(&config, options)
-            .await
-            .map_err(to_py_err)?;
-        serialize_runtime(runtime)
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_py_err(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::RuntimeSetup,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let config =
+            microsandbox::setup::binding_runtime_config(&config_json).map_err(to_py_err)?;
+        let options =
+            microsandbox::setup::binding_install_options(&options_json).map_err(to_py_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let runtime = microsandbox::setup::install_runtime(&config, options)
+                .await
+                .map_err(to_py_err)?;
+            serialize_runtime(runtime)
+        })
+    }
 }
 
 /// Reuse a resolved pair and install only when it is wholly absent.
@@ -44,16 +72,28 @@ pub fn ensure_runtime<'py>(
     config_json: String,
     options_json: String,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let config = microsandbox::setup::binding_runtime_config(&config_json).map_err(to_py_err)?;
-    let options = microsandbox::setup::binding_install_options(&options_json).map_err(to_py_err)?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let runtime = microsandbox::setup::ensure_runtime(&config, options)
-            .await
-            .map_err(to_py_err)?;
-        serialize_runtime(runtime)
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_py_err(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::RuntimeSetup,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let config =
+            microsandbox::setup::binding_runtime_config(&config_json).map_err(to_py_err)?;
+        let options =
+            microsandbox::setup::binding_install_options(&options_json).map_err(to_py_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let runtime = microsandbox::setup::ensure_runtime(&config, options)
+                .await
+                .map_err(to_py_err)?;
+            serialize_runtime(runtime)
+        })
+    }
 }
 
+#[cfg(feature = "local")]
 fn serialize_runtime(runtime: microsandbox::setup::ResolvedRuntime) -> PyResult<String> {
     serde_json::to_string(&runtime)
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
@@ -68,10 +108,19 @@ pub fn set_packaged_msb_path(path: String) {
 /// Resolve the CLI runtime without depending on the selected local/cloud backend.
 #[pyfunction]
 pub fn resolved_cli_msb_path() -> PyResult<String> {
-    let config = microsandbox::setup::binding_runtime_config("{}").map_err(to_py_err)?;
-    microsandbox::setup::resolve_runtime(&config)
-        .map(|runtime| runtime.msb_path.to_string_lossy().into_owned())
-        .map_err(to_py_err)
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_py_err(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::RuntimeSetup,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let config = microsandbox::setup::binding_runtime_config("{}").map_err(to_py_err)?;
+        microsandbox::setup::resolve_runtime(&config)
+            .map(|runtime| runtime.msb_path.to_string_lossy().into_owned())
+            .map_err(to_py_err)
+    }
 }
 
 /// Inspect explicitly selected storage without initializing the normal backend.
@@ -81,9 +130,18 @@ pub fn diagnose_storage<'py>(
     config_json: String,
     selection_json: String,
 ) -> PyResult<Bound<'py, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        microsandbox::setup::binding_diagnose_storage(&config_json, &selection_json)
-            .await
-            .map_err(to_py_err)
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_py_err(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::RuntimeSetup,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            microsandbox::setup::binding_diagnose_storage(&config_json, &selection_json)
+                .await
+                .map_err(to_py_err)
+        })
+    }
 }

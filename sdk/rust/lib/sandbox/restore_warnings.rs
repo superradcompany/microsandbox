@@ -1,7 +1,7 @@
 //! Receiver-identity-bound diagnostics for external filesystem restoration.
 
 #[cfg(feature = "local")]
-use crate::backend::LocalBackend;
+use crate::context::LocalContext;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::{ExternalMountWarning, Sandbox};
@@ -17,7 +17,7 @@ impl Sandbox {
         #[cfg(feature = "local")]
         if let Some(local) = self.backend.as_local() {
             // A stale receiver must never read diagnostics from a replacement run.
-            let _transition = LocalBackend::acquire_sandbox_transition_guard(
+            let _transition = LocalContext::acquire_sandbox_transition_guard(
                 &local.config().run_dir(),
                 &self.name,
             )

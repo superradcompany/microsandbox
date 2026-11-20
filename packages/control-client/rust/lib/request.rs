@@ -81,6 +81,13 @@ pub struct CompactDisks(pub DiskCompact);
 #[derive(Debug, Clone)]
 pub struct ManageJob(pub microsandbox_protocol::jobs::JobRequest);
 
+/// Capability-gated resize tracking; select support before sending this request.
+#[derive(Debug, Clone)]
+pub struct ManageResize(pub microsandbox_protocol::resize::ResizeRequest);
+/// Read support or update labels through the runtime-owned metadata extension.
+#[derive(Debug, Clone)]
+pub struct ManageLabels(pub microsandbox_protocol::labels::LabelsRequest);
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -116,6 +123,29 @@ impl UpdateSecrets {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Request<ControlProtocol> for ManageResize {
+    type Response = microsandbox_protocol::resize::ResizeResponse;
+    type Error = ControlClientError;
+    fn message(&self) -> ControlClientResult<EncodedMessage> {
+        prepared(microsandbox_protocol::resize::RESIZE_REQUEST, &self.0)
+    }
+    fn decode(&self, response: Message) -> ControlClientResult<Self::Response> {
+        checked(response, 2, microsandbox_protocol::resize::RESIZE_RESPONSE)
+    }
+}
+
+impl CompatibleControlRequest for ManageResize {
+    fn min_generation(&self) -> u8 {
+        2
+    }
+    fn compatibility_json_bytes(&self) -> ControlClientResult<Zeroizing<Vec<u8>>> {
+        Err(ControlClientError::UnsupportedMode)
+    }
+    fn decode_compatibility_json(&self, _reply: JsonReply) -> ControlClientResult<Self::Response> {
+        Err(ControlClientError::UnsupportedMode)
+    }
+}
+
 impl Request<ControlProtocol> for ManageJob {
     type Response = microsandbox_protocol::jobs::JobResponse;
     type Error = ControlClientError;
@@ -128,6 +158,29 @@ impl Request<ControlProtocol> for ManageJob {
 }
 
 impl CompatibleControlRequest for ManageJob {
+    fn min_generation(&self) -> u8 {
+        2
+    }
+    fn compatibility_json_bytes(&self) -> ControlClientResult<Zeroizing<Vec<u8>>> {
+        Err(ControlClientError::UnsupportedMode)
+    }
+    fn decode_compatibility_json(&self, _reply: JsonReply) -> ControlClientResult<Self::Response> {
+        Err(ControlClientError::UnsupportedMode)
+    }
+}
+
+impl Request<ControlProtocol> for ManageLabels {
+    type Response = microsandbox_protocol::labels::LabelsResponse;
+    type Error = ControlClientError;
+    fn message(&self) -> ControlClientResult<EncodedMessage> {
+        prepared(microsandbox_protocol::labels::LABELS_REQUEST, &self.0)
+    }
+    fn decode(&self, response: Message) -> ControlClientResult<Self::Response> {
+        checked(response, 2, microsandbox_protocol::labels::LABELS_RESPONSE)
+    }
+}
+
+impl CompatibleControlRequest for ManageLabels {
     fn min_generation(&self) -> u8 {
         2
     }
@@ -332,8 +385,13 @@ impl Request<ControlProtocol> for GetPauseState {
 }
 
 macro_rules! compatible_v2 {
-    ($request:ty, $json:expr, $decode:expr) => {
+    ($request:ty, $json:expr, $decode:expr $(, $configuration:expr, $storage:expr, $block:expr, $exec_limits:expr, $freeze:expr)?) => {
         impl CompatibleControlRequest for $request {
+            $(fn requires_configuration_capture(&self) -> bool { ($configuration)(self) }
+              fn requires_configuration_storage(&self) -> bool { ($storage)(self) }
+              fn requires_configuration_block_capacity(&self) -> bool { ($block)(self) }
+              fn requires_configuration_exec_limits(&self) -> bool { ($exec_limits)(self) }
+              fn requires_configuration_freeze_resources(&self) -> bool { ($freeze)(self) })?
             fn min_generation(&self) -> u8 {
                 2
             }
@@ -369,23 +427,69 @@ compatible_v2!(
 
 compatible_v2!(
     CreateCheckpoint,
-    |request: &CreateCheckpoint| serde_json::json!({
-        "op": "checkpoint_create",
-        "guest_flush": request.0.guest_flush,
-        "record_integrity": request.0.record_integrity,
-        "checkpoint_id": request.0.checkpoint_id,
-        "intent": request.0.intent,
-    }),
-    decode_checkpoint_json
+    |request: &CreateCheckpoint| {
+        let mut value = serde_json::json!({
+            "op": "checkpoint_create",
+            "guest_flush": request.0.guest_flush,
+            "record_integrity": request.0.record_integrity,
+            "checkpoint_id": request.0.checkpoint_id,
+            "intent": request.0.intent,
+        });
+        if let Some(retain) = request.0.retain_configuration {
+            value["retain_configuration"] = retain.into();
+        }
+        if let Some(block) = request.0.retain_configuration_block_capacity {
+            value["retain_configuration_block_capacity"] = block.into();
+        }
+        if let Some(limits) = request.0.retain_configuration_exec_limits {
+            value["retain_configuration_exec_limits"] = limits.into();
+        }
+        if let Some(freeze) = request.0.retain_configuration_freeze_resources {
+            value["retain_configuration_freeze_resources"] = freeze.into();
+        }
+        if let Some(storage) = request.0.retain_configuration_storage {
+            value["retain_configuration_storage"] = storage.into();
+        }
+        value
+    },
+    decode_checkpoint_json,
+    |request: &CreateCheckpoint| request.0.retain_configuration == Some(true),
+    |request: &CreateCheckpoint| request.0.retain_configuration_storage == Some(true),
+    |request: &CreateCheckpoint| request.0.retain_configuration_block_capacity == Some(true),
+    |request: &CreateCheckpoint| request.0.retain_configuration_exec_limits == Some(true),
+    |request: &CreateCheckpoint| request.0.retain_configuration_freeze_resources == Some(true)
 );
 compatible_v2!(
     CreateDiskCheckpoint,
-    |request: &CreateDiskCheckpoint| serde_json::json!({
-        "op": "disk_checkpoint_create",
-        "guest_flush": request.0.guest_flush,
-        "checkpoint_id": request.0.checkpoint_id,
-    }),
-    |reply| decode_json_field(reply, "disk_checkpoint")
+    |request: &CreateDiskCheckpoint| {
+        let mut value = serde_json::json!({
+            "op": "disk_checkpoint_create",
+            "guest_flush": request.0.guest_flush,
+            "checkpoint_id": request.0.checkpoint_id,
+        });
+        if let Some(retain) = request.0.retain_configuration {
+            value["retain_configuration"] = retain.into();
+        }
+        if let Some(block) = request.0.retain_configuration_block_capacity {
+            value["retain_configuration_block_capacity"] = block.into();
+        }
+        if let Some(limits) = request.0.retain_configuration_exec_limits {
+            value["retain_configuration_exec_limits"] = limits.into();
+        }
+        if let Some(freeze) = request.0.retain_configuration_freeze_resources {
+            value["retain_configuration_freeze_resources"] = freeze.into();
+        }
+        if let Some(storage) = request.0.retain_configuration_storage {
+            value["retain_configuration_storage"] = storage.into();
+        }
+        value
+    },
+    |reply| decode_json_field(reply, "disk_checkpoint"),
+    |request: &CreateDiskCheckpoint| request.0.retain_configuration == Some(true),
+    |request: &CreateDiskCheckpoint| request.0.retain_configuration_storage == Some(true),
+    |request: &CreateDiskCheckpoint| request.0.retain_configuration_block_capacity == Some(true),
+    |request: &CreateDiskCheckpoint| request.0.retain_configuration_exec_limits == Some(true),
+    |request: &CreateDiskCheckpoint| request.0.retain_configuration_freeze_resources == Some(true)
 );
 compatible_v2!(
     CreateBranch,

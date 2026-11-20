@@ -1,12 +1,16 @@
-use microsandbox::sandbox::{LogLevel as RustLogLevel, RestoreBuilder, SecurityProfile};
+use microsandbox::sandbox::{
+    LogLevel as RustLogLevel, PullPolicy, RestoreBuilder, SecurityProfile,
+};
 use microsandbox::size::Mebibytes;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
+use crate::init_options_builder::JsInitOptionsBuilder;
 use crate::mount_builder::JsMountBuilder;
 use crate::network_builder::accept_queue_size;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
+use crate::outbound_proxy_builder::{JsOutboundProxyBuilder, take_selected_proxy};
 use crate::pull_progress::JsPullProgressStream;
 use crate::sandbox::Sandbox;
 use crate::sandbox_builder::{JsPullProgressCreate, parse_bind_addr};
@@ -24,6 +28,14 @@ pub struct JsRestoreBuilder {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl JsRestoreBuilder {
+    pub(crate) fn from_builder(builder: RestoreBuilder) -> Self {
+        Self {
+            inner: Some(builder),
+        }
+    }
+}
 
 #[napi]
 impl JsRestoreBuilder {
@@ -54,6 +66,82 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Control retrieval of the snapshot's pinned base image without replacing it.
+    #[napi(js_name = "pullPolicy")]
+    pub fn pull_policy(&mut self, policy: String) -> Result<&Self> {
+        let policy = match policy.as_str() {
+            "always" => PullPolicy::Always,
+            "if-missing" => PullPolicy::IfMissing,
+            "never" => PullPolicy::Never,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid pull policy `{other}`"
+                )));
+            }
+        };
+        self.inner = Some(self.take_inner()?.pull_policy(policy));
+        Ok(self)
+    }
+
+    /// Set the destination proxy before boot or resume, preserving captured guest identity.
+    #[napi(
+        ts_args_type = "configure: (arg: OutboundProxyBuilder) => HttpConnectProxyBuilder | Socks4ProxyBuilder | Socks5ProxyBuilder"
+    )]
+    pub fn proxy(
+        &mut self,
+        env: &Env,
+        configure: Function<ClassInstance<JsOutboundProxyBuilder>, Unknown<'_>>,
+    ) -> Result<&Self> {
+        let selector = JsOutboundProxyBuilder::new();
+        let selection = selector.selection();
+        configure.call(selector.into_instance(env)?)?;
+        let proxy = take_selected_proxy(&selection)?;
+        self.inner = Some(self.take_inner()?.proxy(|_| proxy));
+        Ok(self)
+    }
+
+    /// Default guest directory for new commands.
+    #[napi]
+    pub fn workdir(&mut self, value: String) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.workdir(value));
+        Ok(self)
+    }
+
+    /// Default shell for new commands; never executed by restoration.
+    #[napi]
+    pub fn shell(&mut self, value: String) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.shell(value));
+        Ok(self)
+    }
+
+    /// Entrypoint for future default workloads, not startup execution.
+    #[napi]
+    pub fn entrypoint(&mut self, value: Vec<String>) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.entrypoint(value));
+        Ok(self)
+    }
+
+    /// CMD for future default workloads; an empty array clears it.
+    #[napi]
+    pub fn cmd(&mut self, value: Vec<String>) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.cmd(value));
+        Ok(self)
+    }
+
+    /// Add an environment default for new commands, not captured processes.
+    #[napi]
+    pub fn env(&mut self, key: String, value: String) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.env(key, value));
+        Ok(self)
+    }
+
+    /// Add environment defaults; does not start a command.
+    #[napi]
+    pub fn envs(&mut self, values: std::collections::HashMap<String, String>) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.envs(values));
+        Ok(self)
+    }
+
     /// Set destination CPUs; full execution restore requires the captured count.
     #[napi]
     pub fn cpus(&mut self, count: f64) -> Result<&Self> {
@@ -69,6 +157,75 @@ impl JsRestoreBuilder {
     pub fn memory(&mut self, mib: f64) -> Result<&Self> {
         let mib = crate::numeric::uint32(mib, "mib")?;
         self.inner = Some(self.take_inner()?.memory(Mebibytes::from(mib)));
+        Ok(self)
+    }
+
+    /// Set the CPU ceiling for disk boot; full resume requires the captured ceiling.
+    #[napi(js_name = "maxCpus")]
+    pub fn max_cpus(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::uint32(count, "count")?;
+        let count = u8::try_from(count)
+            .map_err(|_| napi::Error::from_reason("max_cpus out of u8 range"))?;
+        self.inner = Some(self.take_inner()?.max_cpus(count));
+        Ok(self)
+    }
+
+    /// Set the memory ceiling in MiB; full resume requires the captured ceiling.
+    #[napi(js_name = "maxMemory")]
+    pub fn max_memory(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
+        self.inner = Some(self.take_inner()?.max_memory(Mebibytes::from(mib)));
+        Ok(self)
+    }
+
+    /// Annotate the destination sandbox without changing its snapshot.
+    #[napi]
+    pub fn label(&mut self, key: String, value: String) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.label(key, value));
+        Ok(self)
+    }
+
+    /// Attach destination labels, replacing earlier values for matching keys.
+    #[napi]
+    pub fn labels(&mut self, labels: std::collections::HashMap<String, String>) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.labels(labels));
+        Ok(self)
+    }
+
+    /// Set guest PID 1 for disk boot. Full-memory resume rejects this request.
+    #[napi]
+    pub fn init(&mut self, cmd: String, args: Option<Vec<String>>) -> Result<&Self> {
+        self.inner = Some(
+            self.take_inner()?
+                .init_with(cmd, |init| init.args(args.unwrap_or_default())),
+        );
+        Ok(self)
+    }
+
+    /// Set guest PID 1, arguments and environment for disk boot only.
+    #[napi(js_name = "initWith")]
+    pub fn init_with(
+        &mut self,
+        env: &Env,
+        cmd: String,
+        configure: Function<
+            ClassInstance<JsInitOptionsBuilder>,
+            ClassInstance<JsInitOptionsBuilder>,
+        >,
+    ) -> Result<&Self> {
+        // Run the callback before consuming the destination builder so a thrown exception
+        // leaves it usable. The returned init builder is consumed exactly once.
+        let initial = JsInitOptionsBuilder::new().into_instance(env)?;
+        let mut returned = configure.call(initial)?;
+        let init = returned.take_inner_builder()?;
+        self.inner = Some(self.take_inner()?.init_with(cmd, |_| init));
+        Ok(self)
+    }
+
+    /// Set the guest hostname for disk boot; full-memory resume rejects replacement.
+    #[napi]
+    pub fn hostname(&mut self, hostname: String) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.hostname(hostname));
         Ok(self)
     }
 
@@ -150,19 +307,37 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Explicit wall-clock policy; omission preserves the snapshot/default policy.
+    #[napi(js_name = "guestClock")]
+    pub fn guest_clock(&mut self, policy: String) -> Result<&Self> {
+        let policy = match policy.as_str() {
+            "sync" => microsandbox::sandbox::GuestClockPolicy::Sync,
+            "off" => microsandbox::sandbox::GuestClockPolicy::Off,
+            _ => return Err(napi::Error::from_reason("guest clock must be sync or off")),
+        };
+        self.inner = Some(self.take_inner()?.guest_clock(policy));
+        Ok(self)
+    }
+
     /// Apply the destination host's maximum runtime in seconds; zero expires immediately.
-    #[napi(js_name = "maxDuration")]
+    #[napi(js_name = "maxDurationSeconds")]
     pub fn max_duration(&mut self, secs: f64) -> Result<&Self> {
-        let seconds = duration_seconds(secs).map_err(napi::Error::from_reason)?;
-        self.inner = Some(self.take_inner()?.max_duration(seconds));
+        let seconds = crate::numeric::safe_integer(secs, "secs")?;
+        self.inner = Some(
+            self.take_inner()?
+                .max_duration(std::time::Duration::from_secs(seconds)),
+        );
         Ok(self)
     }
 
     /// Apply the destination host's idle timeout in seconds; zero expires immediately.
-    #[napi(js_name = "idleTimeout")]
+    #[napi(js_name = "idleTimeoutSeconds")]
     pub fn idle_timeout(&mut self, secs: f64) -> Result<&Self> {
-        let seconds = duration_seconds(secs).map_err(napi::Error::from_reason)?;
-        self.inner = Some(self.take_inner()?.idle_timeout(seconds));
+        let seconds = crate::numeric::safe_integer(secs, "secs")?;
+        self.inner = Some(
+            self.take_inner()?
+                .idle_timeout(std::time::Duration::from_secs(seconds)),
+        );
         Ok(self)
     }
 
@@ -409,25 +584,11 @@ impl JsRestoreBuilder {
 }
 
 impl JsRestoreBuilder {
-    fn take_inner(&mut self) -> Result<RestoreBuilder> {
+    pub(crate) fn take_inner(&mut self) -> Result<RestoreBuilder> {
         self.inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("RestoreBuilder already consumed"))
     }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-/// Retain explicit zero, but never truncate a positive limit into immediate expiry.
-fn duration_seconds(seconds: f64) -> std::result::Result<u64, &'static str> {
-    // Keep validation independent of Node's error lifecycle so standalone Rust tests
-    // do not need N-API symbols. Only the public binding creates JavaScript errors.
-    if !seconds.is_finite() || seconds < 0.0 || seconds >= u64::MAX as f64 {
-        return Err("restore duration must be finite, non-negative, and fit in seconds");
-    }
-    Ok(seconds.ceil() as u64)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -436,7 +597,6 @@ fn duration_seconds(seconds: f64) -> std::result::Result<u64, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::duration_seconds;
     use crate::network_builder::accept_queue_size;
 
     #[test]
@@ -455,27 +615,6 @@ mod tests {
             f64::INFINITY,
         ] {
             assert!(accept_queue_size(value).is_err(), "{value}");
-        }
-    }
-
-    #[test]
-    fn restore_duration_preserves_zero_and_rounds_positive_limits_up() {
-        assert_eq!(duration_seconds(0.0).unwrap(), 0);
-        assert_eq!(duration_seconds(-0.0).unwrap(), 0);
-        assert_eq!(duration_seconds(0.5).unwrap(), 1);
-        assert_eq!(duration_seconds(1.5).unwrap(), 2);
-        assert_eq!(duration_seconds(f64::MIN_POSITIVE).unwrap(), 1);
-        for value in [
-            -1.0,
-            f64::NAN,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            u64::MAX as f64,
-        ] {
-            assert_eq!(
-                duration_seconds(value).unwrap_err(),
-                "restore duration must be finite, non-negative, and fit in seconds",
-            );
         }
     }
 }

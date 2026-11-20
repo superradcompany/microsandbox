@@ -11,7 +11,7 @@ This guide installs OpenCode in a microVM and opens its terminal UI in a project
 <Steps>
 <Step title="Start OpenCode">
 
-<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="These examples mount files from your computer. On our managed cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-limited">Limited on managed cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Replace `./my-project` with the project directory you want OpenCode to work on:
 
@@ -46,7 +46,7 @@ msb run -t --name opencode-demo --replace `
 The first run downloads the package and may take a couple of minutes. OpenCode should render its prompt and offer `/connect` for provider setup. Its XDG configuration, provider connections, and session data live on the sandbox's 4 GiB root disk and remain available when the sandbox stops and starts.
 
 <Tip>
-  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`. To try the TUI without a project, use `--mkdir /workspace` instead.
+  For an isolated workspace, or when using our managed cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`. To try the TUI without a project, use `--mkdir /workspace` instead.
 </Tip>
 
 </Step>

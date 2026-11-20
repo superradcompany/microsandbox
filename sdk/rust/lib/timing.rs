@@ -58,6 +58,11 @@ impl<'a> ConnectionTiming<'a> {
         self.stage = stage;
     }
 
+    /// Static phase label for errors; never includes endpoint or credentials.
+    pub(crate) fn current_stage(&self) -> &'static str {
+        self.stage
+    }
+
     pub(crate) fn finish(&mut self, outcome: &'static str) {
         self.outcome = outcome;
     }

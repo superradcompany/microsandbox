@@ -127,7 +127,7 @@ func cleanupFailedCreate(t *testing.T, name string) {
 
 	if h, err := microsandbox.GetSandbox(cleanupCtx, name); err == nil {
 		_ = h.Kill(cleanupCtx, microsandbox.WithKillTimeout(10*time.Second))
-		_ = h.Remove(cleanupCtx)
+		_ = h.Destroy(cleanupCtx)
 		return
 	}
 
@@ -420,7 +420,7 @@ func TestVolumeLifecycle(t *testing.T) {
 		t.Errorf("volume %q not found in ListVolumes", name)
 	}
 
-	if err := vol.Remove(ctx); err != nil {
+	if err := vol.Destroy(ctx); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	t.Cleanup(func() {
@@ -439,7 +439,7 @@ func TestVolumeAlreadyExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first CreateVolume: %v", err)
 	}
-	t.Cleanup(func() { _ = vol.Remove(context.Background()) })
+	t.Cleanup(func() { _ = vol.Destroy(context.Background()) })
 
 	_, err = microsandbox.CreateVolume(ctx, name)
 	if err == nil {
@@ -498,10 +498,14 @@ func TestDetachedSandboxOutlivesHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSandbox detached: %v", err)
 	}
-	// Detach the handle — sandbox should keep running. (Close would fire
-	// the SIGTERM safety net and stop the VM.)
+	// Detached creation already relinquishes cleanup. Detach is harmless and
+	// Close releases the still-valid native handle without stopping the VM.
 	if err := sb.Detach(ctx); err != nil {
 		t.Fatalf("Detach: %v", err)
+	}
+
+	if err := sb.Close(); err != nil {
+		t.Fatalf("Close after detach: %v", err)
 	}
 
 	// Look up metadata, then connect to run commands.
@@ -509,7 +513,8 @@ func TestDetachedSandboxOutlivesHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox after detach: %v", err)
 	}
-	sb2, err := handle.Connect(ctx)
+	sb2 := handle
+	err = handle.EnsureRunning(ctx)
 	if err != nil {
 		t.Fatalf("Connect after GetSandbox: %v", err)
 	}

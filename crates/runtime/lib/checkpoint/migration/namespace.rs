@@ -14,7 +14,7 @@ use super::types::MigrationBindings;
 
 /// Execution retains Windows deny-delete handles across asynchronous catalog admission and
 /// synchronous publication. Inspection uses share-all handles and retains none of them.
-pub(super) struct Guard {
+pub(in crate::checkpoint) struct Guard {
     _pins: Vec<File>,
     #[cfg(unix)]
     private_boundaries: Vec<PathBuf>,
@@ -50,6 +50,18 @@ pub(super) fn acquire(
     }
 
     acquire_parents(parents, execution, true)
+}
+
+/// A configured storage home may itself be an administrator-selected alias.
+/// Check its lexical ancestry and pin the canonical directory for publication.
+#[cfg(any(feature = "net", feature = "client"))]
+pub(in crate::checkpoint) fn configuration_home(
+    home: &Path,
+) -> Result<(PathBuf, Guard, Guard), String> {
+    let lexical = acquire_parents(vec![home.to_owned()], true, false)?;
+    let path = fs::canonicalize(home).map_err(|e| failure(home, &e))?;
+    let target = acquire_parents(vec![path.clone()], true, true)?;
+    Ok((path, lexical, target))
 }
 
 pub(super) fn private_parent(path: &Path) -> Result<Guard, String> {
@@ -113,7 +125,7 @@ pub fn open_preview_cache_file(cache: &Path, relative: &Path) -> Result<File, St
     Ok(source)
 }
 
-fn acquire_parents(
+pub(in crate::checkpoint) fn acquire_parents(
     parents: Vec<PathBuf>,
     execution: bool,
     publication: bool,

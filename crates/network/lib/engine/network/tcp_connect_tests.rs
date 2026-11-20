@@ -128,6 +128,7 @@ async fn check_connect(ipv6: bool, listening: bool) {
         HostRoutes {
             ipv4: true,
             ipv6: true,
+            ..HostRoutes::default()
         },
     )
     .unwrap();
@@ -257,6 +258,7 @@ async fn check_stalled_ipv6_fallback() {
         HostRoutes {
             ipv4: true,
             ipv6: true,
+            ..HostRoutes::default()
         },
     )
     .unwrap();

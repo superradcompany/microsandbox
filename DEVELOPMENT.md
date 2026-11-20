@@ -60,6 +60,14 @@ Verify the installation:
 msb --version
 ```
 
+## Unreleased resize-observation dependencies
+
+The resize/telemetry branch pins native Rust crates through workspace Git patches and pins the guest firmware through `vendor/libkrunfw`. No package publication or version bump is needed to build these changes. Initialize the recorded submodule revision with `git submodule update --init vendor/libkrunfw` and explicitly run `just build-libkrunfw` after changing that revision, then rebuild the CLI/SDK artifacts. The ordinary dependency check accepts an existing firmware filename and does not prove it was built from the recorded source commit.
+
+Use the newly built firmware for local qualification (set `MSB_PATH` to the newly built runtime and `MSB_LIBKRUNFW_PATH` to the firmware’s absolute path), and use the matching newly built `agentd`. An older firmware can still run supported workloads, but it lacks authoritative guest-readiness observations; resize observation/wait must report unsupported instead of claiming completion. Never replace that refusal with a target-equals-current heuristic.
+
+The workspace Git patches do not propagate to downstream crates. Before publishing dependent packages, the maintainer must publish the native release and replace those patches with the released dependencies. Until then, qualify from this checkout and retain exact source/binary identities in test reports.
+
 ## Build & Install Loop
 
 The core development cycle is:
@@ -69,6 +77,8 @@ just build && just install
 ```
 
 This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows.
+
+For Linux development or tests that need shared libraries from the checkout, set the search path for that invocation from the repository root, for example `LD_LIBRARY_PATH="$PWD/build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cargo test -p microsandbox-runtime --lib`.
 
 On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64). `just build-agentd` and `just build-libkrunfw` use a Linux build backend for the guest/kernel artifacts, then link/install Windows-native outputs. The backend is selected with `MSB_WINDOWS_LINUX_BUILD_BACKEND=auto|docker|wsl` and defaults to `auto`, which prefers Docker Linux containers and falls back to Ubuntu WSL. Set `MSB_WSL_DISTRO=<name>` when your WSL distro is not named `Ubuntu`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
 
@@ -351,7 +361,7 @@ Dispatch the **Release version bump** workflow (`.github/workflows/release-bump.
 
 The workflow then regenerates `Cargo.lock`, the shared `packages/package-lock.json`, and the SDK npm lockfile and opens a PR titled `chore: release vX.Y.Z`.
 
-`microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes whatever `microsandbox-mcp` version the submodule pointer holds.
+`microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes the pinned `microsandbox-mcp` version and requires it to match the release tag.
 
 ### 2. Tag and Release
 
@@ -376,11 +386,30 @@ The release workflow (`.github/workflows/release.yml`) will:
 10. Update the Homebrew tap and winget manifests
 11. Sync docs to Mintlify and refresh the npm lockfile on `main`
 
+### Release candidates
+
+RC support is independent of GPU bundles. Use canonical versions such as `0.8.0-rc.1`, `0.8.0-rc.2`, then `0.8.0` for the final release. Follow the normal version-bump process to align package versions and exact internal dependencies before tagging the approved commit.
+
+```bash
+# After reviewing and merging the version bump, tag the approved commit.
+git tag -s v0.8.0-rc.1 <approved-commit> -m "microsandbox 0.8.0-rc.1"
+git push origin refs/tags/v0.8.0-rc.1
+```
+
+The existing `v*` trigger runs the same platform builds and release validation for candidates and finals. The release context validates the tag against the source workspace version and classifies SemVer prereleases centrally. npm also checks each package version against the release tag before publishing. Explicit recovery through the Release workflow uses the same classification and source validation.
+
+Candidates become GitHub prereleases and publish to npm `rc` and Docker exact-version/`rc` tags. Other prerelease names never use stable channels. Only stable releases update npm `latest`, Docker `latest` and major/minor aliases, the Homebrew formula, Winget, deployed docs, and the post-release lockfile PR against main. RC lockfile maintenance on a stabilization branch remains manual. PyPI and crates.io retain their normal prerelease-version handling; no new publishing credentials are required. Homebrew does not gain a separate RC formula in this change.
+
+To publish the final release, bump the accepted candidate source to the final version and create a new signed tag. Never move a published tag or replace candidate packages with final artifacts. Publishing across registries is not atomic, and the existing workflow recovery restrictions still apply. Local fixture tests do not replace a controlled RC publication: verify GitHub prerelease status, exact-version installs on supported platforms, npm and Docker channel tags, and unchanged stable distribution pointers before treating the first candidate pipeline run as validated.
+
+
 ### Recovering an unpublished release
 
 If runner retirement or another workflow issue blocks a tagged release before publication, merge the workflow fix to `main`, cancel the blocked run, and dispatch **Release** on `main` with `release_tag` set to the existing tag (for example, `v0.7.12`). Leave this input empty for a build-only run. Do not move or recreate the tag.
 
 Recovery requires an unpublished tag whose commit is already in `main` and whose workspace version matches its name. The workflow resolves that commit once, records it in the run summary, and pins every build and publication checkout to it. All platform builds, artifact checks, and the production SDK smoke test still gate publication. A GitHub release that already exists is rejected; partial publication after that point needs a separate recovery assessment. Post-release lockfile maintenance continues to target current `main`.
+
+Ubuntu package installation in Check and active Release jobs uses bounded retries, then falls back to Kernel.org for x86_64 or MIT Ubuntu Ports for ARM64. The fallback copies the runner's sources into a temporary configuration, preserves suites, components, architecture restrictions, signing keys, and third-party repositories, and refreshes a separate index directory before installation. APT signature and expiration checks remain enabled. Mirrors can lag upstream, so unavailable package versions still fail rather than bypassing verification or forcing a downgrade. Release recovery takes these CI helpers from the workflow revision through a same-run artifact while all product source checkouts remain pinned to the tag. The APT mirror checks workflow exercises a blocked-primary install on both runner architectures.
 
 ### npm publishing and provenance
 

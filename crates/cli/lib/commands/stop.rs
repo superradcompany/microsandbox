@@ -1,7 +1,6 @@
 //! `msb stop` command — stop a running sandbox.
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
 
 use crate::ui;
 
@@ -77,7 +76,7 @@ pub async fn run(args: StopArgs) -> anyhow::Result<()> {
 
 /// Stop a single sandbox.
 async fn stop_one(name: &str, force: bool, timeout_secs: Option<u64>) -> anyhow::Result<()> {
-    let handle = Sandbox::get(name).await?;
+    let handle = crate::commands::common::sandbox_record(name).await?;
     let result = if force {
         handle.kill().await
     } else if let Some(timeout_secs) = timeout_secs {

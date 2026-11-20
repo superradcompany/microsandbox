@@ -18,6 +18,17 @@ const (
 	SandboxStatusCrashed  SandboxStatus = "crashed"
 )
 
+// ServiceStatus reports whether a Service routes requests, is disabled, or has
+// no target.
+type ServiceStatus string
+
+const (
+	ServiceStatusEnabled  ServiceStatus = "enabled"
+	ServiceStatusDisabled ServiceStatus = "disabled"
+	ServiceStatusDetached ServiceStatus = "detached"
+	ServiceStatusUnknown  ServiceStatus = "unknown"
+)
+
 // FsEntryKind classifies a directory listing entry.
 type FsEntryKind string
 
@@ -92,6 +103,22 @@ const (
 	PullPolicyIfMissing PullPolicy = "if-missing"
 	PullPolicyNever     PullPolicy = "never"
 )
+
+// UnmarshalText accepts the Rust variant names used by persisted local specs
+// as well as the public SDK spellings.
+func (p *PullPolicy) UnmarshalText(text []byte) error {
+	switch string(text) {
+	case "IfMissing":
+		*p = PullPolicyIfMissing
+	case "Always":
+		*p = PullPolicyAlways
+	case "Never":
+		*p = PullPolicyNever
+	default:
+		*p = PullPolicy(text)
+	}
+	return nil
+}
 
 // LogLevel selects the sandbox process log verbosity.
 type LogLevel string

@@ -182,6 +182,7 @@ fn config(directory: &Path) -> Config {
     Config {
         agent_transport: AgentTransportProfile::Combined,
         sandbox_name: "custom-backends".into(),
+        retention_source: None,
         sandbox_id: 1,
         log_level: None,
         sandbox_db_path: directory.join("unused.db"),

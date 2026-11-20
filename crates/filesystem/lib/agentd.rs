@@ -18,6 +18,9 @@ static AGENTD_PAYLOAD: OnceLock<AgentdPayload> = OnceLock::new();
 /// Build-time capability of the actual embedded agent. Runtime overrides cannot grant it.
 pub const EMBEDDED_STORAGE_READER: bool = cfg!(msb_embedded_storage_reader_v1);
 
+/// Whether the embedded guest implements the private offline disk editor.
+pub const EMBEDDED_DISK_EDITOR: bool = cfg!(msb_embedded_disk_editor_v1);
+
 #[cfg(feature = "embed-binaries")]
 const EMBEDDED_AGENTD_BYTES: Option<&[u8]> =
     Some(include_bytes!(concat!(env!("OUT_DIR"), "/agentd")));

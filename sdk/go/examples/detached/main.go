@@ -2,11 +2,10 @@
 //
 // Demonstrates the full detached lifecycle:
 //  1. Create a detached sandbox (survives the Go process exit).
-//  2. Detach the local handle (releases the Rust-side ownership without
-//     stopping the VM).
+//  2. Call Detach idempotently without stopping the VM.
 //  3. List sandboxes and confirm it's still there.
-//  4. Reattach by name via GetSandbox + Connect.
-//  5. Run a command that proves the original VM kept running.
+//  4. Look up the resource by name with GetSandbox.
+//  5. Let Shell connect automatically and prove the original VM kept running.
 //  6. Stop and remove.
 //
 // Build: from sdk/go, run
@@ -52,26 +51,27 @@ func main() {
 	if err != nil {
 		log.Fatalf("OwnsLifecycle: %v", err)
 	}
-	fmt.Printf("  initial OwnsLifecycle()=%v (true: this handle would tear it down on Close)\n", owns)
+	fmt.Printf("  initial OwnsLifecycle()=%v (false: detached creation has no automatic shutdown ownership)\n", owns)
 
 	// Mark something inside the guest so the reattach below can see it.
 	if _, err := sb.Shell(ctx, "echo lived-through-detach > /tmp/witness"); err != nil {
 		log.Fatalf("Shell write witness: %v", err)
 	}
 
-	// Detach: release the local handle without stopping the VM.
+	// Detach is idempotent; the same resource remains usable.
 	if err := sb.Detach(ctx); err != nil {
 		log.Fatalf("Detach: %v", err)
 	}
-	fmt.Println("  detached the handle — sandbox keeps running")
+	fmt.Println("  detach preserves the resource — sandbox keeps running")
 
 	// Confirm via ListSandboxes.
 	page, err := microsandbox.ListSandboxes(ctx)
 	if err != nil {
 		log.Fatalf("ListSandboxes: %v", err)
 	}
-	var found *microsandbox.SandboxHandle
+	var found *microsandbox.Sandbox
 	for _, h := range page.Sandboxes {
+		defer h.Close()
 		if h.Name() == name {
 			found = h
 			break
@@ -80,17 +80,16 @@ func main() {
 	if found == nil {
 		log.Fatalf("sandbox %q missing from ListSandboxes after detach", name)
 	}
-	fmt.Printf("  ListSandboxes: still present (status=%s, created=%s)\n",
-		found.Status(), found.CreatedAt().Format(time.RFC3339))
+	info, err := found.Info(ctx)
+	if err != nil {
+		log.Fatalf("Info: %v", err)
+	}
+	fmt.Printf("  ListSandboxes: still present (status=%s, created=%v)\n", info.Status, info.CreatedAt)
 
-	// Reattach via GetSandbox + Connect.
-	h, err := microsandbox.GetSandbox(ctx, name)
+	// Get the same resource; Shell connects to the detached run on demand.
+	sb2, err := microsandbox.GetSandbox(ctx, name)
 	if err != nil {
 		log.Fatalf("GetSandbox: %v", err)
-	}
-	sb2, err := h.Connect(ctx)
-	if err != nil {
-		log.Fatalf("Connect: %v", err)
 	}
 	defer func() {
 		stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
@@ -99,9 +98,6 @@ func main() {
 		_ = sb2.Close()
 	}()
 
-	owns2, _ := sb2.OwnsLifecycle()
-	fmt.Printf("  reattached: OwnsLifecycle()=%v (false: Connect handles don't own the VM)\n", owns2)
-
 	out, err := sb2.Shell(ctx, "cat /tmp/witness")
 	if err != nil {
 		log.Fatalf("Shell read witness: %v", err)
@@ -109,6 +105,8 @@ func main() {
 	if !strings.Contains(out.Stdout(), "lived-through-detach") {
 		log.Fatalf("witness missing — VM was actually torn down: stdout=%q", out.Stdout())
 	}
+	owns2, _ := sb2.OwnsLifecycle()
+	fmt.Printf("  connected: OwnsLifecycle()=%v (false: connecting to an existing run acquires no ownership)\n", owns2)
 	fmt.Println("  VM survived detach: witness file intact ✓")
 
 	fmt.Println("OK — detached-mode example passed")

@@ -43,9 +43,11 @@ Having trouble with a local installation? Choose your platform for setup checks 
   </a>
 </div>
 
+For release candidates or an exact version, see [Versions](/getting-started/versions).
+
 <Steps>
   <Step title="Install microsandbox">
-    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. To run on cloud, set `MSB_BACKEND=cloud` and `MSB_API_KEY`, choose a cloud profile, or select cloud in code in supported SDKs. See [Local or cloud](/operations/backends).
+    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. These examples run locally without a cloud account or daemon. You can [switch to our managed cloud](#next-steps) when you need hosted compute.
 
     <CodeGroup>
     ```bash TypeScript
@@ -87,6 +89,10 @@ Having trouble with a local installation? Choose your platform for setup checks 
     Create an ephemeral sandbox, execute code inside it, and stop it when finished. Ephemeral sandboxes are removed after stopping, so the example can reuse the same name.
 
     <CodeGroup>
+    ```bash CLI
+    msb run python -- python3 -c "print('Hello from a microVM!')"
+    ```
+
     ```typescript TypeScript
     import { Sandbox } from "microsandbox";
 
@@ -178,10 +184,6 @@ Having trouble with a local installation? Choose your platform for setup checks 
     end
     ```
 
-    ```bash CLI
-    msb run python -- python3 -c "print('Hello from a microVM!')"
-    ```
-
     </CodeGroup>
   </Step>
 </Steps>
@@ -190,7 +192,7 @@ If you already ran an older version of this example and retained a sandbox named
 
 ## What just happened?
 
-Here's what happened behind that `Sandbox.builder(...).create()` call:
+Here's what the local runtime did when you created the sandbox:
 
 1. **Pulled the image** from Docker Hub, unless it was already cached.
 2. **Assembled a copy-on-write filesystem** so changes inside the sandbox do not modify the base image.
@@ -200,7 +202,7 @@ Here's what happened behind that `Sandbox.builder(...).create()` call:
 The `exec` call uses the host-guest command channel, not SSH and not the sandbox network.
 
 <Tip>
-  Want the same sandbox on hosted infrastructure? Set `MSB_BACKEND=cloud` and export `MSB_API_KEY`; the code above then runs on [microsandbox cloud](/cloud/overview) unchanged.
+  Ready for hosted compute? Use a remote context in your SDK, or switch the CLI connection. Our managed cloud needs no local VM. See [managed cloud](/cloud/overview) to choose a connection at startup and keep your sandbox workflow.
 </Tip>
 
 ## Next steps
@@ -208,7 +210,7 @@ The `exec` call uses the host-guest command channel, not SSH and not the sandbox
 - [SDK references](/sdk/overview#reference): choose TypeScript, Rust, Python, Go, or Ruby for sandbox lifecycle and API details
 - [Protect API credentials](/sandboxes/secrets): let sandboxed code use an API without receiving the credential value
 - [Browse guides](/how-to/overview): set up agents, CI/CD, Docker, and more
-- [Run on microsandbox cloud](/cloud/overview): the same code on hosted infrastructure
+- [Run on our managed cloud](/cloud/overview): choose a connection and keep your sandbox workflow
 - [Modify live sandbox settings](/sandboxes/tuning): resize headroom, labels, secrets, and storage
 - [Troubleshoot Linux setup](/troubleshooting/linux): KVM, `/dev/kvm`, and permissions
 - [Troubleshoot macOS setup](/troubleshooting/macos): Apple Silicon and local runtime checks

@@ -13,7 +13,7 @@ use microsandbox_image::{
 use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, PaginatorTrait, QueryFilter};
 
 use super::{ImagePruneReport, cleanup_journal::Journal};
-use crate::backend::LocalBackend;
+use crate::context::LocalContext;
 use crate::db::{
     DbReadConnection,
     entity::{image_ref, layer, manifest, manifest_layer, snapshot},
@@ -78,7 +78,7 @@ impl Image {
     /// sandboxes and snapshots. Active storage operations always return
     /// [`MicrosandboxError::ImageInUse`], including with `force`.
     pub async fn remove_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         reference: &str,
         force: bool,
     ) -> MicrosandboxResult<()> {
@@ -93,15 +93,15 @@ impl Image {
     /// are preserved.
     /// If a later cleanup batch fails, the error message includes removal counts from
     /// completed batches. The failing batch may have made additional progress.
-    pub async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport> {
+    pub async fn prune_local(local: &LocalContext) -> MicrosandboxResult<ImagePruneReport> {
         Self::delete_local(local, None).await
     }
 
     async fn delete_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         selected: Option<(String, bool)>,
     ) -> MicrosandboxResult<ImagePruneReport> {
-        crate::backend::local::snapshot::publication::recover(local).await?;
+        crate::context::local::snapshot::publication::recover(local).await?;
         Journal::recover(local).await?;
         let pools = local.db().await?;
         // Freeze the scope of an explicit removal, not the mutable catalog contents. Every
@@ -178,7 +178,7 @@ impl Image {
     }
 
     async fn delete_local_batch(
-        local: &LocalBackend,
+        local: &LocalContext,
         selected: Option<(String, bool)>,
         selected_manifests: HashSet<i32>,
         selected_layers: HashSet<i32>,
@@ -678,7 +678,7 @@ impl PreparedCleanup {
     /// Recheck owners and commit only prepared entries, then finish filesystem cleanup.
     async fn commit(
         self,
-        local: &LocalBackend,
+        local: &LocalContext,
         cache: GlobalCache,
         selected: Option<(String, bool)>,
         selected_manifests: HashSet<i32>,
@@ -746,10 +746,33 @@ mod tests {
     use super::*;
     use crate::Image;
 
-    async fn local(home: &std::path::Path) -> LocalBackend {
+    #[cfg(unix)]
+    fn recovery_fixture_in_child(name: &str) -> bool {
+        if std::env::var("MSB_TEST_IMAGE_RECOVERY").as_deref() == Ok(name) {
+            return false;
+        }
+        // These fixtures assert immediate recovery after dropping the last lock.
+        // A sibling test's fork can retain that descriptor until exec, so create
+        // the locks in a child with no unrelated process-spawning test threads.
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("image::cleanup::tests::{name}"),
+                "--nocapture",
+            ])
+            .env("MSB_TEST_IMAGE_RECOVERY", name)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated recovery fixture {name} failed: {status}"
+        );
+        true
+    }
+
+    async fn local(home: &std::path::Path) -> LocalContext {
         crate::test_support::local_backend_builder(home)
             .build()
-            .await
             .unwrap()
     }
 
@@ -770,7 +793,7 @@ mod tests {
     }
 
     async fn install(
-        local: &LocalBackend,
+        local: &LocalContext,
         reference: &str,
         metadata: &CachedImageMetadata,
     ) -> GlobalCache {
@@ -1069,6 +1092,26 @@ mod tests {
 
     #[tokio::test]
     async fn pending_snapshot_publication_roots_survive_prune_until_abandoned() {
+        #[cfg(unix)]
+        if std::env::var_os("MSB_TEST_PENDING_PUBLICATION_PRUNE").is_none() {
+            // A parallel fork may retain the publisher's descriptor until exec. Keep
+            // this immediate post-drop reclamation assertion in its own process,
+            // just like the busy-image fixture; do not weaken production lock safety.
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "image::cleanup::tests::pending_snapshot_publication_roots_survive_prune_until_abandoned",
+                    "--nocapture",
+                ])
+                .env("MSB_TEST_PENDING_PUBLICATION_PRUNE", "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated publication prune test failed: {status}"
+            );
+            return;
+        }
         use sea_orm::Set;
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
@@ -1309,6 +1352,12 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_cleanup_rechecks_catalog_and_never_unlinks_replacement() {
+        #[cfg(unix)]
+        if recovery_fixture_in_child(
+            "interrupted_cleanup_rechecks_catalog_and_never_unlinks_replacement",
+        ) {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
         let metadata = metadata('a', 'c');
@@ -1369,6 +1418,12 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_discards_abandoned_preparation_without_unlinking_sources() {
+        #[cfg(unix)]
+        if recovery_fixture_in_child(
+            "recovery_discards_abandoned_preparation_without_unlinking_sources",
+        ) {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
         let metadata = metadata('a', 'c');

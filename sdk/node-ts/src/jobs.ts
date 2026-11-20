@@ -2,6 +2,8 @@ import type { NapiJob, NapiJobAttachment, NapiJobLogStream } from "./internal/na
 
 export type JobState = "starting" | "running" | "exited" | "failed" | "lost";
 
+export type JobOutputSource = "stdout" | "stderr" | "output" | "stdin_error";
+
 export interface JobInfo {
   readonly id: string;
   readonly runtimeBootId: string;
@@ -23,7 +25,7 @@ export interface JobPage { readonly items: readonly JobInfo[]; readonly nextCurs
 export interface JobExit { readonly code: number; readonly success: boolean; readonly timedOut: boolean }
 export interface JobLogEntry {
   readonly timestamp: number;
-  readonly source: string;
+  readonly source: JobOutputSource;
   readonly data: Buffer;
   readonly cursor: string;
 }
@@ -31,7 +33,7 @@ export interface JobLogOptions {
   tail?: number;
   since?: number;
   until?: number;
-  sources?: string[];
+  sources?: readonly JobOutputSource[];
   fromCursor?: string;
   follow?: boolean;
 }

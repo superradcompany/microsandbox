@@ -13,6 +13,8 @@ path = "lib/lib.rs"
 
 [features]
 default = ["download-binaries", "embed-binaries", "net", "runner"]
+# Opt-in disposable-VM qualification only; normal/release builds contain no fault hooks.
+retention-test-hooks = []
 client = ["dep:hex", "dep:microsandbox-image", "dep:rand", "dep:tempfile", "dep:tokio"]
 runner = [
     "client",
@@ -34,9 +36,12 @@ runner = [
 ]
 download-binaries = ["runner", "microsandbox-filesystem/download-binaries"]
 embed-binaries = ["runner", "microsandbox-filesystem/embed-binaries"]
-net = ["dep:microsandbox-network", "msb_krun?/net"]
+encrypted-snapshot-identity = ["net", "dep:age"]
+net = ["dep:chacha20poly1305", "dep:microsandbox-network", "microsandbox-network/intercept-identity", "msb_krun?/net"]
 
 [dependencies]
+age = { workspace = true, optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
 base64.workspace = true
 cap-primitives.workspace = true
 ciborium-ll.workspace = true

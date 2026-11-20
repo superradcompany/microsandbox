@@ -12,8 +12,46 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
+)
+
+// ResourceConvergenceState identifies the observed progress of an accepted resource resize.
+type ResourceConvergenceState string
+
+const (
+	ResourceConvergenceStateAccepted     ResourceConvergenceState = "accepted"
+	ResourceConvergenceStateConverging   ResourceConvergenceState = "converging"
+	ResourceConvergenceStateApplied      ResourceConvergenceState = "applied"
+	ResourceConvergenceStateGuestRefused ResourceConvergenceState = "guest-refused"
+	ResourceConvergenceStateFailed       ResourceConvergenceState = "failed"
+)
+
+// ResourceKind identifies the resource whose live resize is being observed.
+type ResourceKind string
+
+const (
+	ResourceCPUs   ResourceKind = "cpus"
+	ResourceMemory ResourceKind = "memory"
+)
+
+// PlannedChangeKind identifies the discriminator of a planned modification.
+type PlannedChangeKind string
+
+const (
+	PlannedChangeKindConfig PlannedChangeKind = "config"
+	PlannedChangeKindSecret PlannedChangeKind = "secret"
+)
+
+// ModificationDisposition describes when a planned modification can take effect.
+type ModificationDisposition string
+
+const (
+	ModificationDispositionLive            ModificationDisposition = "live"
+	ModificationDispositionNextStart       ModificationDisposition = "next start"
+	ModificationDispositionRequiresRestart ModificationDisposition = "requires restart"
+	ModificationDispositionUnsupported     ModificationDisposition = "unsupported"
 )
 
 // ModificationPolicy selects how a modification is planned or applied.
@@ -165,17 +203,17 @@ type SandboxModificationPlan struct {
 // config entries carry Before/After. Disposition is "live", "next start",
 // "requires restart", or "unsupported".
 type PlannedChange struct {
-	Kind        string   `json:"kind"`
-	Field       string   `json:"field"`
-	Name        string   `json:"name,omitempty"`
-	Change      string   `json:"change"`
-	Before      *string  `json:"before,omitempty"`
-	After       *string  `json:"after,omitempty"`
-	BeforeRef   *string  `json:"before_ref,omitempty"`
-	AfterRef    *string  `json:"after_ref,omitempty"`
-	Disposition string   `json:"disposition"`
-	AllowHosts  []string `json:"allow_hosts,omitempty"`
-	Reason      *string  `json:"reason,omitempty"`
+	Kind        PlannedChangeKind       `json:"kind"`
+	Field       string                  `json:"field"`
+	Name        string                  `json:"name,omitempty"`
+	Change      string                  `json:"change"`
+	Before      *string                 `json:"before,omitempty"`
+	After       *string                 `json:"after,omitempty"`
+	BeforeRef   *string                 `json:"before_ref,omitempty"`
+	AfterRef    *string                 `json:"after_ref,omitempty"`
+	Disposition ModificationDisposition `json:"disposition"`
+	AllowHosts  []string                `json:"allow_hosts,omitempty"`
+	Reason      *string                 `json:"reason,omitempty"`
 }
 
 // ModificationConflict blocks applying a modification.
@@ -192,11 +230,11 @@ type ModificationWarning struct {
 
 // ResourceResizeStatus reports runtime convergence for a live resize.
 type ResourceResizeStatus struct {
-	Resource  string `json:"resource"`
-	Requested string `json:"requested"`
-	Actual    string `json:"actual"`
-	Enforced  string `json:"enforced"`
-	State     string `json:"state"`
+	Resource  ResourceKind             `json:"resource"`
+	Requested string                   `json:"requested"`
+	Actual    string                   `json:"actual"`
+	Enforced  string                   `json:"enforced"`
+	State     ResourceConvergenceState `json:"state"`
 }
 
 // Modify plans or applies a sandbox modification on this live sandbox.
@@ -216,21 +254,39 @@ func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModif
 	return parseModificationPlan(out)
 }
 
-// Modify plans or applies a sandbox modification by name. It does not start
-// stopped sandboxes; next-start changes persist for the next boot.
-func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error) {
-	if err := requireModifyCapabilities(opts); err != nil {
-		return nil, err
-	}
-	payload, err := buildModifyRequestJSON(opts)
-	if err != nil {
-		return nil, err
-	}
-	out, err := ffi.ModifySandboxByName(ctx, h.name, payload)
+// ResizeStatus reads the current live CPU and memory resize status. It returns
+// an error when the sandbox is not running.
+func (s *Sandbox) ResizeStatus(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := s.inner.ResizeStatus(ctx)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	return parseModificationPlan(out)
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResized waits for the initially selected resize operations to be confirmed.
+// It returns an error when the sandbox is not running. There is no
+// built-in deadline and it keeps polling while a guest never converges;
+// cancel ctx or use WaitUntilResizedWithTimeout to bound it.
+func (s *Sandbox) WaitUntilResized(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := s.inner.WaitUntilResized(ctx, ffi.ResizeWaitUnbounded)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResizedWithTimeout waits for live resizes to settle within
+// timeout. A zero or negative timeout checks once. It returns an error
+// when the sandbox is not running. Expiry returns a nil list and a
+// *ResizeTimeoutError of kind ErrResizeTimeout whose Status holds the last
+// observed status, empty when no read completed before the deadline.
+func (s *Sandbox) WaitUntilResizedWithTimeout(ctx context.Context, timeout time.Duration) ([]ResourceResizeStatus, error) {
+	out, err := s.inner.WaitUntilResized(ctx, resizeTimeoutMillis(timeout))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
 }
 
 // requireModifyCapabilities rejects options that an older native library
@@ -458,6 +514,26 @@ func parseModificationPlan(raw string) (*SandboxModificationPlan, error) {
 		return nil, fmt.Errorf("parse modification plan: %w", err)
 	}
 	return &plan, nil
+}
+
+func parseResizeStatus(raw string) ([]ResourceResizeStatus, error) {
+	var status []ResourceResizeStatus
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return nil, fmt.Errorf("parse resize status: %w", err)
+	}
+	return status, nil
+}
+
+// resizeTimeoutMillis maps zero or negative budgets to one check and rounds
+// positive sub-millisecond budgets up.
+func resizeTimeoutMillis(timeout time.Duration) uint64 {
+	if timeout <= 0 {
+		return 0
+	}
+	if timeout < time.Millisecond {
+		return 1
+	}
+	return uint64(timeout / time.Millisecond)
 }
 
 func sortedKeys[V any](m map[string]V) []string {

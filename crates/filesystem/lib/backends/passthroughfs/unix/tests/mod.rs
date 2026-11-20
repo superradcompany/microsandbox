@@ -46,6 +46,11 @@ use crate::{
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+// Replace a host name after CREATE opens it but before inode registration.
+thread_local! {
+    pub(super) static BEFORE_CREATE_REGISTRATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+}
+
 /// Linux errno constants for assertion matching.
 ///
 /// The PassthroughFs always returns Linux errno values regardless of host OS

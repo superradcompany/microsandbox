@@ -310,6 +310,217 @@ check_linux_compatibility() {
 # Version resolution
 # ---------------------------------------------------------------------------
 
+usage() {
+    cat <<'USAGE'
+Usage: install.sh [--channel stable|rc | --version VERSION]
+
+No selection installs the latest stable release. RC selection is opt-in.
+VERSION accepts a release tag or SemVer, for example v0.8.0-rc.1.
+Environment: MSB_INSTALL_CHANNEL, MSB_INSTALL_VERSION, MSB_HOME.
+Flags override the corresponding environment variable. Do not combine a
+channel and an exact version. Selection applies only to this invocation.
+USAGE
+}
+
+parse_selection() {
+    CHANNEL=${MSB_INSTALL_CHANNEL:-}
+    VERSION=${MSB_INSTALL_VERSION:-}
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --channel|--version)
+                [ "$#" -ge 2 ] && [ -n "$2" ] || error "$1 requires a value"
+                case "$1" in --channel) CHANNEL=$2 ;; --version) VERSION=$2 ;; esac
+                shift 2 ;;
+            --help|-h) usage; exit 0 ;;
+            *) error "Unknown option: $1 (see --help)" ;;
+        esac
+    done
+    [ -z "$CHANNEL" ] || [ -z "$VERSION" ] || error "Choose --channel or --version, not both"
+    case "$CHANNEL" in ''|stable|rc) ;; *) error "Channel must be stable or rc" ;; esac
+    CHANNEL=${CHANNEL:-stable}
+    if [ -n "$VERSION" ]; then
+        VERSION=$(normalize_version "$VERSION") || error "Invalid release version"
+    fi
+}
+
+normalize_version() {
+    # Validate before constructing a URL. Numeric prerelease identifiers cannot
+    # have leading zeroes; build metadata is not a prerelease identifier.
+    printf '%s\n' "$1" | awk '
+        NR != 1 { exit 1 }
+        {
+            sub(/^v/, ""); version=$0
+            if (!match(version, /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/)) exit 1
+            sub(/\+.*/, "")
+            if (sub(/^[0-9]+\.[0-9]+\.[0-9]+-/, "")) {
+                n=split($0, parts, ".")
+                for (i=1; i<=n; i++) if (parts[i] ~ /^0[0-9]+$/) exit 1
+            }
+            print "v" version
+        }'
+}
+
+release_records() {
+    # Parse JSON structurally: notes and nested assets can contain tag_name,
+    # braces or escaped quotes. Grepping those fields can select the wrong
+    # release. This small parser needs only POSIX awk, not jq/Python/Node.
+    LC_ALL=C awk '
+        # BSD awk can rescan the whole string for each substr call. Keep
+        # character lookups bounded even when GitHub returns megabytes of JSON.
+        {
+            line=$0 "\n"
+            for (start=1; start<=length(line); start+=4096) {
+                chunks[++chunk_count]=substr(line,start,4096)
+                document_length+=length(chunks[chunk_count])
+                chunk_ends[chunk_count]=document_length
+            }
+        }
+        function char_at(position) {
+            if (position<1 || position>document_length) return ""
+            while (position>chunk_ends[chunk_index]) chunk_index++
+            while (chunk_index>1 && position<=chunk_ends[chunk_index-1]) chunk_index--
+            return substr(chunks[chunk_index],position-chunk_ends[chunk_index-1],1)
+        }
+        function fail() { failed=1; exit 1 }
+        function next_token(    c,escape,i) {
+            while (char_at(pos) ~ /[ \t\r\n]/ && pos<=document_length) pos++
+            token=char_at(pos++); value=token
+            if (token=="\"") {
+                value=""
+                while (pos<=document_length) {
+                    c=char_at(pos++)
+                    if (c=="\"") return
+                    if (c ~ /[[:cntrl:]]/) fail()
+                    if (c=="\\") {
+                        escape=char_at(pos++)
+                        if (escape=="u") {
+                            for (i=0;i<4;i++) if (char_at(pos+i) !~ /^[0-9a-fA-F]$/) fail()
+                            pos+=4
+                        } else if (escape !~ /^["\\\/bfnrt]$/) fail()
+                        # Escaped release identifiers are deliberately rejected;
+                        # arbitrary escapes in descriptions are simply skipped.
+                        c="?"
+                    }
+                    value=value c
+                }
+                fail()
+            }
+            if (token ~ /[0-9tfn-]/ && token!="") {
+                pos--; token="literal"; value=""
+                while (char_at(pos) ~ /[0-9A-Za-z.eE+-]/ && pos<=document_length) value=value char_at(pos++)
+                if (value !~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) fail()
+            }
+        }
+        function item(depth,    key,kind,v) {
+            if (depth>64) fail()
+            if (token=="{") {
+                next_token()
+                if (token!="}") while (1) {
+                    if (token!="\"") fail()
+                    key=value; next_token(); if (token!=":") fail()
+                    next_token(); kind=token; v=value
+                    if (depth==record_depth && (key=="tag_name" || key=="draft" || key=="prerelease")) {
+                        if (key in fields) fail()
+                        if (key=="tag_name" && kind!="\"") fail()
+                        if (key!="tag_name" && (kind!="literal" || v !~ /^(true|false)$/)) fail()
+                        fields[key]=v
+                    }
+                    item(depth+1)
+                    if (token=="}") break
+                    if (token!=",") fail()
+                    next_token()
+                }
+                next_token()
+            } else if (token=="[") {
+                next_token()
+                if (token!="]") while (1) {
+                    item(depth+1)
+                    if (token=="]") break
+                    if (token!=",") fail()
+                    next_token()
+                }
+                next_token()
+            } else if (token=="\"" || token=="literal") next_token()
+            else fail()
+        }
+        function record(    key) {
+            for (key in fields) delete fields[key]
+            if (token!="{") fail()
+            item(record_depth)
+            if (!("tag_name" in fields) || !("draft" in fields) || !("prerelease" in fields)) fail()
+            if (fields["tag_name"] ~ /^v[0-9A-Za-z.+-]+$/)
+                print fields["tag_name"] " " fields["draft"] " " fields["prerelease"]
+            count++
+        }
+        END {
+            if (failed) exit 1
+            pos=1; next_token(); if (token!="[") fail()
+            record_depth=1; next_token()
+            if (token!="]") while (1) {
+                record()
+                if (token=="]") break
+                if (token!=",") fail()
+                next_token()
+            }
+            next_token(); if (token!="") fail()
+            print "#" (count+0)
+        }'
+}
+
+select_rc() {
+    awk '
+        # Compare integer strings without awk floating-point rounding.
+        function numbercmp(a,b) {
+            if (length(a)!=length(b)) return length(a)>length(b) ? 1 : -1
+            return ("x" a > "x" b) ? 1 : (("x" a < "x" b) ? -1 : 0)
+        }
+        function versioncmp(a,b,    aa,bb,i,c) {
+            split(a,aa,/[^0-9]+/); split(b,bb,/[^0-9]+/)
+            for (i=2;i<=4;i++) { c=numbercmp(aa[i],bb[i]); if (c) return c }
+            return 0
+        }
+        $2=="false" && $3=="false" && $1 ~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+[0-9A-Za-z.-]+)?$/ {
+            if (!stable || versioncmp($1,stable)>0) stable=$1
+        }
+        $2=="false" && $3=="true" && $1 ~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.(0|[1-9][0-9]*)$/ {
+            candidate=$1; sequence=$1; sub(/^.*-rc\./,"",sequence)
+            comparison=versioncmp(candidate,best)
+            if (!best || comparison>0 || (comparison==0 && numbercmp(sequence,best_sequence)>0)) {
+                best=candidate; best_sequence=sequence
+            }
+        }
+        END {
+            # A final release retires its candidates, including older trains.
+            if (!best || (stable && versioncmp(best,stable)<=0)) exit 1
+            print best
+        }'
+}
+
+resolve_version() {
+    [ -z "$VERSION" ] || return 0
+    if [ "$CHANNEL" = stable ]; then
+        get_latest_version
+        VERSION=$(normalize_version "$VERSION") || error "Invalid latest release version"
+        # GitHub latest excludes prereleases. Also reject a misclassified tag.
+        _core=${VERSION%%+*}
+        case "$_core" in *-*) error "Latest release is not stable" ;; esac
+        return
+    fi
+    _page=1
+    _records=""
+    while [ "$_page" -le 100 ]; do
+        _json=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100&page=${_page}") || error "Could not list RC releases"
+        _batch=$(printf '%s\n' "$_json" | release_records) || error "Invalid release list from GitHub"
+        _count=$(printf '%s\n' "$_batch" | tail -1)
+        _records="${_records}
+${_batch}"
+        [ "$_count" = '#100' ] || break
+        _page=$((_page + 1))
+    done
+    [ "$_page" -le 100 ] || error "Release list exceeded pagination limit; use --version"
+    VERSION=$(printf '%s\n' "$_records" | select_rc) || error "No active RC release found; use --version to select an older candidate"
+}
+
 get_latest_version() {
     _url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     VERSION=$(curl -fsSL "$_url" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/')
@@ -324,6 +535,7 @@ get_latest_version() {
 # ---------------------------------------------------------------------------
 
 main() {
+    parse_selection "$@"
     need_cmd curl
     need_cmd tar
     need_cmd uname
@@ -342,8 +554,8 @@ main() {
         check_linux_compatibility
     fi
 
-    get_latest_version
-    info "Latest version: $VERSION"
+    resolve_version
+    info "Selected version: $VERSION"
 
     _base_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}"
     _bundle="microsandbox-${TARGET}.tar.gz"

@@ -12,6 +12,7 @@ mod local;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use builder::SandboxModificationResult;
 pub use builder::{SandboxModificationBuilder, SecretPatchBuilder};
 pub use microsandbox_types::modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,

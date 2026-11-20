@@ -4,9 +4,14 @@
 //! methods for lifecycle management (signals, wait).
 
 use std::fs::File;
+use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::ExitStatus;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[cfg(unix)]
 use nix::{
@@ -14,6 +19,8 @@ use nix::{
     unistd::Pid,
 };
 use tokio::process::Child;
+#[cfg(target_os = "linux")]
+use tokio::runtime::Handle;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
@@ -27,6 +34,8 @@ use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROC
 
 use microsandbox_metrics::MetricsRegistry;
 
+#[cfg(target_os = "linux")]
+use super::{child_exit::ChildExit, child_reaper};
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -45,22 +54,22 @@ pub struct ProcessHandle {
     sandbox_name: String,
 
     /// The sandbox child process handle.
-    child: Child,
+    child: ReapedChild,
 
     /// Retained only until preparation completes. No background reader survives creation.
     pub(crate) startup_reader: Option<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>>,
 
     /// When true, the Drop impl will NOT send SIGTERM.
-    detached: bool,
+    cleanup: Arc<CleanupControl>,
 
     /// Writer side of the attached-parent watchdog pipe. Keeping this open
     /// lets the child detect when the owner process disappears.
     #[cfg(unix)]
-    parent_watchdog: Option<OwnedFd>,
+    parent_watchdog: Option<Arc<OwnedFd>>,
 
     /// Windows job object that owns the sandbox process tree.
     #[cfg(windows)]
-    job: Option<WindowsJob>,
+    job: Option<Arc<WindowsJob>>,
 
     /// Best-effort cleanup token for a metrics slot that may still be in
     /// `Reserved` if the runtime exits before activation.
@@ -69,6 +78,37 @@ pub struct ProcessHandle {
     /// Startup-owned Windows locks, cleared after duplication into the exact runtime process.
     /// Unix transfers these at spawn. Established handles must not retain parent lock copies.
     _disk_locks: Vec<File>,
+}
+
+/// Sandbox child that is still reaped after its [`ProcessHandle`] is dropped.
+///
+/// Dropping a running Tokio child hands it to Tokio's orphan queue, which is drained only
+/// when Tokio's own SIGCHLD handler runs. Host runtimes such as Node.js (libuv) replace or
+/// reset the process-wide SIGCHLD disposition, so a detached or released VM would otherwise
+/// stay `<defunct>` until the creating process exits.
+struct ReapedChild {
+    /// Always `Some` until `Drop` takes it.
+    child: Option<Child>,
+
+    /// Runtime that spawned the child, so the reaper does not depend on the dropping thread.
+    #[cfg(target_os = "linux")]
+    runtime: Option<Handle>,
+}
+
+/// Shared cleanup control independent of the child-process wait lock.
+///
+/// Only owning resources retain this token. Idle non-owning helpers must not
+/// retain its watchdog or job, which are themselves lifetime authorities.
+pub(crate) struct CleanupControl {
+    detached: AtomicBool,
+    finished: AtomicBool,
+    #[cfg(target_os = "linux")]
+    reaper_started: AtomicBool,
+    transition: std::sync::Mutex<()>,
+    #[cfg(unix)]
+    watchdog: Option<Arc<OwnedFd>>,
+    #[cfg(windows)]
+    job: Option<Arc<WindowsJob>>,
 }
 
 /// Cancellation owner for a process whose startup has not completed.
@@ -96,6 +136,11 @@ pub(crate) struct WindowsJob {
 
 #[cfg(windows)]
 unsafe impl Send for WindowsJob {}
+
+// Windows job handles support concurrent queries/updates; the handle itself is
+// immutable and closes only after the final Arc is released.
+#[cfg(windows)]
+unsafe impl Sync for WindowsJob {}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -236,14 +281,29 @@ impl ProcessHandle {
             drop(disk_locks);
             Vec::new()
         };
+        #[cfg(unix)]
+        let parent_watchdog = parent_watchdog.map(Arc::new);
+        #[cfg(windows)]
+        let job = job.map(Arc::new);
+        let cleanup = Arc::new(CleanupControl {
+            detached: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            reaper_started: AtomicBool::new(false),
+            transition: std::sync::Mutex::new(()),
+            #[cfg(unix)]
+            watchdog: parent_watchdog.clone(),
+            #[cfg(windows)]
+            job: job.clone(),
+        });
         Self {
             pid,
             #[cfg(windows)]
             ownership: None,
             sandbox_name,
-            child,
+            child: ReapedChild::new(child),
             startup_reader: None,
-            detached: false,
+            cleanup,
             _disk_locks: disk_locks,
             #[cfg(unix)]
             parent_watchdog,
@@ -265,6 +325,10 @@ impl ProcessHandle {
 
     /// Send SIGKILL to the sandbox process for immediate termination.
     pub fn kill(&self) -> MicrosandboxResult<()> {
+        // Background collection clears Child::id; the stored PID may now be reused.
+        if self.child.id().is_none() {
+            return Ok(());
+        }
         #[cfg(unix)]
         {
             tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGKILL");
@@ -290,6 +354,10 @@ impl ProcessHandle {
     /// The libkrun signal handler catches SIGUSR1, writes to the exit event
     /// fd, exit observers run, and the process terminates.
     pub fn drain(&self) -> MicrosandboxResult<()> {
+        // Background collection clears Child::id; the stored PID may now be reused.
+        if self.child.id().is_none() {
+            return Ok(());
+        }
         #[cfg(unix)]
         {
             tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGUSR1 (drain)");
@@ -308,17 +376,39 @@ impl ProcessHandle {
     /// Wait for the sandbox process to exit.
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
         tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "waiting for exit");
+        #[cfg(target_os = "linux")]
+        let status = {
+            let mut exit = ChildExit::observe(&self.child);
+            loop {
+                if let Some(status) = self.child.try_wait()? {
+                    break status;
+                }
+                // Child ownership is retained until collection, so this observer cannot
+                // accidentally follow a recycled PID. Cancellation leaves it waitable.
+                if let Some(exit) = &mut exit {
+                    exit.wait().await;
+                }
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
         let status = self.child.wait().await?;
+        self.cleanup.finished.store(true, Ordering::Release);
         self._disk_locks.clear();
         tracing::debug!(pid = self.pid, ?status, "process exited");
         self.cleanup_metrics_reservation();
         Ok(status)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn observe_exit(&self) -> Option<ChildExit> {
+        ChildExit::observe(&self.child)
+    }
+
     /// Check if the process has exited without blocking.
     pub fn try_wait(&mut self) -> MicrosandboxResult<Option<ExitStatus>> {
         let status = self.child.try_wait()?;
         if status.is_some() {
+            self.cleanup.finished.store(true, Ordering::Release);
             // Also release startup-owned copies on failed handoff. Cleanup may retain this
             // ProcessHandle while deleting the sandbox directory containing the sidecars.
             self._disk_locks.clear();
@@ -359,21 +449,14 @@ impl ProcessHandle {
 
     /// Disarm the SIGTERM safety net so the sandbox keeps running after
     /// this handle is dropped. Used by detached sandbox flows.
-    pub fn disarm(&mut self) {
-        self.detached = true;
+    pub fn disarm(&mut self) -> MicrosandboxResult<()> {
+        // An already reaped child has no live Unix watchdog to notify.
+        self.try_wait()?;
+        self.cleanup.disarm()
+    }
 
-        #[cfg(unix)]
-        {
-            if let Some(parent_watchdog) = &self.parent_watchdog
-                && let Err(err) = send_parent_watchdog_detach(parent_watchdog)
-            {
-                tracing::debug!(
-                    error = %err,
-                    sandbox = %self.sandbox_name,
-                    "failed to send parent-watch detach"
-                );
-            }
-        }
+    pub(crate) fn cleanup_control(&self) -> Arc<CleanupControl> {
+        self.cleanup.clone()
     }
 
     fn cleanup_metrics_reservation(&mut self) {
@@ -381,6 +464,64 @@ impl ProcessHandle {
             return;
         };
         metrics_reservation.release_reserved(&self.sandbox_name);
+    }
+}
+
+impl ReapedChild {
+    fn new(child: Child) -> Self {
+        Self {
+            child: Some(child),
+            #[cfg(target_os = "linux")]
+            runtime: Handle::try_current().ok(),
+        }
+    }
+}
+
+impl CleanupControl {
+    /// Start at most one observer for a retained detached run. It never owns cleanup authority.
+    pub(crate) fn disarm_retained(
+        &self,
+        handle: Option<&Arc<tokio::sync::Mutex<ProcessHandle>>>,
+    ) -> MicrosandboxResult<()> {
+        self.disarm()?;
+        #[cfg(target_os = "linux")]
+        if let Some(handle) = handle
+            && !self.reaper_started.swap(true, Ordering::AcqRel)
+        {
+            child_reaper::retained(Arc::downgrade(handle));
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = handle;
+        Ok(())
+    }
+
+    pub(crate) fn is_armed(&self) -> bool {
+        !self.detached.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn disarm(&self) -> MicrosandboxResult<()> {
+        // This lock covers only the synchronous one-byte notification/job update,
+        // never child wait, guest work, or an await. Concurrent detaches share it.
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.is_armed() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        if !self.finished.load(Ordering::Acquire)
+            && let Some(watchdog) = &self.watchdog
+        {
+            send_parent_watchdog_detach(watchdog)?;
+        }
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            job.disarm()?;
+        }
+        // A failed notification leaves authority armed and the receiver usable.
+        self.detached.store(true, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -431,6 +572,25 @@ impl MetricsReservationCleanup {
 
 #[cfg(windows)]
 impl WindowsJob {
+    /// Keep the existing job and process identity, but remove automatic termination.
+    fn disarm(&self) -> std::io::Result<()> {
+        let mut limits = unsafe { std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
+        // This SDK creates the job with only KILL_ON_JOB_CLOSE. Clear that flag
+        // before publishing detach; closing the retained job must no longer kill it.
+        let result = unsafe {
+            SetInformationJobObject(
+                self.handle,
+                JobObjectExtendedLimitInformation,
+                (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Create an unnamed job object that terminates its process tree when the
     /// final job handle closes.
     pub(crate) fn new_kill_on_close() -> std::io::Result<Self> {
@@ -522,7 +682,7 @@ impl Drop for StartupProcess {
 
 impl Drop for ProcessHandle {
     fn drop(&mut self) {
-        if self.detached {
+        if !self.cleanup.is_armed() {
             return;
         }
 
@@ -567,6 +727,30 @@ impl Drop for ProcessHandle {
     }
 }
 
+impl Deref for ReapedChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        self.child.as_ref().expect("child is present until drop")
+    }
+}
+
+impl DerefMut for ReapedChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child is present until drop")
+    }
+}
+
+impl Drop for ReapedChild {
+    /// Runs after `ProcessHandle::drop` has sent any release signal.
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(child) = self.child.take() {
+            reap_in_background(child, self.runtime.take());
+        }
+    }
+}
+
 #[cfg(windows)]
 impl Drop for WindowsJob {
     fn drop(&mut self) {
@@ -605,6 +789,12 @@ fn send_parent_watchdog_detach(fd: &OwnedFd) -> std::io::Result<()> {
             "failed to write parent-watch detach byte",
         ));
     }
+}
+
+/// Transfer the released child to signal-independent collection.
+#[cfg(target_os = "linux")]
+fn reap_in_background(child: Child, runtime: Option<Handle>) {
+    child_reaper::released(child, runtime);
 }
 
 #[cfg(windows)]
@@ -850,6 +1040,9 @@ mod tests {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod reap_tests;
+
 #[cfg(all(test, windows))]
 mod windows_tests {
     use std::os::windows::fs::OpenOptionsExt;
@@ -954,9 +1147,13 @@ mod windows_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("disk.lock");
         let mut process = child(directory.path(), vec![open_lock(&path)]);
+        let job = WindowsJob::new_kill_on_close().unwrap();
+        job.assign_pid(process.pid()).unwrap();
+        process.job = Some(Arc::new(job));
+        Arc::get_mut(&mut process.cleanup).unwrap().job = process.job.clone();
         process.handoff_disk_locks().await.unwrap();
         ready(directory.path()).await;
-        process.disarm();
+        process.disarm().unwrap();
         drop(process);
         assert!(!available(&path));
         std::fs::write(directory.path().join("exit"), b"exit").unwrap();

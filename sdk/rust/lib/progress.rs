@@ -2,7 +2,7 @@
 
 use tokio::sync::mpsc;
 
-pub use microsandbox_runtime::startup_progress::{StartupPhase, StartupProgress};
+pub use microsandbox_types::startup_progress::{StartupPhase, StartupProgress};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -13,7 +13,7 @@ pub use microsandbox_runtime::startup_progress::{StartupPhase, StartupProgress};
 #[serde(tag = "kind", content = "progress", rename_all = "snake_case")]
 pub enum CreationProgress {
     /// Existing per-layer image preparation progress.
-    Pull(microsandbox_image::PullProgress),
+    Pull(microsandbox_types::pull_progress::PullProgress),
     /// Runtime preparation or activation progress.
     Startup(StartupProgress),
 }
