@@ -55,7 +55,17 @@ class CheckpointIntegrationTests(unittest.TestCase):
         suite.run = mock.Mock(side_effect=run)
         with self.assertRaisesRegex(RuntimeError, "fixture cases failed"):
             suite.execute()
-        self.assertEqual(suite.run.call_count, 7)  # shim + all six cases
+        self.assertEqual(suite.run.call_count, 8)  # one extraction + shim + all six cases
+        extraction = suite.run.call_args_list[0]
+        self.assertEqual(extraction.args[0], "extract-tests")
+        command = extraction.args[1]
+        extracted = Path(command[command.index("--extract-to") + 1])
+        for call in suite.run.call_args_list[2:]:
+            command = call.args[1]
+            self.assertNotIn("--archive-file", command)
+            self.assertEqual(command[command.index("--target-dir-remap") + 1],
+                             str(extracted / "target"))
+        self.assertFalse(extracted.exists(), "failed suites must dispose their extracted binaries")
         self.assertEqual(suite.cleanup.call_count, 2)  # failure cleanup and final cleanup
         cancel = suite.run.call_args_list[-2]
         self.assertEqual(cancel.kwargs["env"]["MSB_TEST_EAGER_MODE"], "cancel")
@@ -79,6 +89,18 @@ class CheckpointIntegrationTests(unittest.TestCase):
                 self.assertTrue(popen.call_args.kwargs["start_new_session"])
                 kill.assert_called_once_with(child.pid, HARNESS.signal.SIGTERM)
                 self.assertEqual(child.wait.call_count, 2)
+
+    def test_failed_extraction_cleans_partial_workspace_without_starting_vms(self):
+        suite = object.__new__(HARNESS.Suite)
+        suite.args = SimpleNamespace(workspace=Path("/repo"), archive=Path("/archive"))
+        suite.run = mock.Mock(side_effect=HARNESS.subprocess.CalledProcessError(1, "extract"))
+        suite.execute_cases = mock.Mock()
+        with self.assertRaises(HARNESS.subprocess.CalledProcessError):
+            suite.execute()
+        suite.execute_cases.assert_not_called()
+        command = suite.run.call_args.args[1]
+        extracted = Path(command[command.index("--extract-to") + 1])
+        self.assertFalse(extracted.exists())
 
 
 if __name__ == "__main__":
