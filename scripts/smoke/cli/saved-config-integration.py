@@ -40,6 +40,62 @@ def previous_writer(root):
     return binary
 
 
+def launch_qualification(args, root, image):
+    """Run the candidate SDK against matched current and released runtime bundles."""
+    helpers = runpy.run_path(str(SCRIPTS / "snapshot-compatibility.py"))
+    platform = helpers["release_asset"]().removeprefix("msb-")
+    bundle_name = f"microsandbox-{platform}.tar.gz"
+    agent_name = f"agentd-{platform.rsplit('-', 1)[1]}"
+    released = root / "released-runtime"
+    released.mkdir()
+    for name in ("checksums.sha256", bundle_name, agent_name):
+        url = f"https://github.com/superradcompany/microsandbox/releases/download/v{RELEASE}/{name}"
+        with urllib.request.urlopen(url, timeout=90) as response, (released / name).open("wb") as output:
+            shutil.copyfileobj(response, output)
+    checksums = (released / "checksums.sha256").read_text()
+    for name in (bundle_name, agent_name):
+        helpers["verify_download"](released / name, checksums, name)
+    with tarfile.open(released / bundle_name) as bundle:
+        bundle.extractall(released / "bundle", filter="data")
+    runtime = released / "bundle/msb"
+    firmwares = list((released / "bundle").glob("libkrunfw*"))
+    if len(firmwares) != 1:
+        raise ValueError("released bundle must contain one firmware artifact")
+    if sys.platform == "darwin":
+        subprocess.run(["codesign", "--entitlements", args.workspace / "msb-entitlements.plist",
+                        "--force", "-s", "-", runtime], check=True)
+    cases = [(RELEASE, runtime, firmwares[0], released / agent_name),
+             ("candidate", args.binary, args.firmware, args.agent)]
+    test = "runtime::launch_contract::tests::released_runtime_preserves_lifecycle_data_and_network_policy"
+    for label, binary, firmware, agent in cases:
+        home = root / ("launch-" + label)
+        env = evidence.environment(binary, firmware, home, agent)
+        env.update(MSB_LAUNCH_TEST_IMAGE="alpine:3.23", MSB_LAUNCH_TEST_NAME="cross-version")
+        runner = evidence.Runner(args.binary, env, root / ("launch-" + label + "-logs"))
+        runner.run("load", "image", "load", "--input", image)
+        passed = False
+        try:
+            if args.test_binary:
+                tests = evidence.Runner(args.test_binary, env, runner.output / "sdk")
+                tests.run("lifecycle", "--ignored", "--exact", test)
+                if "1 passed;" not in (tests.output / "lifecycle.stdout").read_text():
+                    raise RuntimeError(f"missing test: {test}")
+            else:
+                tests = evidence.Runner("cargo-nextest", env, runner.output / "sdk")
+                tests.run("lifecycle", "nextest", "run", "--archive-file", args.archive,
+                          "--workspace-remap", args.workspace, "--run-ignored=only", "-E", f"test(={test})")
+            passed = True
+        finally:
+            # Successful tests assert removal themselves. Also clean up a failed
+            # or interrupted test, without reporting an expected missing sandbox.
+            if not passed:
+                runner.run("cleanup", "rm", "--force", "cross-version", required=False)
+        version = subprocess.check_output([binary, "--version"], env=env, text=True, timeout=15).strip()
+        (runner.output / "report.json").write_text(json.dumps({"cases": [{
+            "runtime": version, "status": "passed"}]}))
+        print(f"passed candidate SDK / {label} runtime lifecycle and deny-all policy", flush=True)
+
+
 def command_image(source, destination):
     # Keep the release image's layers intact. Only the command provenance matters here.
     with tarfile.open(source) as original, tarfile.open(destination, "w") as output:
@@ -103,6 +159,7 @@ def run(args, root):
         runner = evidence.Runner(args.binary, evidence.environment(args.binary, args.firmware, root / "image-home"), root / "image-logs")
         runner.run("pull", "image", "pull", "alpine:3.23")
         runner.run("save", "image", "save", "--format", "docker", "--output", image, "alpine:3.23")
+    launch_qualification(args, root, image)
     common = ["--binary", args.binary, "--agent", args.agent, "--firmware", args.firmware,
               "--image", image, "--temp-root", root]
     previous = ["--runtime", "current", "--releases", root, "--previous-writer", writer, "--support", SCRIPTS]
