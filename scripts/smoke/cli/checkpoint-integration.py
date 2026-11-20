@@ -22,8 +22,12 @@ CASES = (
 )
 
 
-def test_command(archive, workspace, binary, test):
-    return ["cargo-nextest", "nextest", "run", "--archive-file", str(archive),
+def test_command(extracted, workspace, binary, test):
+    target = extracted / "target"
+    return ["cargo-nextest", "nextest", "run",
+            "--cargo-metadata", str(target / "nextest/cargo-metadata.json"),
+            "--binaries-metadata", str(target / "nextest/binaries-metadata.json"),
+            "--target-dir-remap", str(target),
             "--workspace-remap", str(workspace), "--run-ignored=only", "--test-threads", "1",
             "--no-tests", "fail", "-E", f"binary(={binary}) & test(={test})"]
 
@@ -119,6 +123,17 @@ class Suite:
         self.msb("remove-warm", "remove", "ci-warm")
 
     def execute(self):
+        # Each case uses the same binaries. Extract once instead of unpacking
+        # the multi-gigabyte workspace six times under the fixture deadline.
+        with tempfile.TemporaryDirectory(prefix="msb-checkpoint-tests-") as directory:
+            extracted = Path(directory)
+            self.run("extract-tests", ["cargo-nextest", "nextest", "list",
+                     "--archive-file", str(self.args.archive), "--extract-to", str(extracted),
+                     "--workspace-remap", str(self.args.workspace),
+                     "--list-type", "binaries-only"])
+            self.execute_cases(extracted)
+
+    def execute_cases(self, extracted):
         try:
             self.prepare_fixture()
             shim = self.output / "slow-eager.so"
@@ -136,7 +151,7 @@ class Suite:
                                MSB_TEST_EAGER_TRACE=str(self.output / f"{label}.jsonl"),
                                MSB_TEST_EAGER_PREFIX=str(self.home))
                 try:
-                    self.run(label, test_command(self.args.archive, self.args.workspace,
+                    self.run(label, test_command(extracted, self.args.workspace,
                                                 binary, test), env=env)
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                     failures.append(str(error))
