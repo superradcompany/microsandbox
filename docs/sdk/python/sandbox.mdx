@@ -1871,7 +1871,7 @@ Observed convergence state for an accepted live resize.
 async def config(self) -> SandboxConfigInspection: ...
 ```
 
-Fetch a fresh persisted observation without starting the sandbox. The typed dictionary contains `kind`, `name`, `spec`, `unavailable` and `redacted`. Read execution settings through `observed["spec"]["runtime"]`. Remote source identities and secret material are not reconstructed; unavailable/redacted paths are explicit. Failed lookups raise instead of returning stale data. Persisted settings may require restart to apply. See [inspection result shapes](/migrations/sdk-contexts#configuration-result-shape).
+Fetch a fresh persisted observation without starting the sandbox. The typed dictionary contains `kind`, `name`, `spec`, `unavailable` and `redacted`. Read execution settings through `observed["spec"]["runtime"]`. Remote source identities and secret material are not reconstructed; unavailable/redacted paths are explicit. Failed lookups raise instead of returning stale data. Persisted settings may require restart to apply. See [inspection result shapes](/migrations/v0.8#configuration-result-shape).
 
 ## SandboxMetrics
 
@@ -2073,7 +2073,7 @@ async def recover_storage(
 ) -> StorageRecovery
 ```
 
-Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage repair](/repairs/sandbox-storage) for maintenance requirements and recovery limits.
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage repair](/migrations/v0.7#sandbox-storage-migration) for maintenance requirements and recovery limits.
 
 <p className="msb-label">Parameters</p>
 

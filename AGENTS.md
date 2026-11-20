@@ -410,7 +410,9 @@ git diff origin/main..HEAD --name-status
 
 - For changes under `docs/`, read [the Microsandbox docs skill](.agents/skills/microsandbox-docs/SKILL.md) for page structure, examples, version labels, and validation.
 - Update docs when behavior, configuration, CLI flags, SDK APIs, or examples change.
-- For persisted-format or cross-version changes, update `COMPATIBILITY.md`. Put version upgrade and downgrade guidance in `docs/migrations/`, and issue-specific recovery in `docs/repairs/`. Keep separate fixes on separate repair pages, with affected versions, availability, safe actions, and data-preservation limits.
+- For persisted-format or cross-version changes, update `COMPATIBILITY.md`.
+- Before documenting migration behavior, read the relevant version-to-version guide in `docs/migrations/` and use its structure and style as the reference. Keep upgrade, downgrade, migration-related diagnosis, repair, and recovery steps together as sections in that guide. Extend the existing version guide rather than creating separate pages for migration topics. Include affected versions, availability, safe actions, and data-preservation limits, and preserve old URLs with redirects when moving content.
+- Keep release pages focused on shipped features and fixes, with a link to the relevant migration guide for upgrade instructions.
 - Document command and API additions in their owning references and link to the applicable migration or repair guide instead of repeating it. Keep additions minimal and use maintained release-note sources; do not hand-edit generated changelogs.
 - Keep SDK reference introductions to a short purpose statement and a link to the relevant usage guide, then go straight into API entries. Follow the concise structure of the execution and networking reference pages across all SDK languages.
 - Start reference type sections directly with their members when the type heading is sufficient. Avoid redundant “Built by” / “Used by” rows and introductory text that repeats the member descriptions.
