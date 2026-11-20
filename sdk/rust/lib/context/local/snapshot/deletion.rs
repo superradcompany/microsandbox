@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use cap_primitives::fs::_WindowsByHandle;
 use cap_primitives::fs::{FollowSymlinks, open_dir_nofollow};
 use cap_std::fs::Dir;
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use cap_std::fs::MetadataExt;
 use microsandbox_image::storage_lease::StorageLease;
 use microsandbox_runtime::ipc::SandboxLifecycleGuard;
@@ -265,6 +265,15 @@ pub(crate) async fn release_store_objects(
         return Ok(());
     }
     let db = local.db().await?;
+    // Imported descriptors carry advisory source names. Do not create persistent lock
+    // entries for absent sources, and bind cleanup to this catalog incarnation below.
+    let Some(expected) = sandbox::Entity::find()
+        .filter(sandbox::Column::Name.eq(source))
+        .one(db.read())
+        .await?
+    else {
+        return Ok(());
+    };
     let run_dir = local.config().run_dir();
     let Some(transition) =
         microsandbox_runtime::ipc::try_acquire_transition_guard(&run_dir, source)?
@@ -286,7 +295,7 @@ pub(crate) async fn release_store_objects(
     else {
         return Ok(());
     };
-    if registered.status.has_active_runtime_state() {
+    if registered.id != expected.id || registered.status.has_active_runtime_state() {
         return Ok(());
     }
     // Older Windows runtimes do not own the modern lifecycle lock. Retain their store
@@ -447,7 +456,7 @@ fn release_unlinked(directory: &File, name: &Path) -> io::Result<()> {
     let unlinked = metadata.nlink() == 1;
     #[cfg(windows)]
     let unlinked = _WindowsByHandle::number_of_links(&metadata) == Some(1)
-        && metadata.file_attributes() & 0x400 == 0;
+        && _WindowsByHandle::file_attributes(&metadata) & 0x400 == 0;
     #[cfg(not(any(unix, windows)))]
     let unlinked = false;
     if !metadata.is_file() || !unlinked {
@@ -539,6 +548,26 @@ mod tests {
         )
         .unwrap();
         (home, local, store, model.id)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_skips_absent_sources_without_creating_lock_files() {
+        let (_home, local, _, _) = store_fixture().await;
+        let run_dir = local.config().run_dir();
+        release_store_objects(&local, "absent-source")
+            .await
+            .unwrap();
+        assert!(
+            !microsandbox_runtime::ipc::sandbox_transition_lock_path(&run_dir, "absent-source")
+                .exists()
+        );
+        assert!(
+            !microsandbox_runtime::ipc::snapshot_lineage_lock_path(&run_dir, "absent-source")
+                .exists()
+        );
+        assert!(
+            !microsandbox_runtime::ipc::lifecycle_lock_path(&run_dir, "absent-source").exists()
+        );
     }
 
     #[tokio::test]
