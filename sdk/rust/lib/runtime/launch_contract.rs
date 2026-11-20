@@ -217,9 +217,8 @@ impl LaunchContract {
     /// Encode a launch for the selected executable without discarding unsupported intent.
     pub(crate) fn encode(self, launch: &LaunchConfig) -> MicrosandboxResult<Value> {
         // Check capabilities before the machine fast path so the gate is applied
-        // uniformly. `header_fields` is true only for the current build, which is
-        // the only contract that can carry the field; every historical contract
-        // drops it and would substitute in every header.
+        // uniformly. Admitted machine contracts carry the field; v0.6 contracts
+        // drop it and would substitute in every header.
         #[cfg(feature = "net")]
         if !self.header_fields()
             && launch.network.as_ref().is_some_and(|network| {
@@ -449,12 +448,8 @@ impl LaunchContract {
     /// Whether this launch contract supports per-header secret substitution
     /// scopes (`SecretSubstitution.header_fields`).
     ///
-    /// The allowlist was added to the machine-protocol launch input, and only
-    /// the exact current build selects that protocol: `from_version` rejects
-    /// every other runtime (including 0.7.0/0.7.1) before encoding, so no
-    /// released 0.7.x contract reaches here without support. If a future
-    /// compatibility range ever admits an older machine-protocol runtime, this
-    /// capability must key off the runtime version instead of `machine`.
+    /// Both admitted machine contracts (the current build and v0.7.16) honor
+    /// this allowlist. Earlier v0.7 releases remain outside the admitted set.
     pub fn header_fields(self) -> bool {
         self.machine
     }
@@ -727,6 +722,19 @@ pub(crate) async fn resolve(path: &Path) -> MicrosandboxResult<LaunchContract> {
     let contract = if modern
         && version == Version::parse(env!("CARGO_PKG_VERSION")).expect("Cargo version is semver")
     {
+        LaunchContract {
+            patch: 18,
+            machine: true,
+        }
+    } else if modern && version == Version::new(0, 7, 16) {
+        // Qualify this released machine contract explicitly. A version section
+        // alone does not establish the protected layout or wire generation.
+        require_capability(
+            &path,
+            |capabilities| capabilities.protected_guest_state,
+            "protected protocol-2 launch",
+        )
+        .await?;
         LaunchContract {
             patch: 18,
             machine: true,
