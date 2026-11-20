@@ -1,12 +1,16 @@
-use microsandbox::{Operation, UnsupportedReason};
+use std::time::Duration;
+
+use microsandbox::{ChangeState, Operation, ServiceError, UnsupportedReason};
 use pyo3::prelude::*;
 use pyo3::{PyErr, Python};
+
+use crate::helpers::str_enum_member;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Error returned when a sandbox handle has been consumed (detached/removed).
+/// Error returned when a sandbox handle has been consumed (removed or disposed).
 pub fn consumed() -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err("sandbox has been consumed")
 }
@@ -17,7 +21,7 @@ pub fn local_only(name: &str) -> PyErr {
     let msg = format!("{name}() is not supported by this backend: use a local backend");
     Python::attach(|py| {
         let instance = py
-            .import("microsandbox.errors")
+            .import(crate::provider::public_module("errors").as_str())
             .and_then(|m| m.getattr("UnsupportedError"))
             .and_then(|cls| cls.call1((msg.as_str(),)));
         match instance {
@@ -38,10 +42,75 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
     }
 
     Python::attach(|py| {
-        let errors_mod = match py.import("microsandbox.errors") {
+        let errors_mod = match py.import(crate::provider::public_module("errors").as_str()) {
             Ok(m) => m,
             Err(_) => return pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         };
+
+        if let SnapshotRemovalRecovery { result, source } = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let result = crate::snapshot::PyCheckpointRemoveResult {
+                    inner: (**result).clone(),
+                };
+                errors_mod.getattr("SnapshotRemovalRecoveryError")?.call1((
+                    err.to_string(),
+                    result,
+                    source.to_string(),
+                ))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
+        if let SnapshotGroupRemovalRecovery { result, source } = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let result = crate::snapshot_group::PySnapshotRemoveResult {
+                    inner: (**result).clone(),
+                };
+                errors_mod
+                    .getattr("SnapshotGroupRemovalRecoveryError")?
+                    .call1((err.to_string(), result, source.to_string()))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
+        if let SnapshotVerification(report) = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let value = serde_json::to_value(report).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let report = crate::conversion::json_value_to_py(py, value)?;
+                errors_mod
+                    .getattr("SnapshotVerificationError")?
+                    .call1((err.to_string(), report))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
+        if let SnapshotImport(details) = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let payload = serde_json::to_string(details).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let details = py.import("json")?.call_method1("loads", (payload,))?;
+                let details = details.cast::<pyo3::types::PyDict>()?;
+                errors_mod
+                    .getattr("SnapshotImportError")?
+                    .call((err.to_string(),), Some(details))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
 
         if let SnapshotSourceRecovery(recovery) = &err {
             // Keep the structured recovery locator across the native boundary. The Python class
@@ -59,6 +128,66 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             return match instance {
                 Ok(instance) => PyErr::from_value(instance),
                 // The textual fallback still contains the saved artifact locator.
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
+        if let ResizeWait(details) = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let payload = serde_json::to_string(details).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let payload = py.import("json")?.call_method1("loads", (payload,))?;
+                let payload = payload.cast::<pyo3::types::PyDict>()?;
+                // Match ordinary resize results: Python callers receive enums, not JSON strings.
+                let status = serde_json::to_value(&details.status).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                payload.set_item("status", crate::sandbox::resize_statuses_to_py(py, status)?)?;
+                errors_mod
+                    .getattr("ResizeWaitError")?
+                    .call_method1("_from_native", (payload,))
+            })();
+            if let Ok(instance) = instance {
+                return PyErr::from_value(instance);
+            }
+        }
+
+        if let ResizeTimeout { status, .. } = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let status = serde_json::to_value(status).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let kwargs = pyo3::types::PyDict::new(py);
+                kwargs.set_item("status", crate::sandbox::resize_statuses_to_py(py, status)?)?;
+                errors_mod
+                    .getattr("ResizeTimeoutError")?
+                    .call((err.to_string(),), Some(&kwargs))
+            })();
+            if let Ok(instance) = instance {
+                return PyErr::from_value(instance);
+            }
+        }
+
+        if let Service { slug, error } = &err {
+            // Keep the reason, retry delay and change state as typed attributes.
+            let (reason, retry_after, raw_code, raw_status, raw_message) = service_reason(error);
+            let changed = change_state_value(error.changed());
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let kwargs = pyo3::types::PyDict::new(py);
+                kwargs.set_item("slug", slug)?;
+                kwargs.set_item("reason", reason)?;
+                kwargs.set_item("retry_after", retry_after.map(|wait| wait.as_secs_f64()))?;
+                kwargs.set_item("changed", changed)?;
+                kwargs.set_item("raw_code", raw_code)?;
+                kwargs.set_item("raw_status", raw_status)?;
+                kwargs.set_item("raw_message", raw_message)?;
+                errors_mod
+                    .getattr("ServiceError")?
+                    .call((err.to_string(),), Some(&kwargs))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
                 Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
             };
         }
@@ -95,7 +224,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
         let (cls_name, msg) = match &err {
             RuntimeNotInstalled(_) => ("RuntimeNotInstalledError", err.to_string()),
             RuntimeIncomplete(_) => ("RuntimeIncompleteError", err.to_string()),
-            InvalidConfig(_) | MissingRestoreBindings { .. } => {
+            InvalidConfig(_) | InvalidWorkdir { .. } | MissingRestoreBindings { .. } => {
                 ("InvalidConfigError", err.to_string())
             }
             NoDefaultCommand => ("NoDefaultCommandError", err.to_string()),
@@ -109,10 +238,13 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             SandboxStopTimedOut { .. } => ("SandboxStopTimedOutError", err.to_string()),
             ExecTimeout(_) => ("ExecTimeoutError", err.to_string()),
             StopTimeout { .. } => ("StopTimeoutError", err.to_string()),
+            ResizeTimeout { .. } => ("ResizeTimeoutError", err.to_string()),
             SandboxFsOps(_) => ("FilesystemError", err.to_string()),
             ImageNotFound(_) => ("ImageNotFoundError", err.to_string()),
             ImageInUse(_) => ("ImageInUseError", err.to_string()),
             VolumeNotFound(_) => ("VolumeNotFoundError", err.to_string()),
+            ServiceNotFound(_) => ("ServiceNotFoundError", err.to_string()),
+            ServiceAlreadyExists(_) => ("ServiceAlreadyExistsError", err.to_string()),
             Io(_) => ("IoError", err.to_string()),
             MetricsDisabled(_) => ("MetricsDisabledError", err.to_string()),
             MetricsUnavailable(_) => ("MetricsUnavailableError", err.to_string()),
@@ -133,6 +265,62 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         }
     })
+}
+
+/// Convert a Service change error and attach its change state to the Python exception.
+pub fn to_py_change_err(err: microsandbox::MicrosandboxError) -> PyErr {
+    let changed = change_state_value(err.changed());
+    let py_err = to_py_err(err);
+
+    Python::attach(|py| {
+        if let Ok(changed) = str_enum_member(py, "ChangeState", changed) {
+            // A failed setattr leaves `changed` None, which callers treat as not a change error.
+            let _ = py_err.value(py).setattr("changed", changed);
+        }
+    });
+
+    py_err
+}
+
+fn service_reason(
+    error: &ServiceError,
+) -> (
+    &'static str,
+    Option<Duration>,
+    Option<&str>,
+    Option<u16>,
+    Option<&str>,
+) {
+    match error {
+        ServiceError::QuotaExceeded => ("service_quota_exceeded", None, None, None, None),
+        ServiceError::SandboxLimitExceeded => {
+            ("sandbox_service_limit_exceeded", None, None, None, None)
+        }
+        ServiceError::Conflict => ("service_conflict", None, None, None, None),
+        ServiceError::Detached => ("service_detached", None, None, None, None),
+        ServiceError::TargetUnreachable { retry_after } => {
+            ("target_unreachable", *retry_after, None, None, None)
+        }
+        ServiceError::TargetNotRunning => ("sandbox_not_running", None, None, None, None),
+        ServiceError::ChangesPaused { retry_after } => {
+            ("service_changes_paused", *retry_after, None, None, None)
+        }
+        ServiceError::OutcomeUnknown => ("outcome_unknown", None, None, None, None),
+        ServiceError::Other {
+            code,
+            status,
+            message,
+        } => ("other", None, Some(code), Some(*status), Some(message)),
+        // `ServiceError` is non-exhaustive; `changed` still reports a newer reason correctly.
+        _ => ("other", None, None, None, None),
+    }
+}
+
+fn change_state_value(changed: ChangeState) -> &'static str {
+    match changed {
+        ChangeState::Unchanged => "unchanged",
+        ChangeState::Unknown => "unknown",
+    }
 }
 
 /// Render an [`Operation`] as the Python API it corresponds to:
@@ -211,7 +399,7 @@ mod tests {
 
             let raised = to_py_err(error);
             let class = py
-                .import("microsandbox.errors")
+                .import(crate::provider::public_module("errors").as_str())
                 .unwrap()
                 .getattr("ModificationNotConfirmedError")
                 .unwrap();
@@ -227,5 +415,13 @@ mod tests {
                 "modification-not-confirmed"
             );
         });
+    }
+
+    #[test]
+    fn sandbox_service_limit_has_a_public_reason() {
+        assert_eq!(
+            service_reason(&ServiceError::SandboxLimitExceeded),
+            ("sandbox_service_limit_exceeded", None, None, None, None)
+        );
     }
 }

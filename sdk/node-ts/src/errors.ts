@@ -1,4 +1,22 @@
+import type { HeadUpdate } from "./snapshot.js";
+import type { CheckpointRemoveResult, SnapshotRemoveResult } from "./snapshot-removal.js";
+import type { SnapshotGroupVerifyReport } from "./snapshot-verification.js";
+import type { ResourceResizeStatus } from "./modify.js";
+
 export type MicrosandboxErrorCode =
+  | "agentClient"
+  | "bootStart"
+  | "execFailed"
+  | "invalidCursor"
+  | "missedRotation"
+  | "networkBuilder"
+  | "snapshotAlreadyExists"
+  | "snapshotImageMissing"
+  | "snapshotIntegrity"
+  | "snapshotMigration"
+  | "snapshotNotFound"
+  | "snapshotSandboxRunning"
+  | "windowsHostSetup"
   | "io"
   | "http"
   | "cloudHttp"
@@ -20,15 +38,24 @@ export type MicrosandboxErrorCode =
   | "nix"
   | "execTimeout"
   | "stopTimeout"
+  | "resizeTimeout"
+  | "resizeWait"
   | "terminal"
   | "sandboxFsOps"
   | "imageNotFound"
   | "imageInUse"
   | "volumeNotFound"
   | "volumeAlreadyExists"
+  | "serviceNotFound"
+  | "serviceAlreadyExists"
+  | "service"
   | "image"
   | "patchFailed"
   | "snapshotSourceRecovery"
+  | "snapshotImport"
+  | "snapshotVerification"
+  | "snapshotRemovalRecovery"
+  | "snapshotGroupRemovalRecovery"
   | "metricsDisabled"
   | "metricsUnavailable"
   | "unsupportedOperation"
@@ -36,13 +63,101 @@ export type MicrosandboxErrorCode =
   | "modificationNotConfirmed"
   | "custom";
 
+/** Whether a failed Service change may have been applied. */
+export type ChangeState = "unchanged" | "unknown";
+
+interface ChangeErrorOptions extends ErrorOptions {
+  changed?: ChangeState;
+}
+
 export class MicrosandboxError extends Error {
   readonly code: MicrosandboxErrorCode;
+  /** Present when this error was returned by a Service change. */
+  readonly changed?: ChangeState;
 
   constructor(code: MicrosandboxErrorCode, message: string, options?: ErrorOptions) {
     super(message, options);
     this.code = code;
+    this.changed = (options as ChangeErrorOptions | undefined)?.changed;
     this.name = new.target.name;
+  }
+}
+
+export class AgentClientError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("agentClient", message, options);
+  }
+}
+
+export class BootStartError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("bootStart", message, options);
+  }
+}
+
+export class ExecFailedError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("execFailed", message, options);
+  }
+}
+
+export class InvalidCursorError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("invalidCursor", message, options);
+  }
+}
+
+export class MissedRotationError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("missedRotation", message, options);
+  }
+}
+
+export class NetworkBuilderError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("networkBuilder", message, options);
+  }
+}
+
+export class SnapshotAlreadyExistsError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotAlreadyExists", message, options);
+  }
+}
+
+export class SnapshotImageMissingError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotImageMissing", message, options);
+  }
+}
+
+export class SnapshotIntegrityError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotIntegrity", message, options);
+  }
+}
+
+export class SnapshotMigrationError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotMigration", message, options);
+  }
+}
+
+export class SnapshotNotFoundError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotNotFound", message, options);
+  }
+}
+
+export class SnapshotSandboxRunningError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotSandboxRunning", message, options);
+  }
+}
+
+export class WindowsHostSetupError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("windowsHostSetup", message, options);
   }
 }
 
@@ -176,6 +291,38 @@ export class StopTimeoutError extends MicrosandboxError {
   }
 }
 
+/**
+ * A live resize did not converge before its deadline; completion is unconfirmed and the resize is not undone.
+ * `status` is the last observed resize status, empty when no read completed before the deadline.
+ */
+export class ResizeTimeoutError extends MicrosandboxError {
+  constructor(
+    message: string,
+    readonly status: ResourceResizeStatus[] = [],
+    options?: ErrorOptions,
+  ) {
+    super("resizeTimeout", message, options);
+  }
+}
+
+export type ResizeWaitFailure =
+  | "superseded" | "interrupted" | "history_unavailable"
+  | "invalid_response" | "observation_unavailable";
+
+/** Observation failed; no rollback or successful completion is implied. */
+export class ResizeWaitError extends MicrosandboxError {
+  constructor(
+    message: string,
+    readonly reason: ResizeWaitFailure,
+    readonly sandbox: string | null,
+    readonly operationId: string | null,
+    readonly status: ResourceResizeStatus[],
+    options?: ErrorOptions,
+  ) {
+    super("resizeWait", message, options);
+  }
+}
+
 export class TerminalError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("terminal", message, options);
@@ -212,6 +359,82 @@ export class VolumeAlreadyExistsError extends MicrosandboxError {
   }
 }
 
+/** No visible Service has this slug. */
+export class ServiceNotFoundError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("serviceNotFound", message, options);
+  }
+}
+
+/** The slug is unavailable. */
+export class ServiceAlreadyExistsError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("serviceAlreadyExists", message, options);
+  }
+}
+
+/**
+ * Why a Service change did not complete. `"other"` is unrecognized; `changed` still reports
+ * the outcome.
+ */
+export type ServiceErrorReason =
+  | "serviceQuotaExceeded"
+  | "sandboxServiceLimitExceeded"
+  | "serviceConflict"
+  | "serviceDetached"
+  | "targetUnreachable"
+  | "sandboxNotRunning"
+  | "serviceChangesPaused"
+  | "outcomeUnknown"
+  | "other";
+
+/** Details reported with a Service change error. */
+export interface ServiceErrorDetails {
+  /** Slug of the Service the change addressed. */
+  readonly slug: string;
+  readonly reason: ServiceErrorReason;
+  /** Retry delay returned with the refusal, in milliseconds, or `null`. */
+  readonly retryAfterMs: number | null;
+  readonly changed: ChangeState;
+  /** Raw refusal code when `reason` is `"other"`, otherwise `null`. */
+  readonly rawCode: string | null;
+  /** Raw HTTP status when `reason` is `"other"`, otherwise `null`. */
+  readonly rawStatus: number | null;
+  /** Raw refusal message when `reason` is `"other"`, otherwise `null`. */
+  readonly rawMessage: string | null;
+}
+
+/** A Service change was refused, or its outcome is unknown. */
+export class ServiceError extends MicrosandboxError {
+  readonly slug: string;
+  readonly reason: ServiceErrorReason;
+  readonly retryAfterMs: number | null;
+  override readonly changed: ChangeState;
+  readonly rawCode: string | null;
+  readonly rawStatus: number | null;
+  readonly rawMessage: string | null;
+
+  constructor(
+    message: string,
+    details: ServiceErrorDetails,
+    options?: ErrorOptions,
+  ) {
+    super("service", message, withChangeState(options, details.changed));
+    this.slug = details.slug;
+    this.reason = details.reason;
+    this.retryAfterMs = details.retryAfterMs;
+    this.changed = details.changed;
+    this.rawCode = details.rawCode;
+    this.rawStatus = details.rawStatus;
+    this.rawMessage = details.rawMessage;
+  }
+}
+
+function withChangeState(options: ErrorOptions | undefined, changed: ChangeState): ErrorOptions {
+  const changeOptions: ChangeErrorOptions = { ...options, changed };
+  return changeOptions;
+}
+
 export class ImageError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("image", message, options);
@@ -236,6 +459,8 @@ export interface PublishedSnapshotArtifact {
   readonly path: string;
   readonly snapshotId: string;
   readonly digest: string;
+  /** This publication’s outcome; omitted by older producers and archive-only captures. */
+  readonly headUpdate?: HeadUpdate | null;
 }
 
 /** Recovery locators do not imply that the source is running or safe to resume. */
@@ -257,6 +482,45 @@ export class SnapshotSourceRecoveryError extends MicrosandboxError {
     options?: ErrorOptions,
   ) {
     super("snapshotSourceRecovery", message, options);
+  }
+}
+
+/** Known publication state of a failed archive batch. Unknown requires recovery. */
+export type SnapshotImportOutcome = "not_committed" | "committed" | "unknown";
+
+export interface SnapshotImportDetails {
+  readonly operationId: string;
+  readonly archives: readonly string[];
+  readonly groupPath: string | null;
+  readonly outcome: SnapshotImportOutcome;
+  readonly detail: string;
+}
+
+/** Preserve partial success: a failed call may have committed its entire batch. */
+export class SnapshotImportError extends MicrosandboxError {
+  constructor(message: string, readonly details: SnapshotImportDetails, options?: ErrorOptions) {
+    super("snapshotImport", message, options);
+  }
+}
+
+/** Removal committed, but catalog/cleanup recovery is still required. */
+export class SnapshotRemovalRecoveryError extends MicrosandboxError {
+  constructor(message: string, readonly result: CheckpointRemoveResult, readonly detail: string, options?: ErrorOptions) {
+    super("snapshotRemovalRecovery", message, options);
+  }
+}
+
+/** Whole-group removal committed, but catalog/cleanup recovery remains pending. */
+export class SnapshotGroupRemovalRecoveryError extends MicrosandboxError {
+  constructor(message: string, readonly result: SnapshotRemoveResult, readonly detail: string, options?: ErrorOptions) {
+    super("snapshotGroupRemovalRecovery", message, options);
+  }
+}
+
+/** Failed verification retains results for every selected checkpoint. */
+export class SnapshotVerificationError extends MicrosandboxError {
+  constructor(message: string, readonly report: SnapshotGroupVerifyReport, options?: ErrorOptions) {
+    super("snapshotVerification", message, options);
   }
 }
 

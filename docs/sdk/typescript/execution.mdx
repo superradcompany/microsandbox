@@ -12,8 +12,10 @@ See [Commands](/sandboxes/commands) for usage examples.
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
 
 ```typescript
-exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput>
+exec(cmd: string, args?: CommandArgs): Promise<ExecOutput>
 ```
+
+Pass an array, set or generator of strings. For a single argument, pass `["hello"]`. A bare string raises `TypeError`.
 
 <Accordion title="Example">
 
@@ -65,7 +67,7 @@ const out = await sandbox.execWith("python3", (e) =>
   e.args(["script.py"])
     .cwd("/app")
     .env("PYTHONPATH", "/app/lib")
-    .timeout(30_000),
+    .timeoutMilliseconds(30_000),
 );
 ```
 
@@ -160,7 +162,7 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execStream()</span>
 
 ```typescript
-execStream(cmd: string, args?: Iterable<string>): Promise<ExecHandle>
+execStream(cmd: string, args?: CommandArgs): Promise<ExecHandle>
 ```
 
 <Accordion title="Example">
@@ -284,7 +286,7 @@ Run a shell command with streaming output.
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach()</span>
 
 ```typescript
-attach(cmd: string, args?: Iterable<string>): Promise<number>
+attach(cmd: string, args?: CommandArgs): Promise<number>
 ```
 
 <Accordion title="Example">
@@ -476,7 +478,7 @@ Take ownership of the stdin sink. Returns `null` after the first call
 wait()
 ```
 
-Wait for the process to exit
+Wait for the process to exit, discarding remaining output. After `wait()`, `collect()`, `recv()`, or event iteration observes completion, later waits return the recorded status or reject with the recorded terminal execution error. The command is not rerun and output is not replayed. A nonzero exit remains an exit status. An interrupted observer or lost transport does not establish that the command finished.
 
 <p className="msb-label">Returns</p>
 
@@ -488,7 +490,7 @@ Wait for the process to exit
 collect()
 ```
 
-Drain stdout/stderr and wait for exit
+Drain stdout/stderr and wait for exit. The terminal outcome remains available to `wait()` afterward; output is not retained for replay.
 
 <p className="msb-label">Returns</p>
 
@@ -677,10 +679,10 @@ Add many env vars
 
 `(vars: Record<string, string>) => this`
 
-#### <span className="msb-recv">execOptions.</span><span className="msb-hn">timeout()</span>
+#### <span className="msb-recv">execOptions.</span><span className="msb-hn">timeoutMilliseconds()</span>
 
 ```typescript
-timeout(ms)
+timeoutMilliseconds(ms)
 ```
 
 Kill the process after this many milliseconds
@@ -1004,7 +1006,7 @@ type RlimitResource =
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execDetached()</span>
 
 ```typescript
-execDetached(cmd: string, args?: Iterable<string>): Promise<Job>
+execDetached(cmd: string, args?: CommandArgs): Promise<Job>
 ```
 
 Start a runtime-owned command and return after guest startup. Defaults to pipes with stdin retained. Requires a supporting local runtime. Dropping the handle does not stop the job; stopping the sandbox does. See [background jobs](/sandboxes/commands#managed-jobs) for lifecycle and limits.
@@ -1023,7 +1025,7 @@ Configure detached execution with the existing execution builder. `stdinNull()` 
 getJob(id: string): Promise<Job>
 ```
 
-Look up a sandbox-scoped job. Available on `Sandbox` and `SandboxHandle`.
+Look up a sandbox-scoped job. Available on `Sandbox` and `Sandbox`.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">listJobs()</span>
 
@@ -1031,7 +1033,7 @@ Look up a sandbox-scoped job. Available on `Sandbox` and `SandboxHandle`.
 listJobs(): Promise<JobPage>
 ```
 
-List active jobs. Available on `Sandbox` and `SandboxHandle`.
+List active jobs. Available on `Sandbox` and `Sandbox`.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">listJobsWith()</span>
 
@@ -1039,7 +1041,7 @@ List active jobs. Available on `Sandbox` and `SandboxHandle`.
 listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage>
 ```
 
-Configure pagination or include retained completed jobs. Available on `Sandbox` and `SandboxHandle`.
+Configure pagination or include retained completed jobs. Available on `Sandbox` and `Sandbox`.
 
 ### Job
 
@@ -1278,9 +1280,11 @@ interface JobExit { readonly code: number; readonly success: boolean; readonly t
 ### JobLogEntry
 
 ```typescript
+type JobOutputSource = "stdout" | "stderr" | "output" | "stdin_error";
+
 interface JobLogEntry {
   readonly timestamp: number;
-  readonly source: string;
+  readonly source: JobOutputSource;
   readonly data: Buffer;
   readonly cursor: string;
 }
@@ -1293,7 +1297,7 @@ interface JobLogOptions {
   tail?: number;
   since?: number;
   until?: number;
-  sources?: string[];
+  sources?: readonly JobOutputSource[];
   fromCursor?: string;
   follow?: boolean;
 }

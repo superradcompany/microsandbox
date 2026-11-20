@@ -66,7 +66,8 @@ async def test_fs_streams_and_host_copy_roundtrip(sandbox_factory, tmp_path):
 
     host_src = tmp_path / "host-src.txt"
     host_dst = tmp_path / "host-dst.txt"
-    host_src.write_text("from-host\n", encoding="utf-8")
+    # Byte-exact fixtures avoid Windows text-mode CRLF translation before upload.
+    host_src.write_bytes(b"from-host\n")
 
     await fs.copy_from_host(str(host_src), "/tmp/from-host.txt")
     assert await fs.read_text("/tmp/from-host.txt") == "from-host\n"

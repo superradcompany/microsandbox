@@ -91,6 +91,11 @@ function expectCleanRefusal(className: string, method: string, receiver: string)
 
 describe("native receiver validation", () => {
   const methods = [
+    // The three PR pointer findings originate in generated N-API conversions
+    // for these classes. Exercise their actual receiver boundary as well.
+    ["Context", "get:kind"],
+    ["SnapshotMetadata", "get:stateKind"],
+    ["SandboxSshOps", "openClient"],
     ["SandboxFsOps", "exists"],
     ["Sandbox", "fs"],
     ["LogStream", "recv"],
@@ -115,7 +120,7 @@ describe("native receiver validation", () => {
     }
   }
 
-  for (const className of ["SandboxFsOps", "Sandbox", "LogStream", "SnapshotArchive", "Job", "JobAttachment", "JobLogStream"]) {
+  for (const className of ["SnapshotMetadata", "SandboxSshOps", "SandboxFsOps", "Sandbox", "LogStream", "SnapshotArchive", "Job", "JobAttachment", "JobLogStream"]) {
     it(`${className} rejects direct construction without crashing`, () => {
       expectCleanRefusal(className, "constructor", "constructor");
     });

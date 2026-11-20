@@ -150,14 +150,15 @@ jobs:
 
           mapfile -t firmware < <(find runtime -maxdepth 1 -type f \
             -name 'libkrunfw.so.*.*.*' -print)
-          if [[ ! -f runtime/msb || ${#firmware[@]} -ne 1 ]]; then
-            echo "::error::Runtime artifact does not contain msb and one versioned libkrunfw."
+          if [[ ! -f runtime/msb || ! -f runtime/msb-metrics || ${#firmware[@]} -ne 1 ]]; then
+            echo "::error::Runtime artifact must contain msb, msb-metrics, and one versioned libkrunfw."
             exit 1
           fi
 
           destination="packaging/docker/build/$ARCH"
           mkdir -p "$destination"
           install -m 755 runtime/msb "$destination/msb"
+          install -m 755 runtime/msb-metrics "$destination/msb-metrics"
           install -m 644 "${firmware[0]}" "$destination/$(basename "${firmware[0]}")"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

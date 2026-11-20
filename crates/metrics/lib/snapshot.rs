@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::{GuestMemoryObservation, GuestMemoryValidity};
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -46,6 +48,12 @@ pub struct LiveMetric {
     pub memory_bytes: u64,
     /// Whether `memory_bytes` holds a reported value for this sample.
     pub memory_bytes_reported: bool,
+    /// Fresh guest-reported usable total; unavailable from older writers.
+    pub memory_total_bytes: Option<u64>,
+    /// Original guest receipt retained through buffering; absent for legacy writers.
+    pub guest_memory_observation: Option<GuestMemoryObservation>,
+    /// Allocation/lifecycle validation retained through collection and retries.
+    pub guest_memory_validity: Option<GuestMemoryValidity>,
     /// Guest-available memory in bytes when reported by the guest.
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
@@ -63,6 +71,12 @@ pub struct LiveMetric {
     pub net_rx_bytes: u64,
     /// Cumulative guest-facing network bytes transmitted.
     pub net_tx_bytes: u64,
+    /// Published TCP admission rejections; absent on older runtimes.
+    pub net_inbound_tcp_rejected: Option<u64>,
+    /// Outbound TCP cap rejections; absent on older runtimes.
+    pub net_outbound_tcp_rejected: Option<u64>,
+    /// Outbound UDP session-cap evictions; absent on older runtimes.
+    pub net_outbound_udp_evicted: Option<u64>,
     /// Guest-visible OCI upper filesystem used bytes when available.
     pub upper_used_bytes: Option<u64>,
     /// Guest-visible OCI upper filesystem free bytes when available.
@@ -82,6 +96,12 @@ pub struct SandboxMetrics {
     pub memory_bytes: u64,
     /// Whether `memory_bytes` holds a reported value for this sample.
     pub memory_bytes_reported: bool,
+    /// Fresh guest-reported usable total; unavailable from older writers.
+    pub memory_total_bytes: Option<u64>,
+    /// Original guest receipt retained through buffering; absent for legacy writers.
+    pub guest_memory_observation: Option<GuestMemoryObservation>,
+    /// Allocation/lifecycle validation retained through collection and retries.
+    pub guest_memory_validity: Option<GuestMemoryValidity>,
     /// Guest-available memory in bytes when reported by the guest.
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
@@ -97,6 +117,12 @@ pub struct SandboxMetrics {
     pub net_rx_bytes: u64,
     /// Cumulative network bytes transmitted from the guest into the runtime.
     pub net_tx_bytes: u64,
+    /// Published TCP admission rejections; absent on older runtimes.
+    pub net_inbound_tcp_rejected: Option<u64>,
+    /// Outbound TCP cap rejections; absent on older runtimes.
+    pub net_outbound_tcp_rejected: Option<u64>,
+    /// Outbound UDP session-cap evictions; absent on older runtimes.
+    pub net_outbound_udp_evicted: Option<u64>,
     /// Guest-visible OCI upper filesystem used bytes when available.
     pub upper_used_bytes: Option<u64>,
     /// Guest-visible OCI upper filesystem free bytes when available.
@@ -125,6 +151,34 @@ pub struct SandboxMetricSnapshot {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SandboxMetrics {
+    /// Recheck the original guest receipt, not collection or export time. Legacy
+    /// writers have no receipt contract, so their existing behavior is preserved.
+    pub fn guest_memory_is_fresh_at(&self, now: Option<Duration>) -> bool {
+        self.guest_memory_validity
+            .as_ref()
+            .is_none_or(GuestMemoryValidity::is_current)
+            && self
+                .guest_memory_observation
+                .is_none_or(|report| now.is_some_and(|now| report.is_fresh_at(now)))
+    }
+
+    /// Remove expired guest-derived values before export/retry. Keep the receipt
+    /// and independent metrics; neither buffering nor retries can renew it.
+    pub fn expire_guest_memory_at(&mut self, now: Option<Duration>) {
+        if !self.guest_memory_is_fresh_at(now) {
+            self.memory_bytes = 0;
+            self.memory_bytes_reported = false;
+            self.memory_total_bytes = None;
+            self.memory_available_bytes = None;
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -140,6 +194,9 @@ impl From<LiveMetric> for SandboxMetricSnapshot {
                 vcpu_time_ns: live.vcpu_time_ns,
                 memory_bytes: live.memory_bytes,
                 memory_bytes_reported: live.memory_bytes_reported,
+                memory_total_bytes: live.memory_total_bytes,
+                guest_memory_observation: live.guest_memory_observation,
+                guest_memory_validity: live.guest_memory_validity,
                 memory_available_bytes: live.memory_available_bytes,
                 memory_host_resident_bytes: live.memory_host_resident_bytes,
                 memory_limit_bytes: live.memory_limit_bytes,
@@ -147,6 +204,9 @@ impl From<LiveMetric> for SandboxMetricSnapshot {
                 disk_write_bytes: live.disk_write_bytes,
                 net_rx_bytes: live.net_rx_bytes,
                 net_tx_bytes: live.net_tx_bytes,
+                net_inbound_tcp_rejected: live.net_inbound_tcp_rejected,
+                net_outbound_tcp_rejected: live.net_outbound_tcp_rejected,
+                net_outbound_udp_evicted: live.net_outbound_udp_evicted,
                 upper_used_bytes: live.upper_used_bytes,
                 upper_free_bytes: live.upper_free_bytes,
                 upper_host_allocated_bytes: live.upper_host_allocated_bytes,

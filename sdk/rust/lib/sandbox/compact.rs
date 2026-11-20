@@ -10,12 +10,12 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 #[cfg(any(feature = "local", test))]
 use microsandbox_types::DiskCompactionTarget;
 
-use crate::{MicrosandboxError, MicrosandboxResult, backend::Backend};
+use crate::{MicrosandboxError, MicrosandboxResult, context::Context};
 
 #[cfg(feature = "local")]
 use super::{SandboxConfig, SandboxStatus};
 #[cfg(feature = "local")]
-use crate::backend::local::creation::{self, CreationStorage};
+use crate::context::local::creation::{self, CreationStorage};
 #[cfg(feature = "local")]
 use crate::db::entity::sandbox as sandbox_entity;
 
@@ -26,11 +26,12 @@ use crate::db::entity::sandbox as sandbox_entity;
 /// Plan or compact immutable root/owned-data disk prefixes without changing existing snapshots.
 #[derive(Clone)]
 pub struct DiskCompactionBuilder {
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     name: String,
     layers: Option<usize>,
     disk: Option<String>,
     root_disk_only: bool,
+    identity: Option<super::SandboxId>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -38,14 +39,20 @@ pub struct DiskCompactionBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl DiskCompactionBuilder {
-    pub(crate) fn new(backend: Arc<dyn Backend>, name: String) -> Self {
+    pub(crate) fn new(backend: Arc<dyn Context>, name: String) -> Self {
         Self {
             backend,
             name,
             layers: None,
             disk: None,
             root_disk_only: false,
+            identity: None,
         }
+    }
+
+    pub(crate) fn bound_to(mut self, identity: super::SandboxId) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     /// Select up to `layers` oldest sealed physical layers per disk, counting the base but
@@ -97,13 +104,32 @@ impl DiskCompactionBuilder {
                 "disk compaction is only supported by the local backend".into(),
             )
         })?;
+        let transition = crate::LocalContext::acquire_sandbox_transition_guard(
+            &local.config().run_dir(),
+            &self.name,
+        )
+        .await?;
+        let lineage =
+            crate::snapshot::lineage::lock_source(&local.config().run_dir(), &self.name).await?;
         let model = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(&self.name))
             .one(local.db().await?.read())
             .await?
             .ok_or_else(|| MicrosandboxError::SandboxNotFound(self.name.clone()))?;
+        // Resolve identity while holding the same transition/source locks as
+        // deletion and replacement; a retained builder must not compact a new VM.
+        if let Some(expected) = &self.identity {
+            let actual = super::SandboxId::local(model.id);
+            if expected != &actual {
+                return Err(MicrosandboxError::SandboxReplaced {
+                    name: self.name.clone(),
+                    expected: expected.to_string(),
+                    actual: actual.to_string(),
+                });
+            }
+        }
         let config: SandboxConfig = serde_json::from_str(&model.config)?;
-        crate::LocalBackend::validate_completed_restore(&config)?;
+        crate::LocalContext::validate_completed_restore(&config)?;
         validate_root_selection(&config, &target)?;
         if model.status == SandboxStatus::Running {
             crate::runtime::protected_state::require_running(local, &self.name)?;
@@ -149,7 +175,7 @@ impl DiskCompactionBuilder {
         let storage = CreationStorage::acquire(local, &self.name)?;
         let runtime_dir = storage.join("runtime");
         let current_config: SandboxConfig = serde_json::from_str(&current.config)?;
-        crate::LocalBackend::validate_completed_restore(&current_config)?;
+        crate::LocalContext::validate_completed_restore(&current_config)?;
         crate::runtime::protected_state::prepare(local, &current_config, &storage).await?;
         // The configuration can change before ownership is acquired. Classify the root from
         // this fresh row, not a stale pre-lock view or a journal's incidental presence.
@@ -159,6 +185,8 @@ impl DiskCompactionBuilder {
             // worker until it finishes, even when its caller disconnects or cancels the await.
             let _guard = _guard;
             let _storage = storage;
+            let _transition = transition;
+            let _lineage = lineage;
 
             microsandbox_runtime::checkpoint::compact_stopped_disks(
                 &runtime_dir,
@@ -242,6 +270,12 @@ fn compaction_target(
 }
 
 //--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::{DiskCompactionDiskResult, DiskCompactionResult};
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -266,7 +300,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let local = Arc::new(
                 crate::test_support::local_backend_builder(temp.path())
-                    .build().await.unwrap(),
+                    .build().unwrap(),
             );
             let mut config = SandboxConfig::default();
             config.spec.name = "complete".into();
@@ -277,7 +311,9 @@ mod tests {
                 "INSERT INTO sandbox (name, config, status, ephemeral) VALUES ('complete', ?, 'Stopped', 0)",
                 [serde_json::to_string(&config).unwrap().into()],
             )).await.unwrap();
-            std::fs::create_dir_all(local.sandboxes_dir().join("complete")).unwrap();
+            let runtime_dir = local.sandboxes_dir().join("complete/runtime");
+            std::fs::create_dir_all(&runtime_dir).unwrap();
+            microsandbox_runtime::checkpoint::layout::initialize_new(&runtime_dir).unwrap();
             let compaction = DiskCompactionBuilder::new(local.clone(), "complete".into());
 
             let resizing = CreationStorage::acquire(&local, "complete").unwrap();
@@ -286,7 +322,23 @@ mod tests {
             assert!(error.to_string().contains("retry"), "{error}");
             drop(resizing);
 
-            // Queue compaction behind an occupied blocking worker so cancellation is deterministic.
+            // Finish async transition/lineage directory setup before occupying the only
+            // blocking thread. Hold lifecycle ownership so disk work cannot race ahead.
+            let run_dir = local.config().run_dir();
+            let lifecycle = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+                &run_dir, "complete",
+            ).unwrap().unwrap();
+            let pending = tokio::spawn(compaction.clone().apply());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(lineage) = microsandbox_runtime::ipc::try_acquire_snapshot_lineage_guard(
+                    &run_dir, "complete",
+                ).unwrap() {
+                    drop(lineage);
+                    assert!(!pending.is_finished(), "compaction ended before acquiring lineage");
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+
             let (started, ready) = tokio::sync::oneshot::channel();
             let (release, blocked) = std::sync::mpsc::channel();
             let blocker = tokio::task::spawn_blocking(move || {
@@ -294,7 +346,7 @@ mod tests {
                 let _ = blocked.recv();
             });
             ready.await.unwrap();
-            let pending = tokio::spawn(compaction.clone().apply());
+            drop(lifecycle);
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     match CreationStorage::acquire(&local, "complete") {
@@ -309,12 +361,8 @@ mod tests {
                 }
             }).await.expect("compaction must reserve storage before queueing disk work");
 
-            // Admission now awaits catalog protection before queuing the blocking worker.
-            // Wait for its durable marker so cancellation still targets the queued disk work.
-            while !local.sandboxes_dir().join("complete/state-layout.json").exists() {
-                assert!(!pending.is_finished(), "compaction ended during admission");
-                tokio::task::yield_now().await;
-            }
+            // Ready admission completes without yielding, so observed storage ownership
+            // means this task has queued its worker and is awaiting its completion.
             pending.abort();
             assert!(pending.await.unwrap_err().is_cancelled());
             assert!(CreationStorage::acquire(&local, "complete").is_err(),
@@ -343,7 +391,6 @@ mod tests {
             let local = Arc::new(
                 crate::test_support::local_backend_builder(temp.path())
                     .build()
-                    .await
                     .unwrap(),
             );
             let mut config = SandboxConfig::default();
@@ -457,9 +504,3 @@ mod tests {
         }
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub use microsandbox_types::{DiskCompactionDiskResult, DiskCompactionResult};

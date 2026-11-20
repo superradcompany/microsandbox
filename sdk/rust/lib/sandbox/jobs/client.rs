@@ -5,12 +5,14 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::stream;
-use microsandbox_protocol::jobs::{JobOperation, JobOutput, JobOutputPage, JobResponse};
+use microsandbox_protocol::jobs::{
+    JobOperation, JobOutput, JobOutputPage, JobOutputSource, JobResponse,
+};
 
-use crate::backend::Backend;
+use crate::context::Context;
 #[cfg(feature = "local")]
 use crate::sandbox::SandboxStatus;
-use crate::sandbox::{SandboxHandle, SandboxId};
+use crate::sandbox::{SandboxId, SandboxRecord};
 
 use super::{
     JobError, JobExit, JobId, JobInfo, JobLogEntry, JobLogOptions, JobLogStream, JobResult,
@@ -34,14 +36,14 @@ pub struct Job {
 
 #[derive(Clone)]
 pub(super) struct Target {
-    pub backend: Arc<dyn Backend>,
+    pub backend: Arc<dyn Context>,
     pub name: String,
     pub sandbox_id: SandboxId,
 }
 
 #[cfg(feature = "local")]
 pub(super) struct JobConnection {
-    pub session: crate::backend::local::control::ControlSession,
+    pub session: crate::context::local::control::ControlSession,
     pub boot_id: String,
 }
 
@@ -50,10 +52,10 @@ pub(super) struct JobConnection {
 //--------------------------------------------------------------------------------------------------
 
 impl Target {
-    pub async fn validate(&self) -> JobResult<SandboxHandle> {
+    pub async fn validate(&self) -> JobResult<SandboxRecord> {
         let handle = self
             .backend
-            .sandboxes()
+            .sandbox_ops()
             .get(self.backend.clone(), &self.name)
             .await?;
         if handle.id() != self.sandbox_id {
@@ -462,7 +464,7 @@ impl Job {
         })?;
         Ok(JobLogEntry {
             timestamp: output.timestamp,
-            source: output.source.to_string(),
+            source: output.source,
             data: data.into(),
             cursor: self.cursor(output.sequence),
         })
@@ -508,8 +510,61 @@ fn matches_log(entry: &JobLogEntry, options: &JobLogOptions) -> bool {
     options.since.is_none_or(|since| entry.timestamp >= since)
         && options.until.is_none_or(|until| entry.timestamp < until)
         && if options.sources.is_empty() {
-            matches!(entry.source.as_str(), "stdout" | "stderr" | "output")
+            matches!(
+                entry.source,
+                JobOutputSource::Stdout | JobOutputSource::Stderr | JobOutputSource::Output
+            )
         } else {
             options.sources.contains(&entry.source)
         }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_sources_preserve_wire_values_and_filter_membership() {
+        use JobOutputSource::{Output, Stderr, StdinError, Stdout};
+
+        for (source, tag) in [
+            (Stdout, "stdout"),
+            (Stderr, "stderr"),
+            (Output, "output"),
+            (StdinError, "stdin_error"),
+        ] {
+            let wire_entry = serde_json::json!({"timestamp": 1, "source": tag, "data_base64": "/w==", "cursor": "job:1"});
+            let entry: JobLogEntry = serde_json::from_value(wire_entry.clone()).unwrap();
+            assert_eq!(entry.source, source);
+            assert_eq!(tag.parse::<JobOutputSource>().unwrap(), source);
+            assert_eq!(source.as_str(), tag);
+            assert_eq!(serde_json::to_value(&entry).unwrap(), wire_entry);
+            assert_eq!(
+                matches_log(&entry, &JobLogOptions::default()),
+                source != StdinError
+            );
+
+            for selected in [Stdout, Stderr, Output, StdinError] {
+                let options: JobLogOptions =
+                    serde_json::from_value(serde_json::json!({"sources": [selected.as_str()]}))
+                        .unwrap();
+                assert_eq!(options.sources, [selected]);
+                assert_eq!(matches_log(&entry, &options), source == selected);
+                assert_eq!(
+                    serde_json::to_value(&options).unwrap()["sources"],
+                    serde_json::json!([selected.as_str()])
+                );
+            }
+        }
+
+        assert!("stdoout".parse::<JobOutputSource>().is_err());
+        assert!(
+            serde_json::from_value::<JobLogOptions>(serde_json::json!({"sources": ["stdoout"]}))
+                .is_err()
+        );
+    }
 }

@@ -36,6 +36,11 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 use super::install::is_generated_alias;
 use crate::ui;
 
+mod repair;
+mod storage_doctor;
+pub use repair::RepairArgs;
+pub use storage_doctor::{StorageDoctorExit, run_doctor_command};
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -65,9 +70,12 @@ pub struct SelfArgs {
 /// `msb self` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
-    /// Check local runtime and host virtualization prerequisites.
+    /// Check host setup, or inspect a named sandbox.
     #[command(visible_alias = "check")]
     Doctor(DoctorArgs),
+
+    /// Repair local sandboxes without starting them.
+    Repair(RepairArgs),
 
     /// Update msb and libkrunfw to the latest release.
     #[command(visible_alias = "upgrade")]
@@ -129,15 +137,31 @@ pub struct WindowsSelfSwapArgs {
 }
 
 /// Arguments for `msb doctor` and `msb self doctor`.
-#[derive(Debug, Args, Clone, Copy)]
+#[derive(Debug, Args, Clone)]
 pub struct DoctorArgs {
+    /// Inspect this sandbox's storage. Omit to check the host.
+    #[arg(long = "sandbox", value_name = "SANDBOX", group = "storage_scope", conflicts_with_all = ["sandbox", "fix", "yes"])]
+    pub sandbox_flag: Option<String>,
+
+    /// Positional sandbox name retained for existing scripts.
+    #[arg(value_name = "SANDBOX", hide = true, group = "storage_scope", conflicts_with_all = ["sandbox_flag", "fix", "yes"])]
+    pub sandbox: Option<String>,
+
     /// Attempt supported host virtualization setup fixes.
     #[arg(long)]
     pub fix: bool,
 
-    /// Apply fixes without prompting for confirmation.
+    /// Apply host fixes without prompting for confirmation.
     #[arg(long, short = 'y')]
     pub yes: bool,
+
+    /// Inspect every sandbox in the configured local home.
+    #[arg(short = 'a', long, group = "storage_scope", conflicts_with_all = ["sandbox", "sandbox_flag", "fix", "yes"])]
+    pub all: bool,
+
+    /// Structured sandbox diagnosis (exit 0: ready or eligible, 2: action needed, 3: incomplete).
+    #[arg(long, requires = "storage_scope", value_enum)]
+    pub format: Option<crate::ui::OutputFormat>,
 }
 
 /// Arguments for `msb self uninstall`.
@@ -214,8 +238,8 @@ struct DowngradeOperation {
 }
 
 enum SnapshotArtifactDowngradePlan {
-    V066(microsandbox::backend::local_snapshot_downgrade::DowngradePlan),
-    ReleasedFlat(microsandbox::backend::local_snapshot_downgrade::ReleasedFlatDowngradePlan),
+    V066(microsandbox::context::local_snapshot_downgrade::DowngradePlan),
+    ReleasedFlat(microsandbox::context::local_snapshot_downgrade::ReleasedFlatDowngradePlan),
 }
 
 /// Durable Windows-only handoff from a self-management command to its retryable
@@ -428,27 +452,16 @@ impl Drop for MigrationLock {
 
 fn parse_version(input: &str) -> anyhow::Result<Version> {
     let clean = input.trim().strip_prefix('v').unwrap_or(input.trim());
-    let mut parts = clean.split('.');
-    let Some(major) = parts.next() else {
-        anyhow::bail!("invalid version {input:?}");
-    };
-    let Some(minor) = parts.next() else {
-        anyhow::bail!("invalid version {input:?}; expected MAJOR.MINOR.PATCH");
-    };
-    let Some(patch) = parts.next() else {
-        anyhow::bail!("invalid version {input:?}; expected MAJOR.MINOR.PATCH");
-    };
-    if parts.next().is_some() {
-        anyhow::bail!("invalid version {input:?}; expected MAJOR.MINOR.PATCH");
-    }
-
-    Ok(Version::new(major.parse()?, minor.parse()?, patch.parse()?))
+    // Preserve prerelease/build metadata: RCs participate in SemVer precedence
+    // and are valid installed releases on both update and downgrade paths.
+    Version::parse(clean).map_err(|error| anyhow::anyhow!("invalid version {input:?}: {error}"))
 }
 
 /// Run a `msb self` subcommand.
 pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     match args.command {
-        SelfCommand::Doctor(args) => run_doctor(args),
+        SelfCommand::Doctor(args) => run_doctor_command(args).await,
+        SelfCommand::Repair(args) => repair::run(args).await,
         SelfCommand::Update(args) => run_update(args).await,
         SelfCommand::Downgrade(args) => run_downgrade(args).await,
         SelfCommand::Uninstall(args) => run_uninstall(args).await,
@@ -899,7 +912,7 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     info(&format!("Current version: v{current_version}"));
     info(&format!("Target version: v{target_version}"));
 
-    if target_version >= current_version {
+    if target_version.cmp_precedence(&current_version).is_ge() {
         return refuse_static(
             &format!("v{target_version} is not older than the current version"),
             &["use `msb self update` to move to the latest release"],
@@ -1115,14 +1128,14 @@ async fn run_downgrade_with_db(
             {
                 let spinner = ui::Spinner::start("Checking", "retained snapshot graph");
                 let result = if reverses_legacy_snapshots {
-                    microsandbox::backend::local_snapshot_downgrade::preflight_managed_v066(
+                    microsandbox::context::local_snapshot_downgrade::preflight_managed_v066(
                         ctx.db.inner(),
                         ctx.snapshots_dir,
                     )
                     .await
                     .map(SnapshotArtifactDowngradePlan::V066)
                 } else {
-                    microsandbox::backend::local_snapshot_downgrade::preflight_managed_released_flat(
+                    microsandbox::context::local_snapshot_downgrade::preflight_managed_released_flat(
                         ctx.db.inner(),
                         ctx.snapshots_dir,
                     )
@@ -1205,7 +1218,7 @@ async fn run_downgrade_with_db(
                     let spinner = ui::Spinner::start("Reverting", "snapshot artifacts");
                     let result = match plan {
                         SnapshotArtifactDowngradePlan::V066(plan) => {
-                            microsandbox::backend::local_snapshot_downgrade::execute_managed_v066(
+                            microsandbox::context::local_snapshot_downgrade::execute_managed_v066(
                                 ctx.db.inner(),
                                 ctx.operation.recovery_dir(),
                                 plan,
@@ -1213,7 +1226,7 @@ async fn run_downgrade_with_db(
                             .await
                         }
                         SnapshotArtifactDowngradePlan::ReleasedFlat(plan) => {
-                            microsandbox::backend::local_snapshot_downgrade::execute_managed_released_flat(
+                            microsandbox::context::local_snapshot_downgrade::execute_managed_released_flat(
                                 ctx.db.inner(),
                                 ctx.operation.recovery_dir(),
                                 plan,

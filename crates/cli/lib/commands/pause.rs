@@ -1,7 +1,6 @@
 //! Explicit resident pause and resume.
 
 use clap::Args;
-use microsandbox::Sandbox;
 
 use crate::ui;
 
@@ -38,7 +37,10 @@ pub struct ResumeArgs {
 
 /// Change resident execution state through host control, without opening the guest agent.
 pub async fn run(args: PauseArgs, resume: bool) -> anyhow::Result<()> {
-    let sandbox = Sandbox::get_for_control(&args.name).await?;
+    let sandbox = crate::commands::common::selected_context()?
+        .sandboxes()
+        .get_for_control(&args.name)
+        .await?;
     if resume {
         sandbox.resume().await?;
     } else if let Some(policy) = args.guest_flush {

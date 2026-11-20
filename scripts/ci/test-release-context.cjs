@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { spawnSync } = require('node:child_process');
-const { resolve } = require('node:path');
+const { matchesGlob, resolve } = require('node:path');
 const { resolveReleaseContext } = require('./release-context.cjs');
 
 const root = resolve(__dirname, '../..');
@@ -44,7 +44,7 @@ function fixture(options = {}) {
 
 test('recovery resolves a version-matched unpublished tag in main', async () => {
   const input = fixture();
-  assert.deepEqual(await resolveReleaseContext(input), { source_sha: sourceSha, tag, publish: 'true' });
+  assert.deepEqual(await resolveReleaseContext(input), { source_sha: sourceSha, tag, publish: 'true', channel: 'stable', prerelease: 'false', npm_tag: 'latest' });
   assert.equal(input.calls.filter(call => call[0] === 'rev-parse').length, 1);
 });
 
@@ -87,7 +87,7 @@ test('recovery refuses missing, unrelated, mismatched, and already published tag
 test('normal tag pushes retain publication but reject a moved tag', async () => {
   const input = fixture({ context: { eventName: 'push', ref: `refs/tags/${tag}`, sha: sourceSha } });
   input.releaseTag = '';
-  assert.deepEqual(await resolveReleaseContext(input), { source_sha: sourceSha, tag, publish: 'true' });
+  assert.deepEqual(await resolveReleaseContext(input), { source_sha: sourceSha, tag, publish: 'true', channel: 'stable', prerelease: 'false', npm_tag: 'latest' });
   assert.ok(!input.calls.some(call => call[0] === 'release' || call[0] === 'merge-base'));
   await assert.rejects(resolveReleaseContext({ ...input, context: { ...input.context, sha: workflowSha } }), /triggering commit/);
 });
@@ -153,4 +153,94 @@ test('all publishers retain the complete platform and production validation gate
   for (const line of metadata.with.tags.split('\n').filter(line => line.includes('type=semver'))) {
     assert.ok(line.includes('value=${{ needs.release-context.outputs.tag }}'));
   }
+});
+
+test('recovery uses package installers from the workflow revision with tagged product sources', () => {
+  const release = workflow('release.yml');
+  const context = release.jobs['release-context'];
+  const checkout = context.steps.find(step => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.ref, undefined, 'CI tools must come from the workflow revision');
+  const upload = context.steps.find(step => step.with?.name === 'ci-release-tools');
+  assert.ok(upload.uses.startsWith('actions/upload-artifact@'));
+  assert.equal(upload.with['if-no-files-found'], 'error');
+  for (const filename of ['install-apt-packages.sh', 'prepare-apt-fallback.py']) {
+    assert.ok(upload.with.path.split('\n').includes(`scripts/ci/${filename}`));
+  }
+  let installers = 0;
+  for (const filename of ['release.yml', 'release-linux.yml', 'release-macos.yml']) {
+    for (const job of Object.values(workflow(filename).jobs)) {
+      if (job.if === '${{ false }}') continue;
+      for (const [index, step] of (job.steps || []).entries()) {
+        assert.ok(!step.run?.includes('sudo apt-get update'), 'active jobs must use the shared installer');
+        if (!step.run?.includes('install-apt-packages.sh')) continue;
+        installers++;
+        assert.ok(step.run.includes('$RUNNER_TEMP/ci-release-tools/install-apt-packages.sh'));
+        const download = job.steps.slice(0, index).find(item => item.with?.name === 'ci-release-tools');
+        assert.ok(download?.uses.startsWith('actions/download-artifact@'));
+        assert.equal(download.with.path, '${{ runner.temp }}/ci-release-tools');
+        assert.equal(download.with['run-id'], undefined, 'never use helpers from another run');
+        assert.equal(download.if, step.if);
+      }
+    }
+  }
+  assert.equal(installers, 9);
+});
+
+test('release asset collectors exclude workflow helper artifacts', () => {
+  const { jobs } = workflow('release.yml');
+  const helpers = jobs['release-context'].steps
+    .filter(step => step.uses?.startsWith('actions/upload-artifact@'))
+    .map(step => step.with.name);
+  assert.ok(helpers.length > 0, 'exercise the actual workflow helper uploads');
+
+  // Check the real collector patterns: merely checking that helpers have a
+  // matching downloader misses collisions with the shipping artifact namespace.
+  for (const name of ['release-ready', 'assemble', 'go-sdk-tag']) {
+    const patterns = jobs[name].steps
+      .filter(step => step.uses?.startsWith('actions/download-artifact@') && step.with?.pattern)
+      .map(step => step.with.pattern);
+    assert.ok(patterns.includes('release-*'), `${name} must collect all platform release assets`);
+    for (const pattern of patterns) {
+      for (const helper of helpers) {
+        assert.equal(matchesGlob(helper, pattern), false, `${name}: ${pattern} includes CI helper ${helper}`);
+      }
+    }
+  }
+});
+
+test('RC tag pushes and recovery share classification and version validation', async () => {
+  for (const recovery of [false, true]) {
+    const input = fixture();
+    const candidate = 'v0.8.0-rc.1';
+    input.releaseTag = recovery ? candidate : '';
+    input.context = { ...input.context, eventName: recovery ? 'workflow_dispatch' : 'push',
+      ref: recovery ? 'refs/heads/main' : `refs/tags/${candidate}`, sha: recovery ? workflowSha : sourceSha };
+    input.runGit = (...args) => {
+      if (args[0] === 'rev-parse') return sourceSha;
+      if (args[0] === 'merge-base') return '';
+      if (args[0] === 'show') return '[workspace.package]\nversion = "0.8.0-rc.1"\n';
+      assert.fail(`Unexpected git command: ${args}`);
+    };
+    assert.deepEqual(await resolveReleaseContext(input), {
+      source_sha: sourceSha, tag: candidate, publish: 'true', channel: 'rc', prerelease: 'true', npm_tag: 'rc',
+    });
+  }
+});
+
+test('stable maintenance and Docker aliases exclude every prerelease', () => {
+  const { jobs } = workflow('release.yml');
+  for (const name of ['sync-mintlify', 'update-homebrew', 'update-winget', 'refresh-lockfile']) {
+    assert.match(jobs[name].if, /needs\.release-context\.outputs\.channel == 'stable'/, name);
+  }
+  const metadata = jobs['docker-manifest'].steps.find(step => step.uses?.startsWith('docker/metadata-action@'));
+  assert.equal(metadata.with.flavor, 'latest=false');
+  for (const line of metadata.with.tags.trim().split('\n')) {
+    if (line.includes('value=latest') || line.includes('pattern={{major}}.{{minor}}')) {
+      assert.ok(line.includes("enable=${{ needs.release-context.outputs.channel == 'stable' }}"));
+    }
+    if (line.includes('value=rc')) assert.ok(line.includes("enable=${{ needs.release-context.outputs.channel == 'rc' }}"));
+  }
+  const assemble = jobs.assemble.steps.find(step => step.name === 'Create GitHub Release').run;
+  assert.ok(assemble.includes('needs.release-context.outputs.prerelease'));
+  assert.ok(assemble.includes('--prerelease --latest=false'));
 });

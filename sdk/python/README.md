@@ -63,7 +63,11 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`async with` stops and removes the sandbox when the block exits. Use `Sandbox.create(...)` without a context manager when you want to control `stop()`, `kill()`, or `remove()` yourself.
+`async with` awaits graceful shutdown of its owned local run. It preserves persisted state except for configured ephemeral cleanup and leaves detached, independently connected, and remote runs alone. Cleanup errors are raised; a body exception remains available as their cause. `detach()` relinquishes automatic shutdown while keeping the object usable.
+
+At normal interpreter exit, the SDK stops its native async runtime and waits for native blocking work already in progress before Python finalizes. Await operations and close sandbox contexts explicitly when you need their results or cleanup to complete; process exit is not a substitute for sandbox lifecycle management.
+
+Image imports from stdin and SSH stdio connections require exclusive use of their process input/output streams. Cancelling these operations releases the streams, including when a pipe remains open without input. On Unix, the SDK temporarily enables nonblocking I/O and restores the original blocking mode when the operation ends.
 
 ### Reusable Lifecycle Convergence
 
@@ -74,11 +78,11 @@ from microsandbox import SandboxStatus
 
 sandbox = await Sandbox.connect_or_create("worker", image="python", memory=1024)
 
-print(f"{await sandbox.name}: {await sandbox.id}")
-running = await (await Sandbox.get("worker")).connect_or_start()
+print(f"{sandbox.name}: {sandbox.id}")
+running = await Sandbox.get_running("worker")
 await running.request_stop()
-stopped = await running.wait_for_status(SandboxStatus.STOPPED)
-restarted = await stopped.restart()
+await running.wait_for_status(SandboxStatus.STOPPED)
+restarted = await running.restart()
 await restarted.destroy()
 ```
 
@@ -262,8 +266,7 @@ sandbox = await Sandbox.create(
     replace=True,
 )
 
-handle = await Sandbox.get("python-readme-background")
-reconnected = await handle.connect()
+reconnected = await Sandbox.get_running("python-readme-background")
 output = await reconnected.shell("echo reconnected")
 print(output.stdout_text.strip())
 ```

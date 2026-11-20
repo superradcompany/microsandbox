@@ -13,10 +13,14 @@ EXPECTED_KWARGS = [
     "cpus",
     "max_memory",
     "max_cpus",
+    "cpu_placement",
+    "placement_profile",
+    "thp",
     "nested_virt",
     "workdir",
     "shell",
     "security",
+    "deployment_profile",
     "hostname",
     "user",
     "entrypoint",
@@ -41,28 +45,33 @@ EXPECTED_KWARGS = [
     "vsock",
     "network",
     "intercept_tls",
+    "proxy",
     "secrets",
     "secret_violation_action",
     "detached",
 ]
 
 
-def _sandbox_class() -> ast.ClassDef:
+def _sandbox_class(owner: str = "Sandbox") -> ast.ClassDef:
     tree = ast.parse(STUB_PATH.read_text())
     for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == "Sandbox":
+        if isinstance(node, ast.ClassDef) and node.name == owner:
             return node
     raise AssertionError("Sandbox missing from stub")
 
 
-def _method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
-    for node in _sandbox_class().body:
+def _method(name: str, owner: str = "Sandbox") -> ast.FunctionDef | ast.AsyncFunctionDef:
+    for node in _sandbox_class(owner).body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
     raise AssertionError(f"Sandbox.{name} missing from stub")
 
 
 def test_create_methods_have_explicit_keyword_only_contracts() -> None:
+    for name in ("create", "connect_or_create", "create_with_progress"):
+        assert [ast.dump(arg) for arg in _method(name, "Sandboxes").args.kwonlyargs] == [
+            ast.dump(arg) for arg in _method(name).args.kwonlyargs
+        ]
     create = _method("create")
     connect_or_create = _method("connect_or_create")
     create_with_progress = _method("create_with_progress")
@@ -140,10 +149,10 @@ def test_lifecycle_convergence_methods_are_typed() -> None:
     classes = {
         node.name: node
         for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name in {"Sandbox", "SandboxHandle"}
+        if isinstance(node, ast.ClassDef) and node.name in {"Sandbox"}
     }
 
-    for class_name in ("Sandbox", "SandboxHandle"):
+    for class_name in ("Sandbox",):
         methods = {
             node.name
             for node in classes[class_name].body
@@ -153,10 +162,10 @@ def test_lifecycle_convergence_methods_are_typed() -> None:
 
     handle_methods = {
         node.name
-        for node in classes["SandboxHandle"].body
+        for node in classes["Sandbox"].body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    assert "connect_or_start" in handle_methods
+    assert "ensure_running" in handle_methods
 
 
 def test_restore_has_only_destination_options() -> None:
@@ -164,7 +173,11 @@ def test_restore_has_only_destination_options() -> None:
     names = {arg.arg for arg in restore.args.kwonlyargs}
     assert {"name", "cow_memory", "forked", "disk_only", "snapshot_base", "volumes",
             "ports", "vsock", "allow_missing_resources"} <= names
-    assert not names & {"image", "cmd", "replace", "detached", "from_snapshot", "network"}
+    assert not names & {
+        "image", "foreground_command", "background_command", "replace", "detached",
+        "from_snapshot", "network",
+    }
+    assert {"workdir", "shell", "entrypoint", "cmd", "env"} <= names
     assert {"cpus", "memory", "network_policy", "max_connections", "disable_network",
             "security", "max_duration", "idle_timeout"} <= names
     assert names == {arg.arg for arg in _method("restore_with_progress").args.kwonlyargs}
@@ -175,22 +188,27 @@ def test_restore_accepts_backend_neutral_snapshot_objects() -> None:
     for name in ("restore", "restore_with_progress"):
         snapshot = _method(name).args.args[0]
         assert snapshot.arg == "snapshot"
-        assert ast.unparse(snapshot.annotation) == (
-            "Snapshot | SnapshotHandle | str | os.PathLike[str]"
-        )
+        assert ast.unparse(snapshot.annotation) == ("Snapshot | str | os.PathLike[str]")
 
 
 def test_restore_controls_preserve_optional_values_and_policy_type() -> None:
     for name in ("restore", "restore_with_progress"):
         method = _method(name)
         annotations = {arg.arg: ast.unparse(arg.annotation) for arg in method.args.kwonlyargs}
-        defaults = dict(zip(
-            [arg.arg for arg in method.args.kwonlyargs], method.args.kw_defaults, strict=True
-        ))
+        defaults = dict(
+            zip([arg.arg for arg in method.args.kwonlyargs], method.args.kw_defaults, strict=True)
+        )
         assert annotations["network_policy"] == "NetworkPolicy | None"
         assert annotations["security"] == "SecurityProfile | None"
-        for option in ("cpus", "memory", "network_policy", "max_connections", "security",
-                       "max_duration", "idle_timeout"):
+        for option in (
+            "cpus",
+            "memory",
+            "network_policy",
+            "max_connections",
+            "security",
+            "max_duration",
+            "idle_timeout",
+        ):
             assert ast.literal_eval(defaults[option]) is None
 
 
@@ -200,11 +218,9 @@ def test_fork_methods_retain_branch_alias_signatures() -> None:
         for node in ast.parse(STUB_PATH.read_text()).body
         if isinstance(node, ast.ClassDef)
     }
-    for name in ("Sandbox", "SandboxHandle"):
+    for name in ("Sandbox",):
         methods = {
-            node.name: node
-            for node in classes[name].body
-            if isinstance(node, ast.AsyncFunctionDef)
+            node.name: node for node in classes[name].body if isinstance(node, ast.AsyncFunctionDef)
         }
         for canonical, alias in (("fork", "branch"), ("fork_many", "branch_many")):
             assert ast.dump(methods[canonical].args) == ast.dump(methods[alias].args)
@@ -218,10 +234,34 @@ def test_fork_methods_take_restore_volumes() -> None:
         if isinstance(node, ast.ClassDef)
     }
     restore = {arg.arg: ast.unparse(arg.annotation) for arg in _method("restore").args.kwonlyargs}
-    for name in ("Sandbox", "SandboxHandle"):
+    for name in ("Sandbox",):
         for node in classes[name].body:
             if isinstance(node, ast.AsyncFunctionDef) and node.name in {
-                "fork", "fork_many", "branch", "branch_many"
+                "fork",
+                "fork_many",
+                "branch",
+                "branch_many",
             }:
                 annotations = {arg.arg: ast.unparse(arg.annotation) for arg in node.args.kwonlyargs}
                 assert annotations["volumes"] == restore["volumes"]
+
+
+def test_sandbox_identity_members_are_synchronous_properties() -> None:
+    for name in ("name", "id"):
+        member = _method(name)
+        assert isinstance(member, ast.FunctionDef)
+        assert any(
+            isinstance(decorator, ast.Name) and decorator.id == "property"
+            for decorator in member.decorator_list
+        )
+        assert ast.unparse(member.returns) == "str"
+
+
+def test_get_running_returns_the_operational_sandbox() -> None:
+    method = _method("get_running")
+    assert isinstance(method, ast.AsyncFunctionDef)
+    assert ast.unparse(method.returns) == "Sandbox"
+    assert [arg.arg for arg in method.args.args] == ["name"]
+    assert any(
+        isinstance(item, ast.Name) and item.id == "staticmethod" for item in method.decorator_list
+    )

@@ -1,24 +1,26 @@
 //! Exec session management: spawning processes with PTY or pipe I/O.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::{iter, mem, ptr};
 
+use nix::fcntl::OFlag;
 use nix::pty;
 use nix::sys::signal::Signal;
+use nix::unistd::pipe2;
 use tokio::io::AsyncReadExt;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 
 use microsandbox_protocol::bulk::BulkRecord;
 use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecLimits, ExecRequest};
-use microsandbox_protocol::transport::ClientIncarnation;
+use microsandbox_protocol::transport::{ClientIncarnation, relay_client_slot};
 
 use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
@@ -40,6 +42,13 @@ const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_int = 4;
 const DEFAULT_USER_SPEC: &str = "0:0";
 
+/// Bound only the drain after the tracked process exits, not its total output.
+/// Linux PTYs have a 640 KiB flip-buffer budget plus the 4 KiB N_TTY buffer;
+/// 1 MiB covers that queued tail while a continuously writing descendant cannot
+/// keep a completed execution alive. Preserve output-window backpressure while
+/// sending these bytes; a wall-clock deadline could discard a slow reader's tail.
+const PTY_EXIT_DRAIN_LIMIT: usize = 1024 * 1024;
+
 /// Aggregate guest-to-host data retained outside the serial output buffer.
 const SESSION_OUTPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
 
@@ -50,7 +59,7 @@ const SESSION_OUTPUT_BUDGET_GRANULE: usize = 4096;
 const SESSION_OUTPUT_ITEM_CAPACITY: usize = 1024;
 
 /// Maximum number of records waiting for the independently scheduled bulk writer.
-const SESSION_BULK_OUTPUT_ITEM_CAPACITY: usize = 256;
+pub(crate) const SESSION_BULK_OUTPUT_ITEM_CAPACITY: usize = 256;
 
 /// Maximum lifecycle commands waiting for the dedicated bulk scheduler.
 const SESSION_BULK_COMMAND_CAPACITY: usize = 128;
@@ -136,6 +145,9 @@ fn exec_failed_from_io_error(err: &std::io::Error, cmd: &str, stage: &str) -> Ex
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Bulk flow identity: owning client incarnation and stream id.
+pub(crate) type BulkFlowKey = (ClientIncarnation, u32);
 
 /// An active exec session handle for sending input to a running process.
 ///
@@ -225,7 +237,61 @@ pub struct SessionOutputEnvelope {
 
     /// Capacity follows the allocation and is released only after serial output consumes it.
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+
+    /// Shared-state accounting released with the dedicated bulk record.
+    _pending_bulk: Option<BulkPendingOutput>,
 }
+
+/// Bulk-output ownership the main loop publishes and the scheduler enforces.
+#[derive(Default)]
+struct BulkOwnership {
+    /// Epoch advanced whenever scheduler-visible cleanup state changes.
+    changed: u64,
+
+    /// Range owners that may still have output written.
+    live: HashSet<ClientIncarnation>,
+
+    /// Owner whose complete record the scheduler is writing right now, if any.
+    in_flight: Option<ClientIncarnation>,
+
+    /// Disconnects waiting only for their own in-flight record.
+    awaiting_write: HashMap<ClientIncarnation, oneshot::Sender<()>>,
+
+    /// Cancelled keys that may still have queued or in-channel output.
+    cancelled: HashSet<BulkFlowKey>,
+
+    /// Record counts in the scheduler input channel or per-flow queues.
+    pending_output: HashMap<BulkFlowKey, usize>,
+
+    /// Whether the dedicated scheduler has exited.
+    closed: bool,
+}
+
+/// Shared cleanup state for dedicated bulk output.
+#[derive(Clone, Default)]
+pub(crate) struct BulkCleanup {
+    state: Arc<Mutex<BulkOwnership>>,
+    wake: Arc<Notify>,
+}
+
+/// Scheduler-visible cleanup state captured after its change epoch advances.
+pub(crate) struct BulkCleanupSnapshot {
+    /// Epoch represented by this snapshot.
+    pub(crate) changed: u64,
+    /// Flow keys cancelled since the preceding snapshot.
+    pub(crate) cancelled: HashSet<BulkFlowKey>,
+    /// Range owners that may still have output written.
+    pub(crate) live: HashSet<ClientIncarnation>,
+}
+
+/// One record counted in [`BulkOwnership::pending_output`].
+struct BulkPendingOutput {
+    cleanup: BulkCleanup,
+    key: BulkFlowKey,
+}
+
+/// Scheduler-lifetime guard that closes shared cleanup state on every exit path.
+pub(crate) struct BulkCleanupCloseGuard(BulkCleanup);
 
 /// Lifecycle commands processed ahead of queued dedicated-lane output.
 pub enum BulkOutputCommand {
@@ -246,23 +312,6 @@ pub enum BulkOutputCommand {
         /// Resolves after the scheduler has crossed the cut.
         completion: oneshot::Sender<()>,
     },
-    /// Release queued records for one cancelled operation.
-    DropFlow {
-        /// Range owner that opened the operation.
-        incarnation: ClientIncarnation,
-        /// Correlation being cancelled.
-        id: u32,
-        /// Resolves after matching queued records and their permits are dropped.
-        completion: oneshot::Sender<()>,
-    },
-
-    /// Release every queued record owned by one disconnected SDK client.
-    DropIncarnation {
-        /// Range ownership period being removed.
-        incarnation: ClientIncarnation,
-        /// Resolves after matching queued records and their permits are dropped.
-        completion: oneshot::Sender<()>,
-    },
 }
 
 /// Capacity reserved before a producer reads or encodes a data-bearing event.
@@ -275,6 +324,7 @@ pub struct SessionOutputSender {
     control_tx: mpsc::Sender<SessionOutputEnvelope>,
     bulk_tx: Option<mpsc::Sender<SessionOutputEnvelope>>,
     bulk_command_tx: Option<mpsc::Sender<BulkOutputCommand>>,
+    bulk_cleanup: Option<BulkCleanup>,
     control_budget: Arc<Semaphore>,
     bulk_budget: Arc<Semaphore>,
     incarnation: Option<ClientIncarnation>,
@@ -399,6 +449,183 @@ impl BulkSessionOutput {
     }
 }
 
+impl BulkCleanup {
+    /// Lock ownership state, recovering from poison: the state is still needed to release
+    /// resources. Guest release builds abort on panic; tests need completion after an unwind.
+    fn lock(&self) -> MutexGuard<'_, BulkOwnership> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Clear ownership, advance the change epoch and fire every parked disconnect.
+    fn reset(&self, closed: bool) {
+        let completions = {
+            let mut state = self.lock();
+            let completions = mem::take(&mut state.awaiting_write)
+                .into_values()
+                .collect::<Vec<_>>();
+            let changed = state.changed.wrapping_add(1);
+            *state = BulkOwnership {
+                changed,
+                closed,
+                ..BulkOwnership::default()
+            };
+            completions
+        };
+
+        for completion in completions {
+            let _ = completion.send(());
+        }
+    }
+
+    /// Close shared cleanup state when the scheduler leaves its task.
+    pub(crate) fn close_guard(&self) -> BulkCleanupCloseGuard {
+        BulkCleanupCloseGuard(self.clone())
+    }
+
+    /// Publish one range owner to the dedicated scheduler.
+    pub(crate) fn connect(&self, incarnation: ClientIncarnation) {
+        let mut state = self.lock();
+        if !state.closed && state.live.insert(incarnation) {
+            state.changed = state.changed.wrapping_add(1);
+        }
+        drop(state);
+
+        self.wake.notify_one();
+    }
+
+    /// Mark one cancelled producer only when output can still be pending.
+    pub(crate) fn cancel_flow(
+        &self,
+        incarnation: ClientIncarnation,
+        id: u32,
+        producer_was_live: bool,
+    ) {
+        if relay_client_slot(id).is_none() {
+            return;
+        }
+
+        let key = (incarnation, id);
+        let mut state = self.lock();
+        if !state.closed
+            && (producer_was_live || state.pending_output.contains_key(&key))
+            && state.cancelled.insert(key)
+        {
+            state.changed = state.changed.wrapping_add(1);
+        }
+        drop(state);
+
+        self.wake.notify_one();
+    }
+
+    /// Remove one range owner and wait only for that owner's in-flight record.
+    pub(crate) fn drop_incarnation(&self, incarnation: ClientIncarnation) -> oneshot::Receiver<()> {
+        let (completion, completed) = oneshot::channel();
+        let mut immediate = None;
+        let mut state = self.lock();
+        state.live.remove(&incarnation);
+        state.changed = state.changed.wrapping_add(1);
+        if state.closed || state.in_flight != Some(incarnation) {
+            immediate = Some(completion);
+        } else {
+            state.awaiting_write.insert(incarnation, completion);
+        }
+        drop(state);
+
+        if let Some(completion) = immediate {
+            let _ = completion.send(());
+        }
+        self.wake.notify_one();
+        completed
+    }
+
+    /// Snapshot cleanup requests and owners only after scheduler-visible state changes.
+    pub(crate) fn snapshot_if_changed(&self, observed: Option<u64>) -> Option<BulkCleanupSnapshot> {
+        let mut state = self.lock();
+        if observed == Some(state.changed) {
+            return None;
+        }
+
+        Some(BulkCleanupSnapshot {
+            changed: state.changed,
+            cancelled: mem::take(&mut state.cancelled),
+            live: state.live.clone(),
+        })
+    }
+
+    /// Claim one complete record write if its owner is still live.
+    pub(crate) fn start_write(&self, incarnation: ClientIncarnation) -> bool {
+        let mut state = self.lock();
+        if state.closed || !state.live.contains(&incarnation) {
+            return false;
+        }
+        state.in_flight = Some(incarnation);
+        true
+    }
+
+    /// Complete one record write and release the matching disconnect, if any.
+    pub(crate) fn finish_write(&self, incarnation: ClientIncarnation) {
+        let mut completion = None;
+        let mut state = self.lock();
+        if state.in_flight == Some(incarnation) {
+            state.in_flight = None;
+            completion = state.awaiting_write.remove(&incarnation);
+        }
+        drop(state);
+
+        if let Some(completion) = completion {
+            let _ = completion.send(());
+        }
+    }
+
+    /// Fire parked disconnects and clear ownership at a restore cut.
+    pub(crate) fn restore(&self) {
+        self.reset(false);
+    }
+
+    /// Close the scheduler state and fire every parked disconnect.
+    pub(crate) fn close(&self) {
+        self.reset(true);
+        self.wake.notify_waiters();
+    }
+
+    /// Wait until ownership cleanup may have changed.
+    pub(crate) async fn notified(&self) {
+        self.wake.notified().await;
+    }
+
+    /// Count one record until the scheduler writes or discards it.
+    fn register_output(&self, key: BulkFlowKey) -> BulkPendingOutput {
+        let mut state = self.lock();
+        let count = state.pending_output.entry(key).or_default();
+        *count = count.saturating_add(1);
+        drop(state);
+
+        BulkPendingOutput {
+            cleanup: self.clone(),
+            key,
+        }
+    }
+
+    /// Release one record from shared pending-output accounting.
+    fn output_finished(&self, key: BulkFlowKey) {
+        let mut state = self.lock();
+        let Some(count) = state.pending_output.get_mut(&key) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            state.pending_output.remove(&key);
+        }
+    }
+
+    /// Return allocated cancellation and pending-output key counts.
+    #[cfg(test)]
+    pub(crate) fn pending_counts(&self) -> (usize, usize) {
+        let state = self.lock();
+        (state.cancelled.len(), state.pending_output.len())
+    }
+}
+
 impl SessionOutput {
     /// Bytes retained by this event that count against bulk output capacity.
     fn budget_bytes(&self) -> usize {
@@ -431,6 +658,7 @@ impl SessionOutputSender {
                 control_tx: tx,
                 bulk_tx: None,
                 bulk_command_tx: None,
+                bulk_cleanup: None,
                 control_budget: Arc::clone(&budget),
                 bulk_budget: budget,
                 incarnation: None,
@@ -449,12 +677,14 @@ impl SessionOutputSender {
         let (control_tx, control_rx) = mpsc::channel(SESSION_OUTPUT_ITEM_CAPACITY);
         let (bulk_tx, bulk_rx) = mpsc::channel(SESSION_BULK_OUTPUT_ITEM_CAPACITY);
         let (bulk_command_tx, bulk_command_rx) = mpsc::channel(SESSION_BULK_COMMAND_CAPACITY);
+        let bulk_cleanup = BulkCleanup::default();
         (
             Self {
                 generation: 0,
                 control_tx,
                 bulk_tx: Some(bulk_tx),
                 bulk_command_tx: Some(bulk_command_tx),
+                bulk_cleanup: Some(bulk_cleanup),
                 control_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
                 bulk_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
                 incarnation: None,
@@ -472,6 +702,7 @@ impl SessionOutputSender {
             control_tx: self.control_tx.clone(),
             bulk_tx: self.bulk_tx.clone(),
             bulk_command_tx: self.bulk_command_tx.clone(),
+            bulk_cleanup: self.bulk_cleanup.clone(),
             control_budget: Arc::clone(&self.control_budget),
             bulk_budget: Arc::clone(&self.bulk_budget),
             incarnation,
@@ -481,6 +712,18 @@ impl SessionOutputSender {
     /// Current local attachment generation, independent of the wire protocol version.
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Shared cleanup state for the dedicated scheduler, when enabled.
+    pub(crate) fn bulk_cleanup(&self) -> Option<BulkCleanup> {
+        self.bulk_cleanup.clone()
+    }
+
+    /// Publish one relay range owner to the dedicated scheduler.
+    pub(crate) fn connect_bulk_incarnation(&self, incarnation: ClientIncarnation) {
+        if let Some(cleanup) = &self.bulk_cleanup {
+            cleanup.connect(incarnation);
+        }
     }
 
     pub(crate) async fn park_bulk_output(&self) -> Result<u64, &'static str> {
@@ -536,43 +779,32 @@ impl SessionOutputSender {
         // must therefore enter one FIFO before sharing the physical console stream.
         self.bulk_tx = None;
         self.bulk_command_tx = None;
+        self.bulk_cleanup = None;
     }
 
-    /// Queue a high-priority purge for one operation without awaiting bulk-port progress.
-    pub fn drop_bulk_flow(&self, id: u32) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
+    /// Publish a purge for one operation without awaiting bulk-port progress.
+    pub fn drop_bulk_flow(&self, id: u32, producer_was_live: bool) {
         let Some(incarnation) = self.incarnation else {
-            return Ok(None);
+            return;
         };
-        let Some(commands) = self.bulk_command_tx.as_ref() else {
-            return Ok(None);
+        let Some(cleanup) = &self.bulk_cleanup else {
+            return;
         };
-        let (completion, completed) = oneshot::channel();
-        commands
-            .try_send(BulkOutputCommand::DropFlow {
-                incarnation,
-                id,
-                completion,
-            })
-            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
-        Ok(Some(completed))
+        cleanup.cancel_flow(incarnation, id, producer_was_live);
     }
 
-    /// Queue a high-priority purge for a disconnected range owner.
+    /// Publish a purge for a disconnected range owner.
+    ///
+    /// The receiver resolves once no record of that owner is being written. Combined mode has
+    /// no dedicated scheduler and returns `None`.
     pub fn drop_bulk_incarnation(
         &self,
         incarnation: ClientIncarnation,
-    ) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
-        let Some(commands) = self.bulk_command_tx.as_ref() else {
-            return Ok(None);
+    ) -> Option<oneshot::Receiver<()>> {
+        let Some(cleanup) = &self.bulk_cleanup else {
+            return None;
         };
-        let (completion, completed) = oneshot::channel();
-        commands
-            .try_send(BulkOutputCommand::DropIncarnation {
-                incarnation,
-                completion,
-            })
-            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
-        Ok(Some(completed))
+        Some(cleanup.drop_incarnation(incarnation))
     }
 
     /// Queue an event after its retained allocation has acquired aggregate capacity.
@@ -636,10 +868,19 @@ impl SessionOutputSender {
             return false;
         }
 
-        let tx = if matches!(&output, SessionOutput::Bulk(_)) {
+        let is_bulk = matches!(&output, SessionOutput::Bulk(_));
+        let tx = if is_bulk {
             self.bulk_tx.as_ref().unwrap_or(&self.control_tx)
         } else {
             &self.control_tx
+        };
+        let pending_bulk = if is_bulk {
+            self.bulk_cleanup
+                .as_ref()
+                .zip(self.incarnation)
+                .map(|(cleanup, incarnation)| cleanup.register_output((incarnation, id)))
+        } else {
+            None
         };
         tx.send(SessionOutputEnvelope {
             generation: self.generation,
@@ -647,6 +888,7 @@ impl SessionOutputSender {
             incarnation: self.incarnation,
             output,
             _permit: (charged != 0).then_some(permit.0),
+            _pending_bulk: pending_bulk,
         })
         .await
         .is_ok()
@@ -1013,6 +1255,9 @@ impl ExecSession {
         let output_window = OutputWindow::new(policy.map(|p| p.output_limit))?;
         let pty = pty::openpty(None, None)?;
         let err_pipe = new_exec_error_pipe()?;
+        // Closing the write end wakes the PTY reader without signalling any process.
+        // Allocate before fork so failure cannot strand an already-started command.
+        let exit_pipe = pipe2(OFlag::O_CLOEXEC)?;
 
         // Set initial window size.
         let ws = libc::winsize {
@@ -1227,6 +1472,7 @@ impl ExecSession {
             id,
             reader_fd,
             exit_watcher,
+            exit_pipe,
             tx,
             output_window.clone(),
             policy.map_or(4096, |p| p.output_chunk_size as usize),
@@ -1374,6 +1620,18 @@ impl ExecSession {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl Drop for BulkPendingOutput {
+    fn drop(&mut self) {
+        self.cleanup.output_finished(self.key);
+    }
+}
+
+impl Drop for BulkCleanupCloseGuard {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
 
 impl Drop for ExecSession {
     fn drop(&mut self) {
@@ -1699,13 +1957,13 @@ fn lookup_passwd_by_name(name: &str) -> AgentdResult<Option<PasswdEntry>> {
             &mut result,
         )
     };
-    if rc != 0 {
+    if rc != 0 && !is_missing_entry_error(rc) {
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest user {name:?}: {}",
             std::io::Error::from_raw_os_error(rc)
         )));
     }
-    if result.is_null() {
+    if rc != 0 || result.is_null() {
         return Ok(None);
     }
 
@@ -1737,13 +1995,13 @@ fn lookup_passwd_by_uid(uid: libc::uid_t) -> AgentdResult<ResolvedUserLookup> {
             &mut result,
         )
     };
-    if rc != 0 {
+    if rc != 0 && !is_missing_entry_error(rc) {
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest uid {uid}: {}",
             std::io::Error::from_raw_os_error(rc)
         )));
     }
-    if result.is_null() {
+    if rc != 0 || result.is_null() {
         return Ok(ResolvedUserLookup::Numeric(uid));
     }
 
@@ -1777,18 +2035,26 @@ fn lookup_group_by_name(name: &str) -> AgentdResult<Option<GroupEntry>> {
             &mut result,
         )
     };
-    if rc != 0 {
+    if rc != 0 && !is_missing_entry_error(rc) {
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest group {name:?}: {}",
             std::io::Error::from_raw_os_error(rc)
         )));
     }
-    if result.is_null() {
+    if rc != 0 || result.is_null() {
         return Ok(None);
     }
 
     let grp = unsafe { grp.assume_init() };
     Ok(Some(GroupEntry { gid: grp.gr_gid }))
+}
+
+/// Whether a `getpw*_r` or `getgr*_r` result means the entry does not exist.
+///
+/// POSIX allows these errors for a missing entry. musl returns `ENOENT` when the image has no
+/// `/etc/passwd` or `/etc/group`, which is normal for images built from scratch.
+fn is_missing_entry_error(rc: libc::c_int) -> bool {
+    matches!(rc, libc::ENOENT | libc::ESRCH | libc::EBADF | libc::EPERM)
 }
 
 fn lookup_buffer_len() -> usize {
@@ -1873,15 +2139,23 @@ fn write_nonblocking_fd(fd: RawFd, data: &[u8]) -> std::io::Result<usize> {
     }
 }
 
-fn wait_fd_readable(fd: RawFd) -> AgentdResult<()> {
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
+/// Wait for output or leader exit. Both descriptors stay owned by the reader.
+fn wait_pty_readable(fd: RawFd, exit_fd: RawFd, timeout: i32) -> AgentdResult<bool> {
+    let mut pollfds = [
+        libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: exit_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
 
     loop {
-        let ret = unsafe { libc::poll(&mut pollfd, 1, -1) };
+        let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as _, timeout) };
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
@@ -1889,11 +2163,9 @@ fn wait_fd_readable(fd: RawFd) -> AgentdResult<()> {
             }
             return Err(AgentdError::Io(err));
         }
-        if ret == 0 {
-            continue;
-        }
-        // Always retry read on HUP/ERR too: a PTY may still contain final output before EIO.
-        return Ok(());
+        // HUP on the private pipe means the exit watcher has resolved (or its task
+        // was cancelled). Do not mistake HUP on the PTY for an empty output tail.
+        return Ok(pollfds[1].revents != 0);
     }
 }
 
@@ -1902,26 +2174,39 @@ async fn pty_reader_task(
     id: u32,
     master_fd: OwnedFd,
     exit_watcher: ProcessExitWatcher,
+    exit_pipe: (OwnedFd, OwnedFd),
     tx: SessionOutputSender,
     output_window: Option<Arc<OutputWindow>>,
     chunk_size: usize,
 ) {
+    let (exit_read, exit_write) = exit_pipe;
     let tx_output = tx.clone();
     let runtime_handle = tokio::runtime::Handle::current();
-    let read_result = tokio::task::spawn_blocking(move || {
-        // PTY masters are safer with a dedicated blocking read loop than with
-        // edge-driven readiness. Fast writers followed by process exit can
-        // strand the tail behind a missed wakeup/HUP transition.
+    let reader = tokio::task::spawn_blocking(move || {
+        // Keep nonblocking reads on the dedicated worker: edge-driven readiness
+        // alone can strand final output. The duplicate shares flags with stdin.
         let raw = master_fd.as_raw_fd();
-        // The duplicated master shares O_NONBLOCK with stdin. Never clear that flag here:
-        // a blocked write would otherwise strand lifecycle handling on the agent actor.
-
+        let mut remaining = None;
         let mut buf = vec![0u8; chunk_size];
         loop {
-            let n = unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if remaining.is_none() {
+                match wait_pty_readable(raw, exit_read.as_raw_fd(), 0) {
+                    Ok(true) => remaining = Some(PTY_EXIT_DRAIN_LIMIT),
+                    Ok(false) => {}
+                    Err(_) => break,
+                }
+            }
+            let len = remaining.map_or(buf.len(), |n| n.min(buf.len()));
+            if len == 0 {
+                break;
+            }
+            let n = unsafe { libc::read(raw, buf.as_mut_ptr().cast(), len) };
 
             if n > 0 {
                 let n = n as usize;
+                if let Some(remaining) = &mut remaining {
+                    *remaining -= n;
+                }
                 let sent = runtime_handle.block_on(async {
                     if let Some(window) = &output_window
                         && !window.acquire(n).await
@@ -1940,29 +2225,33 @@ async fn pty_reader_task(
                 }
                 continue;
             }
-
             if n == 0 {
                 break;
             }
 
-            let err = std::io::Error::last_os_error();
-            match err.raw_os_error() {
+            match std::io::Error::last_os_error().raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) => {
-                    if wait_fd_readable(raw).is_err() {
+                Some(libc::EAGAIN) if remaining.is_none() => {
+                    // Exit may race this empty read. Wake and retry the read before
+                    // finishing so bytes queued just before exit are not discarded.
+                    if wait_pty_readable(raw, exit_read.as_raw_fd(), -1).is_err() {
                         break;
                     }
                 }
-                Some(libc::EIO) => break,
+                // A nonblocking Linux PTY read flushes pending flip-buffer work
+                // before EAGAIN. After leader exit, do not wait for descendant EOF.
+                Some(libc::EAGAIN | libc::EIO) => break,
                 _ => break,
             }
         }
-    })
-    .await;
+    });
 
-    let _ = read_result;
-
+    // Observe exit concurrently with the reader, then wake its poll. Waiting for
+    // the reader first deadlocks when a descendant retains a slave descriptor.
     let code = exit_watcher.await;
+    drop(exit_write);
+    let _ = reader.await;
+    // All accepted output precedes completion, including flow-controlled output.
     let _ = tx.send(id, SessionOutput::Exited(code)).await;
 }
 
@@ -2070,6 +2359,7 @@ mod tests {
     use std::process::{Command as StdCommand, Stdio as StdStdio};
     use std::time::Duration;
 
+    use tokio::sync::mpsc::error::TryRecvError;
     use tokio::time;
 
     use microsandbox_protocol::exec::ExecRequest;
@@ -2123,10 +2413,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn split_output_queues_keep_bulk_lifecycle_commands_independent() {
+    async fn split_output_queues_keep_bulk_cleanup_independent() {
         let incarnation = [0x55; 16];
         let (tx, mut control_rx, mut bulk_rx, mut command_rx) =
             SessionOutputSender::split_channel();
+        tx.connect_bulk_incarnation(incarnation);
         let scoped = tx.with_incarnation(Some(incarnation));
         let record = BulkRecord {
             id: 9,
@@ -2144,7 +2435,7 @@ mod tests {
                 .await
         );
         assert!(scoped.send(10, SessionOutput::Exited(0)).await);
-        let mut completed = scoped.drop_bulk_flow(9).unwrap().unwrap();
+        scoped.drop_bulk_flow(9, true);
 
         assert!(matches!(
             bulk_rx.recv().await.unwrap().output,
@@ -2154,18 +2445,8 @@ mod tests {
             control_rx.recv().await.unwrap().output,
             SessionOutput::Exited(0)
         ));
-        let BulkOutputCommand::DropFlow {
-            incarnation: command_incarnation,
-            id,
-            completion,
-        } = command_rx.recv().await.unwrap()
-        else {
-            panic!("expected flow cleanup command");
-        };
-        assert_eq!(command_incarnation, incarnation);
-        assert_eq!(id, 9);
-        completion.send(()).unwrap();
-        assert_eq!(completed.try_recv(), Ok(()));
+        assert!(matches!(command_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(tx.bulk_cleanup().unwrap().pending_counts(), (1, 0));
     }
 
     #[tokio::test]
@@ -2212,6 +2493,17 @@ mod tests {
     }
     const PIPE_OWNER_TEST_NAME: &str =
         "session::tests::test_piped_process_exit_outlives_spawning_runtime";
+
+    #[test]
+    fn test_missing_account_database_is_not_a_lookup_failure() {
+        for rc in [libc::ENOENT, libc::ESRCH, libc::EBADF, libc::EPERM] {
+            assert!(is_missing_entry_error(rc));
+        }
+
+        for rc in [libc::EIO, libc::ENOMEM, libc::ERANGE, libc::EMFILE] {
+            assert!(!is_missing_entry_error(rc));
+        }
+    }
 
     #[test]
     fn test_spawn_reaps_adopted_descendant() {
@@ -2794,6 +3086,182 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Own only the descendant created by this test, including assertion failures.
+    struct PtyTestChild(i32);
+
+    impl Drop for PtyTestChild {
+        fn drop(&mut self) {
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+        }
+    }
+
+    #[tokio::test]
+    async fn pty_leader_exit_preserves_tail_and_background_child() {
+        check_pty_leader_exit(false).await;
+    }
+
+    #[tokio::test]
+    async fn pty_kill_preserves_tail_and_background_child() {
+        check_pty_leader_exit(true).await;
+    }
+
+    async fn check_pty_leader_exit(kill: bool) {
+        for controlled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let pidfile = dir.path().join("child");
+            let after_output = if kill {
+                "while :; do sleep 1; done"
+            } else {
+                "exit 7"
+            };
+            // A separate process group models an interactive shell's background job.
+            // Ignore HUP, which the kernel/shell can send independently of agentd.
+            let command = format!(
+                "trap '' HUP; setsid sh -c 'trap \"\" HUP; echo $$ > {}; exec sleep 30' & \
+                 while [ ! -s {} ]; do sleep .01; done; \
+                 head -c 2097152 /dev/zero | tr '\\000' x; printf '<END>'; {after_output}",
+                pidfile.display(),
+                pidfile.display(),
+            );
+            let req: ExecRequest = serde_json::from_value(serde_json::json!({
+                "cmd": "/bin/sh", "args": ["-c", command], "tty": true,
+            }))
+            .unwrap();
+            let policy = controlled.then(|| ExecLimits {
+                output_limit: 1024,
+                output_chunk_size: 512,
+                ..ExecLimits::default()
+            });
+            let (tx, mut rx) = SessionOutputSender::channel();
+            let mut session =
+                ExecSession::spawn(71, &req, tx, None, SecurityProfile::Default, None, policy)
+                    .unwrap();
+            let child = time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(pid) = std::fs::read_to_string(&pidfile)
+                        && let Ok(pid) = pid.trim().parse::<i32>()
+                    {
+                        break PtyTestChild(pid);
+                    }
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("background child starts");
+            // Exercise a full output window before allowing the consumer to drain.
+            time::sleep(Duration::from_millis(100)).await;
+            let mut output = Vec::new();
+            let mut consumed = 0;
+            let mut signalled = false;
+            let result = time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = rx.recv().await.expect("completion event");
+                    match event.output {
+                        SessionOutput::Stdout(data) => {
+                            consumed += data.len() as u64 + u64::from(EXEC_OUTPUT_EVENT_OVERHEAD);
+                            output.extend_from_slice(&data);
+                            if controlled {
+                                session.acknowledge_output(consumed).unwrap();
+                            }
+                            if kill && !signalled && output.ends_with(b"<END>") {
+                                session.send_signal(libc::SIGKILL).unwrap();
+                                signalled = true;
+                            }
+                        }
+                        SessionOutput::Exited(code) => break code,
+                        _ => panic!("unexpected PTY event"),
+                    }
+                }
+            })
+            .await;
+            if result.is_err() {
+                let _ = session.send_signal(libc::SIGKILL);
+            }
+            let code = result.expect("leader completion must not wait for its child");
+            assert_eq!(code, if kill { -1 } else { 7 });
+            let mut expected = vec![b'x'; 2097152];
+            expected.extend_from_slice(b"<END>");
+            assert_eq!(output, expected, "preserve every byte before completion");
+            assert_eq!(session.finish(code), Some(code));
+            drop(session);
+            time::sleep(Duration::from_millis(20)).await;
+            let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.0)).unwrap();
+            assert!(
+                !stat.split_once(") ").unwrap().1.starts_with('Z'),
+                "child became a zombie"
+            );
+            assert_eq!(
+                unsafe { libc::kill(child.0, 0) },
+                0,
+                "completion must not kill the child"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pty_noisy_descendant_cannot_postpone_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("child");
+        let command = format!(
+            "trap '' HUP; setsid sh -c 'trap \"\" HUP PIPE; echo $$ > {}; \
+             while :; do printf cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; done' & \
+             while [ ! -s {} ]; do sleep .01; done; exit 7",
+            pidfile.display(),
+            pidfile.display(),
+        );
+        let req: ExecRequest = serde_json::from_value(serde_json::json!({
+            "cmd": "/bin/sh", "args": ["-c", command], "tty": true,
+        }))
+        .unwrap();
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let session =
+            ExecSession::spawn(73, &req, tx, None, SecurityProfile::Default, None, None).unwrap();
+        let child = time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pidfile)
+                    && let Ok(pid) = pid.trim().parse::<i32>()
+                {
+                    break PtyTestChild(pid);
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let result = time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = rx.recv().await.expect("completion event");
+                if let SessionOutput::Exited(code) = event.output {
+                    break code;
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.expect("noisy child must not prolong completion"), 7);
+        drop(session);
+        assert_eq!(unsafe { libc::kill(child.0, 0) }, 0);
+    }
+
+    #[tokio::test]
+    async fn pty_closed_output_does_not_complete_a_live_leader() {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let req: ExecRequest = serde_json::from_value(serde_json::json!({
+            "cmd": "/bin/sh", "args": ["-c", "exec </dev/null >/dev/null 2>&1; sleep .3; exit 9"], "tty": true,
+        })).unwrap();
+        let _session =
+            ExecSession::spawn(72, &req, tx, None, SecurityProfile::Default, None, None).unwrap();
+        assert!(
+            time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .is_err()
+        );
+        let event = time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event.output, SessionOutput::Exited(9)));
     }
 
     #[tokio::test]

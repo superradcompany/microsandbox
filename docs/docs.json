@@ -34,7 +34,7 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
-              "cloud/overview",
+              "getting-started/managed-cloud",
               "getting-started/agents"
             ]
           },
@@ -49,6 +49,7 @@
               "sandboxes/secrets",
               "images/overview",
               "sandboxes/volumes",
+              "sandboxes/services",
               "sandboxes/ssh",
               "sandboxes/snapshots",
               "sandboxes/tuning",
@@ -73,7 +74,6 @@
             "group": "Deep dive",
             "icon": "gauge",
             "pages": [
-              "operations/backends",
               "operations/configuration",
               "observability/msb-metrics",
               "sandboxes/optimization"
@@ -99,6 +99,7 @@
             "pages": [
               "sdk/overview",
               "sdk/setup",
+              "getting-started/versions",
               "sdk/errors",
               "configuration"
             ]
@@ -117,6 +118,7 @@
                   "sdk/typescript/ssh",
                   "sdk/typescript/filesystem",
                   "sdk/typescript/volumes",
+                  "sdk/typescript/services",
                   "sdk/typescript/networking",
                   "sdk/typescript/proxies",
                   "sdk/typescript/vsock",
@@ -137,6 +139,7 @@
                   "sdk/rust/ssh",
                   "sdk/rust/filesystem",
                   "sdk/rust/volumes",
+                  "sdk/rust/services",
                   "sdk/rust/networking",
                   "sdk/rust/proxies",
                   "sdk/rust/vsock",
@@ -156,6 +159,7 @@
                   "sdk/python/ssh",
                   "sdk/python/filesystem",
                   "sdk/python/volumes",
+                  "sdk/python/services",
                   "sdk/python/networking",
                   "sdk/python/proxies",
                   "sdk/python/vsock",
@@ -175,6 +179,7 @@
                   "sdk/go/ssh",
                   "sdk/go/filesystem",
                   "sdk/go/volumes",
+                  "sdk/go/services",
                   "sdk/go/images",
                   "sdk/go/networking",
                   "sdk/go/proxies",
@@ -195,6 +200,7 @@
                   "sdk/ruby/ssh",
                   "sdk/ruby/filesystem",
                   "sdk/ruby/volumes",
+                  "sdk/ruby/services",
                   "sdk/ruby/networking",
                   "sdk/ruby/vsock",
                   "sdk/ruby/snapshots",
@@ -213,6 +219,7 @@
               "cli/snapshot-commands",
               "cli/ssh-commands",
               "cli/volume-commands",
+              "cli/service-commands",
               "cli/storage-commands",
               "cli/image-commands",
               "cli/registry-commands",
@@ -222,30 +229,43 @@
         ]
       },
       {
-        "tab": "API Reference",
+        "tab": "Managed Cloud",
         "groups": [
           {
-            "group": "Getting Started",
-            "icon": "book-open",
+            "group": "Managed Cloud",
+            "icon": "cloud",
             "pages": [
-              "api-reference/overview"
+              "cloud/overview",
+              "cloud/connect",
+              "cloud/pricing",
+              "cloud/limitations"
             ]
           },
           {
-            "group": "API keys",
-            "icon": "key",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            }
-          },
-          {
-            "group": "Personal tokens",
-            "icon": "user",
-            "openapi": {
-              "source": "/api-reference/openapi.personal.json",
-              "directory": "api-reference/personal"
-            }
+            "group": "API Reference",
+            "icon": "book-open",
+            "pages": [
+              "api-reference/overview",
+              {
+                "group": "API keys",
+                "icon": "key",
+                "openapi": {
+                  "source": "/api-reference/openapi.json",
+                  "directory": "api-reference/endpoints"
+                },
+                "expanded": false
+              },
+              {
+                "group": "Personal tokens",
+                "icon": "user",
+                "openapi": {
+                  "source": "/api-reference/openapi.personal.json",
+                  "directory": "api-reference/personal"
+                },
+                "expanded": false
+              }
+            ],
+            "expanded": false
           }
         ]
       },
@@ -403,6 +423,8 @@
             "group": "Migration guides",
             "icon": "arrow-right-arrow-left",
             "pages": [
+              "migrations/overview",
+              "migrations/v0.8",
               "migrations/v0.7"
             ]
           },
@@ -410,90 +432,126 @@
             "group": "Releases",
             "icon": "tag",
             "pages": [
-              "changelog/v0.7.8",
-              "changelog/v0.7.7",
-              "changelog/v0.7.6",
-              "changelog/v0.7.5",
-              "changelog/v0.7.4",
-              "changelog/v0.7.3",
-              "changelog/v0.7.2",
-              "changelog/v0.7.1",
-              "changelog/v0.7.0"
-            ]
-          },
-          {
-            "group": "Past updates",
-            "icon": "clock-rotate-left",
-            "pages": [
+              "changelog/v0.8.0",
               {
-                "group": "September 2026",
+                "group": "v0.7",
                 "expanded": false,
                 "pages": [
-                  "changelog/2026-09-25",
-                  "changelog/2026-09-11",
-                  "changelog/2026-09-04"
-                ]
+                  "changelog/v0.7.16",
+                  "changelog/v0.7.15",
+                  "changelog/v0.7.14",
+                  "changelog/v0.7.13",
+                  "changelog/v0.7.12",
+                  "changelog/v0.7.11",
+                  "changelog/v0.7.10",
+                  "changelog/v0.7.9",
+                  "changelog/v0.7.8",
+                  "changelog/v0.7.7",
+                  "changelog/v0.7.6",
+                  "changelog/v0.7.5",
+                  "changelog/v0.7.4",
+                  "changelog/v0.7.3",
+                  "changelog/v0.7.2",
+                  "changelog/v0.7.1",
+                  "changelog/v0.7.0"
+                ],
+                "icon": "bolt"
               },
               {
-                "group": "August 2026",
-                "expanded": false,
+                "group": "Past updates",
+                "icon": "clock-rotate-left",
                 "pages": [
-                  "changelog/2026-08-28",
-                  "changelog/2026-08-26",
-                  "changelog/2026-08-21",
-                  "changelog/2026-08-14",
-                  "changelog/2026-08-07"
-                ]
-              },
-              {
-                "group": "July 2026",
-                "expanded": false,
-                "pages": [
-                  "changelog/2026-07-31",
-                  "changelog/2026-07-24",
-                  "changelog/2026-07-17",
-                  "changelog/2026-07-10",
-                  "changelog/2026-07-05"
-                ]
-              },
-              {
-                "group": "June 2026",
-                "expanded": false,
-                "pages": [
-                  "changelog/2026-06-26",
-                  "changelog/2026-06-19",
-                  "changelog/2026-06-12",
-                  "changelog/2026-06-05"
-                ]
-              },
-              {
-                "group": "May 2026",
-                "expanded": false,
-                "pages": [
-                  "changelog/2026-05-29",
-                  "changelog/2026-05-22",
-                  "changelog/2026-05-15",
-                  "changelog/2026-05-01"
-                ]
-              },
-              {
-                "group": "April 2026",
-                "expanded": false,
-                "pages": [
-                  "changelog/2026-04-24",
-                  "changelog/2026-04-17",
-                  "changelog/2026-04-10",
-                  "changelog/2026-04-03"
-                ]
+                  {
+                    "group": "September 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-09-25",
+                      "changelog/2026-09-11",
+                      "changelog/2026-09-04"
+                    ]
+                  },
+                  {
+                    "group": "August 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-08-28",
+                      "changelog/2026-08-26",
+                      "changelog/2026-08-21",
+                      "changelog/2026-08-14",
+                      "changelog/2026-08-07"
+                    ]
+                  },
+                  {
+                    "group": "July 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-07-31",
+                      "changelog/2026-07-24",
+                      "changelog/2026-07-17",
+                      "changelog/2026-07-10",
+                      "changelog/2026-07-05"
+                    ]
+                  },
+                  {
+                    "group": "June 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-06-26",
+                      "changelog/2026-06-19",
+                      "changelog/2026-06-12",
+                      "changelog/2026-06-05"
+                    ]
+                  },
+                  {
+                    "group": "May 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-05-29",
+                      "changelog/2026-05-22",
+                      "changelog/2026-05-15",
+                      "changelog/2026-05-01"
+                    ]
+                  },
+                  {
+                    "group": "April 2026",
+                    "expanded": false,
+                    "pages": [
+                      "changelog/2026-04-24",
+                      "changelog/2026-04-17",
+                      "changelog/2026-04-10",
+                      "changelog/2026-04-03"
+                    ]
+                  }
+                ],
+                "expanded": false
               }
-            ],
-            "expanded": false
+            ]
           }
         ]
       }
     ]
   },
   "redirects": [
+    {
+      "source": "/getting-started/managed-cloud",
+      "destination": "/cloud/overview"
+    },
+    {
+      "source": "/operations/backends",
+      "destination": "/cloud/connect"
+    },
+    {
+      "source": "/cloud/compute-types",
+      "destination": "/cloud/pricing#standard-or-shared"
+    },
+    {
+      "source": "/cloud/supported-features",
+      "destination": "/cloud/limitations"
+    },
+    {
+      "source": "/getting-started/installation",
+      "destination": "/getting-started/versions"
+    },
     {
       "source": "/networking/security-model",
       "destination": "/security/network"
@@ -524,11 +582,11 @@
     },
     {
       "source": "/getting-started/backends",
-      "destination": "/operations/backends"
+      "destination": "/cloud/connect"
     },
     {
       "source": "/operations/backend-selection",
-      "destination": "/operations/backends"
+      "destination": "/cloud/connect"
     },
     {
       "source": "/observability/deep-dive",
@@ -572,7 +630,7 @@
     },
     {
       "source": "/cloud/compatibility",
-      "destination": "/cloud/overview#compatibility"
+      "destination": "/cloud/limitations"
     },
     {
       "source": "/enterprise/offline-deployment",
@@ -729,6 +787,26 @@
     {
       "source": "/recipes/:slug*",
       "destination": "/examples/:slug*"
+    },
+    {
+      "source": "/migrations/sdk-contexts",
+      "destination": "/migrations/v0.8#sdk-api-migration"
+    },
+    {
+      "source": "/migrations/sdk-distributions",
+      "destination": "/migrations/v0.8#sdk-distribution-migration"
+    },
+    {
+      "source": "/repairs/sandbox-storage",
+      "destination": "/migrations/v0.7#sandbox-storage-migration"
+    },
+    {
+      "source": "/repairs/file-permissions",
+      "destination": "/migrations/v0.7#repair-file-permissions"
+    },
+    {
+      "source": "/migrations/sandbox-storage",
+      "destination": "/migrations/v0.7#sandbox-storage-migration"
     }
   ],
   "integrations": {

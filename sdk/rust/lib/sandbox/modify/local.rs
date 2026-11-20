@@ -6,6 +6,10 @@ use std::{
     sync::Arc,
 };
 
+use microsandbox_control_client::{
+    GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
+};
+use microsandbox_protocol::resize::ResizeTarget;
 use microsandbox_types::secret_plan::{
     self, DesiredSecret, RunningSecret, SecretPlanCapability, SecretPlanInput, SecretPlanStatus,
     SecretSettings,
@@ -14,20 +18,19 @@ use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
 #[cfg(feature = "local")]
-use crate::backend::local::creation::{self, CreationStorage};
-use crate::backend::{Backend, ControlSession};
+use crate::context::local::creation::{self, CreationStorage};
+use crate::context::{Context, ControlSession};
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
+use crate::sandbox::resize;
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_control_client::{
-    GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
-};
 
 use super::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
     ResourceResizeStatus, SandboxModificationBuilder, SandboxModificationPatch,
-    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretSource,
+    SandboxModificationPlan, SandboxModificationResult, SecretChangeKind, SecretModificationPatch,
+    SecretSource,
 };
 use crate::sandbox::{SandboxConfig, SandboxStatus};
 
@@ -334,7 +337,7 @@ pub(super) async fn dry_run(
 ) -> MicrosandboxResult<SandboxModificationPlan> {
     let handle = builder
         .backend
-        .sandboxes()
+        .sandbox_ops()
         .get(builder.backend.clone(), &builder.name)
         .await?;
     let status = handle.status_snapshot();
@@ -358,7 +361,7 @@ pub(super) async fn dry_run(
         builder.policy,
     );
     if ports::requested(&builder.patch) && plan.conflicts.is_empty() {
-        if handle.local().is_none() {
+        if handle.local_state().is_none() {
             return Err(MicrosandboxError::local_only(Operation::SandboxModify));
         }
         if let Err(error) = ports::preflight(&config, active.as_ref(), &builder.patch, status) {
@@ -375,15 +378,16 @@ pub(super) async fn dry_run(
 /// persisted config, then a restart when the policy asks for one.
 pub(super) async fn apply(
     builder: SandboxModificationBuilder,
-) -> MicrosandboxResult<SandboxModificationPlan> {
+    track_resize: bool,
+) -> MicrosandboxResult<SandboxModificationResult> {
     let handle = builder
         .backend
-        .sandboxes()
+        .sandbox_ops()
         .get(builder.backend.clone(), &builder.name)
         .await?;
 
     #[cfg(feature = "local")]
-    if let (Some(local), Some(state)) = (builder.backend.as_local(), handle.local()) {
+    if let (Some(local), Some(state)) = (builder.backend.as_local(), handle.local_state()) {
         creation::require_complete(local.db().await?.read(), state.db_id, &builder.name).await?;
     }
 
@@ -391,7 +395,7 @@ pub(super) async fn apply(
     let mut config = handle.config()?;
     // A failed restore can still own staged immutable lower layers. Do not let
     // offline disk growth or a restart-backed modification bypass its launch gate.
-    crate::LocalBackend::validate_completed_restore(&config)?;
+    crate::LocalContext::validate_completed_restore(&config)?;
     let mut active = handle.active_config().ok().flatten();
     let mut active_json = handle.active_config_json().map(str::to_owned);
     let (live, session) = live_control(
@@ -414,12 +418,25 @@ pub(super) async fn apply(
 
     validate_apply_supported(&plan)?;
     if ports::requested(&builder.patch) {
-        if handle.local().is_none() {
+        if handle.local_state().is_none() {
             return Err(MicrosandboxError::local_only(Operation::SandboxModify));
         }
         ports::preflight(&config, active.as_ref(), &builder.patch, status)?;
     }
     let restart_required = plan_requires_restart(&plan) && running_status(status);
+    // Resolve ownership before the first mutation. A failed dispatched label update
+    // may already have applied and must never be retried through the catalog path.
+    let label_owner = if !restart_required && has_live_label_change(&plan) {
+        match &session {
+            Some(session) => session
+                .label_update_owner()
+                .await
+                .map_err(MicrosandboxError::ControlClient)?,
+            None => None,
+        }
+    } else {
+        None
+    };
     if running_status(status)
         && !restart_required
         && builder.policy == ModificationPolicy::NoRestart
@@ -430,7 +447,7 @@ pub(super) async fn apply(
         crate::runtime::protected_state::require_running(local, &builder.name)?;
     }
 
-    if handle.local().is_some() {
+    if handle.local_state().is_some() {
         // Validate configuration serialization before stopping a VM,
         // growing a disk, or issuing any live control mutation.
         let mut prospective = config.clone();
@@ -449,31 +466,109 @@ pub(super) async fn apply(
         }
     }
 
+    let cpu = live_cpu_target(&plan, &builder.patch);
+    let memory = live_memory_target(&plan, &builder.patch);
+    let paired_targets = cpu.zip(memory);
+    let tracking = if !restart_required
+        && (paired_targets.is_some() || track_resize && (cpu.is_some() || memory.is_some()))
+    {
+        resize::begin_tracking(control_session(&session)?).await?
+    } else {
+        None
+    };
+    let mut resize_operations = tracking
+        .as_ref()
+        .filter(|_| track_resize)
+        .map(|_| Vec::new());
     if restart_required {
         handle.stop().await?;
     }
-    if !restart_required && let Some(target) = live_cpu_target(&plan, &builder.patch) {
-        let state = control_session(&session)?
-            .request(&SetCpuTarget::new(u32::from(target)))
-            .await
-            .map_err(crate::MicrosandboxError::ControlClient)?;
-        plan.resize_status.push(ResourceResizeStatus {
-            resource: ResourceKind::Cpus,
-            requested: target.to_string(),
-            actual: state.actual_online.to_string(),
-            enforced: state.enforced.to_string(),
-            state: if state.actual_online == u32::from(target) {
-                ResourceConvergenceState::Applied
-            } else {
-                ResourceConvergenceState::Converging
-            },
-        });
+    let paired = if let (Some((cpus, memory_mib)), Some(tracking)) = (
+        paired_targets,
+        tracking.as_ref().filter(|t| t.paired_targets),
+    ) {
+        let [cpu, memory] = resize::apply_pair(
+            control_session(&session)?,
+            tracking,
+            u32::from(cpus),
+            u64::from(memory_mib),
+        )
+        .await?;
+        let (ResizeTarget::Cpus { online }, ResizeTarget::Memory { total_mib }) =
+            (&cpu.accepted_target, &memory.accepted_target)
+        else {
+            unreachable!("validated paired response")
+        };
+        if let Some(active) = active.as_mut() {
+            active.spec.resources.cpus = u8::try_from(*online).map_err(|_| {
+                MicrosandboxError::Runtime("accepted CPU target exceeds SDK range".into())
+            })?;
+            active.spec.resources.memory_mib = u32::try_from(*total_mib).map_err(|_| {
+                MicrosandboxError::Runtime("accepted memory target exceeds SDK range".into())
+            })?;
+            persist_active_config(
+                &builder.backend,
+                control_session(&session)?,
+                &mut active_json,
+                active,
+            )
+            .await?;
+        }
+        plan.resize_status
+            .extend([cpu.status.clone(), memory.status.clone()]);
+        if let Some(operations) = &mut resize_operations {
+            operations.extend([cpu, memory]);
+        }
+        true
+    } else {
+        false
+    };
+    if !restart_required
+        && !paired
+        && let Some(target) = cpu
+    {
+        let accepted = if let Some(tracking) = tracking.as_ref().filter(|_| track_resize) {
+            let operation = resize::apply_target(
+                control_session(&session)?,
+                tracking,
+                ResizeTarget::Cpus {
+                    online: u32::from(target),
+                },
+            )
+            .await?;
+            let ResizeTarget::Cpus { online } = operation.accepted_target else {
+                unreachable!("validated CPU response")
+            };
+            let accepted = u8::try_from(online).map_err(|_| {
+                MicrosandboxError::Runtime(
+                    "resize was accepted but its CPU target cannot be represented by this SDK"
+                        .into(),
+                )
+            })?;
+            plan.resize_status.push(operation.status.clone());
+            resize_operations.as_mut().unwrap().push(operation);
+            accepted
+        } else {
+            let state = control_session(&session)?
+                .request(&SetCpuTarget::new(u32::from(target)))
+                .await
+                .map_err(MicrosandboxError::ControlClient)?;
+            plan.resize_status.push(ResourceResizeStatus {
+                resource: ResourceKind::Cpus,
+                requested: target.to_string(),
+                actual: state.actual_online.to_string(),
+                enforced: state.enforced.to_string(),
+                // A target acknowledgement is not operation-bound guest completion.
+                state: ResourceConvergenceState::Accepted,
+            });
+            target
+        };
         // The running VM changed: refresh the active snapshot with the
         // enforced target so inspect does not report the already-live
         // change as pending. The guest driver converges asynchronously;
         // enforcement applies immediately either way.
         if let Some(active) = active.as_mut() {
-            active.spec.resources.cpus = target;
+            active.spec.resources.cpus = accepted;
             persist_active_config(
                 &builder.backend,
                 control_session(&session)?,
@@ -483,29 +578,53 @@ pub(super) async fn apply(
             .await?;
         }
     }
-    if !restart_required && let Some(target_mib) = live_memory_target(&plan, &builder.patch) {
-        let state = control_session(&session)?
-            .request(&SetMemoryTarget {
-                total_mib: u64::from(target_mib),
-            })
-            .await
-            .map_err(crate::MicrosandboxError::ControlClient)?;
-        plan.resize_status.push(ResourceResizeStatus {
-            resource: ResourceKind::Memory,
-            requested: format_mib(target_mib),
-            actual: format_mib(state.current_mib as u32),
-            enforced: format_mib(state.target_mib as u32),
-            state: if state.current_mib >= state.target_mib {
-                ResourceConvergenceState::Applied
-            } else {
-                ResourceConvergenceState::Converging
-            },
-        });
+    if !restart_required
+        && !paired
+        && let Some(target_mib) = memory
+    {
+        let accepted = if let Some(tracking) = tracking.as_ref().filter(|_| track_resize) {
+            let operation = resize::apply_target(
+                control_session(&session)?,
+                tracking,
+                ResizeTarget::Memory {
+                    total_mib: u64::from(target_mib),
+                },
+            )
+            .await?;
+            let ResizeTarget::Memory { total_mib } = operation.accepted_target else {
+                unreachable!("validated memory response")
+            };
+            let accepted = u32::try_from(total_mib).map_err(|_| {
+                MicrosandboxError::Runtime(
+                    "resize was accepted but its memory target cannot be represented by this SDK"
+                        .into(),
+                )
+            })?;
+            plan.resize_status.push(operation.status.clone());
+            resize_operations.as_mut().unwrap().push(operation);
+            accepted
+        } else {
+            let state = control_session(&session)?
+                .request(&SetMemoryTarget {
+                    total_mib: u64::from(target_mib),
+                })
+                .await
+                .map_err(MicrosandboxError::ControlClient)?;
+            plan.resize_status.push(ResourceResizeStatus {
+                resource: ResourceKind::Memory,
+                requested: format_mib(target_mib),
+                actual: format_mib(state.current_mib as u32),
+                enforced: format_mib(state.target_mib as u32),
+                // Plugged capacity alone does not establish guest-ready completion.
+                state: ResourceConvergenceState::Accepted,
+            });
+            state.target_mib as u32
+        };
         // Refresh the active snapshot with the accepted target so inspect
         // does not report the already-live change as pending. Convergence
         // (plugging blocks) continues asynchronously in the guest.
         if let Some(active) = active.as_mut() {
-            active.spec.resources.memory_mib = state.target_mib as u32;
+            active.spec.resources.memory_mib = accepted;
             persist_active_config(
                 &builder.backend,
                 control_session(&session)?,
@@ -577,7 +696,7 @@ pub(super) async fn apply(
             &builder.backend,
             &builder.name,
             handle
-                .local()
+                .local_state()
                 .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxModify))?
                 .db_id,
             &config,
@@ -588,25 +707,48 @@ pub(super) async fn apply(
     if !plan.changes.is_empty() {
         config.apply_modification(&builder.patch);
         config.update_secrets(&builder.patch)?;
+        let labels_persisted_by_runtime = label_owner.is_some();
         let active_labels = if !restart_required && has_live_label_change(&plan) {
             let (Some(active), Some(expected_json)) = (active.as_mut(), active_json.clone()) else {
                 return Err(MicrosandboxError::ControlStateChanged);
             };
             active.update_labels(&builder.patch);
-            Some(ActiveLabelsUpdate {
-                expected_json,
-                active_config_json: serde_json::to_string(active)?,
-            })
+            if let Some(owner) = label_owner {
+                control_session(&session)?
+                    .update_labels(
+                        owner,
+                        &expected_json,
+                        handle
+                            .local_state()
+                            .ok_or(MicrosandboxError::ControlStateChanged)?,
+                        &config,
+                        builder.patch.labels.iter().cloned().collect(),
+                        builder.patch.labels_remove.clone(),
+                    )
+                    .await
+                    .map_err(MicrosandboxError::ControlClient)?;
+                None
+            } else {
+                Some(ActiveLabelsUpdate {
+                    expected_json,
+                    active_config_json: serde_json::to_string(active)?,
+                })
+            }
         } else {
             None
         };
-        persist_config(&builder.backend, &handle, &config, active_labels).await?;
+        if !labels_persisted_by_runtime {
+            persist_config(&builder.backend, &handle, &config, active_labels).await?;
+        }
     }
     if restart_required {
         start_after_modify(&handle).await?;
     }
     plan.applied = true;
-    Ok(plan)
+    Ok(SandboxModificationResult {
+        plan,
+        resize_operations,
+    })
 }
 
 /// Classify requested changes as live, deferred, or conflicting without applying them.
@@ -781,7 +923,7 @@ fn root_disk_grow_target(
 
 /// Grow the sandbox-owned layered upper or flat root disk while it is stopped.
 async fn grow_root_disk_now(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     expected_id: i32,
     config: &SandboxConfig,
@@ -793,6 +935,13 @@ async fn grow_root_disk_now(
             UnsupportedReason::LocalOnly,
         )
     })?;
+    let transition = crate::LocalContext::acquire_sandbox_transition_guard(
+        &local_backend.config().run_dir(),
+        name,
+    )
+    .await?;
+    let lineage =
+        crate::snapshot::lineage::lock_source(&local_backend.config().run_dir(), name).await?;
     // Planning does not own the VM namespace: another caller may have started or replaced it.
     // Revalidate under runtime ownership before migrating or changing any disk bytes.
     let guard = crate::runtime::acquire_sandbox_lifecycle_guard(
@@ -825,6 +974,8 @@ async fn grow_root_disk_now(
         // Keep ownership in the worker, including across the asynchronous fallback helpers.
         // Canceling the caller or shutting down its executor must not release a live writer's lock.
         let _guard = guard;
+        let _transition = transition;
+        let _lineage = lineage;
         let handled = microsandbox_runtime::checkpoint::grow_stopped_root(
             &runtime_dir,
             u64::from(target_mib) * 1024 * 1024,
@@ -867,13 +1018,15 @@ async fn grow_root_disk_now(
 
 /// Discover which live-control operations the running sandbox serves.
 async fn live_control(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     status: SandboxStatus,
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
 ) -> MicrosandboxResult<(LiveControl, Option<ControlSession>)> {
-    let needs_control = patch.root_disk_size_mib.is_some()
+    let needs_control = !patch.labels.is_empty()
+        || !patch.labels_remove.is_empty()
+        || patch.root_disk_size_mib.is_some()
         || patch.cpus.is_some()
         || patch.memory_mib.is_some()
         || !patch.secrets.is_empty()
@@ -1210,13 +1363,13 @@ fn resolve_secret_source_value(
 /// `expected_json`; otherwise the transaction rolls back and returns
 /// [`MicrosandboxError::ControlStateChanged`].
 async fn persist_config(
-    backend: &Arc<dyn Backend>,
-    handle: &crate::sandbox::SandboxHandle,
+    backend: &Arc<dyn Context>,
+    handle: &crate::sandbox::SandboxRecord,
     config: &SandboxConfig,
     active_labels: Option<ActiveLabelsUpdate>,
 ) -> MicrosandboxResult<()> {
     let local = handle
-        .local()
+        .local_state()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
     let local_backend = backend
         .as_local()
@@ -1300,7 +1453,7 @@ async fn persist_config(
 /// Save the running config through its control session and advance the expected JSON.
 /// The session checks that the run and previously observed config still match.
 async fn persist_active_config(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     session: &ControlSession,
     expected: &mut Option<String>,
     active: &SandboxConfig,
@@ -1319,9 +1472,9 @@ async fn persist_active_config(
     Ok(())
 }
 
-async fn start_after_modify(handle: &crate::sandbox::SandboxHandle) -> MicrosandboxResult<()> {
+async fn start_after_modify(handle: &crate::sandbox::SandboxRecord) -> MicrosandboxResult<()> {
     let sandbox = handle.refresh().await?.start_detached().await?;
-    sandbox.detach().await;
+    sandbox.detach().await?;
     Ok(())
 }
 
@@ -2137,18 +2290,17 @@ mod tests {
 
     use super::super::SecretPatchBuilder;
     use super::*;
-    use crate::backend::LocalBackend;
+    use crate::context::LocalContext;
     #[cfg(unix)]
     use crate::db::entity::run;
     use crate::size::SizeExt;
 
-    async fn stopped_growth_fixture() -> (tempfile::TempDir, Arc<LocalBackend>, SandboxConfig, i32)
+    async fn stopped_growth_fixture() -> (tempfile::TempDir, Arc<LocalContext>, SandboxConfig, i32)
     {
         let home = tempdir().unwrap();
         let local = Arc::new(
             crate::test_support::local_backend_builder(home.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let mut config = SandboxConfig::default();
@@ -2170,6 +2322,11 @@ mod tests {
             .unwrap()
             .set_len(1024 * 1024)
             .unwrap();
+        // A real modify request receives the decoded catalog config, including historical
+        // omission evidence. Use that same baseline when checking for a concurrent edit.
+        let config =
+            SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())
+                .unwrap();
         (home, local, config, model.id)
     }
 
@@ -2181,7 +2338,7 @@ mod tests {
             let owner = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run_dir, "growth")
                 .unwrap()
                 .unwrap();
-            let backend: Arc<dyn Backend> = local.clone();
+            let backend: Arc<dyn Context> = local.clone();
             let expected_id = if change == "identity" { id + 1 } else { id };
             let mut growth = Box::pin(grow_root_disk_now(
                 &backend,
@@ -2242,6 +2399,36 @@ mod tests {
             .unwrap();
         runtime.block_on(async {
             let (_home, local, config, id) = stopped_growth_fixture().await;
+            let runtime_dir = local.sandboxes_dir().join("growth/runtime");
+            microsandbox_runtime::checkpoint::layout::initialize_new(&runtime_dir).unwrap();
+            // Let asynchronous lock-directory setup finish before blocking the worker pool.
+            // Lifecycle ownership keeps growth parked until the capture queue is controlled.
+            let run_dir = local.config().run_dir();
+            let lifecycle =
+                microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run_dir, "growth")
+                    .unwrap()
+                    .unwrap();
+            let backend: Arc<dyn Context> = local.clone();
+            let mut pending = tokio::spawn(async move {
+                grow_root_disk_now(&backend, "growth", id, &config, 1).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(lineage) =
+                    microsandbox_runtime::ipc::try_acquire_snapshot_lineage_guard(
+                        &run_dir, "growth",
+                    )
+                    .unwrap()
+                {
+                    drop(lineage);
+                    assert!(
+                        !pending.is_finished(),
+                        "growth ended before acquiring lineage"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
             let (started, ready) = tokio::sync::oneshot::channel();
             let (release, blocked) = std::sync::mpsc::channel();
             let blocker = tokio::task::spawn_blocking(move || {
@@ -2249,17 +2436,22 @@ mod tests {
                 let _ = blocked.recv();
             });
             ready.await.unwrap();
-            let backend: Arc<dyn Backend> = local.clone();
-            let pending = tokio::spawn(async move {
-                grow_root_disk_now(&backend, "growth", id, &config, 1).await
-            });
+            drop(lifecycle);
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while !local
-                    .sandboxes_dir()
-                    .join("growth/state-layout.json")
-                    .exists()
-                {
-                    assert!(!pending.is_finished(), "growth ended before disk admission");
+                loop {
+                    match CreationStorage::acquire(&local, "growth") {
+                        Ok(storage) => drop(storage),
+                        Err(error) => {
+                            assert!(error.to_string().contains("retry"), "{error}");
+                            break;
+                        }
+                    }
+                    if pending.is_finished() {
+                        panic!(
+                            "growth ended before reserving storage: {:?}",
+                            (&mut pending).await
+                        );
+                    }
                     tokio::task::yield_now().await;
                 }
             })
@@ -2335,7 +2527,6 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         // No runtime/control endpoint exists: fixed geometry needs no query.
         for cpus in [1, 2, 4] {
@@ -2361,7 +2552,6 @@ mod tests {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run_with_status(&local, "api", SandboxStatus::Starting).await;
         let agent = local.agent_socket_paths("api").remove(0);
@@ -2421,7 +2611,6 @@ mod tests {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run(&local, "api").await;
         let agent = local.agent_socket_paths("api").remove(0);
@@ -2485,7 +2674,6 @@ mod tests {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run(&local, "api").await;
         let agent = local.agent_socket_paths("api").remove(0);
@@ -2557,11 +2745,9 @@ mod tests {
         let second_home = tempfile::tempdir_in("/tmp").unwrap();
         let first = crate::test_support::local_backend_builder(first_home.path())
             .build()
-            .await
             .unwrap();
         let second = crate::test_support::local_backend_builder(second_home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run(&first, "worker").await;
         seed_control_run(&second, "worker").await;
@@ -2642,11 +2828,9 @@ mod tests {
         let second_home = tempfile::tempdir_in("/tmp").unwrap();
         let first = crate::test_support::local_backend_builder(first_home.path())
             .build()
-            .await
             .unwrap();
         let second = crate::test_support::local_backend_builder(second_home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run(&first, "worker").await;
         seed_control_run(&second, "worker").await;
@@ -2693,6 +2877,7 @@ mod tests {
                 "first-checkpoint".into(),
                 false,
                 microsandbox_types::GuestFlush::Auto,
+                false,
             )
             .await
             .unwrap();
@@ -2704,6 +2889,7 @@ mod tests {
                 "second-checkpoint".into(),
                 true,
                 microsandbox_types::GuestFlush::Auto,
+                false,
             )
             .await
             .unwrap();
@@ -2728,10 +2914,9 @@ mod tests {
     #[tokio::test]
     async fn size_setters_accept_bare_mib_and_typed_sizes() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
+        let backend: Arc<dyn Context> = Arc::new(
             crate::test_support::local_backend_builder(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let plain = SandboxModificationBuilder::new(backend.clone(), "size-api")
@@ -2759,11 +2944,11 @@ mod tests {
         config
     }
 
-    async fn seed_control_run(local: &LocalBackend, name: &str) {
+    async fn seed_control_run(local: &LocalContext, name: &str) {
         seed_control_run_with_status(local, name, SandboxStatus::Running).await;
     }
 
-    async fn seed_control_run_with_status(local: &LocalBackend, name: &str, status: SandboxStatus) {
+    async fn seed_control_run_with_status(local: &LocalContext, name: &str, status: SandboxStatus) {
         use crate::db::entity::{run, sandbox};
 
         let db = local.db().await.unwrap();
@@ -2789,15 +2974,142 @@ mod tests {
         .unwrap();
     }
 
-    async fn label_backend(home: &std::path::Path) -> (Arc<LocalBackend>, Arc<dyn Backend>) {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accepted_resize_never_infers_guest_completion_from_legacy_setter_quantities() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // Pending shrink, equal plugged target, and pending growth are all acceptance
+        // acknowledgements. Even equality cannot attest to online guest memory pages.
+        for (current_mib, track) in [512_u64, 256, 128]
+            .into_iter()
+            .flat_map(|mib| [(mib, false), (mib, true)])
+        {
+            let home = tempfile::tempdir_in("/tmp").unwrap();
+            let local = crate::test_support::local_backend_builder(home.path())
+                .build()
+                .unwrap();
+            seed_control_run(&local, "api").await;
+            let mut active = config(1, if current_mib == 128 { 128 } else { 512 });
+            active.spec.resources.max_cpus = 4;
+            active.spec.resources.max_memory_mib = 1024;
+            let json = serde_json::to_string(&active).unwrap();
+            sandbox_entity::Entity::update_many()
+                .col_expr(sandbox_entity::Column::Config, Expr::value(json.clone()))
+                .col_expr(sandbox_entity::Column::ActiveConfig, Expr::value(json))
+                .filter(sandbox_entity::Column::Name.eq("api"))
+                .exec(local.db().await.unwrap().write())
+                .await
+                .unwrap();
+
+            let agent = local.agent_socket_paths("api").remove(0);
+            let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            let server = tokio::spawn(async move {
+                let mut operations = Vec::new();
+                for index in 0..5 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    operations.push(request["op"].as_str().unwrap().to_owned());
+                    let response = match index {
+                        0 => serde_json::json!({"ok": true, "capabilities": {
+                            "cpu_resize": true, "memory_resize": true, "secrets_update": false
+                        }}),
+                        1 | 4 => serde_json::json!({"ok": true, "pause": {
+                            "paused": false, "recovery_required": false
+                        }}),
+                        2 => {
+                            assert_eq!(request["online"], 2, "unexpected request: {request}");
+                            serde_json::json!({"ok": true, "cpu": {
+                                "possible": 4, "requested_online": 2,
+                                "actual_online": 2, "enforced": 2
+                            }})
+                        }
+                        _ => {
+                            assert_eq!(request["total_mib"], 256);
+                            serde_json::json!({"ok": true, "memory": {
+                                "boot_mib": 128, "target_mib": 256,
+                                "current_mib": current_mib, "max_mib": 1024
+                            }})
+                        }
+                    };
+                    stream
+                        .get_mut()
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                operations
+            });
+            let backend: Arc<dyn Context> = Arc::new(local);
+            let plan = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let builder = SandboxModificationBuilder::new(backend.clone(), "api")
+                    .cpus(2)
+                    .memory(256_u32)
+                    // Saving labels must use the snapshot refreshed by both setters.
+                    .label("resize", "accepted");
+                if track {
+                    let result = builder.apply_with_resize_tracking().await?;
+                    assert!(result.resize_operations.is_none());
+                    Ok(result.plan)
+                } else {
+                    builder.apply().await
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(plan.applied);
+            assert_eq!(plan.resize_status.len(), 2);
+            for status in &plan.resize_status {
+                assert_eq!(status.state, ResourceConvergenceState::Accepted);
+            }
+            assert_eq!(plan.resize_status[0].actual, "2");
+            assert_eq!(plan.resize_status[1].actual, format_mib(current_mib as u32));
+            assert_eq!(plan.resize_status[1].enforced, format_mib(256));
+            // Supported legacy mutations still update both desired and active settings;
+            // only the existing pause-state projection accompanies the target requests.
+            let handle = backend
+                .sandbox_ops()
+                .get(backend.clone(), "api")
+                .await
+                .unwrap();
+            assert_eq!(handle.config().unwrap().spec.resources.memory_mib, 256);
+            assert_eq!(handle.config().unwrap().spec.labels["resize"], "accepted");
+            assert_eq!(
+                handle.active_config().unwrap().unwrap().spec.labels["resize"],
+                "accepted"
+            );
+            assert_eq!(
+                handle.active_config().unwrap().unwrap().spec.resources.cpus,
+                2
+            );
+            assert_eq!(
+                server.await.unwrap(),
+                [
+                    "capabilities",
+                    "pause_state",
+                    "cpu_target",
+                    "memory_target",
+                    "pause_state"
+                ]
+            );
+        }
+    }
+
+    async fn label_backend(home: &std::path::Path) -> (Arc<LocalContext>, Arc<dyn Context>) {
         let builder = crate::test_support::local_backend_builder(home);
-        let local = Arc::new(builder.build().await.unwrap());
+        let local = Arc::new(builder.build().unwrap());
         let backend = local.clone();
         (local, backend)
     }
 
     async fn seed_running_labeled(
-        local: &LocalBackend,
+        local: &LocalContext,
         saved: &SandboxConfig,
         active: &SandboxConfig,
     ) -> i32 {
@@ -2830,7 +3142,7 @@ mod tests {
     }
 
     async fn label_copies(
-        local: &LocalBackend,
+        local: &LocalContext,
         sandbox_id: i32,
     ) -> (
         BTreeMap<String, String>,
@@ -2866,13 +3178,12 @@ mod tests {
     #[tokio::test]
     async fn persist_config_replaces_labels_and_preserves_caller_config_overrides() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();
@@ -2920,7 +3231,7 @@ mod tests {
             ..Default::default()
         });
         let handle = backend
-            .sandboxes()
+            .sandbox_ops()
             .get(backend.clone(), &updated.spec.name)
             .await
             .unwrap();
@@ -2956,7 +3267,7 @@ mod tests {
 
         // Reload through the real handle boundary before rebuilding with new defaults.
         let reloaded = backend
-            .sandboxes()
+            .sandbox_ops()
             .get(backend.clone(), &updated.spec.name)
             .await
             .unwrap();
@@ -3004,7 +3315,6 @@ mod tests {
             let local = Arc::new(
                 crate::test_support::local_backend_builder(temp.path())
                     .build()
-                    .await
                     .unwrap(),
             );
             let current = config(2, 1024);
@@ -3043,13 +3353,12 @@ mod tests {
     #[tokio::test]
     async fn modify_rejects_invalid_env_and_saves_nothing() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();
@@ -3228,7 +3537,7 @@ mod tests {
                 .unwrap();
             let before = label_copies(&local, sandbox_id).await;
             let handle = backend
-                .sandboxes()
+                .sandbox_ops()
                 .get(backend.clone(), &current.spec.name)
                 .await
                 .unwrap();
@@ -4689,13 +4998,12 @@ mod tests {
     #[tokio::test]
     async fn setting_an_invalid_label_key_is_refused_and_nothing_is_saved() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();
@@ -4798,7 +5106,11 @@ mod tests {
         };
         assert_eq!(change.field, SECRET_FIELD);
         assert_eq!(change.change, SecretChangeKind::Added);
+        #[cfg(feature = "net")]
         assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+        // A build without network support must still redact a refused secret plan.
+        #[cfg(not(feature = "net"))]
+        assert_eq!(change.disposition, ModificationDisposition::Unsupported);
     }
 
     //----------------------------------------------------------------------------------------------
@@ -5150,13 +5462,12 @@ mod tests {
     #[tokio::test]
     async fn applying_stopped_secret_policy_edits_persists_each_option() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();
@@ -5277,7 +5588,7 @@ mod tests {
             .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
         std::fs::write(&library, b"").unwrap();
 
-        let backend: Arc<dyn Backend> =
+        let backend: Arc<dyn Context> =
             Arc::new(crate::test_support::local_backend(GlobalConfig {
                 home: Some(home),
                 paths: PathsConfig {
@@ -6652,13 +6963,12 @@ mod tests {
     #[tokio::test]
     async fn duplicate_secret_names_through_with_patch_are_refused() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();

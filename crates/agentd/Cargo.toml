@@ -25,6 +25,7 @@ nix = { workspace = true, features = [
     "fs",
     "hostname",
     "mount",
+    "net",
     "process",
     "signal",
     "term",
@@ -44,3 +45,6 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 typed-path.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

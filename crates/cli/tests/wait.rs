@@ -47,7 +47,7 @@ async fn wait_observes_shutdown_and_timeout_leaves_sandbox_running() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("timed out waiting"));
     assert_eq!(
-        Sandbox::get(name).await.unwrap().status_snapshot(),
+        Sandbox::get(name).await.unwrap().status().await.unwrap(),
         SandboxStatus::Running,
     );
 
@@ -88,7 +88,7 @@ async fn wait_observes_shutdown_and_timeout_leaves_sandbox_running() {
         format!("{name} Stopped")
     );
 
-    Sandbox::get(name).await.unwrap().remove().await.unwrap();
+    Sandbox::get(name).await.unwrap().destroy().await.unwrap();
     let output = msb(&["wait", name]).await;
     assert!(
         !output.status.success(),

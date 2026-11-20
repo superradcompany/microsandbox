@@ -5,18 +5,23 @@
 //!
 //! - `microsandbox.cpu.utilization`     — gauge (vCPU-seconds per wall-second; can exceed 1.0)
 //! - `microsandbox.memory.usage`         — gauge (bytes)
+//! - `microsandbox.memory.total`         — gauge (guest usable bytes)
+//! - `microsandbox.memory.available`     — gauge (guest available bytes)
 //! - `microsandbox.memory.limit`         — gauge (bytes)
 //! - `microsandbox.memory.host_resident` — gauge (bytes)
 //! - `microsandbox.disk.bytes_read`     — gauge (cumulative bytes)
 //! - `microsandbox.disk.bytes_written`  — gauge (cumulative bytes)
 //! - `microsandbox.network.bytes_received` — gauge (cumulative bytes)
 //! - `microsandbox.network.bytes_sent`     — gauge (cumulative bytes)
+//! - `microsandbox.network.inbound_tcp.rejected` — gauge (cumulative cap rejections)
+//! - `microsandbox.network.outbound_tcp.rejected` — gauge (cumulative cap rejections)
+//! - `microsandbox.network.outbound_udp.evicted` — gauge (cumulative cap evictions)
 //! - `microsandbox.upper.used`             — gauge (bytes)
 //! - `microsandbox.upper.free`             — gauge (bytes)
 //! - `microsandbox.upper.host_allocated`   — gauge (bytes)
 //! - `microsandbox.uptime`              — gauge (seconds)
 //!
-//! All cumulative byte counters are emitted as gauges carrying the
+//! All cumulative counters are emitted as gauges carrying the
 //! current cumulative value. Downstream `rate()` queries (Prometheus,
 //! PromQL-on-OTel) compute throughput from successive samples. We use
 //! gauges rather than monotonic counters because each snapshot already
@@ -44,6 +49,7 @@
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
+use microsandbox_metrics::{GuestMemoryObservation, GuestMemoryValidity, guest_memory_clock};
 use opentelemetry::metrics::{Counter, Gauge, Meter, MeterProvider};
 use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{
@@ -137,12 +143,19 @@ impl Default for IdentityAttributes {
 struct SandboxMetricObservation {
     cpu_utilization: f64,
     memory_usage: Option<u64>,
+    memory_total: Option<u64>,
+    memory_available: Option<u64>,
+    guest_memory_observation: Option<GuestMemoryObservation>,
+    guest_memory_validity: Option<GuestMemoryValidity>,
     memory_limit: u64,
     memory_host_resident: Option<u64>,
     disk_bytes_read: u64,
     disk_bytes_written: u64,
     network_bytes_received: u64,
     network_bytes_sent: u64,
+    inbound_tcp_rejected: Option<u64>,
+    outbound_tcp_rejected: Option<u64>,
+    outbound_udp_evicted: Option<u64>,
     upper_used: Option<u64>,
     upper_free: Option<u64>,
     upper_host_allocated: Option<u64>,
@@ -229,6 +242,17 @@ impl OtelExporter {
     /// Create a new builder.
     pub fn builder() -> OtelExporterBuilder {
         OtelExporterBuilder::default()
+    }
+}
+
+impl SandboxMetricObservation {
+    fn guest_memory_is_current(&self) -> bool {
+        self.guest_memory_validity
+            .as_ref()
+            .is_none_or(GuestMemoryValidity::is_current)
+            && self.guest_memory_observation.is_none_or(|report| {
+                guest_memory_clock().is_some_and(|now| report.is_fresh_at(now))
+            })
     }
 }
 
@@ -614,11 +638,16 @@ fn register_sandbox_instruments(meter: &Meter) -> SandboxMetricObservations {
     let cpu_observations = observations.clone();
     let memory_usage_observations = observations.clone();
     let memory_limit_observations = observations.clone();
+    let memory_total_observations = observations.clone();
+    let memory_available_observations = observations.clone();
     let memory_host_resident_observations = observations.clone();
     let disk_read_observations = observations.clone();
     let disk_write_observations = observations.clone();
     let network_received_observations = observations.clone();
     let network_sent_observations = observations.clone();
+    let inbound_rejected_observations = observations.clone();
+    let outbound_rejected_observations = observations.clone();
+    let outbound_evicted_observations = observations.clone();
     let upper_used_observations = observations.clone();
     let upper_free_observations = observations.clone();
     let upper_host_allocated_observations = observations.clone();
@@ -649,7 +678,41 @@ fn register_sandbox_instruments(meter: &Meter) -> SandboxMetricObservations {
         .with_callback(move |observer| {
             memory_usage_observations.with_observations(|observations| {
                 for observation in observations {
-                    if let Some(value) = observation.memory_usage {
+                    if let Some(value) = observation.memory_usage
+                        && observation.guest_memory_is_current()
+                    {
+                        observer.observe(value, &observation.attrs);
+                    }
+                }
+            });
+        })
+        .build();
+    meter
+        .u64_observable_gauge("microsandbox.memory.total")
+        .with_description("Guest-reported usable memory capacity")
+        .with_unit("By")
+        .with_callback(move |observer| {
+            memory_total_observations.with_observations(|observations| {
+                for observation in observations {
+                    if let Some(value) = observation.memory_total
+                        && observation.guest_memory_is_current()
+                    {
+                        observer.observe(value, &observation.attrs);
+                    }
+                }
+            });
+        })
+        .build();
+    meter
+        .u64_observable_gauge("microsandbox.memory.available")
+        .with_description("Guest-reported memory available for workloads")
+        .with_unit("By")
+        .with_callback(move |observer| {
+            memory_available_observations.with_observations(|observations| {
+                for observation in observations {
+                    if let Some(value) = observation.memory_available
+                        && observation.guest_memory_is_current()
+                    {
                         observer.observe(value, &observation.attrs);
                     }
                 }
@@ -730,6 +793,60 @@ fn register_sandbox_instruments(meter: &Meter) -> SandboxMetricObservations {
             });
         })
         .build();
+
+    meter
+        .u64_observable_gauge("microsandbox.network.inbound_tcp.rejected")
+        .with_description("Cumulative published TCP connections rejected by the admission queue")
+        .with_unit("{connection}")
+        .with_callback(move |observer| {
+            inbound_rejected_observations.with_observations(|observations| {
+                for observation in observations {
+                    if let Some(rejected) = observation.inbound_tcp_rejected {
+                        let mut attrs = observation.attrs.clone();
+                        attrs.push(KeyValue::new("reason", "connection_limit"));
+                        observer.observe(rejected, &attrs);
+                    }
+                }
+            });
+        })
+        .build();
+
+    meter
+        .u64_observable_gauge("microsandbox.network.outbound_tcp.rejected")
+        .with_description(
+            "Cumulative outbound TCP connections rejected by the active connection cap",
+        )
+        .with_unit("{connection}")
+        .with_callback(move |observer| {
+            outbound_rejected_observations.with_observations(|observations| {
+                for observation in observations {
+                    if let Some(value) = observation.outbound_tcp_rejected {
+                        let mut attrs = observation.attrs.clone();
+                        attrs.push(KeyValue::new("reason", "connection_limit"));
+                        observer.observe(value, &attrs);
+                    }
+                }
+            });
+        })
+        .build();
+
+    meter
+        .u64_observable_gauge("microsandbox.network.outbound_udp.evicted")
+        .with_description("Cumulative outbound UDP sessions evicted to enforce the session cap")
+        .with_unit("{session}")
+        .with_callback(move |observer| {
+            outbound_evicted_observations.with_observations(|observations| {
+                for observation in observations {
+                    if let Some(value) = observation.outbound_udp_evicted {
+                        let mut attrs = observation.attrs.clone();
+                        attrs.push(KeyValue::new("reason", "session_limit"));
+                        observer.observe(value, &attrs);
+                    }
+                }
+            });
+        })
+        .build();
+
     meter
         .u64_observable_gauge("microsandbox.upper.used")
         .with_description("Guest-visible used bytes on the OCI upper filesystem")
@@ -827,18 +944,36 @@ fn build_observation(
     snapshot: &SandboxMetricSnapshot,
     attrs: Vec<KeyValue>,
 ) -> SandboxMetricObservation {
+    build_observation_at(snapshot, attrs, microsandbox_metrics::guest_memory_clock())
+}
+
+fn build_observation_at(
+    snapshot: &SandboxMetricSnapshot,
+    attrs: Vec<KeyValue>,
+    now: Option<std::time::Duration>,
+) -> SandboxMetricObservation {
     let m = &snapshot.metrics;
+    // A batch can also be passed directly to this exporter or delayed while an
+    // earlier collection is sent. Recheck each collection at observation time.
+    let fresh = m.guest_memory_is_fresh_at(now);
     // cpu_percent is a 0..100 percentage in the source; OTel convention
     // for `*.utilization` is a 0..1 ratio.
     SandboxMetricObservation {
         cpu_utilization: f64::from(m.cpu_percent) / 100.0,
-        memory_usage: m.memory_bytes_reported.then_some(m.memory_bytes),
+        memory_usage: (fresh && m.memory_bytes_reported).then_some(m.memory_bytes),
+        memory_total: m.memory_total_bytes.filter(|_| fresh),
+        memory_available: m.memory_available_bytes.filter(|_| fresh),
+        guest_memory_observation: m.guest_memory_observation,
+        guest_memory_validity: m.guest_memory_validity.clone(),
         memory_limit: m.memory_limit_bytes,
         memory_host_resident: m.memory_host_resident_bytes,
         disk_bytes_read: m.disk_read_bytes,
         disk_bytes_written: m.disk_write_bytes,
         network_bytes_received: m.net_rx_bytes,
         network_bytes_sent: m.net_tx_bytes,
+        inbound_tcp_rejected: m.net_inbound_tcp_rejected,
+        outbound_tcp_rejected: m.net_outbound_tcp_rejected,
+        outbound_udp_evicted: m.net_outbound_udp_evicted,
         upper_used: m.upper_used_bytes,
         upper_free: m.upper_free_bytes,
         upper_host_allocated: m.upper_host_allocated_bytes,
@@ -874,6 +1009,9 @@ mod tests {
                 vcpu_time_ns: 1,
                 memory_bytes: 1,
                 memory_bytes_reported: true,
+                memory_total_bytes: None,
+                guest_memory_observation: None,
+                guest_memory_validity: None,
                 memory_available_bytes: Some(2),
                 memory_host_resident_bytes: Some(3),
                 memory_limit_bytes: 2,
@@ -881,6 +1019,9 @@ mod tests {
                 disk_write_bytes: 4,
                 net_rx_bytes: 5,
                 net_tx_bytes: 6,
+                net_inbound_tcp_rejected: Some(7),
+                net_outbound_tcp_rejected: Some(41),
+                net_outbound_udp_evicted: Some(43),
                 upper_used_bytes: Some(7),
                 upper_free_bytes: Some(8),
                 upper_host_allocated_bytes: Some(7),
@@ -959,6 +1100,54 @@ mod tests {
     }
 
     #[test]
+    fn delayed_guest_pair_expires_together_without_renewing_or_changing_other_metrics() {
+        use microsandbox_metrics::GuestMemoryObservation;
+
+        let (_provider, reader, observations) = test_reader();
+        let mut current = snapshot();
+        let report = GuestMemoryObservation {
+            total_bytes: 100,
+            available_bytes: 20,
+            received_at: guest_memory_clock().unwrap(),
+            reporting_interval: Duration::from_secs(1),
+        };
+        current.metrics.memory_total_bytes = Some(100);
+        current.metrics.memory_available_bytes = Some(20);
+        current.metrics.guest_memory_observation = Some(report);
+        for (now, count) in [
+            (Some(report.received_at + Duration::from_secs(2)), 1),
+            (Some(report.received_at + Duration::from_secs(3)), 0),
+            (None, 0),
+        ] {
+            let attrs = build_attributes(&current, &IdentityAttributes::default(), None);
+            observations.replace(vec![build_observation_at(&current, attrs, now)]);
+            let mut exported = ResourceMetrics::default();
+            reader.collect(&mut exported).unwrap();
+            for name in ["usage", "total", "available"] {
+                assert_eq!(
+                    metric_point_count(&exported, &format!("microsandbox.memory.{name}")),
+                    count
+                );
+            }
+            for name in [
+                "microsandbox.memory.limit",
+                "microsandbox.memory.host_resident",
+                "microsandbox.disk.bytes_read",
+            ] {
+                assert_eq!(metric_point_count(&exported, name), 1);
+            }
+            assert_eq!(current.metrics.guest_memory_observation, Some(report));
+        }
+        current
+            .metrics
+            .expire_guest_memory_at(Some(report.received_at + Duration::from_secs(3)));
+        assert!(!current.metrics.memory_bytes_reported);
+        assert_eq!(current.metrics.memory_total_bytes, None);
+        assert_eq!(current.metrics.memory_available_bytes, None);
+        assert_eq!(current.metrics.guest_memory_observation, Some(report));
+    }
+
+    #[test]
     fn optional_upper_metrics_do_not_survive_absent_collection() {
         let (_provider, reader, observations) = test_reader();
         let current = snapshot();
@@ -1006,7 +1195,104 @@ mod tests {
     }
 
     #[test]
-    fn registry_memory_usage_omits_missing_samples_and_recovers_with_zero() {
+    fn buffered_otlp_observations_follow_lifecycle_even_after_conversion() {
+        let name = format!(
+            "/msb-epoch-{:x}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        #[cfg(unix)]
+        unsafe {
+            libc::shm_unlink(std::ffi::CString::new(&*name).unwrap().as_ptr());
+        }
+        let reserved = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "paused",
+                memory_limit_bytes: 4096,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reserved.slot,
+                generation: reserved.generation,
+                run_id: 70,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let sample = SampleWrite {
+            sampled_at: chrono::Utc::now(),
+            cpu_percent: Some(2.0),
+            vcpu_time_ns: Some(10),
+            memory_bytes: None,
+            memory_available_bytes: None,
+            memory_limit_bytes: None,
+            memory_host_resident_bytes: Some(1024),
+            disk_read_bytes: 17,
+            disk_write_bytes: 0,
+            net_rx_bytes: 0,
+            net_tx_bytes: 0,
+            net_inbound_tcp_rejected: None,
+            net_outbound_tcp_rejected: None,
+            net_outbound_udp_evicted: None,
+            upper_used_bytes: None,
+            upper_free_bytes: None,
+            upper_host_allocated_bytes: None,
+        };
+        let report = GuestMemoryObservation {
+            total_bytes: 3000,
+            available_bytes: 1000,
+            received_at: guest_memory_clock().unwrap(),
+            reporting_interval: Duration::from_secs(1),
+        };
+        writer
+            .write_sample_with_guest_memory(sample, Some(report))
+            .unwrap();
+        let cached = SandboxMetricSnapshot::from(registry.snapshot().unwrap().remove(0));
+        let attrs = build_attributes(&cached, &IdentityAttributes::default(), None);
+        let (_provider, reader, observations) = test_reader();
+        observations.replace(vec![build_observation(&cached, attrs)]);
+        let mut exported = ResourceMetrics::default();
+        reader.collect(&mut exported).unwrap();
+        assert_eq!(
+            metric_point_count(&exported, "microsandbox.memory.total"),
+            1
+        );
+
+        // Invalidate after conversion, then republish identical bytes: neither
+        // the collector batch nor the OTel callback cache may revive that sample.
+        writer.invalidate_guest_memory().unwrap();
+        writer
+            .write_sample_with_guest_memory(sample, Some(report))
+            .unwrap();
+        reader.collect(&mut exported).unwrap();
+        for suffix in ["usage", "total", "available"] {
+            assert_eq!(
+                metric_point_count(&exported, &format!("microsandbox.memory.{suffix}")),
+                0
+            );
+        }
+        assert_eq!(
+            metric_point_count(&exported, "microsandbox.memory.limit"),
+            1
+        );
+        assert_eq!(
+            metric_point_count(&exported, "microsandbox.memory.host_resident"),
+            1
+        );
+        let current = SandboxMetricSnapshot::from(registry.snapshot().unwrap().remove(0));
+        let attrs = build_attributes(&current, &IdentityAttributes::default(), None);
+        observations.replace(vec![build_observation(&current, attrs)]);
+        reader.collect(&mut exported).unwrap();
+        assert_eq!(
+            metric_point_count(&exported, "microsandbox.memory.total"),
+            1
+        );
+    }
+
+    #[test]
+    fn registry_optional_metrics_omit_missing_samples_and_recover_with_zero() {
         let name = format!(
             "/msb-usage-{:x}",
             chrono::Utc::now().timestamp_nanos_opt().unwrap()
@@ -1038,10 +1324,17 @@ mod tests {
 
         let (_provider, reader, observations) = test_reader();
 
-        for (used, limit) in [
-            (Some(128 * 1024 * 1024), 1_024 * 1024 * 1024),
-            (None, 512 * 1024 * 1024),
-            (Some(0), 512 * 1024 * 1024),
+        for (used, limit, rejected, tcp_rejected, udp_evicted) in [
+            (
+                Some(128 * 1024 * 1024),
+                1_024 * 1024 * 1024,
+                Some(37),
+                Some(41),
+                Some(43),
+            ),
+            (None, 512 * 1024 * 1024, None, None, None),
+            (Some(0), 512 * 1024 * 1024, Some(0), Some(0), Some(0)),
+            (Some(0), 512 * 1024 * 1024, Some(37), None, Some(43)),
         ] {
             writer
                 .write_sample(SampleWrite {
@@ -1058,6 +1351,9 @@ mod tests {
                     disk_write_bytes: 0,
                     net_rx_bytes: 0,
                     net_tx_bytes: 0,
+                    net_inbound_tcp_rejected: rejected,
+                    net_outbound_tcp_rejected: tcp_rejected,
+                    net_outbound_udp_evicted: udp_evicted,
                     upper_used_bytes: None,
                     upper_free_bytes: None,
                     upper_host_allocated_bytes: None,
@@ -1077,6 +1373,18 @@ mod tests {
                     used.into_iter().collect::<Vec<_>>(),
                 ),
                 ("microsandbox.memory.limit", vec![limit]),
+                (
+                    "microsandbox.network.inbound_tcp.rejected",
+                    rejected.into_iter().collect(),
+                ),
+                (
+                    "microsandbox.network.outbound_tcp.rejected",
+                    tcp_rejected.into_iter().collect(),
+                ),
+                (
+                    "microsandbox.network.outbound_udp.evicted",
+                    udp_evicted.into_iter().collect(),
+                ),
             ] {
                 let values: Vec<_> = exported
                     .scope_metrics()
@@ -1085,7 +1393,28 @@ mod tests {
                     .flat_map(|metric| match metric.data() {
                         AggregatedMetrics::U64(MetricData::Gauge(gauge)) => gauge
                             .data_points()
-                            .map(|point| point.value())
+                            .map(|point| {
+                                if name.starts_with("microsandbox.network.") {
+                                    let reason = if name.ends_with("evicted") {
+                                        "session_limit"
+                                    } else {
+                                        "connection_limit"
+                                    };
+                                    assert!(
+                                        point
+                                            .attributes()
+                                            .any(|attr| attr.key.as_str() == "reason"
+                                                && attr.value.to_string() == reason)
+                                    );
+                                    assert!(
+                                        point
+                                            .attributes()
+                                            .any(|attr| attr.key.as_str() == "sandbox.name"
+                                                && attr.value.to_string() == "resize")
+                                    );
+                                }
+                                point.value()
+                            })
                             .collect::<Vec<_>>(),
                         _ => panic!("{name} should be a u64 gauge"),
                     })
@@ -1129,7 +1458,7 @@ mod tests {
 
     #[test]
     fn per_sandbox_metrics_only_report_the_current_identity_set() {
-        const METRICS: [&str; 12] = [
+        const METRICS: [&str; 15] = [
             "microsandbox.cpu.utilization",
             "microsandbox.memory.usage",
             "microsandbox.memory.limit",
@@ -1138,6 +1467,9 @@ mod tests {
             "microsandbox.disk.bytes_written",
             "microsandbox.network.bytes_received",
             "microsandbox.network.bytes_sent",
+            "microsandbox.network.inbound_tcp.rejected",
+            "microsandbox.network.outbound_tcp.rejected",
+            "microsandbox.network.outbound_udp.evicted",
             "microsandbox.upper.used",
             "microsandbox.upper.free",
             "microsandbox.upper.host_allocated",

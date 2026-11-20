@@ -10,7 +10,9 @@
 //! through to TTYs and stripped on pipes by default (matching
 //! `ls`/`grep` convention).
 
+use std::future::Future;
 use std::io::{IsTerminal, Write};
+use std::ops::ControlFlow;
 use std::pin::pin;
 use std::time::Duration;
 
@@ -19,12 +21,20 @@ use base64::Engine as _;
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Args, ValueEnum};
 use console::style;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use microsandbox::MicrosandboxError;
-use microsandbox::logs::{self, BootError, LogEntry as EngineLogEntry, LogOptions, LogSource};
+use microsandbox::jobs::{JobLogOptions, JobOutputSource};
+use microsandbox::logs::{BootError, LogEntry as EngineLogEntry, LogOptions, LogSource};
 use microsandbox_utils::log_text::{base64_decode, strip_ansi};
 use regex::Regex;
 use serde::Deserialize;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// How long a followed log must stay quiet after its sandbox stops before `msb logs -f` exits.
+const FOLLOW_DRAIN_IDLE: Duration = Duration::from_millis(300);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -172,7 +182,12 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
     if args.job.is_some() {
         return run_job_logs(args).await;
     }
-    if let Some(boot_error) = logs::boot_error(&args.name).await? {
+    let context = crate::commands::common::selected_context()?;
+    if let Some(boot_error) = context
+        .sandbox_ops()
+        .boot_error(context.clone(), &args.name)
+        .await?
+    {
         render_boot_error(&boot_error, &args.name, args.json)?;
     }
 
@@ -199,7 +214,10 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
     };
 
     if !args.follow {
-        let entries = logs::read_logs(&args.name, &opts).await?;
+        let entries = context
+            .sandbox_ops()
+            .logs(context.clone(), &args.name, &opts)
+            .await?;
         for entry in &entries {
             let cli_entry = engine_entry_to_cli(entry);
             if grep_matches(grep_re.as_ref(), &cli_entry.d) {
@@ -209,28 +227,98 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut stream = pin!(logs::follow_logs(&args.name, &opts).await?);
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(entry) => {
-                let cli_entry = engine_entry_to_cli(&entry);
-                if grep_matches(grep_re.as_ref(), &cli_entry.d) {
-                    render_entry(&cli_entry, &args, color_policy)?;
+    let stream = context
+        .sandbox_ops()
+        .follow_logs(context.clone(), &args.name, &opts)
+        .await?;
+    let stopped = wait_for_sandbox_stop(&args.name);
+    follow_until_stopped(stream, stopped, FOLLOW_DRAIN_IDLE, |item| match item {
+        Ok(entry) => {
+            let cli_entry = engine_entry_to_cli(&entry);
+            if grep_matches(grep_re.as_ref(), &cli_entry.d) {
+                render_entry(&cli_entry, &args, color_policy)?;
+            }
+            Ok(ControlFlow::Continue(()))
+        }
+        Err(MicrosandboxError::MissedRotation {
+            dropped_from_offset,
+        }) => {
+            eprintln!(
+                "log follower fell behind: missed rotation at offset {dropped_from_offset}. \
+                 restart `msb logs -f` to resume."
+            );
+            Ok(ControlFlow::Break(()))
+        }
+        Err(e) => Err(anyhow!(e)),
+    })
+    .await
+}
+
+/// Resolve once the sandbox has stopped or no longer exists.
+async fn wait_for_sandbox_stop(name: &str) -> anyhow::Result<()> {
+    // Only local status is cheap enough to poll for the whole life of a follow.
+    if crate::commands::common::selected_context()?
+        .as_local()
+        .is_none()
+    {
+        return std::future::pending().await;
+    }
+
+    let result = match crate::commands::common::sandbox_record(name).await {
+        Ok(handle) => handle.wait_until_stopped().await.map(|_| ()),
+        Err(error) => Err(error),
+    };
+
+    match result {
+        Err(MicrosandboxError::SandboxNotFound(_)) => Ok(()),
+        result => Ok(result?),
+    }
+}
+
+/// Pass stream items to `handle_item` until the stream ends or `stopped` resolves.
+///
+/// Entries a stopping sandbox already wrote may still be queued, so once `stopped` resolves
+/// this keeps reading until the stream stays quiet for `drain_idle`.
+async fn follow_until_stopped<S, F, H>(
+    stream: S,
+    stopped: F,
+    drain_idle: Duration,
+    mut handle_item: H,
+) -> anyhow::Result<()>
+where
+    S: Stream,
+    F: Future<Output = anyhow::Result<()>>,
+    H: FnMut(S::Item) -> anyhow::Result<ControlFlow<()>>,
+{
+    let mut stream = pin!(stream);
+    let mut stopped = pin!(stopped);
+    let mut stopping = false;
+
+    loop {
+        let item = if stopping {
+            match tokio::time::timeout(drain_idle, stream.next()).await {
+                Ok(item) => item,
+                Err(_) => return Ok(()),
+            }
+        } else {
+            tokio::select! {
+                biased;
+                item = stream.next() => item,
+                result = &mut stopped => {
+                    result?;
+                    stopping = true;
+                    continue;
                 }
             }
-            Err(MicrosandboxError::MissedRotation {
-                dropped_from_offset,
-            }) => {
-                eprintln!(
-                    "log follower fell behind: missed rotation at offset {dropped_from_offset}. \
-                     restart `msb logs -f` to resume."
-                );
-                return Ok(());
-            }
-            Err(e) => return Err(anyhow!(e)),
+        };
+
+        let Some(item) = item else {
+            return Ok(());
+        };
+        if handle_item(item)?.is_break() {
+            return Ok(());
         }
     }
-    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -276,6 +364,17 @@ struct SourceMask {
 }
 
 impl SourceMask {
+    fn to_job_sources(self) -> Vec<JobOutputSource> {
+        [
+            self.stdout.then_some(JobOutputSource::Stdout),
+            self.stderr.then_some(JobOutputSource::Stderr),
+            self.output.then_some(JobOutputSource::Output),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
     /// Translate the mask into the engine's flat source list. Order
     /// is fixed (stdout, stderr, output, system) for stable behavior.
     fn to_engine_sources(self) -> Vec<LogSource> {
@@ -355,24 +454,15 @@ fn engine_entry_to_cli(entry: &EngineLogEntry) -> LogEntry {
 /// Job selection keeps sandbox-wide logs unchanged and delegates replay/follow to the SDK.
 async fn run_job_logs(args: LogsArgs) -> anyhow::Result<()> {
     let id = args.job.as_deref().expect("job branch requires a selector");
-    let job = microsandbox::Sandbox::get(&args.name)
+    let job = crate::commands::common::sandbox_record(&args.name)
         .await?
         .get_job(id)
         .await?;
-    let sources = resolve_sources(&args.source)
-        .to_engine_sources()
-        .into_iter()
-        .map(|source| {
-            match source {
-                LogSource::Stdout => "stdout",
-                LogSource::Stderr => "stderr",
-                LogSource::Output => "output",
-                LogSource::System => "system",
-            }
-            .to_string()
-        })
-        .collect();
-    let options = microsandbox::jobs::JobLogOptions {
+    let sources = resolve_sources(&args.source).to_job_sources();
+    // Only sandbox-wide logs have system records. An empty SDK filter selects
+    // all program output, so suppress rendering for a system-only job query.
+    let system_only = sources.is_empty();
+    let options = JobLogOptions {
         tail: args.tail,
         since: parse_time_arg(args.since.as_deref())?.map(|time| time.timestamp_millis()),
         until: parse_time_arg(args.until.as_deref())?.map(|time| time.timestamp_millis()),
@@ -394,7 +484,7 @@ async fn run_job_logs(args: LogsArgs) -> anyhow::Result<()> {
     let mut output = job.log_stream(&options).await?;
     while let Some(entry) = output.next().await {
         let entry = entry?;
-        if !grep_matches(grep.as_ref(), &String::from_utf8_lossy(&entry.data)) {
+        if system_only || !grep_matches(grep.as_ref(), &String::from_utf8_lossy(&entry.data)) {
             continue;
         }
         let timestamp = DateTime::<Utc>::from_timestamp_millis(entry.timestamp)
@@ -408,7 +498,7 @@ async fn run_job_logs(args: LogsArgs) -> anyhow::Result<()> {
         };
         let record = LogEntry {
             t: timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
-            s: entry.source,
+            s: entry.source.to_string(),
             d,
             id: None,
             e,
@@ -668,7 +758,105 @@ fn prefix_with_timestamp(t: &str, id_prefix: Option<&str>, body: &str) -> String
 
 #[cfg(test)]
 mod tests {
+    use futures::stream;
+
     use super::*;
+
+    const DRAIN_IDLE: Duration = Duration::from_millis(20);
+
+    fn collect_into(seen: &mut Vec<u32>) -> impl FnMut(u32) -> anyhow::Result<ControlFlow<()>> {
+        move |item| {
+            seen.push(item);
+            Ok(ControlFlow::Continue(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn follow_exits_when_a_stopped_sandbox_goes_quiet() {
+        let entries = stream::iter([1, 2]).chain(stream::pending());
+        let mut seen = Vec::new();
+
+        follow_until_stopped(
+            entries,
+            async { Ok(()) },
+            DRAIN_IDLE,
+            collect_into(&mut seen),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(seen, [1, 2]);
+    }
+
+    #[tokio::test]
+    async fn follow_reads_entries_that_arrive_while_stopping() {
+        let late_entry = async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            3
+        };
+        let entries = stream::once(late_entry).chain(stream::pending());
+        let mut seen = Vec::new();
+
+        follow_until_stopped(
+            entries,
+            async { Ok(()) },
+            DRAIN_IDLE,
+            collect_into(&mut seen),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(seen, [3]);
+    }
+
+    #[tokio::test]
+    async fn follow_keeps_reading_while_the_sandbox_runs() {
+        let entries = stream::iter([1, 2, 3]);
+        let mut seen = Vec::new();
+
+        follow_until_stopped(
+            entries,
+            std::future::pending(),
+            DRAIN_IDLE,
+            collect_into(&mut seen),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(seen, [1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn follow_reports_status_errors() {
+        let entries = stream::pending::<u32>();
+        let mut seen = Vec::new();
+
+        let error = follow_until_stopped(
+            entries,
+            async { Err(anyhow!("status unavailable")) },
+            DRAIN_IDLE,
+            collect_into(&mut seen),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "status unavailable");
+    }
+
+    #[tokio::test]
+    async fn follow_stops_when_the_handler_breaks() {
+        let entries = stream::iter([1, 2, 3]);
+        let mut seen = Vec::new();
+
+        follow_until_stopped(entries, std::future::pending(), DRAIN_IDLE, |item| {
+            seen.push(item);
+            Ok(ControlFlow::Break(()))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(seen, [1]);
+    }
 
     #[test]
     fn parse_duration_basic() {
@@ -717,6 +905,24 @@ mod tests {
     fn source_mask_default_excludes_system() {
         let mask = resolve_sources(&[]);
         assert!(mask.stdout && mask.stderr && mask.output && !mask.system);
+    }
+
+    #[test]
+    fn job_source_mask_ignores_system_without_enabling_stdin_diagnostics() {
+        use JobOutputSource::{Output, Stderr, Stdout};
+        assert!(
+            resolve_sources(&[SourceFilter::System])
+                .to_job_sources()
+                .is_empty()
+        );
+        assert_eq!(
+            resolve_sources(&[SourceFilter::All]).to_job_sources(),
+            [Stdout, Stderr, Output]
+        );
+        assert_eq!(
+            resolve_sources(&[SourceFilter::System, SourceFilter::Stderr]).to_job_sources(),
+            [Stderr]
+        );
     }
 
     #[test]

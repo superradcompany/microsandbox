@@ -5,7 +5,9 @@ description: Prepare a local runtime before creating your first sandbox.
 icon: "download"
 ---
 
-Local sandboxes need `msb` and `libkrunfw`. Call the setup helper once at application startup: it reuses an existing runtime or installs one when missing. Sandbox creation does not download it automatically. Cloud sandboxes do not need a local runtime.
+Local sandboxes need `msb` and `libkrunfw`. Call the setup helper once at application startup: it reuses an existing runtime or installs one when missing. Sandbox creation does not download it automatically. To use [our managed cloud](/cloud/overview), skip local runtime setup and connect with an API key.
+
+The setup helpers below describe full SDK distributions. Lean local providers exclude the runtime downloader: provision a compatible `msb`/`libkrunfw` pair separately and use runtime discovery. Lean remote providers need neither host runtime file. See [distribution migration](/migrations/v0.8#sdk-distribution-migration) for package selection and Go’s separate FFI setup.
 
 ## Set up the runtime
 
@@ -141,6 +143,18 @@ To use a custom installation, set both `MSB_PATH` and `MSB_LIBKRUNFW_PATH` befor
 
 ## Advanced setup
 
+### Inspect legacy storage
+
+Storage diagnostics require an explicit list of sandbox names or an explicit whole-home selection. They report readiness, blockers, candidate views, and estimated staging space without installing a runtime or migrating sandbox data. Running results are provisional; SQLite may maintain its normal WAL read-lock sidecars.
+
+- **Rust:** `setup::diagnose_storage(GlobalConfigPatch, StorageSelection)`; recover stopped storage with `Sandbox::recover_storage(name, StorageRecoveryOptions)`.
+- **Python:** `diagnose_storage(names, *, all_sandboxes=False, config=None)`; `Sandbox.recover_storage(name, ...)`.
+- **TypeScript:** `diagnoseStorage(selection, config?)`; `Sandbox.recoverStorage(name, options?)`.
+- **Go:** `DiagnoseStorage(ctx, config, selection)`; `RecoverStorage(ctx, name, options)`.
+- **Ruby:** `Microsandbox.diagnose_storage(names:, all_sandboxes:, home:)`; `Microsandbox::Sandbox.recover_storage(name, ...)`.
+
+Recovery never starts or stops a VM. macOS legacy recovery requires the explicit `legacy_writers_stopped` confirmation (`legacyWritersStopped` in TypeScript, `LegacyWritersStopped` in Go) under the maintenance conditions in the repair guide. Empty selections import or resume the validated current view; explicit candidate selection requires acknowledgement that it may omit later writes. See [sandbox storage repair](/migrations/v0.7#sandbox-storage-migration) for the CLI workflow and recovery limits.
+
 ### Bring your own runtime
 
 Use an existing `msb` executable and its matching `libkrunfw` library instead of downloading a runtime at application startup. Install the pair with the [CLI installer](/getting-started/quickstart), or provision it yourself.
@@ -258,7 +272,7 @@ For existing installations, see the [v0.7 migration guide](/migrations/v0.7) bef
 
 <Accordion title="Customize installation" id="customize-installation">
 
-Python, TypeScript, and Go accept a `RuntimeConfig` and `InstallOptions`. Their per-call home and binary-path overrides are layered on persisted global configuration. Rust accepts `GlobalConfig` and `InstallOptions` directly. Environment binary-path overrides retain the highest priority.
+Per-call home and binary-path overrides layer on persisted global configuration. Environment binary-path overrides retain the highest priority.
 
 Use the directory source to provision a runtime from a flat release-bundle directory containing `msb` and `libkrunfw` side by side, without downloading:
 
@@ -311,7 +325,7 @@ if err != nil {
 | Source | `release_download` (default), `directory`, `archive`, or `embedded_archive`; directory and archive require a source path. |
 | Version | Select the release to download; defaults to the SDK's pinned release. |
 | Force | Replace a complete installation; never repair a partial pair. |
-| Verify | Verify the installed pair; defaults to true. Go uses `*bool` so its zero value preserves this default. |
+| Verify | Verify the installed pair; enabled by default. |
 | Expected archive SHA-256 | Validate downloaded, local, or embedded archive bytes before publishing files. |
 
 An embedded source requires a native SDK built with an embedded runtime archive. If unavailable, explicit installation errors. Ensure still reuses an existing pair before acquisition, even when an embedded source is requested. To require a pre-provisioned runtime, call resolve directly. Each call uses its own configuration; Go no longer caches a process-wide successful setup result.
@@ -320,7 +334,7 @@ An embedded source requires a native SDK built with an embedded runtime archive.
 
 <Accordion title="Override runtime paths" id="override-runtime-paths">
 
-Use process-wide SDK setters where available, or the environment variables below. Go uses environment variables for process-wide overrides and `RuntimeConfig` for individual setup calls. Call setters before creating a local sandbox. Automatic package discovery is a fallback and does not occupy the explicit setter slot. A public libkrunfw setter overrides the library for the selected executable, whether that executable comes from configured paths, home, or a package.
+Use process-wide SDK setters where available, or the environment variables below. See the language examples for per-call overrides. Call setters before creating a local sandbox. Automatic package discovery is a fallback and does not occupy the explicit setter slot. A public libkrunfw setter overrides the library for the selected executable, whether that executable comes from configured paths, home, or a package.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -395,7 +409,7 @@ let version = resolve_runtime_version("/path/to/msb")?;
 </CodeGroup>
 
 
-Rust returns `Option<setup::Version>` and TypeScript returns `string | null`. Older executables without the version section produce `None` or `null`. Invalid executable metadata, malformed version sections and file access failures are errors. The reader supports ELF, PE and thin or universal Mach-O files, limits metadata reads to 4 MiB and version contents to 256 bytes, and never falls back to executing `msb --version`. Universal Mach-O slices must agree on the version, including section absence. The version identifies the build; it does not authenticate the executable or guarantee feature compatibility.
+Executables without an embedded version return no version. Invalid executable metadata, malformed version sections and file access failures are errors. The reader supports ELF, PE and thin or universal Mach-O files, limits metadata reads to 4 MiB and version contents to 256 bytes, and never falls back to executing `msb --version`. Universal Mach-O slices must agree on the version, including section absence. The version identifies the build; it does not authenticate the executable or guarantee feature compatibility.
 
 Sandbox startup separately resolves a tested launch contract for the selected runtime. When embedded version metadata is absent, startup may run a bounded `msb --version` probe and cache the result for that native executable's identity within the SDK process. Replacing the executable invalidates that cache. This startup behavior does not change the read-only version inspection methods above.
 
@@ -444,3 +458,29 @@ Install and ensure now return the selected runtime paths. Rust's four helper nam
 </Accordion>
 
 </AccordionGroup>
+
+<span id="inspect-legacy-storage" />
+
+## Storage recovery
+
+Use storage diagnostics when an older sandbox cannot start because its storage needs repair. Select the sandbox names or the whole home explicitly. Diagnostics report problems and space requirements without migrating data; results for running sandboxes are provisional.
+
+Recovery never starts or stops a VM. macOS legacy recovery requires explicit confirmation that legacy writers are stopped, under the maintenance conditions in the migration guide. Empty selections import or resume the validated current view; explicit candidate selection requires acknowledgement that it may omit later writes. See [sandbox storage migration](/migrations/sandbox-storage) for the CLI workflow and recovery limits.
+
+<CodeGroup>
+```typescript TypeScript
+diagnoseStorage(selection, config?)
+```
+```python Python
+diagnose_storage(names, *, all_sandboxes=False, config=None)
+```
+```go Go
+DiagnoseStorage(ctx, config, selection)
+```
+```rust Rust
+setup::diagnose_storage(config, selection)
+```
+```ruby Ruby
+Microsandbox.diagnose_storage(names:, all_sandboxes:, home:)
+```
+</CodeGroup>

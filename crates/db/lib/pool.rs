@@ -116,6 +116,14 @@ pub(crate) async fn build_pool(
 }
 
 //--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(unix)]
+pub use crate::private_storage::{PRIVATE_DATABASE_DIRECTORY_MODE, PRIVATE_DATABASE_FILE_MODE};
+pub use crate::private_storage::{ensure_private_database_directory, harden_database_files};
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -184,11 +192,3 @@ mod tests {
         assert_eq!(row.try_get_by_index::<i64>(0).unwrap(), 42);
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-#[cfg(unix)]
-pub use crate::private_storage::{PRIVATE_DATABASE_DIRECTORY_MODE, PRIVATE_DATABASE_FILE_MODE};
-pub use crate::private_storage::{ensure_private_database_directory, harden_database_files};

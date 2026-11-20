@@ -23,7 +23,7 @@ use crate::MicrosandboxResult;
 #[cfg(feature = "local")]
 use crate::{
     MicrosandboxError,
-    backend::{Backend, LocalBackend, sandbox::MetricsStream},
+    context::{Context, LocalContext, sandbox::MetricsStream},
     db::entity::sandbox as sandbox_entity,
     error::Operation,
 };
@@ -121,8 +121,12 @@ impl Sandbox {
     /// cloud routes return [`MicrosandboxError::Unsupported`].
     pub async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics> {
         self.backend()
-            .sandboxes()
-            .metrics(self.backend().clone(), self.name(), self.config())
+            .sandbox_ops()
+            .metrics(
+                self.backend().clone(),
+                self.name(),
+                &self.refresh_handle().await?.config()?,
+            )
             .await
     }
 
@@ -132,12 +136,18 @@ impl Sandbox {
         &self,
         interval: Duration,
     ) -> impl futures::Stream<Item = MicrosandboxResult<SandboxMetrics>> + Send + 'static {
-        self.backend().sandboxes().metrics_stream(
-            self.backend().clone(),
-            self.name().to_string(),
-            self.config().clone(),
-            interval,
-        )
+        let sandbox = self.observer();
+        use futures::TryStreamExt;
+        futures::stream::once(async move {
+            let config = sandbox.refresh_handle().await?.config()?;
+            Ok::<_, crate::MicrosandboxError>(sandbox.backend().sandbox_ops().metrics_stream(
+                sandbox.backend().clone(),
+                sandbox.name().to_owned(),
+                config,
+                interval,
+            ))
+        })
+        .try_flatten()
     }
 }
 
@@ -146,11 +156,11 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 /// Local-backend metrics fetch keyed by sandbox name. Called from the
-/// [`SandboxBackend::metrics`](crate::backend::SandboxBackend::metrics) impl on
-/// [`LocalBackend`](crate::backend::LocalBackend).
+/// [`SandboxOps::metrics`](crate::context::SandboxOps::metrics) impl on
+/// [`LocalContext`](crate::context::LocalContext).
 #[cfg(feature = "local")]
 pub(crate) async fn local_metrics(
-    local: &LocalBackend,
+    local: &LocalContext,
     name: &str,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<SandboxMetrics> {
@@ -171,11 +181,11 @@ pub(crate) async fn local_metrics(
 }
 
 /// Local-backend streaming metrics. Called from the
-/// [`SandboxBackend::metrics_stream`](crate::backend::SandboxBackend::metrics_stream)
-/// impl on [`LocalBackend`](crate::backend::LocalBackend).
+/// [`SandboxOps::metrics_stream`](crate::context::SandboxOps::metrics_stream)
+/// impl on [`LocalContext`](crate::context::LocalContext).
 #[cfg(feature = "local")]
 pub(crate) fn local_metrics_stream(
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     name: String,
     config: SandboxConfig,
     interval: Duration,
@@ -233,7 +243,7 @@ pub(crate) fn local_metrics_stream(
 /// Get the latest metrics snapshot for every running sandbox from the active local backend.
 #[cfg(feature = "local")]
 pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
-    let backend = crate::backend::default_backend();
+    let backend = crate::context::configured_context();
     let local = backend
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(Operation::AllSandboxMetrics))?;
@@ -243,7 +253,7 @@ pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, Sandbox
 /// Get the latest metrics snapshot for every running sandbox from an explicit local backend.
 #[cfg(feature = "local")]
 pub async fn all_sandbox_metrics_local(
-    local: &LocalBackend,
+    local: &LocalContext,
 ) -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
     let mut snapshot = local.verified_metrics(None, false).await?;
     // If a restart briefly leaves two active samples, the latest wins by name.
@@ -265,7 +275,7 @@ pub async fn all_sandbox_metrics_local(
 /// that were removed from the catalog are always dropped.
 #[cfg(feature = "local")]
 pub async fn all_sandbox_metrics_reports_local(
-    local: &LocalBackend,
+    local: &LocalContext,
     include_exited: bool,
 ) -> MicrosandboxResult<Vec<SandboxMetricsReport>> {
     let snapshot = local.verified_metrics(None, include_exited).await?;
@@ -329,7 +339,7 @@ pub async fn all_sandbox_metrics_reports_local(
 /// has no slot in the registry — never sampled, or the slot was reused.
 #[cfg(feature = "local")]
 pub async fn sandbox_metrics_report_local(
-    local: &LocalBackend,
+    local: &LocalContext,
     name: &str,
 ) -> MicrosandboxResult<Option<SandboxMetricsReport>> {
     let pools = local.db().await?;
@@ -356,11 +366,11 @@ pub async fn sandbox_metrics_report_local(
 #[cfg(feature = "local")]
 pub(super) async fn metrics_for_sandbox(
     db: &DbReadConnection,
-    local: &LocalBackend,
+    local: &LocalContext,
     sandbox_id: i32,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<SandboxMetrics> {
-    let run = LocalBackend::load_active_run(db, sandbox_id)
+    let run = LocalContext::load_active_run(db, sandbox_id)
         .await?
         .ok_or_else(|| {
             MicrosandboxError::Custom(format!(
@@ -508,6 +518,9 @@ mod tests {
             vcpu_time_ns: 0,
             memory_bytes: 128 * MIB,
             memory_bytes_reported: true,
+            memory_total_bytes: None,
+            guest_memory_observation: None,
+            guest_memory_validity: None,
             memory_available_bytes: None,
             memory_host_resident_bytes: None,
             memory_limit_bytes,
@@ -516,6 +529,9 @@ mod tests {
             disk_write_bytes: 0,
             net_rx_bytes: 0,
             net_tx_bytes: 0,
+            net_inbound_tcp_rejected: None,
+            net_outbound_tcp_rejected: None,
+            net_outbound_udp_evicted: None,
             upper_used_bytes: None,
             upper_free_bytes: None,
             upper_host_allocated_bytes: None,

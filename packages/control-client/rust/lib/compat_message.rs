@@ -37,6 +37,31 @@ pub trait CheckedControlRequest: Request<ControlProtocol, Error = ControlClientE
 /// implementation. Generation-two requests implement it directly without expanding the released
 /// generation-one [`ControlRequest`] enum.
 pub trait CompatibleControlRequest: Request<ControlProtocol, Error = ControlClientError> {
+    /// Whether this request requires checkpoint-bound private configuration evidence.
+    /// Checked transports must establish this capability before sending mutation bytes.
+    fn requires_configuration_capture(&self) -> bool {
+        false
+    }
+
+    /// Whether private mounted-storage evidence is required before dispatch.
+    fn requires_configuration_storage(&self) -> bool {
+        false
+    }
+
+    /// Whether private block capacity must be supported by the same capture peer.
+    fn requires_configuration_block_capacity(&self) -> bool {
+        false
+    }
+
+    /// Whether private effective execution-limit evidence is required before dispatch.
+    fn requires_configuration_exec_limits(&self) -> bool {
+        false
+    }
+    /// Whether the caller requested guest resource evidence from the checkpoint freeze.
+    fn requires_configuration_freeze_resources(&self) -> bool {
+        false
+    }
+
     /// First framed-control generation that defines this operation.
     fn min_generation(&self) -> u8;
     /// Encode the exact historical JSON request without a trailing newline.

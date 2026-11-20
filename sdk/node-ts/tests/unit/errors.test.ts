@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentClientError,
+  BootStartError,
+  ExecFailedError,
+  InvalidCursorError,
+  MissedRotationError,
+  NetworkBuilderError,
+  SnapshotAlreadyExistsError,
+  SnapshotImageMissingError,
+  SnapshotIntegrityError,
+  SnapshotMigrationError,
+  SnapshotNotFoundError,
+  SnapshotSandboxRunningError,
+  WindowsHostSetupError,
   ExecTimeoutError,
   StopTimeoutError,
+  ResizeTimeoutError,
   ImageNotFoundError,
   MetricsDisabledError,
   MicrosandboxError,
@@ -10,11 +24,35 @@ import {
   SandboxNotFoundError,
   SandboxReplacedError,
   SnapshotSourceRecoveryError,
+  SnapshotImportError,
   SandboxStopTimedOutError,
+  ServiceError,
+  ServiceNotFoundError,
 } from "../../dist/index.js";
 import { mapNapiError } from "../../dist/internal/error-mapping.js";
 
 describe("mapNapiError", () => {
+  it.each([
+    ["AgentClient", "agentClient", AgentClientError],
+    ["BootStart", "bootStart", BootStartError],
+    ["ExecFailed", "execFailed", ExecFailedError],
+    ["InvalidCursor", "invalidCursor", InvalidCursorError],
+    ["MissedRotation", "missedRotation", MissedRotationError],
+    ["NetworkBuilder", "networkBuilder", NetworkBuilderError],
+    ["SnapshotAlreadyExists", "snapshotAlreadyExists", SnapshotAlreadyExistsError],
+    ["SnapshotImageMissing", "snapshotImageMissing", SnapshotImageMissingError],
+    ["SnapshotIntegrity", "snapshotIntegrity", SnapshotIntegrityError],
+    ["SnapshotMigration", "snapshotMigration", SnapshotMigrationError],
+    ["SnapshotNotFound", "snapshotNotFound", SnapshotNotFoundError],
+    ["SnapshotSandboxRunning", "snapshotSandboxRunning", SnapshotSandboxRunningError],
+    ["WindowsHostSetup", "windowsHostSetup", WindowsHostSetupError],
+  ] as const)("preserves native %s errors", (tag, code, ctor) => {
+    const cause = new Error(`[${tag}] detail`);
+    const error = mapNapiError(cause);
+    expect(error).toBeInstanceOf(ctor);
+    expect(error).toMatchObject({ code, message: "detail", cause });
+  });
+
   it("preserves graceful stop timeout as a distinct error", () => {
     const raw = new Error('[StopTimeout] sandbox "busy" timed out; no kill was requested');
     const mapped = mapNapiError(raw);
@@ -22,6 +60,28 @@ describe("mapNapiError", () => {
     expect((mapped as StopTimeoutError).code).toBe("stopTimeout");
     expect(mapped.message).toContain("no kill was requested");
     expect(mapped.cause).toBe(raw);
+  });
+  it("maps resize timeout to its own error", () => {
+    const raw = new Error('[ResizeTimeout] timed out waiting for sandbox "api" live resize to converge');
+    const mapped = mapNapiError(raw);
+    expect(mapped).toBeInstanceOf(ResizeTimeoutError);
+    expect((mapped as ResizeTimeoutError).code).toBe("resizeTimeout");
+    expect((mapped as ResizeTimeoutError).status).toEqual([]);
+  });
+  it("retains the last resize status on timeout", () => {
+    const status = [{
+      resource: "memory", requested: "8 GiB", actual: "4 GiB", enforced: "8 GiB", state: "converging",
+    }];
+    const raw = new Error(`[ResizeTimeout] ${JSON.stringify({ message: "timed out", status })}`);
+    const mapped = mapNapiError(raw) as ResizeTimeoutError;
+    expect(mapped).toBeInstanceOf(ResizeTimeoutError);
+    expect(mapped.message).toBe("timed out");
+    expect(mapped.status).toEqual(status);
+    expect(mapped.cause).toBe(raw);
+    const empty = mapNapiError(
+      new Error(`[ResizeTimeout] ${JSON.stringify({ message: "timed out", status: [] })}`),
+    ) as ResizeTimeoutError;
+    expect(empty.status).toEqual([]);
   });
   for (const kind of ["installed", "archive", null]) {
     it(`retains source recovery metadata with ${kind ?? "unpublished"} artifact`, () => {
@@ -53,12 +113,96 @@ describe("mapNapiError", () => {
     });
   }
 
+  for (const head of [null, { group: "history", previous: null, head: "snap_1", reason: "initialized", changed: true }]) {
+    it(`retains the operation's head outcome: ${JSON.stringify(head)}`, () => {
+      const raw = new Error(`[SnapshotSourceRecovery] ${JSON.stringify({
+        message: "source recovery failed",
+        recovery: {
+          source_sandbox: "source", checkpoint_id: "checkpoint-1", checkpoint_root: "root",
+          checkpoint_path: "/runtime/checkpoint", detail: "thaw failed", publication_error: null,
+          artifact: { kind: "installed", path: "/saved", snapshot_id: "snap_1", digest: "digest", head_update: head },
+        },
+      })}`);
+      const mapped = mapNapiError(raw) as SnapshotSourceRecoveryError;
+      expect(mapped).toBeInstanceOf(SnapshotSourceRecoveryError);
+      expect(mapped.recovery.artifact?.headUpdate).toEqual(head);
+    });
+  }
+
   for (const payload of ["not json", "null", "{}", '{"message":"failed","recovery":{}}']) {
     it(`preserves malformed recovery envelopes: ${payload}`, () => {
       const raw = new Error(`[SnapshotSourceRecovery] ${payload}`);
       expect(mapNapiError(raw)).toBe(raw);
     });
   }
+
+  for (const payload of ["not json", "null", '{"message":"m"}']) {
+    it(`preserves malformed Service envelopes: ${payload}`, () => {
+      const raw = new Error(`[Service] ${payload}`);
+      expect(mapNapiError(raw)).toBe(raw);
+    });
+  }
+
+  it("maps an unlisted Service reason to other and an unlisted change state to unknown", () => {
+    const raw = new Error(
+      '[Service] {"message":"m","slug":"shop","reason":"renamed","retryAfterMs":null,"changed":"maybe"}',
+    );
+    const mapped = mapNapiError(raw) as ServiceError;
+    expect(mapped).toBeInstanceOf(ServiceError);
+    expect(mapped.slug).toBe("shop");
+    expect(mapped.reason).toBe("other");
+    expect(mapped.retryAfterMs).toBeNull();
+    expect(mapped.changed).toBe("unknown");
+    expect(mapped.rawCode).toBeNull();
+    expect(mapped.rawStatus).toBeNull();
+    expect(mapped.rawMessage).toBeNull();
+  });
+
+  it("keeps the raw refusal fields for an other Service reason", () => {
+    const raw = new Error(
+      '[Service] {"message":"wrapped","slug":"shop","reason":"other",' +
+      '"retryAfterMs":null,"changed":"unchanged","rawCode":"new_refusal",' +
+      '"rawStatus":409,"rawMessage":"try a newer SDK"}',
+    );
+    const mapped = mapNapiError(raw) as ServiceError;
+
+    expect(mapped).toBeInstanceOf(ServiceError);
+    expect(mapped.rawCode).toBe("new_refusal");
+    expect(mapped.rawStatus).toBe(409);
+    expect(mapped.rawMessage).toBe("try a newer SDK");
+    expect(mapped.changed).toBe("unchanged");
+  });
+
+  it("maps change state onto non-Service errors from Service changes", () => {
+    const raw = new Error(
+      '[ServiceNotFound] {"message":"service not found: shop","changed":"unchanged"}',
+    );
+    const mapped = mapNapiError(raw) as ServiceNotFoundError;
+
+    expect(mapped).toBeInstanceOf(ServiceNotFoundError);
+    expect(mapped.message).toBe("service not found: shop");
+    expect(mapped.changed).toBe("unchanged");
+  });
+
+  it("maps the sandbox Service limit reason", () => {
+    const raw = new Error(
+      '[Service] {"message":"m","slug":"shop","reason":"sandboxServiceLimitExceeded","retryAfterMs":null,"changed":"unchanged"}',
+    );
+    const mapped = mapNapiError(raw) as ServiceError;
+    expect(mapped).toBeInstanceOf(ServiceError);
+    expect(mapped.reason).toBe("sandboxServiceLimitExceeded");
+    expect(mapped.changed).toBe("unchanged");
+  });
+
+  it("maps paused Service changes with their retry delay", () => {
+    const raw = new Error(
+      '[Service] {"message":"m","slug":"shop","reason":"serviceChangesPaused",' +
+      '"retryAfterMs":5000,"changed":"unchanged"}',
+    );
+    const mapped = mapNapiError(raw) as ServiceError;
+    expect(mapped.reason).toBe("serviceChangesPaused");
+    expect(mapped.retryAfterMs).toBe(5000);
+  });
 
   it("translates a tagged napi error into the matching subclass", () => {
     const raw = new Error("[SandboxNotFound] no such sandbox: foo");
@@ -153,5 +297,23 @@ describe("mapNapiError", () => {
     );
     expect((mapped as ModificationNotConfirmedError).message).toBe(message);
     expect((mapped as MicrosandboxError).cause).toBe(raw);
+  });
+});
+
+describe("snapshot import outcomes", () => {
+  for (const outcome of ["not_committed", "committed", "unknown"]) {
+    it(`preserves ${outcome} across the native boundary`, () => {
+      const details = { operation_id: "attempt-1", archives: ["/base.msb", "/child.msb"], group_path: null, outcome, detail: "index failure" };
+      const raw = new Error(`[SnapshotImport] ${JSON.stringify({ message: "batch failure", import: details })}`);
+      const mapped = mapNapiError(raw) as SnapshotImportError;
+      expect(mapped).toBeInstanceOf(SnapshotImportError);
+      expect(mapped.code).toBe("snapshotImport");
+      expect(mapped.details).toEqual({ operationId: "attempt-1", archives: details.archives, groupPath: null, outcome, detail: "index failure" });
+      expect(mapped.cause).toBe(raw);
+    });
+  }
+  it("preserves unknown native payloads as failures", () => {
+    const raw = new Error('[SnapshotImport] {"message":"failed","import":{"outcome":"new_unknown_value"}}');
+    expect(mapNapiError(raw)).toBe(raw);
   });
 });

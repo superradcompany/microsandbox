@@ -1,0 +1,68 @@
+---
+title: "v0.7.14"
+sidebarTitle: "v0.7.14"
+description: "Repair local sandboxes that v0.7.12 refused to start, queue bursts of inbound connections, and get reliable piped input and SSH exit codes."
+icon: "bolt"
+---
+
+November 8, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.14) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.13...v0.7.14)
+
+## New features
+
+**Repair sandboxes refused after v0.7.12.** The v0.7.12 storage change could refuse to start older local sandboxes that used snapshots, forks, owned disks, or completed disk growth or compaction. v0.7.14 migrates these layouts safely and keeps writes made after a snapshot. On Linux and Windows, supported storage migrates on the next start or stopped storage operation. On macOS, use guided repair. Run it in a terminal:
+
+```bash
+msb doctor --sandbox app
+msb self repair --sandbox app
+```
+
+Omit `--sandbox` to pick several sandboxes. Repair asks before stopping a blocking VM and leaves the repaired sandbox stopped. Cases it cannot resolve produce a diagnostic report that you review and copy yourself; nothing is uploaded. The SDKs add matching storage diagnosis and recovery APIs. [Management commands](/cli/management) · [Runtime setup](/sdk/setup)
+
+**Inbound connection bursts wait instead of failing.** When a local sandbox reaches its inbound TCP limit, new connections to published ports now wait in a shared queue of up to 1,024 connections for at most 30 seconds. `msb-metrics` also reports rejected inbound and outbound TCP connections and evicted UDP sessions. [Networking](/networking/overview) · [msb-metrics](/observability/msb-metrics)
+
+## Fixes
+
+- **SSH exec reports failures.** SDK SSH exec no longer reports success when a command terminates abnormally. Signals return `128 +` the Linux signal number, and a channel that closes without an outcome returns an error. [SSH](/sandboxes/ssh)
+- **TypeScript cloud sandboxes clean up at scope exit.** Cloud sandboxes created with `create()` in an `await using` scope now stop when the scope ends, and stopping an ephemeral cloud sandbox succeeds when the cloud deletes it.
+- `msb logs -f` exits when the sandbox stops, and `--init` sandboxes stop reliably.
+- Images without `/etc/passwd` and `curlimages/curl` 8.11.1 and 8.12.1 now work.
+- `msb` starts on Windows 10 again, and Windows directory listings skip junctions instead of failing.
+- Large guest-to-host uploads no longer stall or corrupt data.
+- New boots use guest Linux 6.12.115 with host memory-discard fixes.
+
+## Before upgrading
+
+- **Piped input now reaches `msb run`.** Scripts that pipe data around `msb run`, such as `while read` loops, need `--no-stdin` to keep their input. [Sandbox commands](/cli/sandbox-commands)
+- **A taken host port stops startup.** Published ports are claimed before the VM boots, so `msb run`, `msb fork -p`, and `msb restore -p` fail and name the port instead of starting without it.
+- **Coming from v0.7.11 or earlier?** Read the v0.7.12 [Before upgrading](/changelog/v0.7.12#before-upgrading) notes first.
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/appcypher">
+      <img src="https://avatars.githubusercontent.com/u/20358651?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@appcypher</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/gregwebs">
+      <img src="https://avatars.githubusercontent.com/u/1183?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@gregwebs</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/TheRealSibasishBehera">
+      <img src="https://avatars.githubusercontent.com/u/95071627?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@TheRealSibasishBehera</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/toksdotdev">
+      <img src="https://avatars.githubusercontent.com/u/11903253?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@toksdotdev</span>
+    </a>
+  </li>
+</ul>

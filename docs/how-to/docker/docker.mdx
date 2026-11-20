@@ -5,7 +5,7 @@ description: Run the microsandbox CLI from a Linux container with KVM access
 icon: "box"
 ---
 
-<Tooltip tip="The container runs the local microsandbox backend and needs hardware virtualization from the environment running Docker. It is not a microsandbox cloud workflow."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="The container runs the local microsandbox backend and needs hardware virtualization from the environment running Docker. This guide runs sandboxes locally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 This guide runs the `msb` CLI inside Docker and starts an Alpine microVM from the container. It works in any Docker environment that can pass a usable `/dev/kvm` device into the container.
 

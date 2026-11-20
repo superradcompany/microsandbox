@@ -2,6 +2,7 @@
 
 mod embedded_version;
 
+use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -10,7 +11,7 @@ use microsandbox_cli::{
     commands::{
         completion, context, image, install, pull, registry,
         sandbox::{self, SandboxCommands},
-        self_cmd,
+        self_cmd, service,
         snapshot::{self, SnapshotCommands},
         storage, uninstall, volume,
     },
@@ -40,6 +41,10 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
         commands: &["df", "prune", "volume", "snapshot"],
     },
     CommandGroup {
+        heading: "Services",
+        commands: &["service"],
+    },
+    CommandGroup {
         heading: "Installation",
         commands: &[
             "install",
@@ -66,6 +71,14 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     styles = microsandbox_cli::styles::styles()
 )]
 struct Cli {
+    /// Select remote for sandbox, volume, snapshot or context inspection commands.
+    #[arg(long, global = true, conflicts_with = "local")]
+    remote: bool,
+
+    /// Select local for sandbox, volume, snapshot or context inspection commands.
+    #[arg(long, global = true, conflicts_with = "remote")]
+    local: bool,
+
     #[command(flatten)]
     tree: microsandbox_cli::tree::TreeArgs,
 
@@ -82,6 +95,15 @@ enum Commands {
     /// Run the VM process (internal).
     #[command(hide = true)]
     Machine(Box<MachineArgs>),
+
+    /// Apply ordered edits to a private staged disk in an isolated VM (internal).
+    #[command(name = "__snapshot-editor", hide = true)]
+    SnapshotEditor {
+        firmware: std::path::PathBuf,
+        scratch: std::path::PathBuf,
+        chain: std::path::PathBuf,
+        lower: Option<std::path::PathBuf>,
+    },
 
     /// Report launch wire capabilities without initializing a backend.
     #[command(name = "__launch-protocol", hide = true)]
@@ -161,13 +183,16 @@ enum Commands {
     #[command(visible_alias = "snap")]
     Snapshot(snapshot::SnapshotArgs),
 
+    /// Manage public URLs for sandbox ports.
+    Service(service::ServiceArgs),
+
     /// Install a sandbox as a system command.
     Install(install::InstallArgs),
 
     /// Remove an installed sandbox command.
     Uninstall(uninstall::UninstallArgs),
 
-    /// Check local runtime and host virtualization prerequisites.
+    /// Check host setup, or inspect a named sandbox.
     Doctor(self_cmd::DoctorArgs),
 
     /// Update msb and libkrunfw to the latest release (alias for `self update`).
@@ -262,6 +287,72 @@ impl HelpStyles {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Clap validates conflicts at one command level; inherited flags can occur on
+/// different levels, so check the final propagated values before dispatch too.
+fn selected_destination(cli: &Cli) -> Result<Option<microsandbox::ContextKind>, clap::Error> {
+    if cli.local && cli.remote {
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--local and --remote cannot be used together",
+        ));
+    }
+    Ok(if cli.remote {
+        Some(microsandbox::ContextKind::Remote)
+    } else if cli.local {
+        Some(microsandbox::ContextKind::Local)
+    } else {
+        None
+    })
+}
+
+fn parse_cli_args(mut argv: Vec<OsString>) -> Result<(Cli, bool), clap::Error> {
+    let legacy_launch = microsandbox_cli::launch_compat::route_legacy_launch(&mut argv);
+    normalize_sandbox_bools(&mut argv);
+    Ok((Cli::try_parse_from(argv)?, legacy_launch))
+}
+
+fn normalize_sandbox_bools(argv: &mut Vec<OsString>) {
+    // Locate the command path, ignoring leading global flags. A resource named
+    // "run" on another command must never trigger sandbox option parsing.
+    let mut path = argv
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take_while(|(_, arg)| *arg != "--")
+        .filter(|(_, arg)| !arg.as_encoded_bytes().starts_with(b"-"));
+    let mut command = path.next();
+    if matches!(
+        command.and_then(|(_, arg)| arg.to_str()),
+        Some("sandbox" | "sbx")
+    ) {
+        command = path.next();
+    }
+    let Some((index, name)) = command else { return };
+    if name != "run" && name != "create" {
+        return;
+    }
+
+    // Clap keeps require_equals so a bare flag cannot consume the image.
+    // Only join a separate, exact boolean on the host side of the separator.
+    let mut i = index + 1;
+    while i < argv.len() {
+        match argv[i].to_str() {
+            Some("--") => break,
+            // This option consumes even flag-shaped values as literal init argv.
+            Some("--init-arg") => i += 2,
+            Some("--net-strict" | "--nested-virt")
+                if argv.get(i + 1).is_some_and(|v| v == "true" || v == "false") =>
+            {
+                let value = argv.remove(i + 1);
+                argv[i].push("=");
+                argv[i].push(value);
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
 fn main() {
     // Ensure terminal echo is restored even if a panic aborts the process
     // (release profile sets `panic = "abort"`, so Drop impls don't run).
@@ -288,17 +379,44 @@ fn main() {
         return;
     }
 
-    let mut argv: Vec<_> = std::env::args_os().collect();
-    let legacy_launch = microsandbox_cli::launch_compat::route_legacy_launch(&mut argv);
-    let cli = Cli::parse_from(argv);
+    let (cli, legacy_launch) =
+        parse_cli_args(std::env::args_os().collect()).unwrap_or_else(|error| error.exit());
     let log_level = cli.logs.selected_level();
 
-    let exit_code = match cli.command.into_canonical() {
+    let selected = match selected_destination(&cli) {
+        Ok(selected) => selected,
+        Err(error) => error.exit(),
+    };
+    let command = cli.command.into_canonical();
+    // Reject selectors on maintenance/internal commands before any side effects.
+    if selected.is_some() && !supports_destination_selector(&command) {
+        Cli::command().error(clap::error::ErrorKind::ArgumentConflict,
+            "--local/--remote apply only to sandbox, volume, snapshot and context inspection commands").exit();
+    }
+    let exit_code = match command {
+        Commands::SnapshotEditor {
+            firmware,
+            scratch,
+            chain,
+            lower,
+        } => {
+            if let Err(error) = microsandbox_runtime::vm::enter_snapshot_editor(
+                &firmware,
+                &scratch,
+                &chain,
+                lower.as_deref(),
+            ) {
+                eprintln!("snapshot editor: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Commands::LaunchProtocol => {
-            println!(
-                "{}",
-                serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
+            let mut capabilities =
+                serde_json::to_value(microsandbox_runtime::launch::LaunchCapabilities {
+                    storage_reader: microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
                     protected_guest_state: true,
+                    header_fields: Some(cfg!(feature = "net")),
                     protocols: vec![2, 1],
                     required_restore_backing: true,
                     tcp_accept_queue_size: true,
@@ -309,13 +427,17 @@ fn main() {
                     http_connect_proxy_auth: cfg!(feature = "net"),
                     guest_clock: true,
                     fs_state_limit: true,
+                    configuration_retention: true,
                     nested_virt: Some(
-                        microsandbox_runtime::nested_virt_supported().unwrap_or(false)
+                        microsandbox_runtime::nested_virt_supported().unwrap_or(false),
                     ),
                     exec_limits: true,
+                    multi_tenant: cfg!(feature = "net"),
                 })
-                .expect("serialize capabilities")
-            );
+                .expect("serialize capabilities");
+            capabilities["deferred_command_bindings"] = true.into();
+            capabilities["restored_exec_limits"] = true.into();
+            println!("{capabilities}");
             return;
         }
         // Sandbox process entry — never returns (VMM takes over).
@@ -334,7 +456,19 @@ fn main() {
             // runtime.log via setup_log_capture(), so disable ANSI —
             // color escapes have nowhere useful to render.
             log_args::init_tracing(sandbox_level, false);
-            if let Err(error) = microsandbox_filesystem::agentd::initialize_agentd_payload() {
+            if args.require_storage_reader {
+                // The capability belongs to the compiled host/guest pair. Never consult a
+                // configured agent override for a VM receiving private recovery captures.
+                if !microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER
+                    || microsandbox_filesystem::agentd::initialize_embedded_reader().is_err()
+                {
+                    eprintln!(
+                        "upgrade required: install a runtime with the embedded storage recovery reader"
+                    );
+                    std::process::exit(2);
+                }
+            } else if let Err(error) = microsandbox_filesystem::agentd::initialize_agentd_payload()
+            {
                 eprintln!("msb: failed to select agentd payload: {error}");
                 std::process::exit(1);
             }
@@ -347,7 +481,7 @@ fn main() {
             // built-in detection.
             let ansi = std::io::stderr().is_terminal() && console::colors_enabled_stderr();
             log_args::init_tracing(log_level, ansi);
-            match run_async_command_anyhow(command, log_level) {
+            match run_async_command_anyhow(command, log_level, selected) {
                 Ok(()) => 0,
                 Err(e) => render_anyhow_error(&e),
             }
@@ -509,11 +643,23 @@ fn format_command_help_line(
 /// `MicrosandboxError::ExecFailed`. Returns the appropriate exit
 /// code so callers don't conflate "rendered an error" with "1".
 fn render_anyhow_error(err: &anyhow::Error) -> i32 {
+    if let Some(diagnostic) = err.downcast_ref::<self_cmd::StorageDoctorExit>() {
+        return diagnostic.code;
+    }
     if err.chain().any(|cause| {
         cause
             .downcast_ref::<microsandbox_cli::ui::AlreadyRenderedError>()
             .is_some()
     }) {
+        return 1;
+    }
+    // A nested boot error may explain why the candidate failed, but the original
+    // sandbox's recovery outcome determines the action to show the CLI caller.
+    if let Some(hint) = replacement_restart_hint(err) {
+        microsandbox_cli::ui::error_with_lines(
+            &err.to_string(),
+            &[microsandbox_cli::ui::ErrorLine::Hint(&hint)],
+        );
         return 1;
     }
     if let Some((name, boot_err)) = find_boot_start_in_chain(err) {
@@ -559,6 +705,21 @@ fn render_anyhow_error(err: &anyhow::Error) -> i32 {
     }
     microsandbox_cli::ui::error(&err.to_string());
     1
+}
+
+/// Translate an SDK replacement outcome into a CLI restart instruction.
+fn replacement_restart_hint(error: &anyhow::Error) -> Option<String> {
+    error.chain().find_map(|cause| {
+        match cause.downcast_ref::<microsandbox::MicrosandboxError>()? {
+            microsandbox::MicrosandboxError::ReplacementStopped { name, .. } => {
+                Some(format!("Restart with: msb start {name}"))
+            }
+            microsandbox::MicrosandboxError::ReplacementRecoveryPending { name, .. } => Some(
+                format!("After resolving the recovery error, retry: msb start {name}"),
+            ),
+            _ => None,
+        }
+    })
 }
 
 /// Walk the chain looking for a Windows host setup failure.
@@ -643,6 +804,7 @@ fn extract_quoted_token_str(s: &str) -> Option<String> {
 fn run_async_command_anyhow(
     command: Commands,
     log_level: Option<microsandbox::LogLevel>,
+    selected: Option<microsandbox::ContextKind>,
 ) -> anyhow::Result<()> {
     // Internal maintenance commands do not execute sandbox operations and
     // must remain usable while diagnosing an invalid backend configuration.
@@ -675,21 +837,20 @@ fn run_async_command_anyhow(
         // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
         // reaper here.
         if !is_backend_independent_command(&command) {
-            // Resolve once, fallibly, before backend-dependent dispatch. Unlike
-            // the SDK's ambient convenience fallback, the CLI must not run a
-            // sandbox operation locally after an invalid explicit cloud selection.
-            let backend = microsandbox::resolve_default_backend()?;
+            // Resolve once before dispatch so an invalid selection fails before any
+            // command can touch a local catalog or contact a remote provider.
+            let backend = microsandbox::context::resolve_cli_context(selected)?;
             if requires_current_catalog(&command)
                 && let Some(local) = backend.as_local()
             {
                 local.prepare_cli_catalog().await?;
             }
             cleanup_backend = Some(backend.clone());
-            microsandbox::set_default_backend(backend);
+            microsandbox_cli::commands::common::set_cli_context(backend)?;
         }
 
         let result = match command {
-            Commands::Machine(_) | Commands::LaunchProtocol => {
+            Commands::Machine(_) | Commands::LaunchProtocol | Commands::SnapshotEditor { .. } => {
                 unreachable!("handled before Tokio starts")
             }
             Commands::SandboxShortcut(_) => unreachable!("normalized before dispatch"),
@@ -730,9 +891,10 @@ fn run_async_command_anyhow(
             Commands::Prune(args) => storage::run_prune(args).await,
             Commands::Volume(args) => volume::run(args).await,
             Commands::Snapshot(args) => snapshot::run(args).await,
+            Commands::Service(args) => service::run(args).await,
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
-            Commands::Doctor(args) => self_cmd::run_doctor(args),
+            Commands::Doctor(args) => self_cmd::run_doctor_command(args).await,
             Commands::Update(args) => self_cmd::run_update(args).await,
             Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
@@ -769,6 +931,19 @@ fn requires_current_catalog(command: &Commands) -> bool {
     }
 }
 
+/// Limit explicit selection to commands that operate through retained resource contexts.
+fn supports_destination_selector(command: &Commands) -> bool {
+    match command {
+        Commands::Sandbox(_)
+        | Commands::Volume(_)
+        | Commands::Volumes(_)
+        | Commands::Snapshot(_)
+        | Commands::Snapshots(_) => true,
+        Commands::Context(args) => args.command.is_none(),
+        _ => false,
+    }
+}
+
 /// Return whether a command can run without constructing the selected backend.
 ///
 /// These commands are deliberately available even when backend configuration is
@@ -793,6 +968,161 @@ mod command_tests {
     use super::*;
 
     #[test]
+    fn replacement_errors_preserve_sdk_context_and_offer_cli_recovery() {
+        use microsandbox::MicrosandboxError;
+
+        let launch_error = || Box::new(MicrosandboxError::Runtime("candidate boot failed".into()));
+        let stopped = MicrosandboxError::ReplacementStopped {
+            name: "original".into(),
+            original_id: 37,
+            source: launch_error(),
+        };
+        let pending = MicrosandboxError::ReplacementRecoveryPending {
+            name: "original".into(),
+            original_id: 37,
+            source: launch_error(),
+            recovery: Box::new(MicrosandboxError::Runtime("catalog busy".into())),
+        };
+        assert!(pending.to_string().contains("catalog busy"));
+        for (failure, hint) in [
+            (stopped, "Restart with: msb start original"),
+            (
+                pending,
+                "After resolving the recovery error, retry: msb start original",
+            ),
+        ] {
+            let message = failure.to_string();
+            assert!(message.contains("original") && message.contains("ID 37"));
+            assert!(message.contains("candidate boot failed") && !message.contains("msb start"));
+            let wrapped = anyhow::Error::new(failure).context("creating sandbox");
+            assert_eq!(replacement_restart_hint(&wrapped).as_deref(), Some(hint));
+        }
+        assert!(replacement_restart_hint(&anyhow::anyhow!("unrelated failure")).is_none());
+    }
+
+    fn parse_sandbox(args: &[&str]) -> SandboxCommands {
+        let argv = std::iter::once("msb")
+            .chain(args.iter().copied())
+            .map(OsString::from)
+            .collect();
+        let (cli, _) = parse_cli_args(argv).unwrap();
+        let Commands::Sandbox(group) = cli.command.into_canonical() else {
+            panic!("expected sandbox command")
+        };
+        group.command
+    }
+
+    #[test]
+    fn sandbox_bool_forms_preserve_image_and_omission() {
+        for cmd in ["run", "create"] {
+            for flag in [
+                #[cfg(feature = "net")]
+                "--net-strict",
+                "--nested-virt",
+            ] {
+                let equals_false = format!("{flag}=false");
+                let equals_true = format!("{flag}=true");
+                for (args, image, expected) in [
+                    (vec![cmd, "alpine"], "alpine", None),
+                    (vec![cmd, flag, "false", "alpine"], "alpine", Some(false)),
+                    (vec![cmd, "alpine", flag, "true"], "alpine", Some(true)),
+                    (vec![cmd, flag, "alpine"], "alpine", Some(true)),
+                    (vec![cmd, flag, "TRUE"], "TRUE", Some(true)),
+                    (vec![cmd, &equals_false, "alpine"], "alpine", Some(false)),
+                    (vec![cmd, &equals_true, "false"], "false", Some(true)),
+                    (
+                        vec!["--local", "sbx", cmd, "alpine", flag, "false"],
+                        "alpine",
+                        Some(false),
+                    ),
+                ] {
+                    let (opts, parsed_image) = match parse_sandbox(&args) {
+                        SandboxCommands::Run(run) => (run.sandbox, run.image),
+                        SandboxCommands::Create(create) => (create.sandbox, create.image),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(parsed_image.as_deref(), Some(image), "{args:?}");
+                    let value = match flag {
+                        #[cfg(feature = "net")]
+                        "--net-strict" => opts.net_strict,
+                        _ => opts.nested_virt,
+                    };
+                    assert_eq!(value, expected, "{args:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_bool_flags_preserve_guest_and_init_arguments() {
+        for flag in [
+            #[cfg(feature = "net")]
+            "--net-strict",
+            "--nested-virt",
+        ] {
+            let SandboxCommands::Run(run) =
+                parse_sandbox(&["run", "alpine", "--", "echo", flag, "false"])
+            else {
+                unreachable!()
+            };
+            assert_eq!(run.command, ["echo", flag, "false"]);
+            let SandboxCommands::Exec(exec) =
+                parse_sandbox(&["exec", "run", "--", "echo", flag, "true"])
+            else {
+                unreachable!()
+            };
+            assert_eq!(exec.command, ["echo", flag, "true"]);
+            let SandboxCommands::Create(create) =
+                parse_sandbox(&["create", "--init", "auto", "--init-arg", flag, "false"])
+            else {
+                unreachable!()
+            };
+            assert_eq!(create.sandbox.init_arg, [flag]);
+            assert_eq!(create.image.as_deref(), Some("false"));
+        }
+    }
+
+    #[test]
+    fn destination_flags_parse_on_resource_commands_and_do_not_consume_guest_flags() {
+        for arguments in [
+            vec!["msb", "run", "--remote", "python", "--", "echo", "ok"],
+            vec!["msb", "create", "python", "--name", "worker", "--remote"],
+            vec!["msb", "exec", "--remote", "worker", "--", "echo", "ok"],
+            vec!["msb", "sandbox", "list", "--local"],
+            vec!["msb", "volume", "list", "--remote"],
+            vec!["msb", "volumes", "--remote"],
+            vec!["msb", "vols", "--local"],
+            vec!["msb", "--local", "volumes"],
+            vec!["msb", "--remote", "vols"],
+            vec!["msb", "snapshot", "list", "--local"],
+        ] {
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            assert!(cli.local || cli.remote);
+            assert!(supports_destination_selector(&cli.command.into_canonical()));
+        }
+        let cli = Cli::try_parse_from(["msb", "exec", "worker", "--", "echo", "--remote"]).unwrap();
+        assert!(!cli.remote);
+        assert!(!cli.local);
+        let conflicting = Cli::try_parse_from(["msb", "--local", "list", "--remote"]).unwrap();
+        assert!(selected_destination(&conflicting).is_err());
+    }
+
+    #[test]
+    fn storage_reader_capability_matches_the_actual_embedded_protocol() {
+        let marker = microsandbox_protocol::storage_preview::HANDSHAKE.as_bytes();
+        let has_reader =
+            microsandbox_filesystem::agentd::embedded_agentd_payload().is_some_and(|agent| {
+                agent
+                    .as_bytes()
+                    .windows(marker.len())
+                    .any(|part| part == marker)
+            });
+        assert_eq!(
+            microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
+            has_reader
+        );
+    }
+    #[test]
     fn catalog_upgrade_leaves_stop_and_diagnostics_available() {
         for (arguments, expected) in [
             (vec!["msb", "sandbox", "create", "alpine"], true),
@@ -805,10 +1135,40 @@ mod command_tests {
                 false,
             ),
             (vec!["msb", "doctor"], false),
+            (vec!["msb", "doctor", "app"], false),
+            (vec!["msb", "doctor", "--sandbox", "app"], false),
+            (vec!["msb", "self", "repair", "app"], false),
+            (vec!["msb", "self", "repair", "--sandbox", "app"], false),
             (vec!["msb", "context"], false),
         ] {
             let cli = Cli::try_parse_from(arguments).unwrap();
             assert_eq!(requires_current_catalog(&cli.command), expected);
+        }
+    }
+
+    #[test]
+    fn sandbox_repair_and_both_doctor_target_spellings_stay_backend_independent() {
+        for args in [
+            vec!["msb", "self", "repair"],
+            vec!["msb", "self", "repair", "app"],
+            vec!["msb", "self", "repair", "--sandbox", "app"],
+            vec!["msb", "doctor", "app"],
+            vec!["msb", "doctor", "--sandbox", "app"],
+            vec!["msb", "self", "doctor", "app"],
+            vec!["msb", "self", "doctor", "--sandbox", "app"],
+            vec!["msb", "doctor", "--all"],
+        ] {
+            let command = Cli::try_parse_from(args).unwrap().command;
+            assert!(is_backend_independent_command(&command));
+            assert!(!requires_current_catalog(&command));
+        }
+        for args in [
+            vec!["msb", "repair", "app"],
+            vec!["msb", "recover-storage", "app"],
+            vec!["msb", "sandbox", "recover-storage", "app"],
+            vec!["msb", "doctor", "--storage", "--sandbox", "app"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
         }
     }
 
@@ -825,6 +1185,7 @@ mod command_tests {
                     path: "/saved/snapshot.tar".into(),
                     snapshot_id: "snap_test".into(),
                     digest: "digest".into(),
+                    head_update: None,
                 }),
                 detail: "thaw acknowledgement timed out".into(),
                 publication_error: None,
@@ -906,6 +1267,42 @@ mod command_tests {
             .unwrap();
         assert!(storage.commands.contains(&"df"));
         assert!(storage.commands.contains(&"prune"));
+    }
+
+    #[test]
+    fn service_commands_use_the_default_backend_without_the_catalog_gate() {
+        for arguments in [
+            vec![
+                "msb",
+                "service",
+                "create",
+                "my-app",
+                "--target",
+                "web-1:8080",
+            ],
+            vec![
+                "msb",
+                "service",
+                "update",
+                "my-app",
+                "--target",
+                "web-2:8080",
+            ],
+            vec!["msb", "service", "enable", "my-app"],
+            vec!["msb", "service", "disable", "my-app"],
+            vec!["msb", "service", "get", "my-app"],
+            vec!["msb", "service", "ls"],
+            vec!["msb", "service", "remove", "my-app"],
+        ] {
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            assert!(matches!(cli.command, Commands::Service(_)));
+            assert!(!is_backend_independent_command(&cli.command));
+            assert!(!requires_current_catalog(&cli.command));
+        }
+
+        let help = render_grouped_commands(&Cli::command(), &HelpStyles::detect());
+        let services = help.split("Services:").nth(1).unwrap();
+        assert!(services.lines().nth(1).unwrap().contains("service"));
     }
 
     #[test]
@@ -1028,8 +1425,7 @@ mod command_tests {
             vec!["snaps"],
         ] {
             let cli =
-                Cli::try_parse_from(["msb"].into_iter().chain(prefix).chain(["--group", "app"]))
-                    .unwrap();
+                Cli::try_parse_from(["msb"].into_iter().chain(prefix).chain(["app"])).unwrap();
             let args = match cli.command {
                 Commands::Snapshots(args) => args,
                 Commands::Snapshot(snapshot::SnapshotArgs {
@@ -1183,7 +1579,8 @@ mod sandbox_command_tests {
             let short = parse_sandbox(
                 prefix,
                 &[
-                    "modify", "demo", "-c", "2", "-m", "1G", "-e", "A=B", "-w", "/work",
+                    "modify", "demo", "-c", "2", "-m", "1G", "-e", "A=B", "-w", "/work", "--wait",
+                    "-t", "30",
                 ],
             );
             let long = parse_sandbox(
@@ -1199,6 +1596,9 @@ mod sandbox_command_tests {
                     "A=B",
                     "--workdir",
                     "/work",
+                    "--wait",
+                    "--timeout",
+                    "30",
                 ],
             );
             assert_eq!(format!("{short:?}"), format!("{long:?}"));
@@ -1499,7 +1899,7 @@ mod sandbox_command_tests {
                     "accepted {prefix:?} restore {extra:?}"
                 );
             }
-            // The old create/run route must fail, not parse as an ordinary fresh boot.
+            // Canonical create/run accepts a source without extending deprecated restore.
             for verb in ["create", "run"] {
                 let argv = ["msb"].into_iter().chain(prefix.iter().copied()).chain([
                     verb,
@@ -1508,7 +1908,7 @@ mod sandbox_command_tests {
                     "--name",
                     "child",
                 ]);
-                assert!(Cli::try_parse_from(argv).is_err());
+                assert!(Cli::try_parse_from(argv).is_ok());
             }
         }
     }

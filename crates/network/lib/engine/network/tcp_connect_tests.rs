@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 
 use super::test_support::{GuestDevice, ipv6_loopback_unavailable};
 use super::{HostRoutes, SmoltcpNetwork};
-use crate::config::{EnvNetworkSecretResolver, NetworkConfig};
+use crate::config::{EnvNetworkSecretResolver, MultiTenantConfig, NetworkConfig};
 use crate::policy::NetworkPolicy;
 use crate::proxy::OutboundProxy;
 
@@ -125,9 +125,11 @@ async fn check_connect(ipv6: bool, listening: bool) {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         2,
         Default::default(),
+        &MultiTenantConfig::default(),
         HostRoutes {
             ipv4: true,
             ipv6: true,
+            ..HostRoutes::default()
         },
     )
     .unwrap();
@@ -160,7 +162,7 @@ async fn check_connect(ipv6: bool, listening: bool) {
         .connect(iface.context(), (gateway, port), (guest, 49152))
         .unwrap();
     let handle = sockets.add(socket);
-    network.start(tokio::runtime::Handle::current());
+    network.start(tokio::runtime::Handle::current()).unwrap();
     let started = std::time::Instant::now();
     let mut received = Vec::new();
     let mut replied = false;
@@ -254,9 +256,11 @@ async fn check_stalled_ipv6_fallback() {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         2,
         Default::default(),
+        &MultiTenantConfig::default(),
         HostRoutes {
             ipv4: true,
             ipv6: true,
+            ..HostRoutes::default()
         },
     )
     .unwrap();
@@ -300,7 +304,7 @@ async fn check_stalled_ipv6_fallback() {
             (v6.address, 49152),
         )
         .unwrap();
-    network.start(tokio::runtime::Handle::current());
+    network.start(tokio::runtime::Handle::current()).unwrap();
     let started = std::time::Instant::now();
     let mut fallback_started = false;
     let mut cancelled = false;

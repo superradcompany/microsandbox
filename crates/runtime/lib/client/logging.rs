@@ -1,6 +1,15 @@
 //! Logging contracts shared by runtime clients and the VM runner.
 
 //--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types::SandboxLogLevel as LogLevel;
+
+#[cfg(feature = "runner")]
+pub use crate::runner::logging::RotatingLog;
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -17,12 +26,3 @@ mod tests {
         assert_eq!(LogLevel::Trace.to_string(), "trace");
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub use microsandbox_types::SandboxLogLevel as LogLevel;
-
-#[cfg(feature = "runner")]
-pub use crate::runner::logging::RotatingLog;

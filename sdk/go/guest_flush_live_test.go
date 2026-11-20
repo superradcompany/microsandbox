@@ -56,7 +56,7 @@ func TestGuestFlushLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, policy := range []GuestFlush{GuestFlushAuto, GuestFlushRequired, GuestFlushSkip} {
-		snapshot, err := Snapshot.Create(ctx, SnapshotCreateOptions{
+		snapshot, err := CreateSnapshot(ctx, SnapshotCreateOptions{
 			Name: string(policy), FromSandbox: name, Full: true, GuestFlush: policy,
 		})
 		if err != nil {
@@ -140,7 +140,7 @@ func TestOwnedDiskGuestFlushLive(t *testing.T) {
 				if before < 96*1024 {
 					t.Fatalf("fixture not dirty: %d KiB", before)
 				}
-				var snapshot *SnapshotArtifact
+				var snapshot *Snapshot
 				var child *Sandbox
 				switch operation {
 				case "pause":
@@ -155,7 +155,7 @@ func TestOwnedDiskGuestFlushLive(t *testing.T) {
 				case "branch":
 					child, err = source.Fork(ctx, name+"-child", WithForkGuestFlush(policy))
 				default:
-					snapshot, err = Snapshot.Create(ctx, SnapshotCreateOptions{
+					snapshot, err = CreateSnapshot(ctx, SnapshotCreateOptions{
 						Name: "dirty", FromSandbox: name, Full: operation == "full", GuestFlush: policy,
 					})
 				}

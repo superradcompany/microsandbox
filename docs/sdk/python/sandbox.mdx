@@ -13,7 +13,9 @@ See [Snapshots](/sdk/python/snapshots#forking) for live fork methods.
 
 ## Sandbox
 
-<p className="msb-member-group">Instance properties</p>
+### Live inspection
+
+`info()` returns identity, status, optional failure message, and creation/update timestamps. Timestamps are UTC `datetime` values or `None`, with microsecond precision. `id` and `name` require no I/O; mutable state is fetched on each inspection call. See [inspection and lifecycle](/sandboxes/lifecycle).
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle</span>
 
@@ -22,7 +24,7 @@ See [Snapshots](/sdk/python/snapshots#forking) for live fork methods.
 async def owns_lifecycle(self) -> bool
 ```
 
-Whether this handle owns the sandbox lifecycle. Local attached sandboxes returned by [`create()`](#sandbox-create) or [`start()`](#sandbox-start) own lifecycle. Local detached sandboxes, cloud sandboxes, and handles upgraded via [`SandboxHandle.connect()`](#sandboxhandle) return `False`. This is an async property; use `await sb.owns_lifecycle`.
+Whether this handle owns the sandbox lifecycle. Local attached sandboxes returned by [`create()`](#sandbox-create) or [`start()`](#sandbox-start) own lifecycle. Preparing a stopped local sandbox through `ensure_running()` or an operation acquires ownership on that object. Connecting to an already-running sandbox acquires no ownership. Local detached sandboxes and remote sandboxes return `False`. This is an async property; use `await sb.owns_lifecycle`.
 
 <p className="msb-label">Returns</p>
 
@@ -63,7 +65,7 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
 
-<Tooltip tip="Creation works on microsandbox cloud, but host-integrated configuration is rejected and leaving the async context does not clean up the sandbox. Call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Creation works on managed cloud, but host-integrated configuration is rejected and leaving the async context does not clean up the sandbox. Call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod
@@ -83,7 +85,9 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 
 Create and boot a sandbox. Keyword arguments provide individual config fields; see [`SandboxConfig`](#sandboxconfig) for the full set. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
-The returned `Sandbox` is an async context manager. On the local backend, `async with` guarantees cleanup: exit kills the sandbox and removes its persisted state. Cloud handles do not own the host process, so stop or remove them explicitly before leaving the context.
+The returned `Sandbox` is an async context manager. On scope exit, `async with` awaits graceful shutdown only for the local run this object owns; persisted state is retained except for configured ephemeral cleanup. Detached, independently connected, and cloud resources are not stopped. Cleanup checks the captured run and cannot stop a replacement run. A cleanup failure is raised, with any body exception retained as its cause.
+
+Creation also accepts `cpu_placement`, `placement_profile`, `thp`, `deployment_profile` and `proxy` through the default and context-bound factories.
 
 Pass `intercept_tls=True` to enable [TLS interception](/networking/tls) while preserving supplied network settings. `False` leaves them unchanged.
 
@@ -111,7 +115,7 @@ Pass `intercept_tls=True` to enable [TLS interception](/networking/tls) while pr
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create_with_progress()</span>
 
-<Tooltip tip="Microsandbox cloud creates the sandbox without reporting per-layer image-pull progress. Host-integrated configuration fields are also unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="our managed cloud creates the sandbox without reporting per-layer image-pull progress. Host-integrated configuration fields are also unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod
@@ -211,41 +215,60 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
   </div>
 </div>
 
-#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">get()</span>
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">get_running()</span>
 
 ```python
 @staticmethod
-async def get(name: str) -> SandboxHandle
+async def get_running(name: str) -> Sandbox
 ```
+
+Get an existing sandbox and connect to its run, starting it when stopped. A missing sandbox is an error; this never creates one. Unlike explicit start, an already-running sandbox succeeds. If the name is replaced during preparation, the operation fails instead of targeting the replacement.
+
+A newly started local run is owned by the returned Sandbox. Connecting to an existing run acquires no shutdown ownership. Remote runtime lifetime remains independent of the client.
 
 <Accordion title="Example">
 
 ```python
-handle = await Sandbox.get("api")
-print(handle.status)
+sb = await Sandbox.get_running("task")
+output = await sb.shell("echo hello")
 ```
 
 </Accordion>
 
-Get a handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control without requiring a full connection to the guest agent.
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">get()</span>
 
-<p className="msb-label">Parameters</p>
+```python
+@staticmethod
+async def get(name: str) -> Sandbox
+```
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
-  </div>
-</div>
+Look up an existing sandbox without starting it or connecting to its guest. The result is the same Sandbox type returned by creation. Guest execution prepares it automatically, while inspection remains non-starting. A missing or replaced resource is an error.
 
-<p className="msb-label">Returns</p>
+<Accordion title="Example">
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">SandboxHandle</a></div>
-    <div className="msb-param-desc">Handle with status and lifecycle control.</div>
-  </div>
-</div>
+```python
+sb = await Sandbox.get("api")
+output = await sb.shell("echo hello")
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ensure_running()</span>
+
+```python
+async def ensure_running(self) -> None
+```
+
+Connect to the sandbox if running, or start it if stopped. The object and its clones own any attached local run they start. Ordinary shell and exec calls do this automatically. See [lifecycle](/sandboxes/lifecycle#prepare-ahead-of-time).
+
+<Accordion title="Example">
+
+```python
+sb = await Sandbox.get("api")
+await sb.ensure_running()
+```
+
+</Accordion>
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list()</span>
 
@@ -259,7 +282,7 @@ async def list() -> SandboxPage
 ```python
 page = await Sandbox.list()
 for h in page.sandboxes:
-    print(h.name, h.status)
+    print(h.name, await h.status())
 ```
 
 </Accordion>
@@ -271,7 +294,7 @@ Return the first page of sandboxes (running, stopped, and crashed), ordered newe
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">SandboxPage</span></div>
-    <div className="msb-param-desc">Handles in this page and an optional cursor for the next page.</div>
+    <div className="msb-param-desc">Unprepared Sandbox resources in this page and an optional cursor for the next page.</div>
   </div>
 </div>
 
@@ -359,21 +382,22 @@ Delete a stopped sandbox by name. See [Destroy or remove](/sandboxes/lifecycle#d
 
 Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
 
-#### <span className="msb-recv">sb.</span><span className="msb-hn">name()</span>
+#### <span className="msb-recv">sb.</span><span className="msb-hn">name</span>
 
 ```python
-async def name(self) -> str
+@property
+def name(self) -> str
 ```
 
 <Accordion title="Example">
 
 ```python
-print(await sb.name())
+print(sb.name)
 ```
 
 </Accordion>
 
-Return the sandbox name.
+Read the name captured when this object was created or fetched, without I/O. It is not a live rename lookup.
 
 <p className="msb-label">Returns</p>
 
@@ -387,10 +411,19 @@ Return the sandbox name.
 #### <span className="msb-recv">sb.</span><span className="msb-hn">id</span>
 
 ```python
-identity: str = await sb.id
+@property
+def id(self) -> str
 ```
 
-Await the opaque stable identity of this persisted sandbox. It remains unchanged across stop and restart and changes when the reusable name is removed and recreated. Use it for equality, logging, and correlation; do not parse it.
+<Accordion title="Example">
+
+```python
+identity: str = sb.id
+```
+
+</Accordion>
+
+Read the opaque stable identity of this persisted sandbox. It remains unchanged across stop and restart and changes when the reusable name is removed and recreated. Use it for equality, logging, and correlation; do not parse it.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach()</span>
 
@@ -482,7 +515,7 @@ Attach your terminal to the sandbox's default shell for an interactive session.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ping()</span>
 
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def ping(self) -> SandboxPingResult
@@ -510,7 +543,7 @@ Check that the running sandbox's guest agent is reachable without refreshing idl
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">touch()</span>
 
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def touch(self) -> SandboxTouchResult
@@ -538,7 +571,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On managed cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def modify(
@@ -546,8 +579,8 @@ async def modify(
     *,
     cpus: int | None = None,
     max_cpus: int | None = None,
-    memory: int | None = None,
-    max_memory: int | None = None,
+    memory: int | Size | None = None,
+    max_memory: int | Size | None = None,
     root_disk_size: int | None = None,
     env: Mapping[str, str] | None = None,
     env_rm: list[str] | None = None,
@@ -637,7 +670,7 @@ The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed di
 | `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
 | `resize_status` | `list[ResourceResizeStatus]` | Live resize outcomes after apply, using [`ResourceKind`](#resourcekind) and [`ResourceConvergenceState`](#resourceconvergencestate). Omitted when no live resize ran |
 
-A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
+A live CPU or memory resize can take a moment to settle. The immediate result's `resize_status` reports `accepted` after the runtime accepts each target; it does not confirm guest completion. The plan's `applied` field describes applying the modification request, not usable guest capacity.
 
 <p className="msb-label">Parameters</p>
 
@@ -651,11 +684,11 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
     <div className="msb-param-desc">Boot-time maximum possible vCPUs (restart-backed).</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>memory</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-key"><code>memory</code><span className="msb-type">int | Size | None</span></div>
     <div className="msb-param-desc">Desired effective guest memory in MiB. Live when within the booted <code>max_memory</code>.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>max_memory</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-key"><code>max_memory</code><span className="msb-type">int | Size | None</span></div>
     <div className="msb-param-desc">Boot-time maximum hotpluggable memory in MiB (restart-backed).</div>
   </div>
   <div className="msb-param">
@@ -709,9 +742,66 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">modify_with_resize_tracking()</span>
+
+```python
+async def modify_with_resize_tracking(self, **modify_options) -> SandboxModificationResult
+```
+
+Accepts the same keyword arguments as [`modify()`](#sb-modify). Returns `plan` and `resize_operations`, the exact requests dispatched by this call. `resize_operations` is `None` for dry runs, changes without tracked live resizes, and supported changes through older runtimes. Missing identities must not be replaced by a later current operation. The existing `modify()` return shape is unchanged.
+
+<Accordion title="Example">
+
+```python
+result = await sb.modify_with_resize_tracking(cpus=4)
+operations = result["resize_operations"]
+if operations is not None:
+    statuses = await sb.wait_for_resize_operations(operations, timeout=30)
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resize_operations()</span>
+
+```python
+async def resize_operations(self) -> list[ResizeOperation]
+```
+
+Read the latest recorded operation per resource without changing targets. Reads return retained evidence and request a background refresh; they do not wait for a new guest sample. Use an operation-specific wait to await confirmed completion. An empty list means no recorded request. Each record contains `id`, `runtime_boot_id`, `generation`, `requested_target`, `accepted_target`, `status`, `outcome` and `observation`. Targets use `ResourceKind.CPUS` with `online`, or `ResourceKind.MEMORY` with `total_mib`. Status retains requested/actual/enforced quantities and convergence state. Outcome is `ResizeOutcome.PENDING`, `APPLIED` or `SUPERSEDED`; observation is `ResizeObservation.AVAILABLE`, `UNSUPPORTED`, `PAUSED` or `UNAVAILABLE`.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_for_resize_operations()</span>
+
+```python
+async def wait_for_resize_operations(
+    self, operations: list[ResizeOperation], *, timeout: float | None = None
+) -> list[ResourceResizeStatus]
+```
+
+Wait for the supplied one or two operation records. Reconnecting to the same runtime is supported; a replaced runtime, expired identity or superseded operation fails instead of following a newer target. Caller-supplied status is rechecked and is never proof of completion. `timeout` is seconds: `None` has no deadline and zero performs one bounded check. Expiry raises `ResizeTimeoutError` with the last completed per-resource reads; it does not undo the resize. Unsupported observation reports an error without claiming success.
+
+The runtime retains at most 256 operation records, protecting the latest CPU and memory records from eviction. Older records can expire; restarting the runtime clears its history. Resident pause preserves the history. An expired identity cannot establish completion.
+
+`ResizeWaitError` exposes `reason`, `sandbox`, `operation_id` and verified `status`. Its reasons are `superseded`, `interrupted`, `history_unavailable`, `invalid_response` and `observation_unavailable`; none proves rollback or final failure of the resize. Timeout and unsupported-feature errors remain separate. Unknown future peer errors retain their ordinary error mapping.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resize_status()</span>
+
+```python
+async def resize_status(self) -> list[ResourceResizeStatus]
+```
+
+Return current per-resource status without operation identities. Use `resize_operations()` when a later wait must stay bound to those records.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_resized()</span>
+
+```python
+async def wait_until_resized(self, *, timeout: float | None = None) -> list[ResourceResizeStatus]
+```
+
+Select the operations present at the first read and wait for those identities. This does not identify which caller submitted them; use the result of `modify_with_resize_tracking()` for a wait tied to your modification. Timeout semantics match `wait_for_resize_operations()`.
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def metrics(self) -> SandboxMetrics
@@ -739,7 +829,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
 
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On managed cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def metrics_stream(self, interval: float = 1.0) -> MetricsStream
@@ -777,7 +867,7 @@ Stream resource metrics at a regular interval. The returned [`MetricsStream`](#m
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">logs()</span>
 
-<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Bounded log reads are not available on managed cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def logs(
@@ -818,7 +908,7 @@ recent = await handle.logs(
 
 </Accordion>
 
-Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike; there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike; there is no protocol traffic. Reading logs does not start the sandbox.
 
 The default sources are `STDOUT`, `STDERR`, and `OUTPUT` (PTY-merged). Add `LogReadSource.SYSTEM` to include synthetic lifecycle markers and runtime/kernel diagnostic lines, or use `LogReadSource.ALL` as shorthand for all four. Timestamps are exposed as `float` ms since the Unix epoch (UTC) for parity with [`SandboxMetrics.timestamp_ms`](#sandboxmetrics).
 
@@ -854,7 +944,7 @@ The default sources are `STDOUT`, `STDERR`, and `OUTPUT` (PTY-merged). Add `LogR
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">log_stream()</span>
 
-<Tooltip tip="On microsandbox cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On managed cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def log_stream(
@@ -877,7 +967,7 @@ async for entry in stream:
 
 </Accordion>
 
-Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` the stream stays open and yields new entries as they are written, like `tail -f`. Resume an earlier stream by passing the [`cursor`](#logentry) of the last entry you saw as `from_cursor`. Also available on [`SandboxHandle`](#sandboxhandle).
+Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` the stream stays open and yields new entries as they are written, like `tail -f`. Resume an earlier stream by passing the [`cursor`](#logentry) of the last entry you saw as `from_cursor`. Also available on [`Sandbox`](#sandbox).
 
 <p className="msb-label">Parameters</p>
 
@@ -918,7 +1008,7 @@ Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` t
 <Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
-async def stop(self, timeout: float | None = None) -> None
+async def stop(self, timeout: float | timedelta | None = None) -> None
 ```
 
 <Accordion title="Example">
@@ -935,7 +1025,7 @@ Wait indefinitely for graceful shutdown and release of the targeted runtime's ow
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | timedelta | None</span></div>
     <div className="msb-param-desc">Total graceful-completion budget in seconds. <code>None</code> waits indefinitely; expiry raises <code>StopTimeoutError</code> without killing.</div>
   </div>
 </div>
@@ -943,7 +1033,7 @@ Wait indefinitely for graceful shutdown and release of the targeted runtime's ow
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
 
 ```python
-async def stop_with_timeout(self, timeout: float) -> None
+async def stop_with_timeout(self, timeout: float | timedelta) -> None
 ```
 
 Use `await sb.stop_with_timeout(seconds)` for an explicit total graceful-completion budget. Expiry raises `StopTimeoutError`; zero expires before dispatch. A delivered request may finish later, but the timeout never requests force termination.
@@ -966,10 +1056,10 @@ Request graceful shutdown and return once the request is sent, without waiting f
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">kill()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
-async def kill(self, timeout: float | None = None) -> None
+async def kill(self, timeout: float | timedelta | None = None) -> None
 ```
 
 <Accordion title="Example">
@@ -986,14 +1076,14 @@ Force-terminate the sandbox and wait until stopped state is observed. No gracefu
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | timedelta | None</span></div>
     <div className="msb-param-desc">Seconds to wait for the stopped state to be observed.</div>
   </div>
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_kill()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def request_kill(self) -> None
@@ -1011,7 +1101,7 @@ Request force termination and return once the signal is sent, without waiting fo
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_drain()</span>
 
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not available on managed cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def request_drain(self) -> None
@@ -1025,7 +1115,7 @@ await sb.request_drain()
 
 </Accordion>
 
-Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected; the sandbox transitions to stopped when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes. Use [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs stopped-state observation.
+Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected; the sandbox transitions to stopped when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes. Use [`wait_until_stopped()`](#sb-wait_until_stopped) when you need to wait for the sandbox to stop.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_stopped()</span>
 
@@ -1056,10 +1146,12 @@ Block until the sandbox is observed in a terminal non-running state, without tri
 #### <span className="msb-recv">sb.</span><span className="msb-hn">wait_for_status()</span>
 
 ```python
-async def wait_for_status(self, status: SandboxStatus) -> SandboxHandle
+async def wait_for_status(self, status: SandboxStatus) -> None
 ```
 
-Wait without a built-in timeout until this exact sandbox reaches `status`, returning a refreshed metadata handle. Raises `SandboxReplacedError` rather than following a reused name. Wrap the coroutine with `asyncio.wait_for()` when a deadline is required.
+Returns completion only and never starts the sandbox. The existing resource remains usable; call `info()` for a fresh observation afterward. The observed status may change after this wait completes.
+
+Wait without a built-in timeout until this exact sandbox reaches `status`. Raises `SandboxReplacedError` rather than following a reused name. Wrap the coroutine with `asyncio.wait_for()` when a deadline is required.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">restart()</span>
 
@@ -1068,7 +1160,7 @@ async def restart(
     self,
     *,
     force: bool = False,
-    timeout: float | None = None,
+    timeout: float | timedelta | None = None,
     detached: bool = False,
 ) -> Sandbox
 ```
@@ -1078,7 +1170,7 @@ Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">destroy()</span>
 
 ```python
-async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None
+async def destroy(self, *, force: bool = False, timeout: float | timedelta | None = None) -> None
 ```
 
 Stop and remove this exact sandbox. Defaults to graceful shutdown with the SDK's ten-second timeout. Raises `SandboxReplacedError` rather than deleting a same-name replacement.
@@ -1092,13 +1184,27 @@ async def detach(self) -> None
 <Accordion title="Example">
 
 ```python
-sb = await Sandbox.create("worker", image="python", detached=True)
-await sb.detach()  # keeps running in the background
+sb = await Sandbox.create("worker", image="python")
+await sb.detach()  # relinquish automatic shutdown; sb remains usable
 ```
 
 </Accordion>
 
-Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox.get()`](#sandbox-get).
+Disarm automatic shutdown without consuming the sandbox. Repeated calls succeed, guest operations remain available, and explicit stop/destroy still work. A failed detach raises without losing the object or clearing its cleanup authority. Detach does not cancel work or scoped shutdown already in progress.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
+
+<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```python
+snapshot(name)
+```
+
+Create a named [snapshot](/sdk/python/snapshots) of the sandbox
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[Snapshot]`
 
 ## Patch
 
@@ -1242,7 +1348,9 @@ Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't ex
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_file()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```python
 @staticmethod
@@ -1274,7 +1382,9 @@ Copy a single host file at `src` into the guest rootfs at `dst`.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_dir()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```python
 @staticmethod
@@ -1325,325 +1435,6 @@ Create a symlink at `link` pointing to `target`.
     <div className="msb-param-desc">When <code>True</code>, overwrite an existing path at <code>link</code>.</div>
   </div>
 </div>
-
-## SandboxHandle
-
-
-<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
-
-A metadata and lifecycle handle for an existing sandbox.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`str`
-
-Sandbox name, up to 128 UTF-8 bytes
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
-
-`str`
-
-Opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and raise `SandboxReplacedError` when the reusable name now points to another sandbox.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
-
-[`SandboxStatus`](#sandboxstatus)
-
-Current status
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">config_json</span>
-
-`str`
-
-Raw JSON configuration
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
-
-`float \| None`
-
-Creation timestamp (ms since epoch)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">updated_at</span>
-
-`float \| None`
-
-Last update timestamp (ms since epoch)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
-
-<Tooltip tip="Parsed sandbox configuration is local-only; use raw cloud JSON inspection on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-config()
-```
-
-Parsed configuration
-
-<p className="msb-label">Returns</p>
-
-`dict[str, Any]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">refresh()</span>
-
-```python
-refresh()
-```
-
-Re-fetch status and metadata, returning a fresh handle
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[`[`SandboxHandle`](#sandboxhandle)`]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">ping()</span>
-
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-ping()
-```
-
-Check agent reachability without refreshing idle activity; does not start stopped sandboxes
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">touch()</span>
-
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-touch()
-```
-
-Explicitly refresh idle activity; does not start stopped sandboxes
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
-
-<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-modify(...)
-```
-
-Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[`[`SandboxModificationPlan`](#sandboxmodificationplan)`]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">connect()</span>
-
-```python
-connect(timeout=None)
-```
-
-Connect to a running sandbox, optionally with an explicit timeout in seconds
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[`[`Sandbox`](#instance-methods)`]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">connect_or_start()</span>
-
-```python
-async def connect_or_start(self, *, detached: bool = False) -> Sandbox
-```
-
-Connect when this exact sandbox is running, wait through `STARTING`, or start it when it is `CREATED`, `STOPPED`, or `CRASHED`. `DRAINING` and `PAUSED` are rejected. `detached=True` affects only a required local start; connecting to an already-running sandbox does not change ownership.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">wait_for_status()</span>
-
-```python
-async def wait_for_status(self, status: SandboxStatus) -> SandboxHandle
-```
-
-Wait without a built-in timeout until this exact sandbox reaches `status`, returning a refreshed handle. Raises `SandboxReplacedError` rather than rebinding to a replacement.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">restart()</span>
-
-```python
-async def restart(
-    self,
-    *,
-    force: bool = False,
-    timeout: float | None = None,
-    detached: bool = False,
-) -> Sandbox
-```
-
-Restart this exact sandbox with the same state and option semantics as [`sb.restart()`](#sb-restart).
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">destroy()</span>
-
-```python
-async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None
-```
-
-Stop and remove this exact sandbox. A stale handle cannot destroy a same-name replacement.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">start()</span>
-
-```python
-start(*, detached=False)
-```
-
-Start in attached or detached mode
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[`[`Sandbox`](#instance-methods)`]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
-
-<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-stop(timeout=None)
-```
-
-Wait indefinitely for graceful completion and runtime ownership release. `await handle.stop_with_timeout(seconds)` supplies one total budget; expiry raises `StopTimeoutError` without killing, and zero expires before dispatch. The optional `stop(timeout=...)` argument uses the same behavior.
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[None]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">request_stop()</span>
-
-```python
-request_stop()
-```
-
-Request graceful shutdown without waiting
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[None]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">kill()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-kill(timeout=None)
-```
-
-Force terminate and wait until stopped state is observed
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[None]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">request_kill()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-request_kill()
-```
-
-Request force termination without waiting
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[None]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">request_drain()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-request_drain()
-```
-
-Request graceful drain without waiting
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[None]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">wait_until_stopped()</span>
-
-```python
-wait_until_stopped()
-```
-
-Block until the sandbox reaches terminal state
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
-
-```python
-remove()
-```
-
-Delete sandbox and state
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[None]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
-
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-metrics()
-```
-
-Point-in-time resource metrics
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">logs()</span>
-
-<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-logs(...)
-```
-
-Read captured `exec.log` (works without starting)
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[list[`[`LogEntry`](#logentry)`]]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">log_stream()</span>
-
-```python
-log_stream(...)
-```
-
-Stream captured log entries (works without starting)
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[`[`LogStream`](#logstream)`]`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
-
-<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-snapshot(name)
-```
-
-Create a named [snapshot](/sdk/python/snapshots) of the sandbox
-
-<p className="msb-label">Returns</p>
-
-`Awaitable[Snapshot]`
 
 ## MetricsStream
 
@@ -1777,7 +1568,7 @@ Async iterator of pull progress events
 result()
 ```
 
-Await once to get the final running sandbox. A second call raises `RuntimeError`
+Claim the sandbox once, inside the block or after it exits successfully. Normal exit waits for creation and raises any creation failure you haven’t already observed. If the block raises, the session requests cancellation and propagates the block’s exception. A second `result()` call raises `RuntimeError`.
 
 <p className="msb-label">Returns</p>
 
@@ -1788,7 +1579,7 @@ session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
 async with session:
     async for event in session.progress:
         print(event)
-    sb = await session.result()
+sb = await session.result()
 ```
 
 ## Types
@@ -1797,7 +1588,7 @@ async with session:
 
 <p className="msb-backref">Used by <a href="#sandbox-create">create()</a> · <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
 
-<Tooltip tip="Microsandbox cloud accepts common OCI, resource, lifecycle, environment, policy, secret, script, and inline patch fields. Snapshots, replace, host ports, custom network infrastructure, local rootfs forms, hostname, resource ceilings, metrics sampling, and custom registry transport are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="our managed cloud accepts common OCI, resource, lifecycle, environment, policy, secret, script, and inline patch fields. Full snapshots, replace, host ports, custom network infrastructure, hostname, resource ceilings, metrics sampling, and custom registry transport are local-only. Directory and disk-image roots use your organization host volume."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_with_progress()`](#sandbox-create_with_progress). There is no `SandboxConfig` object you construct directly; these are passed as `**kwargs`.
 
@@ -1806,8 +1597,8 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | image | `str \| os.PathLike[str] \| `[`ImageSource`](/sdk/python/images) | - | OCI image, local path, or disk image. Required; use `Sandbox.restore()` for snapshots. Use `Image.oci("python:3.12", root_disk=RootDisk.managed(8192))` to set a managed OCI root-disk size |
 | cpus | `int` | `1` | Virtual CPUs. This is a limit, not a reservation |
 | max_cpus | `int` | same as `cpus` | Boot-time maximum possible virtual CPUs |
-| memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation |
-| max_memory | `int` | same as `memory` | Boot-time maximum hotpluggable memory in MiB |
+| memory | `int \| Size` | `512` | Guest memory in MiB. This is a limit, not a reservation |
+| max_memory | `int \| Size` | same as `memory` | Boot-time maximum hotpluggable memory in MiB |
 | thp | `"always" \| "madvise" \| "never"` | `"madvise"` | Guest transparent huge-page policy selected at boot |
 | workdir | `str` | - | Default working directory for commands |
 | shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
@@ -1818,9 +1609,9 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | cmd | `Sequence[str]` | - | Override the image's stored CMD used by `exec_default`; an empty sequence clears CMD |
 | init | `str \| `[`InitConfig`](#initconfig)` \| `[`InitOptions`](#initoptions) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/bootstrap#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | `False` | Replace an existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
-| replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
-| max_duration | `float` | - | Maximum sandbox lifetime in seconds; finite and non-negative, rounded up to whole seconds |
-| idle_timeout | `float` | - | Idle timeout in seconds; finite and non-negative, rounded up to whole seconds |
+| replace_with_timeout | `float \| timedelta` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
+| max_duration | `float \| timedelta` | - | Maximum sandbox lifetime in seconds; must be a non-negative whole number of seconds |
+| idle_timeout | `float \| timedelta` | - | Idle timeout in seconds; must be a non-negative whole number of seconds |
 | ephemeral | `bool` | `False` | If `True`, the sandbox and all its persisted state are removed automatically once it stops, rather than left on disk for restart |
 | env | `Mapping[str, str]` | `{}` | Environment variables visible to all commands |
 | labels | `Mapping[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Select in bulk](/sandboxes/labels#select-in-bulk). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |
@@ -1837,7 +1628,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | proxy | [`OutboundProxy`](/sdk/python/proxies#outboundproxy)` \| None` | `None` | Single proxy used for outbound connections. See [Proxies](/sdk/python/proxies) |
 | secrets | `Sequence[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
 | secret_violation_action | [`ViolationAction`](/sdk/python/secrets#violationaction) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.secret_violation_action`; if both are provided, this top-level value takes precedence. |
-| detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |
+| detached | `bool` | `False` | If `True`, spawn without automatic shutdown ownership; no subsequent detach call is required |
 
 ### InitConfig
 
@@ -1906,7 +1697,7 @@ One stable, newest-first page returned by [`Sandbox.list()`](#sandbox-list) or [
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `sandboxes` | `list[SandboxHandle]` | Handles in this page |
+| `sandboxes` | `list[Sandbox]` | Unprepared Sandbox resources in this page |
 | `next_cursor` | `str \| None` | Opaque continuation cursor, or `None` on the final page |
 
 ### SandboxPingResult
@@ -1948,7 +1739,7 @@ Observed terminal sandbox state returned by [`wait_until_stopped()`](#sb-wait_un
 
 ### SandboxStatus
 
-<p className="msb-backref">Used by <a href="#sandboxhandle">SandboxHandle.status</a> · <a href="#sandboxstopresult">SandboxStopResult.status</a></p>
+<p className="msb-backref">Used by <a href="#sandbox">Sandbox.status</a> · <a href="#sandboxstopresult">SandboxStopResult.status</a></p>
 
 Sandbox lifecycle status returned by `status` fields.
 
@@ -1961,23 +1752,6 @@ Sandbox lifecycle status returned by `status` fields.
 | `SandboxStatus.CRASHED` | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
 | `SandboxStatus.DRAINING` | `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
 | `SandboxStatus.PAUSED` | `"paused"` | VM paused |
-
-### BackendKind
-
-<p className="msb-backref">Used by <code>set_default_backend()</code> · <code>backend_scope()</code> · returned by <code>default_backend_kind()</code></p>
-
-Selected sandbox backend.
-
-| Member | Value | Description |
-|--------|-------|-------------|
-| `BackendKind.LOCAL` | `"local"` | Local libkrun backend |
-| `BackendKind.CLOUD` | `"cloud"` | Microsandbox cloud backend; requires an API key or named profile |
-
-```python
-from microsandbox import BackendKind, set_default_backend
-
-set_default_backend(BackendKind.CLOUD, profile="production")
-```
 
 ### ModificationPolicy
 
@@ -2012,7 +1786,7 @@ Desired state for one secret. `env`, `value`, and `store` are mutually exclusive
 
 ### SandboxModificationPlan
 
-Typed dictionary returned by `Sandbox.modify()` and `SandboxHandle.modify()`. Config changes and secret changes use different typed shapes and are discriminated by their `kind` member.
+Typed dictionary returned by `Sandbox.modify()` and `Sandbox.modify()`. Config changes and secret changes use different typed shapes and are discriminated by their `kind` member.
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -2087,11 +1861,19 @@ Observed convergence state for an accepted live resize.
 |--------|-------|-------------|
 | `ResourceConvergenceState.ACCEPTED` | `"accepted"` | Runtime accepted the request |
 | `ResourceConvergenceState.CONVERGING` | `"converging"` | Guest and VMM are still converging |
-| `ResourceConvergenceState.APPLIED` | `"applied"` | Desired, actual, and enforced values match |
+| `ResourceConvergenceState.APPLIED` | `"applied"` | Guest completion has been confirmed for the operation; not produced by the immediate target acknowledgement |
 | `ResourceConvergenceState.GUEST_REFUSED` | `"guest-refused"` | Guest refused or failed to cooperate |
 | `ResourceConvergenceState.FAILED` | `"failed"` | Resize failed |
 
-### SandboxMetrics
+#### config()
+
+```python
+async def config(self) -> SandboxConfigInspection: ...
+```
+
+Fetch a fresh persisted observation without starting the sandbox. The typed dictionary contains `kind`, `name`, `spec`, `unavailable` and `redacted`. Read execution settings through `observed["spec"]["runtime"]`. Remote source identities and secret material are not reconstructed; unavailable/redacted paths are explicit. Failed lookups raise instead of returning stale data. Persisted settings may require restart to apply. See [inspection result shapes](/migrations/v0.8#configuration-result-shape).
+
+## SandboxMetrics
 
 <p className="msb-backref">Returned by <a href="#sb-metrics">metrics()</a> · <a href="#sb-metrics_stream">metrics_stream()</a></p>
 
@@ -2275,3 +2057,46 @@ Discriminator returned by [`PullEvent.event_type`](#pullevent).
 ```python
 sandbox = await Sandbox.create(name="nested", image="alpine", nested_virt=True)
 ```
+
+## Storage recovery
+
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">recover_storage()</span>
+
+```python
+@staticmethod
+async def recover_storage(
+    name: str,
+    *,
+    selections: Mapping[str, str] | None = None,
+    accept_selected_view: bool = False,
+    legacy_writers_stopped: bool = False,
+) -> StorageRecovery
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage repair](/migrations/v0.7#sandbox-storage-migration) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>selections</code><span className="msb-type">Mapping[str, str] | None</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with disk ID keys and candidate ID values. Omit or leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>accept_selected_view</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Default <code>False</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>legacy_writers_stopped</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Default <code>False</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originals_retained</code> (boolean) confirms the original disks were retained.</div>
+  </div>
+</div>

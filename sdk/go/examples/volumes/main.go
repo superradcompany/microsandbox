@@ -70,7 +70,7 @@ func main() {
 	fmt.Printf("  duplicate create correctly rejected: %v\n", err)
 
 	// 3. Remove, then verify it is gone.
-	if err := vol.Remove(ctx); err != nil {
+	if err := vol.Destroy(ctx); err != nil {
 		log.Fatalf("Remove: %v", err)
 	}
 	vols, err = microsandbox.ListVolumes(ctx)
@@ -85,7 +85,7 @@ func main() {
 	fmt.Println("OK — volumes example passed")
 }
 
-func containsVolume(vols []*microsandbox.VolumeHandle, name string) bool {
+func containsVolume(vols []*microsandbox.Volume, name string) bool {
 	for _, v := range vols {
 		if v.Name() == name {
 			return true

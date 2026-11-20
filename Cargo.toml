@@ -52,7 +52,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.7.13"
+version = "0.8.0"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -79,25 +79,25 @@ strip = false
 # Exact (`=`) pins: these crates share private, unstable APIs across patch
 # releases, so every published version must resolve its siblings to the same
 # version. Caret would let an older release pull newer siblings and break.
-microsandbox = { version = "=0.7.13", path = "sdk/rust", default-features = false }
-microsandbox-agent-client = { version = "=0.7.13", path = "packages/agent-client/rust" }
-microsandbox-control-client = { version = "=0.7.13", path = "packages/control-client/rust" }
-microsandbox-protocol-client = { version = "=0.7.13", path = "packages/protocol-client/rust" }
-microsandbox-db = { version = "=0.7.13", path = "crates/db" }
-microsandbox-filesystem = { version = "=0.7.13", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "=0.7.13", path = "crates/image" }
-microsandbox-metrics = { version = "=0.7.13", path = "crates/metrics" }
-microsandbox-types-macros = { version = "=0.7.13", path = "packages/microsandbox-types/macros" }
-microsandbox-types = { version = "=0.7.13", path = "packages/microsandbox-types/rust" }
-microsandbox-migration = { version = "=0.7.13", path = "crates/migration" }
-microsandbox-network = { version = "=0.7.13", path = "crates/network", default-features = false }
-microsandbox-protocol = { version = "=0.7.13", path = "crates/protocol" }
-microsandbox-runtime = { version = "=0.7.13", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "=0.7.13", path = "crates/utils" }
-microsandbox-vsock = { version = "=0.7.13", path = "crates/vsock" }
+microsandbox = { version = "=0.8.0", path = "sdk/rust", default-features = false }
+microsandbox-agent-client = { version = "=0.8.0", path = "packages/agent-client/rust" }
+microsandbox-control-client = { version = "=0.8.0", path = "packages/control-client/rust" }
+microsandbox-protocol-client = { version = "=0.8.0", path = "packages/protocol-client/rust" }
+microsandbox-db = { version = "=0.8.0", path = "crates/db" }
+microsandbox-filesystem = { version = "=0.8.0", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "=0.8.0", path = "crates/image" }
+microsandbox-metrics = { version = "=0.8.0", path = "crates/metrics" }
+microsandbox-types-macros = { version = "=0.8.0", path = "packages/microsandbox-types/macros" }
+microsandbox-types = { version = "=0.8.0", path = "packages/microsandbox-types/rust" }
+microsandbox-migration = { version = "=0.8.0", path = "crates/migration" }
+microsandbox-network = { version = "=0.8.0", path = "crates/network", default-features = false }
+microsandbox-protocol = { version = "=0.8.0", path = "crates/protocol" }
+microsandbox-runtime = { version = "=0.8.0", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "=0.8.0", path = "crates/utils" }
+microsandbox-vsock = { version = "=0.8.0", path = "crates/vsock" }
 # Keep runtime APIs and shared metrics types on the same published release.
-msb_krun = "=0.1.44"
-msb_krun_utils = "=0.1.44"
+msb_krun = "=0.1.46"
+msb_krun_utils = "=0.1.46"
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 
@@ -105,6 +105,7 @@ test-utils = { path = "crates/testing/utils" }
 anyhow = "1.0"
 astral-tokio-tar = "0.6"
 base64 = "0.23"
+age = { version = "0.11", default-features = false, features = ["async"] }
 async-compression = "0.4"
 blake3 = "1.8"
 bytes = "1.9"
@@ -126,7 +127,9 @@ futures-util = "0.3"
 hex = "0.4"
 hickory-net = "0.26.1"
 hickory-proto = "0.26.1"
+if-addrs = "0.15"
 httlib-hpack = "0.1.3"
+httpdate = "1.0"
 imago = { package = "msb-imago", version = "0.1.7" }
 indicatif = "0.18"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
@@ -222,3 +225,10 @@ parking_lot = "0.13"
 rpassword = "7"
 russh = "0.65.0"
 russh-sftp = "2.3.0"
+
+# Temporary native APIs from libkrun PR #173, pinned for reproducible builds.
+# Replace these patches with the maintainer's published native version before
+# publishing dependent crates: workspace patches do not propagate to consumers.
+[patch.crates-io]
+msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "77cad8a1b7d3c519fe12fd1e1e8dc6b2c5d383a3" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "77cad8a1b7d3c519fe12fd1e1e8dc6b2c5d383a3" }
