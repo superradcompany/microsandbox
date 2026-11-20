@@ -52,7 +52,7 @@ impl PyJob {
 
     fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let result = inner.inspect().await.map_err(job_error)?;
             decode("info", serde_json::to_value(result).map_err(invalid)?)
         })
@@ -60,7 +60,7 @@ impl PyJob {
 
     fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let result = inner.wait().await.map_err(job_error)?;
             decode("exit", serde_json::to_value(result).map_err(invalid)?)
         })
@@ -68,23 +68,20 @@ impl PyJob {
 
     fn signal<'py>(&self, py: Python<'py>, signal: i32) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.signal(signal).await.map_err(job_error)
-        })
+        crate::runtime::future_into_py(
+            py,
+            async move { inner.signal(signal).await.map_err(job_error) },
+        )
     }
 
     fn kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.kill().await.map_err(job_error)
-        })
+        crate::runtime::future_into_py(py, async move { inner.kill().await.map_err(job_error) })
     }
 
     fn eof<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.eof().await.map_err(job_error)
-        })
+        crate::runtime::future_into_py(py, async move { inner.eof().await.map_err(job_error) })
     }
 
     #[pyo3(signature = (*, read_only = false, replay_bytes = None, cursor = None))]
@@ -104,7 +101,7 @@ impl PyJob {
             _ => JobReplay::None,
         };
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(PyJobAttachment {
                 inner: Arc::new(
                     inner
@@ -136,7 +133,7 @@ impl PyJob {
             from_cursor,
             follow: false,
         };
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             decode(
                 "logs",
                 serde_json::to_value(inner.logs(&options).await.map_err(job_error)?)
@@ -166,7 +163,7 @@ impl PyJob {
             from_cursor,
             follow,
         };
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(PyJobLogStream {
                 inner: Arc::new(LogReader {
                     stream: Mutex::new(Some(inner.log_stream(&options).await.map_err(job_error)?)),
@@ -197,7 +194,7 @@ impl PyJob {
             from_cursor,
             follow: true,
         };
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(PyJobLogStream {
                 inner: Arc::new(LogReader {
                     stream: Mutex::new(Some(inner.log_stream(&options).await.map_err(job_error)?)),
@@ -213,7 +210,7 @@ impl PyJob {
 impl PyJobAttachment {
     fn recv<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner
                 .recv()
                 .await
@@ -225,23 +222,21 @@ impl PyJobAttachment {
 
     fn write_stdin<'py>(&self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.write_stdin(data).await.map_err(job_error)
         })
     }
 
     fn resize<'py>(&self, py: Python<'py>, rows: u16, cols: u16) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.resize(rows, cols).await.map_err(job_error)
         })
     }
 
     fn detach<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.detach().await.map_err(job_error)
-        })
+        crate::runtime::future_into_py(py, async move { inner.detach().await.map_err(job_error) })
     }
 
     fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -249,7 +244,7 @@ impl PyJobAttachment {
     }
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let event = inner
                 .recv()
                 .await
@@ -267,7 +262,7 @@ impl PyJobLogStream {
     }
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let notified = inner.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -292,7 +287,7 @@ impl PyJobLogStream {
         // Wake a pending read before acquiring its mutex.
         inner.closed.store(true, Ordering::Release);
         inner.notify.notify_waiters();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.stream.lock().await.take();
             Ok(())
         })

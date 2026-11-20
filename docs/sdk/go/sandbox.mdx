@@ -405,7 +405,7 @@ Fetch the latest failure message, or `nil` when none is available.
 func (s *Sandbox) Config(ctx context.Context) (*SandboxConfigInspection, error)
 ```
 
-Fetch a fresh `SandboxConfigInspection` without starting the sandbox. Read `Kind`, `Name`, `Spec.Runtime`, `Unavailable` and `Redacted`; `Spec.Image` retains the backend-specific JSON source shape. This is not a creation `SandboxConfig`. Some persisted settings require restart to apply. See [inspection result shapes](/migrations/sdk-contexts#configuration-result-shape).
+Fetch a fresh `SandboxConfigInspection` without starting the sandbox. Read `Kind`, `Name`, `Spec.Runtime`, `Unavailable` and `Redacted`; `Spec.Image` retains the backend-specific JSON source shape. This is not a creation `SandboxConfig`. Some persisted settings require restart to apply. See [inspection result shapes](/migrations/v0.8#configuration-result-shape).
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Name()</span>
 
@@ -3183,7 +3183,7 @@ func RecoverStorage(
 ) (StorageRecovery, error)
 ```
 
-Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage repair](/repairs/sandbox-storage) for maintenance requirements and recovery limits.
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage repair](/migrations/v0.7#sandbox-storage-migration) for maintenance requirements and recovery limits.
 
 <p className="msb-label">Options</p>
 

@@ -77,7 +77,7 @@ impl PySnapshot {
     #[pyo3(signature = (*, force = false))]
     fn remove<'py>(&self, py: Python<'py>, force: bool) -> PyResult<Bound<'py, PyAny>> {
         let checkpoint = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let inner = checkpoint
                 .remove_with(|options| if force { options.force() } else { options })
                 .await
@@ -119,7 +119,7 @@ impl PySnapshot {
     /// Observe artifact storage through this snapshot's captured backend.
     fn storage_usage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let usage = snapshot.storage_usage().await.map_err(to_py_err)?;
             Ok(crate::storage::PyStorageItemUsage::from_rust(usage))
         })
@@ -203,7 +203,7 @@ impl PySnapshot {
         plain_tar: bool,
         guest_flush: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut builder = RustSnapshot::builder(name)
                 .from_sandbox(from_sandbox)
                 .guest_flush(guest_flush_policy(guest_flush)?);
@@ -236,7 +236,7 @@ impl PySnapshot {
     /// Cheap metadata validation only — does not read the upper file.
     #[staticmethod]
     fn open<'py>(py: Python<'py>, path_or_name: String) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let snap = RustSnapshot::open(&path_or_name).await.map_err(to_py_err)?;
             Ok(PySnapshot::from_rust(snap))
         })
@@ -245,7 +245,7 @@ impl PySnapshot {
     /// Look up a snapshot using the active backend's public identifier.
     #[staticmethod]
     fn get<'py>(py: Python<'py>, name_or_digest: String) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let h = RustSnapshot::get(&name_or_digest)
                 .await
                 .map_err(to_py_err)?;
@@ -256,7 +256,7 @@ impl PySnapshot {
     /// List snapshots visible through the active backend.
     #[staticmethod]
     fn list<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let handles = RustSnapshot::list().await.map_err(to_py_err)?;
             let py_handles: Vec<PySnapshot> =
                 handles.into_iter().map(PySnapshot::from_rust).collect();
@@ -275,7 +275,7 @@ impl PySnapshot {
         path_or_name: String,
         force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             RustSnapshot::remove_by_reference(&path_or_name, force)
                 .await
                 .map_err(to_py_err)?;
@@ -315,7 +315,7 @@ impl PySnapshot {
         last_layers: Option<usize>,
         compatibility: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let opts = RustSaveOpts {
                 compatibility: compatibility.parse().map_err(to_py_err)?,
                 with_parents,
@@ -355,7 +355,7 @@ impl PySnapshot {
                 maximum_disk_bytes,
             },
         );
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let handle = prepared
                 .map_err(to_py_err)?
                 .checkpoint()
@@ -387,7 +387,7 @@ impl PySnapshot {
                 maximum_disk_bytes,
             },
         );
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let handles = prepared
                 .map_err(to_py_err)?
                 .checkpoints()
@@ -460,7 +460,7 @@ impl PySnapshot {
     /// Fetch current metadata through this snapshot's retained context.
     fn image_manifest_digest<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(snapshot
                 .manifest()
                 .await
@@ -491,7 +491,7 @@ impl PySnapshot {
     /// Fetch current metadata through this snapshot's retained context.
     fn checkpoint_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(snapshot
                 .manifest()
                 .await
@@ -523,15 +523,16 @@ impl PySnapshot {
     /// Fetch current metadata through this snapshot's retained context.
     fn labels<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            snapshot.labels().await.map_err(to_py_err)
-        })
+        crate::runtime::future_into_py(
+            py,
+            async move { snapshot.labels().await.map_err(to_py_err) },
+        )
     }
 
     /// Fetch current metadata through this snapshot's retained context.
     fn source_sandbox<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(snapshot
                 .manifest()
                 .await
@@ -545,7 +546,7 @@ impl PySnapshot {
     /// Raises `UnsupportedError` when artifact-file access is unavailable.
     #[staticmethod]
     fn list_dir<'py>(py: Python<'py>, dir: PathBuf) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let snapshots = RustSnapshot::list_dir(&dir).await.map_err(to_py_err)?;
             Ok(snapshots
                 .into_iter()
@@ -559,7 +560,7 @@ impl PySnapshot {
     #[staticmethod]
     #[pyo3(signature = (dir = None))]
     fn reindex<'py>(py: Python<'py>, dir: Option<PathBuf>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             match dir {
                 Some(dir) => RustSnapshot::reindex(dir).await,
                 None => RustSnapshot::reindex_default().await,
@@ -583,7 +584,7 @@ impl PySnapshot {
             kwargs,
         )?;
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(crate::sandbox::PySandbox::from_rust(
                 inner
                     .spawn_sandbox_with(|_| builder)
@@ -607,7 +608,7 @@ impl PySnapshot {
             kwargs,
         )?;
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let (progress, task) = inner
                 .spawn_sandbox_with_progress_with(|_| builder)
                 .await
@@ -640,7 +641,7 @@ impl PySnapshot {
         compatibility: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             snapshot
                 .save_to(
                     &out,
@@ -682,7 +683,7 @@ impl PySnapshot {
         compatibility: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             snapshot
                 .save_to(
                     &out,
@@ -716,7 +717,7 @@ impl PySnapshot {
     /// Raises `UnsupportedError` when payload verification is unavailable.
     fn verify<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let report = snapshot.verify().await.map_err(to_py_err)?;
             Python::attach(|py| -> PyResult<Py<PyAny>> {
                 let upper = PyDict::new(py);
@@ -802,7 +803,7 @@ impl PySnapshot {
     /// Load and validate the captured identity, returning a detached observation.
     fn manifest<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let observed = snapshot.manifest().await.map_err(to_py_err)?;
             let json = serde_json::to_string(&observed)
                 .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
@@ -813,7 +814,7 @@ impl PySnapshot {
     /// Load and validate the captured identity, returning a detached observation.
     fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let observed = snapshot.state().await.map_err(to_py_err)?;
             let json = serde_json::to_string(&observed)
                 .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
@@ -825,7 +826,7 @@ impl PySnapshot {
     #[pyo3(signature = (*, force = false))]
     fn destroy<'py>(&self, py: Python<'py>, force: bool) -> PyResult<Bound<'py, PyAny>> {
         let h = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             h.destroy(force).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -882,7 +883,7 @@ impl PySnapshotCopyBuilder {
         let output_archive_path = self.output_archive_path.clone();
         let labels = self.labels.clone();
         let record_integrity = self.record_integrity;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             snapshot
                 .copy_to(output_archive_path)
                 .labels(labels)
@@ -918,7 +919,7 @@ pub(crate) fn group_head_in(
     py: Python<'_>,
     group: String,
 ) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::runtime::future_into_py(py, async move {
         let head = context
             .checkpoints()
             .group_head(&group)
@@ -934,7 +935,7 @@ pub(crate) fn set_group_head_in(
     group: String,
     id: String,
 ) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::runtime::future_into_py(py, async move {
         let id = microsandbox::snapshot::SnapshotId::new(id).map_err(|e| {
             to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
                 e.to_string(),
@@ -1007,7 +1008,7 @@ pub(crate) fn create_in<'py>(
     full: bool,
     guest_flush: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::runtime::future_into_py(py, async move {
         let mut builder = RustSnapshot::ctx(context.as_ref())
             .builder(name)
             .from_sandbox(&from_sandbox)
