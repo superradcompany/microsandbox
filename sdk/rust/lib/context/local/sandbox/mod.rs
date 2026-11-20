@@ -1639,6 +1639,8 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::net::UnixListener;
     #[cfg(unix)]
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    #[cfg(unix)]
     use std::process::Command;
     use std::sync::Arc;
     #[cfg(unix)]
@@ -2183,8 +2185,43 @@ mod tests {
         journal
             .confirm(Some(serde_json::to_value(&source).unwrap()))
             .unwrap();
-        // Finish fallible evidence setup before spawning the disposable process.
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        // Signal dispatch requires the runtime's inherited ownership descriptor.
+        let lifecycle = microsandbox_runtime::ipc::acquire_lifecycle_guard(
+            &backend.config().run_dir(),
+            "kill-start",
+        )
+        .unwrap();
+        let lifecycle_fd = lifecycle.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "context::local::sandbox::signal_tests::lifecycle_signal_child",
+                "--nocapture",
+            ])
+            .env("MSB_LIFECYCLE_SIGNAL_CHILD", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        unsafe {
+            command.pre_exec(move || {
+                let copy = libc::fcntl(lifecycle_fd, libc::F_DUPFD_CLOEXEC, 200);
+                if copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(copy, microsandbox_runtime::vm::LIFECYCLE_LOCK_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
+            super::signal_tests::cleanup_child(&mut child);
+        });
+        super::signal_tests::expect_line(
+            &super::signal_tests::child_lines(child.stdout.take().unwrap()),
+            "ready",
+        );
+        drop(lifecycle);
         let pid = child.id() as i32;
         let published = run_entity::Entity::update_many()
             .col_expr(
@@ -2201,10 +2238,18 @@ mod tests {
         }
         drop(transition);
         let result = tokio::time::timeout(Duration::from_secs(6), kill).await;
+        let status_before_cleanup = child.try_wait();
         // Ensure assertion failures never leave the helper process behind.
         let _ = child.kill();
         child.wait().unwrap();
         result.unwrap().unwrap().unwrap();
+        assert_eq!(
+            status_before_cleanup
+                .unwrap()
+                .and_then(|status| status.signal()),
+            Some(libc::SIGKILL),
+            "kill must terminate the runtime before fixture cleanup"
+        );
         assert_eq!(
             backend
                 .sandbox_handle_state("kill-start", Some(id))

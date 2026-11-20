@@ -10,6 +10,7 @@
 //! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tokio_tar` remains the header codec and the dense-entry writer.
 
 mod batch;
+mod budget;
 mod delta;
 mod encryption;
 mod extensions;
@@ -34,7 +35,8 @@ use async_compression::tokio::write::ZstdEncoder;
 use microsandbox_image::checkpoint::{CheckpointClosure, MemoryExtentContent, ObjectId};
 use microsandbox_image::snapshot::migration::V066_DESCRIPTOR_FILENAME;
 use microsandbox_image::snapshot::{
-    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, SnapshotState, UpperIntegrity,
+    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, Manifest, SnapshotState,
+    UpperIntegrity,
 };
 use microsandbox_runtime::launch::RootfsUpperLayerConfig;
 use microsandbox_types::snapshot::GUEST_CLOCK_EXTENSION;
@@ -53,6 +55,8 @@ use crate::context::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 pub use crate::snapshot::{LoadOpts, SaveOpts};
+
+use self::budget::ImportBudget;
 
 use super::{
     CHECKPOINT_DIRECTORY, Snapshot, SnapshotHandle, store, validate_checkpoint_owned_inventory,
@@ -283,16 +287,25 @@ impl LocalContext {
             .await?
             .starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
 
+        // Direct restore has no import-size option.
+        let mut budget = ImportBudget::unlimited();
         let unpack_started = Instant::now();
         let unpacked = if is_zstd {
             Box::pin(unpack_archive(
                 ZstdDecoder::new(buffered),
                 child_stage,
                 cache_stage.path(),
+                &mut budget,
             ))
             .await?
         } else {
-            Box::pin(unpack_archive(buffered, child_stage, cache_stage.path())).await?
+            Box::pin(unpack_archive(
+                buffered,
+                child_stage,
+                cache_stage.path(),
+                &mut budget,
+            ))
+            .await?
         };
 
         let unpack_us = unpack_started.elapsed().as_micros();
@@ -310,7 +323,8 @@ impl LocalContext {
 
         let Some(inventory) = unpacked.inventory else {
             super::migration::normalize_staged(self.db().await?, &unpacked.manifest_dirs).await?;
-            let imported = verify_imported_snapshots(self, &unpacked.manifest_dirs).await?;
+            let imported =
+                verify_imported_snapshots(self, &unpacked.manifest_dirs, &budget).await?;
             let head_index = select_head_snapshot(&imported)?;
             let head = &imported[head_index];
             let manifest = head.manifest().clone();
@@ -2584,6 +2598,7 @@ async fn unpack_archive<R>(
     reader: R,
     snapshots_dir: &Path,
     cache_dir: &Path,
+    budget: &mut ImportBudget,
 ) -> MicrosandboxResult<UnpackedArchive>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -2610,6 +2625,16 @@ where
         }
         let (target, descriptor, inventory) =
             archive_entry_target(&components, &path_in_archive, snapshots_dir, cache_dir)?;
+
+        let metadata_limit =
+            inspect::metadata_limit(&path_in_archive).or_else(|| match components.as_slice() {
+                ["snapshots", _, name] if *name == super::metadata::METADATA_FILENAME => {
+                    Some(super::metadata::MAX_METADATA_BYTES)
+                }
+                _ => None,
+            });
+        // Read the logical size once: sparse bodies may be much smaller.
+        budget.charge_entry(header.size()?, metadata_limit)?;
 
         // Tar member names are portable paths. Re-encode their parsed components
         // instead of displaying a native Path, which would put `\\` into the
@@ -3763,8 +3788,10 @@ fn inventory_entry_target(
 async fn materialize_inventory_layers(
     inventory: &ArchiveInventory,
     snapshots_dir: &Path,
+    budget: &mut ImportBudget,
 ) -> MicrosandboxResult<()> {
     let shared_layers = snapshots_dir.join(".archive-layers");
+    let mut materialized = HashSet::new();
     for member in &inventory.members {
         let artifact_dir = snapshots_dir.join(&member.snapshot_id);
         let descriptor_bytes = tokio::fs::read(artifact_dir.join(DESCRIPTOR_FILENAME)).await?;
@@ -3783,6 +3810,11 @@ async fn materialize_inventory_layers(
             let target = artifact_dir.join(&relative);
             if let Some(parent) = target.parent() {
                 tokio::fs::create_dir_all(parent).await?;
+            }
+            // Extraction or dependency resolution already charged one copy. Only charge
+            // additional member copies; the shared staging file is removed below.
+            if !materialized.insert(source.clone()) {
+                budget.charge_file(&source).await?;
             }
             let source_clone = source.clone();
             let target_clone = target.clone();
@@ -4012,9 +4044,30 @@ fn is_supported_cache_file(kind: &str, file: &str) -> bool {
     }
 }
 
+async fn read_budget_manifest(directory: &Path) -> MicrosandboxResult<Manifest> {
+    let bytes = tokio::fs::read(directory.join(DESCRIPTOR_FILENAME)).await?;
+    Manifest::from_bytes(&bytes)
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))
+}
+
+async fn validate_staged_manifests(
+    directories: &[PathBuf],
+    budget: &ImportBudget,
+) -> MicrosandboxResult<()> {
+    if !budget.is_limited() {
+        return Ok(());
+    }
+
+    for directory in directories {
+        budget.validate_manifest(&read_budget_manifest(directory).await?)?;
+    }
+    Ok(())
+}
+
 async fn verify_imported_snapshots(
     local: &LocalContext,
     manifest_dirs: &[PathBuf],
+    budget: &ImportBudget,
 ) -> MicrosandboxResult<Vec<Snapshot>> {
     if manifest_dirs.is_empty() {
         return Err(MicrosandboxError::Custom(
@@ -4052,6 +4105,9 @@ async fn verify_imported_snapshots(
         return Err(MicrosandboxError::Custom(
             "archive contained no snapshot manifest".into(),
         ));
+    }
+    for snapshot in &snapshots {
+        budget.validate_manifest(snapshot.manifest())?;
     }
     Ok(snapshots)
 }
@@ -4569,7 +4625,13 @@ pub async fn fuzz_unpack_local_snapshot_archive(data: &[u8]) {
     let Ok(cache) = tempfile::tempdir() else {
         return;
     };
-    let _ = unpack_archive(data, snapshots.path(), cache.path()).await;
+    let _ = unpack_archive(
+        data,
+        snapshots.path(),
+        cache.path(),
+        &mut ImportBudget::unlimited(),
+    )
+    .await;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -4578,6 +4640,8 @@ pub async fn fuzz_unpack_local_snapshot_archive(data: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use microsandbox_image::checkpoint::{
         CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, DiskGenerationManifest,
         DiskLayerRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
@@ -4590,6 +4654,238 @@ mod tests {
     };
 
     use super::*;
+    use crate::Context;
+
+    #[tokio::test]
+    async fn bounded_import_limits_expansion_and_keeps_unbounded_import_compatible() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .unwrap();
+        let data = grouped_archive_manifest(990, None);
+        let artifact = root.path().join("artifact");
+        write_grouped_archive_fixture(&artifact, &data);
+        let archive = root.path().join("archive.msb");
+        save_snapshot(
+            &backend,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts {
+                plain_tar: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let file_bytes: u64 = tar::Archive::new(std::fs::File::open(&archive).unwrap())
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().size())
+            .sum();
+
+        {
+            let snapshots = backend.checkpoints();
+            let groups = backend.snapshots();
+            let loaded = groups
+                .load_with("bounded", slice::from_ref(&archive), |options| {
+                    options.maximum_disk_bytes(file_bytes)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                loaded.checkpoints[0].manifest().await.unwrap().snapshot_id,
+                data.snapshot_id
+            );
+
+            for (disk_limit, expected) in [
+                (0, "must be positive"),
+                (file_bytes - 1, "maximum disk size"),
+            ] {
+                let error = groups
+                    .load_with("refused", slice::from_ref(&archive), |options| {
+                        options.maximum_disk_bytes(disk_limit)
+                    })
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains(expected), "{error}");
+                assert!(!backend.snapshots_dir().join("refused").exists());
+            }
+
+            let local = &backend;
+            for entry in std::fs::read_dir(local.snapshots_dir()).unwrap() {
+                let entry = entry.unwrap();
+                assert!(
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".msb-snapshot-")
+                );
+            }
+            snapshots
+                .load_with_options(
+                    &archive,
+                    LoadOpts {
+                        group: Some("unbounded".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_batch_import_accepts_more_than_256_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .unwrap();
+        let mut archives = Vec::new();
+        for index in 0..86 {
+            // Repeated members keep group metadata small while all 258 tar entries are admitted.
+            let manifest = grouped_archive_manifest(1000, None);
+            let artifact = root.path().join("artifact");
+            write_grouped_archive_fixture(&artifact, &manifest);
+            let archive = root.path().join(format!("archive-{index}.msb"));
+            save_snapshot(
+                &local,
+                artifact.to_str().unwrap(),
+                &archive,
+                SaveOpts::default(),
+            )
+            .await
+            .unwrap();
+            archives.push(archive);
+        }
+
+        let loaded = load_snapshots(
+            &local,
+            &archives,
+            LoadOpts::default().maximum_disk_bytes(86 * 8192),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(loaded.len(), 86);
+    }
+
+    #[tokio::test]
+    async fn bounded_metadata_rejects_large_bodies_before_writing() {
+        use tokio::io::AsyncWriteExt;
+
+        let snapshot = "snap_00000000000000000000000000000001";
+        for (name, limit) in [
+            ("archive.json".into(), 4096),
+            ("archive.json".into(), 4 * 1024 * 1024),
+            (format!("snapshots/{snapshot}/snapshot.json"), 1024 * 1024),
+            (format!("snapshots/{snapshot}/metadata.json"), 1024 * 1024),
+            ("legacy/manifest.json".into(), 1024 * 1024),
+            (
+                format!("checkpoints/{snapshot}/checkpoint.json"),
+                8 * 1024 * 1024,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let snapshots = root.path().join("snapshots");
+            let cache = root.path().join("cache");
+            std::fs::create_dir_all(&snapshots).unwrap();
+            std::fs::create_dir_all(&cache).unwrap();
+            let archive = root.path().join("oversized.msb");
+            let mut header = Header::new_gnu();
+            header.set_path(name).unwrap();
+            header.set_size(limit + 1);
+            header.set_mode(0o600);
+            header.set_cksum();
+            // The declared body is intentionally absent: reject its size before writing it.
+            let mut encoder = ZstdEncoder::new(tokio::fs::File::create(&archive).await.unwrap());
+            encoder.write_all(header.as_bytes()).await.unwrap();
+            encoder.shutdown().await.unwrap();
+            let reader = BufReader::new(tokio::fs::File::open(&archive).await.unwrap());
+            let mut budget = ImportBudget::new(Some(4096)).unwrap();
+
+            let error = unpack_archive(ZstdDecoder::new(reader), &snapshots, &cache, &mut budget)
+                .await
+                .err()
+                .unwrap();
+
+            let expected = if limit == 4096 {
+                "maximum disk size"
+            } else {
+                "metadata exceeds its size limit"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(std::fs::read_dir(&snapshots).unwrap().count(), 0);
+            assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_import_counts_sparse_logical_sizes_before_extraction() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .unwrap();
+        let names = [
+            "upper.ext4",
+            "archive.json",
+            "snapshot.json",
+            "manifest.json",
+            "metadata.json",
+        ];
+        {
+            let snapshots = backend.checkpoints();
+            for (index, name) in names.into_iter().enumerate() {
+                let name = format!("files/{}/{name}", "a".repeat(64));
+                let archive = root.path().join(format!("bad-{index}.tar"));
+                let mut header = tokio_tar::Header::new_gnu();
+                header.set_path(&name).unwrap();
+                header.set_mode(0o600);
+                header.set_entry_type(EntryType::GNUSparse);
+                header.set_size(0);
+                let gnu = header.as_gnu_mut().unwrap();
+                gnu.realsize.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].offset.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].numbytes.copy_from_slice(b"00000000000\0");
+                header.set_cksum();
+                let mut bytes = header.as_bytes().to_vec();
+                bytes.resize(bytes.len() + 1024, 0);
+                std::fs::write(&archive, bytes).unwrap();
+                let error = snapshots
+                    .load_with_options(&archive, LoadOpts::default().maximum_disk_bytes(4096))
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("maximum disk size"), "{error}");
+            }
+            let archive = root.path().join("aggregate.tar");
+            let mut bytes = Vec::new();
+            for index in 0..2 {
+                let mut header = tokio_tar::Header::new_gnu();
+                header
+                    .set_path(format!("files/{}/upper-{index}.ext4", "a".repeat(64)))
+                    .unwrap();
+                header.set_mode(0o600);
+                header.set_entry_type(EntryType::GNUSparse);
+                header.set_size(0);
+                let gnu = header.as_gnu_mut().unwrap();
+                gnu.realsize.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].offset.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].numbytes.copy_from_slice(b"00000000000\0");
+                header.set_cksum();
+                bytes.extend_from_slice(header.as_bytes());
+            }
+            bytes.resize(bytes.len() + 1024, 0);
+            std::fs::write(&archive, bytes).unwrap();
+            let error = snapshots
+                .load_with_options(
+                    &archive,
+                    LoadOpts::default().maximum_disk_bytes(64 * 1024 * 1024),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("maximum disk size"), "{error}");
+        }
+    }
 
     #[tokio::test]
     async fn import_requires_durable_ownership_and_recovers_failed_completion() {
@@ -4833,7 +5129,7 @@ mod tests {
             "image": {"ref": "alpine:3.21", "manifest_digest": format!("sha256:{}", "a".repeat(64))},
             "source_sandbox": "previous", "labels": {},
             "state": {"kind": "file", "format": "raw", "fstype": "ext4",
-                "upper": {"file": "disk.ext4", "size_bytes": 7, "integrity": null}},
+                "upper": {"file": "archive.json", "size_bytes": 7, "integrity": null}},
             "extensions": {}, "requires": []
         })).unwrap();
             let parent = if with_parent {
@@ -4861,9 +5157,9 @@ mod tests {
             let digest = manifest.digest().unwrap();
             let digest = digest.strip_prefix("sha256:").unwrap();
             for (directory, payload_name) in [
-                (digest, "disk.ext4"),
+                (digest, "archive.json"),
                 (digest, "upper.ext4"),
-                ("not-an-id", "disk.ext4"),
+                ("not-an-id", "archive.json"),
             ] {
                 let archive = temporary.path().join(format!("{payload_name}.tar"));
                 let mut builder = tar::Builder::new(std::fs::File::create(&archive).unwrap());
@@ -4892,7 +5188,10 @@ mod tests {
                             format!("snapshots/{digest}/snapshot.json"),
                             descriptor.as_slice(),
                         ),
-                        (format!("files/{digest}/disk.ext4"), b"payload".as_slice()),
+                        (
+                            format!("files/{digest}/archive.json"),
+                            b"payload".as_slice(),
+                        ),
                     ] {
                         let mut header = tar::Header::new_gnu();
                         header.set_mode(0o600);
@@ -4925,8 +5224,23 @@ mod tests {
                     continue;
                 }
                 inspection.unwrap();
+                if with_parent && payload_name == "archive.json" {
+                    let error = load_snapshot_with_options(
+                        &local,
+                        &archive,
+                        LoadOpts {
+                            group: Some("over-budget".into()),
+                            ..Default::default()
+                        }
+                        .maximum_disk_bytes(10),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(error.to_string().contains("maximum disk size"), "{error}");
+                    assert!(!local.snapshots_dir().join("over-budget").exists());
+                }
                 let result = load_snapshot(&local, &archive, None).await;
-                if payload_name == "disk.ext4" {
+                if payload_name == "archive.json" {
                     let loaded = result.unwrap();
                     let snapshot = store::open_snapshot(&local, &loaded.path().to_string_lossy())
                         .await
@@ -4946,6 +5260,14 @@ mod tests {
                         std::fs::read(snapshot.layer_path(layer)).unwrap(),
                         b"payload"
                     );
+                    let mut budget = ImportBudget::new(Some(6)).unwrap();
+                    let base =
+                        delta::open_base(&local, archive.to_str().unwrap(), &mut budget).await;
+                    let error = match base {
+                        Err(error) => error,
+                        Ok(_) => panic!("legacy base bypassed the size limit"),
+                    };
+                    assert!(error.to_string().contains("maximum disk size"), "{error}");
                 } else {
                     assert!(
                         result.is_err(),
@@ -5300,7 +5622,8 @@ mod tests {
             .build()
             .unwrap();
         let parent = grouped_archive_manifest(1, None);
-        let child = grouped_archive_manifest(2, Some(&parent));
+        let mut child = grouped_archive_manifest(2, Some(&parent));
+        child.state = parent.state.clone();
         for name in ["first", "second"] {
             let group = super::super::group::ensure(&local.snapshots_dir(), Some(name))
                 .await
@@ -5341,7 +5664,74 @@ mod tests {
         )
         .await
         .unwrap();
-        let loaded = load_snapshot(&local, &archive, None).await.unwrap();
+        // Store the common layer once, as permitted by the portable archive format.
+        let bytes = std::fs::read(&archive).unwrap();
+        let mut source = tar::Archive::new(bytes.as_slice());
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut paths = HashSet::new();
+        for entry in source.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            if !paths.insert(path.clone()) {
+                continue;
+            }
+            let mut header = entry.header().clone();
+            if path == Path::new("archive.json") {
+                let mut inventory: ArchiveInventory = serde_json::from_reader(entry).unwrap();
+                inventory.entries.dedup_by(|a, b| a.path == b.path);
+                inventory.limits = ArchiveLimits {
+                    entry_count: inventory.entries.len() as u64,
+                    encoded_bytes: inventory
+                        .entries
+                        .iter()
+                        .map(|entry| entry.encoded_size)
+                        .sum(),
+                    apparent_bytes: inventory
+                        .entries
+                        .iter()
+                        .map(|entry| entry.apparent_size)
+                        .sum(),
+                };
+                let bytes = serde_json::to_vec(&inventory).unwrap();
+                header.set_size(bytes.len() as u64);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, path, bytes.as_slice())
+                    .unwrap();
+            } else {
+                builder.append_data(&mut header, path, &mut entry).unwrap();
+            }
+        }
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+
+        let extracted_bytes: u64 = tar::Archive::new(std::fs::File::open(&archive).unwrap())
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().size())
+            .sum();
+        let installed_bytes = extracted_bytes + 4096;
+
+        let error = load_snapshot_with_options(
+            &local,
+            &archive,
+            LoadOpts {
+                group: Some("over-budget".into()),
+                ..Default::default()
+            }
+            .maximum_disk_bytes(installed_bytes - 1),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("maximum disk size"), "{error}");
+        assert!(!local.snapshots_dir().join("over-budget").exists());
+
+        let loaded = load_snapshot_with_options(
+            &local,
+            &archive,
+            LoadOpts::default().maximum_disk_bytes(installed_bytes),
+        )
+        .await
+        .unwrap();
         let loaded_group = loaded.group().unwrap();
         assert_eq!(
             store::get_handle(&local, &format!("{loaded_group}:base"))
@@ -5407,10 +5797,9 @@ mod tests {
                 .is_err()
             );
             assert!(!local.snapshots_dir().join(group).exists());
-            let imported =
-                load_encrypted(&local, std::slice::from_ref(&archive), opts, &identity_path)
-                    .await
-                    .unwrap();
+            let imported = load_encrypted(&local, slice::from_ref(&archive), opts, &identity_path)
+                .await
+                .unwrap();
             assert_eq!(imported.heads[0].id(), manifest.snapshot_id.as_str());
         }
     }

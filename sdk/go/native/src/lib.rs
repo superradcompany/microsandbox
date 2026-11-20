@@ -1224,6 +1224,8 @@ struct SnapshotLoadOptsJson {
     group: Option<String>,
     #[serde(default)]
     set_head: bool,
+    #[serde(default)]
+    maximum_disk_bytes: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -7141,6 +7143,10 @@ pub unsafe extern "C" fn msb_snapshot_import_with_base(
     })
 }
 
+/// Advertise enforcement of the snapshot import byte limit.
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_supports_snapshot_import_budget() {}
+
 /// Import an archive with group selection without changing the existing import ABI.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_snapshot_import_with_options(
@@ -7163,6 +7169,7 @@ pub unsafe extern "C" fn msb_snapshot_import_with_options(
                     base: opts.base,
                     group: opts.group,
                     set_head: opts.set_head,
+                    maximum_disk_bytes: opts.maximum_disk_bytes,
                 },
             )
             .await
@@ -7196,6 +7203,7 @@ pub unsafe extern "C" fn msb_snapshot_import_many(
                     base: opts.base,
                     group: opts.group,
                     set_head: opts.set_head,
+                    maximum_disk_bytes: opts.maximum_disk_bytes,
                 },
             )
             .await

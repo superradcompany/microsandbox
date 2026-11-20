@@ -902,6 +902,11 @@ char *msb_snapshot_import_with_base(uint64_t cancel_id,
                                     uintptr_t buf_len);
 
 /**
+ * Advertise enforcement of the snapshot import byte limit.
+ */
+void msb_supports_snapshot_import_budget(void);
+
+/**
  * Import an archive with group selection without changing the existing import ABI.
  */
 char *msb_snapshot_import_with_options(uint64_t cancel_id,

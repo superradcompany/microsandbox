@@ -431,6 +431,14 @@ destDir(value: string): this
 
 Select the parent storage directory. Omission uses default storage.
 
+#### <span className="msb-recv">options.</span><span className="msb-hn">maximumDiskBytes()</span>
+
+```typescript
+maximumDiskBytes(bytes: number): this
+```
+
+Limit total logical file bytes, including metadata, dependencies, and sparse holes. Each declared file disk must also fit. Omit it for no size limit. Legacy `LoadOpts` accepts the same `maximumDiskBytes` property.
+
 <span id="load-option-sethead" />
 
 #### <span className="msb-recv">options.</span><span className="msb-hn">setHead()</span>

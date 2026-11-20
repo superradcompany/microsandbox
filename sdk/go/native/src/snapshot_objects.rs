@@ -381,6 +381,7 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
                     dest: options.dest,
                     base: options.base,
                     set_head: options.set_head,
+                    maximum_disk_bytes: options.maximum_disk_bytes,
                     ..Default::default()
                 },
                 options.caller_directory.as_deref(),

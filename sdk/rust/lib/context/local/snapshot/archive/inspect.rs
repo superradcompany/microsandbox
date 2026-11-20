@@ -426,7 +426,7 @@ impl MetadataReader {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn metadata_limit(path: &Path) -> Option<u64> {
+pub(super) fn metadata_limit(path: &Path) -> Option<u64> {
     let parts = normal_utf8_components(path).ok()?;
 
     match parts.as_slice() {

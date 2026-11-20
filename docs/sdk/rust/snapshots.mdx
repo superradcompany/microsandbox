@@ -2425,3 +2425,11 @@ fn set_head(mut self) -> Self
 ```
 
 Select the unique imported tip even if it diverges from the current head. Ambiguous tips fail; omission preserves the normal fast-forward/headless policy.
+
+#### <span className="msb-recv">import.</span><span className="msb-hn">maximum_disk_bytes()</span>
+
+```rust
+fn maximum_disk_bytes(self, bytes: u64) -> Self
+```
+
+Limit total logical file bytes, including metadata, dependencies, and sparse holes. Each declared file disk must also fit. The limit must be positive; omission means unlimited. `LoadOpts` supports the same field and builder method. Temporary staging may need additional disk space.
