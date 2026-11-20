@@ -153,6 +153,14 @@ mod tests {
     }
 
     #[test]
+    fn current_rc_needs_no_historical_saved_config_projection() {
+        let version = Version::parse("0.8.0-rc.1").unwrap();
+        assert!(!requires_downgrade(&version));
+        assert!(!requires_rewrite(&version));
+        assert!(to_previous_version("{}", &Version::parse("0.7.6-rc.1").unwrap()).is_err());
+    }
+
+    #[test]
     fn v0_6_5_downgrade_restores_cpu_and_mount_fields_without_losing_settings() {
         let raw = include_str!("../../../../sdk/rust/lib/db/fixtures/config-0.6.5.json");
         let mut value: Value = serde_json::from_str(raw).unwrap();

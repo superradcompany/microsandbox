@@ -29,8 +29,7 @@ use microsandbox_protocol::core::{
     WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
     WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_BYTES,
     WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFailure, WorkloadFailureDisposition, WorkloadFreeze,
-    WorkloadFrozen, WorkloadThaw, WorkloadThawMode, WorkloadThawed, WorkloadTransportCredit,
-    WorkloadTransportPosition,
+    WorkloadFrozen, WorkloadThawed, WorkloadTransportCredit, WorkloadTransportPosition,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecOutputAck, ExecRequest, ExecResize, ExecSignal,
@@ -39,7 +38,11 @@ use microsandbox_protocol::exec::{
 };
 use microsandbox_protocol::fs::{FS_CHUNK_SIZE, FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
+use microsandbox_protocol::init_observation::InitObservation;
 use microsandbox_protocol::message::{FRAME_HEADER_SIZE, Message, MessageType};
+use microsandbox_protocol::restore_transport::{
+    GuestReady, GuestThaw as WorkloadThaw, GuestThawMode as WorkloadThawMode,
+};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 use microsandbox_protocol::transport::{
     BULK_BINDING_SIZE, BulkTransportReady, CLIENT_INCARNATION_SIZE, ClientIncarnation,
@@ -155,7 +158,7 @@ struct AgentState {
     // Retain stdin/PTY and process registrations until inherited output readers finish.
     detached_sessions: HashMap<(u64, u32), ExecSession>,
     stdin_poll_offset: usize,
-    restored_attempt: Option<String>,
+    restored_attempt: Option<(String, WorkloadThawMode)>,
     client_incarnations: HashMap<u32, ClientIncarnation>,
     bulk_input_budget: Arc<Semaphore>,
     sessions: HashMap<u32, ExecSession>,
@@ -209,6 +212,7 @@ struct ActivityTracker {
 pub struct BootConsoleState {
     input: Vec<u8>,
     init_failure_ack: bool,
+    init_observation: Option<InitObservation>,
 }
 
 #[derive(Clone)]
@@ -300,6 +304,13 @@ impl Default for AgentState {
             pending_bulk_finishes: HashMap::new(),
             fs: FsState::default(),
         }
+    }
+}
+
+impl BootConsoleState {
+    /// Retain boot selection without adding init arguments or environment to Ready.
+    pub fn set_init_observation(&mut self, observation: Option<InitObservation>) {
+        self.init_observation = observation;
     }
 }
 
@@ -548,20 +559,33 @@ pub async fn run(
     let ready_msg = Message::with_payload(
         MessageType::Ready,
         0,
-        &Ready {
-            boot_time_ns,
-            init_time_ns,
-            ready_time_ns,
-            agent_version: env!("CARGO_PKG_VERSION").to_string(),
-            bulk_transport: bulk_port
-                .as_ref()
-                .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
-            relay_lease: Some(RelayLeaseReady::range_lease_v1()),
-            // Shared arenas are negotiated only on the local SDK-to-runtime hop. Agentd speaks to
-            // the runtime over the guest consoles, so the runtime injects this capability later.
-            local_transport: None,
-            workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
-            exec_limits: config.exec_limits,
+        &GuestReady {
+            public: Ready {
+                boot_time_ns,
+                init_time_ns,
+                ready_time_ns,
+                agent_version: env!("CARGO_PKG_VERSION").to_string(),
+                bulk_transport: bulk_port
+                    .as_ref()
+                    .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
+                relay_lease: Some(RelayLeaseReady::range_lease_v1()),
+                // Shared arenas are negotiated only on the local SDK-to-runtime hop. Agentd speaks to
+                // the runtime over the guest consoles, so the runtime injects this capability later.
+                local_transport: None,
+                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+                exec_limits: config.exec_limits,
+            },
+            applied_security_profile: Some(match config.security_profile {
+                crate::config::SecurityProfile::Default => {
+                    microsandbox_protocol::bootstrap::BootstrapSecurityProfile::Default
+                }
+                crate::config::SecurityProfile::Restricted => {
+                    microsandbox_protocol::bootstrap::BootstrapSecurityProfile::Restricted
+                }
+            }),
+            init_observation: boot_console.init_observation,
+            restore_tcp_reset_version: crate::network_reset::supported().then_some(1),
+            freeze_resources_version: Some(1),
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -2542,6 +2566,42 @@ async fn handle_message_with_charge(
     // queued output after a disconnect instead of relabelling it with a recycled correlation ID.
     let session_tx = root_session_tx.with_incarnation(client_incarnation_for_id(state, msg.id));
     match msg.t {
+        MessageType::ObserveResources => {
+            if !MessageType::ObservedResources.is_available_at(msg.v) {
+                return encode_core_error_if_supported(
+                    &msg,
+                    msg.id,
+                    CoreErrorKind::UnsupportedProtocolGeneration,
+                    "resource observations require protocol generation 11".into(),
+                    Some(msg.t.as_str().into()),
+                    out_buf,
+                );
+            }
+            let Some(request) = decode_payload_or_core_error::<
+                microsandbox_protocol::resources::ResourceObservationRequest,
+            >(&msg, out_buf)?
+            else {
+                return Ok(());
+            };
+            // Kernel readiness reads are bounded and non-mutating. Keep filesystem work off
+            // the async executor and entirely separate from the independent liveness pulse.
+            let observation =
+                tokio::task::spawn_blocking(move || crate::resources::observe(request))
+                    .await
+                    .map_err(|e| {
+                        AgentdError::ExecSession(format!("resource observation worker: {e}"))
+                    })?;
+            let mut reply =
+                Message::with_payload(MessageType::ObservedResources, msg.id, &observation)
+                    .map_err(|e| {
+                        AgentdError::ExecSession(format!("encode resource observation: {e}"))
+                    })?;
+            reply.v = msg.v;
+            codec::encode_to_buf(&reply, out_buf).map_err(|e| {
+                AgentdError::ExecSession(format!("encode resource observation frame: {e}"))
+            })?;
+        }
+
         MessageType::RootDiskPrepare | MessageType::RootDiskGrow => {
             let Some(request) = decode_payload_or_core_error::<
                 microsandbox_protocol::core::RootDiskGrow,
@@ -2603,10 +2663,14 @@ async fn handle_message_with_charge(
         }
 
         MessageType::WorkloadFreeze => {
-            let Some(request) = decode_payload_or_core_error::<WorkloadFreeze>(&msg, out_buf)?
+            let Some(request) = decode_payload_or_core_error::<
+                microsandbox_protocol::restore_transport::GuestFreeze,
+            >(&msg, out_buf)?
             else {
                 return Ok(());
             };
+            let query = request.observe_resources;
+            let request = request.freeze;
             let position = state.input_window.position();
             if state.pending_freeze.as_ref().is_some_and(|pending| {
                 pending
@@ -2720,16 +2784,27 @@ async fn handle_message_with_charge(
                         } else {
                             false
                         };
-                        let reply = Message::with_payload(
-                            MessageType::WorkloadFrozen,
-                            msg.id,
-                            &WorkloadFrozen {
-                                attempt_id: request.attempt_id,
-                                guest_bulk_bytes_target: state.frozen_guest_bulk_bytes,
-                                input_credit: state.input_window.credit()?,
-                                external_mounts_synced,
-                            },
-                        )
+                        // The workload is parked and guest writeback has reached this cut.
+                        // Missing or slow optional evidence must not fail the checkpoint.
+                        let frozen = WorkloadFrozen {
+                            attempt_id: request.attempt_id,
+                            guest_bulk_bytes_target: state.frozen_guest_bulk_bytes,
+                            input_credit: state.input_window.credit()?,
+                            external_mounts_synced,
+                        };
+                        let reply = if let Some(query) = query {
+                            let frozen_resources = crate::resources::observe_frozen(query).await;
+                            Message::with_payload(
+                                MessageType::WorkloadFrozen,
+                                msg.id,
+                                &microsandbox_protocol::restore_transport::GuestFrozen {
+                                    frozen,
+                                    frozen_resources,
+                                },
+                            )
+                        } else {
+                            Message::with_payload(MessageType::WorkloadFrozen, msg.id, &frozen)
+                        }
                         .map_err(|error| {
                             AgentdError::ExecSession(format!(
                                 "encode workload-frozen response: {error}"
@@ -2806,16 +2881,59 @@ async fn handle_message_with_charge(
                 codec::encode_to_buf(&reply, out_buf)?;
                 return Ok(());
             }
-            if request.mode == WorkloadThawMode::Restore
-                && state.restored_attempt.as_deref() != Some(&request.attempt_id)
+            // A duplicate restore may arrive after workloads have already resumed.
+            // It may acknowledge only the cleanup mode actually performed for this cut.
+            if let Some((attempt, mode)) = &state.restored_attempt
+                && attempt == &request.attempt_id
+                && *mode != request.mode
+            {
+                encode_workload_error(
+                    &msg,
+                    &request.attempt_id,
+                    WorkloadLatchError::Conflict(
+                        "restore attempt already used a different thaw mode".into(),
+                    ),
+                    out_buf,
+                )?;
+                return Ok(());
+            }
+            if request.mode != WorkloadThawMode::Continue
+                && !state
+                    .restored_attempt
+                    .as_ref()
+                    .is_some_and(|(attempt, _)| attempt == &request.attempt_id)
             {
                 if let Err(error) = workload.require_frozen_attempt(&request.attempt_id) {
                     encode_workload_error(&msg, &request.attempt_id, error, out_buf)?;
                     return Ok(());
                 }
-                // Never call ordinary disconnect here: it kills the very processes we captured.
+                if request.mode == WorkloadThawMode::RestoreResetTcp {
+                    // Workloads remain frozen on failure. Never acknowledge connection
+                    // reset based only on the boot capability or a partially completed dump.
+                    let result =
+                        tokio::task::spawn_blocking(crate::network_reset::reset_external_tcp)
+                            .await
+                            .map_err(|error| {
+                                AgentdError::ExecSession(format!(
+                                    "restore TCP reset worker: {error}"
+                                ))
+                            })?;
+                    if let Err(error) = result {
+                        encode_workload_error(
+                            &msg,
+                            &request.attempt_id,
+                            WorkloadLatchError::Conflict(format!(
+                                "restore TCP reset failed; workloads remain frozen: {error}"
+                            )),
+                            out_buf,
+                        )?;
+                        return Ok(());
+                    }
+                }
+                // Delay client detachment until socket cleanup succeeds: a failed
+                // reset may be retried while the same transport cut is still frozen.
                 restore_client_state(state, root_session_tx).await?;
-                state.restored_attempt = Some(request.attempt_id.clone());
+                state.restored_attempt = Some((request.attempt_id.clone(), request.mode));
             }
             match workload.thaw(&request.attempt_id) {
                 Ok(()) => {
@@ -3314,6 +3432,7 @@ fn message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(
         t,
         MessageType::ClockSync
+            | MessageType::ObserveResources
             | MessageType::Ping
             | MessageType::Touch
             | MessageType::WorkloadFreeze
@@ -3332,6 +3451,7 @@ fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(
         t,
         MessageType::Pong
+            | MessageType::ObservedResources
             | MessageType::Touched
             | MessageType::WorkloadFrozen
             | MessageType::WorkloadThawed
@@ -6373,6 +6493,9 @@ mod tests {
     fn maintenance_messages_do_not_implicitly_refresh_idle_timer() {
         assert!(!message_refreshes_idle_timer(&MessageType::ClockSync));
         assert!(!message_refreshes_idle_timer(&MessageType::Ping));
+        assert!(!message_refreshes_idle_timer(
+            &MessageType::ObserveResources
+        ));
         assert!(!message_refreshes_idle_timer(&MessageType::Touch));
         assert!(message_refreshes_idle_timer(&MessageType::ExecRequest));
     }
@@ -6380,6 +6503,9 @@ mod tests {
     #[test]
     fn maintenance_replies_do_not_refresh_idle_timer() {
         assert!(!guest_message_refreshes_idle_timer(&MessageType::Pong));
+        assert!(!guest_message_refreshes_idle_timer(
+            &MessageType::ObservedResources
+        ));
         assert!(!guest_message_refreshes_idle_timer(&MessageType::Touched));
         assert!(!guest_message_refreshes_idle_timer(&MessageType::CoreError));
         assert!(guest_message_refreshes_idle_timer(&MessageType::ExecStdout));

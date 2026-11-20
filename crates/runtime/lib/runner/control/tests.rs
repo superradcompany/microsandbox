@@ -1081,3 +1081,35 @@ async fn windows_cancelled_reply_drain_releases_its_flush_worker() {
         .unwrap();
     drop(client);
 }
+
+#[tokio::test]
+async fn unsupported_label_probe_preserves_the_control_connection() {
+    let (_host, dispatcher) = dispatcher(true);
+    let (mut client, server) = connection(&dispatcher);
+    handshake_generation(&mut client, 64, 2).await;
+    request_at(
+        &mut client,
+        2,
+        1,
+        0,
+        microsandbox_protocol::labels::LABELS_REQUEST,
+        &microsandbox_protocol::labels::LabelsRequest::Hello,
+    )
+    .await;
+    let refused: ControlError = response(&mut client).await.payload().unwrap();
+    assert_eq!(refused.code, "unsupported_operation");
+    assert_eq!(refused.effect, ErrorEffect::None);
+    request_at(
+        &mut client,
+        2,
+        2,
+        0,
+        "control.cpu.target",
+        &CpuTarget { online: 2 },
+    )
+    .await;
+    let cpu: CpuState = response(&mut client).await.payload().unwrap();
+    assert_eq!(cpu.enforced, 2);
+    drop(client);
+    server.await.unwrap().unwrap();
+}

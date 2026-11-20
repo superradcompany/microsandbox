@@ -57,7 +57,8 @@ class Smoke:
             self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
         else:
             # macOS's default per-user temp path is too long for the runtime's Unix sockets.
-            self.root = Path(tempfile.mkdtemp(prefix="msb-smoke-", dir="/tmp" if os.name == "posix" else None))
+            # The CLI can return the physical /private/tmp path on macOS during publication.
+            self.root = Path(tempfile.mkdtemp(prefix="msb-smoke-", dir="/tmp" if os.name == "posix" else None)).resolve()
         self.logs = self.root / "logs"
         self.logs.mkdir()
         self.home = self.root / "home"
@@ -156,10 +157,13 @@ class Smoke:
         if actual != expected:
             raise RuntimeError(f"{name}: expected status {expected}, got {actual}")
 
-    def capture(self, member, full=False):
+    def capture(self, member, full=False, new_group=False):
         options = ["--full"] if full else []
-        output = self.run("capture-" + member, "snapshot", "create", member,
-                          "--from-sandbox", "source", "--group", "work", *options)[0]
+        # Creation binds the source once; later captures use that saved identity.
+        command = (["snapshot", "create", "work", "--sandbox", "source"]
+                   if new_group else ["snapshot", "checkpoint", "work"])
+        output = self.run("capture-" + member, *command, "--name", member,
+                          "--integrity", *options)[0]
         path = Path(output.splitlines()[-1])
         descriptor = json.loads((path / "snapshot.json").read_text())
         if (path.parent != self.home / "snapshots/work"
@@ -198,7 +202,7 @@ class Smoke:
         self.branch("source", "paused-child")
         self.check_markers("paused-child", "source")
         self.stop("paused-child")
-        full = self.capture("full", full=True)
+        full = self.capture("full", full=True, new_group=True)
         self.check_status("source", "Paused")
         _, error = self.run("paused-exec-refused", "exec", "source", "--", "true",
                             expected_failure=True)
@@ -217,15 +221,14 @@ class Smoke:
         self.stop("disk-child")
 
         full_archive, disk_archive = self.root / "full.msb", self.root / "disk.msb"
-        self.run("save-full", "snapshot", "save", "work:full", full_archive)
-        self.run("save-disk", "snapshot", "save", "work:disk", disk_archive)
-        self.run("load-batch-reversed", "snapshot", "load", disk_archive, full_archive,
-                 "--group", "received")
+        self.run("save-full", "snapshot", "export", "work", "--checkpoint", "full", full_archive)
+        self.run("save-disk", "snapshot", "export", "work", "--checkpoint", "disk", disk_archive)
+        self.run("load-batch-reversed", "snapshot", "import", "received", "--file", disk_archive, full_archive)
         head = json.loads(self.run("batch-head", "snapshot", "head", "received",
                                    "--format", "json")[0])
         if head["head"] != disk["snapshot_id"]:
             raise RuntimeError("batch head followed argument order instead of ancestry")
-        self.run("verify-imported-full", "snapshot", "verify", "received:full")
+        self.run("verify-imported-full", "snapshot", "verify", "received", "--checkpoint", "full")
         self.restore("eager", "received:full")
         self.check_markers("eager", "source")
         self.run("pause-eager", "pause", "eager")

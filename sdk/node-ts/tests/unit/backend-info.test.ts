@@ -41,7 +41,7 @@ describe("explicit destination selection", () => {
         if (key === undefined) delete childEnv.MSB_API_KEY;
         return promisify(execFile)(process.execPath, ["--input-type=module", "-e", `
           import assert from "node:assert/strict";
-          import { Sandbox, Volume, Snapshot, LocalContext, RemoteContext, SandboxNotFoundError } from ${JSON.stringify(moduleUrl)};
+          import { Sandbox, Volume, Checkpoint, Snapshot, LocalContext, RemoteContext, SandboxNotFoundError } from ${JSON.stringify(moduleUrl)};
           ${script}
         `], { env: childEnv, timeout: 30_000 });
       };
@@ -50,9 +50,10 @@ describe("explicit destination selection", () => {
       await run(`
         assert.equal(new RemoteContext({url: process.env.MSB_API_URL, apiKey: "fixture"}).kind, "remote");
         assert.equal(new LocalContext().kind, "local");
-        for (const resource of [Sandbox, Volume, Snapshot]) {
+        for (const resource of [Sandbox, Volume, Checkpoint]) {
           await assert.rejects(resource.list(), /selected provider/);
         }
+        await assert.rejects(Snapshot.list(), /not supported/);
         await assert.rejects(Sandbox.local().get("absent"), SandboxNotFoundError);
       `, "cloud", "fixture");
       expect(hits).toHaveLength(3);

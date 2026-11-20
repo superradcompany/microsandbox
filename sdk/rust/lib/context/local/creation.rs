@@ -166,6 +166,7 @@ impl LocalContext {
             .collect::<Vec<_>>();
         let run_dir = self.config().run_dir();
         let sandboxes_dir = self.sandboxes_dir();
+        let home = self.config().home();
         let sandbox_name = name.to_owned();
         let worker_storage = preparation.clone();
 
@@ -178,6 +179,8 @@ impl LocalContext {
 
             crate::runtime::remove_socket_artifacts_at(&run_dir, &sandboxes_dir, &sandbox_name)?;
 
+            microsandbox_runtime::checkpoint::remove_sandbox_identity(&home, id)
+                .map_err(MicrosandboxError::Runtime)?;
             remove_dir_if_exists(&sandboxes_dir.join(sandbox_name))?;
             Ok(())
         })

@@ -78,16 +78,20 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
     policy
         .rules
         .insert(0, allow_domain_suffix_https(".alpinelinux.org"));
-    let sb = Sandbox::builder(name)
+    let builder = Sandbox::builder(name)
         .image("mirror.gcr.io/library/alpine")
         .cpus(1)
         .memory(512)
         // These cases exercise DNS/SNI policy without TLS interception.
-        .network(|n| n.policy(policy).strict(false))
-        .replace()
-        .create()
-        .await
-        .expect("create sandbox");
+        .network(|n| n.policy(policy).strict(false));
+    // A fresh isolated home has nothing to replace. Avoid probing old-runtime
+    // endpoints on busy CI runners; preserve replacement for manual reruns.
+    let builder = if std::env::var_os("MSB_TEST_ISOLATE_HOME").is_some() {
+        builder
+    } else {
+        builder.replace()
+    };
+    let sb = builder.create().await.expect("create sandbox");
     sb.shell("apk add --quiet --no-progress curl >/dev/null 2>&1")
         .await
         .expect("install curl");
@@ -100,7 +104,7 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
 /// hostname-only HTTPS allows fail closed before TLS interception is
 /// configured.
 async fn setup_curl(name: &str, policy: NetworkPolicy, strict: Option<bool>) -> Sandbox {
-    Sandbox::builder(name)
+    let builder = Sandbox::builder(name)
         .image(CURL_IMAGE)
         .cpus(1)
         .memory(256)
@@ -111,11 +115,13 @@ async fn setup_curl(name: &str, policy: NetworkPolicy, strict: Option<bool>) -> 
                 Some(enabled) => n.strict(enabled),
                 None => n,
             }
-        })
-        .replace()
-        .create()
-        .await
-        .expect("create sandbox")
+        });
+    let builder = if std::env::var_os("MSB_TEST_ISOLATE_HOME").is_some() {
+        builder
+    } else {
+        builder.replace()
+    };
+    builder.create().await.expect("create sandbox")
 }
 
 async fn stop_and_remove(name: &str) {

@@ -1,0 +1,95 @@
+---
+title: "v0.7.9"
+sidebarTitle: "v0.7.9"
+description: "Change published ports on existing sandboxes, give agents readable policy denials, and restrict which backends users can run."
+icon: "bolt"
+---
+
+October 22, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.9) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.8...v0.7.9)
+
+## New features
+
+**Change published ports without recreating a sandbox.** `msb modify` now adds, updates, and removes individual TCP or UDP mappings while keeping the rest. Apply changes with `--restart` or save them with `--next-start`. The Rust, Python, TypeScript, and Go SDKs expose the same operations. Port changes are local-only.
+
+```bash
+msb modify worker -p 8080:3000 --next-start
+msb modify worker --port-rm 8080 --restart
+```
+
+Known conflicts are rejected before anything is saved, but ports are not reserved until startup. [Change published ports](/sandboxes/tuning#change-published-ports)
+
+**Tell agents why a request was blocked.** Denied HTTP requests now get a JSON `403 Forbidden` response with `code`, `message`, and `domain` fields instead of a dropped connection. Supported secret-policy violations get the same treatment, so an agent can explain the denial or ask for access. [HTTP denial responses](/networking/overview#what-a-denied-http-request-sees)
+
+**Restrict which backends users can run.** Set `allowed_backends` to `["local"]`, `["cloud"]`, or both in user config or managed overrides. The standalone CLI can now select cloud, and `msb context list`, `use`, and `reset` inspect and switch saved profiles. [Backends](/operations/backends#permit-local-cloud-or-both) · [Context commands](/cli/management#msb-context)
+
+**More control for running sandboxes.**
+
+- Label changes on a running local sandbox now apply live instead of waiting for a restart. [Update labels](/sandboxes/tuning#update-labels)
+- HTTP CONNECT proxies accept Basic authentication from the CLI with `--http-connect-username` and `--http-connect-password-env`, or through the Rust SDK. The password stays on the host.
+- `--max-inbound-tcp-connections` caps active connections across published ports. [Published ports](/cli/sandbox-commands#published-ports)
+- The Rust SDK adds `terminal_exit()` to read why a local sandbox last stopped, such as an idle timeout or a crash. [Rust reference](/sdk/rust/sandbox)
+
+## Before upgrading
+
+- **Check response status on denied requests.** Code that expected a connection error may now receive `403`. Set `deny_response: false` to close silently, or `deny_response_format: text` for the legacy plain-text body. JSON responses require a supporting runtime. Cloud behavior is unchanged.
+- **Published ports no longer cap inbound connections by default.** Older runtimes allowed 256. Set `--max-inbound-tcp-connections` to keep a limit.
+- **Upgrade clients before relying on new settings.** Older CLI and SDK versions ignore `allowed_backends` and can remove it when saving user config. They also drop HTTP CONNECT credentials from saved configuration.
+- **Rust API changes.** `Backend::info()` and `default_backend_info()` return `MicrosandboxResult<BackendInfo>`. Exhaustive `GlobalConfig` literals and `OutboundProxy::HttpConnect` patterns need the new fields. See [upgrade notes](/migrations/v0.7#later-v0-7-releases).
+
+## Fixes
+
+- Commands with large output or stdin now use bounded buffers, so one slow reader no longer stalls other commands in the sandbox.
+- Completed published-port connections free their slots promptly, and IPv4 fallback works when IPv6 stalls.
+- `modify` rejects env entries and label keys that would stop a sandbox from booting, updates the effective value of repeated env keys, and keeps a secret's substitution rule unless you pass a new one.
+- Archive restores read metadata first and defer extraction until creation, and imports no longer create duplicate catalog entries.
+- `msb df` shows a shorter summary by default; use `--verbose` for details.
+- Fixed macOS SQLite locking, relative installer paths, and Node bundled-binary resolution in paths with special characters. The guest kernel is updated to Linux 6.12.113.
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/0xpolarzero">
+      <img src="https://avatars.githubusercontent.com/u/99199454?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@0xpolarzero</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/appcypher">
+      <img src="https://avatars.githubusercontent.com/u/20358651?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@appcypher</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/GoldArowana">
+      <img src="https://avatars.githubusercontent.com/u/27399349?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@GoldArowana</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/gregwebs">
+      <img src="https://avatars.githubusercontent.com/u/1183?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@gregwebs</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/TheRealSibasishBehera">
+      <img src="https://avatars.githubusercontent.com/u/95071627?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@TheRealSibasishBehera</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/toksdotdev">
+      <img src="https://avatars.githubusercontent.com/u/11903253?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@toksdotdev</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/x0day">
+      <img src="https://avatars.githubusercontent.com/u/6091595?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@x0day</span>
+    </a>
+  </li>
+</ul>

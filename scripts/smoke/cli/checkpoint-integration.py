@@ -102,21 +102,25 @@ class Suite:
         if errors or resident:
             raise RuntimeError(f"fixture cleanup failed: {errors}; resident={resident}")
 
+    def prepare_fixture(self):
+        self.msb("source", "create", self.args.image, "--name", "ci-source",
+                 "--memory", "256M", "--max-memory", "256M", "--cpus", "1",
+                 "--root-disk", "128M", "--tmpfs", "/work:16M", "--no-net")
+        self.msb("checksum", "exec", "ci-source", "--", "sh", "-ec",
+                 "dd if=/dev/urandom of=/work/payload bs=1M count=4; "
+                 "sha256sum /work/payload > /work/hash")
+        self.msb("capture", "snapshot", "create", "ci-progress", "--name", "baseline",
+                 "--sandbox", "ci-source", "--full")
+        self.msb("stop-source", "stop", "ci-source")
+        self.msb("warm", "restore", self.env["MSB_PROGRESS_SNAPSHOT"],
+                 "--name", "ci-warm", "--cow-mem")
+        self.msb("verify-warm", "exec", "ci-warm", "--", "sha256sum", "-c", "/work/hash")
+        self.msb("stop-warm", "stop", "ci-warm")
+        self.msb("remove-warm", "remove", "ci-warm")
+
     def execute(self):
         try:
-            self.msb("source", "create", self.args.image, "--name", "ci-source",
-                     "--memory", "256M", "--max-memory", "256M", "--cpus", "1",
-                     "--root-disk", "128M", "--tmpfs", "/work:16M", "--no-net")
-            self.msb("checksum", "exec", "ci-source", "--", "sh", "-ec",
-                     "dd if=/dev/urandom of=/work/payload bs=1M count=4; "
-                     "sha256sum /work/payload > /work/hash")
-            self.msb("capture", "snapshot", "create", "baseline", "--group", "ci-progress",
-                     "--from-sandbox", "ci-source", "--full")
-            self.msb("stop-source", "stop", "ci-source")
-            self.msb("warm", "restore", self.env["MSB_PROGRESS_SNAPSHOT"],
-                     "--name", "ci-warm", "--cow-mem")
-            self.msb("stop-warm", "stop", "ci-warm")
-            self.msb("remove-warm", "remove", "ci-warm")
+            self.prepare_fixture()
             shim = self.output / "slow-eager.so"
             self.run("compile-shim", ["cc", "-shared", "-fPIC", "-O2", "-o", str(shim),
                                      str(self.args.workspace / "scripts/smoke/cli/slow-eager-preload.c"),

@@ -1,7 +1,7 @@
 //! Retained persistent resources for Go. Releasing a registration never deletes storage.
 
 use super::{FfiError, Handle, cstr, run_c};
-use microsandbox::{Snapshot, Volume};
+use microsandbox::{Checkpoint as Snapshot, Volume};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -70,6 +70,17 @@ pub(super) fn register(resource: Resource) -> Result<Value, FfiError> {
     Ok(value)
 }
 
+/// Borrow an exact checkpoint across the two Go receiver interfaces without looking it up by name.
+pub(super) fn checkpoint(handle: Handle) -> Result<Snapshot, FfiError> {
+    let registry = registry()
+        .read()
+        .map_err(|_| FfiError::internal("persistent resource registry lock poisoned"))?;
+    match registry.get(&handle).map(Arc::as_ref) {
+        Some(Resource::Snapshot(snapshot)) => Ok(snapshot.as_ref().clone()),
+        _ => Err(FfiError::invalid_handle(handle)),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn msb_resource_release(handle: Handle) {
     if let Ok(mut registry) = registry().write() {
@@ -111,7 +122,7 @@ pub unsafe extern "C" fn msb_resource_operation(
                 Resource::Snapshot(snapshot) => match request.operation.as_str() {
                     "info" => {
                         let context = snapshot.context().clone_shared();
-                        let current = context.snapshots().open_ref(snapshot.reference()).await?;
+                        let current = context.checkpoints().open_ref(snapshot.reference()).await?;
                         // Released index rows may use the descriptor digest as their public ID.
                         // Compare the unchanged descriptor, then retain the selected public identity.
                         if current.digest() != snapshot.digest() {
@@ -142,6 +153,7 @@ pub unsafe extern "C" fn msb_resource_operation(
                             .save_to(
                                 std::path::Path::new(out),
                                 microsandbox::snapshot::SaveOpts {
+                                    compatibility: opts.compatibility,
                                     since: opts.since,
                                     last_layers: opts.last_layers,
                                     with_parents: opts.with_parents,

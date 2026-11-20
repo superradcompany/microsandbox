@@ -110,7 +110,7 @@ func RestoreSandboxWithProgress[T SnapshotSeed](ctx context.Context, snapshot T,
 	if err := validateRestoreConfig(config); err != nil {
 		return failedCreationProgress(err)
 	}
-	selected, err := configuredContext()
+	selected, err := restoreContext(snapshot)
 	if err != nil {
 		return failedCreationProgress(err)
 	}

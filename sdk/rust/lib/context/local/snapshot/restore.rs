@@ -16,7 +16,8 @@ use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConf
 use crate::context::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
-use super::create::{copy_checkpoint_file, harden_copied_file, stage_checkpoint_closure};
+use super::copy::copy_private_payload;
+use super::create::{copy_checkpoint_file, stage_checkpoint_closure};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -491,7 +492,7 @@ async fn materialize_checkpoint_disk_layers(
     Ok(upper_layers)
 }
 
-async fn append_private_writable_head(
+pub(crate) async fn append_private_writable_head(
     layers: &mut Vec<RootfsUpperLayerConfig>,
     virtual_size: u64,
     child_stage: &CreationStorage,
@@ -549,12 +550,8 @@ fn copy_child_disk_layer(
     if let Some(predecessor) = predecessor {
         // Only qcow2 layers may have a predecessor. Their relocated header must not write into
         // an inode shared with the source artifact or another restored child.
-        microsandbox_utils::copy::fast_copy(source, target)?;
-        microsandbox_image::checkpoint::relocate_qcow2_backing(target, predecessor)?;
-        if copy_files {
-            harden_copied_file(target)?;
-        }
-        Ok(())
+        copy_private_payload(source, target)?;
+        microsandbox_image::checkpoint::relocate_qcow2_backing(target, predecessor)
     } else {
         copy_checkpoint_file(source, target, copy_files)
     }
@@ -955,23 +952,29 @@ mod tests {
         .unwrap();
         std::fs::remove_dir_all(source).unwrap();
 
-        assert_eq!(materialized.upper_layers.len(), 2);
-        assert_eq!(materialized.upper_layers[0].format, "raw");
-        assert_eq!(materialized.upper_layers[1].format, "qcow2");
-        assert!(materialized.upper_layers[0].path.exists());
-        assert!(materialized.upper_layers[1].path.exists());
-        let reopened = CheckpointClosure::open(
-            &materialized.restore.closure,
-            Some(&checkpoint_root),
-            crate::test_support::DEFAULT_FS_STATE_LIMIT,
-        )
-        .unwrap();
-        assert_eq!(reopened.checkpoint().checkpoint_id, "checkpoint_test");
-        assert_eq!(
-            reopened
-                .reused_disk_integrity(&materialized.upper_layers[0].path)
-                .unwrap(),
-            Some(layer_integrity.root)
-        );
+        // Both materialization policies must still open and validate the child's disk once the
+        // original checkpoint is gone, including when the child owns an independent copy.
+        for materialized in [copied, materialized] {
+            assert_eq!(materialized.upper_layers.len(), 2);
+            assert_eq!(materialized.upper_layers[0].format, "raw");
+            assert_eq!(materialized.upper_layers[1].format, "qcow2");
+            assert!(materialized.upper_layers[0].path.exists());
+            assert!(materialized.upper_layers[1].path.exists());
+            let reopened = CheckpointClosure::open(
+                &materialized.restore.closure,
+                Some(&checkpoint_root),
+                crate::test_support::DEFAULT_FS_STATE_LIMIT,
+            )
+            .unwrap();
+            assert_eq!(reopened.checkpoint().checkpoint_id, "checkpoint_test");
+            assert_eq!(
+                reopened
+                    .reused_disk_integrity(&materialized.upper_layers[0].path)
+                    .unwrap(),
+                Some(layer_integrity.root.clone())
+            );
+            let integrity = sparse_file_integrity(&materialized.upper_layers[0].path).unwrap();
+            assert_eq!(integrity.root, layer_integrity.root);
+        }
     }
 }

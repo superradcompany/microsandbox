@@ -12,6 +12,9 @@ mod coordinator;
 mod disk;
 mod execution;
 mod external_mounts;
+#[cfg(feature = "client")]
+#[doc(hidden)]
+pub mod launch_staging;
 pub mod layout;
 mod local;
 #[cfg(feature = "runner")]
@@ -26,10 +29,19 @@ mod object_pipeline;
 mod owned_disk;
 #[cfg(feature = "runner")]
 mod restore;
+#[cfg(feature = "net")]
+#[doc(hidden)]
+pub mod tls_identity;
+#[cfg(feature = "net")]
+pub mod tls_receipt;
+mod tls_storage;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
+
+#[doc(hidden)]
+pub use tls_storage::remove_sandbox_identity;
 
 pub use cache_storage::{
     MemoryCacheEntry, MemoryCacheKind, MemoryCacheReport, MemoryCacheState, MemoryPruneOptions,
@@ -37,7 +49,9 @@ pub use cache_storage::{
 };
 pub use compaction::compact_stopped_disks;
 #[cfg(feature = "runner")]
-pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult, UserPause};
+pub(crate) use coordinator::{
+    CheckpointCoordinator, CheckpointDeviceBindings, CheckpointResult, UserPause,
+};
 #[cfg(feature = "runner")]
 pub(crate) use disk::recover_runtime_owned_root;
 pub use disk::{

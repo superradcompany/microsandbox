@@ -42,7 +42,7 @@ impl PyService {
         target: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let target = extract_target(target)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut builder = Service::builder(slug);
             if let Some(target) = target {
                 builder = builder.target(target.sandbox, target.port);
@@ -56,7 +56,7 @@ impl PyService {
     /// Get a Service by slug.
     #[staticmethod]
     fn get(py: Python<'_>, slug: String) -> PyResult<Bound<'_, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let inner = Service::get(&slug).await.map_err(to_py_err)?;
             Ok(PyService { inner })
         })
@@ -65,7 +65,7 @@ impl PyService {
     /// List the first page of the organization's Services.
     #[staticmethod]
     fn list(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let page = Service::list().await.map_err(to_py_err)?;
             Ok(PyServicePage::from_rust(page))
         })
@@ -80,7 +80,7 @@ impl PyService {
         cursor: Option<String>,
         limit: Option<u32>,
     ) -> PyResult<Bound<'_, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let page = Service::list_with(|list| {
                 let mut list = list;
                 if let Some(sandbox) = sandbox {
@@ -152,7 +152,7 @@ impl PyService {
     ) -> PyResult<Bound<'py, PyAny>> {
         let target = extract_target(target)?;
         let service = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let inner = service
                 .update(|update| {
                     let mut update = update;
@@ -170,7 +170,7 @@ impl PyService {
     /// Enable the Service without retrying.
     fn enable<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let service = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let inner = service.enable().await.map_err(to_py_change_err)?;
             Ok(PyService { inner })
         })
@@ -179,7 +179,7 @@ impl PyService {
     /// Disable the Service without retrying while retaining its target.
     fn disable<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let service = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let inner = service.disable().await.map_err(to_py_change_err)?;
             Ok(PyService { inner })
         })
@@ -188,7 +188,7 @@ impl PyService {
     /// Remove the Service and release its slug without retrying.
     fn remove<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let service = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             service.remove().await.map_err(to_py_change_err)?;
             Ok(())
         })
@@ -197,7 +197,7 @@ impl PyService {
     /// Get the Service again and return its current state. This object is not changed.
     fn refresh<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let service = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let inner = service.refresh().await.map_err(to_py_err)?;
             Ok(PyService { inner })
         })
