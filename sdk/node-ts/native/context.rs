@@ -199,14 +199,14 @@ impl JsContext {
 
     #[napi]
     pub fn snapshot_builder(&self, name: String) -> JsSnapshotBuilder {
-        let builder = self.inner.snapshots().builder(&name);
+        let builder = self.inner.checkpoints().builder(&name);
         JsSnapshotBuilder::from_builder(name, builder)
     }
 
     #[napi]
     pub async fn snapshot_group_head(&self, group: String) -> Result<Option<String>> {
         self.inner
-            .snapshots()
+            .checkpoints()
             .group_head(&group)
             .await
             .map(|head| head.map(|id| id.to_string()))
@@ -218,7 +218,7 @@ impl JsContext {
         let id = parse_snapshot_id(id)?;
         let update = self
             .inner
-            .snapshots()
+            .checkpoints()
             .set_group_head(&group, &id)
             .await
             .map_err(to_napi_error)?;
@@ -226,9 +226,66 @@ impl JsContext {
     }
 
     #[napi]
-    pub async fn snapshot_get(&self, reference: String) -> Result<JsSnapshot> {
+    pub async fn snapshot_group_get(
+        &self,
+        name: String,
+    ) -> Result<crate::snapshot_group::JsSnapshotGroup> {
         self.inner
             .snapshots()
+            .get(&name)
+            .await
+            .map(crate::snapshot_group::JsSnapshotGroup::from_rust)
+            .map_err(to_napi_error)
+    }
+
+    #[napi]
+    pub async fn snapshot_group_list(&self) -> Result<Vec<crate::snapshot_group::JsSnapshotGroup>> {
+        Ok(self
+            .inner
+            .snapshots()
+            .list()
+            .await
+            .map_err(to_napi_error)?
+            .into_iter()
+            .map(crate::snapshot_group::JsSnapshotGroup::from_rust)
+            .collect())
+    }
+
+    #[napi(ts_return_type = "Promise<SnapshotGroup>")]
+    pub fn snapshot_group_open<'env>(
+        &self,
+        env: &'env napi::Env,
+        path: String,
+    ) -> Result<napi::bindgen_prelude::PromiseRaw<'env, crate::snapshot_group::JsSnapshotGroup>>
+    {
+        let pending = self.inner.snapshots().open(path);
+        env.spawn_future(async move {
+            Ok(crate::snapshot_group::JsSnapshotGroup::from_rust(
+                pending.await.map_err(to_napi_error)?,
+            ))
+        })
+    }
+
+    #[napi(
+        ts_args_type = "group: string, archives: string[], opts?: LoadOpts",
+        ts_return_type = "Promise<SnapshotImportResult>"
+    )]
+    pub fn snapshot_group_load<'env>(
+        &self,
+        env: &'env napi::Env,
+        group: String,
+        archives: Vec<String>,
+        opts: Option<crate::snapshot::JsLoadOpts>,
+    ) -> Result<
+        napi::bindgen_prelude::PromiseRaw<'env, crate::snapshot_group::JsSnapshotImportResult>,
+    > {
+        crate::snapshot_group::load_in(env, self.inner.snapshots(), group, archives, opts)
+    }
+
+    #[napi]
+    pub async fn snapshot_get(&self, reference: String) -> Result<JsSnapshot> {
+        self.inner
+            .checkpoints()
             .get(&reference)
             .await
             .map(JsSnapshot::from_rust)
@@ -238,7 +295,7 @@ impl JsContext {
     #[napi]
     pub async fn snapshot_list(&self) -> Result<Vec<JsSnapshot>> {
         self.inner
-            .snapshots()
+            .checkpoints()
             .list()
             .await
             .map(|values| values.into_iter().map(JsSnapshot::from_rust).collect())
@@ -248,7 +305,7 @@ impl JsContext {
     #[napi]
     pub async fn snapshot_remove(&self, reference: String, force: bool) -> Result<()> {
         self.inner
-            .snapshots()
+            .checkpoints()
             .remove(reference, force)
             .await
             .map_err(to_napi_error)

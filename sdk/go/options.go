@@ -84,7 +84,7 @@ type SandboxConfig struct {
 // passing the resource preserves its typed reference; a string remains a
 // backend-relative compatibility reference.
 type SnapshotSeed interface {
-	string | *Snapshot
+	string | *Checkpoint
 }
 
 // SandboxOption is a functional option for configuring a sandbox.

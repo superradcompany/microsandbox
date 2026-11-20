@@ -505,6 +505,19 @@ impl PatchField {
         }
     }
 
+    fn replacement_query(&self) -> Option<proc_macro2::TokenStream> {
+        self.merge.as_ref()?;
+        let ident = &self.ident;
+        let method = format_ident!("replaces_{ident}");
+        let visibility = &self.visibility;
+        Some(quote! {
+            #[doc = concat!("Whether this patch explicitly replaces the complete `", stringify!(#ident), "` collection, rather than merging entries.")]
+            #visibility fn #method(&self) -> bool {
+                self.#ident.as_ref().is_some_and(|(replace, _)| *replace)
+            }
+        })
+    }
+
     fn getter(&self) -> Option<proc_macro2::TokenStream> {
         self.merge.as_ref()?;
         let ident = &self.ident;
@@ -669,6 +682,7 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
         }
     });
     let getters = fields.iter().filter_map(PatchField::getter);
+    let replacement_queries = fields.iter().filter_map(PatchField::replacement_query);
     let setters = fields.iter().map(PatchField::setter);
     let replacers = fields.iter().filter_map(PatchField::replacer);
     let clearers = fields.iter().map(PatchField::clearer);
@@ -696,6 +710,7 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
 
         impl #patch_ident {
             #(#getters)*
+            #(#replacement_queries)*
             #(#adapters)*
             #is_empty
             /// Create an empty patch that leaves every target field unchanged.

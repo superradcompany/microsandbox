@@ -7,7 +7,7 @@
 mod cloud;
 mod collections;
 mod dispatch;
-pub use collections::{Sandboxes, Snapshots, Volumes};
+pub use collections::{Checkpoints, Sandboxes, Snapshots, Volumes};
 #[cfg(feature = "local")]
 pub(crate) mod local;
 

@@ -21,6 +21,7 @@ type Context interface {
 	Sandboxes() *Sandboxes
 	Volumes() *Volumes
 	Snapshots() *Snapshots
+	Checkpoints() *Checkpoints
 	nativeContext() *ffi.Context
 }
 
@@ -204,3 +205,6 @@ func contextFromNative(destination *ffi.Context) Context {
 
 func (c *LocalContext) Snapshots() *Snapshots  { return SnapshotCtx(c) }
 func (c *RemoteContext) Snapshots() *Snapshots { return SnapshotCtx(c) }
+
+func (c *LocalContext) Checkpoints() *Checkpoints  { return CheckpointCtx(c) }
+func (c *RemoteContext) Checkpoints() *Checkpoints { return CheckpointCtx(c) }

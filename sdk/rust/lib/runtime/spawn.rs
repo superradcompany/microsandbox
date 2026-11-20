@@ -50,7 +50,10 @@ use windows_sys::Win32::System::Threading::{
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 #[cfg(feature = "net")]
-use microsandbox_network::{ResolvedNetworkConfig, config::EnvNetworkSecretResolver};
+use microsandbox_network::{
+    ResolvedNetworkConfig,
+    config::{EnvNetworkSecretResolver, MultiTenantConfig},
+};
 use microsandbox_protocol::{
     bootstrap::{
         BootstrapBlockRoot, BootstrapBlockRootUpper, BootstrapDirMount, BootstrapDiskMount,
@@ -62,6 +65,8 @@ use microsandbox_protocol::{
 use microsandbox_runtime::ipc::SandboxLifecycleGuard;
 use microsandbox_runtime::launch::{FileMountConfig, LaunchConfig, Lifecycle};
 use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
+#[cfg(feature = "net")]
+use microsandbox_types::DeploymentProfile;
 use microsandbox_types::{CommandResolutionError, SandboxLogLevel, resolve_default_command};
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -300,11 +305,6 @@ impl LocalContext {
         // Durable configuration stores only host-side source references. Resolve
         // them into the private runtime configuration before the sandbox process
         // is spawned.
-        #[cfg(feature = "net")]
-        let resolved_network = config
-            .local_network_config()?
-            .resolve(&EnvNetworkSecretResolver)
-            .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
 
         // Resolve the already-layered runtime paths as one compatible pair before launch.
         let global = self.config();
@@ -322,15 +322,30 @@ impl LocalContext {
         ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
         launch_contract::require_protected_guest_state(&resolved_runtime.msb_path).await?;
         let launch_contract = launch_contract::resolve(&resolved_runtime.msb_path).await?;
+        let retention_supported = launch_contract.machine
+            && launch_contract::supports_configuration_retention(&resolved_runtime.msb_path).await;
         // A stopped sandbox may have been edited without a runtime installed, or
         // the selected executable may have changed since creation. Validate its
         // effective configuration here for both initial launch and later starts.
         launch_contract.validate_launch_intent(config)?;
         #[cfg(feature = "net")]
-        launch_contract::validate_http_deny_response(&resolved_runtime.msb_path, config).await?;
+        let resolved_network = {
+            let mut network = config.local_network_config()?;
+            network.http =
+                launch_contract::select_http_deny_response(&resolved_runtime.msb_path, config)
+                    .await?;
+            network
+                .resolve(&EnvNetworkSecretResolver)
+                .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
+        };
         launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
+
+        #[cfg(feature = "net")]
+        launch_contract::validate_multi_tenant_config(&resolved_runtime.msb_path, config, global)
+            .await?;
+
         launch_contract::validate_nested_virt(&resolved_runtime.msb_path, config, launch_contract)
             .await?;
         if config.checkpoint_restore.as_ref().is_some_and(|restore| {
@@ -600,6 +615,12 @@ impl LocalContext {
         }
         if !launch_contract.machine {
             visible[0] = OsString::from("sandbox");
+        }
+        // Only advertise private tracking to a runtime that passed protected-state admission.
+        if retention_supported {
+            launch.retention_source = Some(microsandbox_runtime::retention::RetentionSource {
+                configuration: serde_json::to_value(config.clone_for_persistence())?,
+            });
         }
         let launch_value = match launch_contract.encode_for_runtime(&msb_path, &launch).await {
             Ok(launch) => launch,
@@ -2331,6 +2352,16 @@ fn machine_cli_args(
         }),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
+
+        #[cfg(feature = "net")]
+        multi_tenant: if config.spec.deployment_profile == DeploymentProfile::MultiTenant {
+            MultiTenantConfig {
+                nameservers: local.config().dns.nameservers.clone(),
+            }
+        } else {
+            MultiTenantConfig::default()
+        },
+
         bootstrap: guest_bootstrap(config),
         ..Default::default()
     };

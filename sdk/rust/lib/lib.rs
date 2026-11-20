@@ -42,7 +42,7 @@ pub use agent::{
 #[cfg(feature = "local")]
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use context::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
+    Checkpoints, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
     CloudErrorBody, CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
     CloudSandboxStatusReason, CloudService, CloudServiceStatus, CloudServiceTarget,
     CloudUpdateServiceRequest, CloudVolumeKind, CloudVolumeStatus, ComputeType, Context,
@@ -116,11 +116,14 @@ pub use service::{
     ServiceUpdate,
 };
 pub use snapshot::{
-    CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts,
-    Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotConfig, SnapshotCopyBuilder,
-    SnapshotDescriptor, SnapshotFormat, SnapshotReference, SnapshotRootDisk, SnapshotScope,
-    SnapshotSpec, SnapshotState, SnapshotStateKind, SnapshotVerifyReport, UpperIntegrity,
-    UpperVerifyStatus,
+    ArchiveCompatibility, Checkpoint, CheckpointCaptureResult, CheckpointRemoveOptions,
+    CheckpointRemoveResult, CheckpointSnapshotState, FileSnapshotState, HeadUpdate,
+    HeadUpdateReason, LoadOpts, SaveOpts, Snapshot, SnapshotArchive, SnapshotBuilder,
+    SnapshotCaptureOptions, SnapshotConfig, SnapshotCopyBuilder, SnapshotCreateResult,
+    SnapshotDescriptor, SnapshotFormat, SnapshotGroupInfo, SnapshotImportOptions,
+    SnapshotImportResult, SnapshotReference, SnapshotRemoveResult, SnapshotRootDisk, SnapshotScope,
+    SnapshotSourceBinding, SnapshotSourceStatus, SnapshotSpec, SnapshotState, SnapshotStateKind,
+    SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
 };
 pub use storage::{Storage, StorageCategoryUsage, StorageItemUsage, StorageUsage};
 pub use volume::{Volume, VolumeConfig, VolumeId, VolumeKind, VolumeSpec};

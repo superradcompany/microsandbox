@@ -36,7 +36,7 @@ impl Sandbox {
         let opts = f(ExecOptionsBuilder::default())
             .prepend_args(command.args)
             .build()?;
-        self.execute_stream_prepared(session, command.program, opts)
+        self.execute_stream_prepared(session, command.program, opts, false)
             .await
     }
 
@@ -62,7 +62,8 @@ impl Sandbox {
         let opts = f(ExecOptionsBuilder::default())
             .prepend_args(command.args)
             .build()?;
-        self.execute_prepared(session, command.program, opts).await
+        self.execute_prepared(session, command.program, opts, false)
+            .await
     }
 
     /// Execute a command and return a streaming handle.
@@ -80,7 +81,7 @@ impl Sandbox {
             args: args.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
-        self.execute_stream_prepared(session, cmd.into(), opts)
+        self.execute_stream_prepared(session, cmd.into(), opts, true)
             .await
     }
 
@@ -94,9 +95,11 @@ impl Sandbox {
         cmd: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
-        let opts = f(ExecOptionsBuilder::default()).build()?;
+        let builder = f(ExecOptionsBuilder::default());
+        let explicit_argv = builder.explicit_argv();
+        let opts = builder.build()?;
         let session = self.prepare_runtime().await?;
-        self.execute_stream_prepared(session, cmd.into(), opts)
+        self.execute_stream_prepared(session, cmd.into(), opts, explicit_argv)
             .await
     }
 
@@ -115,7 +118,7 @@ impl Sandbox {
             args: args.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
-        self.execute_prepared(session, cmd.into(), opts).await
+        self.execute_prepared(session, cmd.into(), opts, true).await
     }
 
     /// Execute a command with full options and wait for completion.
@@ -128,9 +131,12 @@ impl Sandbox {
         cmd: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let opts = f(ExecOptionsBuilder::default()).build()?;
+        let builder = f(ExecOptionsBuilder::default());
+        let explicit_argv = builder.explicit_argv();
+        let opts = builder.build()?;
         let session = self.prepare_runtime().await?;
-        self.execute_prepared(session, cmd.into(), opts).await
+        self.execute_prepared(session, cmd.into(), opts, explicit_argv)
+            .await
     }
 
     /// Run a shell command and wait for completion.
@@ -154,7 +160,7 @@ impl Sandbox {
             args: vec!["-c".to_string(), script.into()],
             ..Default::default()
         };
-        self.execute_prepared(session, shell, opts).await
+        self.execute_prepared(session, shell, opts, true).await
     }
 
     /// Run a shell command with full options and wait for completion.
@@ -174,7 +180,7 @@ impl Sandbox {
             .to_string();
         let mut opts = f(ExecOptionsBuilder::default()).build()?;
         opts.args.splice(0..0, ["-c".to_string(), script.into()]);
-        self.execute_prepared(session, shell, opts).await
+        self.execute_prepared(session, shell, opts, true).await
     }
 
     /// Run a shell command with streaming I/O.
@@ -195,7 +201,8 @@ impl Sandbox {
             args: vec!["-c".to_string(), script.into()],
             ..Default::default()
         };
-        self.execute_stream_prepared(session, shell, opts).await
+        self.execute_stream_prepared(session, shell, opts, true)
+            .await
     }
 
     /// Run a shell command with full options and streaming I/O.
@@ -215,7 +222,8 @@ impl Sandbox {
             .to_string();
         let mut opts = f(ExecOptionsBuilder::default()).build()?;
         opts.args.splice(0..0, ["-c".to_string(), script.into()]);
-        self.execute_stream_prepared(session, shell, opts).await
+        self.execute_stream_prepared(session, shell, opts, true)
+            .await
     }
 }
 
@@ -225,6 +233,7 @@ impl Sandbox {
         session: Arc<RuntimeSession>,
         command: String,
         options: ExecOptions,
+        explicit_argv: bool,
     ) -> MicrosandboxResult<ExecHandle> {
         #[cfg(feature = "local")]
         if let crate::context::SandboxInner::Local(local) = &session.inner {
@@ -234,8 +243,8 @@ impl Sandbox {
                 &session.config,
                 command,
                 options,
-                24,
-                80,
+                (24, 80),
+                explicit_argv,
             )
             .await?;
             execution.retain_runtime(session);
@@ -261,13 +270,14 @@ impl Sandbox {
         session: Arc<RuntimeSession>,
         command: String,
         mut options: ExecOptions,
+        explicit_argv: bool,
     ) -> MicrosandboxResult<ExecOutput> {
         #[cfg(feature = "local")]
         if matches!(&session.inner, crate::context::SandboxInner::Local(_)) {
             // Preserve buffered execution's existing deadline/kill contract.
             let timeout = options.timeout.take();
             let execution = self
-                .execute_stream_prepared(session, command, options)
+                .execute_stream_prepared(session, command, options, explicit_argv)
                 .await?;
             return agent::collect_buffered(execution, timeout).await;
         }
@@ -308,7 +318,9 @@ impl Sandbox {
             session.config.spec.runtime.cmd.as_deref(),
             None,
         )?;
-        let builder = f(AttachOptionsBuilder::default()).prepend_args(command.args);
+        let builder = f(AttachOptionsBuilder::default())
+            .prepend_args(command.args)
+            .with_inherited_command(true);
         self.attach_prepared(session, command.program, builder)
             .await
     }

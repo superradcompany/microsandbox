@@ -10,9 +10,10 @@ use microsandbox_image::checkpoint::{
     ResourceTreatment,
 };
 use microsandbox_protocol::core::{
-    Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WorkloadTransportCredit, WorkloadTransportPosition,
+    WORKLOAD_TRANSPORT_BARRIER_VERSION, WorkloadTransportCredit, WorkloadTransportPosition,
 };
 use microsandbox_protocol::message::{MessageType, PROTOCOL_VERSION};
+use microsandbox_protocol::restore_transport::GuestReady;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -28,6 +29,7 @@ const MAX_MEMORY_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 /// Fully admitted checkpoint state ready to install during [`msb_krun::Vm::enter`].
 pub(crate) struct PreparedCheckpointRestore {
     geometry: CheckpointGeometry,
+    required_intercept_ca: Option<String>,
     execution: msb_krun::ExecutionState,
     devices: Vec<PreparedDeviceRestore>,
     memory: Option<CheckpointMemoryRestore>,
@@ -45,7 +47,7 @@ pub(crate) struct RestoredAgentState {
     /// Protocol generation spoken by the captured agent.
     pub(crate) protocol_generation: u8,
     /// Cached ready payload used for post-activation client handshakes.
-    pub(crate) ready: Ready,
+    pub(crate) ready: GuestReady,
     /// Checkpoint attempt that owns the captured workload freeze.
     pub(crate) attempt_id: String,
     /// Complete host input admitted before the captured freeze acknowledgement.
@@ -187,6 +189,7 @@ impl PreparedCheckpointRestore {
             .map_err(|e| e.to_string())?
             .with_capture_baseline();
         Ok(Self {
+            required_intercept_ca: super::network::intercept_ca_requirement(&state.resources)?,
             geometry: CheckpointGeometry {
                 vcpus: state.vcpus,
                 max_vcpus: state.max_cpus.max(state.vcpus),
@@ -257,6 +260,9 @@ impl PreparedCheckpointRestore {
         );
 
         Ok(Self {
+            required_intercept_ca: super::network::intercept_ca_requirement(
+                &closure.checkpoint().resources,
+            )?,
             geometry: closure.checkpoint().geometry,
             execution,
             devices,
@@ -268,6 +274,12 @@ impl PreparedCheckpointRestore {
             local_disks: None,
             agent,
         })
+    }
+
+    /// A captured guest trusts the CA used when it booted. Compare the actual
+    /// destination proxy identity before restoring devices or resuming guest code.
+    pub(crate) fn validate_intercept_ca(&self, destination: Option<&str>) -> Result<(), String> {
+        super::network::validate_intercept_ca(self.required_intercept_ca.as_deref(), destination)
     }
 
     /// Validate the launcher configuration before preparing RAM backing or entering the VM.
@@ -602,9 +614,9 @@ fn parse_restored_agent_resource(
         ));
     }
 
-    let ready: Ready = serde_json::from_str(value("ready")?)
+    let ready: GuestReady = serde_json::from_str(value("ready")?)
         .map_err(|error| format!("checkpoint guest readiness is invalid: {error}"))?;
-    if ready.workload_transport_barrier_version != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) {
+    if ready.public.workload_transport_barrier_version != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) {
         return Err("checkpoint guest has an unsupported development transport-credit contract; recreate the full snapshot with a matching build".into());
     }
     let host_input: WorkloadTransportPosition =
@@ -623,7 +635,7 @@ fn parse_restored_agent_resource(
     let guest_bulk_bytes_target = value("transport_guest_bulk_bytes")?
         .parse::<u64>()
         .map_err(|error| format!("checkpoint guest bulk position is invalid: {error}"))?;
-    if ready.bulk_transport.is_none() && guest_bulk_bytes_target != 0 {
+    if ready.public.bulk_transport.is_none() && guest_bulk_bytes_target != 0 {
         return Err("combined checkpoint has a dedicated guest bulk counter".into());
     }
     Ok(RestoredAgentState {
@@ -649,6 +661,7 @@ fn parse_restored_agent_resource(
 #[cfg(test)]
 mod tests {
     use microsandbox_image::checkpoint::DeviceStateRef;
+    use microsandbox_protocol::core::Ready;
 
     use super::*;
 
@@ -690,6 +703,20 @@ mod tests {
                     .unwrap(),
                 ),
             ]),
+        }
+    }
+
+    #[test]
+    fn missing_tcp_reset_capability_keeps_historical_restores_admissible() {
+        for version in [None, Some(0), Some(2)] {
+            let mut resource = agent_resource(PROTOCOL_VERSION);
+            let mut ready: GuestReady = serde_json::from_str(&resource.binding["ready"]).unwrap();
+            ready.restore_tcp_reset_version = version;
+            resource
+                .binding
+                .insert("ready".into(), serde_json::to_string(&ready).unwrap());
+            let restored = parse_restored_agent_resource(&resource, "attempt").unwrap();
+            assert_eq!(restored.ready.restore_tcp_reset_version, version);
         }
     }
 
@@ -786,10 +813,32 @@ mod tests {
 
         assert_eq!(restored.protocol_generation, PROTOCOL_VERSION);
         assert_eq!(restored.attempt_id, "checkpoint-attempt");
-        assert_eq!(restored.ready.agent_version, "0.6.16-test");
-        assert_eq!(restored.ready.boot_time_ns, 10);
-        assert_eq!(restored.ready.init_time_ns, 20);
-        assert_eq!(restored.ready.ready_time_ns, 30);
+        assert_eq!(restored.ready.public.agent_version, "0.6.16-test");
+        assert_eq!(restored.ready.public.boot_time_ns, 10);
+        assert_eq!(restored.ready.public.init_time_ns, 20);
+        assert_eq!(restored.ready.public.ready_time_ns, 30);
+    }
+
+    #[test]
+    fn restores_optional_init_selection_without_inventing_legacy_evidence() {
+        use microsandbox_protocol::init_observation::InitObservation;
+
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        let legacy = parse_restored_agent_resource(&resource, "checkpoint-attempt").unwrap();
+        assert!(legacy.ready.init_observation.is_none());
+        let mut ready = legacy.ready;
+        ready.init_observation = Some(InitObservation::Builtin);
+        resource
+            .binding
+            .insert("ready".into(), serde_json::to_string(&ready).unwrap());
+        let restored = parse_restored_agent_resource(&resource, "checkpoint-attempt").unwrap();
+        assert_eq!(
+            restored.ready.init_observation,
+            Some(InitObservation::Builtin)
+        );
+        // Older parsers consume exactly this same nested Ready document, not a new binding key.
+        let legacy: Ready = serde_json::from_str(&resource.binding["ready"]).unwrap();
+        assert_eq!(legacy.agent_version, "0.6.16-test");
     }
 
     #[test]
@@ -841,8 +890,8 @@ mod tests {
     #[test]
     fn rejects_development_snapshot_with_stdin_charged_to_control() {
         let mut resource = agent_resource(PROTOCOL_VERSION);
-        let mut ready: Ready = serde_json::from_str(&resource.binding["ready"]).unwrap();
-        ready.workload_transport_barrier_version = Some(1);
+        let mut ready: GuestReady = serde_json::from_str(&resource.binding["ready"]).unwrap();
+        ready.public.workload_transport_barrier_version = Some(1);
         resource
             .binding
             .insert("ready".into(), serde_json::to_string(&ready).unwrap());

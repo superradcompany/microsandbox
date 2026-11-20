@@ -1,0 +1,82 @@
+---
+title: "v0.7.12"
+sidebarTitle: "v0.7.12"
+description: "Run nested VMs inside local sandboxes, change secrets on cloud sandboxes, and keep local sandbox state private to its owner."
+icon: "bolt"
+---
+
+October 31, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.12) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.11...v0.7.12)
+
+## New features
+
+**Nested virtualization.** Local sandboxes can now run their own VMs through guest KVM. Full snapshots save the running inner VM, and restore or fork resumes it. Nesting is off by default. Enable it with `--nested-virt`, the SDK nesting option, or `sandbox_defaults.nested_virt`. It works on Linux x86-64, Windows x86-64, and supported Apple Silicon Macs. Linux and Windows ARM64 hosts do not support it. [Nested VM snapshots](/sandboxes/snapshots)
+
+```python
+sandbox = await Sandbox.create("nested", image="alpine", nested_virt=True)
+```
+
+**Change secrets on cloud sandboxes.** `modify` can now update secrets on microsandbox cloud sandboxes. A secret's value, allowed hosts, and removal can apply live. Other secret changes need the next-start policy, followed by a stop and start. Other settings remain local-only. The cloud service must support this route. A cloud change that may not have taken effect returns a new modification-not-confirmed error. [Live modify](/sandboxes/tuning)
+
+## Security hardening
+
+- **Guests can no longer reach host disk journals.** The host now keeps root-disk journals, checkpoints, and disk staging outside the guest-visible `/.msb` directory. It also rejects journal paths that point at another sandbox's disk.
+- **The local catalog is private to its owner.** On Linux and macOS, the catalog directory and its database, journal, and backup files are now readable only by the owning OS account. Rotate credentials if an earlier install may have exposed them. [Local catalog permissions](/security/secrets)
+
+## Fixes
+
+- **Interrupted creates can be cleaned up.** A crashed sandbox or volume create now stays recorded as incomplete. Remove it with `msb rm` or `msb volume rm`, or recreate it with `--replace`. [Lifecycle](/sandboxes/lifecycle)
+- Host-side renames and moves on Windows bind mounts are visible in the guest without a restart.
+- macOS bind mounts return the correct offsets for sparse file seeks.
+- `msb cp SANDBOX:/path out.txt` now writes to the current directory.
+- `msb registry login` works in release builds again.
+- TypeScript validates kill and connect timeouts and throws a `RangeError` for out-of-range values.
+
+## Before upgrading
+
+- **Upgrade the SDK, CLI, and runtime together.** v0.7.12 adds database migrations, so older SDKs and CLIs cannot reopen an upgraded `MSB_HOME`. Every new local start, restart, and restore requires a runtime with protected sandbox state. Downgrade is refused while protected sandboxes remain. [v0.7 migration guide](/migrations/v0.7)
+- **Restart running sandboxes.** Running VMs gain the new protection only after a restart. Until then, exec and stop still work, but snapshots, forks, disk growth, and compaction are refused.
+- **Use one OS account per catalog.** Sharing a catalog between OS accounts is no longer supported, and startup resets group permissions. Give each account its own `MSB_HOME`.
+- **Recapture older Windows full snapshots.** New Windows x86-64 full snapshots save timer state, and older ones without it are rejected. Restore them with `--disk-only`, then capture a new full snapshot. [Snapshots](/sandboxes/snapshots)
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/appcypher">
+      <img src="https://avatars.githubusercontent.com/u/20358651?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@appcypher</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/enricoschaaf">
+      <img src="https://avatars.githubusercontent.com/u/54645197?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@enricoschaaf</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/Jackmeson1">
+      <img src="https://avatars.githubusercontent.com/u/130693642?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@Jackmeson1</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/juleszimmermann">
+      <img src="https://avatars.githubusercontent.com/u/36171452?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@juleszimmermann</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/TheRealSibasishBehera">
+      <img src="https://avatars.githubusercontent.com/u/95071627?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@TheRealSibasishBehera</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/toksdotdev">
+      <img src="https://avatars.githubusercontent.com/u/11903253?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@toksdotdev</span>
+    </a>
+  </li>
+</ul>

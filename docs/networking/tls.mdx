@@ -18,9 +18,29 @@ When interception is enabled, microsandbox:
 3. Creates a certificate for each intercepted host.
 4. Opens a separate verified TLS connection to the upstream server.
 
-microsandbox stores the default CA at `~/.microsandbox/tls/ca.{crt,key}` and reuses it across local sandboxes. Delete both files to generate a new CA. Use the intercept CA certificate and key settings when sandboxes should use a CA that you provide.
+Creating a local sandbox with interception enabled generates a dedicated CA unless you supply one. The private key stays in host storage. The guest receives the public certificate at `/.msb/tls/ca.pem`. Existing sandboxes that use the shared CA at `~/.microsandbox/tls/ca.{crt,key}` continue to use it. If you supplied a CA, keep its certificate and key available at the configured paths.
 
 For new local sandboxes, relative paths to upstream CA certificates and interception CA certificate/key files are resolved when the sandbox is created and saved as absolute paths. Starting the same sandbox from another working directory does not select different TLS files. Existing saved sandboxes with relative TLS paths retain their previous resolution behavior. They remain usable without recreation, and restart does not rewrite their saved paths.
+
+## Moving a full snapshot to another machine
+
+An installed full checkpoint can retain a dedicated sandbox CA. Its signing key is sealed with a wrapping key in the source microsandbox home and bound to the captured checkpoint. Back up the checkpoint with an age recipient before removing that home or its wrapping key. A plaintext export omits signing keys.
+
+To transfer a dedicated CA, export to the destination’s age X25519 public key. On the destination, import with the matching private identity file and restore the imported group.
+
+```bash
+msb snapshot export backend --checkpoint ready --with-image --recipient "$AGE_RECIPIENT" --output backend.msb
+msb snapshot import imported --file backend.msb --identity ./receiver.key
+msb snapshot restore imported --name backend-copy
+```
+
+The destination seals the imported credential under its own wrapping key. If the group already contains a plaintext copy of that checkpoint, importing its encrypted backup attaches the verified signer in the same transaction as the rest of the batch. Repeating the import preserves the installed signer. A signer-only import keeps the current head selection unless you explicitly pass `--set-head`. A holder of a matching age identity can recover the sandbox signing key from the backup. Keep recipient identities private. A source that uses a custom or historical machine-wide CA requires a matching signer supplied separately. Full restore also requires compatible guest architecture and runtime support. Configure destination network policy and upstream certificate trust for the new host.
+
+## Connections after a full restore or fork
+
+A full snapshot includes guest memory. The host proxy and upstream server each hold connection state outside the guest. On a supported guest, full restore and fork close inherited external TCP connections before the restored workloads resume. Applications can then open fresh connections. An older guest produces a warning and an existing read may wait for its application timeout.
+
+A server might already have processed a request when the snapshot was taken. Microsandbox does not replay it. For a request such as a payment or a job submission, check its outcome or use the service’s idempotency mechanism before retrying. An ordinary pause and resume of the same VM does not trigger this reset.
 
 ## Enabling interception
 

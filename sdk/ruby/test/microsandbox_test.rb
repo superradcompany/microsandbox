@@ -19,7 +19,8 @@ class MicrosandboxTest < Test::Unit::TestCase
     ServiceNotFoundError ServiceAlreadyExistsError ServiceError
     ImageNotFoundError ImageInUseError ImagePullFailedError
     SnapshotNotFoundError SnapshotAlreadyExistsError SnapshotSandboxRunningError
-    SnapshotImageMissingError SnapshotIntegrityError SnapshotSourceRecoveryError SnapshotMigrationError
+    SnapshotImageMissingError SnapshotIntegrityError SnapshotSourceRecoveryError SnapshotImportError SnapshotMigrationError
+    SnapshotVerificationError SnapshotRemovalRecoveryError SnapshotGroupRemovalRecoveryError
     NetworkPolicyError SecretViolationError TlsError
     IoError
     MetricsDisabledError MetricsUnavailableError
@@ -202,8 +203,8 @@ class MicrosandboxTest < Test::Unit::TestCase
   end
 
   def test_snapshot_head_read_rejects_member_selectors
-    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Snapshot.group_head("app:previous") }
-    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Snapshot.local.group_head("app:previous") }
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Checkpoint.group_head("app:previous") }
+    assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Checkpoint.local.group_head("app:previous") }
   end
 
   def test_snapshot_source_recovery_error_attributes_default_to_nil
@@ -213,6 +214,15 @@ class MicrosandboxTest < Test::Unit::TestCase
       assert_nil error.public_send(name), name
     end
     assert_equal "snapshot-source-recovery", error.code
+  end
+
+  def test_snapshot_import_error_attributes_default_to_nil
+    error = Microsandbox::SnapshotImportError.new("boom")
+
+    %i[operation_id archives group_path outcome detail].each do |name|
+      assert_nil error.public_send(name), name
+    end
+    assert_equal "snapshot-import", error.code
   end
 
   def test_missing_sandbox_raises_sandbox_not_found_error

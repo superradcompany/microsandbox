@@ -340,6 +340,14 @@ impl BackendConfig {
         )
     }
 
+    /// Portable settings and caller overrides cannot weaken the administrator's profile.
+    pub(crate) fn minimum_snapshot_security(&self) -> microsandbox_types::SecurityProfile {
+        SandboxConfigPatch::from_managed(&self.managed)
+            .spec
+            .security_profile
+            .unwrap_or_default()
+    }
+
     /// Managed overrides must be enforceable on the captured guest; the managed
     /// patch is private to this type, so the check lives behind this accessor.
     pub(crate) fn validate_managed_against_snapshot(

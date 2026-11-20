@@ -90,7 +90,7 @@ Capture the prepared toolchain:
 
 <CodeGroup>
 ```sh Shell
-msb snap create office-tools --sandbox office-base --integrity
+msb snap create office-base --name office-tools --sandbox office-base --integrity
 ```
 </CodeGroup>
 
@@ -98,7 +98,7 @@ Verify the snapshot before using it:
 
 <CodeGroup>
 ```sh Shell
-msb snap verify office-base:office-tools
+msb snap verify office-base --checkpoint office-tools
 ```
 </CodeGroup>
 
@@ -114,14 +114,14 @@ The example accepts a Word document named `input.docx`:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap restore office-base:office-tools --name document-worker \
+msb create --from-snapshot office-base --checkpoint office-tools --name document-worker \
   --cpus 2 --memory 2G \
   --user converter --security restricted \
   --no-net --max-duration 2m
 ```
 
 ```powershell Windows
-msb snap restore office-base:office-tools --name document-worker `
+msb create --from-snapshot office-base --checkpoint office-tools --name document-worker `
   --cpus 2 --memory 2G `
   --user converter --security restricted `
   --no-net --max-duration 2m
@@ -268,9 +268,11 @@ Remove the reusable toolchain snapshot:
 
 <CodeGroup>
 ```sh Shell
-msb snap rm office-base:office-tools
+msb snap rm office-base --checkpoint office-tools
 ```
 </CodeGroup>
+
+This removes the checkpoint and keeps the `office-base` history. To reuse the group name on a fresh run, first confirm it contains no checkpoints you need with `msb snap ls office-base`, then remove it with `msb snap rm office-base --all`.
 
 The checked `output.pdf` and `preview.png` remain in the artifact directory configured above.
 

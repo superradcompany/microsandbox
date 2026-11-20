@@ -952,9 +952,20 @@ async fn endpoint_answers(path: &Path) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    // connect already distinguishes missing/malformed paths from live sockets.
-    // A preliminary async stat only queues blocking-pool work and can exhaust
-    // the deadline under load even when every endpoint is absent.
+    // These are filesystem endpoints, never Linux abstract socket names. The
+    // previous filesystem lookup also rejected NUL before attempting a connect.
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Err(endpoint_error(
+            "connect to",
+            path,
+            std::io::Error::new(ErrorKind::InvalidInput, "socket path contains NUL"),
+        ));
+    }
+
+    // Connect already distinguishes absent/stale paths from live listeners and
+    // propagates uncertain errors. A preceding tokio::fs lookup adds no ownership
+    // evidence, but blocking-pool queueing can consume the entire probe deadline
+    // and falsely prevent creation even when every endpoint is absent.
     loop {
         match tokio::net::UnixStream::connect(path).await {
             Ok(_) => return Ok(true),
@@ -1038,6 +1049,27 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn endpoint_probe_covers_current_and_legacy_paths() {
+        // Concurrent fork-based tests can inherit the listening descriptor, so
+        // closing our copy alone cannot establish the closed-listener precondition.
+        const ISOLATED: &str = "MSB_TEST_ISOLATED_ENDPOINT_PROBE";
+        if std::env::var_os(ISOLATED).is_none() {
+            let name = std::thread::current()
+                .name()
+                .expect("named test thread")
+                .to_owned();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let run_dir = home.path().join("run");
         let sandbox_dir = home.path().join("sandbox");
@@ -1073,7 +1105,8 @@ mod tests {
             std::fs::write(&path, b"stale artifact").unwrap();
             assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());
             std::fs::remove_file(&path).unwrap();
-            // Final symlinks pass symlink_metadata; connect must reject their targets.
+            // Connecting must reject malformed symlink targets without following
+            // them during cleanup or mistaking them for live endpoints.
             std::os::unix::fs::symlink(&path, &path).unwrap();
             assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());
             std::fs::remove_file(&path).unwrap();
@@ -1115,7 +1148,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn absent_endpoints_do_not_wait_for_the_blocking_pool() {
+    fn endpoint_probe_checks_missing_paths_with_a_busy_blocking_pool() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let paths = SandboxSocketPaths::new(home.path(), home.path(), "worker");
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1130,12 +1163,109 @@ mod tests {
             let _ = wait.recv();
         });
         started.recv().unwrap();
-        // A busy filesystem pool must not turn an absent endpoint into a live
-        // owner. Release the blocker before asserting so failures cannot hang.
+
+        // A direct nonblocking connect can prove every endpoint absent even
+        // while unrelated filesystem work occupies the blocking pool.
         let result = runtime.block_on(paths.may_be_live());
+        std::fs::create_dir_all(paths.fallback_agent.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&paths.fallback_agent).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let live_result = runtime.block_on(paths.may_be_live());
+        let accepted = listener.accept();
         release.send(()).unwrap();
         runtime.block_on(blocker).unwrap();
-        assert!(!result.unwrap());
+        assert!(
+            !result.unwrap(),
+            "absent endpoints are not uncertain owners"
+        );
+        assert!(live_result.unwrap());
+        accepted.expect("a live historical endpoint must actually be contacted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_probe_timeout_retains_an_uncertain_owner() {
+        // Keep the latency contract independent of the production constant.
+        const EXPECTED_BUDGET: Duration = Duration::from_millis(50);
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let paths = SandboxSocketPaths::new(home.path(), home.path(), "worker");
+        let path = &paths.runtime.legacy_agent;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let _queued = tokio::net::UnixStream::connect(path).await.unwrap();
+        assert_eq!(
+            tokio::net::UnixStream::connect(path)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock,
+        );
+
+        // This is real uncertainty: a live owner has no listener queue space.
+        // It must stay protected, without lengthening the probe's deadline.
+        let probe = paths.may_be_live();
+        tokio::pin!(probe);
+        tokio::select! {
+            biased;
+            result = &mut probe => panic!("probe completed before deadline: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        tokio::time::advance(EXPECTED_BUDGET).await;
+        let result = tokio::select! {
+            biased;
+            result = &mut probe => result,
+            () = tokio::task::yield_now() => {
+                panic!("probe still pending after {EXPECTED_BUDGET:?}")
+            }
+        };
+        assert!(result.unwrap());
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endpoint_probe_rejects_nul_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        for bytes in [b"\0abstract".as_slice(), b"path\0suffix".as_slice()] {
+            let path = PathBuf::from(OsString::from_vec(bytes.to_vec()));
+            let error = endpoint_answers(&path).await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endpoint_probe_propagates_permission_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses filesystem mode checks, so cannot exercise this denial.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let paths = SandboxSocketPaths::new(home.path(), home.path(), "worker");
+        std::fs::create_dir_all(&paths.runtime.canonical_dir).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&paths.runtime.agent).unwrap();
+        std::fs::set_permissions(
+            &paths.runtime.canonical_dir,
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        let result = paths.may_be_live().await;
+        std::fs::set_permissions(
+            &paths.runtime.canonical_dir,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(paths.runtime.agent.exists());
     }
 
     #[cfg(target_os = "linux")]

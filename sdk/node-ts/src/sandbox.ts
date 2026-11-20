@@ -1,3 +1,5 @@
+import { UnsupportedError } from "./errors.js";
+import { snapshotCreateResult, type SnapshotCreateResult, SnapshotCaptureOptions } from "./snapshot-group.js";
 import type { SandboxConfigInspection } from "./config-inspection.js";
 import { bindingFor } from "./internal/provider.js";
 import { Snapshot } from "./snapshot.js";
@@ -17,10 +19,20 @@ import {
 import {
   modificationPlanFromJson,
   modifyOptionsToNapi,
+  resizeStatusFromJson,
+  validateResizeTimeout,
   requireModifyCapabilities,
   type ModifyOptions,
+  type ResourceResizeStatus,
   type SandboxModificationPlan,
 } from "./modify.js";
+import {
+  modificationResultFromJson,
+  resizeOperationsFromJson,
+  resizeOperationsToJson,
+  type ResizeOperation,
+  type SandboxModificationResult,
+} from "./resize.js";
 import {
   napi,
   type NapiAttachOptionsBuilder,
@@ -230,7 +242,7 @@ export class PullProgressCreate {
   /** Await the sandbox. Resolves once pull + boot finishes. */
   async awaitSandbox(): Promise<Sandbox> {
     const inner = await withMappedErrors(() => this.inner.awaitSandbox());
-    return new Sandbox(inner, this.name, this.attachedCreation);
+    return new Sandbox(inner, await inner.name, this.attachedCreation);
   }
 }
 
@@ -267,6 +279,16 @@ export class Sandbox implements AsyncDisposable {
   static async recoverStorage(name: string, options: StorageRecoveryOptions = {}): Promise<StorageRecovery> {
     return recoverStorage(name, options);
   }
+
+  async snapshot(group: string): Promise<SnapshotCreateResult> {
+    return this.snapshotWith(group, options => options);
+  }
+
+  async snapshotWith(group: string, configure: (options: SnapshotCaptureOptions) => SnapshotCaptureOptions): Promise<SnapshotCreateResult> {
+    const options = configure(new SnapshotCaptureOptions()).toNative();
+    return snapshotCreateResult(await withMappedErrors(() => this.inner.snapshot(group, options)));
+  }
+
   async getJob(id: string): Promise<Job> { return new Job(await jobCall(() => this.inner.getJob(id))); }
   async listJobs(): Promise<JobPage> { return this.listJobsWith(b => b); }
   async listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage> {
@@ -293,6 +315,16 @@ export class Sandbox implements AsyncDisposable {
 
   /** @internal Wrap terminals without replacing the native builder's retained destination. */
   static fromNativeRestoreBuilder(builder: NapiRestoreBuilder): RestoreBuilder {
+    // A new JS package can load an older native addon. Reject explicit unsupported policy
+    // instead of dropping it; ordinary restores still use the old supported entry points.
+    if (typeof builder.guestClock !== "function") {
+      builder.guestClock = () => { throw new UnsupportedError("guest clock selection requires an updated native SDK"); };
+    }
+    for (const option of ["init", "initWith", "hostname", "maxCpus", "maxMemory", "label", "labels", "workdir", "shell", "entrypoint", "cmd", "env", "envs", "proxy", "pullPolicy"] as const) {
+      if (typeof builder[option] !== "function") {
+        builder[option] = () => { throw new UnsupportedError(`${option} selection requires an updated native SDK`); };
+      }
+    }
     const restore = builder.restore.bind(builder);
     const progress = builder.restoreWithProgress.bind(builder);
     let name = "";
@@ -687,6 +719,60 @@ export class Sandbox implements AsyncDisposable {
     return modificationPlanFromJson(raw);
   }
 
+  /** Apply once and retain this call's operation identities; ordinary modify() is unchanged. */
+  async modifyWithResizeTracking(opts?: ModifyOptions): Promise<SandboxModificationResult> {
+    if (typeof this.inner.modifyWithResizeTracking !== "function") {
+      throw new Error("resize operation tracking requires an updated native library");
+    }
+    requireModifyCapabilities(opts);
+    return modificationResultFromJson(await withMappedErrors(() =>
+      this.inner.modifyWithResizeTracking!(modifyOptionsToNapi(opts)),
+    ));
+  }
+
+  /** Read current operation identities and evidence without changing targets. */
+  async resizeOperations(): Promise<ResizeOperation[]> {
+    if (typeof this.inner.resizeOperations !== "function") {
+      throw new Error("resize operation tracking requires an updated native library");
+    }
+    return resizeOperationsFromJson(await withMappedErrors(() => this.inner.resizeOperations!()));
+  }
+
+  /** Wait for supplied identities. Timeout ends waiting only; later targets cannot replace them. */
+  async waitForResizeOperations(
+    operations: readonly ResizeOperation[], timeoutMs?: number,
+  ): Promise<ResourceResizeStatus[]> {
+    validateResizeTimeout(timeoutMs);
+    const raw = resizeOperationsToJson(operations);
+    if (typeof this.inner.waitForResizeOperations !== "function") {
+      throw new Error("resize operation tracking requires an updated native library");
+    }
+    return resizeStatusFromJson(await withMappedErrors(() =>
+      this.inner.waitForResizeOperations!(raw, timeoutMs),
+    ));
+  }
+
+  /** Read retained CPU and memory resize status. Rejects a stopped sandbox or unsupported runtime. */
+  async resizeStatus(): Promise<ResourceResizeStatus[]> {
+    return resizeStatusFromJson(
+      await withMappedErrors(() => this.inner.resizeStatus()),
+    );
+  }
+
+  /**
+   * Wait for the operations selected at the first read to be guest-confirmed.
+   * Stopped, unsupported, superseded or unavailable history is not success.
+   * Omitted waits without a deadline and keeps polling while a guest
+   * never converges; `0` checks once. Expiry throws `ResizeTimeoutError`, whose
+   * `status` is empty if no read completed before the deadline.
+   */
+  async waitUntilResized(timeoutMs?: number): Promise<ResourceResizeStatus[]> {
+    validateResizeTimeout(timeoutMs);
+    return resizeStatusFromJson(
+      await withMappedErrors(() => this.inner.waitUntilResized(timeoutMs)),
+    );
+  }
+
   /** Compact sealed root and owned-data disk layers without rewriting existing snapshots. */
   async compact(opts?: DiskCompactionOptions): Promise<DiskCompactionResult> {
     const raw = await withMappedErrors(() =>
@@ -790,8 +876,8 @@ export class Sandbox implements AsyncDisposable {
    * instead of silently redirecting the wait to the new identity.
    */
   /** Capture this resource's stable identity in its retained context. */
-  async snapshot(name: string): Promise<Snapshot> {
-    return new Snapshot(await withMappedErrors(() => this.inner.snapshot(name)));
+  async checkpoint(name: string): Promise<Snapshot> {
+    return new Snapshot(await withMappedErrors(() => this.inner.checkpoint(name)));
   }
 
   async storageUsage(): Promise<StorageItemUsage> {

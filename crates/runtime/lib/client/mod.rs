@@ -5,6 +5,7 @@
 //--------------------------------------------------------------------------------------------------
 
 pub mod boot_error;
+pub mod command_bindings;
 pub mod compat;
 pub mod control;
 #[cfg(windows)]
@@ -16,4 +17,6 @@ pub mod logging;
 pub mod maintenance;
 #[cfg(target_os = "linux")]
 pub mod memory_handoff;
+pub mod restored_exec_limits;
+pub mod retention;
 pub mod startup_progress;

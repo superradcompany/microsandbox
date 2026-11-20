@@ -1,3 +1,4 @@
+import { parseCheckpointRemoval, parseGroupRemoval } from "../snapshot-removal.js";
 import {
   AgentClientError,
   BootStartError,
@@ -17,6 +18,8 @@ import {
   DatabaseError,
   ExecTimeoutError,
   StopTimeoutError,
+  ResizeTimeoutError,
+  ResizeWaitError,
   HttpError,
   ImageError,
   ImageInUseError,
@@ -47,6 +50,10 @@ import {
   ServiceError,
   ServiceNotFoundError,
   SnapshotSourceRecoveryError,
+  SnapshotImportError,
+  SnapshotVerificationError,
+  SnapshotRemovalRecoveryError,
+  SnapshotGroupRemovalRecoveryError,
   TerminalError,
   UnsupportedOperationError,
   UnsupportedError,
@@ -55,9 +62,9 @@ import {
   type ChangeState,
   type ServiceErrorReason,
 } from "../errors.js";
+import { parseGroupVerification } from "../snapshot-verification.js";
 
-// The recovery and Service variants, and any error from a Service change, carry a JSON envelope
-// after the usual tag; all others carry text.
+  // Recovery, resize, and Service errors may carry a JSON envelope with structured details.
 const PATTERN = /^\[(\w+)\] ([\s\S]*)$/;
 
 const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
@@ -95,6 +102,8 @@ const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
   ["Nix", (m, c) => new NixError(m, { cause: c })],
   ["ExecTimeout", (m, c) => new ExecTimeoutError(m, parseTimeoutMs(m), { cause: c })],
   ["StopTimeout", (m, c) => new StopTimeoutError(m, { cause: c })],
+  ["ResizeWait", (m, c) => mapResizeWaitError(m, c)],
+  ["ResizeTimeout", (m, c) => mapResizeTimeoutError(m, c)],
   ["Terminal", (m, c) => new TerminalError(m, { cause: c })],
   ["SandboxFsOps", (m, c) => new SandboxFsOpsError(m, { cause: c })],
   ["ImageNotFound", (m, c) => new ImageNotFoundError(m, { cause: c })],
@@ -131,6 +140,28 @@ export function mapNapiError(err: unknown): unknown {
   if (!(err instanceof Error)) return err;
   const m = PATTERN.exec(err.message);
   if (!m) return err;
+  if (m[1] === "SnapshotImport") return mapImportError(m[2]!, err);
+  if (m[1] === "SnapshotRemovalRecovery") {
+    try {
+      const envelope = JSON.parse(m[2]!);
+      if (typeof envelope.message !== "string" || typeof envelope.detail !== "string") return err;
+      return new SnapshotRemovalRecoveryError(envelope.message, parseCheckpointRemoval(envelope.result), envelope.detail, { cause: err });
+    } catch { return err; }
+  }
+  if (m[1] === "SnapshotGroupRemovalRecovery") {
+    try {
+      const envelope = JSON.parse(m[2]!);
+      if (typeof envelope.message !== "string" || typeof envelope.detail !== "string") return err;
+      return new SnapshotGroupRemovalRecoveryError(envelope.message, parseGroupRemoval(envelope.result), envelope.detail, { cause: err });
+    } catch { return err; }
+  }
+  if (m[1] === "SnapshotVerification") {
+    try {
+      const envelope = JSON.parse(m[2]!);
+      if (typeof envelope.message !== "string") return err;
+      return new SnapshotVerificationError(envelope.message, parseGroupVerification(envelope.report), { cause: err });
+    } catch { return err; }
+  }
   if (m[1] === "SnapshotSourceRecovery") {
     return mapRecoveryError(m[2]!, err);
   }
@@ -174,6 +205,11 @@ function mapRecoveryError(payload: string, raw: Error): unknown {
     const a = r.artifact;
     if (a !== null && (!a || !(a.kind === "installed" || a.kind === "archive") ||
         !["path", "snapshot_id", "digest"].every((key) => typeof a[key] === "string"))) return raw;
+    const head = a?.head_update;
+    if (head != null && (typeof head !== "object" || typeof head.group !== "string" ||
+        typeof head.reason !== "string" || typeof head.changed !== "boolean" ||
+        !(head.previous === null || typeof head.previous === "string") ||
+        !(head.head === null || typeof head.head === "string"))) return raw;
     return new SnapshotSourceRecoveryError(envelope.message, {
       sourceSandbox: r.source_sandbox,
       checkpointId: r.checkpoint_id,
@@ -183,12 +219,42 @@ function mapRecoveryError(payload: string, raw: Error): unknown {
       publicationError: r.publication_error,
       artifact: a === null ? null : {
         kind: a.kind, path: a.path, snapshotId: a.snapshot_id, digest: a.digest,
+        ...(a.head_update === undefined ? {} : { headUpdate: head }),
       },
     }, { cause: raw });
   } catch {
     // Preserve the original refusal if a mismatched native binary sends an unknown envelope.
     return raw;
   }
+}
+
+function mapResizeWaitError(payload: string, raw: Error): MicrosandboxError {
+  try {
+    const value = JSON.parse(payload);
+    if (typeof value?.message === "string" &&
+        ["superseded", "interrupted", "history_unavailable", "invalid_response", "observation_unavailable"].includes(value.reason) &&
+        (value.sandbox === null || typeof value.sandbox === "string") &&
+        (value.operation_id === null || typeof value.operation_id === "string") &&
+        Array.isArray(value.status)) {
+      return new ResizeWaitError(value.message, value.reason, value.sandbox,
+        value.operation_id, value.status, { cause: raw });
+    }
+  } catch {
+    // Preserve malformed/unknown future payloads as errors, never guessed outcomes.
+  }
+  return new RuntimeError(payload, { cause: raw });
+}
+
+function mapResizeTimeoutError(payload: string, raw: Error): ResizeTimeoutError {
+  try {
+    const envelope = JSON.parse(payload);
+    if (typeof envelope?.message === "string" && Array.isArray(envelope.status)) {
+      return new ResizeTimeoutError(envelope.message, envelope.status, { cause: raw });
+    }
+  } catch {
+    // Older native bindings send only the message.
+  }
+  return new ResizeTimeoutError(payload, [], { cause: raw });
 }
 
 const SERVICE_REASONS: ReadonlySet<string> = new Set<ServiceErrorReason>([
@@ -234,5 +300,24 @@ export async function withMappedErrors<T>(fn: () => Promise<T>): Promise<T> {
     return await fn();
   } catch (e) {
     throw mapNapiError(e);
+  }
+}
+
+function mapImportError(payload: string, raw: Error): unknown {
+  try {
+    const envelope = JSON.parse(payload);
+    const details = envelope.import;
+    if (typeof envelope.message !== "string" || !details ||
+        typeof details.operation_id !== "string" || typeof details.detail !== "string" ||
+        !(details.group_path === null || typeof details.group_path === "string") ||
+        !["not_committed", "committed", "unknown"].includes(details.outcome) ||
+        !Array.isArray(details.archives) || !details.archives.every((path: unknown) => typeof path === "string")) return raw;
+    return new SnapshotImportError(envelope.message, {
+      operationId: details.operation_id, archives: details.archives,
+      groupPath: details.group_path, outcome: details.outcome, detail: details.detail,
+    }, { cause: raw });
+  } catch {
+    // A mismatched native payload is still a failure, never an inferred successful import.
+    return raw;
   }
 }
