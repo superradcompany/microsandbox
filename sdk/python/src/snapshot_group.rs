@@ -127,7 +127,7 @@ impl PySnapshotGroup {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (group, files, *, dest=None, base=None, set_head=false))]
+    #[pyo3(signature = (group, files, *, dest=None, base=None, set_head=false, maximum_disk_bytes=None))]
     fn load<'py>(
         py: Python<'py>,
         group: String,
@@ -135,6 +135,7 @@ impl PySnapshotGroup {
         dest: Option<PathBuf>,
         base: Option<String>,
         set_head: bool,
+        maximum_disk_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let prepared = microsandbox::snapshot::PreparedSnapshotImport::new(
             files,
@@ -143,6 +144,7 @@ impl PySnapshotGroup {
                 base,
                 group: None,
                 set_head,
+                maximum_disk_bytes,
             },
         );
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

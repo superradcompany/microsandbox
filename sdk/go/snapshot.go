@@ -52,6 +52,8 @@ type SnapshotLoadOptions struct {
 	Group string
 	// Select the unique imported tip even when it is not a fast-forward.
 	SetHead bool
+	// Maximum logical bytes imported; nil means unlimited.
+	MaximumDiskBytes *uint64 `json:"maximum_disk_bytes,omitempty"`
 }
 
 // SnapshotHeadUpdate reports the result of reading or selecting a group head.
@@ -363,7 +365,7 @@ func (s *Checkpoints) LoadWithOptions(ctx context.Context, archive string, opts 
 	return oneSnapshot(s.LoadMany(ctx, []string{archive}, opts))
 }
 func (s *Checkpoints) LoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*Checkpoint, error) {
-	return s.operation(ctx, "snapshot_load", "", map[string]any{"archives": archives, "options": ffi.SnapshotLoadOptions{Dest: opts.Dest, Base: opts.Base, Group: opts.Group, SetHead: opts.SetHead}})
+	return s.operation(ctx, "snapshot_load", "", map[string]any{"archives": archives, "options": ffi.SnapshotLoadOptions{Dest: opts.Dest, Base: opts.Base, Group: opts.Group, SetHead: opts.SetHead, MaximumDiskBytes: opts.MaximumDiskBytes}})
 }
 func (s *Checkpoints) GroupHead(ctx context.Context, group string) (*string, error) {
 	var id *string

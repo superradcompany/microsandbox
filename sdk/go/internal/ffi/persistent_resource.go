@@ -46,6 +46,9 @@ func (c *Context) Resources(ctx context.Context, operation, name string, args an
 	if err != nil {
 		return nil, err
 	}
+	if err := c.lib().requireImportBudget(raw); err != nil {
+		return nil, err
+	}
 	request := C.CString(string(raw))
 	defer C.free(unsafe.Pointer(request))
 	out, err := c.lib().callBufWithAbandonedResult(ctx, defaultBufSize, func(id C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {

@@ -280,6 +280,7 @@ async fn persistent_operation(
                         base: opts.base,
                         group: opts.group,
                         set_head: opts.set_head,
+                        maximum_disk_bytes: opts.maximum_disk_bytes,
                     },
                 )
                 .await?

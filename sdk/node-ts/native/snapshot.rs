@@ -68,6 +68,8 @@ pub struct JsLoadOpts {
     pub group: Option<String>,
     /// Select the unique imported tip even when it is not a fast-forward.
     pub set_head: Option<bool>,
+    /// Maximum logical bytes imported.
+    pub maximum_disk_bytes: Option<f64>,
 }
 
 /// Outcome of reading or selecting a snapshot group's head.
@@ -111,6 +113,12 @@ pub struct JsSnapshotRemoveOpts {
 
 #[napi]
 impl JsSnapshot {
+    /// Advertise support before an older provider can ignore the requested limit.
+    #[napi]
+    pub fn supports_import_budget() -> bool {
+        true
+    }
+
     /// Consume destination options; the receiver always selects the source and backend.
     ///
     /// # Safety
@@ -236,6 +244,10 @@ impl JsSnapshot {
                 base: opts.base,
                 group: opts.group,
                 set_head: opts.set_head.unwrap_or(false),
+                maximum_disk_bytes: opts
+                    .maximum_disk_bytes
+                    .map(|value| crate::numeric::safe_integer(value, "maximumDiskBytes"))
+                    .transpose()?,
             },
         );
         env.spawn_future(async move {
@@ -264,6 +276,10 @@ impl JsSnapshot {
                 base: opts.base,
                 group: opts.group,
                 set_head: opts.set_head.unwrap_or(false),
+                maximum_disk_bytes: opts
+                    .maximum_disk_bytes
+                    .map(|value| crate::numeric::safe_integer(value, "maximumDiskBytes"))
+                    .transpose()?,
             },
         );
         env.spawn_future(async move {

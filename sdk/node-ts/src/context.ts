@@ -1,4 +1,5 @@
-import { binding } from "./internal/provider.js";
+import { UnsupportedError } from "./errors.js";
+import { binding, nativeOwner } from "./internal/provider.js";
 import { type NapiSnapshotSeed, type NapiContext } from "./internal/napi.js";
 import { withMappedErrors } from "./internal/error-mapping.js";
 import { Sandbox, SandboxListBuilder, sandboxPageFromNapi, type RestoreBuilder, type SandboxBuilder, type SandboxPage } from "./sandbox.js";
@@ -173,6 +174,7 @@ export class Snapshots {
 
   async load(name: string, files: string[], configure: (options: SnapshotLoadOptions) => SnapshotLoadOptions = options => options): Promise<SnapshotImportResult> {
     const options = configure(new SnapshotLoadOptions()).toNative();
+    if (options.maximumDiskBytes != null && !nativeOwner(this.context.native)?.Snapshot.supportsImportBudget?.()) throw new UnsupportedError("Snapshot import size limits require an updated native SDK");
     return wrapImportResult(await withMappedErrors(() => this.context.native.snapshotGroupLoad(name, [...files], options)));
   }
 

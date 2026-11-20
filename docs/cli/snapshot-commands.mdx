@@ -327,3 +327,5 @@ msb snap reindex /mnt/snapshots
 | --- | --- |
 | [`msb fork`](/cli/sandbox-commands#msb-sandbox-fork) | Copy running execution without saving a snapshot |
 | [`msb modify --compact`](/cli/sandbox-commands#compaction) | Merge sealed disk layers |
+
+For `msb snapshot load`, `--maximum-disk-bytes` sets a positive limit on logical imported file bytes, including metadata and dependencies. Each declared file disk must also fit. Omit it for no size limit.
