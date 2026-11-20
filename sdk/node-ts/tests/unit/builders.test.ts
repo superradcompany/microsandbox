@@ -410,7 +410,10 @@ describe("SandboxBuilder.build", () => {
     for (const method of ["fromSnapshot", "forked", "diskOnly", "snapshotBase", "externalMountPolicy"]) {
       expect(create).not.toHaveProperty(method);
     }
-    for (const method of ["image", "network", "cmd", "entrypoint", "replace", "create"]) {
+    for (const method of ["cmd", "entrypoint", "workdir", "shell", "env", "envs"]) {
+      expect(typeof (restore as unknown as Record<string, unknown>)[method], method).toBe("function");
+    }
+    for (const method of ["image", "network", "foregroundCommand", "backgroundCommand", "replace", "create"]) {
       expect(restore).not.toHaveProperty(method);
     }
   });

@@ -55,6 +55,7 @@ pub struct ExecOptions {
 /// Builder for [`ExecOptions`].
 #[derive(Default)]
 pub struct ExecOptionsBuilder {
+    inherited_argv: bool,
     options: ExecOptions,
 }
 
@@ -115,6 +116,9 @@ pub struct ExecHandle {
 
     /// Client-owned deadline state, shared with the independent event pump.
     timeout: Option<Arc<StreamTimeout>>,
+
+    /// Confirmed terminal outcome only; output and observer failures are not retained.
+    completion: Option<ExecCompletion>,
 }
 
 struct StreamTimeout {
@@ -124,6 +128,13 @@ struct StreamTimeout {
     expired: AtomicBool,
     /// Failure to deliver timeout termination, reported to the output consumer.
     failure: Mutex<Option<String>>,
+}
+
+/// Reproducible terminal result, independent of the consumed event stream.
+enum ExecCompletion {
+    Exited(ExitStatus),
+    TimedOut(Duration),
+    Failed(ExecFailed),
 }
 
 /// Cloneable control handle for a streaming exec session.
@@ -183,6 +194,16 @@ pub struct ExecSink {
 //--------------------------------------------------------------------------------------------------
 
 impl ExecOptionsBuilder {
+    /// Mark a program or arguments resolved from sandbox defaults by a higher-level client.
+    pub fn with_inherited_command(mut self, inherited: bool) -> Self {
+        self.inherited_argv = inherited;
+        self
+    }
+
+    pub(crate) fn explicit_argv(&self) -> bool {
+        !self.inherited_argv
+    }
+
     /// Prepend arguments resolved by a higher-level execution helper.
     pub(crate) fn prepend_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
         self.options.args.splice(0..0, args);
@@ -334,6 +355,16 @@ impl ExecOutput {
     }
 }
 
+impl ExecCompletion {
+    fn result(&self) -> MicrosandboxResult<ExitStatus> {
+        match self {
+            Self::Exited(status) => Ok(*status),
+            Self::TimedOut(duration) => Err(crate::MicrosandboxError::ExecTimeout(*duration)),
+            Self::Failed(failure) => Err(crate::MicrosandboxError::ExecFailed(failure.clone())),
+        }
+    }
+}
+
 impl ExecHandle {
     /// Create a new exec handle.
     fn new(
@@ -349,7 +380,12 @@ impl ExecHandle {
             stdin,
             client,
             timeout,
+            completion: None,
         }
+    }
+
+    pub(crate) fn retain_runtime(&mut self, runtime: Arc<crate::sandbox::state::RuntimeSession>) {
+        self.events.retain_runtime(runtime);
     }
 
     /// Get the execution session ID.
@@ -384,7 +420,29 @@ impl ExecHandle {
     /// while no events are polled. This raw event API reports the actual exit event;
     /// [`Self::wait`] and [`Self::collect`] report `ExecTimeout` after a timed-out exit.
     pub async fn recv(&mut self) -> Option<ExecEvent> {
-        self.events.recv().await
+        let event = self.events.recv().await?;
+        // Record before exposing the event, with no intervening await. Cancelling a
+        // caller cannot erase an outcome whose terminal event we already consumed.
+        if self.completion.is_none() {
+            self.completion = match &event {
+                ExecEvent::Exited { code } => {
+                    let expired = self
+                        .timeout
+                        .as_ref()
+                        .filter(|timeout| timeout.expired.load(Ordering::Acquire));
+                    Some(match expired {
+                        Some(timeout) => ExecCompletion::TimedOut(timeout.duration),
+                        None => ExecCompletion::Exited(ExitStatus {
+                            code: *code,
+                            success: *code == 0,
+                        }),
+                    })
+                }
+                ExecEvent::Failed(failure) => Some(ExecCompletion::Failed(failure.clone())),
+                _ => None,
+            };
+        }
+        Some(event)
     }
 
     /// Take the stdin sink (if `StdinMode::Pipe` was used).
@@ -399,35 +457,30 @@ impl ExecHandle {
     /// Returns `ExecTimeout` after the process exits following its configured deadline.
     /// Cancelling this wait does not cancel the deadline. Failure to deliver termination
     /// is reported separately, without claiming that the process exited.
+    /// Once observed through `wait`, `collect`, or `recv`, the terminal outcome is
+    /// retained: later waits return it without rerunning the command or replaying output.
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
-        while let Some(event) = self.events.recv().await {
-            match event {
-                ExecEvent::Exited { code } => {
-                    self.check_timeout()?;
-                    return Ok(ExitStatus {
-                        code,
-                        success: code == 0,
-                    });
-                }
-                ExecEvent::Failed(payload) => {
-                    return Err(crate::MicrosandboxError::ExecFailed(payload));
-                }
-                _ => {}
+        loop {
+            if let Some(completion) = &self.completion {
+                return completion.result();
+            }
+            if self.recv().await.is_none() {
+                // EOF or lost observation does not confirm command completion.
+                return Err(self.incomplete_error());
             }
         }
-
-        Err(self.incomplete_error())
     }
 
     /// Wait for completion and collect all stdout/stderr.
     ///
     /// Uses the same timeout and termination-confirmation behavior as [`Self::wait`].
+    /// Records completion for later waits, but does not retain or replay output.
     pub async fn collect(&mut self) -> MicrosandboxResult<ExecOutput> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_code: Option<i32> = None;
 
-        while let Some(event) = self.events.recv().await {
+        while let Some(event) = self.recv().await {
             match event {
                 ExecEvent::Started { pid: _ } => {}
                 ExecEvent::Stdout(data) => {
@@ -641,7 +694,7 @@ pub(crate) mod agent {
     };
 
     pub(crate) async fn exec_stream(
-        backend: &dyn crate::backend::Backend,
+        backend: &dyn crate::context::Context,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
@@ -651,7 +704,7 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn exec_stream_with_pty_size(
-        backend: &dyn crate::backend::Backend,
+        backend: &dyn crate::context::Context,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
@@ -660,6 +713,19 @@ pub(crate) mod agent {
         cols: u16,
     ) -> MicrosandboxResult<ExecHandle> {
         let client = Arc::new(connect_agent(backend, name).await?);
+        exec_stream_on_client(client, name, config, cmd, opts, (rows, cols), true).await
+    }
+
+    pub(crate) async fn exec_stream_on_client(
+        client: Arc<AgentClient>,
+        name: &str,
+        config: &SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+        size: (u16, u16),
+        explicit_argv: bool,
+    ) -> MicrosandboxResult<ExecHandle> {
+        let (rows, cols) = size;
         let policy = client.ready()?.exec_limits;
 
         if let Some(policy) = policy {
@@ -722,7 +788,7 @@ pub(crate) mod agent {
         let input_window = policy.filter(|_| controlled).map(|policy| {
             io::InputWindow::new(policy.input_limit, policy.stdin_chunk_size as usize)
         });
-        let (id, rx) = client.stream(MessageType::ExecRequest, &req).await?;
+        let (id, rx) = client.stream_exec(&req, &env, explicit_argv).await?;
 
         let stdin = match &stdin_mode {
             StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&client), input_window.clone())),
@@ -762,7 +828,7 @@ pub(crate) mod agent {
     }
 
     pub(crate) async fn exec(
-        backend: &dyn crate::backend::Backend,
+        backend: &dyn crate::context::Context,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
@@ -771,8 +837,14 @@ pub(crate) mod agent {
         // Buffered exec keeps its existing deadline and error contract. Do not start a
         // second timer in its underlying streaming session.
         let timeout_duration = opts.timeout.take();
-        let mut handle = exec_stream(backend, name, config, cmd, opts).await?;
+        let handle = exec_stream(backend, name, config, cmd, opts).await?;
+        collect_buffered(handle, timeout_duration).await
+    }
 
+    pub(crate) async fn collect_buffered(
+        mut handle: ExecHandle,
+        timeout_duration: Option<Duration>,
+    ) -> MicrosandboxResult<ExecOutput> {
         match timeout_duration {
             Some(duration) => match tokio::time::timeout(duration, handle.collect()).await {
                 Ok(result) => result,
@@ -1048,6 +1120,175 @@ pub(crate) mod agent {
             };
             let (client, peer) = tokio::join!(connect, handshake);
             (Arc::new(client.unwrap()), peer)
+        }
+
+        async fn completion_handle(
+            timeout: Option<Arc<StreamTimeout>>,
+        ) -> (
+            ExecHandle,
+            mpsc::UnboundedSender<ExecEvent>,
+            tokio::io::DuplexStream,
+        ) {
+            let (client, peer) = flow_test_client().await;
+            let (sender, receiver) = mpsc::unbounded_channel();
+            let (events, _) = EventReceiver::new(receiver, false);
+            (
+                ExecHandle::new(77, events, None, client, timeout),
+                sender,
+                peer,
+            )
+        }
+
+        #[tokio::test]
+        async fn completion_wait_is_repeatable_including_nonzero_exit() {
+            for code in [0, 17] {
+                let (mut handle, sender, _peer) = completion_handle(None).await;
+                sender
+                    .send(ExecEvent::Stdout(Bytes::from_static(b"discarded")))
+                    .unwrap();
+                sender.send(ExecEvent::Exited { code }).unwrap();
+                let first = handle.wait().await.unwrap();
+                // Keep the sender open: subsequent waits must not await another event.
+                let second = tokio::time::timeout(Duration::from_secs(1), handle.wait())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(first.code, code);
+                assert_eq!(second.code, first.code);
+                assert_eq!(second.success, code == 0);
+                drop(sender);
+                assert!(handle.recv().await.is_none());
+            }
+        }
+
+        #[tokio::test]
+        async fn completion_collect_then_wait_preserves_bytes_without_replay() {
+            let (mut handle, sender, _peer) = completion_handle(None).await;
+            sender
+                .send(ExecEvent::Stdout(Bytes::from_static(b"\xff\0out")))
+                .unwrap();
+            sender
+                .send(ExecEvent::Stderr(Bytes::from_static(b"\xfe\0err")))
+                .unwrap();
+            sender.send(ExecEvent::Exited { code: 3 }).unwrap();
+            drop(sender);
+            let output = handle.collect().await.unwrap();
+            assert_eq!(output.stdout_bytes().as_ref(), b"\xff\0out");
+            assert_eq!(output.stderr_bytes().as_ref(), b"\xfe\0err");
+            assert_eq!(handle.wait().await.unwrap().code, output.status().code);
+            assert!(handle.recv().await.is_none());
+        }
+
+        #[tokio::test]
+        async fn completion_received_exit_is_available_to_wait() {
+            let (mut handle, sender, _peer) = completion_handle(None).await;
+            sender.send(ExecEvent::Exited { code: 4 }).unwrap();
+            assert!(matches!(
+                handle.recv().await,
+                Some(ExecEvent::Exited { code: 4 })
+            ));
+            assert_eq!(handle.wait().await.unwrap().code, 4);
+            assert_eq!(handle.wait().await.unwrap().code, 4);
+        }
+
+        #[tokio::test]
+        async fn completion_failure_is_retained_through_each_observer() {
+            for observer in 0..3 {
+                let (mut handle, sender, _peer) = completion_handle(None).await;
+                sender
+                    .send(ExecEvent::Failed(ExecFailed {
+                        kind: ExecFailureKind::NotFound,
+                        errno: Some(2),
+                        errno_name: Some("ENOENT".to_owned()),
+                        message: "command missing".to_owned(),
+                        stage: Some("spawn".to_owned()),
+                    }))
+                    .unwrap();
+                match observer {
+                    0 => {
+                        assert!(handle.wait().await.is_err());
+                    }
+                    1 => {
+                        assert!(handle.collect().await.is_err());
+                    }
+                    _ => {
+                        assert!(matches!(handle.recv().await, Some(ExecEvent::Failed(_))));
+                    }
+                }
+                for _ in 0..2 {
+                    let MicrosandboxError::ExecFailed(failure) = handle.wait().await.unwrap_err()
+                    else {
+                        panic!("expected retained execution failure");
+                    };
+                    assert_eq!(failure.kind, ExecFailureKind::NotFound);
+                    assert_eq!(failure.errno, Some(2));
+                    assert_eq!(failure.errno_name.as_deref(), Some("ENOENT"));
+                    assert_eq!(failure.message, "command missing");
+                    assert_eq!(failure.stage.as_deref(), Some("spawn"));
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn completion_confirmed_timeout_is_retained() {
+            for observer in 0..3 {
+                let timeout = Arc::new(state());
+                timeout.expired.store(true, Ordering::Release);
+                let (mut handle, sender, _peer) = completion_handle(Some(timeout)).await;
+                sender.send(ExecEvent::Exited { code: 143 }).unwrap();
+                match observer {
+                    0 => {
+                        assert!(handle.wait().await.is_err());
+                    }
+                    1 => {
+                        assert!(handle.collect().await.is_err());
+                    }
+                    _ => {
+                        assert!(matches!(
+                            handle.recv().await,
+                            Some(ExecEvent::Exited { code: 143 })
+                        ));
+                    }
+                }
+                for _ in 0..2 {
+                    assert!(
+                        matches!(handle.wait().await, Err(MicrosandboxError::ExecTimeout(duration)) if duration == Duration::from_secs(1))
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn completion_cancelled_observer_does_not_finish_execution() {
+            let (mut handle, sender, _peer) = completion_handle(None).await;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), handle.wait())
+                    .await
+                    .is_err()
+            );
+            assert!(handle.completion.is_none());
+            sender.send(ExecEvent::Exited { code: 0 }).unwrap();
+            assert!(handle.wait().await.unwrap().success);
+        }
+
+        #[tokio::test]
+        async fn completion_lost_transport_or_signal_failure_is_not_terminal() {
+            for signal_failed in [false, true] {
+                let timeout = Arc::new(state());
+                if signal_failed {
+                    timeout.expired.store(true, Ordering::Release);
+                    *timeout.failure.lock().unwrap() = Some("signal delivery failed".to_owned());
+                }
+                let (mut handle, sender, _peer) = completion_handle(Some(timeout)).await;
+                drop(sender);
+                for _ in 0..2 {
+                    assert!(matches!(
+                        handle.wait().await,
+                        Err(MicrosandboxError::Runtime(_))
+                    ));
+                    assert!(handle.completion.is_none());
+                }
+            }
         }
 
         #[tokio::test]

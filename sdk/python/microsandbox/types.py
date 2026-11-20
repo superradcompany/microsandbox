@@ -8,6 +8,7 @@ import sys
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Literal, TypeAlias, TypedDict
 
 # --------------------------------------------------------------------------------------------------
@@ -81,9 +82,65 @@ class SandboxStatus(StrEnum):
     PAUSED = "paused"
 
 
-class BackendKind(StrEnum):
+class SandboxInfo(TypedDict):
+    """A fresh backend observation; timestamps are timezone-aware UTC datetimes."""
+
+    id: str
+    name: str
+    status: SandboxStatus
+    last_failure_message: str | None
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+class ComputeType(StrEnum):
+    STANDARD = "standard"
+    SHARED = "shared"
+
+
+class ServiceStatus(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    DETACHED = "detached"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceTarget:
+    """The sandbox and port that receive a Service's requests."""
+
+    sandbox: str
+    port: int
+
+
+class ContextKind(StrEnum):
     LOCAL = "local"
-    CLOUD = "cloud"
+    REMOTE = "remote"
+
+
+class ServiceErrorReason(StrEnum):
+    """Why a Service change did not complete.
+
+    ``OTHER`` is an unrecognized reason; ``ServiceError.raw_code`` keeps its raw code,
+    and ``ServiceError.changed`` still reports the outcome.
+    """
+
+    SERVICE_QUOTA_EXCEEDED = "service_quota_exceeded"
+    SANDBOX_SERVICE_LIMIT_EXCEEDED = "sandbox_service_limit_exceeded"
+    SERVICE_CONFLICT = "service_conflict"
+    SERVICE_DETACHED = "service_detached"
+    TARGET_UNREACHABLE = "target_unreachable"
+    SANDBOX_NOT_RUNNING = "sandbox_not_running"
+    SERVICE_CHANGES_PAUSED = "service_changes_paused"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    OTHER = "other"
+
+
+class ChangeState(StrEnum):
+    """Whether a failed Service change may have been applied."""
+
+    UNCHANGED = "unchanged"
+    UNKNOWN = "unknown"
 
 
 class ModificationPolicy(StrEnum):
@@ -122,6 +179,23 @@ class ModificationDisposition(StrEnum):
 class ResourceKind(StrEnum):
     CPUS = "cpus"
     MEMORY = "memory"
+
+
+class ResizeOutcome(StrEnum):
+    """Operation ownership outcome, separate from resource convergence."""
+
+    PENDING = "pending"
+    APPLIED = "applied"
+    SUPERSEDED = "superseded"
+
+
+class ResizeObservation(StrEnum):
+    """Availability of authoritative evidence for the latest operation read."""
+
+    AVAILABLE = "available"
+    UNSUPPORTED = "unsupported"
+    PAUSED = "paused"
+    UNAVAILABLE = "unavailable"
 
 
 class ResourceConvergenceState(StrEnum):
@@ -252,9 +326,26 @@ class DiskImageFormat(StrEnum):
     RAW = "raw"
     VMDK = "vmdk"
 
+
 class VolumeKind(StrEnum):
     DIRECTORY = "dir"
     DISK = "disk"
+
+
+class VolumeInfo(TypedDict):
+    """A fresh volume observation. Missing measurements remain None."""
+
+    id: str
+    name: str
+    kind: VolumeKind
+    is_default: bool
+    quota_mib: int | None
+    used_bytes: int | None
+    capacity_bytes: int | None
+    disk_format: str | None
+    disk_fstype: str | None
+    labels: dict[str, str]
+    created_at: str | None
 
 
 class NamedVolumeMode(StrEnum):
@@ -454,6 +545,32 @@ class ResourceResizeStatus(TypedDict):
     state: ResourceConvergenceState
 
 
+class CpuResizeTarget(TypedDict):
+    resource: Literal[ResourceKind.CPUS]
+    online: int
+
+
+class MemoryResizeTarget(TypedDict):
+    resource: Literal[ResourceKind.MEMORY]
+    total_mib: int
+
+
+ResizeTarget: TypeAlias = CpuResizeTarget | MemoryResizeTarget
+
+
+class ResizeOperation(TypedDict):
+    """Identity-bound retained request; status is evidence, not authority to rebind it."""
+
+    id: str
+    runtime_boot_id: str
+    generation: int
+    requested_target: ResizeTarget
+    accepted_target: ResizeTarget
+    status: ResourceResizeStatus
+    outcome: ResizeOutcome
+    observation: ResizeObservation
+
+
 class _ConfigPlannedChangeRequired(TypedDict):
     kind: Literal[PlannedChangeKind.CONFIG]
     field: str
@@ -505,6 +622,13 @@ class SandboxModificationPlan(_SandboxModificationPlanRequired, total=False):
     resize_status: list[ResourceResizeStatus]
 
 
+class SandboxModificationResult(TypedDict):
+    """Plan and operations accepted by this call; None means tracking was unavailable or unused."""
+
+    plan: SandboxModificationPlan
+    resize_operations: list[ResizeOperation] | None
+
+
 class ExecOptions(TypedDict, total=False):
     """Options accepted in the second positional argument to exec methods."""
 
@@ -512,7 +636,7 @@ class ExecOptions(TypedDict, total=False):
     cwd: str
     user: str
     env: Mapping[str, str]
-    timeout: float
+    timeout: float | timedelta
     stdin: Stdin | bytes
     stdin_data: bytes
     tty: bool
@@ -1992,3 +2116,30 @@ class RegistryAuth:
 
     def _to_dict(self) -> dict:
         return {"username": self.username, "password": self.password}
+
+
+# --------------------------------------------------------------------------------------------------
+# Types: Snapshot group inspection
+# --------------------------------------------------------------------------------------------------
+
+SnapshotSourceStatus: TypeAlias = Literal["available", "missing_sandbox", "different_catalog"]
+
+
+class SnapshotSourceBinding(TypedDict):
+    """The recorded sandbox instance and its availability at inspection time."""
+
+    database_uuid: str
+    sandbox_id: int
+    recorded_name: str
+    current_name: str | None
+    status: SnapshotSourceStatus
+
+
+class SnapshotGroupInfo(TypedDict):
+    """One protected metadata read; source=None identifies an unbound history."""
+
+    name: str
+    path: str
+    head: str | None
+    checkpoint_count: int
+    source: SnapshotSourceBinding | None

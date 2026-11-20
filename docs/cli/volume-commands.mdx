@@ -6,11 +6,13 @@ description: Create, mount, and manage persistent sandbox volumes with the micro
 icon: "hard-drive"
 ---
 
+Use mutually exclusive `--local` / `--remote` to select a destination for this command. Explicit flags override profile/environment selection while preserving managed backend restrictions; see [selection and credentials](/cloud/connect#explicit-cli-selection).
+
 Named volumes persist independently of sandboxes. Local volumes default to `~/.microsandbox/volumes/`.
 
 ## msb volume create
 
-<Tooltip tip="On microsandbox cloud, create a named volume before mounting it; disk-kind volumes and size are not available, and quota must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, create a named volume before mounting it; disk-kind volumes and size are not available, and quota must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
 ```bash Shell
@@ -39,6 +41,8 @@ msb volumes -q               # Names only
 
 Expanded form: `msb volume ls`. The shorter plural alias `msb vols` is also available.
 
+Both aliases accept destination flags, for example `msb volumes --remote` and `msb vols --local`.
+
 | Flag | Description |
 |------|-------------|
 | `--format` | Output format (`json`) |
@@ -46,7 +50,7 @@ Expanded form: `msb volume ls`. The shorter plural alias `msb vols` is also avai
 
 ## msb volume inspect
 
-<Tooltip tip="Not yet available on microsandbox cloud; read volume metadata through the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not yet available on our managed cloud; read volume metadata through the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
 ```bash Shell
@@ -69,7 +73,7 @@ msb volume rm cache-1 cache-2   # Remove multiple
 
 ## Using volumes with sandboxes
 
-Use `NAME:GUEST_PATH` to mount a volume. Locally, missing named volumes are created and compatible existing volumes are reused. On cloud, create the volume first.
+Use `NAME:GUEST_PATH` with `-v` or `--mount-named` to mount a volume. Missing named volumes are created with default settings and existing volumes are reused. With the cloud backend, the client looks up or creates the volume before creating the sandbox.
 
 <Accordion title="Examples">
 
@@ -91,7 +95,7 @@ msb run --name reader -v shared:/data alpine -- cat /data/msg.txt
 
 </Accordion>
 
-`--mount-named` accepts a `kind` from [volume creation](#msb-volume-create), disk `size`, and directory `quota`. Disk mounts require a size. Conflicting settings on an existing volume fail.
+Locally, `--mount-named` also accepts a `kind` from [volume creation](#msb-volume-create), disk `size`, and directory `quota`. Disk mounts require a size. Conflicting settings on an existing volume fail. The cloud backend rejects these inline creation settings; use a separate volume-create call for supported custom settings.
 
 Directory and bind mounts accept paired `uid` and `gid` guest-owner fallbacks. These do not change host ownership and cannot combine with `stat-virt=off` or disk mounts.
 

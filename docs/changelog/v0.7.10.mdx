@@ -1,0 +1,67 @@
+---
+title: "v0.7.10"
+sidebarTitle: "v0.7.10"
+description: "Set secret policies from Node and Go modify, pull public images anonymously in Go, and clean up after disk-root sandboxes."
+icon: "bolt"
+---
+
+October 23, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.10) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.9...v0.7.10)
+
+## New features
+
+**Pull public images despite stale credentials in Go.** A stale `docker login` on the host could make every pull from that registry fail, even for public images. `WithRegistryAnonymous()` skips stored credentials for that pull. Rust and TypeScript already supported anonymous pulls. [Go sandbox reference](/sdk/go/sandbox)
+
+```go
+sb, err := m.CreateSandbox(ctx, "app",
+    m.WithImage("ghcr.io/org/public-image:latest"),
+    m.WithRegistryAnonymous(),
+)
+```
+
+## Fixes
+
+- **Secret policies from Node and Go `modify()`.** `SecretModifySpec` now accepts substitution, violation action, TLS identity, and placeholder-host settings, matching Python. Previously, Node silently dropped these fields, so a secret added through `modify()` was substituted in every header. Policy edits on a running sandbox need a restart or next start. [Rotate secrets](/sandboxes/tuning#rotate-secrets)
+- Disk-root sandboxes no longer leave a temporary bootstrap directory on the host after each run.
+- Custom filesystem backends supplied through the Rust runtime configuration are now registered with the VM.
+- Updated dependencies behind security alerts and removed secret values from example output.
+
+## Before upgrading
+
+- **Ruby installs need Rust 1.89 or newer.** `gem install microsandbox` compiles the native extension from source.
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/choksi2212">
+      <img src="https://avatars.githubusercontent.com/u/162600900?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@choksi2212</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/lukaskoebe">
+      <img src="https://avatars.githubusercontent.com/u/26327948?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@lukaskoebe</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/TheRealSibasishBehera">
+      <img src="https://avatars.githubusercontent.com/u/95071627?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@TheRealSibasishBehera</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/toksdotdev">
+      <img src="https://avatars.githubusercontent.com/u/11903253?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@toksdotdev</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/x0day">
+      <img src="https://avatars.githubusercontent.com/u/6091595?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@x0day</span>
+    </a>
+  </li>
+</ul>

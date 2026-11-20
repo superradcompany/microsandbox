@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::{Manifest, Snapshot};
+use super::{Checkpoint as Snapshot, Manifest};
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -56,7 +56,7 @@ impl SnapshotCopyBuilder {
     pub async fn save(self) -> MicrosandboxResult<Manifest> {
         self.snapshot
             .backend
-            .snapshots()
+            .snapshot_ops()
             .copy(
                 &self.snapshot,
                 &self.output_archive_path,

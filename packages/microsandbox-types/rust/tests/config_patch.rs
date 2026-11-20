@@ -466,3 +466,51 @@ fn mutable_nullable_setters_distinguish_clear_from_omission() {
     };
     assert_eq!(image.reference, "alpine:latest");
 }
+
+#[test]
+fn replacement_queries_preserve_native_patch_intent_without_changing_wire_behavior() {
+    let omitted = SandboxSpecPatch::new();
+    assert!(!omitted.replaces_env());
+    let merge = SandboxSpecPatch::new().env(vec![EnvVar::new("KEEP", "value")]);
+    assert!(!merge.replaces_env());
+    let replacement = SandboxSpecPatch::new().replace_env(vec![]);
+    assert!(replacement.replaces_env());
+    let combined = merge
+        .overlay(replacement)
+        .overlay(SandboxSpecPatch::new().env(vec![EnvVar::new("NEW", "value")]));
+    assert!(combined.replaces_env());
+    let mut target = SandboxSpec::default();
+    target.env.push(EnvVar::new("OLD", "old"));
+    combined.clone().apply_to(&mut target);
+    assert_eq!(target.env, vec![EnvVar::new("NEW", "value")]);
+    assert!(!combined.clear_env().replaces_env());
+    // Config-file collections still use their existing merge semantics. The new
+    // accessor must not introduce reset metadata into released serialized input.
+    #[derive(Debug, Clone, Default, microsandbox_types::ConfigPatch)]
+    #[config_patch(serde)]
+    struct Settings {
+        #[config_patch(merge)]
+        values: std::collections::BTreeMap<String, String>,
+    }
+    let decoded: SettingsPatch = serde_json::from_str(r#"{"values":{}}"#).unwrap();
+    assert!(!decoded.replaces_values());
+    assert_eq!(
+        serde_json::to_value(SettingsPatch::new().replace_values(Default::default())).unwrap(),
+        serde_json::json!({"values":{}})
+    );
+    assert!(
+        SandboxRuntimeOptionsPatch::new()
+            .replace_scripts(Default::default())
+            .replaces_scripts()
+    );
+    assert!(
+        !SandboxRuntimeOptionsPatch::new()
+            .scripts(Default::default())
+            .replaces_scripts()
+    );
+    assert!(
+        SandboxSpecPatch::new()
+            .replace_labels(Default::default())
+            .replaces_labels()
+    );
+}

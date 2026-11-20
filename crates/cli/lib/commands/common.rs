@@ -1,17 +1,17 @@
 //! Common sandbox configuration flags shared between commands.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
 #[cfg(feature = "net")]
 use microsandbox::OutboundProxy;
 use microsandbox::VolumeKind;
-use microsandbox::backend::{Backend, LocalBackend};
+use microsandbox::context::{Context, LocalContext};
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, GuestClockPolicy, MountBuilder,
-    Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
+    Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxRecord, SecurityProfile,
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
 #[cfg(feature = "net")]
@@ -25,19 +25,46 @@ use microsandbox_types::SecretSubstitution;
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Backend resolution
+// Constants
 //--------------------------------------------------------------------------------------------------
+
+static CLI_CONTEXT: OnceLock<Arc<dyn Context>> = OnceLock::new();
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Context resolution
+//--------------------------------------------------------------------------------------------------
+
+/// Install the command destination once, after fallible profile resolution in main.
+pub fn set_cli_context(context: Arc<dyn Context>) -> microsandbox::MicrosandboxResult<()> {
+    CLI_CONTEXT.set(context).map_err(|_| {
+        microsandbox::MicrosandboxError::InvalidConfig("CLI context was already initialized".into())
+    })
+}
+
+/// Borrow the command's captured destination. Direct library callers resolve explicitly.
+pub fn selected_context() -> microsandbox::MicrosandboxResult<Arc<dyn Context>> {
+    match CLI_CONTEXT.get() {
+        Some(context) => Ok(context.clone()),
+        None => microsandbox::resolve_default_backend(),
+    }
+}
+
+/// Read a provider observation for CLI inspection and explicit lifecycle commands.
+pub(crate) async fn sandbox_record(name: &str) -> microsandbox::MicrosandboxResult<SandboxRecord> {
+    let context = crate::commands::common::selected_context()?;
+    context.sandbox_ops().get(context.clone(), name).await
+}
 
 /// Resolve the process-wide local backend exactly once at the CLI entry point.
 ///
 /// CLI commands always operate against the active default backend. Returns
-/// an `Arc<dyn Backend>` plus a borrow of the `LocalBackend` inside it so
+/// an `Arc<dyn Context>` plus a borrow of the `LocalContext` inside it so
 /// callers can dispatch through either the trait or the local-only APIs.
 /// Errors when the resolved default backend isn't a local one (e.g. when
 /// the user has installed a cloud profile but is running a local-only
 /// command).
-pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Backend>> {
-    let backend = microsandbox::backend::default_backend();
+pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Context>> {
+    let backend = crate::commands::common::selected_context()?;
     if backend.as_local().is_none() {
         anyhow::bail!(
             "this command requires a local backend, but the active default is a cloud backend"
@@ -48,7 +75,10 @@ pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Backend>> {
 
 /// Display relaxed-restore diagnostics even when ordinary progress is quiet.
 pub(crate) async fn display_restore_warnings(sandbox: &Sandbox) {
-    if !sandbox.config().resumed_from_full_snapshot() {
+    if !sandbox
+        .launch_info()
+        .is_some_and(|info| info.resumed_from_full_snapshot)
+    {
         return;
     }
     match sandbox.restore_warnings().await {
@@ -66,8 +96,8 @@ pub(crate) async fn display_restore_warnings(sandbox: &Sandbox) {
     }
 }
 
-/// Borrow the `LocalBackend` inside the resolved default backend, or error.
-pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBackend> {
+/// Borrow the `LocalContext` inside the resolved default backend, or error.
+pub fn local_backend_ref(backend: &Arc<dyn Context>) -> anyhow::Result<&LocalContext> {
     backend
         .as_local()
         .ok_or_else(|| anyhow::anyhow!("this command requires a local backend"))
@@ -151,7 +181,7 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
     pub thp: Option<String>,
 
-    /// Enable or disable nested virtualization. Omission uses the runtime default.
+    /// Enable nested virtualization, or pass `--nested-virt false` to disable it. Omission uses the runtime default.
     #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub nested_virt: Option<bool>,
 
@@ -326,6 +356,7 @@ pub struct SandboxOpts {
 
     /// Root disk for OCI images (e.g. 8G, tmpfs:2G, flat:8G,
     /// ./scratch.img, ./scratch.qcow2:format=qcow2,fstype=ext4).
+    /// Snapshot launches accept a size only, growing the child disk and filesystem.
     #[arg(long = "root-disk", value_name = "SPEC")]
     pub root_disk: Option<String>,
 
@@ -556,7 +587,7 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub max_udp_connections: Option<usize>,
 
-    /// Require inspectable request authority for hostname allows (default: true).
+    /// Require inspectable request authority for hostname allows (default: true). Use `--net-strict false` to disable.
     #[cfg(feature = "net")]
     #[arg(long = "net-strict", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub net_strict: Option<bool>,
@@ -757,9 +788,9 @@ enum CopyKind {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxOpts {
-    /// Builds the protocol-specific proxy selected by the CLI flags.
+    /// Builds the protocol-specific proxy selected by flags or an atomic file input.
     #[cfg(feature = "net")]
-    fn build_outbound_proxy(&self) -> anyhow::Result<Option<OutboundProxy>> {
+    pub(crate) fn build_outbound_proxy(&self) -> anyhow::Result<Option<OutboundProxy>> {
         let Some(raw) = self.proxy.as_deref() else {
             if self.socks4_user_id.is_some()
                 || self.socks5_username.is_some()
@@ -1263,7 +1294,7 @@ impl SandboxConfigKind {
     /// The long option spelling, without its leading dashes.
     const fn long(self) -> &'static str {
         match self {
-            Self::Root => "conf",
+            Self::Root => "file",
             Self::Network => "net-conf",
             Self::Resources => "resource-conf",
             Self::Runtime => "runtime-conf",
@@ -1275,13 +1306,19 @@ impl SandboxConfigKind {
 
     /// The long option spelling used when persisting an installed alias.
     pub(crate) fn flag(self) -> String {
-        format!("--{}", self.long())
+        // Installed commands can outlive the CLI that generated them.
+        match self {
+            Self::Root => "--conf".to_owned(),
+            _ => format!("--{}", self.long()),
+        }
     }
 
     /// User-facing help for this configuration source.
     const fn help(self) -> &'static str {
         match self {
-            Self::Root => "Load a sparse single-sandbox configuration",
+            Self::Root => {
+                "Load a Sandboxfile or another sandbox YAML file. Repeat to layer files in order"
+            }
             Self::Network => "Load an unwrapped network configuration",
             Self::Resources => "Load an unwrapped resource and lifecycle configuration",
             Self::Runtime => "Load an unwrapped runtime configuration",
@@ -1304,6 +1341,7 @@ impl Args for SandboxConfigSources {
                 command.arg(
                     Arg::new(kind.id())
                         .long(kind.long())
+                        .visible_aliases((kind == SandboxConfigKind::Root).then_some("conf"))
                         .value_name("PATH")
                         .help(kind.help())
                         .action(ArgAction::Append)
@@ -1435,7 +1473,11 @@ fn apply_sandbox_opts_inner(
     // --- Environment ---
     for env_str in &opts.env {
         let (k, v) = ui::parse_env(env_str).map_err(anyhow::Error::msg)?;
-        builder = builder.env(k, v);
+        builder = if env_str.contains('=') {
+            builder.env(k, v)
+        } else {
+            builder.host_env(k, v)
+        };
     }
 
     // --- Labels ---
@@ -1537,10 +1579,20 @@ fn apply_sandbox_opts_inner(
             let mut init_envs = Vec::with_capacity(opts.init_env.len());
             for entry in &opts.init_env {
                 let (k, v) = ui::parse_env(entry).map_err(anyhow::Error::msg)?;
-                init_envs.push((k, v));
+                init_envs.push((k, v, !entry.contains('=')));
             }
             let init_args = opts.init_arg.clone();
-            builder = builder.init_with(init_path, |i| i.args(init_args).envs(init_envs));
+            builder = builder.init_with(init_path, |i| {
+                init_envs
+                    .into_iter()
+                    .fold(i.args(init_args), |i, (key, value, host)| {
+                        if host {
+                            i.host_env(key, value)
+                        } else {
+                            i.env(key, value)
+                        }
+                    })
+            });
         }
     }
 
@@ -1551,10 +1603,10 @@ fn apply_sandbox_opts_inner(
 
     // --- Lifecycle ---
     if let Some(ref dur) = opts.max_duration {
-        builder = builder.max_duration(parse_duration_secs(dur)?);
+        builder = builder.max_duration(std::time::Duration::from_secs(parse_duration_secs(dur)?));
     }
     if let Some(ref dur) = opts.idle_timeout {
-        builder = builder.idle_timeout(parse_duration_secs(dur)?);
+        builder = builder.idle_timeout(std::time::Duration::from_secs(parse_duration_secs(dur)?));
     }
 
     // --- Host communication ---
@@ -1940,6 +1992,10 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 ///
 /// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...][,uid=...,gid=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
+    if builder.is_snapshot_launch() {
+        let (guest, mount) = parse_restore_volume(spec)?;
+        return Ok(builder.snapshot_volume(guest, |_| mount));
+    }
     let parsed = parse_volume_mount_spec(spec)?;
     let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
     let source = parsed.source.to_string();
@@ -3587,17 +3643,17 @@ pub(crate) fn use_interactive_tty(stdin_is_terminal: bool, no_tty: bool) -> bool
 /// Resolution order when the user supplies no explicit command:
 /// 1. Image entrypoint [+ cmd]
 /// 2. Image cmd alone
-/// 3. `config.spec.runtime.shell` (interactive only)
+/// 3. `runtime.shell` (interactive only)
 /// 4. `/bin/sh` (interactive only)
 pub fn resolve_command(
-    config: &microsandbox::sandbox::SandboxConfig,
+    runtime: &microsandbox_types::SandboxRuntimeOptions,
     user_command: Vec<String>,
     interactive: bool,
 ) -> anyhow::Result<(Option<String>, Vec<String>)> {
     let cmd_override = (!user_command.is_empty()).then_some(user_command.as_slice());
     match microsandbox_types::resolve_default_command(
-        config.spec.runtime.entrypoint.as_deref(),
-        config.spec.runtime.cmd.as_deref(),
+        runtime.entrypoint.as_deref(),
+        runtime.cmd.as_deref(),
         cmd_override,
     ) {
         Ok(command) => return Ok((Some(command.program), command.args)),
@@ -3607,7 +3663,7 @@ pub fn resolve_command(
 
     // Fall back to configured shell (or /bin/sh) in interactive mode.
     if interactive {
-        let shell = config.spec.runtime.shell.as_deref().unwrap_or("/bin/sh");
+        let shell = runtime.shell.as_deref().unwrap_or("/bin/sh");
         return Ok((Some(shell.to_string()), vec![]));
     }
 
@@ -3623,7 +3679,7 @@ pub fn resolve_command(
 /// workload start shape; reapplying it here would turn ordinary maintenance
 /// commands like `msb exec app -- date` into `entrypoint date`.
 pub fn resolve_exec_command(
-    config: &microsandbox::sandbox::SandboxConfig,
+    runtime: &microsandbox_types::SandboxRuntimeOptions,
     user_command: Vec<String>,
     interactive: bool,
 ) -> anyhow::Result<(Option<String>, Vec<String>)> {
@@ -3633,7 +3689,7 @@ pub fn resolve_exec_command(
         return Ok((Some(cmd), parts));
     }
 
-    resolve_command(config, user_command, interactive)
+    resolve_command(runtime, user_command, interactive)
 }
 
 /// Parse an rlimit spec: `RESOURCE=LIMIT` or `RESOURCE=SOFT:HARD`.
@@ -3657,20 +3713,21 @@ pub fn parse_label_selectors(labels: &[String]) -> Vec<(String, String)> {
 }
 
 /// List every page of sandboxes matching repeatable `--label KEY[=VALUE]` selectors.
-pub async fn list_sandboxes(labels: &[String]) -> anyhow::Result<Vec<SandboxHandle>> {
+pub async fn list_sandboxes(labels: &[String]) -> anyhow::Result<Vec<SandboxRecord>> {
     let labels = parse_label_selectors(labels);
     let mut cursor: Option<String> = None;
     let mut sandboxes = Vec::new();
 
     loop {
-        let page = Sandbox::list_with(|list| {
-            let list = list.limit(100).labels(labels.clone());
-            match cursor.as_ref() {
-                Some(cursor) => list.cursor(cursor.clone()),
-                None => list,
-            }
-        })
-        .await?;
+        let context = crate::commands::common::selected_context()?;
+        let query = microsandbox::SandboxListBuilder::default()
+            .limit(100)
+            .labels(labels.clone());
+        let query = match cursor.as_ref() {
+            Some(cursor) => query.cursor(cursor.clone()),
+            None => query,
+        };
+        let page = context.sandbox_ops().list(context.clone(), query).await?;
         sandboxes.extend(page.sandboxes);
 
         match page.next_cursor {
@@ -5360,8 +5417,8 @@ mod tests {
     #[test]
     fn resolve_command_prepends_entrypoint_to_explicit_run_command() {
         let config = command_config(Some(&["start"]), None);
-        let (cmd, args) =
-            resolve_command(&config, vec!["date".to_string()], false).expect("resolve command");
+        let (cmd, args) = resolve_command(&config.spec.runtime, vec!["date".to_string()], false)
+            .expect("resolve command");
 
         assert_eq!(cmd.as_deref(), Some("start"));
         assert_eq!(args, vec!["date".to_string()]);
@@ -5371,7 +5428,7 @@ mod tests {
     fn resolve_command_replaces_stored_cmd_with_run_override() {
         let config = command_config(Some(&["start", "--verbose"]), Some(&["serve", "--http"]));
         let (cmd, args) = resolve_command(
-            &config,
+            &config.spec.runtime,
             vec!["worker".to_string(), "--once".to_string()],
             false,
         )
@@ -5391,8 +5448,9 @@ mod tests {
     #[test]
     fn resolve_exec_command_runs_explicit_command_directly() {
         let config = command_config(Some(&["start"]), None);
-        let (cmd, args) = resolve_exec_command(&config, vec!["date".to_string()], false)
-            .expect("resolve exec command");
+        let (cmd, args) =
+            resolve_exec_command(&config.spec.runtime, vec!["date".to_string()], false)
+                .expect("resolve exec command");
 
         assert_eq!(cmd.as_deref(), Some("date"));
         assert!(args.is_empty());
@@ -5402,7 +5460,7 @@ mod tests {
     fn resolve_exec_command_keeps_explicit_command_args() {
         let config = command_config(Some(&["start"]), None);
         let (cmd, args) = resolve_exec_command(
-            &config,
+            &config.spec.runtime,
             vec!["sh".to_string(), "-lc".to_string(), "echo ok".to_string()],
             false,
         )
@@ -5415,8 +5473,8 @@ mod tests {
     #[test]
     fn resolve_exec_command_without_explicit_command_uses_image_defaults() {
         let config = command_config(Some(&["start"]), Some(&["default"]));
-        let (cmd, args) =
-            resolve_exec_command(&config, Vec::new(), false).expect("resolve exec command");
+        let (cmd, args) = resolve_exec_command(&config.spec.runtime, Vec::new(), false)
+            .expect("resolve exec command");
 
         assert_eq!(cmd.as_deref(), Some("start"));
         assert_eq!(args, vec!["default".to_string()]);

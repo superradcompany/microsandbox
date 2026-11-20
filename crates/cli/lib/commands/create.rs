@@ -1,9 +1,8 @@
 //! `msb create` command — create and boot a fresh sandbox.
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
 
-use super::common::{SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
+use super::common::{self, SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
 use crate::{sandbox_config, ui};
 
 //--------------------------------------------------------------------------------------------------
@@ -17,6 +16,10 @@ pub struct CreateArgs {
     ///
     /// May be omitted when a config file supplies `image`.
     pub image: Option<String>,
+
+    /// Snapshot source and restore-mode selection.
+    #[command(flatten)]
+    pub snapshot: crate::snapshot_source::SnapshotSourceArgs,
 
     /// Sandbox configuration options.
     #[command(flatten)]
@@ -42,12 +45,11 @@ pub async fn run(
     }
 
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
-    let image = resolved.image(args.image.as_deref(), None)?;
-    if matches!(image, sandbox_config::ResolvedImage::Snapshot(_)) {
-        anyhow::bail!("snapshot sources require `msb snap restore SNAPSHOT --name NAME`");
-    }
-    let builder = resolved.apply(Sandbox::builder(&name))?;
-    let builder = image.apply(builder)?;
+    let builder = resolved.apply(common::selected_context()?.sandboxes().builder(&name))?;
+    let (builder, display_label) = args
+        .snapshot
+        .apply(&resolved, args.image.as_deref(), builder)
+        .await?;
     let builder = if resolved.loaded() {
         apply_sandbox_opts_after_config(builder, &args.sandbox)?
     } else {
@@ -56,9 +58,9 @@ pub async fn run(
 
     let (mut progress, task) = builder.detached(true).create_detached_with_progress()?;
     let mut display = if args.sandbox.quiet {
-        ui::PullProgressDisplay::quiet(&image.display())
+        ui::PullProgressDisplay::quiet(&display_label)
     } else {
-        ui::PullProgressDisplay::new(&image.display())
+        ui::PullProgressDisplay::new(&display_label)
     };
 
     while let Some(event) = progress.recv().await {
@@ -69,7 +71,7 @@ pub async fn run(
         Ok(Ok(sandbox)) => {
             display.finish();
             super::common::display_restore_warnings(&sandbox).await;
-            sandbox.detach().await;
+            sandbox.detach().await?;
             // Print auto-generated name to stdout so it's scriptable.
             if !is_named {
                 println!("{name}");

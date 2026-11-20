@@ -142,18 +142,8 @@ func (s *Sandbox) Logs(ctx context.Context, opts LogOptions) ([]LogEntry, error)
 	return logEntriesFromFFI(entries)
 }
 
-// Logs reads persisted output for this sandbox handle. It works without
-// starting or connecting to the sandbox.
-func (h *SandboxHandle) Logs(ctx context.Context, opts LogOptions) ([]LogEntry, error) {
-	entries, err := ffi.SandboxHandleLogs(ctx, h.name, logOptionsToFFI(opts))
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return logEntriesFromFFI(entries)
-}
-
 // LogStreamHandle is a live log subscription. Obtain via
-// Sandbox.LogStream or SandboxHandle.LogStream. Call Close to release
+// Sandbox.LogStream. Call Close to release
 // Rust-side resources.
 type LogStreamHandle struct {
 	inner *ffi.LogStreamHandle
@@ -192,19 +182,4 @@ func (s *Sandbox) LogStream(ctx context.Context, opts LogStreamOptions) (*LogStr
 		return nil, wrapFFI(err)
 	}
 	return &LogStreamHandle{inner: h}, nil
-}
-
-// LogStream starts a streaming log subscription for this sandbox handle.
-// Works without starting or connecting to the sandbox; with
-// LogStreamOptions{Follow: true}, the stream picks up new entries the
-// moment they land in exec.log.
-func (h *SandboxHandle) LogStream(
-	ctx context.Context,
-	opts LogStreamOptions,
-) (*LogStreamHandle, error) {
-	inner, err := ffi.SandboxHandleLogStream(ctx, h.name, logStreamOptionsToFFI(opts))
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &LogStreamHandle{inner: inner}, nil
 }

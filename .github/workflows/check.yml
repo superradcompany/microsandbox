@@ -23,6 +23,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Native SDK subprocesses must retain a stack trace when a Rust worker aborts.
+  RUST_BACKTRACE: "1"
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_TIMEOUT: "120"
   CARGO_HTTP_MULTIPLEXING: "false"
@@ -123,7 +125,7 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/release-note-checks"
           "$RUNNER_TEMP/release-note-checks/bin/pip" install PyYAML==6.0.3
-          PYTHON="$RUNNER_TEMP/release-note-checks/bin/python" node --test scripts/ci/test-release-notes.cjs scripts/ci/test-release-context.cjs
+          PYTHON="$RUNNER_TEMP/release-note-checks/bin/python" node --test scripts/ci/test-release-notes.cjs scripts/ci/test-release-context.cjs scripts/ci/test-release-channel.mjs
 
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
@@ -358,10 +360,12 @@ jobs:
           python3 scripts/smoke/cli/runtime-discovery.py \
             --msb build/msb --libkrunfw build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
 
-      - name: Smoke test cloud backend in msb
+      - name: Smoke test remote context and legacy cloud selector in msb
         run: |
-          MSB_BACKEND=cloud MSB_API_KEY=msb_test_ci build/msb context --format json |
-            python3 -c 'import json, sys; assert json.load(sys.stdin)["kind"] == "cloud"'
+          for backend in remote cloud; do
+            MSB_BACKEND="$backend" MSB_API_KEY=msb_test_ci build/msb context --format json |
+              python3 -c 'import json, sys; assert json.load(sys.stdin)["kind"] == "remote"'
+          done
 
       # Upload immediately. All KVM lanes can begin while independent quality
       # and cross-platform checks continue in parallel.
@@ -655,7 +659,7 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           foreach ($filter in @(
             'image::cleanup::tests',
-            'backend::local::snapshot::store::tests',
+            'context::local::snapshot::store::tests',
             'external_import_alias_has_one_row_and_preserves_distinct_copies',
             'import_requires_durable_ownership_and_recovers_failed_completion',
             'storage::usage::local_usage::tests',
@@ -680,6 +684,35 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features -p microsandbox-filesystem --lib --target ${{ matrix.rust_target }} dax_
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+          python-version: "3.13"
+
+      - name: Test Python native shutdown on Windows
+        shell: pwsh
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          Push-Location sdk/python
+          uv sync --group dev --no-install-project
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # These metadata-only regressions need native workers, not a VM or
+          # release downloads. Reuse this lane's dev-profile dependency builds.
+          uv run --no-sync maturin build --profile dev --no-default-features --features local,remote --target ${{ matrix.rust_target }} --out dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheel = (Get-ChildItem dist/*.whl).FullName
+          uv pip install --reinstall $wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          uv run --project sdk/python --no-sync pytest sdk/python/tests/test_runtime_shutdown.py sdk/python/tests/test_checkpoint_removal.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --project sdk/python --no-sync cargo test -p microsandbox-py --no-default-features --features local,remote --target ${{ matrix.rust_target }} --test stdio
 
   windows-build:
     name: Build Windows ${{ matrix.component }} (${{ matrix.target }})
@@ -957,11 +990,25 @@ jobs:
 
       - name: Check Rust SDK feature surfaces
         run: |
+          cargo +stable check -p microsandbox --no-default-features --features cloud --tests
+          cargo +stable check -p microsandbox --no-default-features --features cloud,net --tests
           cargo +stable test -p microsandbox --no-default-features --features cloud,net --test api_compat
           cargo +stable check -p microsandbox --no-default-features --features local,net
           cargo +stable check -p microsandbox-runtime --no-default-features --features client,net
           cargo +stable check -p microsandbox-network --no-default-features
           cargo +stable check -p microsandbox-types --features utoipa
+
+      - name: Check native SDK provider feature surfaces
+        run: |
+          # Separate invocations prevent Cargo feature unification from hiding
+          # remote-only failures behind another SDK's local/full dependency.
+          for provider in local remote; do
+            for sdk in microsandbox-node microsandbox-py microsandbox-go; do
+              cargo +stable check --locked -p "$sdk" --no-default-features --features "$provider"
+            done
+          done
+          cargo +stable test -p microsandbox --no-default-features --features cloud,net --lib remote_resize_refuses
+          cargo +stable test -p microsandbox --no-default-features --features cloud,net --lib cloud_projection_retains_source_digest
 
       - name: Docs
         env:
@@ -1044,12 +1091,14 @@ jobs:
             sdk/node-ts/package.json
             sdk/node-ts/package-lock.json
             sdk/node-ts/scripts/prune-platform-optional-deps.mjs
+            sdk/node-ts/scripts/stage-distribution.mjs
             sdk/node-ts/tests/
             sdk/node-ts/tsconfig.json
             sdk/node-ts/vitest.config.ts
 
       # Artifact-only SDK jobs need the workspace dependency beside sdk/node-ts
-      # so npm's existing workspace link resolves to the tested build.
+      # so npm's existing workspace link resolves to the tested build, and the
+      # shared Service fixtures the SDK tests read.
       - name: Upload shared types artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -1057,6 +1106,7 @@ jobs:
           path: |
             packages/microsandbox-types/typescript/package.json
             packages/microsandbox-types/typescript/dist/
+            packages/microsandbox-types/rust/lib/cloud/fixtures/
 
   python-wheel-build:
     name: Build Python wheel (linux-x86_64)
@@ -1659,7 +1709,12 @@ jobs:
           python3 -m unittest discover -s scripts/ci -p test_runner_storage.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_compatibility.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_checkpoint_integration.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_catalog_history.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_lifecycle_evidence.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_saved_config_integration.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_saved_evidence_cleanup.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_managed_job_integration.py
 
       - name: Snapshot and branch live smoke
@@ -1674,11 +1729,13 @@ jobs:
           status=0
           # Short isolated homes avoid Unix socket limits and cross-layout reuse.
           # Run both even if one fails so the artifact reports retain both outcomes.
+          # Allow aggregate I/O contention across the many operations on shared runners;
+          # each operation still has its independent 30-second deadline.
           for layout in managed flat; do
             python3 scripts/smoke/cli/snapshot-branch.py \
               --binary "${{ github.workspace }}/build/msb" \
               --output "/tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-$layout" \
-              --layout "$layout" || status=$?
+              --layout "$layout" --suite-timeout 240 || status=$?
           done
           exit "$status"
 
@@ -1767,6 +1824,7 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
       - name: Prepare pre-built agentd
+        id: integration_ready
         # upload-artifact normalizes executable bits. The runtime build already
         # produced agentd; restore its mode instead of compiling it again here.
         run: chmod +x build/agentd
@@ -1780,6 +1838,10 @@ jobs:
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
+          # Self-provisioning fixtures may select a fresh backend home. Resolve the
+          # downloaded runtime explicitly instead of looking inside that empty home.
+          MSB_PATH: ${{ github.workspace }}/build/msb
+          MSB_LIBKRUNFW_PATH: ${{ github.workspace }}/build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
           MSB_TEST_RUNTIME_DIR: ${{ github.workspace }}/build
           MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
         run: |
@@ -1797,16 +1859,44 @@ jobs:
           # historical binaries, existing VMs, and dummy secrets. The jobs binary also requires
           # MSB_JOB_TEST_SANDBOX and an idle, caller-provisioned VM, with serial execution and
           # an explicit restart opt-in. Keep these out of this self-provisioning batch; the
-          # catalog and managed-job fixtures are provisioned separately below.
+          # catalog and managed-job fixtures are provisioned separately below. Snapshot unit
+          # helpers are invoked by their parent crash/cancellation tests, not standalone;
+          # historical readers get a pinned release in the dedicated fixture below. The
+          # artifact-dependent live snapshot diagnostics remain explicit qualification tests.
+          # Portable-defaults qualification requires an external archive; this
+          # self-provisioning batch cannot supply that fixture.
+          # The six saved-config assertions consume records produced by the dedicated step below.
+          saved_config_tests="$(python3 scripts/smoke/cli/saved-config-integration.py --nextest-filter)"
           cargo-nextest nextest run \
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
+            -E "not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or binary(=portable_defaults_live) or test(/^context::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^context::local::snapshot::/) or test(/^context::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/)) and not ($saved_config_tests)" \
             --test-threads 2
 
+      - name: Saved configuration integration fixtures
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
+        timeout-minutes: 15
+        run: |
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          python3 scripts/smoke/cli/saved-config-integration.py \
+            --binary build/msb --agent build/agentd \
+            --firmware "build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" \
+            --archive build/rust-integration-tests.tar.zst --workspace "${{ github.workspace }}" \
+            --output build/saved-config-integration-results
+
+      - name: Upload saved configuration diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: saved-config-integration-results
+          path: build/saved-config-integration-results/
+          if-no-files-found: warn
+
       - name: Managed-job integration fixtures
-        if: ${{ !cancelled() }}
+        # Keep independent test results after a test failure, but never launch fixtures
+        # when admission/download/install failed and their binaries are unavailable.
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 15
         run: |
           python3 scripts/smoke/cli/managed-job-integration.py \
@@ -1827,7 +1917,8 @@ jobs:
       # This fixture needs a released runtime, not the candidate installed above.
       # Keep its signal even when an unrelated test in the generic batch fails.
       - name: Historical catalog compatibility (v0.6.18)
-        if: ${{ !cancelled() }}
+        # A failed test may be followed by independent fixtures; failed setup may not.
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           python3 scripts/smoke/cli/catalog-history.py \
@@ -1844,10 +1935,28 @@ jobs:
           path: build/catalog-history-results/*.log
           if-no-files-found: ignore
 
+      - name: Snapshot reader compatibility (v0.7.8)
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
+        timeout-minutes: 15
+        run: |
+          python3 scripts/smoke/cli/snapshot-compatibility.py \
+            --archive build/rust-integration-tests.tar.zst \
+            --workspace "${{ github.workspace }}" \
+            --output build/snapshot-compatibility-results
+
+      - name: Upload snapshot compatibility results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: snapshot-compatibility-results
+          path: build/snapshot-compatibility-results/
+          if-no-files-found: warn
+
       # These tests require a captured guest and scoped fault injection; run every case
       # explicitly, including all three eager modes, even if the general batch failed.
       - name: Checkpoint lifecycle integration fixtures
-        if: ${{ !cancelled() }}
+        # A failed test may be followed by independent fixtures; failed setup may not.
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         run: |
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           python3 scripts/smoke/cli/checkpoint-integration.py \
@@ -1897,7 +2006,7 @@ jobs:
     steps:
       - name: Clean workspace
         run: |
-          rm -rf "${{ github.workspace }}"/{sdk,build,packages/microsandbox-types/typescript}
+          rm -rf "${{ github.workspace }}"/{sdk,build,packages/microsandbox-types}
           rm -rf ~/.microsandbox
 
       # Keep SDK tests artifact-only; fetch only the shared CI maintenance scripts.
@@ -1930,7 +2039,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: node-sdk-shared-types
-          path: packages/microsandbox-types/typescript/
+          path: packages/microsandbox-types/
 
       - name: Install Node.js dependencies
         working-directory: sdk/node-ts
@@ -2060,6 +2169,7 @@ jobs:
           path: sdk/python/dist/
 
       - name: Install Python development environment
+        id: python_ready
         working-directory: sdk/python
         run: |
           uv sync --group dev --no-install-project
@@ -2077,7 +2187,8 @@ jobs:
           uv run --project sdk/python --no-sync pytest --import-mode=importlib -n 2 --dist loadscope sdk/python/integration
 
       - name: Python managed-job and null-stdin regression
-        if: ${{ !cancelled() }}
+        # Run after test failures only when artifacts and the Python environment are ready.
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         timeout-minutes: 5
         run: |
           chmod +x build/msb build/agentd

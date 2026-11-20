@@ -42,11 +42,11 @@ pub(super) fn mirror_eligible_type(file_type: u32) -> bool {
     file_type == platform::MODE_REG || file_type == platform::MODE_DIR
 }
 
-/// Apply the `Mirror` policy to `fd`: `fchmod` to the guest's perm bits
-/// merged with the owner-access floor for the given file type.
+/// Apply guest-visible permissions to a host inode and retain host owner access.
 ///
-/// Strips file-type, setuid, and setgid bits — only ordinary rwx survives.
-pub(super) fn fchmod_mirror(fd: RawFd, perms: u32, file_type: u32) -> io::Result<()> {
+/// Strips file-type, setuid, and setgid bits. Passing zero permissions keeps
+/// a private backing inode at the minimum owner-access floor.
+pub(super) fn fchmod_with_owner_floor(fd: RawFd, perms: u32, file_type: u32) -> io::Result<()> {
     let floor = if file_type == platform::MODE_DIR {
         OWNER_FLOOR_DIR
     } else {
@@ -60,8 +60,8 @@ pub(super) fn fchmod_mirror(fd: RawFd, perms: u32, file_type: u32) -> io::Result
     Ok(())
 }
 
-/// `fchmod_mirror` for a path: open through `dirfd`, `fchmod`, then close.
-pub(super) fn fchmod_at_mirror(
+/// Apply guest-visible permissions through a directory handle, without following links.
+pub(super) fn fchmod_at_with_owner_floor(
     dirfd: RawFd,
     name: &CStr,
     perms: u32,
@@ -76,7 +76,7 @@ pub(super) fn fchmod_at_mirror(
     if fd < 0 {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
-    let result = fchmod_mirror(fd, perms, file_type);
+    let result = fchmod_with_owner_floor(fd, perms, file_type);
     unsafe { libc::close(fd) };
     result
 }

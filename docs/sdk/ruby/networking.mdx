@@ -41,7 +41,7 @@ sandbox = Microsandbox::Sandbox.create(
 
 ### secrets
 
-An array of hashes. Each entry requires all three string fields below. Ruby does not expose per-location substitution, violation-action, or passthrough-policy configuration.
+An array of hashes. Each entry requires all three string fields below. Unknown keys raise `ArgumentError`. Ruby does not expose per-location substitution, violation-action, or passthrough-policy configuration.
 
 <p className="msb-label">Fields</p>
 

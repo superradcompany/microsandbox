@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
+use super::macos_acl::acl_bytes;
 use crate::{DbReadConnection, DbWriteConnection};
 
 //--------------------------------------------------------------------------------------------------
@@ -139,8 +140,8 @@ async fn preserves_harmless_acls(on_directory: bool) {
         };
         command("chmod", &["+a", &entry], target);
         fixture.make_read_only(target);
-        let before_acl = acl(target);
-        assert!(!before_acl.is_empty(), "fixture must have an ACL");
+        let before_acl = acl_bytes(target);
+        assert!(!acl(target).is_empty(), "fixture must have an ACL");
         let before_file = metadata(&fixture.database);
         let before_directory = metadata(&fixture.directory);
 
@@ -149,7 +150,7 @@ async fn preserves_harmless_acls(on_directory: bool) {
             .await
             .unwrap();
 
-        assert_eq!(acl(target), before_acl, "{entry}");
+        assert_eq!(acl_bytes(target), before_acl, "{entry}");
         assert_eq!(metadata(&fixture.database), before_file, "{entry}");
         assert_eq!(metadata(&fixture.directory), before_directory, "{entry}");
     }
@@ -187,14 +188,14 @@ async fn immutable_catalog_with_untrusted_acl_grants_is_refused() {
             command("chmod", &["+a", "everyone deny delete"], target);
             command("chmod", &["+a", entry], target);
             fixture.make_read_only(target);
-            let before_acl = acl(target);
+            let before_acl = acl_bytes(target);
             let before_metadata = metadata(target);
             let error = fixture.read().await.unwrap_err();
             assert!(
                 error.to_string().contains("cannot make catalog storage"),
                 "{error}"
             );
-            assert_eq!(acl(target), before_acl);
+            assert_eq!(acl_bytes(target), before_acl);
             assert_eq!(metadata(target), before_metadata);
         }
     }

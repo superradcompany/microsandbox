@@ -12,7 +12,9 @@ path = "lib/lib.rs"
 
 [features]
 default = ["engine"]
+intercept-identity = ["dep:rcgen", "dep:rustls", "dep:sha2", "dep:hex", "dep:x509-parser"]
 engine = [
+    "intercept-identity",
     "dep:base64",
     "dep:bytes",
     "dep:core-foundation",
@@ -21,6 +23,7 @@ engine = [
     "dep:hickory-net",
     "dep:httlib-hpack",
     "dep:httparse",
+    "dep:if-addrs",
     "dep:libc",
     "dep:lru",
     "dep:msb_krun",
@@ -28,11 +31,11 @@ engine = [
     "dep:parking_lot",
     "dep:pem",
     "dep:percent-encoding",
-    "dep:rcgen",
     "dep:resolv-conf",
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:rustls-pki-types",
+    "dep:rustls-platform-verifier",
     "dep:serde_json",
     "dep:socket2",
     "dep:smoltcp",
@@ -45,6 +48,8 @@ engine = [
 ]
 
 [dependencies]
+hex = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 bytes = { workspace = true, optional = true }
 crossbeam-queue = { workspace = true, optional = true }
@@ -54,6 +59,7 @@ futures = { workspace = true, optional = true }
 # crypto provider, so no new dependency is introduced.
 hickory-net = { workspace = true, features = ["tls-ring"], optional = true }
 hickory-proto = { workspace = true }
+if-addrs = { workspace = true, optional = true }
 httlib-hpack = { workspace = true, optional = true }
 httparse = { version = "1", optional = true }
 ipnetwork = { workspace = true }
@@ -96,6 +102,7 @@ tokio = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 tokio-socks = { workspace = true, optional = true }
 tracing.workspace = true
+x509-parser = { version = "0.18", optional = true }
 zeroize = { workspace = true }
 
 # macOS reads DNS servers from SystemConfiguration / SCDynamicStore rather
@@ -108,6 +115,7 @@ core-foundation = { version = "0.9", optional = true }
 system-configuration = { version = "0.7", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+rustls-platform-verifier = { workspace = true, optional = true }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns", "Win32_System_LibraryLoader"], optional = true }
 
 [dev-dependencies]
