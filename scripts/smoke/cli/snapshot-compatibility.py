@@ -105,13 +105,28 @@ def execute(args):
             missing = [test for test in TESTS if f"{test}: test" not in listing]
             if missing:
                 raise ValueError(f"candidate test binary lacks required cases: {missing}")
+        else:
+            # All reader contracts consume the same candidate workspace. Keep
+            # one extraction alive for the suite, including failure cleanup.
+            extracted = root / "tests"
+            extracted.mkdir()
+            with (args.output / "extract-tests.log").open("w") as log:
+                command = ["cargo-nextest", "nextest", "list", "--archive-file", str(args.archive),
+                           "--extract-to", str(extracted), "--workspace-remap", str(args.workspace),
+                           "--list-type", "binaries-only"]
+                if run_test(command, env, root, log):
+                    raise RuntimeError("snapshot test archive extraction failed")
+            target = extracted / "target"
         failures = []
         # Run every contract even after one fails, retaining individual diagnostics.
         for test in TESTS:
             if args.test_binary:
                 command = [str(args.test_binary), "--ignored", "--exact", test, "--nocapture"]
             else:
-                command = ["cargo-nextest", "nextest", "run", "--archive-file", str(args.archive),
+                command = ["cargo-nextest", "nextest", "run",
+                           "--cargo-metadata", str(target / "nextest/cargo-metadata.json"),
+                           "--binaries-metadata", str(target / "nextest/binaries-metadata.json"),
+                           "--target-dir-remap", str(target),
                            "--workspace-remap", str(args.workspace), "--run-ignored=only",
                            "--test-threads", "1", "--no-tests", "fail", "-E", f"test(={test})"]
             with (args.output / f"{test.rsplit('::', 1)[1]}.log").open("w") as log:

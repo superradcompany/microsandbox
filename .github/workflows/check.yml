@@ -1775,12 +1775,19 @@ jobs:
   # ---------------------------------------------------------------------------
   # Integration tests (requires KVM)
   # ---------------------------------------------------------------------------
-  integration-test:
-    name: Integration Tests
+  integration-suites:
+    name: Integration Tests (${{ matrix.suite }})
     needs: [build-linux-x86_64, rust-integration-build, changes]
     if: always() && needs.changes.outputs.code == 'true' && needs.build-linux-x86_64.result == 'success' && needs.rust-integration-build.result == 'success'
     runs-on: self-hosted-ubuntu-2404-x64
-    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    # Give the main batch and serial fixture suites independent deadlines.
+    # Two runner users provide isolated workspaces/homes; cap fan-out because
+    # their microVMs still share the physical KVM host and root disk.
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        suite: [standard, fixtures]
     timeout-minutes: 45
     steps:
       - name: Clean workspace
@@ -1835,6 +1842,7 @@ jobs:
       # this at two: stdin-heavy tests and overlapping microVM boots have lost
       # relay/session readiness when the shared KVM host is oversubscribed.
       - name: Run integration tests
+        if: matrix.suite == 'standard'
         env:
           MSB_TEST_ISOLATE_HOME: "1"
           # Self-provisioning fixtures may select a fresh backend home. Resolve the
@@ -1866,15 +1874,26 @@ jobs:
           # self-provisioning batch cannot supply that fixture.
           # The six saved-config assertions consume records produced by the dedicated step below.
           saved_config_tests="$(python3 scripts/smoke/cli/saved-config-integration.py --nextest-filter)"
-          cargo-nextest nextest run \
+          # Keep the extraction inside job-owned build output. An interrupted
+          # nextest run can leave its automatic /tmp archive behind; build/ is
+          # reclaimed at job finish and again before the next job starts.
+          mkdir -p build/nextest
+          cargo-nextest nextest list \
             --archive-file build/rust-integration-tests.tar.zst \
+            --extract-to build/nextest \
+            --workspace-remap "${{ github.workspace }}" \
+            --list-type binaries-only
+          cargo-nextest nextest run \
+            --cargo-metadata build/nextest/target/nextest/cargo-metadata.json \
+            --binaries-metadata build/nextest/target/nextest/binaries-metadata.json \
+            --target-dir-remap build/nextest/target \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
             -E "not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or binary(=portable_defaults_live) or test(/^context::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^context::local::snapshot::/) or test(/^context::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/)) and not ($saved_config_tests)" \
             --test-threads 2
 
       - name: Saved configuration integration fixtures
-        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 15
         run: |
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
@@ -1885,7 +1904,7 @@ jobs:
             --output build/saved-config-integration-results
 
       - name: Upload saved configuration diagnostics
-        if: always()
+        if: ${{ always() && matrix.suite == 'fixtures' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: saved-config-integration-results
@@ -1895,7 +1914,7 @@ jobs:
       - name: Managed-job integration fixtures
         # Keep independent test results after a test failure, but never launch fixtures
         # when admission/download/install failed and their binaries are unavailable.
-        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 15
         run: |
           python3 scripts/smoke/cli/managed-job-integration.py \
@@ -1906,7 +1925,7 @@ jobs:
             --output build/managed-job-integration-results
 
       - name: Upload managed-job integration results
-        if: always()
+        if: ${{ always() && matrix.suite == 'fixtures' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: managed-job-integration-results
@@ -1917,7 +1936,7 @@ jobs:
       # Keep its signal even when an unrelated test in the generic batch fails.
       - name: Historical catalog compatibility (v0.6.18)
         # A failed test may be followed by independent fixtures; failed setup may not.
-        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           python3 scripts/smoke/cli/catalog-history.py \
@@ -1927,7 +1946,7 @@ jobs:
             --output build/catalog-history-results
 
       - name: Upload historical catalog results
-        if: always()
+        if: ${{ always() && matrix.suite == 'fixtures' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: catalog-history-results
@@ -1935,7 +1954,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Snapshot reader compatibility (v0.7.8)
-        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 15
         run: |
           python3 scripts/smoke/cli/snapshot-compatibility.py \
@@ -1944,7 +1963,7 @@ jobs:
             --output build/snapshot-compatibility-results
 
       - name: Upload snapshot compatibility results
-        if: always()
+        if: ${{ always() && matrix.suite == 'fixtures' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: snapshot-compatibility-results
@@ -1955,7 +1974,7 @@ jobs:
       # explicitly, including all three eager modes, even if the general batch failed.
       - name: Checkpoint lifecycle integration fixtures
         # A failed test may be followed by independent fixtures; failed setup may not.
-        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
         run: |
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           python3 scripts/smoke/cli/checkpoint-integration.py \
@@ -1966,7 +1985,7 @@ jobs:
             --output build/checkpoint-integration-results
 
       - name: Upload checkpoint lifecycle results
-        if: always()
+        if: ${{ always() && matrix.suite == 'fixtures' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: checkpoint-integration-results
@@ -1976,6 +1995,23 @@ jobs:
       - name: Disk usage
         if: always()
         run: scripts/ci/clean-runner-disk.sh --finish
+
+  # Preserve the existing required check name while requiring both suites.
+  integration-test:
+    name: Integration Tests
+    needs: [integration-suites, changes]
+    if: ${{ always() && needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both integration suites
+        env:
+          SUITES_RESULT: ${{ needs.integration-suites.result }}
+        run: |
+          if [ "$SUITES_RESULT" != success ]; then
+            echo "::error::Integration suites did not all pass: $SUITES_RESULT"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)

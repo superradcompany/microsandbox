@@ -5,6 +5,7 @@ import importlib.util
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest.mock
 
 
@@ -15,6 +16,47 @@ SPEC.loader.exec_module(HARNESS)
 
 
 class SnapshotCompatibilityTests(unittest.TestCase):
+    def test_archive_is_extracted_once_and_all_contracts_run_after_a_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(output=Path(directory) / "results", legacy_binary=Path("/legacy"),
+                                   test_binary=None, archive=Path("/archive"), workspace=Path("/repo"))
+            # Extraction succeeds, the first contract fails, and every other
+            # contract must still run against the same extracted workspace.
+            results = iter([0, 1, 0, 0, 0, 0])
+
+            def run_case(command, *_args):
+                if "--extract-to" in command:
+                    # nextest requires the extraction destination to exist.
+                    self.assertTrue(Path(command[command.index("--extract-to") + 1]).is_dir())
+                return next(results)
+
+            with unittest.mock.patch.object(HARNESS.subprocess, "check_output", return_value="msb 0.7.8"), \
+                    unittest.mock.patch.object(HARNESS, "run_test", side_effect=run_case) as run:
+                with self.assertRaisesRegex(RuntimeError, "snapshot compatibility cases failed"):
+                    HARNESS.execute(args)
+            self.assertEqual(run.call_count, 1 + len(HARNESS.TESTS))
+            extraction = run.call_args_list[0].args[0]
+            self.assertIn("--archive-file", extraction)
+            extracted = Path(extraction[extraction.index("--extract-to") + 1])
+            for call, test in zip(run.call_args_list[1:], HARNESS.TESTS, strict=True):
+                command = call.args[0]
+                self.assertNotIn("--archive-file", command)
+                self.assertEqual(command[-1], f"test(={test})")
+                self.assertEqual(command[command.index("--no-tests") + 1], "fail")
+                self.assertEqual(command[command.index("--target-dir-remap") + 1],
+                                 str(extracted / "target"))
+            self.assertFalse(extracted.exists(), "failed suites must dispose their extracted binaries")
+
+    def test_failed_extraction_stops_before_running_contracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(output=Path(directory) / "results", legacy_binary=Path("/legacy"),
+                                   test_binary=None, archive=Path("/archive"), workspace=Path("/repo"))
+            with unittest.mock.patch.object(HARNESS.subprocess, "check_output", return_value="msb 0.7.8"), \
+                    unittest.mock.patch.object(HARNESS, "run_test", return_value=1) as run:
+                with self.assertRaisesRegex(RuntimeError, "archive extraction failed"):
+                    HARNESS.execute(args)
+            self.assertEqual(run.call_count, 1)
+
     def test_checksum_refusal_never_marks_unverified_bytes_executable(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "msb"
