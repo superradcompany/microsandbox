@@ -29,22 +29,23 @@ try {
   await checkpoint.saveTo(join(first, "delta.tar"), { plainTar: true, since: join(first, "base.tar") });
   await Snapshot.load("base-group", ["base.tar"]);
 
-  // This child owns cwd and provider-home changes. Each import must resolve its omitted payload
+  // This child owns cwd and provider-home changes. Each API must resolve its omitted payload
   // from the original base, even after a same-named file shadows that group name.
-  for (let index = 0; index < 16; index++) {
+  const imports = [
+    () => firstContext.snapshots.load("from-group", ["delta.tar"], o => o.destDir("destination").base("base-group")),
+    () => Checkpoint.loadWithOptions("delta.tar", { dest: "destination", base: "base.tar", group: "from-archive" }),
+    () => Checkpoint.loadMany(["delta.tar"], { dest: "destination", base: "./base.tar", group: "from-explicit" }),
+    () => Checkpoint.load("delta.tar", "destination", "base-group"),
+  ];
+  for (const [index, createImport] of imports.entries()) {
     process.chdir(first);
     process.env.MSB_HOME = join(root, "home-a");
-    const base = ["base-group", "base.tar", "./base.tar"][index % 3];
-    let pending;
-    if (index % 4 === 0) pending = firstContext.snapshots.load(`group-${index}`, ["delta.tar"], o => o.destDir("destination").base(base));
-    else if (index % 4 === 1) pending = Checkpoint.loadWithOptions("delta.tar", { dest: "destination", base, group: `group-${index}` });
-    else if (index % 4 === 2) pending = Checkpoint.loadMany(["delta.tar"], { dest: "destination", base, group: `group-${index}` });
-    else pending = Checkpoint.load("delta.tar", "destination", base);
+    const pending = createImport();
     assert.ok(pending instanceof Promise);
     process.chdir(second);
     process.env.MSB_HOME = join(root, "home-b");
     const result = await pending;
-    const handles = index % 4 === 0 ? result.checkpoints : index % 4 === 2 ? result : [result];
+    const handles = index === 0 ? result.checkpoints : index === 2 ? result : [result];
     assert.equal(handles.length, 1);
     const path = handles[0].path;
     assert.ok(resolve(path).startsWith(resolve(first, "destination") + "/"));

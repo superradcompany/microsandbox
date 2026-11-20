@@ -323,6 +323,10 @@ impl LaunchContract {
         if launch.fs_state_limit_bytes.is_some() {
             return unsupported("filesystem state budget");
         }
+        #[cfg(feature = "net")]
+        if !launch.multi_tenant.is_default() {
+            return unsupported("multi-tenant configuration");
+        }
         if !launch.owned_volumes.is_empty() {
             return unsupported("sandbox-owned volumes");
         }
@@ -719,6 +723,8 @@ pub(crate) async fn validate_runtime_config(
     validate_exec_limits(&runtime.msb_path, config).await?;
     validate_guest_clock(&runtime.msb_path, config).await?;
     validate_fs_state_limit(&runtime.msb_path, global).await?;
+    #[cfg(feature = "net")]
+    validate_multi_tenant_config(&runtime.msb_path, config, global).await?;
     Ok(())
 }
 
@@ -934,6 +940,44 @@ pub(crate) async fn validate_guest_clock(
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
             crate::error::UnsupportedReason::NotAvailable(upgrade_required("runtime.guest_clock")),
+        ));
+    }
+    Ok(())
+}
+
+/// Probe operator resolver support only when a multi-tenant sandbox would send them.
+/// Runtimes that predate the capability would otherwise use the built-in resolvers silently.
+#[cfg(feature = "net")]
+pub(crate) async fn validate_multi_tenant_config(
+    path: &Path,
+    config: &SandboxConfig,
+    global: &GlobalConfig,
+) -> MicrosandboxResult<()> {
+    let profile = global
+        .deployment_profile
+        .unwrap_or(config.spec.deployment_profile);
+    if profile != microsandbox_types::DeploymentProfile::MultiTenant
+        || global.dns.nameservers.is_none()
+    {
+        return Ok(());
+    }
+    if global.dns.nameservers.as_ref().is_some_and(Vec::is_empty) {
+        return Err(MicrosandboxError::InvalidConfig(
+            "dns.nameservers must not be empty in multi-tenant mode".into(),
+        ));
+    }
+
+    let supported = bounded_probe(path, "__launch-protocol")
+        .await
+        .ok()
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
+        .is_some_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.multi_tenant
+        });
+    if !supported {
+        return Err(MicrosandboxError::unsupported(
+            crate::error::Operation::SandboxStart,
+            crate::error::UnsupportedReason::NotAvailable(upgrade_required("dns.nameservers")),
         ));
     }
     Ok(())
@@ -1927,6 +1971,86 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":true}'"#,
         );
         validate_guest_clock(&path, &config).await.unwrap();
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn multi_tenant_nameservers_require_an_explicit_runtime_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SandboxConfig::default();
+        let mut global = GlobalConfig::default();
+        global.dns.nameservers = Some(vec!["9.9.9.9".parse().unwrap()]);
+        // Single-tenant overrides use the existing sandbox DNS launch fields.
+        validate_multi_tenant_config(&dir.path().join("no-probe"), &config, &global)
+            .await
+            .unwrap();
+        config.spec.deployment_profile = microsandbox_types::DeploymentProfile::MultiTenant;
+        validate_multi_tenant_config(
+            &dir.path().join("no-probe"),
+            &config,
+            &GlobalConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        for response in [
+            "exit 1",
+            r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"multi_tenant":false}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"multi_tenant_nameservers":true}'"#,
+            r#"printf '%s' '{"protocols":[1],"multi_tenant":true}'"#,
+        ] {
+            let path = script(dir.path(), "unsupported-nameservers", response);
+            let error = validate_multi_tenant_config(&path, &config, &global)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
+            assert!(error.to_string().contains("dns.nameservers"));
+        }
+        let path = script(
+            dir.path(),
+            "supports-nameservers",
+            r#"printf '%s' '{"protocols":[2,1],"multi_tenant":true}'"#,
+        );
+        validate_multi_tenant_config(&path, &config, &global)
+            .await
+            .unwrap();
+
+        // A restart preflight must use the current operator profile, not the
+        // profile saved in the running sandbox configuration.
+        config.spec.deployment_profile = microsandbox_types::DeploymentProfile::SingleTenant;
+        global.deployment_profile = Some(microsandbox_types::DeploymentProfile::MultiTenant);
+        let error = validate_multi_tenant_config(&dir.path().join("no-probe"), &config, &global)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("dns.nameservers"));
+
+        validate_multi_tenant_config(&path, &config, &global)
+            .await
+            .unwrap();
+
+        global.dns.nameservers = Some(vec![]);
+        let error = validate_multi_tenant_config(&path, &config, &global)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("dns.nameservers must not be empty")
+        );
+
+        config.spec.deployment_profile = microsandbox_types::DeploymentProfile::SingleTenant;
+        global.deployment_profile = None;
+        validate_multi_tenant_config(&dir.path().join("no-probe"), &config, &global)
+            .await
+            .unwrap();
+
+        config.spec.deployment_profile = microsandbox_types::DeploymentProfile::MultiTenant;
+        global.deployment_profile = Some(microsandbox_types::DeploymentProfile::SingleTenant);
+        validate_multi_tenant_config(&dir.path().join("no-probe"), &config, &global)
+            .await
+            .unwrap();
     }
 
     #[cfg(unix)]
@@ -3141,6 +3265,42 @@ mod protocol {
                 .as_object()
                 .unwrap()
                 .contains_key("fs_state_limit_bytes")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn legacy_codec_refuses_multi_tenant_settings() {
+        use microsandbox_network::config::MultiTenantConfig;
+
+        let config = LaunchConfig {
+            multi_tenant: MultiTenantConfig {
+                nameservers: Some(vec!["9.9.9.9".parse().unwrap()]),
+            },
+            ..Default::default()
+        };
+        assert!(
+            encode_bytes(&config, LEGACY)
+                .unwrap_err()
+                .contains("requires a newer runtime launch contract")
+        );
+        let current = LaunchContract {
+            patch: 18,
+            machine: true,
+            header_fields: true,
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encode_bytes(&config, current).unwrap()).unwrap()["multi_tenant"]
+                ["nameservers"],
+            json!(["9.9.9.9"])
+        );
+        let default = encode_bytes(&LaunchConfig::default(), current).unwrap();
+        assert!(
+            !serde_json::from_slice::<Value>(&default)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("multi_tenant")
         );
     }
 

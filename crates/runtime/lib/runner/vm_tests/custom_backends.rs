@@ -254,6 +254,8 @@ fn config(directory: &Path) -> Config {
             #[cfg(feature = "net")]
             deployment_profile: Default::default(),
             #[cfg(feature = "net")]
+            multi_tenant: Default::default(),
+            #[cfg(feature = "net")]
             sandbox_slot: 1,
             checkpoint_restore: None,
         },
