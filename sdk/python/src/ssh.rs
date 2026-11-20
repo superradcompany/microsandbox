@@ -455,12 +455,10 @@ impl PySshServer {
                 let guard = inner.lock().await;
                 guard.as_ref().ok_or_else(crate::error::consumed)?.clone()
             };
-            server
-                .serve_connection(
-                    crate::stdio::StdioStream::new().map_err(|error| to_py_err(error.into()))?,
-                )
-                .await
-                .map_err(to_py_err)?;
+            let stream =
+                crate::stdio::StdioStream::new().map_err(|error| to_py_err(error.into()))?;
+            let _cancel = stream.cancel_on_drop();
+            server.serve_connection(stream).await.map_err(to_py_err)?;
             Ok(())
         })
     }

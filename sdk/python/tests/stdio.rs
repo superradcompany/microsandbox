@@ -16,7 +16,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
 fn cancellation_joins_readers_and_writers_with_open_pipes() {
-    for mode in ["read", "write", "runtime-drop"] {
+    for mode in [
+        "read",
+        "write",
+        "runtime-drop",
+        "cancel-retained-stream",
+        "cancel-retained-writer",
+    ] {
         let mut child = child(mode).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -99,6 +105,31 @@ fn subprocess_stdio() {
     runtime.block_on(async {
         let mut stream = stdio::StdioStream::new().unwrap();
         match mode.as_str() {
+            "cancel-retained-stream" | "cancel-retained-writer" => {
+                let guard = stream.cancel_on_drop();
+                let writing = mode == "cancel-retained-writer";
+                let task = tokio::spawn(async move {
+                    let error = if writing {
+                        stream
+                            .write_all(&vec![0; 16 * 1024 * 1024])
+                            .await
+                            .unwrap_err()
+                    } else {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).await.unwrap_err()
+                    };
+                    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+                });
+                // The transport remains owned by another task, as it does in
+                // russh. Dropping the caller's guard must wake that task.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                drop(guard);
+                tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let _reopened = stdio::StdioStream::new().unwrap();
+            }
             "read" => {
                 let mut byte = [0];
                 assert!(

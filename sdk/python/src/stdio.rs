@@ -2,9 +2,11 @@
 
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
+use futures::task::AtomicWaker;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[cfg(unix)]
@@ -33,9 +35,19 @@ static OUTPUT_OWNED: AtomicBool = AtomicBool::new(false);
 pub(crate) struct StdioStream {
     input: Stdio,
     output: Stdio,
+    cancellation: Arc<Cancellation>,
 }
 
 struct Lease(&'static AtomicBool);
+
+#[derive(Default)]
+struct Cancellation {
+    cancelled: AtomicBool,
+    reader: AtomicWaker,
+    writer: AtomicWaker,
+}
+
+pub(crate) struct CancelOnDrop(Arc<Cancellation>);
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -46,7 +58,12 @@ impl StdioStream {
         Ok(Self {
             input: stdin()?,
             output: Stdio::new(false, Lease::acquire(&OUTPUT_OWNED)?)?,
+            cancellation: Arc::new(Cancellation::default()),
         })
+    }
+
+    pub(crate) fn cancel_on_drop(&self) -> CancelOnDrop {
+        CancelOnDrop(self.cancellation.clone())
     }
 }
 
@@ -69,13 +86,29 @@ impl Drop for Lease {
     }
 }
 
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        // russh retains a background session after the initial peer banner.
+        // Cancelling the caller must wake that session, even though it still
+        // owns the stream and therefore has not dropped its I/O adapters yet.
+        self.0.cancelled.store(true, Ordering::Release);
+        self.0.reader.wake();
+        self.0.writer.wake();
+    }
+}
+
 impl AsyncRead for StdioStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().input).poll_read(cx, buf)
+        let this = self.get_mut();
+        this.cancellation.reader.register(cx.waker());
+        if this.cancellation.cancelled.load(Ordering::Acquire) {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut this.input).poll_read(cx, buf)
     }
 }
 
@@ -85,15 +118,25 @@ impl AsyncWrite for StdioStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().output).poll_write(cx, buf)
+        let this = self.get_mut();
+        this.cancellation.writer.register(cx.waker());
+        if this.cancellation.cancelled.load(Ordering::Acquire) {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut this.output).poll_write(cx, buf)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().output).poll_flush(cx)
+        let this = self.get_mut();
+        this.cancellation.writer.register(cx.waker());
+        if this.cancellation.cancelled.load(Ordering::Acquire) {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut this.output).poll_flush(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().output).poll_shutdown(cx)
+        self.poll_flush(cx)
     }
 }
 
