@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderName, HeaderValue, USER_AGENT};
-use reqwest::{Method, RequestBuilder, Response, StatusCode};
+use reqwest::{Body, Method, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -65,6 +65,18 @@ enum CloudSseItem {
     Ignore,
 }
 
+/// How a volume file request bounds its time on the network.
+pub(in crate::context) enum FileTransfer {
+    /// Small request and response, bounded by the request timeout as a total.
+    Request,
+    /// File read: the request timeout bounds the wait for the response and
+    /// each wait for more data, not the whole transfer.
+    Download,
+    /// File write, retaining the ordinary total request timeout (or the custom
+    /// client's timeout). Body polling cannot measure transport write progress.
+    Upload(Body),
+}
+
 #[derive(Serialize)]
 struct CloudSandboxListQuery<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,12 +114,23 @@ impl RemoteContext {
         self.authorize_request(self.inner.http.request(method, url))
     }
 
+    fn stream_request(&self, method: Method, url: &str) -> RequestBuilder {
+        self.apply_request_headers(self.inner.http.request(method, url))
+    }
+
     pub(super) fn authorize_request(&self, request: RequestBuilder) -> RequestBuilder {
+        let request = self.apply_request_headers(request);
+        if self.inner.user_agent_header.is_some() {
+            request.timeout(self.inner.request_timeout)
+        } else {
+            request
+        }
+    }
+
+    fn apply_request_headers(&self, request: RequestBuilder) -> RequestBuilder {
         let request = request.header(AUTHORIZATION, self.inner.authorization.clone());
         match &self.inner.user_agent_header {
-            Some(agent) => request
-                .header(USER_AGENT, agent.clone())
-                .timeout(self.inner.request_timeout),
+            Some(agent) => request.header(USER_AGENT, agent.clone()),
             None => request,
         }
     }
@@ -437,19 +460,24 @@ impl RemoteContext {
         }
 
         let mut request = self
-            .request(Method::GET, &url)
+            .stream_request(Method::GET, &url)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if let LogStreamStart::From(cursor) = &opts.start {
             request = request.header(HeaderName::from_static("last-event-id"), cursor.to_string());
         }
 
-        let resp = request
-            .send()
+        let resp = tokio::time::timeout(self.inner.request_timeout, request.send())
             .await
+            .map_err(|_| {
+                MicrosandboxError::Custom(format!(
+                    "log stream: no response within {:?}",
+                    self.inner.request_timeout
+                ))
+            })?
             .map_err(|e| cloud_io_error("GET /v1/sandboxes/:id/logs", e))?;
         let status = resp.status();
         if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
+            let body_text = error_body_text(resp, Some(self.inner.request_timeout)).await;
             let typed: Option<CloudErrorBody> = serde_json::from_str(&body_text).ok();
             return Err(cloud_http_error(
                 status.as_u16(),
@@ -556,7 +584,7 @@ impl RemoteContext {
         suffix: &str,
         headers: &[(&str, String)],
         json: Option<serde_json::Value>,
-        body: Option<reqwest::Body>,
+        transfer: FileTransfer,
     ) -> MicrosandboxResult<Response> {
         let url = format!(
             "{}/v1/volumes/{}/files{}",
@@ -564,27 +592,80 @@ impl RemoteContext {
             urlencoding(id),
             suffix
         );
-        let mut request = self.request(method, &url);
+        let download = matches!(&transfer, FileTransfer::Download);
+        let mut request = if download {
+            self.stream_request(method, &url)
+        } else {
+            self.request(method, &url)
+        };
         for (name, value) in headers {
             request = request.header(*name, value);
         }
         if let Some(json) = json {
             request = request.json(&json);
         }
-        if let Some(body) = body {
+        if let FileTransfer::Upload(body) = transfer {
             request = request.body(body);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| cloud_io_error("volume filesystem request", e))?;
-        ensure_success(response, "volume filesystem request").await
+        let response = if download {
+            tokio::time::timeout(self.inner.request_timeout, request.send())
+                .await
+                .map_err(|_| {
+                    MicrosandboxError::Custom(format!(
+                        "volume read: no response within {:?}",
+                        self.inner.request_timeout
+                    ))
+                })?
+                .map_err(|e| cloud_io_error("volume filesystem request", e))?
+        } else {
+            request
+                .send()
+                .await
+                .map_err(|e| cloud_io_error("volume filesystem request", e))?
+        };
+        ensure_success_with_timeout(
+            response,
+            "volume filesystem request",
+            download.then_some(self.inner.request_timeout),
+        )
+        .await
     }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: HTTP helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Stream a volume file read, failing when no data arrives within `timeout`.
+pub(super) fn volume_download_stream(
+    response: Response,
+    timeout: Duration,
+) -> Pin<Box<dyn futures::Stream<Item = MicrosandboxResult<Bytes>> + Send>> {
+    let chunks = Box::pin(response.bytes_stream());
+    let stream = stream::unfold((chunks, false), move |(mut chunks, finished)| async move {
+        if finished {
+            return None;
+        }
+
+        match tokio::time::timeout(timeout, chunks.next()).await {
+            Ok(Some(Ok(bytes))) => Some((Ok(bytes), (chunks, false))),
+            Ok(Some(Err(error))) => Some((
+                Err(MicrosandboxError::Custom(format!(
+                    "volume read failed: {error}"
+                ))),
+                (chunks, true),
+            )),
+            Ok(None) => None,
+            Err(_) => Some((
+                Err(MicrosandboxError::Custom(format!(
+                    "volume read stalled: no data for {timeout:?}"
+                ))),
+                (chunks, true),
+            )),
+        }
+    });
+    Box::pin(stream)
+}
 
 /// Parse a JSON response into `T`, mapping HTTP errors to typed
 /// `MicrosandboxError` variants. Tries to decode the cloud API's typed error body
@@ -611,11 +692,19 @@ pub(super) async fn decode_json<T: serde::de::DeserializeOwned>(
 }
 
 pub(super) async fn ensure_success(resp: Response, op: &str) -> MicrosandboxResult<Response> {
+    ensure_success_with_timeout(resp, op, None).await
+}
+
+async fn ensure_success_with_timeout(
+    resp: Response,
+    op: &str,
+    timeout: Option<Duration>,
+) -> MicrosandboxResult<Response> {
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);
     }
-    let body_text = resp.text().await.unwrap_or_default();
+    let body_text = error_body_text(resp, timeout).await;
     let typed: Option<CloudErrorBody> = serde_json::from_str(&body_text).ok();
     Err(cloud_http_error(
         status.as_u16(),
@@ -623,6 +712,17 @@ pub(super) async fn ensure_success(resp: Response, op: &str) -> MicrosandboxResu
         &body_text,
         op,
     ))
+}
+
+async fn error_body_text(resp: Response, timeout: Option<Duration>) -> String {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, resp.text())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default(),
+        None => resp.text().await.unwrap_or_default(),
+    }
 }
 
 pub(super) fn cloud_io_error(op: &str, e: reqwest::Error) -> MicrosandboxError {
@@ -716,7 +816,16 @@ async fn parse_cloud_log_sse(
 ) {
     let mut buffer = Vec::new();
 
-    while let Some(chunk) = chunks.next().await {
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = tx.closed() => return,
+            chunk = chunks.next() => chunk,
+        };
+        let Some(chunk) = chunk else {
+            return;
+        };
+
         match chunk {
             Ok(bytes) => buffer.extend_from_slice(&bytes),
             Err(error) => {
