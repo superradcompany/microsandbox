@@ -18,6 +18,7 @@ mod setup;
 mod snapshot;
 mod snapshot_group;
 mod ssh;
+mod stdio;
 mod storage;
 mod volume;
 

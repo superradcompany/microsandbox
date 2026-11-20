@@ -165,3 +165,71 @@ print("asyncio.run completed with pending native work", flush=True)
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "asyncio.run completed with pending native work" in result.stdout
+
+
+@pytest.mark.parametrize("cancel", ["cancel", "pending"])
+def test_exit_with_open_stdin(tmp_path: Path, cancel: str) -> None:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            r"""
+import atexit
+import asyncio
+import os
+import sys
+
+if os.name == "posix":
+    import fcntl
+    original = fcntl.fcntl(0, fcntl.F_GETFL)
+
+def verify():
+    if os.name == "posix":
+        assert fcntl.fcntl(0, fcntl.F_GETFL) == original, "stdin flags were not restored"
+    print("stdin shutdown finished", flush=True)
+
+atexit.register(verify)
+from microsandbox import Image
+
+pending = None
+async def main():
+    global pending
+    pending = Image.load("-")
+    if sys.argv[1] == "cancel":
+        try:
+            await asyncio.wait_for(pending, timeout=0.2)
+        except asyncio.TimeoutError:
+            pass
+        else:
+            raise AssertionError("read unexpectedly finished without input or EOF")
+    else:
+        await asyncio.sleep(0.2)
+        assert not pending.done()
+
+asyncio.run(main())
+print("asyncio finished with stdin still open", flush=True)
+""",
+            cancel,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={
+            **os.environ,
+            "MSB_HOME": str(tmp_path),
+            "MSB_CONFIG_PATH": str(tmp_path / "missing.json"),
+        },
+    )
+    try:
+        # communicate() closes stdin, which would conceal this regression.
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        pytest.fail(f"interpreter hung with stdin open: {stdout}{stderr}")
+    else:
+        stdout, stderr = process.communicate()
+        assert process.returncode == 0, stdout + stderr
+        assert "stdin shutdown finished" in stdout, stdout + stderr
+        assert "Exception ignored" not in stderr

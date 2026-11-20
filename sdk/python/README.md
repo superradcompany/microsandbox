@@ -67,6 +67,8 @@ asyncio.run(main())
 
 At normal interpreter exit, the SDK stops its native async runtime and waits for native blocking work already in progress before Python finalizes. Await operations and close sandbox contexts explicitly when you need their results or cleanup to complete; process exit is not a substitute for sandbox lifecycle management.
 
+Image imports from stdin and SSH stdio connections require exclusive use of their process input/output streams. Cancelling these operations releases the streams, including when a pipe remains open without input. On Unix, the SDK temporarily enables nonblocking I/O and restores the original blocking mode when the operation ends.
+
 ### Reusable Lifecycle Convergence
 
 Use `connect_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; creation arguments are used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.

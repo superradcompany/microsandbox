@@ -456,7 +456,9 @@ impl PySshServer {
                 guard.as_ref().ok_or_else(crate::error::consumed)?.clone()
             };
             server
-                .serve_connection(microsandbox::sandbox::SshStdioStream::new())
+                .serve_connection(
+                    crate::stdio::StdioStream::new().map_err(|error| to_py_err(error.into()))?,
+                )
                 .await
                 .map_err(to_py_err)?;
             Ok(())

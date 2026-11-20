@@ -4507,6 +4507,7 @@ dependencies = [
  "chrono",
  "futures",
  "ipnetwork",
+ "libc",
  "microsandbox",
  "microsandbox-network",
  "pyo3",
@@ -4515,6 +4516,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "typed-path",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

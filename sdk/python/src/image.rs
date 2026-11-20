@@ -1,8 +1,8 @@
-use std::io::Write;
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList, PyModule};
+use tokio::io::AsyncWriteExt;
 
 #[cfg(feature = "local")]
 use microsandbox::ImageArchiveFormat;
@@ -739,18 +739,14 @@ fn resolve_local(
 }
 
 async fn read_stdin_to_temp_file() -> microsandbox::MicrosandboxResult<tempfile::NamedTempFile> {
-    tokio::task::spawn_blocking(
-        || -> microsandbox::MicrosandboxResult<tempfile::NamedTempFile> {
-            let mut temp = tempfile::NamedTempFile::new()?;
-            std::io::copy(&mut std::io::stdin().lock(), temp.as_file_mut())?;
-            temp.as_file_mut().flush()?;
-            Ok(temp)
-        },
-    )
-    .await
-    .map_err(|e| {
-        microsandbox::MicrosandboxError::Custom(format!("stdin read task panicked: {e}"))
-    })?
+    let mut input = crate::stdio::stdin()?;
+    let temp = tempfile::NamedTempFile::new()?;
+    let mut output = tokio::fs::File::from_std(temp.reopen()?);
+    // Dropping the future also drops the input adapter, interrupting an open
+    // pipe read instead of leaving it in the runtime's blocking worker pool.
+    tokio::io::copy(&mut input, &mut output).await?;
+    output.flush().await?;
+    Ok(temp)
 }
 
 fn json_object_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {

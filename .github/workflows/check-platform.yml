@@ -265,6 +265,7 @@ jobs:
           # `uv sync` otherwise builds the local extension before maturin does
           # it again. Build one wheel, install it, and test that exact artifact.
           uv sync --group dev --no-install-project
+          uv run --no-sync cargo test -p microsandbox-py --profile ci --no-default-features --features local,remote --test stdio
           uv run --no-sync maturin build --profile ci --out dist
           uv pip install --reinstall dist/*.whl
           # Run outside sdk/python so the source tree cannot shadow the wheel.

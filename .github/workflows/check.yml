@@ -711,6 +711,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
           uv run --project sdk/python --no-sync pytest sdk/python/tests/test_runtime_shutdown.py sdk/python/tests/test_checkpoint_removal.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --project sdk/python --no-sync cargo test -p microsandbox-py --no-default-features --features local,remote --target ${{ matrix.rust_target }} --test stdio
 
   windows-build:
     name: Build Windows ${{ matrix.component }} (${{ matrix.target }})
