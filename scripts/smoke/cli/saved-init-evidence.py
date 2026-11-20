@@ -62,7 +62,9 @@ def main():
     home = Path(tempfile.mkdtemp(prefix="saved-init-", dir=args.temp_root))
     env = history.environment(args.binary, args.firmware, home, args.agent)
     runner = history.Runner(args.binary, env, args.output / "current")
-    old = history.Runner(args.old, env, args.output / "old-reader")
+    # Released launchers require their matching runtime when starting a VM.
+    old_env = dict(env, MSB_PATH=str(args.old))
+    old = history.Runner(args.old, old_env, args.output / "old-reader")
     report = {
         "host": platform.platform(), "home": str(home),
         "binary": history.digest(args.binary), "old": history.digest(args.old),
@@ -152,11 +154,12 @@ def main():
             fd = os.open(args.output / (label + "-source.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as output:
                 json.dump(evidence, output)
-            # Released SDK requests still work; absence of private origin evidence must
-            # stay unavailable when the old writer replaces the local configuration.
+            # Released SDK requests still work with their matching runtime. That
+            # runtime cannot refresh the newer runtime's private origin evidence.
             old.run(label + "-start", "start", name)
             old.run(label + "-exec", "exec", name, "--", "sh", "-ec", check)
-            assert state(name)[1]["confirmed"]["source"] is None
+            old_run_id = rows("SELECT id FROM run ORDER BY id DESC LIMIT 1")[0][0]
+            assert state(name)[1]["confirmed"]["owner"]["run_id"] != old_run_id
             old.run(label + "-stop", "stop", *stop, name)
             runner.run(label + "-rm", "rm", name)
             names.remove(name)
