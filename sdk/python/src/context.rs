@@ -112,7 +112,7 @@ impl PySandboxes {
             name,
             kwargs,
         )?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             builder
                 .restore()
                 .await
@@ -134,7 +134,8 @@ impl PySandboxes {
             name,
             kwargs,
         )?;
-        let _guard = pyo3_async_runtimes::tokio::get_runtime().enter();
+        let runtime = crate::runtime::get_runtime()?;
+        let _guard = runtime.enter();
         let (progress, task) = builder.restore_with_progress().map_err(to_py_err)?;
         Ok(crate::sandbox::PyPullSession::new(progress, task))
     }
@@ -151,7 +152,8 @@ impl PySandboxes {
             .map(|value| value.extract::<bool>())
             .transpose()?
             .unwrap_or(false);
-        let _guard = pyo3_async_runtimes::tokio::get_runtime().enter();
+        let runtime = crate::runtime::get_runtime()?;
+        let _guard = runtime.enter();
         let (progress, task) = if detached {
             builder.create_detached_with_progress()
         } else {
@@ -181,7 +183,7 @@ impl PySandboxes {
             .map(|v| v.extract::<bool>())
             .transpose()?
             .unwrap_or(false);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let sandbox = if detached {
                 builder.create_detached().await
             } else {
@@ -199,7 +201,7 @@ impl PySandboxes {
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let builder = sandbox_builder_with_context(self.inner.clone(), name, kwargs)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             builder
                 .connect_or_create()
                 .await
@@ -210,7 +212,7 @@ impl PySandboxes {
 
     fn get<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.sandboxes();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection
                 .get(&name)
                 .await
@@ -220,7 +222,7 @@ impl PySandboxes {
     }
     fn get_running<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.sandboxes();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection
                 .get_running(&name)
                 .await
@@ -237,7 +239,7 @@ impl PySandboxes {
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.sandboxes();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection
                 .list_with(|mut query| {
                     if let Some(limit) = limit {
@@ -264,7 +266,7 @@ impl PySandboxes {
         detached: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let context = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let record = context
                 .sandbox_ops()
                 .get(context.clone(), &name)
@@ -280,7 +282,7 @@ impl PySandboxes {
     }
     fn remove<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let context = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             context
                 .sandbox_ops()
                 .remove(context.clone(), &name)
@@ -321,7 +323,7 @@ impl PyVolumes {
     }
     fn get<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.volumes();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection
                 .get(&name)
                 .await
@@ -331,7 +333,7 @@ impl PyVolumes {
     }
     fn get_default<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.volumes();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection
                 .get_default()
                 .await
@@ -341,7 +343,7 @@ impl PyVolumes {
     }
     fn list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.volumes();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection
                 .list()
                 .await
@@ -356,7 +358,7 @@ impl PyVolumes {
     }
     fn remove<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.volumes();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection.remove(&name).await.map_err(to_py_err)?;
             Ok(Python::attach(|py| py.None()))
         })
@@ -415,7 +417,7 @@ impl PyCheckpoints {
     }
     fn get<'py>(&self, py: Python<'py>, reference: String) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.checkpoints();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection
                 .get(&reference)
                 .await
@@ -425,7 +427,7 @@ impl PyCheckpoints {
     }
     fn list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.checkpoints();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection
                 .list()
                 .await
@@ -446,7 +448,7 @@ impl PyCheckpoints {
         force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let collection = self.inner.checkpoints();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             collection
                 .remove(reference, force)
                 .await
@@ -467,7 +469,7 @@ impl PySnapshots {
 
     fn get<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let groups = self.inner.snapshots();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(crate::snapshot_group::PySnapshotGroup {
                 inner: groups.get(&name).await.map_err(to_py_err)?,
             })
@@ -476,7 +478,7 @@ impl PySnapshots {
 
     fn list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let groups = self.inner.snapshots();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(groups
                 .list()
                 .await
@@ -513,7 +515,7 @@ impl PySnapshots {
                 },
             )
             .map_err(to_py_err)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let inner = prepared.group(group).await.map_err(to_py_err)?;
             Ok(crate::snapshot_group::PySnapshotImportResult { inner })
         })
@@ -521,7 +523,7 @@ impl PySnapshots {
 
     fn open<'py>(&self, py: Python<'py>, path: std::path::PathBuf) -> PyResult<Bound<'py, PyAny>> {
         let pending = self.inner.snapshots().open(path);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(crate::snapshot_group::PySnapshotGroup {
                 inner: pending.await.map_err(to_py_err)?,
             })

@@ -45,7 +45,7 @@ impl PySandboxFs {
     /// Read an entire file as bytes.
     fn read<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let data = fs.read(&path).await.map_err(to_py_err)?;
             Ok(data.to_vec())
         })
@@ -54,7 +54,7 @@ impl PySandboxFs {
     /// Read a file as a UTF-8 string.
     fn read_text<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let text = fs.read_to_string(&path).await.map_err(to_py_err)?;
             Ok(text)
         })
@@ -63,7 +63,7 @@ impl PySandboxFs {
     /// Read a file with streaming. Returns an async iterator of bytes chunks.
     fn read_stream<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let stream = fs.read_stream(&path).await.map_err(to_py_err)?;
             Ok(PyFsReadStream {
                 inner: Arc::new(Mutex::new(stream)),
@@ -79,7 +79,7 @@ impl PySandboxFs {
         data: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             fs.write(&path, &data).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -88,7 +88,7 @@ impl PySandboxFs {
     /// Write with streaming. Returns an async context manager.
     fn write_stream<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let sink = fs.write_stream(&path).await.map_err(to_py_err)?;
             Ok(PyFsWriteSink {
                 inner: Arc::new(Mutex::new(Some(sink))),
@@ -99,7 +99,7 @@ impl PySandboxFs {
     /// List directory contents.
     fn list<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let entries = fs.list(&path).await.map_err(to_py_err)?;
             let py_entries: Vec<PyFsEntry> = entries.into_iter().map(convert_fs_entry).collect();
             Ok(py_entries)
@@ -109,7 +109,7 @@ impl PySandboxFs {
     /// Create a directory (and parents).
     fn mkdir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             fs.mkdir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -118,7 +118,7 @@ impl PySandboxFs {
     /// Remove a file.
     fn remove<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             fs.remove(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -127,7 +127,7 @@ impl PySandboxFs {
     /// Remove a directory recursively.
     fn remove_dir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             fs.remove_dir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -136,7 +136,7 @@ impl PySandboxFs {
     /// Copy a file within the sandbox.
     fn copy<'py>(&self, py: Python<'py>, src: String, dst: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             fs.copy(&src, &dst).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -150,7 +150,7 @@ impl PySandboxFs {
         dst: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             fs.rename(&src, &dst).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -159,7 +159,7 @@ impl PySandboxFs {
     /// Get file/directory metadata.
     fn stat<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let meta = fs.stat(&path).await.map_err(to_py_err)?;
             Ok(convert_fs_metadata(&meta))
         })
@@ -168,7 +168,7 @@ impl PySandboxFs {
     /// Check if a path exists.
     fn exists<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let exists = fs.exists(&path).await.map_err(to_py_err)?;
             Ok(exists)
         })
@@ -182,7 +182,7 @@ impl PySandboxFs {
         guest_path: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             fs.copy_from_host(&host_path, &guest_path)
                 .await
                 .map_err(to_py_err)?;
@@ -198,7 +198,7 @@ impl PySandboxFs {
         host_path: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let fs = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             fs.copy_to_host(&guest_path, &host_path)
                 .await
                 .map_err(to_py_err)?;
@@ -219,7 +219,7 @@ impl PyFsReadStream {
 
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut guard = inner.lock().await;
             match guard.recv().await.map_err(to_py_err)? {
                 Some(chunk) => Ok(chunk.to_vec()),
@@ -231,7 +231,7 @@ impl PyFsReadStream {
     /// Collect all remaining data.
     fn collect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             // We need to take the stream out since collect consumes self.
             let mut guard = inner.lock().await;
             let mut data = Vec::new();
@@ -252,7 +252,7 @@ impl PyFsWriteSink {
     /// Write a chunk of data.
     fn write<'py>(&self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sink = guard
                 .as_ref()
@@ -265,7 +265,7 @@ impl PyFsWriteSink {
     /// Close the stream (sends EOF).
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut guard = inner.lock().await;
             if let Some(sink) = guard.take() {
                 sink.close().await.map_err(to_py_err)?;
@@ -277,7 +277,7 @@ impl PyFsWriteSink {
     fn __aenter__<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let obj: Py<PyAny> = slf.into();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) })
+        crate::runtime::future_into_py(py, async move { Ok(obj) })
     }
 
     fn __aexit__<'py>(
@@ -288,7 +288,7 @@ impl PyFsWriteSink {
         _exc_tb: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut guard = inner.lock().await;
             if let Some(sink) = guard.take() {
                 sink.close().await.map_err(to_py_err)?;

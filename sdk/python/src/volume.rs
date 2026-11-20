@@ -79,7 +79,7 @@ impl PyVolume {
     /// Get a lightweight handle to an existing volume.
     #[staticmethod]
     fn get<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let handle = microsandbox::Volume::get(&name).await.map_err(to_py_err)?;
             Ok(PyVolume { inner: handle })
         })
@@ -88,7 +88,7 @@ impl PyVolume {
     /// Get the cloud account's always-present default volume.
     #[staticmethod]
     fn get_default<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let handle = microsandbox::Volume::get_default()
                 .await
                 .map_err(to_py_err)?;
@@ -99,7 +99,7 @@ impl PyVolume {
     /// List all volumes.
     #[staticmethod]
     fn list<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let handles = microsandbox::Volume::list().await.map_err(to_py_err)?;
             let py_handles: Vec<PyVolume> =
                 handles.into_iter().map(|h| PyVolume { inner: h }).collect();
@@ -110,7 +110,7 @@ impl PyVolume {
     /// Remove a volume.
     #[staticmethod]
     fn remove<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             microsandbox::Volume::remove(&name)
                 .await
                 .map_err(to_py_err)?;
@@ -349,7 +349,7 @@ impl PyVolume {
     /// One fresh backend observation; no captured metadata fallback on failure.
     fn info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let volume = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let info = volume.info().await.map_err(to_py_err)?;
             let mut value = serde_json::to_value(&info).map_err(|error| to_py_err(error.into()))?;
             value["labels"] =
@@ -369,7 +369,7 @@ impl PyVolume {
     /// Remove this volume.
     fn destroy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             handle.destroy().await.map_err(to_py_err)?;
             Ok(())
         })
@@ -399,7 +399,7 @@ pub struct PyVolumeFs {
 impl PyVolumeFs {
     fn read<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             let data = fs.read(&path).await.map_err(to_py_err)?;
             Ok(data.to_vec())
@@ -408,7 +408,7 @@ impl PyVolumeFs {
 
     fn read_text<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             let text = fs.read_to_string(&path).await.map_err(to_py_err)?;
             Ok(text)
@@ -422,7 +422,7 @@ impl PyVolumeFs {
         data: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             fs.write(&path, &data).await.map_err(to_py_err)?;
             Ok(())
@@ -431,7 +431,7 @@ impl PyVolumeFs {
 
     fn list<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             let entries = fs.list(&path).await.map_err(to_py_err)?;
             let py_entries: Vec<crate::fs::PyFsEntry> = entries
@@ -444,7 +444,7 @@ impl PyVolumeFs {
 
     fn mkdir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             fs.mkdir(&path).await.map_err(to_py_err)?;
             Ok(())
@@ -453,7 +453,7 @@ impl PyVolumeFs {
 
     fn remove_file<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             fs.remove(&path).await.map_err(to_py_err)?;
             Ok(())
@@ -462,7 +462,7 @@ impl PyVolumeFs {
 
     fn remove_dir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             handle.fs().remove_dir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -470,7 +470,7 @@ impl PyVolumeFs {
 
     fn copy<'py>(&self, py: Python<'py>, from_: String, to: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             handle.fs().copy(&from_, &to).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -483,7 +483,7 @@ impl PyVolumeFs {
         to: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             handle.fs().rename(&from_, &to).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -491,7 +491,7 @@ impl PyVolumeFs {
 
     fn stat<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let metadata = handle.fs().stat(&path).await.map_err(to_py_err)?;
             Ok(crate::fs::convert_fs_metadata(&metadata))
         })
@@ -499,7 +499,7 @@ impl PyVolumeFs {
 
     fn exists<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             let exists = fs.exists(&path).await.map_err(to_py_err)?;
             Ok(exists)
@@ -565,7 +565,7 @@ pub(crate) fn create_in<'py>(
         .map(|value| extract_str_enum(value.bind(py), "VolumeKind"))
         .transpose()?
         .unwrap_or_else(|| "dir".to_string());
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::runtime::future_into_py(py, async move {
         let mut builder = microsandbox::Volume::ctx(context.as_ref()).builder(&name);
         match kind.as_str() {
             "dir" => {

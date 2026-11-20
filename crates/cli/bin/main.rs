@@ -416,6 +416,7 @@ fn main() {
                 serde_json::to_value(microsandbox_runtime::launch::LaunchCapabilities {
                     storage_reader: microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
                     protected_guest_state: true,
+                    header_fields: Some(cfg!(feature = "net")),
                     protocols: vec![2, 1],
                     required_restore_backing: true,
                     tcp_accept_queue_size: true,
