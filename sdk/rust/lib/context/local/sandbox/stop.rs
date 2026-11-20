@@ -66,8 +66,14 @@ struct BranchMemoryReference {
 //--------------------------------------------------------------------------------------------------
 
 impl LocalContext {
-    /// Wait for branch-cache and checkpoint-store cleanup requested by completed stops.
-    /// CLI callers use this after their stop result, outside the graceful-stop deadline.
+    /// Reuse the per-root stop worker when snapshot removal finds a busy stopped source.
+    /// Sharing its queue preserves coalescing and the CLI's existing cleanup drain.
+    pub(crate) fn schedule_stopped_storage_cleanup(&self, name: &str) {
+        schedule_stopped_memory_sweep(self.clone(), name);
+    }
+
+    /// Wait for cleanup requested by completed stops or deferred snapshot removals.
+    /// CLI callers drain before exit, outside the graceful-stop deadline.
     pub async fn finish_stopped_memory_cleanup(&self) {
         let root = self.cache_dir().join("memory");
         loop {

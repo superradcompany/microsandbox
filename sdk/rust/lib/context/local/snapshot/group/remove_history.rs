@@ -128,7 +128,7 @@ async fn remove_observed(
     })
     .await?;
     for source in sources {
-        if let Err(error) = deletion::release_store_objects(local, &source).await {
+        if let Err(error) = deletion::release_store_objects_after_removal(local, &source).await {
             tracing::warn!(%error, source, "checkpoint objects of removed group were kept");
         }
     }

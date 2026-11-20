@@ -266,6 +266,19 @@ async fn recover_parent_owned(
     Ok(())
 }
 
+/// A removal has no later stop to rely on when its source is already stopped. Keep
+/// contention queued in the shared worker; its individual attempts must not enqueue
+/// themselves, or each retry would also request another complete memory-cache scan.
+pub(super) async fn release_store_objects_after_removal(
+    local: &LocalContext,
+    source: &str,
+) -> MicrosandboxResult<()> {
+    if release_store_objects(local, source).await? == StoreCleanup::Deferred {
+        local.schedule_stopped_storage_cleanup(source);
+    }
+    Ok(())
+}
+
 /// Release unused objects only after excluding both runtime activity and capture publication.
 /// Captures can still be publishing after their VM exits, so the lifecycle lock alone is
 /// insufficient. The existing transition -> lineage -> lifecycle order also fences restarts.
