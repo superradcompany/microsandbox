@@ -1830,13 +1830,14 @@ jobs:
           # helpers are invoked by their parent crash/cancellation tests, not standalone;
           # historical readers get a pinned release in the dedicated fixture below. The
           # artifact-dependent live snapshot diagnostics remain explicit qualification tests.
+          # portable_defaults_live requires MSB_PORTABLE_DEFAULTS_ARCHIVE from its caller.
           # The six saved-config assertions consume records produced by the dedicated step below.
           saved_config_tests="$(python3 scripts/smoke/cli/saved-config-integration.py --nextest-filter)"
           cargo-nextest nextest run \
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E "not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^context::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^context::local::snapshot::/) or test(/^context::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/)) and not ($saved_config_tests)" \
+            -E "not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or binary(=portable_defaults_live) or test(/^context::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^context::local::snapshot::/) or test(/^context::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/)) and not ($saved_config_tests)" \
             --test-threads 2
 
       - name: Saved configuration integration fixtures
