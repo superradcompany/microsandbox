@@ -691,10 +691,12 @@ mod tests {
         let root = local.sandboxes_dir().join("box/checkpoint-store");
         let outside = home.path().join("outside");
         std::fs::rename(&root, &outside).unwrap();
+        // Unlike Rust's filesystem APIs, cmd's mklink parses forward slashes as
+        // switches. Use native separators for both generated fixture paths.
         let created = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&root)
-            .arg(&outside)
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(root.as_os_str().to_string_lossy().replace('/', "\\"))
+            .arg(outside.as_os_str().to_string_lossy().replace('/', "\\"))
             .output()
             .unwrap();
         assert!(
