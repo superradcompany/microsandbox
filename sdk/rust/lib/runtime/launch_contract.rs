@@ -928,7 +928,10 @@ pub(crate) async fn validate_multi_tenant_config(
     config: &SandboxConfig,
     global: &GlobalConfig,
 ) -> MicrosandboxResult<()> {
-    if config.spec.deployment_profile != microsandbox_types::DeploymentProfile::MultiTenant
+    let profile = global
+        .deployment_profile
+        .unwrap_or(config.spec.deployment_profile);
+    if profile != microsandbox_types::DeploymentProfile::MultiTenant
         || global.dns.nameservers.is_none()
     {
         return Ok(());
@@ -1970,6 +1973,19 @@ mod tests {
             .await
             .unwrap();
 
+        // A restart preflight must use the current operator profile, not the
+        // profile saved in the running sandbox configuration.
+        config.spec.deployment_profile = microsandbox_types::DeploymentProfile::SingleTenant;
+        global.deployment_profile = Some(microsandbox_types::DeploymentProfile::MultiTenant);
+        let error = validate_multi_tenant_config(&dir.path().join("no-probe"), &config, &global)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("dns.nameservers"));
+
+        validate_multi_tenant_config(&path, &config, &global)
+            .await
+            .unwrap();
+
         global.dns.nameservers = Some(vec![]);
         let error = validate_multi_tenant_config(&path, &config, &global)
             .await
@@ -1982,6 +1998,13 @@ mod tests {
         );
 
         config.spec.deployment_profile = microsandbox_types::DeploymentProfile::SingleTenant;
+        global.deployment_profile = None;
+        validate_multi_tenant_config(&dir.path().join("no-probe"), &config, &global)
+            .await
+            .unwrap();
+
+        config.spec.deployment_profile = microsandbox_types::DeploymentProfile::MultiTenant;
+        global.deployment_profile = Some(microsandbox_types::DeploymentProfile::SingleTenant);
         validate_multi_tenant_config(&dir.path().join("no-probe"), &config, &global)
             .await
             .unwrap();
