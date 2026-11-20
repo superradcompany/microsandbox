@@ -82,6 +82,7 @@ impl RuntimeCaptureSource<'_> {
             max_inbound_tcp_connections,
             max_udp_connections,
             tcp_accept_queue_size,
+            dns_revalidation_grace_secs,
             rate_limiter,
             nat64_prefixes,
             trust_host_cas,
@@ -219,6 +220,9 @@ impl RuntimeCaptureSource<'_> {
                 recorded_field("tcp_accept_queue_size"),
                 *tcp_accept_queue_size,
             )),
+            // Recorded only when configured: omission already means the runtime default, and
+            // leaving the key out keeps such manifests readable by releases that predate it.
+            dns_revalidation_grace_secs: dns_revalidation_grace_secs.map(configured),
             rate_limiter: Some(project_optional(
                 recorded_field("rate_limiter"),
                 "rate_limiter",

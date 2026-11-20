@@ -552,6 +552,8 @@ impl CloudSandboxSpec {
             max_udp_connections: self.network.max_udp_connections,
             // Tunes published-port listeners, and the cloud spec publishes no ports.
             tcp_accept_queue_size: None,
+            // The cloud create contract has no runtime grace setting.
+            dns_revalidation_grace_secs: None,
             max_inbound_tcp_connections: None,
             rate_limiter: None,
             nat64_prefixes: NetworkSpec::default().nat64_prefixes,

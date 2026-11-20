@@ -882,6 +882,16 @@ Runtimes that predate the setting are refused with an upgrade-required error rat
 
 `RestoreBuilder`, `ForkBuilder`, and `ForkManyBuilder` expose the same `tcp_accept_queue_size()` for the listeners a child publishes.
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">dns_revalidation_grace_secs()</span>
+
+```rust
+fn dns_revalidation_grace_secs(self, secs: u64) -> Self
+```
+
+Set how long after a DNS answer's TTL a TLS reconnect may still use an address from that answer, provided a fresh lookup for the name succeeds. Default: `60`. `0` requires the fresh answer to contain the address. Accepts `0..=3600`; larger values record [`BuildError::InvalidDnsRevalidationGrace`](#builderror). See [domain-based policy rules](/networking/dns#domain-based-policy-rules).
+
+Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it. Cloud sandboxes reject it.
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">nat64_prefix()</span>
 
 ```rust
@@ -1641,6 +1651,7 @@ Errors surfaced by the builders' `build()` methods. The same enum covers [`Netwo
 | `InvalidIpv4Pool { raw }` | `ipv4_pool()` got a pool that can't hold a `/30` sandbox subnet |
 | `InvalidIpv6Pool { raw }` | `ipv6_pool()` got a pool that can't hold a `/64` sandbox prefix |
 | `InvalidTcpAcceptQueueSize { source }` | `tcp_accept_queue_size()` got a value outside `1..=i32::MAX` |
+| `InvalidDnsRevalidationGrace { secs }` | `dns_revalidation_grace_secs()` got a value above 3600 |
 | `InvalidNat64Prefix { raw }` | `nat64_prefix()` got a prefix that is not an IPv6 `/96` |
 | `InvalidOutboundProxy { reason }` | [`SandboxBuilder::proxy()`](/sdk/rust/proxies#proxy) got an invalid proxy configuration |
 | `InvalidDomain { rule_index, raw, source }` | `.domain` / `.domain_suffix` got a value that failed `DomainName` parse |

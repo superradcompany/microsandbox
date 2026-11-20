@@ -6408,6 +6408,36 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[tokio::test]
+    async fn test_builder_network_carries_dns_revalidation_grace() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| n.dns_revalidation_grace_secs(0))
+            .build()
+            .await
+            .unwrap();
+        let error = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| n.dns_revalidation_grace_secs(3601))
+            .build()
+            .await
+            .unwrap_err();
+
+        assert_eq!(config.spec.network.dns_revalidation_grace_secs, Some(0));
+        assert_eq!(
+            config
+                .local_network_config()
+                .unwrap()
+                .dns_revalidation_grace_secs,
+            Some(0)
+        );
+        assert!(
+            error.to_string().contains("DNS revalidation grace period"),
+            "{error}"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
     async fn test_builder_network_preserves_top_level_settings() {
         let config = SandboxBuilder::new("test")
             .image("alpine")

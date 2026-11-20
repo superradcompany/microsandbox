@@ -106,7 +106,7 @@ Gateway replies are checked for restricted names and addresses in every record s
 
 Even without rebinding, a time-of-check to time-of-use race exists: an allowed domain resolves to an allowed IP when policy is checked, then the guest looks it up again at connect time and reaches a different IP.
 
-Domain rules require a live DNS binding between the allowed name and destination IP. When an allowed TLS SNI name has no live binding, microsandbox re-resolves it through the policy-filtered resolver. The answer must contain the chosen IP, or an earlier filtered answer for that name must have returned it within a 60-second grace period after its TTL. No prior guest lookup is required; connections without SNI still need a live binding. The same pin set gates [secret injection](/security/secrets).
+Domain rules require a live DNS binding between the allowed name and destination IP. When an allowed TLS SNI name has no live binding, microsandbox re-resolves it through the policy-filtered resolver. The answer must contain the chosen IP, or an earlier filtered answer for that name must have returned it within a grace period after its TTL (60 seconds by default, configurable from 0 to 3600). No prior guest lookup is required; connections without SNI still need a live binding. The same pin set gates [secret injection](/security/secrets).
 
 ## SNI spoofing
 

@@ -109,6 +109,10 @@ impl LaunchContract {
             require_tcp_accept_queue_size(msb_path).await?;
         }
 
+        if self.machine && network.dns_revalidation_grace_secs.is_some() {
+            require_dns_revalidation_grace(msb_path).await?;
+        }
+
         if self.machine
             && matches!(
                 network.outbound_proxy,
@@ -184,6 +188,9 @@ impl LaunchContract {
         }
         if network.tcp_accept_queue_size.is_some() {
             return unsupported("TCP accept queue size");
+        }
+        if network.dns_revalidation_grace_secs.is_some() {
+            return unsupported("DNS revalidation grace period");
         }
         if let Some(limit) = network.max_tcp_connections {
             let Some(cap) = limit.cap() else {
@@ -403,11 +410,13 @@ impl LaunchContract {
             } else {
                 &mut value["network"]
             };
-            // Explicit UDP limits and accept queue sizes were rejected above; omit the new optional
-            // keys entirely when encoding a previous producer's network object.
+            // Explicit UDP limits, accept queue sizes and revalidation grace periods were rejected
+            // above; omit the new optional keys entirely when encoding a previous producer's
+            // network object.
             if let Some(fields) = network.as_object_mut() {
                 fields.remove("max_udp_connections");
                 fields.remove("tcp_accept_queue_size");
+                fields.remove("dns_revalidation_grace_secs");
             }
             // Pin the previous default at the boundary; omission on the current contract
             // intentionally has a different meaning and must not broaden an old launch.
@@ -1001,6 +1010,18 @@ async fn require_tcp_accept_queue_size(path: &Path) -> MicrosandboxResult<()> {
     .await
 }
 
+/// Probe only when a grace period is requested. `machine` runtimes that predate the field
+/// decode network JSON leniently and would drop it, keeping their previous revalidation rules.
+#[cfg(feature = "net")]
+async fn require_dns_revalidation_grace(path: &Path) -> MicrosandboxResult<()> {
+    require_capability(
+        path,
+        |capabilities| capabilities.dns_revalidation_grace,
+        "a configurable DNS revalidation grace period",
+    )
+    .await
+}
+
 /// This is a security prerequisite for every start, rather than an optional feature.
 /// Probe failures are refusals too: older executables may not recognize the probe command.
 pub(crate) async fn require_protected_guest_state(path: &Path) -> MicrosandboxResult<()> {
@@ -1320,6 +1341,51 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn dns_revalidation_grace_probe_refuses_runtimes_that_would_drop_it() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
+        use microsandbox_network::config::NetworkConfig;
+        let dir = tempfile::tempdir().unwrap();
+        // Current `machine` entry point, but no grace period support to advertise.
+        let old = script(
+            dir.path(),
+            "old-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true}'",
+        );
+        let new = script(
+            dir.path(),
+            "new-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"dns_revalidation_grace\":true}'",
+        );
+        // Probing this path fails, so an Ok below proves no probe ran.
+        let absent = dir.path().join("absent-msb");
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+            header_fields: true,
+        };
+        let strict: NetworkConfig =
+            serde_json::from_value(json!({ "dns_revalidation_grace_secs": 0 })).unwrap();
+
+        let error = machine
+            .require_network_capabilities(&old, &strict)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("upgrade msb"), "{error}");
+        assert!(error.contains("DNS revalidation grace period"), "{error}");
+        machine
+            .require_network_capabilities(&new, &strict)
+            .await
+            .unwrap();
+        machine
+            .require_network_capabilities(&absent, &NetworkConfig::default())
+            .await
+            .unwrap();
     }
 
     /// Explicit published-port overrides require support; omission leaves runtime defaults alone.
@@ -2633,6 +2699,65 @@ mod encoding {
                         &value["network"]
                     };
                     assert!(network.get("tcp_accept_queue_size").is_none());
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn dns_revalidation_grace_requires_current_launch_contract() {
+        use microsandbox_network::config::{EnvNetworkSecretResolver, NetworkConfig};
+
+        for requested in [None, Some(0), Some(30)] {
+            let network: NetworkConfig =
+                serde_json::from_value(json!({ "dns_revalidation_grace_secs": requested }))
+                    .unwrap();
+            let launch = LaunchConfig {
+                network: Some(network.clone().resolve(&EnvNetworkSecretResolver).unwrap()),
+                ..Default::default()
+            };
+
+            let current = LaunchContract {
+                patch: 18,
+                machine: true,
+                header_fields: true,
+            }
+            .encode(&launch)
+            .unwrap();
+
+            let encoded = current["network"]["config"].get("dns_revalidation_grace_secs");
+            assert_eq!(encoded.and_then(Value::as_u64), requested);
+            for patch in 0..=18 {
+                let result = LaunchContract {
+                    patch,
+                    machine: false,
+                    header_fields: false,
+                }
+                .validate_network(&network, microsandbox_types::DeploymentProfile::default())
+                .and_then(|()| {
+                    LaunchContract {
+                        patch,
+                        machine: false,
+                        header_fields: false,
+                    }
+                    .encode(&launch)
+                });
+                if requested.is_some() {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("DNS revalidation grace period")
+                    );
+                } else {
+                    let value = result.unwrap();
+                    let network = if patch >= 17 {
+                        &value["network"]["config"]
+                    } else {
+                        &value["network"]
+                    };
+                    assert!(network.get("dns_revalidation_grace_secs").is_none());
                 }
             }
         }

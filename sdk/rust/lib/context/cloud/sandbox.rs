@@ -865,6 +865,11 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.network.tcp_accept_queue_size.is_some() {
         return Err(unsupported("network.tcp_accept_queue_size"));
     }
+    // The cloud create contract has no grace setting; silently dropping it would apply the
+    // service's own revalidation rules instead.
+    if config.spec.network.dns_revalidation_grace_secs.is_some() {
+        return Err(unsupported("network.dns_revalidation_grace_secs"));
+    }
 
     if config
         .spec
@@ -2456,6 +2461,14 @@ mod tests {
         config.spec.network.tcp_accept_queue_size = Some(4096);
 
         assert_unsupported_config_field(config, "network.tcp_accept_queue_size");
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_dns_revalidation_grace() {
+        let mut config = base_cloud_config();
+        config.spec.network.dns_revalidation_grace_secs = Some(0);
+
+        assert_unsupported_config_field(config, "network.dns_revalidation_grace_secs");
     }
 
     #[test]

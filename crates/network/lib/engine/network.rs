@@ -9,6 +9,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use if_addrs::{IfAddr, get_if_addrs};
 use ipnetwork::{Ipv4Network, Ipv6Network};
@@ -17,7 +18,8 @@ use microsandbox_protocol::bootstrap::{
 };
 use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6};
 use microsandbox_types::{
-    DeploymentProfile, NetworkRateLimitDirection, RateLimitConfigError, RateLimiterConfig,
+    DeploymentProfile, MAX_DNS_REVALIDATION_GRACE_SECS, NetworkRateLimitDirection,
+    RateLimitConfigError, RateLimiterConfig,
 };
 use msb_krun::backends::net::NetBackend;
 
@@ -26,7 +28,7 @@ use crate::engine::tls::state::{TlsState, TlsStateError};
 use crate::netstack::{
     backend::SmoltcpBackend,
     poll::{self, GatewayIps, PollLoopConfig},
-    shared::{DEFAULT_QUEUE_CAPACITY, SharedState},
+    shared::{DEFAULT_QUEUE_CAPACITY, REVALIDATION_GRACE, SharedState},
 };
 use crate::policy::{NetworkPolicy, NetworkProfile};
 use crate::ports::{BoundPublishedPorts, PublishedPortBindError};
@@ -112,6 +114,13 @@ pub enum NetworkInitError {
         pool: Ipv6Network,
         /// Requested sandbox slot.
         slot: u16,
+    },
+
+    /// The configured SNI revalidation grace period exceeds the supported maximum.
+    #[error("invalid DNS revalidation grace period {secs}s: must be at most 3600 seconds")]
+    InvalidDnsRevalidationGrace {
+        /// Requested grace period in seconds.
+        secs: u64,
     },
 
     /// A configured NAT64 prefix is not an IPv6 `/96` network.
@@ -338,7 +347,15 @@ impl SmoltcpNetwork {
 
         // Packet queue capacity is independent of the optional connection cap:
         // a large cap must not allocate a correspondingly large packet queue.
-        let shared = Arc::new(SharedState::new(DEFAULT_QUEUE_CAPACITY));
+        // Stored launch configs bypass the builder, so validate the range again here.
+        let revalidation_grace = match config.dns_revalidation_grace_secs {
+            None => REVALIDATION_GRACE,
+            Some(secs) if secs <= MAX_DNS_REVALIDATION_GRACE_SECS => Duration::from_secs(secs),
+            Some(secs) => return Err(NetworkInitError::InvalidDnsRevalidationGrace { secs }),
+        };
+        let shared = Arc::new(
+            SharedState::new(DEFAULT_QUEUE_CAPACITY).with_revalidation_grace(revalidation_grace),
+        );
         shared.set_host_networks(
             host_routes.host_ipv4.clone(),
             host_routes.host_ipv4_networks.clone(),

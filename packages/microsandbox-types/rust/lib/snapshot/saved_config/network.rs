@@ -90,6 +90,14 @@ pub struct SavedNetworkConfig {
         deserialize_with = "deserialize_present"
     )]
     pub tcp_accept_queue_size: Option<SavedValue<u32>>,
+    /// SNI revalidation grace period in seconds. Recorded only when configured, so snapshots
+    /// that do not set it stay readable by releases that predate the field.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub dns_revalidation_grace_secs: Option<SavedValue<u64>>,
     /// Configured token buckets; host-side accounting starts fresh.
     #[serde(
         default,

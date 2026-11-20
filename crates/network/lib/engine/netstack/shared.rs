@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
 use ipnetwork::{Ipv4Network, Ipv6Network};
-use microsandbox_types::HttpConfig;
+use microsandbox_types::{DEFAULT_DNS_REVALIDATION_GRACE_SECS, HttpConfig};
 use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
 pub use microsandbox_utils::wake_pipe::WakePipe;
 use parking_lot::RwLock;
@@ -45,7 +45,8 @@ pub(crate) const MAX_BINDINGS_PER_HOSTNAME: usize = 1_024;
 /// to another pool member while clients keep using the address they cached.
 /// This is a policy grace period, not DNS semantics: it never authorizes a
 /// connection by itself, see [`SharedState::renew_recent_resolved_hostname`].
-pub(crate) const REVALIDATION_GRACE: Duration = Duration::from_secs(60);
+pub(crate) const REVALIDATION_GRACE: Duration =
+    Duration::from_secs(DEFAULT_DNS_REVALIDATION_GRACE_SECS);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -187,8 +188,8 @@ impl SharedState {
         }
     }
 
-    /// Override the revalidation grace period, so tests can observe its end.
-    #[cfg(test)]
+    /// Set the SNI revalidation grace period. Called once at boot, before the
+    /// state is shared.
     pub(crate) fn with_revalidation_grace(mut self, grace: Duration) -> Self {
         self.revalidation_grace = grace;
         self
