@@ -62,7 +62,9 @@ def main():
     home = Path(tempfile.mkdtemp(prefix="saved-init-", dir=args.temp_root))
     env = history.environment(args.binary, args.firmware, home, args.agent)
     runner = history.Runner(args.binary, env, args.output / "current")
-    old = history.Runner(args.old, env, args.output / "old-reader")
+    # Old-writer restarts use the released runtime that matches that launcher.
+    old_env = dict(env, MSB_PATH=str(args.old))
+    old = history.Runner(args.old, old_env, args.output / "old-reader")
     report = {
         "host": platform.platform(), "home": str(home),
         "binary": history.digest(args.binary), "old": history.digest(args.old),
@@ -156,7 +158,9 @@ def main():
             # stay unavailable when the old writer replaces the local configuration.
             old.run(label + "-start", "start", name)
             old.run(label + "-exec", "exec", name, "--", "sh", "-ec", check)
-            assert state(name)[1]["confirmed"]["source"] is None
+            latest_run = rows("SELECT id FROM run WHERE sandbox_id=(SELECT id FROM sandbox WHERE name=?) ORDER BY id DESC LIMIT 1", (name,))[0][0]
+            # A released runtime leaves stale evidence, never evidence for its new run.
+            assert state(name)[1]["confirmed"]["owner"]["run_id"] != latest_run
             old.run(label + "-stop", "stop", *stop, name)
             runner.run(label + "-rm", "rm", name)
             names.remove(name)

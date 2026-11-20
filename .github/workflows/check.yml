@@ -23,6 +23,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Native SDK subprocesses must retain a stack trace when a Rust worker aborts.
+  RUST_BACKTRACE: "1"
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_TIMEOUT: "120"
   CARGO_HTTP_MULTIPLEXING: "false"
@@ -1832,8 +1834,8 @@ jobs:
           # helpers are invoked by their parent crash/cancellation tests, not standalone;
           # historical readers get a pinned release in the dedicated fixture below. The
           # artifact-dependent live snapshot diagnostics remain explicit qualification tests.
-          # Portable-defaults qualification requires an external archive; production
-          # portable publication remains gated, so this batch cannot prepare it.
+          # Portable-defaults qualification requires an external archive; this
+          # self-provisioning batch cannot supply that fixture.
           # The six saved-config assertions consume records produced by the dedicated step below.
           saved_config_tests="$(python3 scripts/smoke/cli/saved-config-integration.py --nextest-filter)"
           cargo-nextest nextest run \

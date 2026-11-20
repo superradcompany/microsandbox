@@ -233,7 +233,7 @@ def save_diagnostics(root, output, workspace, error=None):
             text = text.replace(source, replacement)
         return text
 
-    result = {"status": "failed" if error else "passed", "commands": [], "cases": []}
+    result = {"status": "failed" if error else "passed", "commands": [], "cases": [], "reports": []}
     if error:
         result["error_type"] = type(error).__name__
         result["error"] = redact(error)
@@ -251,15 +251,25 @@ def save_diagnostics(root, output, workspace, error=None):
                 row["stderr"] = redact(data[:65536].decode(errors="replace"))
                 row["stderr_truncated"] = len(data) > 65536
             result["commands"].append(row)
+
+    def diagnostic_row(source, suite):
+        row = {key: source[key] for key in ("runtime", "status", "remaining_sandboxes",
+                                            "remaining_live_runs", "surviving_pids") if key in source}
+        row["suite"] = suite
+        if "cleanup" in source:
+            row["cleanup"] = {key: redact(value) for key, value in source["cleanup"].items()}
+        for key in ("error", "cleanup_error"):
+            if key in source:
+                row[key] = redact(source[key])
+        return row
+
     for report in sorted(root.rglob("report.json")):
-        for case in json.loads(report.read_text()).get("cases", []):
-            row = {key: case[key] for key in ("runtime", "status", "remaining_sandboxes", "remaining_live_runs") if key in case}
-            row["suite"] = str(report.parent.relative_to(root))
-            if "cleanup" in case:
-                row["cleanup"] = {key: redact(value) for key, value in case["cleanup"].items()}
-            if "error" in case:
-                row["error"] = redact(case["error"])
-            result["cases"].append(row)
+        source = json.loads(report.read_text())
+        suite = str(report.parent.relative_to(root))
+        # Init fixtures put failures and cleanup on the report itself, including
+        # failures before any case exists. Apply the same allowlist at both levels.
+        result["reports"].append(diagnostic_row(source, suite))
+        result["cases"].extend(diagnostic_row(case, suite) for case in source.get("cases", []))
     (output / "diagnostics.json").write_text(json.dumps(result, indent=2) + "\n")
     for row in result["commands"]:
         if row.get("exit") != 0:

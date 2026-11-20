@@ -9,8 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import unittest
-from unittest import mock
+import unittest.mock
 
 SPEC = importlib.util.spec_from_file_location(
     "saved_config_integration", Path(__file__).with_name("saved-config-integration.py"))
@@ -45,8 +44,8 @@ class SavedConfigIntegrationTests(unittest.TestCase):
 
                 argv = ["harness", "--binary", "/msb", "--agent", "/agent", "--firmware", "/firmware",
                         "--workspace", "/repo", "--archive", "/tests", "--output", str(output)]
-                with mock.patch.object(sys, "argv", argv), mock.patch.object(HARNESS, "run", side_effect=run), \
-                        mock.patch.object(HARNESS.evidence, "install_termination_handler"), redirect_stderr(io.StringIO()):
+                with unittest.mock.patch.object(sys, "argv", argv), unittest.mock.patch.object(HARNESS, "run", side_effect=run), \
+                        unittest.mock.patch.object(HARNESS.evidence, "install_termination_handler"), redirect_stderr(io.StringIO()):
                     with self.assertRaises(type(failure)) as caught:
                         HARNESS.main()
                 self.assertIs(caught.exception, failure)
@@ -60,14 +59,61 @@ class SavedConfigIntegrationTests(unittest.TestCase):
                     self.assertNotIn(private, raw)
                 self.assertEqual([path.name for path in output.iterdir()], ["diagnostics.json"])
 
+    def test_init_report_keeps_early_failure_and_cleanup_without_private_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fixture"
+            init = root / "init"
+            init.mkdir(parents=True)
+            output = Path(directory) / "out"
+            report = {
+                "status": "failed", "cases": [],
+                "error": f"failed to launch {root}/home from /repo/fixture",
+                "cleanup": {"origin-auto": {"stop": 1, "rm": 1}},
+                "cleanup_error": f"could not remove {Path.home()}/private-home",
+                "remaining_sandboxes": 1, "remaining_live_runs": 1, "surviving_pids": [123],
+                "home": str(root / "home"), "host": "private-host-details",
+                "binary": "private-binary-digest", "source": "private-configuration",
+            }
+            (init / "report.json").write_text(json.dumps(report))
+            HARNESS.save_diagnostics(root, output, Path("/repo"), RuntimeError("init failed"))
+            raw = (output / "diagnostics.json").read_text()
+            result = json.loads(raw)
+            self.assertEqual(result["cases"], [])
+            saved = result["reports"][0]
+            self.assertEqual(saved["suite"], "init")
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["error"], "failed to launch <fixture>/home from <workspace>/fixture")
+            self.assertEqual(saved["cleanup"], {"origin-auto": "{'stop': 1, 'rm': 1}"})
+            self.assertEqual(saved["cleanup_error"], "could not remove <host-home>/private-home")
+            self.assertEqual(saved["remaining_sandboxes"], 1)
+            self.assertEqual(saved["remaining_live_runs"], 1)
+            self.assertEqual(saved["surviving_pids"], [123])
+            for private in (str(root), str(Path.home()), "/repo", "private-host-details",
+                            "private-binary-digest", "private-configuration"):
+                self.assertNotIn(private, raw)
+
+    def test_case_cleanup_failure_is_retained_and_redacted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fixture"
+            self.fixture(root)
+            report = root / "presence/report.json"
+            source = json.loads(report.read_text())
+            source["cases"][0]["cleanup_error"] = f"cleanup failed at {root}/home"
+            report.write_text(json.dumps(source))
+            output = Path(directory) / "out"
+            with redirect_stderr(io.StringIO()):
+                HARNESS.save_diagnostics(root, output, Path("/repo"), RuntimeError("failed"))
+            result = json.loads((output / "diagnostics.json").read_text())
+            self.assertEqual(result["cases"][0]["cleanup_error"], "cleanup failed at <fixture>/home")
+
     def test_security_capability_changes_do_not_silently_change_matrix_expectations(self):
         args = Namespace(binary=Path("/candidate"))
         for label, advertised in (("candidate", False), ("0.7.12", False), ("0.7.11", True)):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                with mock.patch.object(HARNESS.subprocess, "check_output", return_value=json.dumps({
+                with unittest.mock.patch.object(HARNESS.subprocess, "check_output", return_value=json.dumps({
                         "protocols": [2], "protected_guest_state": advertised})), \
-                        mock.patch.object(HARNESS.evidence, "Runner") as runner:
+                        unittest.mock.patch.object(HARNESS.evidence, "Runner") as runner:
                     with self.assertRaisesRegex(ValueError, "unexpected protected-storage capability"):
                         HARNESS.qualify_launch_runtime(args, root, root / "image", label,
                                                        root / "msb", root / "firmware", root / "agent")
@@ -77,10 +123,10 @@ class SavedConfigIntegrationTests(unittest.TestCase):
         args = Namespace(binary=Path("/candidate"), firmware=Path("/firmware"), agent=Path("/agent"))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with mock.patch.object(HARNESS, "LAUNCH_RELEASES", ("0.7.12", "0.7.13")), \
-                    mock.patch.object(HARNESS, "released_launch_runtime", side_effect=[
+            with unittest.mock.patch.object(HARNESS, "LAUNCH_RELEASES", ("0.7.12", "0.7.13")), \
+                    unittest.mock.patch.object(HARNESS, "released_launch_runtime", side_effect=[
                         RuntimeError("checksum mismatch"), (Path("/old"), Path("/old-fw"), Path("/old-agent"))]), \
-                    mock.patch.object(HARNESS, "qualify_launch_runtime") as qualify, redirect_stderr(io.StringIO()):
+                    unittest.mock.patch.object(HARNESS, "qualify_launch_runtime") as qualify, redirect_stderr(io.StringIO()):
                 with self.assertRaisesRegex(RuntimeError, "runtime qualification failed: 0.7.12"):
                     HARNESS.launch_qualification(args, root, root / "image")
             self.assertEqual([call.args[3] for call in qualify.call_args_list], ["0.7.13", "candidate"])

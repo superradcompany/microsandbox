@@ -487,7 +487,8 @@ impl PySnapshots {
         })
     }
 
-    #[pyo3(signature = (group, files, *, dest=None, base=None, set_head=false))]
+    #[pyo3(signature = (group, files, *, dest=None, base=None, set_head=false, maximum_disk_bytes=None))]
+    #[allow(clippy::too_many_arguments)]
     fn load<'py>(
         &self,
         py: Python<'py>,
@@ -496,6 +497,7 @@ impl PySnapshots {
         dest: Option<std::path::PathBuf>,
         base: Option<String>,
         set_head: bool,
+        maximum_disk_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let prepared = self
             .inner
@@ -507,6 +509,7 @@ impl PySnapshots {
                     base,
                     set_head,
                     group: None,
+                    maximum_disk_bytes,
                 },
             )
             .map_err(to_py_err)?;

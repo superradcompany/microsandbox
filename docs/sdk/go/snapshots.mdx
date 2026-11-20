@@ -213,7 +213,7 @@ provider.Snapshots().Load(ctx, group, files, SnapshotImportOptions{Dest: "store"
 
 </Accordion>
 
-`files` is `[]string`; at most one `SnapshotImportOptions` value is accepted. It contains `Dest`, `Base`, and `SetHead`; the group is selected only by the positional argument. Legacy `Checkpoint.LoadWithOptions` and `Checkpoint.LoadMany` retain `SnapshotLoadOptions`, including its `Group` field. Returns `(*SnapshotImportResult, error)` with `Snapshot`, `Checkpoints`, `Added`, `Reused`, `HeadUpdate`, `OperationID`, and `Warnings`.
+`files` is `[]string`; at most one `SnapshotImportOptions` value is accepted. It contains `Dest`, `Base`, `SetHead`, and `MaximumDiskBytes`; the group is selected only by the positional argument. Legacy `Checkpoint.LoadWithOptions` and `Checkpoint.LoadMany` retain `SnapshotLoadOptions`, including its `Group` field. Returns `(*SnapshotImportResult, error)` with `Snapshot`, `Checkpoints`, `Added`, `Reused`, `HeadUpdate`, `OperationID`, and `Warnings`.
 
 The result contains every unique supplied checkpoint, including bundled dependencies, in stable ID order. `Added` and `Reused` identify what was new versus already installed at publication; archive argument order does not select the head. The head outcome belongs to this operation and does not change when another operation edits the group. Multiple incomparable tips can commit a headless group; explicit head selection refuses ambiguous tips.
 
@@ -326,6 +326,8 @@ Pass the returned option to initial capture or group append. This option replace
 <span id="group-load-options" />
 
 ### SnapshotImportOptions
+
+`MaximumDiskBytes` (`*uint64`) limits total logical file bytes, including metadata, dependencies, and sparse holes. Each declared file disk must also fit. Leave it nil for no size limit. Legacy `SnapshotLoadOptions` accepts the same field.
 
 <div className="msb-params">
   <div className="msb-param">

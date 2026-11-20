@@ -335,7 +335,7 @@ impl PySnapshot {
     /// snapshots directory, preserving recorded integrity for explicit
     /// verification.
     #[staticmethod]
-    #[pyo3(signature = (archive, *, dest = None, base = None, group = None, set_head = false))]
+    #[pyo3(signature = (archive, *, dest = None, base = None, group = None, set_head = false, maximum_disk_bytes = None))]
     fn load<'py>(
         py: Python<'py>,
         archive: PathBuf,
@@ -343,6 +343,7 @@ impl PySnapshot {
         base: Option<String>,
         group: Option<String>,
         set_head: bool,
+        maximum_disk_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let prepared = microsandbox::snapshot::PreparedSnapshotImport::new(
             vec![archive],
@@ -351,6 +352,7 @@ impl PySnapshot {
                 base,
                 group,
                 set_head,
+                maximum_disk_bytes,
             },
         );
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -365,7 +367,7 @@ impl PySnapshot {
 
     /// Import archives together, resolving dependencies within the batch and destination group.
     #[staticmethod]
-    #[pyo3(signature = (archives, *, dest = None, base = None, group = None, set_head = false))]
+    #[pyo3(signature = (archives, *, dest = None, base = None, group = None, set_head = false, maximum_disk_bytes = None))]
     fn load_many<'py>(
         py: Python<'py>,
         archives: Vec<PathBuf>,
@@ -373,6 +375,7 @@ impl PySnapshot {
         base: Option<String>,
         group: Option<String>,
         set_head: bool,
+        maximum_disk_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let prepared = microsandbox::snapshot::PreparedSnapshotImport::new(
             archives,
@@ -381,6 +384,7 @@ impl PySnapshot {
                 base,
                 group,
                 set_head,
+                maximum_disk_bytes,
             },
         );
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

@@ -353,6 +353,10 @@ pub(crate) fn load_in<'env>(
                     base: opts.base,
                     group: None,
                     set_head: opts.set_head.unwrap_or(false),
+                    maximum_disk_bytes: opts
+                        .maximum_disk_bytes
+                        .map(|value| crate::numeric::safe_integer(value, "maximumDiskBytes"))
+                        .transpose()?,
                 },
             )
             .map_err(to_napi_error)
