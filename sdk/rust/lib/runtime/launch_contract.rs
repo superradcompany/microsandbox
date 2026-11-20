@@ -2049,6 +2049,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_v0_7_16_admission_requires_the_qualified_version_and_capabilities() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("probe.rs");
+        let executable = |name: &str| {
+            dir.path().join(if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_string()
+            })
+        };
+        let fixture = include_str!("fixtures/native_launch_probe.rs");
+
+        for version in ["0.7.15", "0.7.16", "0.7.17"] {
+            std::fs::write(&source, fixture.replace("0.7.16", version)).unwrap();
+            let native = executable(&format!("native-{version}"));
+            let output = std::process::Command::new("rustc")
+                .arg("--edition=2024")
+                .arg(&source)
+                .arg("-o")
+                .arg(&native)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            for (index, response) in [
+                r#"{"protocols":[2,1],"protected_guest_state":true}"#,
+                r#"{"protocols":[1],"protected_guest_state":true}"#,
+                r#"{"protocols":[2,1]}"#,
+                r#"{"protocols":[2,1],"protected_guest_state":false}"#,
+                r#"{"protocols":[2,1],"protected_guest_state":"true"}"#,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let path = executable(&format!("probe-{version}-{index}"));
+                std::fs::copy(&native, &path).unwrap();
+                std::fs::write(path.with_extension("json"), response).unwrap();
+
+                let result = resolve(&path).await;
+                if version == "0.7.16" && index == 0 {
+                    assert_eq!(
+                        result.unwrap(),
+                        LaunchContract {
+                            patch: 18,
+                            machine: true
+                        }
+                    );
+                } else {
+                    let error = result.unwrap_err().to_string();
+                    if version == "0.7.16" {
+                        assert!(
+                            error.contains("protocol") || error.contains("invalid type"),
+                            "{error}"
+                        );
+                    } else {
+                        assert!(
+                            error.contains("no tested sandbox launch contract"),
+                            "{error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "requires MSB_LAUNCH_CONTRACT_BINARY naming a real released runtime"]
     async fn released_runtime_contract_and_warm_resolution() {
         let path = PathBuf::from(std::env::var_os("MSB_LAUNCH_CONTRACT_BINARY").unwrap());
