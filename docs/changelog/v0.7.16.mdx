@@ -1,7 +1,7 @@
 ---
 title: "v0.7.16"
 sidebarTitle: "v0.7.16"
-description: "Manage Services through the CLI and SDKs, with runtime and network reliability fixes."
+description: "Services, network reliability, Cloud API fixes, and runtime updates."
 icon: "bolt"
 ---
 
@@ -9,8 +9,30 @@ November 18, 2026 · [GitHub release](https://github.com/superradcompany/microsa
 
 ## Highlights
 
-Services are available through the CLI and SDKs.
+### Services
+
+Services expose a sandbox port through a stable public HTTPS URL. The feature is available in the Cloud SDKs and CLI.
+
+```typescript
+import { Service } from "microsandbox";
+
+const service = await Service.builder("my-app")
+  .target("my-sandbox", 8080)
+  .create();
+console.log(service.url);
+```
+
+See [Services](/sandboxes/services), the [CLI reference](/cli/service-commands), and the language-specific SDK references.
 
 ## Fixes
 
-The network stack revalidates SNI DNS bindings on reconnect. SDKs decode every cloud sandbox status, cloud modifications use canonical endpoints, and guest bulk-cleanup bursts no longer stop the guest. The release also updates libkrun and firmware and repairs Rust toolchain checks.
+- The network stack revalidates SNI DNS bindings when a connection reconnects.
+- SDKs decode every Cloud sandbox status, including newer service states.
+- Cloud modifications use canonical sandbox change endpoints.
+- Guest bulk-cleanup bursts no longer stop the guest.
+- libkrun and multigrain firmware were updated.
+- Rust toolchain checks and the port test build were repaired.
+
+## Upgrade notes
+
+Services are Cloud-only. Existing local sandboxes and SDK workflows are unchanged. Keep the runtime and firmware from the same release bundle when updating local installations.
