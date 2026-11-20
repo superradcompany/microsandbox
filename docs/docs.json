@@ -432,13 +432,7 @@
             "group": "Releases",
             "icon": "tag",
             "pages": [
-              "changelog/v0.8.0"
-            ]
-          },
-          {
-            "group": "Past updates",
-            "icon": "clock-rotate-left",
-            "pages": [
+              "changelog/v0.8.0",
               {
                 "group": "v0.7",
                 "expanded": false,
@@ -460,8 +454,15 @@
                   "changelog/v0.7.2",
                   "changelog/v0.7.1",
                   "changelog/v0.7.0"
-                ]
-              },
+                ],
+                "icon": "bolt"
+              }
+            ]
+          },
+          {
+            "group": "Past updates",
+            "icon": "clock-rotate-left",
+            "pages": [
               {
                 "group": "September 2026",
                 "expanded": false,
