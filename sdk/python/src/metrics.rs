@@ -85,7 +85,7 @@ impl PyMetricsStream {
 
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.stream.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut guard = stream.lock().await;
             match guard.next().await {
                 Some(Ok(m)) => Ok(convert_metrics(&m)),
@@ -132,7 +132,7 @@ pub fn all_sandbox_metrics<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> 
     }
     #[cfg(feature = "local")]
     {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let backend = microsandbox::context::configured_context();
             let local = backend.as_local().ok_or_else(|| {
                 to_py_err(microsandbox::MicrosandboxError::local_only(

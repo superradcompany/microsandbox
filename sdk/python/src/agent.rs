@@ -41,7 +41,7 @@ impl PyAgentClient {
         #[cfg(feature = "local")]
         {
             let timeout = crate::helpers::timeout_input(timeout)?;
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let bridge = match timeout {
                     Some(timeout) => {
                         AgentBridge::connect_sandbox_with_timeout(&name, timeout).await
@@ -65,7 +65,7 @@ impl PyAgentClient {
         timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let timeout = crate::helpers::timeout_input(timeout)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let bridge = match timeout {
                 Some(timeout) => AgentBridge::connect_path_with_timeout(&path, timeout).await,
                 None => AgentBridge::connect_path(&path).await,
@@ -103,7 +103,7 @@ impl PyAgentClient {
         body: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let frame = inner.request(flags, body).await.map_err(to_py_err_agent)?;
             frame_to_py(frame)
         })
@@ -117,7 +117,7 @@ impl PyAgentClient {
         body: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let (id, handle) = inner
                 .stream_open(flags, body)
                 .await
@@ -134,7 +134,7 @@ impl PyAgentClient {
     /// Pull the next frame from a stream. Returns `None` at EOF.
     fn stream_next<'py>(&self, py: Python<'py>, handle: u64) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             match inner.stream_next(handle).await.map_err(to_py_err_agent)? {
                 Some(frame) => frame_to_py(frame).map(Some),
                 None => Ok(None),
@@ -145,7 +145,7 @@ impl PyAgentClient {
     /// Close a stream handle. Idempotent.
     fn stream_close<'py>(&self, py: Python<'py>, handle: u64) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.stream_close(handle).await;
             Ok(())
         })
@@ -160,7 +160,7 @@ impl PyAgentClient {
         body: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.send(id, flags, body).await.map_err(to_py_err_agent)?;
             Ok(())
         })
@@ -177,7 +177,7 @@ impl PyAgentClient {
     /// Close the connection. Idempotent.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.close().await;
             Ok(())
         })

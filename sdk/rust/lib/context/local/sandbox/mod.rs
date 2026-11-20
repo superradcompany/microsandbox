@@ -2210,6 +2210,7 @@ mod tests {
             .stdout(Stdio::piped());
         unsafe {
             command.pre_exec(move || {
+                // Duplicate first in case the source already uses the fixed FD.
                 let copy = libc::fcntl(lifecycle_fd, libc::F_DUPFD_CLOEXEC, 200);
                 if copy < 0 {
                     return Err(std::io::Error::last_os_error());
@@ -2224,7 +2225,6 @@ mod tests {
             cleanup_child(&mut child);
         });
         expect_line(&child_lines(child.stdout.take().unwrap()), "ready");
-        drop(lifecycle);
         let pid = child.id() as i32;
         let published = run_entity::Entity::update_many()
             .col_expr(
@@ -2239,6 +2239,8 @@ mod tests {
             let _ = child.wait();
             panic!("publish fixture process: {error}");
         }
+        // Startup publishes the run before handing ownership to the child.
+        drop(lifecycle);
         drop(transition);
         let result = tokio::time::timeout(Duration::from_secs(6), kill).await;
         let status_before_cleanup = child.try_wait();
