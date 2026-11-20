@@ -1,15 +1,21 @@
 //! Cloud volume lifecycle: the [`VolumeOps`] impl for [`RemoteContext`],
 //! the volume wire shape, and its conversions into the SDK's volume state.
 
+use std::io::Error as IoError;
 use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use futures::{StreamExt, future::BoxFuture, stream};
+use reqwest::Method;
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use tokio_util::task::AbortOnDropHandle;
 
-use super::RemoteContext;
+use super::{
+    RemoteContext,
+    http::{FileTransfer, volume_download_stream},
+};
 use crate::context::{
     Context,
     volume::{CloudVolumeKind, CloudVolumeStatus, VolumeOps, VolumeRemoteState},
@@ -159,7 +165,7 @@ impl RemoteContext {
         query: &[(&str, String)],
         json: Option<serde_json::Value>,
     ) -> MicrosandboxResult<T> {
-        self.volume_file_request(method, id, suffix, query, json, None)
+        self.volume_file_request(method, id, suffix, query, json, FileTransfer::Request)
             .await?
             .json()
             .await
@@ -266,18 +272,22 @@ impl VolumeOps for RemoteContext {
     ) -> BoxFuture<'a, MicrosandboxResult<Bytes>> {
         Box::pin(async move {
             let volume_id = self.volume_id_for_fs(name).await?;
-            self.volume_file_request(
-                reqwest::Method::GET,
-                &volume_id,
-                "/content",
-                &[(FILE_PATH_HEADER, encoded_path(path))],
-                None,
-                None,
-            )
-            .await?
-            .bytes()
-            .await
-            .map_err(|error| MicrosandboxError::Custom(format!("volume read failed: {error}")))
+            let response = self
+                .volume_file_request(
+                    Method::GET,
+                    &volume_id,
+                    "/content",
+                    &[(FILE_PATH_HEADER, encoded_path(path))],
+                    None,
+                    FileTransfer::Download,
+                )
+                .await?;
+            let mut stream = volume_download_stream(response, self.inner.request_timeout);
+            let mut data = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                data.extend_from_slice(&chunk?);
+            }
+            Ok(Bytes::from(data))
         })
     }
 
@@ -303,12 +313,12 @@ impl VolumeOps for RemoteContext {
         Box::pin(async move {
             let volume_id = self.volume_id_for_fs(name).await?;
             self.volume_file_request(
-                reqwest::Method::PUT,
+                Method::PUT,
                 &volume_id,
                 "/content",
                 &[(FILE_PATH_HEADER, encoded_path(path))],
                 None,
-                Some(reqwest::Body::from(data)),
+                FileTransfer::Upload(reqwest::Body::from(data)),
             )
             .await?;
             Ok(())
@@ -324,7 +334,7 @@ impl VolumeOps for RemoteContext {
             let volume_id = self.volume_id_for_fs(name).await?;
             let response: CloudFileList = self
                 .file_json(
-                    reqwest::Method::GET,
+                    Method::GET,
                     &volume_id,
                     "",
                     &[(FILE_PATH_HEADER, encoded_path(path))],
@@ -344,7 +354,7 @@ impl VolumeOps for RemoteContext {
             let volume_id = self.volume_id_for_fs(name).await?;
             let response: CloudFileStat = self
                 .file_json(
-                    reqwest::Method::GET,
+                    Method::GET,
                     &volume_id,
                     "/stat",
                     &[(FILE_PATH_HEADER, encoded_path(path))],
@@ -363,12 +373,12 @@ impl VolumeOps for RemoteContext {
         Box::pin(async move {
             let volume_id = self.volume_id_for_fs(name).await?;
             self.volume_file_request(
-                reqwest::Method::POST,
+                Method::POST,
                 &volume_id,
                 "/mkdir",
                 &[],
                 Some(serde_json::json!({ "path": path })),
-                None,
+                FileTransfer::Request,
             )
             .await?;
             Ok(())
@@ -384,7 +394,7 @@ impl VolumeOps for RemoteContext {
         Box::pin(async move {
             let volume_id = self.volume_id_for_fs(name).await?;
             self.volume_file_request(
-                reqwest::Method::DELETE,
+                Method::DELETE,
                 &volume_id,
                 "",
                 &[
@@ -392,7 +402,7 @@ impl VolumeOps for RemoteContext {
                     (FILE_RECURSIVE_HEADER, recursive.to_string()),
                 ],
                 None,
-                None,
+                FileTransfer::Request,
             )
             .await?;
             Ok(())
@@ -408,12 +418,12 @@ impl VolumeOps for RemoteContext {
         Box::pin(async move {
             let volume_id = self.volume_id_for_fs(name).await?;
             self.volume_file_request(
-                reqwest::Method::POST,
+                Method::POST,
                 &volume_id,
                 "/copy",
                 &[],
                 Some(serde_json::json!({ "from": from, "to": to })),
-                None,
+                FileTransfer::Request,
             )
             .await?;
             Ok(())
@@ -429,12 +439,12 @@ impl VolumeOps for RemoteContext {
         Box::pin(async move {
             let volume_id = self.volume_id_for_fs(name).await?;
             self.volume_file_request(
-                reqwest::Method::POST,
+                Method::POST,
                 &volume_id,
                 "/rename",
                 &[],
                 Some(serde_json::json!({ "from": from, "to": to })),
-                None,
+                FileTransfer::Request,
             )
             .await?;
             Ok(())
@@ -450,7 +460,7 @@ impl VolumeOps for RemoteContext {
             let volume_id = self.volume_id_for_fs(name).await?;
             let response: CloudFileExists = self
                 .file_json(
-                    reqwest::Method::GET,
+                    Method::GET,
                     &volume_id,
                     "/exists",
                     &[(FILE_PATH_HEADER, encoded_path(path))],
@@ -470,20 +480,16 @@ impl VolumeOps for RemoteContext {
             let volume_id = self.volume_id_for_fs(name).await?;
             let response = self
                 .volume_file_request(
-                    reqwest::Method::GET,
+                    Method::GET,
                     &volume_id,
                     "/content",
                     &[(FILE_PATH_HEADER, encoded_path(path))],
                     None,
-                    None,
+                    FileTransfer::Download,
                 )
                 .await?;
-            let stream = response.bytes_stream().map(|chunk| {
-                chunk.map_err(|error| {
-                    MicrosandboxError::Custom(format!("volume read stream failed: {error}"))
-                })
-            });
-            Ok(VolumeFsReadStream::from_stream(Box::pin(stream)))
+            let stream = volume_download_stream(response, self.inner.request_timeout);
+            Ok(VolumeFsReadStream::from_stream(stream))
         })
     }
 
@@ -496,21 +502,30 @@ impl VolumeOps for RemoteContext {
             let id = self.volume_id_for_fs(name).await?;
             let path = path.to_string();
             let backend = self.clone();
-            let (tx, rx) = mpsc::channel::<Bytes>(8);
+            let (tx, mut rx) = mpsc::channel::<Bytes>(8);
             let completion = tokio::spawn(async move {
-                let body_stream = stream::unfold(rx, |mut rx| async {
-                    rx.recv()
-                        .await
-                        .map(|chunk| (Ok::<_, std::io::Error>(chunk), rx))
+                // Reqwest can retain a body while a socket write is blocked even
+                // after its request times out. Own the caller's receiver here so
+                // ending the request also releases any blocked sink.write().
+                let (body_tx, body_rx) = mpsc::channel(1);
+                let _pump = AbortOnDropHandle::new(tokio::spawn(async move {
+                    while let Some(chunk) = rx.recv().await {
+                        if body_tx.send(chunk).await.is_err() {
+                            return;
+                        }
+                    }
+                }));
+                let body_stream = stream::unfold(body_rx, |mut rx| async {
+                    rx.recv().await.map(|chunk| (Ok::<_, IoError>(chunk), rx))
                 });
                 backend
                     .volume_file_request(
-                        reqwest::Method::PUT,
+                        Method::PUT,
                         &id,
                         "/content",
                         &[(FILE_PATH_HEADER, encoded_path(&path))],
                         None,
-                        Some(reqwest::Body::wrap_stream(body_stream)),
+                        FileTransfer::Upload(reqwest::Body::wrap_stream(body_stream)),
                     )
                     .await?;
                 Ok(())
