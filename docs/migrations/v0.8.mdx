@@ -53,4 +53,4 @@ The protected storage layout was introduced in v0.7.12. It is not a new v0.8 mig
 
 Keep the original backup and runtime pair until the upgrade is verified. Older tools may refuse the catalog, saved settings, or snapshots written by a newer release. Follow the CLI's compatibility checks; replacing a binary alone does not convert stored data.
 
-A released v0.7.16 CLI refuses a v0.8.0 runtime with `no tested sandbox launch contract for runtime 0.8.0`. Use matching versions or a launcher update that explicitly supports the selected runtime. Do not change version metadata to bypass the check.
+Released v0.7 SDKs and CLIs refuse a v0.8.0 runtime with `no tested sandbox launch contract for runtime 0.8.0`. This affects the v0.7 release line, not only v0.7.16. Use matching versions or a launcher update that explicitly supports the selected runtime. Do not change version metadata to bypass the check.
