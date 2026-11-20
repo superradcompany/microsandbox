@@ -12,6 +12,8 @@ icon: "bolt"
 Explicit local and remote contexts keep related operations on the same destination. Resource lookups return objects that can execute commands, access files, and prepare stopped sandboxes when needed. Live inspection reads current backend state.
 
 ```typescript
+import { Sandbox } from "microsandbox";
+
 const sandbox = await Sandbox.builder("worker").image("python").create();
 const output = await sandbox.shell("echo ready");
 ```
@@ -23,8 +25,8 @@ See [Migrating from v0.7 to v0.8](/migrations/v0.8) for context selection, resou
 `Snapshot` represents a history, while `Checkpoint` represents one immutable capture. The CLI separates creating a history from appending checkpoints. Snapshot loading supports explicit import limits, and restore workflows can retain saved configuration and observe resource resizing.
 
 ```bash
-msb snapshot create worker
-msb snapshot checkpoint worker
+msb snapshot create history --sandbox worker
+msb snapshot checkpoint history
 ```
 
 ### Smaller SDK packages

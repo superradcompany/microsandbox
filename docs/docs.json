@@ -429,14 +429,6 @@
             ]
           },
           {
-            "group": "Repair guides",
-            "icon": "wrench",
-            "pages": [
-              "repairs/sandbox-storage",
-              "repairs/file-permissions"
-            ]
-          },
-          {
             "group": "Releases",
             "icon": "tag",
             "pages": [
@@ -554,10 +546,6 @@
     {
       "source": "/cloud/supported-features",
       "destination": "/cloud/limitations"
-    },
-    {
-      "source": "/migrations/sandbox-storage",
-      "destination": "/repairs/sandbox-storage"
     },
     {
       "source": "/getting-started/installation",
@@ -806,6 +794,18 @@
     {
       "source": "/migrations/sdk-distributions",
       "destination": "/migrations/v0.8#sdk-distribution-migration"
+    },
+    {
+      "source": "/repairs/sandbox-storage",
+      "destination": "/migrations/v0.7#sandbox-storage-migration"
+    },
+    {
+      "source": "/repairs/file-permissions",
+      "destination": "/migrations/v0.7#repair-file-permissions"
+    },
+    {
+      "source": "/migrations/sandbox-storage",
+      "destination": "/migrations/v0.7#sandbox-storage-migration"
     }
   ],
   "integrations": {
