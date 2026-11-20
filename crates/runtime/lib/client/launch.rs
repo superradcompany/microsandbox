@@ -56,6 +56,10 @@ pub const BOOTSTRAP_ROOTFS_DIR: &str = ".bootstrap-rootfs";
 /// Capability response to `msb __launch-protocol`, including host nesting support.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LaunchCapabilities {
+    /// Per-header secret substitution scopes are enforced. Absence permits only
+    /// documented historical contracts; an explicit false always refuses scopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_fields: Option<bool>,
     /// The runtime can validate its selected agent before opening recovery preview disks.
     #[serde(default)]
     pub storage_reader: bool,

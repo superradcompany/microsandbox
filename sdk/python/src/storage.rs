@@ -102,7 +102,7 @@ impl PyStorage {
         {
             // Capture before scheduling: later backend_scope changes must not redirect this call.
             let backend = resolve_local(microsandbox::Operation::StorageUsage)?;
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let local = backend.as_local().expect("validated local backend");
                 let report = Storage::usage_local(local).await.map_err(to_py_err)?;
                 Ok(PyStorageUsage::from_rust(report))
@@ -135,7 +135,7 @@ impl PyStorage {
                 ..Default::default()
             };
             let backend = resolve_local(microsandbox::Operation::StoragePrune)?;
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let local = backend.as_local().expect("validated local backend");
                 let report = Storage::prune_local(local, &options)
                     .await

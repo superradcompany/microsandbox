@@ -129,6 +129,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use microsandbox_image::checkpoint::{
         CaptureIntent, CheckpointGeometry, CheckpointManifest, ContentRef, DiskGenerationManifest,
@@ -146,6 +147,7 @@ mod tests {
     use sea_orm::{EntityTrait, Set};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::process::Command;
     use tokio::sync::Mutex;
 
     use crate::ContextSelectionSource;
@@ -710,6 +712,35 @@ esac
 
     #[tokio::test]
     async fn restore_staging_does_not_match_destination_labels() {
+        if std::env::var_os("MSB_RESTORE_LABELS_CHILD").is_none() {
+            // Parallel fork/pre_exec tests can retain copies of this test's lock
+            // descriptors even after it drops them. Create the staging lease in
+            // an isolated process so the immediate cleanup assertion has no
+            // unrelated owners; keep the production ownership checks intact.
+            let output = tokio::time::timeout(
+                Duration::from_secs(30),
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "context::local::sandbox::create::restore::tests::restore_staging_does_not_match_destination_labels",
+                        "--nocapture",
+                    ])
+                    .env("MSB_RESTORE_LABELS_CHILD", "1")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("isolated restore-label test timed out")
+            .expect("start isolated restore-label test");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         let temp = private_test_root();
         let local = Arc::new(local_backend_builder(temp.path()).build().unwrap());
         let mut config = replaceable_config();

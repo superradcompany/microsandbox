@@ -452,21 +452,9 @@ impl Drop for MigrationLock {
 
 fn parse_version(input: &str) -> anyhow::Result<Version> {
     let clean = input.trim().strip_prefix('v').unwrap_or(input.trim());
-    let mut parts = clean.split('.');
-    let Some(major) = parts.next() else {
-        anyhow::bail!("invalid version {input:?}");
-    };
-    let Some(minor) = parts.next() else {
-        anyhow::bail!("invalid version {input:?}; expected MAJOR.MINOR.PATCH");
-    };
-    let Some(patch) = parts.next() else {
-        anyhow::bail!("invalid version {input:?}; expected MAJOR.MINOR.PATCH");
-    };
-    if parts.next().is_some() {
-        anyhow::bail!("invalid version {input:?}; expected MAJOR.MINOR.PATCH");
-    }
-
-    Ok(Version::new(major.parse()?, minor.parse()?, patch.parse()?))
+    // Preserve prerelease/build metadata: RCs participate in SemVer precedence
+    // and are valid installed releases on both update and downgrade paths.
+    Version::parse(clean).map_err(|error| anyhow::anyhow!("invalid version {input:?}: {error}"))
 }
 
 /// Run a `msb self` subcommand.
@@ -924,7 +912,7 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     info(&format!("Current version: v{current_version}"));
     info(&format!("Target version: v{target_version}"));
 
-    if target_version >= current_version {
+    if target_version.cmp_precedence(&current_version).is_ge() {
         return refuse_static(
             &format!("v{target_version} is not older than the current version"),
             &["use `msb self update` to move to the latest release"],

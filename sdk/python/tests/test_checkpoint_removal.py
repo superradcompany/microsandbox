@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def checkpoint_fixture(tmp_path: Path) -> list[str]:
     # Metadata-only checkpoint fixtures exercise removal, not guest restoration.
@@ -123,7 +125,10 @@ asyncio.run(main())
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_native_group_removal(tmp_path: Path) -> None:
+# Each case uses a fresh interpreter and catalog. Native worker teardown races
+# can disappear on a rerun, so every exit must pass instead of retrying failures.
+@pytest.mark.parametrize("_attempt", range(20))
+def test_native_group_removal(tmp_path: Path, _attempt: int) -> None:
     ids = checkpoint_fixture(tmp_path)
     result = subprocess.run(
         [
@@ -171,8 +176,12 @@ async def main():
     assert report.group == "empty" and report.removed == []
     assert report.head_update["head"] is None and not report.head_update["changed"]
     assert not empty.exists()
+    print("group removal assertions completed", flush=True)
 
 asyncio.run(main())
+# Distinguish an operation failure from a native worker abort during interpreter
+# teardown. These markers are included in the parent's failure assertion.
+print("asyncio.run completed; exiting interpreter", flush=True)
 """,
             *ids,
         ],
