@@ -39,7 +39,7 @@ sb = await Sandbox.create("worker", image="python")
 
 Python uses separate distributions, not `microsandbox[local]` or `microsandbox[remote]` extras. Each owns a separate import package. npm uses separately installable scoped packages, not `microsandbox/local` or `microsandbox/remote` subpath imports.
 
-Local and remote packages can be installed together. Existing objects keep their original connection. A remote-only installation requires a [RemoteContext](/cloud/connect#sdk-contexts); trying to run locally reports a missing-package error.
+Local and remote packages can be installed together. Existing objects keep their original connection. A remote-only installation requires a [RemoteContext](/migrations/sdk-contexts#remote-context-construction); trying to run locally reports a missing-package error.
 
 ## Provision Go FFI explicitly
 

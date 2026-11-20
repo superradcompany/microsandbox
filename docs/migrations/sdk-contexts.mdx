@@ -22,7 +22,7 @@ In TypeScript and Python, use `await ctx.snapshots.get(name)` or `await ctx.chec
 
 Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSandbox` for ordinary resource operations. Use the matching resource or collection for lookups and lists. These calls honor the configured backend and use local when unset. An API key alone supplies credentials.
 
-Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. See [context selection](/operations/backends#sdk-contexts) for complete language examples. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. Use the selected context’s collections to keep related operations on the same provider.
+Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. Use the selected context’s collections to keep related operations on the same provider.
 
 ## Use the returned resource directly
 
@@ -63,7 +63,7 @@ output = sb.shell("echo ready")
 ```
 </CodeGroup>
 
-Explicit static `start` and `start_detached` are strict: they start an existing stopped resource and fail if it is already running. They do not perform connect-or-start. There is no separate instance `start`; use `ensure_running` only when you need [explicit preparation ahead of work](/sandboxes/lifecycle#prepare-ahead-of-time). Ordinary execution needs no preparation call.
+Explicit static `start` and `start_detached` are strict: they start an existing stopped resource and fail if it is already running. They do not perform connect-or-start. There is no separate instance `start`; use `ensure_running` only when you need explicit preparation ahead of work. Ordinary execution needs no preparation call.
 
 When preparation starts a stopped local sandbox, the receiving resource retains the new run's ownership. Connecting to an already running sandbox acquires no new shutdown ownership. Remote resources do not gain client-scope shutdown ownership. Use explicit stop or destroy when that is the intended action. See [lifecycle](/sandboxes/lifecycle) for cleanup and detachment.
 
@@ -105,23 +105,23 @@ Rust `sandbox.launch_info()` returns optional `SandboxLaunchInfo` for the receiv
 
 Key-only constructors now honor `MSB_API_URL`. To pin an endpoint, pass its URL explicitly. In Rust, replace `new(url, key)` with `with_url(url, key)` and `with_api_key(key)` with `new(key)`. In Go, use `NewRemoteContextWithURL(url, key)` for the two-argument form.
 
-TypeScript keeps `new RemoteContext({ apiKey })` and adds `RemoteContext.withUrl(url, apiKey, options?)`. Python keeps `RemoteContext(api_key=...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Ruby keeps `RemoteContext.new(api_key: ...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Existing URL options/keywords remain supported. Builders, explicit environment loading and named profiles retain their roles. See [remote endpoints](/cloud/connect#another-endpoint).
+TypeScript keeps `new RemoteContext({ apiKey })` and adds `RemoteContext.withUrl(url, apiKey, options?)`. Python keeps `RemoteContext(api_key=...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Ruby keeps `RemoteContext.new(api_key: ...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Existing URL options/keywords remain supported. Builders, explicit environment loading and named profiles retain their roles.
 
 This is a public source API change. Runtime protocols, stored configuration, resource identity and the local fallback are unchanged.
 
 ## Remote context derivation and authentication
 
-Use Rust `to_builder()` or TypeScript `toBuilder()` to derive through the existing fluent builder. Python uses `replace(...)`, Ruby uses `with(...)`, and Go uses `WithOptions(...)`; these SDKs do not gain context builders. Derivation preserves captured configuration and native-provider ownership. Existing resources keep their original credentials and endpoint. See [the language examples](/cloud/connect#more-options).
+Use Rust `to_builder()` or TypeScript `toBuilder()` to derive through the existing fluent builder. Python uses `replace(...)`, Ruby uses `with(...)`, and Go uses `WithOptions(...)`; these SDKs do not gain context builders. Derivation preserves captured configuration and native-provider ownership. Existing resources keep their original credentials and endpoint.
 
 Rust custom HTTP clients now use the context's API key for Authorization, consistently with agent connections. A different default Authorization header on a supplied `reqwest::Client` no longer overrides that key. Pass the intended credential to `RemoteContext` or its derived builder. Custom transport, timeout and user-agent settings retain their existing precedence. Runtime protocols and persisted configuration formats are unchanged.
 
 ## Resource selectors and state accessors
 
-Explicit resource-type `local()` / `remote()` selectors return the existing plural collections before builder/create/get/list. Go uses `SandboxLocal()` / `SandboxRemote()` and corresponding Volume/Snapshot functions. Remote selection reads environment credentials; unqualified calls use the configured destination. See [usage and feature availability](/cloud/connect#resource-selectors).
+Explicit resource-type `local()` / `remote()` selectors return the existing plural collections before builder/create/get/list. Go uses `SandboxLocal()` / `SandboxRemote()` and corresponding Volume/Snapshot functions. Remote selection reads environment credentials; unqualified calls use the configured destination.
 
 Rust's previous instance `.local()` and `.cloud()` state accessors are now `.local_state()` and `.remote_state()`. Public `SandboxCloudState` and `VolumeCloudState` become `SandboxRemoteState` and `VolumeRemoteState`. This source-breaking rename frees the resource-type selector names. State access remains synchronous and does not replace live inspection. Runtime protocols and persisted field spellings are unchanged.
 
-CLI `--local` / `--remote` override ordinary and managed active-profile selection but still enforce `allowed_backends`. Remote flags use environment credentials; omit them for named-profile credential resolution. `MSB_BACKEND=remote` is accepted alongside legacy `cloud`. Diagnostic JSON uses `remote` for the remote kind. Explicit flag-selected contexts use the existing `programmatic` source value. See [CLI precedence](/cloud/connect#precedence).
+CLI `--local` / `--remote` override ordinary and managed active-profile selection but still enforce `allowed_backends`. Remote flags use environment credentials; omit them for named-profile credential resolution. `MSB_BACKEND=remote` is accepted alongside legacy `cloud`. Diagnostic JSON uses `remote` for the remote kind. Explicit flag-selected contexts use the existing `programmatic` source value.
 
 
 <Accordion title="Rust client and launch information">
