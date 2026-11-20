@@ -45,7 +45,7 @@ pub(crate) const MAX_BINDINGS_PER_HOSTNAME: usize = 1_024;
 /// to another pool member while clients keep using the address they cached.
 /// This is a policy grace period, not DNS semantics: it never authorizes a
 /// connection by itself, see [`SharedState::renew_recent_resolved_hostname`].
-pub(crate) const REVALIDATION_GRACE: Duration = Duration::from_secs(300);
+pub(crate) const REVALIDATION_GRACE: Duration = Duration::from_secs(60);
 
 //--------------------------------------------------------------------------------------------------
 // Types
