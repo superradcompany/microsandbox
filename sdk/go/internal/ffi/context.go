@@ -111,6 +111,9 @@ func (c *Context) Request(ctx context.Context, operation, name string, args, res
 	if err != nil {
 		return err
 	}
+	if err := c.lib().requireImportBudget(raw); err != nil {
+		return err
+	}
 	request := C.CString(string(raw))
 	defer C.free(unsafe.Pointer(request))
 	out, err := c.lib().call(ctx, func(id C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {

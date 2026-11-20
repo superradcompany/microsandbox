@@ -1327,6 +1327,7 @@ class Snapshot:
         base: str | None = None,
         group: str | None = None,
         set_head: bool = False,
+        maximum_disk_bytes: int | None = None,
     ) -> Snapshot: ...
     @staticmethod
     async def load_many(
@@ -1336,6 +1337,7 @@ class Snapshot:
         base: str | None = None,
         group: str | None = None,
         set_head: bool = False,
+        maximum_disk_bytes: int | None = None,
     ) -> builtins.list[Snapshot]: ...
     @staticmethod
     async def group_head(group: str) -> str | None: ...
@@ -1544,6 +1546,7 @@ class SnapshotGroup:
         dest: str | os.PathLike[str] | None = None,
         base: str | None = None,
         set_head: bool = False,
+        maximum_disk_bytes: int | None = None,
     ) -> SnapshotImportResult: ...
     async def spawn_sandbox(self, *, name: str | None = None, **kwargs: Any) -> Sandbox: ...
     async def spawn_sandbox_with_progress(
@@ -1846,6 +1849,7 @@ class Snapshots:
         dest: str | os.PathLike[str] | None = None,
         base: str | None = None,
         set_head: bool = False,
+        maximum_disk_bytes: int | None = None,
     ) -> SnapshotImportResult: ...
     @property
     def context(self) -> Context: ...

@@ -206,10 +206,11 @@ async def load(
     group: str, files: list[str | os.PathLike[str]], *,
     dest: str | os.PathLike[str] | None = None, base: str | None = None,
     set_head: bool = False,
+    maximum_disk_bytes: int | None = None,
 ) -> SnapshotImportResult
 ```
 
-Import a batch atomically. `dest` selects the parent storage directory; omission uses default storage. `base` supplies an external dependency snapshot or archive. `set_head=True` selects the unique imported tip even when it is not a fast-forward; ambiguous tips are refused.
+Import a batch atomically. `maximum_disk_bytes` limits total logical file bytes, including metadata, dependencies, and sparse holes. Each declared file disk must also fit. Omit it for no size limit. `dest` selects the parent storage directory; omission uses default storage. `base` supplies an external dependency snapshot or archive. `set_head=True` selects the unique imported tip even when it is not a fast-forward; ambiguous tips are refused.
 
 <Accordion title="Example">
 
@@ -805,6 +806,7 @@ async def load(
     base: str | None = None,
     group: str | None = None,
     set_head: bool = False,
+    maximum_disk_bytes: int | None = None,
 ) -> Checkpoint
 ```
 
@@ -853,6 +855,7 @@ async def load_many(
     base: str | None = None,
     group: str | None = None,
     set_head: bool = False,
+    maximum_disk_bytes: int | None = None,
 ) -> list[Checkpoint]
 ```
 

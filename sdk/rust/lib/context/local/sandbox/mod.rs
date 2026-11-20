@@ -2241,8 +2241,18 @@ mod tests {
         }
         drop(transition);
         let result = tokio::time::timeout(Duration::from_secs(6), kill).await;
+        let status_before_cleanup = child.try_wait();
+        // Ensure assertion failures never leave the helper process behind.
+        let _ = child.kill();
+        child.wait().unwrap();
         result.unwrap().unwrap().unwrap();
-        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert_eq!(
+            status_before_cleanup
+                .unwrap()
+                .and_then(|status| status.signal()),
+            Some(libc::SIGKILL),
+            "kill must terminate the runtime before fixture cleanup"
+        );
         assert_eq!(
             backend
                 .sandbox_handle_state("kill-start", Some(id))

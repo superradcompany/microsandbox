@@ -95,6 +95,7 @@ export interface LoadOpts {
   group?: string;
   /** Select the unique imported tip even when it is not a fast-forward. */
   setHead?: boolean;
+  maximumDiskBytes?: number;
 }
 
 /** Outcome of reading or selecting a snapshot group's head. */
@@ -297,12 +298,14 @@ export class Snapshot {
 
   /** Import into a selected or generated group, with optional head selection. */
   static async loadWithOptions(archive: string, opts: LoadOpts = {}): Promise<Snapshot> {
+    if (opts.maximumDiskBytes != null && !napi.Snapshot.supportsImportBudget?.()) throw new UnsupportedError("Snapshot import size limits require an updated native SDK");
     const raw = await withMappedErrors(() => napi.Snapshot.loadWithOptions(archive, opts));
     return new Snapshot(raw);
   }
 
   /** Import archives together into one group, resolving dependencies regardless of input order. */
   static async loadMany(archives: string[], opts: LoadOpts = {}): Promise<Snapshot[]> {
+    if (opts.maximumDiskBytes != null && !napi.Snapshot.supportsImportBudget?.()) throw new UnsupportedError("Snapshot import size limits require an updated native SDK");
     const raw = await withMappedErrors(() => napi.Snapshot.loadMany(archives, opts));
     return raw.map((handle) => new Snapshot(handle));
   }

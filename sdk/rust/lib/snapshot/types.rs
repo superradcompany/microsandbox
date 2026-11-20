@@ -212,6 +212,9 @@ pub struct SnapshotImportOptions {
     pub base: Option<String>,
     /// Select the unique imported tip even when it is not a fast-forward.
     pub set_head: bool,
+    /// Maximum logical file bytes imported, including metadata and dependencies.
+    /// Each declared file disk must also fit this limit. None means unlimited.
+    pub maximum_disk_bytes: Option<u64>,
 }
 
 /// Legacy artifact-loading options. Canonical group import uses [`SnapshotImportOptions`].
@@ -225,6 +228,9 @@ pub struct LoadOpts {
     pub group: Option<String>,
     /// Select the imported target even when it is not a fast-forward.
     pub set_head: bool,
+    /// Maximum logical file bytes imported, including metadata and dependencies.
+    /// Each declared file disk must also fit this limit. None means unlimited.
+    pub maximum_disk_bytes: Option<u64>,
 }
 
 /// Options for [`super::Checkpoint::save`].
@@ -292,6 +298,12 @@ pub enum HeadUpdateReason {
 //--------------------------------------------------------------------------------------------------
 
 impl SnapshotImportOptions {
+    /// Limit imported file bytes and each declared file disk's capacity.
+    pub fn maximum_disk_bytes(mut self, bytes: u64) -> Self {
+        self.maximum_disk_bytes = Some(bytes);
+        self
+    }
+
     /// Supply a base for omitted disk layers or memory objects.
     pub fn base(mut self, base: impl Into<String>) -> Self {
         self.base = Some(base.into());
@@ -317,11 +329,18 @@ impl SnapshotImportOptions {
             base: self.base,
             group: None,
             set_head: self.set_head,
+            maximum_disk_bytes: self.maximum_disk_bytes,
         }
     }
 }
 
 impl LoadOpts {
+    /// Limit imported file bytes and each declared file disk's capacity.
+    pub fn maximum_disk_bytes(mut self, bytes: u64) -> Self {
+        self.maximum_disk_bytes = Some(bytes);
+        self
+    }
+
     /// Supply a base for omitted disk layers or memory objects.
     pub fn base(mut self, base: impl Into<String>) -> Self {
         self.base = Some(base.into());
