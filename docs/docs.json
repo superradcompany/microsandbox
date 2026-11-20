@@ -405,36 +405,15 @@
             "icon": "arrow-right-arrow-left",
             "pages": [
               "migrations/overview",
-              {
-                "group": "v0.8",
-                "expanded": true,
-                "pages": [
-                  "migrations/v0.8",
-                  "migrations/sdk-contexts",
-                  "migrations/sdk-distributions"
-                ]
-              },
-              {
-                "group": "v0.7",
-                "expanded": false,
-                "pages": [
-                  "migrations/v0.7",
-                  "migrations/sandbox-storage"
-                ]
-              }
+              "migrations/v0.8",
+              "migrations/v0.7"
             ]
           },
           {
             "group": "Releases",
             "icon": "tag",
             "pages": [
-              {
-                "group": "v0.8",
-                "expanded": true,
-                "pages": [
-                  "changelog/v0.8.0"
-                ]
-              },
+              "changelog/v0.8.0",
               {
                 "group": "v0.7",
                 "expanded": false,
@@ -772,6 +751,18 @@
     {
       "source": "/recipes/:slug*",
       "destination": "/examples/:slug*"
+    },
+    {
+      "source": "/migrations/sdk-contexts",
+      "destination": "/migrations/v0.8#sdk-api-migration"
+    },
+    {
+      "source": "/migrations/sdk-distributions",
+      "destination": "/migrations/v0.8#sdk-distribution-migration"
+    },
+    {
+      "source": "/migrations/sandbox-storage",
+      "destination": "/migrations/v0.7#sandbox-storage-migration"
     }
   ],
   "integrations": {
