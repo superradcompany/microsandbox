@@ -84,6 +84,7 @@ async fn load_inner(
             "snapshot load requires at least one archive".into(),
         ));
     }
+    let mut budget = ImportBudget::new(opts.maximum_disk_bytes)?;
     let started = Instant::now();
     let snapshots_dir = opts.dest.clone().unwrap_or_else(|| local.snapshots_dir());
     {
@@ -105,7 +106,16 @@ async fn load_inner(
 
     let mut staged = Vec::with_capacity(archives.len());
     for archive in archives {
-        staged.push(unpack(archive, &snapshots_dir, &cache_tmp, keys.clone()).await?);
+        staged.push(
+            unpack(
+                archive,
+                &snapshots_dir,
+                &cache_tmp,
+                keys.clone(),
+                &mut budget,
+            )
+            .await?,
+        );
     }
     let unpack_us = started.elapsed().as_micros();
     let has_dependencies = staged.iter().try_fold(false, |found, item| {
@@ -128,10 +138,15 @@ async fn load_inner(
                 &item.unpacked.manifest_dirs,
             )
             .await?;
-            for snapshot in verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await? {
+            for snapshot in
+                verify_imported_snapshots(local, &item.unpacked.manifest_dirs, &budget).await?
+            {
                 super::super::metadata::write(snapshot.path(), snapshot.labels()).await?;
                 normalize_imported_descriptor(&snapshot).await?;
             }
+        }
+        if item.unpacked.inventory.is_some() {
+            validate_staged_manifests(&item.unpacked.manifest_dirs, &budget).await?;
         }
         if has_dependencies {
             for directory in &item.unpacked.manifest_dirs {
@@ -179,7 +194,7 @@ async fn load_inner(
         }
         match opts.base.as_deref().filter(|_| !complete(&sources)) {
             Some(base) => {
-                let opened = Box::pin(delta::open_base(local, base)).await?;
+                let opened = Box::pin(delta::open_base(local, base, &mut budget)).await?;
                 sources
                     .add(opened.snapshot.manifest(), opened.snapshot.path(), None)
                     .await?;
@@ -208,6 +223,7 @@ async fn load_inner(
                 item.snapshots.path(),
                 item.cache.path(),
                 &sources,
+                &mut budget,
             )
             .await
             .map_err(|error| archive_error(&item.source, error))?;
@@ -222,9 +238,10 @@ async fn load_inner(
     let mut identities = BTreeMap::new();
     for item in &staged {
         if let Some(inventory) = &item.unpacked.inventory {
-            materialize_inventory_layers(inventory, item.snapshots.path()).await?;
+            materialize_inventory_layers(inventory, item.snapshots.path(), &mut budget).await?;
         }
-        let snapshots = verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await?;
+        let snapshots =
+            verify_imported_snapshots(local, &item.unpacked.manifest_dirs, &budget).await?;
         if let Some(inventory) = &item.unpacked.inventory {
             validate_inventory_snapshot_bindings(
                 inventory,
@@ -443,6 +460,7 @@ pub(super) async fn unpack(
     root: &Path,
     cache_tmp: &Path,
     keys: Option<std::sync::Arc<Vec<age::x25519::Identity>>>,
+    budget: &mut ImportBudget,
 ) -> MicrosandboxResult<StagedArchive> {
     let snapshots = tempfile::Builder::new()
         .prefix(".msb-snapshot-import-")
@@ -470,10 +488,17 @@ pub(super) async fn unpack(
             ZstdDecoder::new(reader),
             snapshots.path(),
             cache.path(),
+            budget,
         ))
         .await?
     } else {
-        Box::pin(unpack_archive(reader, snapshots.path(), cache.path())).await?
+        Box::pin(unpack_archive(
+            reader,
+            snapshots.path(),
+            cache.path(),
+            budget,
+        ))
+        .await?
     };
     Ok(StagedArchive {
         source: archive.to_path_buf(),

@@ -284,10 +284,10 @@ The receiver selects one immutable checkpoint. Use the group’s optional head o
 #### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">load()</span>
 
 ```ruby
-Microsandbox::Snapshot.load(group, files, dest: nil, base: nil, set_head: false) # => SnapshotImportResult
+Microsandbox::Snapshot.load(group, files, dest: nil, base: nil, set_head: false, maximum_disk_bytes: nil) # => SnapshotImportResult
 ```
 
-Import a batch atomically. `dest` selects the parent storage directory; omission uses default storage. `base` supplies an external dependency snapshot or archive. `set_head: true` selects the unique imported tip even when it is not a fast-forward; ambiguous tips are refused.
+Import a batch atomically. `maximum_disk_bytes` limits total logical file bytes, including metadata, dependencies, and sparse holes. Each declared file disk must also fit. Omit it for no size limit. `dest` selects the parent storage directory; omission uses default storage. `base` supplies an external dependency snapshot or archive. `set_head: true` selects the unique imported tip even when it is not a fast-forward; ambiguous tips are refused.
 
 <Accordion title="Example">
 

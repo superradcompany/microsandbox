@@ -157,7 +157,8 @@ def main():
                 first = journal()
                 check_presence(first["confirmed"]["source"])
                 save_source("current-source", first["confirmed"]["source"])
-                # Released launchers require their matching runtime when starting a VM.
+                # Keep the released launcher paired with its own runtime. Mixed-version
+                # launch admission is qualified separately from retained-source evidence.
                 old_env = dict(env, MSB_PATH=str(previous_writer))
                 old = history.Runner(previous_writer, old_env, args.output / "old-writer")
                 old.run("inspect", "inspect", "presence", "--format", "json")
@@ -179,10 +180,10 @@ def main():
                 old.run("exec", "exec", "presence", "--", "cat", "/root/presence-marker")
                 old.run("stop", "stop", "presence")
                 old.run("start", "start", "presence")
-                # The old runtime leaves the newer journal untouched. Its prior-run
-                # evidence must not be mistaken for an observation of this run.
-                old_run_id = rows("SELECT id FROM run ORDER BY id DESC LIMIT 1")[0][0]
-                assert journal()["confirmed"]["owner"]["run_id"] != old_run_id
+                # The released runtime cannot update private evidence. Its new run
+                # must not be confused with the previous runtime's retained source.
+                latest_run = rows("SELECT id FROM run ORDER BY id DESC LIMIT 1")[0][0]
+                assert journal()["confirmed"]["owner"]["run_id"] != latest_run
                 pids.update(pid for (pid,) in rows("SELECT pid FROM run") if pid)
                 old.run("exec-restarted", "exec", "presence", "--", "cat", "/root/presence-marker")
                 check_mount("mount-old-restarted", old)

@@ -537,6 +537,9 @@ char *provider_call_msb_sandbox_wait_until_resized(msb_library *library, uint64_
 	return library->ptr_msb_sandbox_wait_until_resized ? library->ptr_msb_sandbox_wait_until_resized(cancel_id, handle, timeout_ms, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_wait_until_resized(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) { return provider_call_msb_sandbox_wait_until_resized(&default_library, cancel_id, handle, timeout_ms, buf, buf_len); }
+bool provider_has_snapshot_import_budget(msb_library *library) {
+    return library->handle && dlsym(library->handle, "msb_supports_snapshot_import_budget") != NULL;
+}
 bool provider_has_msb_snapshot_objects(msb_library *library) { return library->ptr_msb_snapshot_object && library->ptr_msb_snapshot_object_close; }
 bool has_msb_snapshot_objects(void) { return provider_has_msb_snapshot_objects(&default_library); }
 bool provider_has_context_snapshot_objects(msb_library *library) {
@@ -5260,11 +5263,12 @@ type SnapshotSaveOptions struct {
 }
 
 type SnapshotLoadOptions struct {
-	CallerDirectory string `json:"caller_directory,omitempty"`
-	Dest            string `json:"dest,omitempty"`
-	Base            string `json:"base,omitempty"`
-	Group           string `json:"group,omitempty"`
-	SetHead         bool   `json:"set_head,omitempty"`
+	CallerDirectory  string  `json:"caller_directory,omitempty"`
+	Dest             string  `json:"dest,omitempty"`
+	Base             string  `json:"base,omitempty"`
+	Group            string  `json:"group,omitempty"`
+	SetHead          bool    `json:"set_head,omitempty"`
+	MaximumDiskBytes *uint64 `json:"maximum_disk_bytes,omitempty"`
 }
 
 type SnapshotHeadUpdate struct {
@@ -7207,6 +7211,13 @@ func (library *Library) SnapshotLoadWithBase(ctx context.Context, archive, dest,
 }
 
 func (library *Library) SnapshotLoadWithOptions(ctx context.Context, archive string, opts SnapshotLoadOptions) (*SnapshotHandleInfo, error) {
+	admission, err := json.Marshal(map[string]any{"op": "load", "options": opts})
+	if err != nil {
+		return nil, err
+	}
+	if err := library.requireImportBudget(admission); err != nil {
+		return nil, err
+	}
 	if err := library.ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -7231,6 +7242,13 @@ func (library *Library) SnapshotLoadWithOptions(ctx context.Context, archive str
 }
 
 func (library *Library) SnapshotLoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*SnapshotHandleInfo, error) {
+	admission, err := json.Marshal(map[string]any{"op": "load", "options": opts})
+	if err != nil {
+		return nil, err
+	}
+	if err := library.requireImportBudget(admission); err != nil {
+		return nil, err
+	}
 	if err := library.ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -7348,6 +7366,54 @@ func SnapshotObjectCall(ctx context.Context, handle uint64, request any) ([]byte
 	return defaultLibrary().SnapshotObjectCall(ctx, handle, request)
 }
 
+// requireImportBudget prevents an older provider from silently ignoring a requested limit.
+func (library *Library) requireImportBudget(payload []byte) error {
+	var request struct {
+		Operation string          `json:"operation"`
+		Op        string          `json:"op"`
+		Request   json.RawMessage `json:"request"`
+		Options   json.RawMessage `json:"options"`
+		Args      struct {
+			Options json.RawMessage `json:"options"`
+		} `json:"args"`
+	}
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return err
+	}
+	if len(request.Request) != 0 {
+		return library.requireImportBudget(request.Request)
+	}
+	var options SnapshotLoadOptions
+	switch {
+	case request.Operation == "snapshot_load":
+		if len(request.Args.Options) == 0 {
+			return nil
+		}
+		if err := json.Unmarshal(request.Args.Options, &options); err != nil {
+			return err
+		}
+	case request.Op == "load":
+		if len(request.Options) == 0 {
+			return nil
+		}
+		if err := json.Unmarshal(request.Options, &options); err != nil {
+			return err
+		}
+	default:
+		return nil
+	}
+	if options.MaximumDiskBytes == nil {
+		return nil
+	}
+	if err := library.ensureLoaded(); err != nil {
+		return err
+	}
+	if !bool(C.provider_has_snapshot_import_budget(library.table)) {
+		return &Error{Kind: KindUnsupportedOperation, Message: "snapshot import size limits require an updated native SDK"}
+	}
+	return nil
+}
+
 func (library *Library) requireContextSnapshotObjects() error {
 	if err := library.ensureLoaded(); err != nil {
 		return err
@@ -7370,6 +7436,9 @@ func (library *Library) SnapshotObjectCall(ctx context.Context, handle uint64, r
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
+		return nil, err
+	}
+	if err := library.requireImportBudget(payload); err != nil {
 		return nil, err
 	}
 	text := C.CString(string(payload))

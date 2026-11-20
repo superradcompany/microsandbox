@@ -13,8 +13,8 @@ use microsandbox_runtime::checkpoint::launch_staging::LaunchStaging;
 use super::super::{Snapshot, dispatch, migration, store};
 use super::batch::{StagedArchive, read_manifest, unpack};
 use super::{
-    delta, install_staged_cache, materialize_inventory_layers, normalize_imported_descriptor,
-    validate_inventory_snapshot_bindings, verify_imported_snapshots,
+    ImportBudget, delta, install_staged_cache, materialize_inventory_layers,
+    normalize_imported_descriptor, validate_inventory_snapshot_bindings, verify_imported_snapshots,
 };
 use crate::context::{Context, LocalContext};
 use crate::sandbox::SandboxConfig;
@@ -99,6 +99,8 @@ async fn prepare_inner(
     paths: &[PathBuf],
     target: Option<&SnapshotId>,
 ) -> MicrosandboxResult<PreparedLaunchSource> {
+    // Launch preparation does not expose an import-size option.
+    let mut budget = ImportBudget::unlimited();
     let mut staging: Option<LaunchStaging> = None;
     let mut archives = Vec::new();
     let mut directories = Vec::new();
@@ -130,7 +132,7 @@ async fn prepare_inner(
                 );
             }
             let root = staging.as_ref().expect("archive staging reserved").path();
-            archives.push(unpack(path, root, root, None).await?);
+            archives.push(unpack(path, root, root, None, &mut budget).await?);
         } else {
             return Err(MicrosandboxError::InvalidConfig(format!(
                 "snapshot input {} is not a regular archive or artifact directory",
@@ -150,7 +152,7 @@ async fn prepare_inner(
             // Normalize only private unpacked copies. Never publish or reindex a group.
             migration::normalize_staged(local.db().await?, &archive.unpacked.manifest_dirs).await?;
             for snapshot in
-                verify_imported_snapshots(local, &archive.unpacked.manifest_dirs).await?
+                verify_imported_snapshots(local, &archive.unpacked.manifest_dirs, &budget).await?
             {
                 normalize_imported_descriptor(&snapshot).await?;
             }
@@ -187,6 +189,7 @@ async fn prepare_inner(
                 archive.snapshots.path(),
                 archive.cache.path(),
                 &sources,
+                &mut budget,
             )
             .await
             .map_err(|error| input_error(&archive.source, error))?;
@@ -198,9 +201,10 @@ async fn prepare_inner(
     }
     for archive in &archives {
         if let Some(inventory) = &archive.unpacked.inventory {
-            materialize_inventory_layers(inventory, archive.snapshots.path()).await?;
+            materialize_inventory_layers(inventory, archive.snapshots.path(), &mut budget).await?;
         }
-        let snapshots = verify_imported_snapshots(local, &archive.unpacked.manifest_dirs).await?;
+        let snapshots =
+            verify_imported_snapshots(local, &archive.unpacked.manifest_dirs, &budget).await?;
         if let Some(inventory) = &archive.unpacked.inventory {
             validate_inventory_snapshot_bindings(
                 inventory,

@@ -937,3 +937,9 @@ A snapshot destination with a retained nondefault execution policy needs a runti
 ### Checkpoint CPU and memory observations
 
 New clients and runtimes negotiate `configuration_freeze_resources` before requesting private capacity evidence. The host sends the original freeze payload to a guest without the observation capability. An older client receives its original receipt shape. Missing observations allow the checkpoint to succeed and leave the corresponding resource unknown. The observation is private to capture and does not change the public Ready type, guest protocol generation, snapshot format or metrics layout.
+
+### Snapshot import byte budget
+
+Snapshot import options accept an optional `maximum_disk_bytes`. The caller chooses the limit; the SDK supplies no default. It counts logical extracted payload and metadata bytes, archive dependencies, sparse holes, and extra installed copies of shared layers. Each declared file-disk capacity must also fit the same limit. Existing parser bounds remain unchanged. Restore and launch preparation remain unlimited. No archive, catalog, or runtime wire format changes.
+
+The released group-based API and legacy `LoadOpts` entry points remain available. Language bindings pass the limit through their existing options. Node and Go reject older native providers before dispatch when a requested limit cannot be enforced; Python and Ruby reject the new keyword on older bindings.

@@ -326,6 +326,9 @@ pub struct SnapshotLoadArgs {
     /// Select the batch's unique tip as head even if it is not a fast-forward.
     #[arg(long)]
     pub set_head: bool,
+    /// Maximum expanded file bytes, including metadata and dependencies.
+    #[arg(long)]
+    pub maximum_disk_bytes: Option<u64>,
 }
 
 /// Arguments for `msb snapshot head`.
@@ -1124,6 +1127,7 @@ async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
         options.dest = args.dest;
         options.base = args.base;
         options.set_head = args.set_head;
+        options.maximum_disk_bytes = args.maximum_disk_bytes;
         options
     };
     let result = match args.identity {

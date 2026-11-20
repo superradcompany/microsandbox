@@ -132,6 +132,8 @@ type SnapshotImportOptions struct {
 	Base string
 	// Select the unique imported tip even when it is not a fast-forward.
 	SetHead bool
+	// Maximum logical bytes imported; nil means unlimited.
+	MaximumDiskBytes *uint64 `json:"maximum_disk_bytes,omitempty"`
 }
 
 // SnapshotImportResult contains only facts from this committed import attempt.
@@ -263,7 +265,7 @@ func (s *Snapshots) Load(ctx context.Context, group string, files []string, opti
 		Warnings    []string                `json:"warnings"`
 	}
 	if err := snapshotObjectRequest(ctx, owner, map[string]any{"op": "load", "name": group, "files": files,
-		"options": ffi.SnapshotLoadOptions{CallerDirectory: directory, Dest: opts.Dest, Base: opts.Base, SetHead: opts.SetHead}}, &wire); err != nil {
+		"options": ffi.SnapshotLoadOptions{CallerDirectory: directory, Dest: opts.Dest, Base: opts.Base, SetHead: opts.SetHead, MaximumDiskBytes: opts.MaximumDiskBytes}}, &wire); err != nil {
 		return nil, err
 	}
 	history, err := snapshotGroupFromWire(owner, wire.Snapshot)
