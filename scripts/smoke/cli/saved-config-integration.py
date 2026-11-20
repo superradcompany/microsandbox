@@ -72,7 +72,27 @@ def released_launch_runtime(args, root, version):
     return runtime, firmwares[0], released / agent_name
 
 
-def qualify_launch_runtime(args, root, image, label, binary, firmware, agent):
+def extract_tests(args, root):
+    if args.test_binary:
+        return None
+    # The archive contains the whole workspace. Re-extracting it for every
+    # runtime dominates the matrix and can exhaust the CI step's deadline.
+    extracted = root / "tests"
+    extracted.mkdir()
+    subprocess.run(["cargo-nextest", "nextest", "list", "--archive-file", args.archive,
+                    "--extract-to", extracted, "--workspace-remap", args.workspace,
+                    "--list-type", "binaries-only"], check=True)
+    return extracted / "target"
+
+
+def nextest_arguments(args, target, test):
+    return ["nextest", "run", "--cargo-metadata", target / "nextest/cargo-metadata.json",
+            "--binaries-metadata", target / "nextest/binaries-metadata.json",
+            "--target-dir-remap", target, "--workspace-remap", args.workspace,
+            "--run-ignored=only", "--no-tests", "fail", "-E", f"test(={test})"]
+
+
+def qualify_launch_runtime(args, root, image, label, binary, firmware, agent, archive_target=None):
     """Keep expected security refusals separate from successful VM lifecycle tests."""
     home = root / ("launch-" + label)
     env = evidence.environment(binary, firmware, home, agent)
@@ -99,8 +119,7 @@ def qualify_launch_runtime(args, root, image, label, binary, firmware, agent):
                 raise RuntimeError(f"missing test: {test}")
         else:
             tests = evidence.Runner("cargo-nextest", env, runner.output / "sdk")
-            tests.run("lifecycle" if protected else "security-refusal", "nextest", "run", "--archive-file", args.archive,
-                      "--workspace-remap", args.workspace, "--run-ignored=only", "-E", f"test(={test})")
+            tests.run("lifecycle" if protected else "security-refusal", *nextest_arguments(args, archive_target, test))
         passed = True
     finally:
         if not passed:
@@ -111,12 +130,12 @@ def qualify_launch_runtime(args, root, image, label, binary, firmware, agent):
     print(f"{version}: {status}", flush=True)
 
 
-def launch_qualification(args, root, image):
+def launch_qualification(args, root, image, archive_target=None):
     failures = []
     for version in LAUNCH_RELEASES:
         try:
             runtime = released_launch_runtime(args, root, version)
-            qualify_launch_runtime(args, root, image, version, *runtime)
+            qualify_launch_runtime(args, root, image, version, *runtime, archive_target=archive_target)
         except Exception as error:
             # Finish the independent pairings and retain each failure in diagnostics.
             failures.append(version)
@@ -125,7 +144,8 @@ def launch_qualification(args, root, image):
             (output / "report.json").write_text(json.dumps({"cases": [{
                 "runtime": version, "status": "failed", "error": str(error)}]}))
             print(f"{version}: failed: {error}", file=sys.stderr, flush=True)
-    qualify_launch_runtime(args, root, image, "candidate", args.binary, args.firmware, args.agent)
+    qualify_launch_runtime(args, root, image, "candidate", args.binary, args.firmware, args.agent,
+                           archive_target=archive_target)
     if failures:
         raise RuntimeError("runtime qualification failed: " + ", ".join(failures))
 
@@ -187,13 +207,14 @@ def command_receipts(args, root, image):
 
 
 def run(args, root):
+    archive_target = extract_tests(args, root)
     writer = args.previous_writer or previous_writer(root)
     image = args.image or root / "alpine.tar"
     if args.image is None:
         runner = evidence.Runner(args.binary, evidence.environment(args.binary, args.firmware, root / "image-home"), root / "image-logs")
         runner.run("pull", "image", "pull", "alpine:3.23")
         runner.run("save", "image", "save", "--format", "docker", "--output", image, "alpine:3.23")
-    launch_qualification(args, root, image)
+    launch_qualification(args, root, image, archive_target)
     common = ["--binary", args.binary, "--agent", args.agent, "--firmware", args.firmware,
               "--image", image, "--temp-root", root]
     previous = ["--runtime", "current", "--releases", root, "--previous-writer", writer, "--support", SCRIPTS]
@@ -215,8 +236,7 @@ def run(args, root):
             if "1 passed;" not in result.stdout:
                 raise RuntimeError(f"missing test: {test}")
         else:
-            subprocess.run(["cargo-nextest", "nextest", "run", "--archive-file", args.archive,
-                            "--workspace-remap", args.workspace, "--run-ignored=only", "-E", f"test(={test})"],
+            subprocess.run(["cargo-nextest", *nextest_arguments(args, archive_target, test)],
                            env=env, check=True)
         print(f"passed {test}", flush=True)
 

@@ -106,6 +106,48 @@ class SavedConfigIntegrationTests(unittest.TestCase):
             result = json.loads((output / "diagnostics.json").read_text())
             self.assertEqual(result["cases"][0]["cleanup_error"], "cleanup failed at <fixture>/home")
 
+    def test_archive_is_extracted_once_and_reused_by_the_matrix_and_consumers(self):
+        args = Namespace(binary=Path("/candidate"), agent=Path("/agent"), firmware=Path("/firmware"),
+                         workspace=Path("/repo"), archive=Path("/tests.tar.zst"), test_binary=None,
+                         previous_writer=Path("/old"), image=Path("/image.tar"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "tests/target"
+            with unittest.mock.patch.object(HARNESS.subprocess, "run") as run, \
+                    unittest.mock.patch.object(HARNESS, "launch_qualification") as matrix, \
+                    unittest.mock.patch.object(HARNESS, "command_receipts"):
+                HARNESS.run(args, root)
+            self.assertTrue(target.parent.is_dir())
+            matrix.assert_called_once_with(args, root, args.image, target)
+            commands = [call.args[0] for call in run.call_args_list]
+            extracts = [command for command in commands if "--archive-file" in command]
+            self.assertEqual(len(extracts), 1)
+            self.assertEqual(extracts[0][:3], ["cargo-nextest", "nextest", "list"])
+            self.assertEqual(extracts[0][extracts[0].index("--extract-to") + 1], target.parent)
+            consumers = [command for command in commands if command[:3] == ["cargo-nextest", "nextest", "run"]]
+            self.assertEqual(len(consumers), len(HARNESS.TESTS))
+            for command, test in zip(consumers, HARNESS.TESTS):
+                self.assertNotIn("--archive-file", command)
+                self.assertEqual(command[command.index("--cargo-metadata") + 1], target / "nextest/cargo-metadata.json")
+                self.assertEqual(command[command.index("--binaries-metadata") + 1], target / "nextest/binaries-metadata.json")
+                self.assertEqual(command[command.index("--target-dir-remap") + 1], target)
+                self.assertEqual(command[command.index("--no-tests") + 1], "fail")
+                self.assertEqual(command[-1], f"test(={test})")
+
+    def test_failed_archive_extraction_stops_before_any_runtime_fixture(self):
+        args = Namespace(test_binary=None, archive=Path("/missing"), workspace=Path("/repo"))
+        with tempfile.TemporaryDirectory() as directory, \
+                unittest.mock.patch.object(HARNESS.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "extract")), \
+                unittest.mock.patch.object(HARNESS, "launch_qualification") as matrix:
+            with self.assertRaises(subprocess.CalledProcessError):
+                HARNESS.run(args, Path(directory))
+        matrix.assert_not_called()
+
+    def test_direct_test_binary_does_not_extract_an_archive(self):
+        with unittest.mock.patch.object(HARNESS.subprocess, "run") as run:
+            self.assertIsNone(HARNESS.extract_tests(Namespace(test_binary=Path("/tests")), Path("/fixture")))
+        run.assert_not_called()
+
     def test_security_capability_changes_do_not_silently_change_matrix_expectations(self):
         args = Namespace(binary=Path("/candidate"))
         for label, advertised in (("candidate", False), ("0.7.12", False), ("0.7.11", True)):
