@@ -193,7 +193,7 @@ On Unix, whole-group removal keeps two file descriptors per checkpoint open, plu
 
 The canonical CLI no longer accepts `GROUP:MEMBER`, multiple removal arguments, or a standalone indexed artifact path here. Use `GROUP --checkpoint MEMBER` or `GROUP --all`. Legacy SDK reference-removal methods retain their indexed-missing-artifact behavior.
 
-Removing a checkpoint or group also reclaims unused memory objects from a stopped source sandbox. If the source is running, cleanup is retried after a completed stop. Cleanup preserves objects still linked by another snapshot or recovery capture. Older capture folders are retained because they can contain recovery data; cleanup does not infer that they are disposable.
+Removing a checkpoint or group also reclaims unused memory objects from a stopped source sandbox. If the source is running, cleanup is retried after a completed stop. When capture publication is still in progress, stop cleanup waits and retries automatically; a restarted source keeps its objects until its next stop. Cleanup preserves objects still linked by another snapshot or recovery capture. Older capture folders are retained because they can contain recovery data; cleanup does not infer that they are disposable.
 
 <Accordion title="Reader protection, stale entries, and interrupted cleanup">
 

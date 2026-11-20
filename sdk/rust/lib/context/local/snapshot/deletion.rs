@@ -23,6 +23,18 @@ use crate::sandbox::validate_sandbox_name;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StoreCleanup {
+    /// Reclaimed, absent, or owned by a runtime whose next stop will request cleanup.
+    Finished,
+    /// A source transition or capture publication still owns the stopped store.
+    Deferred,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -260,9 +272,9 @@ async fn recover_parent_owned(
 pub(crate) async fn release_store_objects(
     local: &LocalContext,
     source: &str,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxResult<StoreCleanup> {
     if validate_sandbox_name(source).is_err() {
-        return Ok(());
+        return Ok(StoreCleanup::Finished);
     }
     let db = local.db().await?;
     // Imported descriptors carry advisory source names. Do not create persistent lock
@@ -272,44 +284,40 @@ pub(crate) async fn release_store_objects(
         .one(db.read())
         .await?
     else {
-        return Ok(());
+        return Ok(StoreCleanup::Finished);
     };
+    // A restarted runtime can coexist with an older capture still publishing. Do not
+    // keep a stop waiter alive for that capture when the next stop owns reclamation.
+    if has_live_store_owner(local, &expected).await? {
+        return Ok(StoreCleanup::Finished);
+    }
     let run_dir = local.config().run_dir();
     let Some(transition) =
         microsandbox_runtime::ipc::try_acquire_transition_guard(&run_dir, source)?
     else {
-        return Ok(());
+        // Do not probe lifecycle ownership without transition ownership: taking that
+        // lock even briefly could make an in-progress start mistake us for a runtime.
+        return Ok(StoreCleanup::Deferred);
     };
-    let Some(lineage) =
-        microsandbox_runtime::ipc::try_acquire_snapshot_lineage_guard(&run_dir, source)?
-    else {
-        return Ok(());
-    };
+    let lineage = microsandbox_runtime::ipc::try_acquire_snapshot_lineage_guard(&run_dir, source)?;
+    // Probe lifecycle ownership even if capture publication is busy: recorded runtime
+    // status can be stale. No earlier lock is acquired while this guard is held;
+    // incomplete acquisition immediately drops every guard.
     let Some(lifecycle) = SandboxLifecycleGuard::try_acquire(&run_dir, source)? else {
-        return Ok(());
+        return Ok(StoreCleanup::Finished);
+    };
+    let Some(lineage) = lineage else {
+        return Ok(StoreCleanup::Deferred);
     };
     let Some(registered) = sandbox::Entity::find()
         .filter(sandbox::Column::Name.eq(source))
         .one(db.read())
         .await?
     else {
-        return Ok(());
+        return Ok(StoreCleanup::Finished);
     };
-    if registered.id != expected.id || registered.status.has_active_runtime_state() {
-        return Ok(());
-    }
-    // Older Windows runtimes do not own the modern lifecycle lock. Retain their store
-    // whenever a recorded active process is alive rather than treating a free lock as exit.
-    let active_runs = run::Entity::find()
-        .filter(run::Column::SandboxId.eq(registered.id))
-        .filter(run::Column::Status.eq(run::RunStatus::Running))
-        .all(db.read())
-        .await?;
-    if active_runs
-        .iter()
-        .any(|run| run.pid.is_none_or(LocalContext::pid_is_alive))
-    {
-        return Ok(());
+    if registered.id != expected.id || has_live_store_owner(local, &registered).await? {
+        return Ok(StoreCleanup::Finished);
     }
     let sandboxes = local.sandboxes_dir();
     let source = source.to_owned();
@@ -322,7 +330,27 @@ pub(crate) async fn release_store_objects(
         }
     })
     .await
-    .map_err(|error| MicrosandboxError::Custom(format!("checkpoint object release: {error}")))?
+    .map_err(|error| MicrosandboxError::Custom(format!("checkpoint object release: {error}")))??;
+    Ok(StoreCleanup::Finished)
+}
+
+async fn has_live_store_owner(
+    local: &LocalContext,
+    registered: &sandbox::Model,
+) -> MicrosandboxResult<bool> {
+    if registered.status.has_active_runtime_state() {
+        return Ok(true);
+    }
+    // Older Windows runtimes do not own the modern lifecycle lock. Retain their store
+    // whenever a recorded active process is alive rather than treating a free lock as exit.
+    let active_runs = run::Entity::find()
+        .filter(run::Column::SandboxId.eq(registered.id))
+        .filter(run::Column::Status.eq(run::RunStatus::Running))
+        .all(local.db().await?.read())
+        .await?;
+    Ok(active_runs
+        .iter()
+        .any(|run| run.pid.is_none_or(LocalContext::pid_is_alive)))
 }
 
 /// Every child is opened relative to an admitted directory, without following symlinks or
