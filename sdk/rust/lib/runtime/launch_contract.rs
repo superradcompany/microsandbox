@@ -167,6 +167,15 @@ impl LaunchContract {
         {
             return unsupported("per-header secret substitution scope");
         }
+        // Deserialized configs bypass the builder; refuse before spawning rather than at VM start.
+        if let Some(secs) = network.dns_revalidation_grace_secs
+            && secs > microsandbox_types::MAX_DNS_REVALIDATION_GRACE_SECS
+        {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "invalid DNS revalidation grace period {secs}s: must be at most {} seconds",
+                microsandbox_types::MAX_DNS_REVALIDATION_GRACE_SECS
+            )));
+        }
         if self.machine {
             return Ok(());
         }
@@ -2761,6 +2770,26 @@ mod encoding {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn dns_revalidation_grace_above_the_maximum_is_refused_before_launch() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let network: NetworkConfig =
+            serde_json::from_value(json!({ "dns_revalidation_grace_secs": 3601 })).unwrap();
+
+        let error = LaunchContract {
+            patch: 18,
+            machine: true,
+            header_fields: true,
+        }
+        .validate_network(&network, microsandbox_types::DeploymentProfile::default())
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("DNS revalidation grace period"), "{error}");
     }
 
     #[cfg(feature = "net")]
