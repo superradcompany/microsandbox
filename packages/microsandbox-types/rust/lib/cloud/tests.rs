@@ -343,6 +343,41 @@ fn cloud_secrets_config_round_trips_through_domain() {
 }
 
 #[test]
+fn cloud_create_request_debug_redacts_secret_values() {
+    const MATERIAL: &str = "distinctive-cloud-secret-material";
+
+    let mut request = image_request("agent-1");
+    let CloudCreateSandboxRequest::Oci { sandbox, .. } = &mut request else {
+        panic!("expected OCI create request");
+    };
+    let entry = CloudSecretEntry {
+        env_var: "API_KEY".into(),
+        value: MATERIAL.into(),
+        source: None,
+        placeholder: "$MSB_API_KEY".into(),
+        allowed_hosts: vec![CloudHostPattern::Exact {
+            value: "api.example.com".into(),
+        }],
+        substitution: SecretSubstitution::default(),
+        passthrough_hosts: Vec::new(),
+        violation_action: None,
+        require_tls_identity: true,
+    };
+    let serialized = serde_json::to_value(&entry).unwrap();
+    sandbox.network.secrets = Some(CloudSecretsConfig {
+        entries: vec![entry],
+        ..Default::default()
+    });
+
+    for rendered in [format!("{request:?}"), format!("{request:#?}")] {
+        assert!(!rendered.contains(MATERIAL), "value leaked: {rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        assert!(rendered.contains("API_KEY"), "{rendered}");
+    }
+    assert_eq!(serialized["value"], MATERIAL);
+}
+
+#[test]
 fn create_request_converts_disk_size_to_oci_rootfs() {
     let mut req = image_request("agent-1");
     assert!(req.set_oci_disk_size_mib(8192));

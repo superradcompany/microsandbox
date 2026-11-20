@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use super::{Manifest, Snapshot, SnapshotReference, SnapshotState};
+use super::{Checkpoint, Manifest, SnapshotReference, SnapshotState};
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     context::{Context, ContextKind},
@@ -12,7 +12,7 @@ use crate::{
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl Snapshot {
+impl Checkpoint {
     pub(crate) fn from_descriptor(
         backend: Arc<dyn Context>,
         reference: SnapshotReference,

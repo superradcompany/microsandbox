@@ -7,7 +7,7 @@ icon: "download"
 
 Local sandboxes need `msb` and `libkrunfw`. Call the setup helper once at application startup: it reuses an existing runtime or installs one when missing. Sandbox creation does not download it automatically. To use [our managed cloud](/cloud/overview), skip local runtime setup and connect with an API key.
 
-The setup helpers below describe full SDK distributions. Lean local providers exclude the runtime downloader: provision a compatible `msb`/`libkrunfw` pair separately and use runtime discovery. Lean remote providers need neither host runtime file. See [distribution migration](/migrations/sdk-distributions) for package selection and Go’s separate FFI setup.
+The setup helpers below describe full SDK distributions. Lean local providers exclude the runtime downloader: provision a compatible `msb`/`libkrunfw` pair separately and use runtime discovery. Lean remote providers need neither host runtime file. See [distribution migration](/migrations/v0.8#sdk-distribution-migration) for package selection and Go’s separate FFI setup.
 
 ## Set up the runtime
 
@@ -153,7 +153,7 @@ Storage diagnostics require an explicit list of sandbox names or an explicit who
 - **Go:** `DiagnoseStorage(ctx, config, selection)`; `RecoverStorage(ctx, name, options)`.
 - **Ruby:** `Microsandbox.diagnose_storage(names:, all_sandboxes:, home:)`; `Microsandbox::Sandbox.recover_storage(name, ...)`.
 
-Recovery never starts or stops a VM. macOS legacy recovery requires the explicit `legacy_writers_stopped` confirmation (`legacyWritersStopped` in TypeScript, `LegacyWritersStopped` in Go) under the maintenance conditions in the repair guide. Empty selections import or resume the validated current view; explicit candidate selection requires acknowledgement that it may omit later writes. See [sandbox storage repair](/repairs/sandbox-storage) for the CLI workflow and recovery limits.
+Recovery never starts or stops a VM. macOS legacy recovery requires the explicit `legacy_writers_stopped` confirmation (`legacyWritersStopped` in TypeScript, `LegacyWritersStopped` in Go) under the maintenance conditions in the repair guide. Empty selections import or resume the validated current view; explicit candidate selection requires acknowledgement that it may omit later writes. See [sandbox storage repair](/migrations/v0.7#sandbox-storage-migration) for the CLI workflow and recovery limits.
 
 ### Bring your own runtime
 

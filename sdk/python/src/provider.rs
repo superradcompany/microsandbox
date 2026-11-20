@@ -43,17 +43,20 @@ pub(crate) fn provider_info() -> String {
 #[cfg(not(feature = "provider-package"))]
 #[pymodule]
 fn _microsandbox(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    crate::runtime::register(module)?;
     crate::register_native(module)
 }
 
 #[cfg(all(feature = "provider-package", feature = "local"))]
 #[pymodule]
 fn _microsandbox_local(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    crate::runtime::register(module)?;
     crate::register_native(module)
 }
 
 #[cfg(all(feature = "provider-package", feature = "remote"))]
 #[pymodule]
 fn _microsandbox_remote(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    crate::runtime::register(module)?;
     crate::register_native(module)
 }

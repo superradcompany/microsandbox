@@ -476,6 +476,27 @@ When reading snapshots, allow enough space for each device's saved state. The re
 
 Before raising it, consider memory use, especially when restoring imported snapshots. Raise it only for snapshots you trust.
 
+## `dns`
+
+<Tooltip tip="Local runtime placement only; microsandbox cloud applies its own DNS settings."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Multi-tenant sandboxes use the operator's `dns.nameservers` list. Set a nonempty list of resolver IP addresses, queried on port 53.
+
+```json
+{
+  "deployment_profile": "multi-tenant",
+  "dns": {
+    "nameservers": ["9.9.9.9", "149.112.112.112"]
+  }
+}
+```
+
+Choose resolvers that cannot answer private infrastructure names. An omitted or null list uses `1.1.1.1` and `1.0.0.1` on supporting runtimes. An explicit list requires runtime support. Older runtimes use host DNS when the list is omitted.
+
+Single-tenant sandboxes use their existing per-sandbox DNS configuration and overlay precedence. The operator's list applies only in multi-tenant mode.
+
+Restart multi-tenant sandboxes after changing the list.
+
 ## `profiles`
 
 Save local or remote connections by name. `active_profile` selects the CLI connection; SDK code loads profiles explicitly. See [remote connections](/cloud/connect) for examples and CLI precedence.

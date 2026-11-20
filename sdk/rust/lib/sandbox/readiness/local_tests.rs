@@ -541,7 +541,7 @@ async fn creation_workdir_validation_uses_ready_session_before_running_publicati
     })
     .await
     .expect("startup validation must not wait for Running publication");
-    assert!(result.unwrap_err().to_string().contains("missing workdir"));
+    assert!(result.unwrap().unwrap_err().contains("missing workdir"));
     assert_eq!(
         sandbox::Entity::find_by_id(1)
             .one(db.read())

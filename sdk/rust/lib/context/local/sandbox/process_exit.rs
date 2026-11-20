@@ -42,7 +42,11 @@ impl RuntimeExit {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let expected = std::fs::metadata(lifecycle)?;
+        let expected = match std::fs::metadata(lifecycle) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
         // A stale catalog PID can point to an unrelated process. Require the runtime's
         // inherited lifecycle file, not just a live PID or a terminal database row.
         if (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
@@ -72,6 +76,27 @@ impl RuntimeExit {
         // the leader becoming a zombie is insufficient while workers release shared files.
         Ok(poll.revents & (libc::POLLIN | libc::POLLHUP) != 0)
     }
+
+    pub(super) fn send_signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.0.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(false)
+            } else {
+                Err(error)
+            };
+        }
+        Ok(true)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -80,10 +105,11 @@ impl RuntimeExit {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, Read, Write};
+    use std::io::{Read, Write};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
+    use super::super::signal_tests::{child_lines, cleanup_child, expect_line, wait_child};
     use super::*;
 
     fn lock_disk(path: &Path) -> std::io::Result<std::fs::File> {
@@ -150,6 +176,9 @@ mod tests {
                 "--exact",
                 "context::local::sandbox::process_exit::tests::exit_barrier_child",
                 "--nocapture",
+                // Pretty serial test output prefixes the child's first handshake line.
+                "--format",
+                "terse",
             ])
             .env("MSB_EXIT_BARRIER_CHILD", "1")
             .stdin(Stdio::piped())
@@ -175,19 +204,10 @@ mod tests {
         }
         let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
             // A failed assertion must not leave a helper holding inherited disk locks.
-            let _ = child.kill();
-            let _ = child.wait();
+            cleanup_child(&mut child);
         });
-        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
-        let mut wait_line = |expected: &str| {
-            loop {
-                let mut line = String::new();
-                assert_ne!(output.read_line(&mut line).unwrap(), 0);
-                if line.trim() == expected {
-                    break;
-                }
-            }
-        };
+        let lines = child_lines(child.stdout.take().unwrap());
+        let wait_line = |expected: &str| expect_line(&lines, expected);
         wait_line("ready");
         let barrier = RuntimeExit::capture(
             Some(child.id() as i32),
@@ -220,7 +240,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(
-            child.wait().unwrap().success(),
+            wait_child(&mut child).success(),
             "exit observation must not reap Child"
         );
         // Completion is independent of this new owner's continuing exclusive attachment.
@@ -242,5 +262,55 @@ mod tests {
             .is_none()
         );
         assert!(RuntimeExit::capture(None, home.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn send_signal_targets_only_the_captured_process() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle =
+            microsandbox_runtime::ipc::acquire_lifecycle_guard(home.path(), "signal").unwrap();
+        let lifecycle_fd = lifecycle.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "context::local::sandbox::process_exit::tests::exit_barrier_child",
+                "--nocapture",
+            ])
+            .env("MSB_EXIT_BARRIER_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        unsafe {
+            command.pre_exec(move || {
+                let copy = libc::fcntl(lifecycle_fd, libc::F_DUPFD_CLOEXEC, 200);
+                if copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(copy, microsandbox_runtime::vm::LIFECYCLE_LOCK_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
+            cleanup_child(&mut child);
+        });
+        let lines = child_lines(child.stdout.take().unwrap());
+        let wait_line = |expected: &str| expect_line(&lines, expected);
+        wait_line("ready");
+        let barrier = RuntimeExit::capture(
+            Some(child.id() as i32),
+            &microsandbox_runtime::ipc::lifecycle_lock_path(home.path(), "signal"),
+        )
+        .unwrap()
+        .unwrap();
+        child.stdin.as_mut().unwrap().write_all(b"l").unwrap();
+        wait_line("lifecycle-released");
+        child.stdin.as_mut().unwrap().write_all(b"d").unwrap();
+        wait_line("disk-released");
+        // The helper keeps its worker alive until this final handshake byte.
+        child.stdin.take().unwrap().write_all(b"x").unwrap();
+        assert!(wait_child(&mut child).success());
+        assert!(!barrier.send_signal(libc::SIGKILL).unwrap());
     }
 }

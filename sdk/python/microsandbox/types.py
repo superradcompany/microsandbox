@@ -181,6 +181,23 @@ class ResourceKind(StrEnum):
     MEMORY = "memory"
 
 
+class ResizeOutcome(StrEnum):
+    """Operation ownership outcome, separate from resource convergence."""
+
+    PENDING = "pending"
+    APPLIED = "applied"
+    SUPERSEDED = "superseded"
+
+
+class ResizeObservation(StrEnum):
+    """Availability of authoritative evidence for the latest operation read."""
+
+    AVAILABLE = "available"
+    UNSUPPORTED = "unsupported"
+    PAUSED = "paused"
+    UNAVAILABLE = "unavailable"
+
+
 class ResourceConvergenceState(StrEnum):
     ACCEPTED = "accepted"
     CONVERGING = "converging"
@@ -528,6 +545,32 @@ class ResourceResizeStatus(TypedDict):
     state: ResourceConvergenceState
 
 
+class CpuResizeTarget(TypedDict):
+    resource: Literal[ResourceKind.CPUS]
+    online: int
+
+
+class MemoryResizeTarget(TypedDict):
+    resource: Literal[ResourceKind.MEMORY]
+    total_mib: int
+
+
+ResizeTarget: TypeAlias = CpuResizeTarget | MemoryResizeTarget
+
+
+class ResizeOperation(TypedDict):
+    """Identity-bound retained request; status is evidence, not authority to rebind it."""
+
+    id: str
+    runtime_boot_id: str
+    generation: int
+    requested_target: ResizeTarget
+    accepted_target: ResizeTarget
+    status: ResourceResizeStatus
+    outcome: ResizeOutcome
+    observation: ResizeObservation
+
+
 class _ConfigPlannedChangeRequired(TypedDict):
     kind: Literal[PlannedChangeKind.CONFIG]
     field: str
@@ -577,6 +620,13 @@ class SandboxModificationPlan(_SandboxModificationPlanRequired, total=False):
     """Typed result returned by sandbox modification operations."""
 
     resize_status: list[ResourceResizeStatus]
+
+
+class SandboxModificationResult(TypedDict):
+    """Plan and operations accepted by this call; None means tracking was unavailable or unused."""
+
+    plan: SandboxModificationPlan
+    resize_operations: list[ResizeOperation] | None
 
 
 class ExecOptions(TypedDict, total=False):
@@ -2066,3 +2116,30 @@ class RegistryAuth:
 
     def _to_dict(self) -> dict:
         return {"username": self.username, "password": self.password}
+
+
+# --------------------------------------------------------------------------------------------------
+# Types: Snapshot group inspection
+# --------------------------------------------------------------------------------------------------
+
+SnapshotSourceStatus: TypeAlias = Literal["available", "missing_sandbox", "different_catalog"]
+
+
+class SnapshotSourceBinding(TypedDict):
+    """The recorded sandbox instance and its availability at inspection time."""
+
+    database_uuid: str
+    sandbox_id: int
+    recorded_name: str
+    current_name: str | None
+    status: SnapshotSourceStatus
+
+
+class SnapshotGroupInfo(TypedDict):
+    """One protected metadata read; source=None identifies an unbound history."""
+
+    name: str
+    path: str
+    head: str | None
+    checkpoint_count: int
+    source: SnapshotSourceBinding | None

@@ -1,0 +1,293 @@
+//! Translate user-selected host inputs into a private, ordered edit stream.
+
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufWriter, Write};
+use std::path::Path;
+use std::process::Stdio;
+
+use cap_std::fs::Dir;
+use microsandbox_protocol::snapshot_patch::{Action, Edit, RECEIPT};
+use microsandbox_types::Patch;
+
+use super::restore::RestoreStaging;
+use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+struct EditStream {
+    manifest: BufWriter<File>,
+    payload: BufWriter<File>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl EditStream {
+    fn record(&mut self, path: &[u8], action: Action) -> MicrosandboxResult<()> {
+        serde_json::to_writer(
+            &mut self.manifest,
+            &Edit {
+                path: path.to_owned(),
+                action,
+            },
+        )?;
+        self.manifest.write_all(b"\n")?;
+        Ok(())
+    }
+
+    fn directory(&mut self, dir: &Dir, path: &[u8], replace: bool) -> MicrosandboxResult<()> {
+        let handle = dir.try_clone()?.into_std_file();
+        self.record(
+            path,
+            Action::CopyDirectory {
+                mode: mode(&handle, 0o755)?,
+                replace,
+            },
+        )?;
+        for entry in dir.entries()? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let mut child = path.to_vec();
+            child.push(b'/');
+            child.extend_from_slice(name.as_encoded_bytes());
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                let target = dir.read_link_contents(&name)?;
+                self.record(
+                    &child,
+                    Action::Symlink {
+                        target: target.as_os_str().as_encoded_bytes().to_vec(),
+                        replace: true,
+                    },
+                )?;
+            } else if kind.is_dir() {
+                let fd = cap_primitives::fs::open_dir_nofollow(&handle, Path::new(&name))?;
+                self.directory(&Dir::from_std_file(fd), &child, true)?;
+            } else if kind.is_file() {
+                let mut options = cap_std::fs::OpenOptions::new();
+                options
+                    .read(true)
+                    ._cap_fs_ext_follow(cap_primitives::fs::FollowSymlinks::No);
+                #[cfg(unix)]
+                {
+                    use cap_std::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NONBLOCK);
+                }
+                self.copy_file(
+                    dir.open_with(&name, &options)?.into_std(),
+                    &child,
+                    None,
+                    true,
+                )?;
+            } else {
+                return Err(MicrosandboxError::PatchFailed(format!(
+                    "unsupported CopyDir entry {name:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_file(
+        &mut self,
+        mut file: File,
+        path: &[u8],
+        requested: Option<u32>,
+        replace: bool,
+    ) -> MicrosandboxResult<()> {
+        if !file.metadata()?.is_file() {
+            return Err(MicrosandboxError::PatchFailed(
+                "copy source must be a regular file".into(),
+            ));
+        }
+        let mode = requested.unwrap_or(mode(&file, 0o644)?);
+        let len = io::copy(&mut file, &mut self.payload)?;
+        self.record(path, Action::Write { mode, replace, len })
+    }
+
+    fn push(&mut self, patch: &Patch) -> MicrosandboxResult<()> {
+        match patch {
+            Patch::Text {
+                path,
+                content,
+                mode,
+                replace,
+            } => self.write(path, content.as_bytes(), *mode, *replace),
+            Patch::File {
+                path,
+                content,
+                mode,
+                replace,
+            } => self.write(path, content, *mode, *replace),
+            Patch::Append { path, content } => {
+                self.payload.write_all(content.as_bytes())?;
+                self.record(
+                    path.as_bytes(),
+                    Action::Append {
+                        len: content.len() as u64,
+                    },
+                )
+            }
+            Patch::CopyDir { src, dst, replace } => self.directory(
+                &Dir::open_ambient_dir(src, cap_std::ambient_authority())?,
+                dst.as_bytes(),
+                *replace,
+            ),
+            Patch::CopyFile {
+                src,
+                dst,
+                mode,
+                replace,
+            } => {
+                let mut options = OpenOptions::new();
+                options.read(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NONBLOCK);
+                }
+                self.copy_file(options.open(src)?, dst.as_bytes(), *mode, *replace)
+            }
+            Patch::Symlink {
+                target,
+                link,
+                replace,
+            } => self.record(
+                link.as_bytes(),
+                Action::Symlink {
+                    target: target.as_bytes().to_vec(),
+                    replace: *replace,
+                },
+            ),
+            Patch::Remove { path } => self.record(path.as_bytes(), Action::Remove),
+            Patch::Mkdir { path, mode } => self.record(
+                path.as_bytes(),
+                Action::Directory {
+                    mode: mode.unwrap_or(0o755),
+                },
+            ),
+        }
+    }
+
+    fn write(
+        &mut self,
+        path: &str,
+        bytes: &[u8],
+        mode: Option<u32>,
+        replace: bool,
+    ) -> MicrosandboxResult<()> {
+        self.payload.write_all(bytes)?;
+        self.record(
+            path.as_bytes(),
+            Action::Write {
+                mode: mode.unwrap_or(0o644),
+                replace,
+                len: bytes.len() as u64,
+            },
+        )
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn mode(file: &File, fallback: u32) -> io::Result<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = file.metadata()?.permissions().mode() & 0o7777;
+        if permissions != 0 {
+            return Ok(permissions);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    Ok(fallback)
+}
+
+pub(super) async fn apply(
+    mut config: SandboxConfig,
+    stage: RestoreStaging,
+    msb: std::path::PathBuf,
+    firmware: std::path::PathBuf,
+    image: super::ResolvedOciImage,
+) -> MicrosandboxResult<(SandboxConfig, RestoreStaging, super::ResolvedOciImage)> {
+    // Keep the reservation and its disk leases until the VMM has really exited, even
+    // if the original create future is dropped. Scratch is never published with the child.
+    tokio::spawn(async move {
+        let (config, stage, temp, scratch) =
+            tokio::task::spawn_blocking(move || -> MicrosandboxResult<_> {
+                let temp = tempfile::Builder::new()
+                    .prefix(".editor-")
+                    .tempdir_in(stage.path())?;
+                let scratch = temp.path().join("guest");
+                microsandbox_utils::private_file::create_private_directory(&scratch)?;
+                let mut stream = EditStream {
+                    manifest: BufWriter::new(File::create_new(scratch.join("edits"))?),
+                    payload: BufWriter::new(File::create_new(scratch.join("payload"))?),
+                };
+                for patch in std::mem::take(&mut config.spec.patches) {
+                    stream.push(&patch)?;
+                }
+                stream.manifest.flush()?;
+                stream.payload.flush()?;
+                serde_json::to_writer(
+                    File::create_new(temp.path().join("chain"))?,
+                    &config.snapshot_upper_layers,
+                )?;
+                Ok((config, stage, temp, std::fs::canonicalize(scratch)?))
+            })
+            .await
+            .map_err(|e| MicrosandboxError::PatchFailed(e.to_string()))??;
+        let mut command = tokio::process::Command::new(msb);
+        command
+            .arg("__snapshot-editor")
+            .arg(firmware)
+            .arg(&scratch)
+            .arg(temp.path().join("chain"));
+        if matches!(
+            config.spec.image.oci_root_disk(),
+            Some(crate::sandbox::RootDisk::Managed { .. })
+        ) {
+            let lower = image
+                .cache_operation
+                .vmdk_path(&image.pull_result.manifest_digest);
+            File::create_new(scratch.join("layered"))?;
+            command.arg(lower);
+        }
+        let stderr = temp.path().join("stderr");
+        let mut vm = command
+            .env_remove("MSB_KRUN_KERNEL_CMDLINE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(File::create_new(&stderr)?)
+            .kill_on_drop(true)
+            .spawn()?;
+        // Child::wait closes any attached stdin. Hold the pipe separately so EOF really
+        // means the SDK died, including an abrupt process exit.
+        let _owner = vm.stdin.take();
+        let status = vm.wait().await?;
+        let receipt = std::fs::read_to_string(scratch.join("result")).unwrap_or_default();
+        if status.success() && !receipt.is_empty() && receipt != RECEIPT {
+            return Err(MicrosandboxError::PatchFailed(receipt));
+        }
+        if !status.success() || receipt != RECEIPT {
+            let detail = if receipt.is_empty() {
+                std::fs::read_to_string(stderr)?
+            } else {
+                receipt
+            };
+            return Err(MicrosandboxError::PatchFailed(format!(
+                "snapshot editor exited {status}: {detail}"
+            )));
+        }
+        temp.close()?;
+        Ok((config, stage, image))
+    })
+    .await
+    .map_err(|e| MicrosandboxError::PatchFailed(e.to_string()))?
+}

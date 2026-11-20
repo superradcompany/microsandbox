@@ -57,6 +57,14 @@ async def probe():
         observation = await sb.info()
         assert observation['id'] == sb.id and observation['status'] is core.SandboxStatus.STOPPED
         assert await sb.status() is core.SandboxStatus.STOPPED
+        # Exercise the new lifecycle symbols through a real remote-only extension.
+        for observe in (sb.resize_status, sb.resize_operations, sb.wait_until_resized):
+            before = len(requests)
+            try: await observe()
+            except core.UnsupportedError as error:
+                assert 'local backend' in str(error), str(error)
+            else: raise AssertionError('remote resize unexpectedly succeeded')
+            assert len(requests) == before
         # Unsupported remote jobs must retain their typed error in every package.
         try: await sb.exec_detached('true')
         except JobError: pass

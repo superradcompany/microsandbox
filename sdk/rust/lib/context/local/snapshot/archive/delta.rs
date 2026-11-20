@@ -82,6 +82,10 @@ pub(super) struct Sources {
     disks: BTreeMap<String, PathBuf>,
     memory: BTreeMap<ObjectId, PathBuf>,
     owned: BTreeMap<String, PathBuf>,
+    // Canonical launch sets reject ambiguous shared identities. Legacy import
+    // callers keep their existing admission path through `add`.
+    strict_disk_identities: BTreeMap<String, (LayerIdentity, PathBuf)>,
+    strict_disk_hashes: BTreeMap<String, UpperIntegrity>,
 }
 
 type SourceIndex = (
@@ -116,6 +120,75 @@ impl Sources {
         for (identity, path) in disks {
             self.disks.entry(identity).or_insert(path);
         }
+        for (identity, path) in memory {
+            self.memory.entry(identity).or_insert(path);
+        }
+        for (identity, path) in owned {
+            self.owned.entry(identity).or_insert(path);
+        }
+        Ok(())
+    }
+
+    /// Admit a canonical launch input without choosing between conflicting providers.
+    pub(super) async fn add_strict(
+        &mut self,
+        manifest: &Manifest,
+        directory: &Path,
+        archive_stage: Option<&Path>,
+    ) -> MicrosandboxResult<()> {
+        let manifest = manifest.clone();
+        let directory = directory.to_path_buf();
+        let archive_stage = archive_stage.map(Path::to_path_buf);
+        let (disks, memory, owned) = tokio::task::spawn_blocking(move || {
+            inspect_sources(&manifest, &directory, archive_stage.as_deref())
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Runtime(format!("snapshot source inspection: {error}"))
+        })??;
+        for (key, path) in disks {
+            let mut identity: LayerIdentity = serde_json::from_str(&key)?;
+            let (id, has_backing) = match &mut identity {
+                LayerIdentity::File(layer) => {
+                    // A file snapshot copy can opt into recording integrity independently.
+                    // Admission verifies each descriptor's own recorded checksum. Compare
+                    // shared layers by their topology and actual bytes across providers.
+                    layer.payload.integrity = None;
+                    (format!("file:{}", layer.layer_id), layer.backing.is_some())
+                }
+                LayerIdentity::Checkpoint(layer) => (
+                    format!("checkpoint:{}", layer.layer_id),
+                    layer.predecessor.is_some(),
+                ),
+            };
+            if let Some((previous, previous_path)) = self.strict_disk_identities.get(&id) {
+                if previous != &identity {
+                    return Err(source_error(format!(
+                        "conflicting disk layer metadata for {id}"
+                    )));
+                }
+                let previous_hash = match self.strict_disk_hashes.get(&id) {
+                    Some(hash) => hash.clone(),
+                    None => {
+                        let hash = launch_disk_hash(previous_path, has_backing).await?;
+                        self.strict_disk_hashes.insert(id.clone(), hash.clone());
+                        hash
+                    }
+                };
+                if previous_hash != launch_disk_hash(&path, has_backing).await? {
+                    return Err(source_error(format!(
+                        "conflicting disk layer payloads for {id}"
+                    )));
+                }
+            } else {
+                self.strict_disk_identities
+                    .insert(id, (identity, path.clone()));
+            }
+            // Dependency reconstruction still selects the exact descriptor requested.
+            self.disks.entry(key).or_insert(path);
+        }
+        // RAM and borrowed owned payload identities include content hashes and
+        // are verified when reconstructed; disk IDs alone may have no checksum.
         for (identity, path) in memory {
             self.memory.entry(identity).or_insert(path);
         }
@@ -168,6 +241,17 @@ impl Sources {
 
 /// Inspect only descriptors and small identity-verified manifests. Missing payloads in dependent
 /// archives are expected; admission still happens after filling their complete target closure.
+async fn launch_disk_hash(path: &Path, has_backing: bool) -> MicrosandboxResult<UpperIntegrity> {
+    // The on-disk backing name is transport location, not immutable payload data.
+    // Use one comparison-only header without changing either source file.
+    let prefix = if has_backing {
+        microsandbox_image::checkpoint::relocated_qcow2_header(path, Path::new("parent"))?
+    } else {
+        Vec::new()
+    };
+    super::super::verify::compute_merkle_integrity_with_prefix(path, prefix).await
+}
+
 fn inspect_sources(
     manifest: &Manifest,
     directory: &Path,
@@ -488,6 +572,7 @@ pub(super) async fn resolve_sources(
     snapshots_dir: &Path,
     cache_dir: &Path,
     sources: &Sources,
+    budget: &mut ImportBudget,
 ) -> MicrosandboxResult<()> {
     let Some(dependencies) = validate(inventory)? else {
         return Ok(());
@@ -496,7 +581,7 @@ pub(super) async fn resolve_sources(
     for layer in &dependencies.disks {
         let source = &sources.disks[&serde_json::to_string(&layer.identity)?];
         let target = inventory_entry_target(&layer.path, snapshots_dir, cache_dir)?;
-        copy_dependency(source, &target).await?;
+        copy_dependency(source, &target, budget).await?;
         if let LayerIdentity::File(layer) = &layer.identity {
             super::super::verify::verify_file_payload(&target, layer.payload.integrity.as_ref())
                 .await?;
@@ -508,7 +593,7 @@ pub(super) async fn resolve_sources(
             snapshots_dir,
             cache_dir,
         )?;
-        copy_dependency(&sources.memory[id], &target).await?;
+        copy_dependency(&sources.memory[id], &target, budget).await?;
         let actual = format!(
             "sha256:{}",
             hex::encode(Box::pin(file_sha256(&target)).await?)
@@ -522,7 +607,7 @@ pub(super) async fn resolve_sources(
     for payload in &dependencies.owned {
         let source = &sources.owned[&serde_json::to_string(&payload.identity)?];
         let target = inventory_entry_target(&payload.path, snapshots_dir, cache_dir)?;
-        copy_dependency(source, &target).await?;
+        copy_dependency(source, &target, budget).await?;
         verify_owned_payload(&target, &payload.identity).await?;
     }
     validate_resolved(local, inventory, snapshots_dir, cache_dir, &dependencies).await
@@ -552,7 +637,7 @@ pub(super) async fn selection(
     let required = if let Some(base) = &opts.since {
         // Base archives carry buffered decoder/verification futures; keep them off the caller's
         // stack, including when this planner is nested inside a direct restore or SDK call.
-        let base = Box::pin(open_base(local, base)).await?;
+        let base = Box::pin(open_base(local, base, &mut ImportBudget::unlimited())).await?;
         let baseline = physical_layers(
             base.snapshot.manifest(),
             base.snapshot.path(),
@@ -655,8 +740,12 @@ pub(super) fn apply(
 }
 
 pub(super) fn validate(inventory: &ArchiveInventory) -> MicrosandboxResult<Option<Dependencies>> {
-    let extension = inventory.extensions.get(REQUIREMENT);
-    let required = inventory.requires.iter().any(|value| value == REQUIREMENT);
+    let capability = extensions::Extension::Dependencies;
+    let extension = capability.resolve(&inventory.extensions, &inventory.requires)?;
+    let required = inventory
+        .requires
+        .iter()
+        .any(|value| capability.recognizes(value));
     if inventory.completeness == "boot-complete" && !required && extension.is_none() {
         if inventory.entries.iter().any(|entry| !entry.included) {
             return Err(MicrosandboxError::SnapshotIntegrity(
@@ -772,7 +861,9 @@ pub(super) async fn resolve(
         )
     })?;
     let fs_state_limit = local.config().fs_state_limit();
-    let base = Box::pin(open_base(local, base)).await?;
+    // Direct restore has no import-size option.
+    let mut budget = ImportBudget::unlimited();
+    let base = Box::pin(open_base(local, base, &mut budget)).await?;
     let required_disks = dependencies
         .owned
         .iter()
@@ -836,7 +927,7 @@ pub(super) async fn resolve(
     // must not inherit a writable hardlink into the base; deleting the base must be harmless.
     for (source, required) in available.iter().zip(&dependencies.disks) {
         let target = inventory_entry_target(&required.path, snapshots_dir, cache_dir)?;
-        copy_dependency(&source.source, &target).await?;
+        copy_dependency(&source.source, &target, &mut budget).await?;
     }
     for id in &dependencies.memory {
         let source = checkpoint_object_path(&base.snapshot.path().join(CHECKPOINT_DIRECTORY), id);
@@ -845,7 +936,7 @@ pub(super) async fn resolve(
             snapshots_dir,
             cache_dir,
         )?;
-        copy_dependency(&source, &target).await?;
+        copy_dependency(&source, &target, &mut budget).await?;
         // Verify only the objects actually borrowed, in the destination-owned copy. Export
         // selection is metadata-only for RAM; it must not scan the base's entire guest memory.
         // This reader owns a 64 KiB buffer; boxing prevents every enclosing archive/SDK
@@ -872,7 +963,7 @@ pub(super) async fn resolve(
                 source_error(format!("base is missing owned payload {}", payload.path))
             })?;
         let target = inventory_entry_target(&payload.path, snapshots_dir, cache_dir)?;
-        copy_dependency(source, &target).await?;
+        copy_dependency(source, &target, &mut budget).await?;
         verify_owned_payload(&target, &payload.identity).await?;
     }
 
@@ -984,12 +1075,17 @@ async fn validate_resolved(
     Ok(())
 }
 
-async fn copy_dependency(source: &Path, target: &Path) -> MicrosandboxResult<()> {
+async fn copy_dependency(
+    source: &Path,
+    target: &Path,
+    budget: &mut ImportBudget,
+) -> MicrosandboxResult<()> {
     if tokio::fs::symlink_metadata(target).await.is_ok() {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "dependency collides with an extracted member".into(),
         ));
     }
+    budget.charge_file(source).await?;
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -1134,12 +1230,14 @@ fn physical_layers(
 pub(super) async fn open_base(
     local: &LocalContext,
     input: &str,
+    budget: &mut ImportBudget,
 ) -> MicrosandboxResult<BaseSnapshot> {
     let path = Path::new(input);
     // Admission has already anchored archive filenames. A remaining bare selector
     // belongs to the snapshot store and must not be reclassified after a cwd change.
     if !store::looks_like_path(input) || !path.is_file() {
         let snapshot = store::open_snapshot_leased(local, input).await?;
+        budget.validate_manifest(snapshot.manifest())?;
         if matches!(snapshot.manifest().state, SnapshotState::File(_)) {
             Box::pin(snapshot.verify(local.config().fs_state_limit())).await?;
         }
@@ -1163,21 +1261,26 @@ pub(super) async fn open_base(
             ZstdDecoder::new(reader),
             &snapshots_dir,
             &cache_dir,
+            budget,
         ))
         .await?
     } else {
-        Box::pin(unpack_archive(reader, &snapshots_dir, &cache_dir)).await?
+        Box::pin(unpack_archive(reader, &snapshots_dir, &cache_dir, budget)).await?
     };
+    if unpacked.inventory.is_some() {
+        validate_staged_manifests(&unpacked.manifest_dirs, budget).await?;
+    }
     if let Some(inventory) = &unpacked.inventory {
         if validate(inventory)?.is_some() {
             return Err(MicrosandboxError::InvalidConfig("the supplied base archive must be standalone; load dependent bases explicitly first".into()));
         }
-        materialize_inventory_layers(inventory, &snapshots_dir).await?;
+        materialize_inventory_layers(inventory, &snapshots_dir, budget).await?;
     } else {
         super::super::migration::normalize_staged(local.db().await?, &unpacked.manifest_dirs)
             .await?;
     }
-    let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs).await?;
+    let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs, budget).await?;
+
     let head = match unpacked.head {
         Some(head) => imported
             .iter()
@@ -1308,7 +1411,9 @@ mod tests {
                 assert_eq!(group_selector, "group");
                 std::env::set_current_dir(&second).unwrap();
                 for selector in [&archive_selector, &group_selector] {
-                    let base = open_base(&local, selector).await.unwrap();
+                    let base = open_base(&local, selector, &mut ImportBudget::unlimited())
+                        .await
+                        .unwrap();
                     assert_eq!(base.snapshot.id(), &manifest.snapshot_id);
                 }
                 assert_eq!(
@@ -1558,6 +1663,45 @@ mod tests {
         .await
         .unwrap();
         assert!(load_snapshot(&local, &archive, None).await.is_err());
+        // The omitted base consumes the same budget as payloads in the archive.
+        let top_bytes = std::fs::metadata(head_dir.join(microsandbox_image::snapshot::layer_path(
+            &top.layer_id,
+            top.format,
+        )))
+        .unwrap()
+        .len();
+        let error = load_snapshot_with_options(
+            &local,
+            &archive,
+            LoadOpts {
+                group: Some("over-budget".into()),
+                ..Default::default()
+            }
+            .base(base_name)
+            .maximum_disk_bytes(top_bytes.max(65536)),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("maximum disk size"), "{error}");
+        assert!(!local.snapshots_dir().join("over-budget").exists());
+
+        let limited = load_snapshot_with_options(
+            &local,
+            &archive,
+            LoadOpts {
+                group: Some("within-budget".into()),
+                ..Default::default()
+            }
+            .base(base_name)
+            .maximum_disk_bytes(top_bytes + 65536 + 8192),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(limited.path().join(&base_path)).unwrap(),
+            vec![91u8; 65536],
+        );
+
         // Loading now resolves exact payload identities from a source pool. A complete newer
         // snapshot can supply the required prefix even when it contains additional layers.
         let supplied_by_newer = load_snapshot_with_base(&local, &archive, None, Some(head_name))

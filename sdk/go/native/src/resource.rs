@@ -93,7 +93,8 @@ pub unsafe extern "C" fn msb_sandbox_resource_operation(
                     Ok(r#"{"ok":true}"#.into())
                 }
                 "snapshot" => {
-                    let snapshot = sandbox.snapshot(&name).await?;
+                    // This operation is part of the released single-artifact ABI.
+                    let snapshot = sandbox.checkpoint(&name).await?;
                     let entry = super::persistent_resource::register(
                         super::persistent_resource::Resource::snapshot(snapshot),
                     )?;
