@@ -97,7 +97,7 @@ async fn named_volume_mounts_reuse_or_create_once_before_sandbox_create() {
         );
 
         let body: Value = serde_json::from_str(&requests.last().unwrap().body).unwrap();
-        let mounts = body["spec"]["mounts"].as_array().unwrap();
+        let mounts = body["mounts"].as_array().unwrap();
         assert_eq!(mounts.len(), 2);
         for mount in mounts {
             assert_eq!(mount["name"], "cache");

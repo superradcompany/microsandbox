@@ -94,6 +94,11 @@ it.skipIf(!local || !remote)("coexists with distinct local and remote native lib
         const {nativeOwner} = await import(${JSON.stringify(`file://${temp}/core/dist/internal/provider.js`)});
         const owner = nativeOwner(sb.inner);
         assert.equal(JSON.parse(owner.providerInfo()).local, false);
+        // These exports must exist in the remote library and refuse local-only
+        // observation rather than being hidden by a full/local build.
+        await assert.rejects(sb.resizeStatus(), local.UnsupportedError);
+        await assert.rejects(sb.resizeOperations(), local.UnsupportedError);
+        await assert.rejects(sb.waitUntilResized(), local.UnsupportedError);
         const marker = new Error('configured');
         await assert.rejects(sb.execWith('true', options => {
           assert.equal(nativeOwner(options), owner);

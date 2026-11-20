@@ -37,8 +37,14 @@ struct StopMemorySweep {
     // The token distinguishes this worker from one registered after it has exited.
     token: Arc<()>,
     pending: bool,
-    targets: Vec<PathBuf>,
+    targets: Vec<StoppedMemoryTarget>,
     finished: watch::Sender<bool>,
+}
+
+struct StoppedMemoryTarget {
+    directory: PathBuf,
+    // The source is selected by completed stop; cleanup rechecks current ownership.
+    context: Option<LocalContext>,
 }
 
 struct StopMemorySweepRegistration {
@@ -57,7 +63,7 @@ struct BranchMemoryReference {
 //--------------------------------------------------------------------------------------------------
 
 impl LocalContext {
-    /// Wait for branch cache cleanup requested by this backend's completed stops.
+    /// Wait for branch-cache and checkpoint-store cleanup requested by completed stops.
     /// CLI callers use this after their stop result, outside the graceful-stop deadline.
     pub async fn finish_stopped_memory_cleanup(&self) {
         let root = self.cache_dir().join("memory");
@@ -197,10 +203,27 @@ impl LocalContext {
         #[cfg(not(windows))]
         let legacy_alive = false;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let departing = super::process_exit::RuntimeExit::capture(
+        let departing = match super::process_exit::RuntimeExit::capture(
             run.as_ref().and_then(|run| run.pid),
             &microsandbox_runtime::ipc::lifecycle_lock_path(&run_dir, name),
-        )?;
+        ) {
+            // A foreign PID after reboot can deny descriptor inspection. With no
+            // runtime owner, stop still waits for the selected generation's disk locks.
+            Err(error) if !lock_owned && error.kind() == std::io::ErrorKind::PermissionDenied => {
+                if microsandbox_runtime::ipc::SandboxSocketPaths::in_sandboxes_dir(
+                    &run_dir,
+                    &self.sandboxes_dir(),
+                    name,
+                )
+                .may_be_live()
+                .await?
+                {
+                    return Err(error.into());
+                }
+                None
+            }
+            result => result?,
+        };
         // Ownership, not a potentially recycled PID, decides whether there is a
         // runtime to signal. A stale Running row must still converge successfully.
         if (lock_owned || legacy_alive)
@@ -338,8 +361,7 @@ impl LocalContext {
                 drop(_disk_guards);
                 drop(_ownership);
                 drop(transition);
-                let memory_root = self.cache_dir().join("memory");
-                schedule_stopped_memory_sweep(memory_root, Some(self.sandboxes_dir().join(name)));
+                schedule_stopped_memory_sweep(self.clone(), name);
                 return Ok(());
             }
             drop(transition);
@@ -423,9 +445,14 @@ fn branch_memory_for_stop(sandbox: &Path, root: &Path) -> Option<LocalMemory> {
     Some(reference.memory)
 }
 
-fn schedule_stopped_memory_sweep(root: PathBuf, target: Option<PathBuf>) {
+fn schedule_stopped_memory_sweep(local: LocalContext, name: &str) {
+    let root = local.cache_dir().join("memory");
+    let target = Some(StoppedMemoryTarget {
+        directory: local.sandboxes_dir().join(name),
+        context: Some(local),
+    });
     let session = Mutex::new(microsandbox_runtime::checkpoint::MemoryPruneSession::default());
-    schedule_stopped_memory_sweep_with(root, target, move |root| {
+    schedule_memory_cleanup(root, target, move |root| {
         let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
             branches_only: true,
             max_entries: Some(256),
@@ -442,9 +469,25 @@ fn schedule_stopped_memory_sweep(root: PathBuf, target: Option<PathBuf>) {
     });
 }
 
+#[cfg(test)]
 fn schedule_stopped_memory_sweep_with(
     root: PathBuf,
     target: Option<PathBuf>,
+    sweep: impl Fn(&Path) -> bool + Send + Sync + 'static,
+) {
+    schedule_memory_cleanup(
+        root,
+        target.map(|directory| StoppedMemoryTarget {
+            directory,
+            context: None,
+        }),
+        sweep,
+    );
+}
+
+fn schedule_memory_cleanup(
+    root: PathBuf,
+    target: Option<StoppedMemoryTarget>,
     sweep: impl Fn(&Path) -> bool + Send + Sync + 'static,
 ) {
     let token = {
@@ -490,11 +533,24 @@ fn schedule_stopped_memory_sweep_with(
                     .map(|active| std::mem::take(&mut active.targets))
                     .unwrap_or_default()
             };
+            for target in &targets {
+                if let Some(local) = &target.context
+                    && let Some(source) =
+                        target.directory.file_name().and_then(|name| name.to_str())
+                    && let Err(error) =
+                        crate::context::local::snapshot::deletion::release_store_objects(
+                            local, source,
+                        )
+                        .await
+                {
+                    tracing::warn!(%error, source, "stopped sandbox checkpoint cleanup deferred");
+                }
+            }
             let scan_root = root.clone();
             let scan = Arc::clone(&sweep);
             let truncated = match tokio::task::spawn_blocking(move || {
                 for sandbox in targets {
-                    if let Some(memory) = branch_memory_for_stop(&sandbox, &scan_root)
+                    if let Some(memory) = branch_memory_for_stop(&sandbox.directory, &scan_root)
                         && let Err(error) = memory.evict()
                     {
                         tracing::debug!(%error, "targeted stopped sandbox memory cleanup");
@@ -559,6 +615,67 @@ mod tests {
     use super::*;
     use crate::db::entity::sandbox;
     use crate::sandbox::SandboxConfig;
+
+    #[tokio::test]
+    async fn completed_stop_retries_checkpoint_store_cleanup_and_preserves_recovery_links() {
+        use microsandbox_image::checkpoint::LocalObjectStore;
+        let (_home, local, id, run_id) = fixture("checkpoint-stop").await;
+        let sandbox = local.sandboxes_dir().join("checkpoint-stop");
+        let store = LocalObjectStore::open(sandbox.join("checkpoint-store")).unwrap();
+        let orphan = store.object_path(&store.put_bytes(b"removed snapshot").unwrap());
+        let recovery = store.object_path(&store.put_bytes(b"recovery").unwrap());
+        let capture = sandbox.join("checkpoints/checkpoint_recovery");
+        std::fs::create_dir_all(&capture).unwrap();
+        std::fs::hard_link(&recovery, capture.join("object")).unwrap();
+        let runtime = try_acquire_lifecycle_guard(&local.config().run_dir(), "checkpoint-stop")
+            .unwrap()
+            .unwrap();
+        crate::context::local::snapshot::deletion::release_store_objects(&local, "checkpoint-stop")
+            .await
+            .unwrap();
+        assert!(orphan.exists());
+        drop(runtime);
+
+        local
+            .wait_stop_complete(
+                "checkpoint-stop",
+                id,
+                Some(run_id),
+                false,
+                #[cfg(windows)]
+                None,
+            )
+            .await
+            .unwrap();
+        local.finish_stopped_memory_cleanup().await;
+
+        assert!(!orphan.exists());
+        assert!(recovery.exists());
+        assert_eq!(std::fs::read(capture.join("object")).unwrap(), b"recovery");
+    }
+
+    #[tokio::test]
+    async fn deferred_checkpoint_store_cleanup_rechecks_a_restarted_runtime() {
+        use microsandbox_image::checkpoint::LocalObjectStore;
+        let (_home, local, _, _) = fixture("checkpoint-restart").await;
+        let store = LocalObjectStore::open(
+            local
+                .sandboxes_dir()
+                .join("checkpoint-restart/checkpoint-store"),
+        )
+        .unwrap();
+        let object = store.object_path(&store.put_bytes(b"new runtime baseline").unwrap());
+        let runtime = try_acquire_lifecycle_guard(&local.config().run_dir(), "checkpoint-restart")
+            .unwrap()
+            .unwrap();
+        schedule_stopped_memory_sweep(local.clone(), "checkpoint-restart");
+        local.finish_stopped_memory_cleanup().await;
+        assert!(object.exists());
+        drop(runtime);
+        schedule_stopped_memory_sweep(local.clone(), "checkpoint-restart");
+        local.finish_stopped_memory_cleanup().await;
+        assert!(!object.exists());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stopped_memory_sweeps_coalesce_without_blocking_other_roots() {

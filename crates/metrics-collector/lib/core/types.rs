@@ -51,6 +51,11 @@ pub struct MetricsExportBatch {
 #[async_trait]
 pub trait MetricsExporter: Send + Sync + 'static {
     /// Export a buffered metrics batch.
+    ///
+    /// The worker removes expired guest-memory values before dispatch. Exporters
+    /// that retain or delay a batch must recheck `guest_memory_is_fresh_at` against
+    /// `microsandbox_metrics::guest_memory_clock()` before emitting current values;
+    /// collection/export time must never replace the original guest receipt.
     async fn export(&self, batch: Arc<MetricsExportBatch>) -> MetricsCollectorResult<()>;
 
     /// Shut down any exporter-owned resources.

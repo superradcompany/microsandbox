@@ -95,7 +95,7 @@ mod tests {
             let destination: std::sync::Arc<dyn crate::Context> = (backend).into();
 
             let snapshot = destination
-                .snapshots()
+                .checkpoints()
                 .open(source.to_string_lossy())
                 .await
                 .unwrap();
@@ -111,7 +111,11 @@ mod tests {
                 .save_to(&archive, SaveOpts::default())
                 .await
                 .unwrap();
-            let imported = destination.snapshots().load(&archive, None).await.unwrap();
+            let imported = destination
+                .checkpoints()
+                .load(&archive, None)
+                .await
+                .unwrap();
             let copy = temp.path().join("copy.tar.zst");
             let manifest = imported
                 .copy_to(&copy)
@@ -119,7 +123,7 @@ mod tests {
                 .save()
                 .await
                 .unwrap();
-            let copied = destination.snapshots().load(&copy, None).await.unwrap();
+            let copied = destination.checkpoints().load(&copy, None).await.unwrap();
             assert_eq!(copied.manifest().await.unwrap(), manifest);
             assert!(copied.verify().await.is_ok());
             let manifest = copied.manifest().await.unwrap();

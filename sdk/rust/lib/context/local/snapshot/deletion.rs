@@ -2,9 +2,15 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(windows)]
+use cap_primitives::fs::_WindowsByHandle;
+use cap_primitives::fs::{FollowSymlinks, open_dir_nofollow};
+use cap_std::fs::Dir;
+#[cfg(any(unix, windows))]
+use cap_std::fs::MetadataExt;
 use microsandbox_image::storage_lease::StorageLease;
 use microsandbox_runtime::ipc::SandboxLifecycleGuard;
 use microsandbox_utils::process_lock;
@@ -12,7 +18,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
 
 use crate::context::LocalContext;
-use crate::db::entity::{sandbox, snapshot};
+use crate::db::entity::{run, sandbox, snapshot};
 use crate::sandbox::validate_sandbox_name;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -26,6 +32,42 @@ pub(super) fn quarantine(source: &Path) -> MicrosandboxResult<()> {
     let parent = source
         .parent()
         .ok_or_else(|| std::io::Error::other("snapshot has no parent"))?;
+    let (path, lock) = prepare_retirement(parent, source.file_name().unwrap())?;
+    let root = parent.join(".snapshot-deletions");
+    std::fs::rename(source, path.join("payload")).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("move snapshot into deletion quarantine: {error}"),
+        )
+    })?;
+    sync_dir(parent)?;
+    sync_dir(&path)?;
+    std::fs::remove_dir_all(path.join("payload")).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("remove quarantined snapshot: {error}"),
+        )
+    })?;
+    // Keep the intent until catalog deletion has committed. Recovery may finish the row
+    // removal if the process dies between retiring the directory and updating the index.
+    drop(lock);
+    sync_dir(&root)?;
+    Ok(())
+}
+
+/// Create a recoverable catalog-retirement receipt without changing the live member.
+/// The returned lock must span publication. A complete-generation publisher places this
+/// record in its private view, making the absent member and recovery intent visible together.
+pub(super) fn prepare_retirement(
+    parent: &Path,
+    name: &std::ffi::OsStr,
+) -> MicrosandboxResult<(PathBuf, File)> {
+    let name_path = Path::new(name);
+    if name_path.components().count() != 1
+        || !matches!(name_path.components().next(), Some(Component::Normal(_)))
+    {
+        return Err(std::io::Error::other("invalid snapshot retirement name").into());
+    }
     let root = parent.join(".snapshot-deletions");
     std::fs::create_dir_all(&root)?;
     if !std::fs::symlink_metadata(&root)?.file_type().is_dir() {
@@ -41,40 +83,63 @@ pub(super) fn quarantine(source: &Path) -> MicrosandboxResult<()> {
     let record = path.join("source.json");
     let temporary = path.join("source.json.part");
     let mut file = File::create(&temporary)?;
-    file.write_all(&serde_json::to_vec(&PathBuf::from(
-        source.file_name().unwrap(),
-    ))?)?;
+    file.write_all(&serde_json::to_vec(&PathBuf::from(name))?)?;
     file.sync_all()?;
     drop(file);
 
     std::fs::rename(&temporary, &record)?;
     sync_dir(&path)?;
     sync_dir(&root)?;
-    std::fs::rename(source, path.join("payload")).map_err(|error| {
-        std::io::Error::new(
-            error.kind(),
-            format!("move snapshot into deletion quarantine: {error}"),
-        )
-    })?;
-    sync_dir(parent)?;
-    sync_dir(&path)?;
     drop(coordination);
-    std::fs::remove_dir_all(path.join("payload")).map_err(|error| {
-        std::io::Error::new(
-            error.kind(),
-            format!("remove quarantined snapshot: {error}"),
-        )
-    })?;
-    // Keep the intent until catalog deletion has committed. Recovery may finish the row
-    // removal if the process dies between retiring the directory and updating the index.
-    drop(lock);
-    sync_dir(&root)?;
-    Ok(())
+    Ok((path, lock))
 }
 
 /// Recovery never removes a new artifact at the original name. Only an absent source permits
 /// deletion of its stale catalog row. The exact entry lease spans that check and row deletion.
 pub(super) async fn recover_parent(local: &LocalContext, parent: &Path) -> MicrosandboxResult<()> {
+    super::group::recover_histories(local, parent).await?;
+
+    // Recovery creates namespace leases and retires journal paths too. It must
+    // enter before those operations, otherwise a group exchange could move its
+    // journal while the worker is still using the old pathname. Busy recovery is
+    // deferred; never wait on admission while catalog initialization owns locks.
+    let writer = if super::group::is_group(parent) {
+        let Some(writer) = super::writer::WriterLease::try_acquire(parent)? else {
+            return Ok(());
+        };
+        Some(writer)
+    } else {
+        None
+    };
+    recover_parent_owned(local, parent, writer).await
+}
+
+/// A whole-history remover already owns admission; do not skip its final recovery pass.
+pub(super) async fn recover_parent_admitted(
+    local: &LocalContext,
+    parent: &Path,
+    writer: super::writer::WriterLease,
+) -> MicrosandboxResult<()> {
+    writer.validate(parent)?;
+    recover_parent_owned(local, parent, Some(writer)).await
+}
+
+async fn recover_parent_owned(
+    local: &LocalContext,
+    parent: &Path,
+    writer: Option<super::writer::WriterLease>,
+) -> MicrosandboxResult<()> {
+    if let Some(admission) = writer.clone() {
+        let directory = parent.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let _admission = admission;
+            super::group::recover_retired(&directory)
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Custom(format!("group generation recovery: {error}"))
+        })??;
+    }
     let root = parent.join(".snapshot-deletions");
     match std::fs::symlink_metadata(&root) {
         Ok(metadata) if metadata.file_type().is_dir() => {}
@@ -155,6 +220,13 @@ pub(super) async fn recover_parent(local: &LocalContext, parent: &Path) -> Micro
         };
         match std::fs::symlink_metadata(&source) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The receipt may have arrived in a complete-directory exchange whose
+                // publisher died before flushing the group's parent. Confirm that view
+                // is durable before releasing its catalog/image roots.
+                sync_dir(parent)?;
+                if let Some(container) = parent.parent() {
+                    sync_dir(container)?;
+                }
                 // Current rows use the resolved address; older catalogs can retain
                 // the original spelling through a symlinked parent.
                 let canonical_key = StorageLease::key(&source)?.display().to_string();
@@ -169,8 +241,9 @@ pub(super) async fn recover_parent(local: &LocalContext, parent: &Path) -> Micro
             Ok(_) => {} // Publication or a crash before retirement left a valid live name.
         }
         let path = entry.path();
+        let worker_writer = writer.clone();
         tokio::task::spawn_blocking(move || {
-            let _guards = (lease, lock);
+            let _guards = (lease, lock, worker_writer);
             discard(&path)
         })
         .await
@@ -181,58 +254,120 @@ pub(super) async fn recover_parent(local: &LocalContext, parent: &Path) -> Micro
     Ok(())
 }
 
-/// Delete objects from a stopped source sandbox's checkpoint store once no snapshot or capture
-/// directory links them. A running sandbox keeps its latest capture's objects in memory by path
-/// without a link, so only a sandbox that no runtime owns is touched, and the lifecycle lock
-/// keeps it stopped meanwhile. Anything skipped or failing stays in the store.
-pub(super) async fn release_store_objects(
+/// Release unused objects only after excluding both runtime activity and capture publication.
+/// Captures can still be publishing after their VM exits, so the lifecycle lock alone is
+/// insufficient. The existing transition -> lineage -> lifecycle order also fences restarts.
+pub(crate) async fn release_store_objects(
     local: &LocalContext,
     source: &str,
 ) -> MicrosandboxResult<()> {
     if validate_sandbox_name(source).is_err() {
         return Ok(());
     }
-    let registered = sandbox::Entity::find()
+    let db = local.db().await?;
+    let run_dir = local.config().run_dir();
+    let Some(transition) =
+        microsandbox_runtime::ipc::try_acquire_transition_guard(&run_dir, source)?
+    else {
+        return Ok(());
+    };
+    let Some(lineage) =
+        microsandbox_runtime::ipc::try_acquire_snapshot_lineage_guard(&run_dir, source)?
+    else {
+        return Ok(());
+    };
+    let Some(lifecycle) = SandboxLifecycleGuard::try_acquire(&run_dir, source)? else {
+        return Ok(());
+    };
+    let Some(registered) = sandbox::Entity::find()
         .filter(sandbox::Column::Name.eq(source))
-        .one(local.db().await?.read())
-        .await?;
-    if registered.is_none() {
+        .one(db.read())
+        .await?
+    else {
+        return Ok(());
+    };
+    if registered.status.has_active_runtime_state() {
         return Ok(());
     }
-
-    let run_dir = local.config().run_dir();
-    let store = local
-        .sandboxes_dir()
-        .join(source)
-        .join("checkpoint-store")
-        .join("objects")
-        .join("sha256");
+    // Older Windows runtimes do not own the modern lifecycle lock. Retain their store
+    // whenever a recorded active process is alive rather than treating a free lock as exit.
+    let active_runs = run::Entity::find()
+        .filter(run::Column::SandboxId.eq(registered.id))
+        .filter(run::Column::Status.eq(run::RunStatus::Running))
+        .all(db.read())
+        .await?;
+    if active_runs
+        .iter()
+        .any(|run| run.pid.is_none_or(LocalContext::pid_is_alive))
+    {
+        return Ok(());
+    }
+    let sandboxes = local.sandboxes_dir();
     let source = source.to_owned();
     tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
-        let Some(_lifecycle) = SandboxLifecycleGuard::try_acquire(&run_dir, &source)? else {
-            return Ok(());
-        };
-        let shards = match std::fs::read_dir(&store) {
-            Ok(shards) => shards,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        for shard in shards {
-            let shard = shard?;
-            if !is_hex(&shard.file_name().to_string_lossy(), 2) || !shard.file_type()?.is_dir() {
-                continue;
-            }
-            for object in std::fs::read_dir(shard.path())? {
-                let object = object?;
-                if is_hex(&object.file_name().to_string_lossy(), 64) {
-                    release_unlinked(&object.path())?;
-                }
-            }
+        // Cancellation of the async caller must not release guards during the filesystem scan.
+        let _guards = (transition, lineage, lifecycle);
+        match release_stopped_store(&sandboxes, &source) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result.map_err(Into::into),
         }
-        Ok(())
     })
     .await
     .map_err(|error| MicrosandboxError::Custom(format!("checkpoint object release: {error}")))?
+}
+
+/// Every child is opened relative to an admitted directory, without following symlinks or
+/// Windows reparse points. A corrupt store must never redirect cleanup into another host tree.
+fn release_stopped_store(sandboxes: &Path, source: &str) -> io::Result<()> {
+    let mut parent =
+        Dir::open_ambient_dir(sandboxes, cap_std::ambient_authority())?.into_std_file();
+    for name in [source, "checkpoint-store", "objects", "sha256"] {
+        parent = open_dir_nofollow(&parent, Path::new(name))?;
+    }
+    let store = Dir::from_std_file(parent);
+    let shards = store.entries()?;
+    let store = store.into_std_file();
+    for shard in shards {
+        let shard = shard?;
+        if !is_hex(&shard.file_name().to_string_lossy(), 2) || !shard.file_type()?.is_dir() {
+            continue;
+        }
+        let shard = Dir::from_std_file(open_dir_nofollow(&store, Path::new(&shard.file_name()))?);
+        let objects = shard.entries()?;
+        let shard = shard.into_std_file();
+        for object in objects {
+            let object = object?;
+            if is_hex(&object.file_name().to_string_lossy(), 64) {
+                release_unlinked(&shard, Path::new(&object.file_name()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Never erase a receipt skipped because another process still owns its active lock.
+/// Called under the group publication lock after admitted recovery has completed.
+pub(super) fn require_no_pending(parent: &Path) -> MicrosandboxResult<()> {
+    let root = parent.join(".snapshot-deletions");
+    match std::fs::symlink_metadata(&root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "snapshot deletion directory is not a real directory".into(),
+            ));
+        }
+    }
+    for entry in std::fs::read_dir(root)? {
+        if entry?.file_name().to_string_lossy().starts_with("delete-") {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "snapshot group still has pending member cleanup; retry removal after recovery"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Remember external parents before retiring the last indexed member. These small
@@ -261,7 +396,13 @@ pub(crate) fn recovery_parents(local: &LocalContext) -> std::io::Result<BTreeSet
     if managed.exists() {
         for entry in std::fs::read_dir(&managed)? {
             let entry = entry?;
-            if entry.file_type()?.is_dir()
+            // Private/retired generations carry group.json too. Only the live
+            // group may recover their receipts under its stable writer key.
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".group-generation-")
+                && entry.file_type()?.is_dir()
                 && entry.path().join(super::group::GROUP_FILENAME).is_file()
             {
                 parents.insert(entry.path());
@@ -294,27 +435,28 @@ pub(crate) fn recovery_parents(local: &LocalContext) -> std::io::Result<BTreeSet
     Ok(parents)
 }
 
-#[cfg(unix)]
-fn release_unlinked(object: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = match std::fs::symlink_metadata(object) {
+fn release_unlinked(directory: &File, name: &Path) -> io::Result<()> {
+    // Windows directory enumeration does not provide the link count. A no-follow,
+    // handle-relative stat obtains it on both platforms through the existing cap APIs.
+    let metadata = match cap_primitives::fs::stat(directory, name, FollowSymlinks::No) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+    #[cfg(unix)]
+    let unlinked = metadata.nlink() == 1;
+    #[cfg(windows)]
+    let unlinked = _WindowsByHandle::number_of_links(&metadata) == Some(1)
+        && metadata.file_attributes() & 0x400 == 0;
+    #[cfg(not(any(unix, windows)))]
+    let unlinked = false;
+    if !metadata.is_file() || !unlinked {
         return Ok(());
     }
-    match std::fs::remove_file(object) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+    match cap_primitives::fs::remove_file(directory, name) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
-}
-
-#[cfg(not(unix))]
-fn release_unlinked(_object: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 fn is_hex(name: &str, length: usize) -> bool {
@@ -361,4 +503,230 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn store_fixture() -> (
+        tempfile::TempDir,
+        LocalContext,
+        microsandbox_image::checkpoint::LocalObjectStore,
+        i32,
+    ) {
+        use sea_orm::{ActiveModelTrait, Set};
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .unwrap();
+        let model = sandbox::ActiveModel {
+            name: Set("box".into()),
+            config: Set("{}".into()),
+            status: Set(crate::sandbox::SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+        let store = microsandbox_image::checkpoint::LocalObjectStore::open(
+            local.sandboxes_dir().join("box/checkpoint-store"),
+        )
+        .unwrap();
+        (home, local, store, model.id)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_reclaims_orphans_and_preserves_snapshots_and_recovery_captures() {
+        let (_home, local, store, _) = store_fixture().await;
+        let orphan = store.object_path(&store.put_bytes(b"orphan").unwrap());
+        let shared = store.object_path(&store.put_bytes(b"snapshot").unwrap());
+        let recovery = store.object_path(&store.put_bytes(b"recovery").unwrap());
+        let snapshot_link = local.sandboxes_dir().join("retained-snapshot-object");
+        std::fs::hard_link(&shared, &snapshot_link).unwrap();
+        let capture = local.sandboxes_dir().join("box/checkpoints/checkpoint_old");
+        std::fs::create_dir_all(&capture).unwrap();
+        let recovery_link = capture.join("recovery-object");
+        std::fs::hard_link(&recovery, &recovery_link).unwrap();
+        let independent_copy = local.sandboxes_dir().join("copied-snapshot-object");
+        std::fs::copy(&orphan, &independent_copy).unwrap();
+        let unknown = orphan.parent().unwrap().join("unrecognized-file");
+        std::fs::write(&unknown, b"retain").unwrap();
+
+        release_store_objects(&local, "box").await.unwrap();
+
+        assert!(!orphan.exists());
+        assert!(shared.exists() && recovery.exists() && unknown.exists());
+        assert_eq!(std::fs::read(recovery_link).unwrap(), b"recovery");
+        assert_eq!(std::fs::read(snapshot_link).unwrap(), b"snapshot");
+        assert_eq!(std::fs::read(independent_copy).unwrap(), b"orphan");
+        // A later pass becomes eligible only once the protected capture link is gone.
+        std::fs::remove_dir_all(capture).unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(!recovery.exists());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_defers_for_transition_capture_and_runtime_owners() {
+        let (_home, local, store, _) = store_fixture().await;
+        let orphan = store.object_path(&store.put_bytes(b"orphan").unwrap());
+        let run_dir = local.config().run_dir();
+        let transition = microsandbox_runtime::ipc::try_acquire_transition_guard(&run_dir, "box")
+            .unwrap()
+            .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(orphan.exists());
+        drop(transition);
+        let capture = super::super::lineage::lock_source(&run_dir, "box")
+            .await
+            .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(orphan.exists());
+        drop(capture);
+        let runtime = SandboxLifecycleGuard::try_acquire(&run_dir, "box")
+            .unwrap()
+            .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(orphan.exists());
+        drop(runtime);
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(!orphan.exists());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_preserves_a_live_legacy_process_without_a_lifecycle_lock() {
+        use sea_orm::{ActiveModelTrait, Set};
+        let (_home, local, store, id) = store_fixture().await;
+        let orphan = store.object_path(&store.put_bytes(b"orphan").unwrap());
+        let active = run::ActiveModel {
+            sandbox_id: Set(id),
+            pid: Set(Some(std::process::id() as i32)),
+            status: Set(run::RunStatus::Running),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(orphan.exists());
+        run::Entity::delete_by_id(active.id)
+            .exec(local.db().await.unwrap().write())
+            .await
+            .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(!orphan.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_store_never_follows_symlinked_directories_or_objects() {
+        use std::os::unix::fs::symlink;
+        let (home, local, store, _) = store_fixture().await;
+        let orphan = store.object_path(&store.put_bytes(b"orphan").unwrap());
+        let sandbox = local.sandboxes_dir().join("box");
+        // Move each admitted subtree out, then substitute a symlink. No outside file may be deleted.
+        for relative in [
+            "checkpoint-store/objects/sha256",
+            "checkpoint-store/objects",
+            "checkpoint-store",
+        ] {
+            let path = sandbox.join(relative);
+            let outside = home.path().join("outside");
+            std::fs::rename(&path, &outside).unwrap();
+            symlink(&outside, &path).unwrap();
+            assert!(release_store_objects(&local, "box").await.is_err());
+            assert!(orphan.exists());
+            std::fs::remove_file(&path).unwrap();
+            std::fs::rename(&outside, &path).unwrap();
+        }
+        let outside = home.path().join("outside-object");
+        std::fs::write(&outside, b"outside").unwrap();
+        let alias = orphan.parent().unwrap().join("a".repeat(64));
+        symlink(&outside, &alias).unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+        assert!(alias.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(!orphan.exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn checkpoint_store_never_follows_windows_directory_junctions() {
+        let (home, local, store, _) = store_fixture().await;
+        let object = store.object_path(&store.put_bytes(b"outside object").unwrap());
+        let root = local.sandboxes_dir().join("box/checkpoint-store");
+        let outside = home.path().join("outside");
+        std::fs::rename(&root, &outside).unwrap();
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&root)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+
+        assert!(release_store_objects(&local, "box").await.is_err());
+        assert_eq!(std::fs::read(&object).unwrap(), b"outside object");
+        // Remove the junction itself so TempDir cleanup never needs to inspect its target.
+        std::fs::remove_dir(&root).unwrap();
+        std::fs::rename(&outside, &root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_never_recovers_a_private_generation_as_a_live_group() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .unwrap();
+        let group = super::super::group::ensure(&local.snapshots_dir(), Some("history"))
+            .await
+            .unwrap();
+        let private = local.snapshots_dir().join(".group-generation-interrupted");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::copy(
+            group.join(super::super::group::GROUP_FILENAME),
+            private.join(super::super::group::GROUP_FILENAME),
+        )
+        .unwrap();
+        let parents = recovery_parents(&local).unwrap();
+        assert!(parents.contains(&group));
+        assert!(!parents.contains(&private));
+    }
+
+    #[tokio::test]
+    async fn group_recovery_defers_namespace_and_journal_mutation_until_writer_finishes() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .unwrap();
+        local.db().await.unwrap();
+        let group = super::super::group::ensure(&local.snapshots_dir(), Some("history"))
+            .await
+            .unwrap();
+        let journal = group.join(".snapshot-deletions/delete-interrupted");
+        std::fs::create_dir_all(journal.join("payload")).unwrap();
+        std::fs::write(journal.join("source.json"), b"\"retired\"").unwrap();
+        std::fs::write(journal.join("payload/marker"), b"retained").unwrap();
+        let admission = super::super::writer::WriterLease::acquire(&group)
+            .await
+            .unwrap();
+
+        recover_parent(&local, &group).await.unwrap();
+        assert!(journal.join("payload/marker").is_file());
+        assert!(!group.join(".msb-leases").exists());
+
+        drop(admission);
+        recover_parent(&local, &group).await.unwrap();
+        assert!(!journal.exists());
+        assert!(group.join(super::super::group::GROUP_FILENAME).is_file());
+    }
 }

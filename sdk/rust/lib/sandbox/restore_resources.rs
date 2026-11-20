@@ -16,6 +16,12 @@ use crate::{MicrosandboxResult, SandboxConfigPatch};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RestoreResources {
+    /// The prepared patch already contains a resolved disk-boot allocation.
+    pub portable_defaults_applied: bool,
+    /// Destination policy before caller options. A sparse patch also distinguishes
+    /// an explicit allocation ceiling from a ceiling derived from the chosen size.
+    pub destination_defaults: Option<Box<microsandbox_types::SandboxSpecPatch>>,
+    pub minimum_security: microsandbox_types::SecurityProfile,
     /// Descriptor admitted during archive inspection, checked again before child publication.
     #[cfg(feature = "local")]
     pub archive_manifest: Option<std::sync::Arc<crate::snapshot::Manifest>>,
@@ -52,6 +58,7 @@ impl RestoreResources {
             self.archive_manifest = None;
             self.geometry = None;
         }
+        self.portable_defaults_applied = false;
         self.agent_ready = None;
         self.nested_virt = None;
     }
@@ -79,6 +86,22 @@ impl RestoreResources {
 
         self.agent_ready = Some(ready);
         Ok(())
+    }
+
+    /// Recognize the saved-settings requirement only on a path that applied its plan.
+    /// Generic readers and later schema versions keep their existing refusal.
+    #[cfg(feature = "local")]
+    pub(crate) fn unsupported_for_restore<'a>(
+        &self,
+        manifest: &'a crate::snapshot::Manifest,
+    ) -> Vec<&'a str> {
+        let mut unsupported = manifest.unsupported_requires();
+        if self.portable_defaults_applied {
+            unsupported.retain(|key| {
+                *key != microsandbox_types::snapshot::saved_config::SAVED_CONFIG_EXTENSION
+            });
+        }
+        unsupported
     }
 
     /// Validate explicit settings against the captured guest before merging defaults.

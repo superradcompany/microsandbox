@@ -36,7 +36,6 @@ async def test_create_kwargs_affect_guest_defaults(sandbox_name):
                 "printf 'script:%s:%s\\n' \"$(whoami)\" \"$PYTHON_CREATE_KWARG\""
             )
         },
-        replace=True,
     )
 
     try:
@@ -86,7 +85,6 @@ async def test_create_kwargs_round_trip_through_config(sandbox_name):
         pull_policy=PullPolicy.IF_MISSING,
         log_level=LogLevel.INFO,
         detached=True,
-        replace=True,
     )
     handle = None
     connected = None

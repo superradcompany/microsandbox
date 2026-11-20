@@ -44,23 +44,36 @@ pub(super) async fn create(
     builder: microsandbox::sandbox::SandboxBuilder,
     id: u64,
 ) -> Result<microsandbox::Sandbox, FfiError> {
-    observe(id, || builder.create_with_progress()).await
+    observe(id, || async { builder.create_with_progress() }).await
 }
 
 pub(super) async fn restore(
     builder: microsandbox::sandbox::RestoreBuilder,
     id: u64,
 ) -> Result<microsandbox::Sandbox, FfiError> {
-    observe(id, || builder.restore_with_progress()).await
+    observe(id, || async { builder.restore_with_progress() }).await
 }
 
-async fn observe(
+pub(super) async fn spawn_checkpoint(
+    checkpoint: microsandbox::Checkpoint,
+    builder: microsandbox::sandbox::RestoreBuilder,
     id: u64,
-    start: impl FnOnce() -> microsandbox::MicrosandboxResult<(
-        microsandbox::CreationProgressHandle,
-        tokio::task::JoinHandle<microsandbox::MicrosandboxResult<microsandbox::Sandbox>>,
-    )>,
 ) -> Result<microsandbox::Sandbox, FfiError> {
+    observe(id, || {
+        checkpoint.spawn_sandbox_with_progress_with(|_| builder)
+    })
+    .await
+}
+
+async fn observe<F>(id: u64, start: impl FnOnce() -> F) -> Result<microsandbox::Sandbox, FfiError>
+where
+    F: std::future::Future<
+            Output = microsandbox::MicrosandboxResult<(
+                microsandbox::CreationProgressHandle,
+                tokio::task::JoinHandle<microsandbox::MicrosandboxResult<microsandbox::Sandbox>>,
+            )>,
+        >,
+{
     let sender = registry()
         .read()
         .map_err(|_| FfiError::internal("progress registry poisoned"))?
@@ -68,7 +81,7 @@ async fn observe(
         .ok_or_else(|| FfiError::invalid_handle(id))?
         .0
         .clone();
-    let (mut progress, task) = start().map_err(FfiError::from)?;
+    let (mut progress, task) = start().await.map_err(FfiError::from)?;
     let mut task = CreationTask(task);
     loop {
         tokio::select! {

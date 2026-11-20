@@ -15,7 +15,7 @@ use super::Manifest;
 
 pub(crate) const METADATA_FILENAME: &str = "metadata.json";
 const METADATA_SCHEMA: &str = "microsandbox.snapshot-metadata/1";
-const MAX_METADATA_BYTES: u64 = 1024 * 1024;
+pub(super) const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const LEGACY_LABEL_EXTENSION: &str = "org.microsandbox.capture-labels";
 
 //--------------------------------------------------------------------------------------------------

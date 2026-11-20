@@ -32,7 +32,7 @@ func liveVolumeInfo(t *testing.T, ctx context.Context, volume *microsandbox.Volu
 	}
 	return value
 }
-func liveSnapshotInfo(t *testing.T, ctx context.Context, snapshot *microsandbox.Snapshot) *microsandbox.SnapshotInfo {
+func liveSnapshotInfo(t *testing.T, ctx context.Context, snapshot *microsandbox.Checkpoint) *microsandbox.SnapshotInfo {
 	t.Helper()
 	value, err := snapshot.Info(ctx)
 	if err != nil {
@@ -40,7 +40,7 @@ func liveSnapshotInfo(t *testing.T, ctx context.Context, snapshot *microsandbox.
 	}
 	return value
 }
-func localSnapshotPath(t *testing.T, snapshot *microsandbox.Snapshot) string {
+func localSnapshotPath(t *testing.T, snapshot *microsandbox.Checkpoint) string {
 	t.Helper()
 	path, err := snapshot.Path()
 	if err != nil {

@@ -37,10 +37,10 @@ pub struct ExecControlReady {
 
 /// Client-facing Ready extension. Keeping this separate preserves existing Ready struct literals.
 #[derive(Serialize)]
-pub struct ExecControlAdvertisement<'a> {
+pub struct ExecControlAdvertisement<'a, T = Ready> {
     /// Original guest capability payload, unchanged.
     #[serde(flatten)]
-    pub ready: &'a Ready,
+    pub ready: &'a T,
     /// Host-owned route advertised to this one agent connection.
     pub exec_control: &'a ExecControlReady,
 }

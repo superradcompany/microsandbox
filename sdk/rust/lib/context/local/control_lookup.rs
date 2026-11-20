@@ -225,6 +225,7 @@ mod tests {
                 run: selected,
             },
             &CreationStorage::for_test(&child_dir),
+            2,
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("changed runtime"));
