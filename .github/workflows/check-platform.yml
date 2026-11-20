@@ -30,6 +30,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Reusable workflows do not inherit the caller's workflow-level environment.
+  RUST_BACKTRACE: "full"
+  PYTHONFAULTHANDLER: "1"
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_TIMEOUT: "120"
   CARGO_HTTP_MULTIPLEXING: "false"
@@ -256,6 +259,7 @@ jobs:
             ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
           fi
       - name: Build and test Python SDK
+        id: python-check
         working-directory: sdk/python
         run: |
           # `uv sync` otherwise builds the local extension before maturin does
@@ -266,6 +270,14 @@ jobs:
           # Run outside sdk/python so the source tree cannot shadow the wheel.
           cd ../..
           uv run --project sdk/python --no-sync pytest sdk/python/tests
+
+      - name: Upload Python wheel for native failure reproduction
+        if: failure() && steps.python-check.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: python-failure-wheel-${{ inputs.target }}
+          path: sdk/python/dist/*.whl
+          if-no-files-found: ignore
 
   go-build:
     name: Go build (${{ inputs.target }})
