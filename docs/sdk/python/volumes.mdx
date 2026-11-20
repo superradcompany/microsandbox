@@ -9,6 +9,14 @@ See [Volumes](/sandboxes/volumes) for usage examples.
 
 ## Volume
 
+Creation, lookup and list items return the same `Volume` type. Each resource retains its destination and stable identity. Dropping it does not delete storage.
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">id</span>
+
+`str`
+
+An opaque identity for this connection. Reading it does not contact the backend. A replacement with the same name has a different identity.
+
 <p className="msb-member-group" id="instance-properties">Instance properties</p>
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
@@ -50,27 +58,28 @@ Use `Volume.owned()` to configure local storage allocated for one sandbox. It st
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get_default()</span>
 
-<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available only on our managed cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
-async def get_default() -> VolumeHandle
+async def get_default() -> Volume
 ```
 
-Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend raises a typed unsupported error; it never substitutes a directory from the caller's machine.
+Get your managed cloud organization's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs`. The local backend raises a typed unsupported error; it never substitutes a directory from the caller's machine.
 
 <Accordion title="Example">
 
 ```python
-volume = await Volume.get_default()
-await volume.fs().write("customers/acme.json", b'{"active": true}')
-print(await volume.fs().read_to_string("customers/acme.json"))
+remote = RemoteContext.from_env()
+volume = await remote.volumes.get_default()
+await volume.fs.write("customers/acme.json", b'{"active": true}')
+print(await volume.fs.read_text("customers/acme.json"))
 ```
 
 </Accordion>
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">create()</span>
 
-<Tooltip tip="Microsandbox cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="our managed cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def create(
@@ -133,7 +142,7 @@ Create a new named volume of the selected [`VolumeKind`](#volumekind). Disk volu
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get()</span>
 
 ```python
-async def get(name: str) -> VolumeHandle
+async def get(name: str) -> Volume
 ```
 
 <Accordion title="Example">
@@ -160,7 +169,7 @@ Get a lightweight handle to an existing named volume, with its metadata and a di
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">VolumeHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#volume">Volume</a></div>
     <div className="msb-param-desc">Handle with metadata and a filesystem accessor.</div>
   </div>
 </div>
@@ -168,7 +177,7 @@ Get a lightweight handle to an existing named volume, with its metadata and a di
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">list()</span>
 
 ```python
-async def list() -> list[VolumeHandle]
+async def list() -> list[Volume]
 ```
 
 <Accordion title="Example">
@@ -186,7 +195,7 @@ List all named volumes.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">list[VolumeHandle]</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#volume">list[Volume]</a></div>
     <div className="msb-param-desc">All volume handles.</div>
   </div>
 </div>
@@ -216,13 +225,24 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
+#### <span className="msb-recv">volume.</span><span className="msb-hn">info()</span>
+
+```python
+info = await volume.info()
+print(info["quota_mib"], info["used_bytes"], info["capacity_bytes"], info["labels"])
+```
+
+Fetch current metadata for the captured identity. Mutable quota, usage, capacity, and labels require this live lookup; `None` means a measurement is unavailable. Lookup failures propagate without stale fallback. The returned `VolumeInfo` dictionary contains the same `VolumeKind` enum as the resource getter.
+
 <p className="msb-member-group" id="mount-factories">Mount factories</p>
 
 Static factory methods on `Volume` that build a [`MountConfig`](#mountconfig). Pass the result as a value in the `volumes` dict when creating a sandbox, keyed by the guest mount point.
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">bind()</span>
 
-<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```python
 def bind(
@@ -305,7 +325,7 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">named()</span>
 
-<Tooltip tip="On microsandbox cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On our managed cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 def named(
@@ -478,7 +498,9 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops.
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+On our managed cloud, these paths refer to files in your organization’s host volume, rather than files on your computer.
+</Note>
 
 ```python
 def disk(
@@ -549,76 +571,65 @@ Mount a host disk image as a virtio-blk device. `format` is the disk image forma
   </div>
 </div>
 
-## VolumeHandle
 
-<p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a>, <a href="#volume-list">Volume.list()</a></p>
-
-A lightweight handle to a named volume, with its database metadata and a host-side filesystem accessor.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`str`
-
-Volume name
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">kind</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">kind</span>
 
 [`VolumeKind`](#volumekind)
 
 Volume storage kind
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">quota_mib</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">quota_mib</span>
 
 `int \| None`
 
 Storage quota in MiB
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">used_bytes</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">used_bytes</span>
 
 `int`
 
-Current disk usage in bytes
+Recorded usage at resource creation or lookup; not a live measurement.
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">capacity_bytes</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">capacity_bytes</span>
 
 `int \| None`
 
 Disk capacity in bytes
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">disk_format</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">disk_format</span>
 
 [`DiskImageFormat \| None`](#diskimageformat)
 
 Disk image format
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">disk_fstype</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">disk_fstype</span>
 
 `str \| None`
 
 Disk filesystem type
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">labels</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">labels</span>
 
 `dict[str, str]`
 
 Metadata labels
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">created_at</span>
 
 `float \| None`
 
 Creation timestamp (ms since epoch)
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">fs</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">fs</span>
 
 [`VolumeFs`](#volumefs)
 
 Host-side filesystem handle
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">destroy()</span>
 
 ```python
-remove()
+destroy()
 ```
 
 Delete this volume
@@ -629,7 +640,7 @@ Delete this volume
 
 ## VolumeFs
 
-<p className="msb-backref">Returned by <a href="#volumehandle">VolumeHandle.fs</a></p>
+<p className="msb-backref">Returned by <a href="#volume">Volume.fs</a></p>
 
 Host-side filesystem operations for a named volume.
 
@@ -854,7 +865,7 @@ String enum (`StrEnum`) for the type of mount.
 
 ### VolumeKind
 
-<p className="msb-backref">Used by <a href="#volume-create">Volume.create()</a> · <a href="#volume-named">Volume.named()</a> · <a href="#volumehandle">VolumeHandle.kind</a></p>
+<p className="msb-backref">Used by <a href="#volume-create">Volume.create()</a> · <a href="#volume-named">Volume.named()</a> · <a href="#volume">Volume.kind</a></p>
 
 Storage kind for a named volume.
 

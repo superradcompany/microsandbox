@@ -7,7 +7,7 @@
 //   4. Boot a brand-new sandbox from that snapshot — the captured
 //      filesystem state is the new sandbox's starting point.
 
-import { Sandbox, Snapshot } from "microsandbox";
+import { Sandbox } from "microsandbox";
 
 // 1. Stand up a baseline sandbox and customize it.
 {
@@ -24,7 +24,8 @@ import { Sandbox, Snapshot } from "microsandbox";
 
 // 3. Snapshot the stopped sandbox via the lookup-by-name handle.
 const h = await Sandbox.get("snapshot-baseline");
-const snap = await h.snapshot("snapshot-baseline-state");
+const created = await h.snapshot("snapshot-baseline-state");
+const snap = created.checkpoint;
 console.log(`created snapshot: ${snap.digest}`);
 console.log(`                  ${snap.path}`);
 
@@ -32,10 +33,9 @@ console.log(`                  ${snap.path}`);
 //    with the captured upper layer, so /root/marker.txt is already
 //    present.
 {
-  const fork = await Sandbox.restore(snap.path)
-    .name("snapshot-fork")
-    .restore();
+  const fork = await snap.spawnSandboxWith(destination => destination.name("snapshot-fork"));
   const out = (await fork.shell("cat /root/marker.txt")).stdout();
+  if (out.trim() !== "shipped via snapshot") throw new Error("restored marker differs");
   console.log(`fork sees: ${out.trim()}`);
   await fork.stop();
 }
@@ -43,4 +43,4 @@ console.log(`                  ${snap.path}`);
 // Cleanup.
 await Sandbox.remove("snapshot-baseline");
 await Sandbox.remove("snapshot-fork");
-await Snapshot.remove("snapshot-baseline:snapshot-baseline-state");
+await created.snapshot.remove();

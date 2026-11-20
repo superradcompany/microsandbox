@@ -1,20 +1,28 @@
 //! Runtime-owned serialization and fencing for host control mutations.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use microsandbox_protocol::bootstrap::GuestBootstrap;
+use microsandbox_protocol::control::ControlError as FramedControlError;
+use microsandbox_protocol::resize::{ResizeRequest, ResizeResponse, ResizeTarget};
+use microsandbox_types::modify::{ResourceConvergenceState, ResourceKind, ResourceResizeStatus};
 use rand::Rng as _;
 use sha2::{Digest as _, Sha256};
 
+use super::resize::ResizeTracker;
+use super::resize_observer::ResizeObserver;
 use crate::checkpoint::{CheckpointCoordinator, CheckpointResult, UserPause};
 use crate::control::*;
+use crate::metrics::ConfirmedMemoryLimit;
 use crate::relay::RelayIdleState;
 use crate::runner::jobs::JobManager;
 use crate::vm::VmConfig;
-use microsandbox_protocol::bootstrap::GuestBootstrap;
+
+#[path = "executor/labels.rs"]
+mod labels;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -30,25 +38,33 @@ const RUNTIME_BOOT_ID_FILE: &str = "runtime-boot-id";
 
 /// One in-process authority for all host-owned runtime mutations.
 pub struct RuntimeControlExecutor {
-    signal_runtime: tokio::runtime::Handle,
+    pub(super) signal_runtime: tokio::runtime::Handle,
     signal_workload: std::sync::Arc<crate::runner::workload_control::WorkloadControl>,
     jobs: Arc<JobManager>,
     pause_observation: std::sync::RwLock<ControlResponse>,
     resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    vm: msb_krun::VmControl,
+    pub(super) vm: msb_krun::VmControl,
+    pub(super) agent_sock: PathBuf,
     #[cfg(feature = "net")]
     secrets: Option<microsandbox_network::secrets::handle::SecretsHandle>,
-    state: Mutex<ExecutorState>,
+    pub(super) state: Mutex<ExecutorState>,
+    pub(super) resize_observer: ResizeObserver,
+    retention_db: microsandbox_db::DbWriteConnection,
+    runtime_script_root: Option<std::fs::File>,
+    mounted_filesystems: crate::retention::MountedStorageEvidence,
+    managed_block_mounts: BTreeMap<String, String>,
 }
 
-struct ExecutorState {
+pub(super) struct ExecutorState {
     runtime_boot_id: String,
+    pub(super) resize: ResizeTracker,
     revision: u64,
-    lifecycle: RuntimeLifecycle,
+    pub(super) lifecycle: RuntimeLifecycle,
     dedup: BTreeMap<String, DedupEntry>,
     dedup_order: VecDeque<String>,
     checkpoint: CheckpointCoordinator,
-    user_pause: Option<UserPause>,
+    pub(super) user_pause: Option<UserPause>,
+    retention: crate::retention::RetentionJournal,
 }
 
 #[derive(Clone)]
@@ -83,12 +99,14 @@ impl RuntimeControlExecutor {
         workload_control: std::sync::Arc<crate::runner::workload_control::WorkloadControl>,
         resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
         inherited_memory: Option<crate::checkpoint::LocalMemoryPin>,
-        owned_directory_checkpoints: BTreeMap<
-            String,
-            microsandbox_filesystem::OwnedDirectoryCheckpoint,
-        >,
+        device_bindings: crate::checkpoint::CheckpointDeviceBindings,
+        memory_limit: ConfirmedMemoryLimit,
+        runtime_script_root: Option<std::fs::File>,
+        mounted_filesystems: crate::runner::storage_observation::MountedFilesystemInventory,
+        retention: crate::retention::RetentionJournal,
+        retention_db: microsandbox_db::DbWriteConnection,
     ) -> Result<Self, String> {
-        let runtime_boot_id = new_runtime_boot_id();
+        let runtime_boot_id = retention.record().owner.runtime_boot_id.clone();
         let jobs = crate::runner::jobs::JobManager::open(
             runtime_boot_id.clone(),
             runtime_dir
@@ -107,10 +125,17 @@ impl RuntimeControlExecutor {
             runtime.clone(),
             agent_sock,
             workload_control.clone(),
-            owned_directory_checkpoints,
+            device_bindings,
         )?;
         checkpoint.inherit_local_memory(inherited_memory);
         Ok(Self {
+            mounted_filesystems: mounted_filesystems.guest_evidence(guest_bootstrap),
+            managed_block_mounts: crate::runner::storage_observation::managed_block_mounts(
+                &vm_config.disks,
+                guest_bootstrap,
+            ),
+            runtime_script_root,
+            retention_db,
             signal_runtime: runtime.clone(),
             signal_workload: std::sync::Arc::clone(&workload_control),
             jobs,
@@ -125,9 +150,16 @@ impl RuntimeControlExecutor {
             }),
             resident_paused,
             vm,
+            agent_sock: agent_sock.to_path_buf(),
             #[cfg(feature = "net")]
             secrets,
+            resize_observer: ResizeObserver::new(
+                vm_config.memory_mib,
+                vm_config.max_memory_mib,
+                memory_limit,
+            ),
             state: Mutex::new(ExecutorState {
+                resize: ResizeTracker::new(runtime_boot_id.clone()),
                 runtime_boot_id,
                 revision: 0,
                 lifecycle: RuntimeLifecycle::Running,
@@ -135,8 +167,34 @@ impl RuntimeControlExecutor {
                 dedup_order: VecDeque::new(),
                 checkpoint,
                 user_pause: None,
+                retention,
             }),
         })
+    }
+
+    /// Confirm activation under the same authority used by both legacy and framed mutations.
+    pub(crate) fn confirm_activation(
+        &self,
+        source: Option<crate::retention::RetentionSource>,
+    ) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        state
+            .retention
+            .confirm_start(
+                source.map(|source| source.configuration),
+                self.signal_workload.boot_init(),
+            )
+            .map_err(|error| {
+                format!(
+                    "active configuration confirmation failed after guest activation; \
+                     outcome uncertain and runtime termination requested: {error}"
+                )
+            })
+    }
+
+    /// Generate the shared startup/control identity before any guest activation.
+    pub(crate) fn new_boot_identity() -> String {
+        new_runtime_boot_id()
     }
 
     /// Execute a legacy command through the same exclusive mutation path.
@@ -147,7 +205,7 @@ impl RuntimeControlExecutor {
             return self.pause_observation.read().unwrap().clone();
         }
         let mut state = self.state.lock().unwrap();
-        let response = self.execute_locked(&mut state, command);
+        let response = self.execute_locked(&mut state, command, None);
         *self.pause_observation.write().unwrap() = pause_response(&state);
         response
     }
@@ -212,7 +270,7 @@ impl RuntimeControlExecutor {
         }
 
         let request_id = envelope.request_id;
-        let response = self.execute_locked(&mut state, envelope.command);
+        let response = self.execute_locked(&mut state, envelope.command, None);
         *self.pause_observation.write().unwrap() = pause_response(&state);
         let response = ControlEnvelopeResponse {
             request_id: request_id.clone(),
@@ -221,6 +279,142 @@ impl RuntimeControlExecutor {
         };
         remember_response(&mut state, request_id, fingerprint, response.clone());
         response
+    }
+
+    /// Read or apply an operation under the same authority as legacy setters.
+    pub(crate) fn resize_request(
+        &self,
+        request: ResizeRequest,
+    ) -> Result<ResizeResponse, FramedControlError> {
+        let mut state = self.state.lock().unwrap();
+        let (boot, id) = match &request {
+            ResizeRequest::Hello => (None, None),
+            ResizeRequest::Read {
+                runtime_boot_id,
+                id,
+            } => (Some(runtime_boot_id), Some(id)),
+            ResizeRequest::Apply {
+                runtime_boot_id, ..
+            }
+            | ResizeRequest::ApplyPair {
+                runtime_boot_id, ..
+            } => (Some(runtime_boot_id), None),
+            ResizeRequest::Current { runtime_boot_id } => (Some(runtime_boot_id), None),
+        };
+        if boot.is_some_and(|boot| boot != &state.runtime_boot_id) {
+            return Err(FramedControlError::rejected(
+                "runtime_changed",
+                "resize history belongs to a different runtime incarnation",
+            ));
+        }
+        if id.is_some_and(|id| !valid_control_id(id)) {
+            return Err(FramedControlError::rejected(
+                "invalid_identifier",
+                "resize identity must be nonempty printable ASCII of at most 128 bytes",
+            ));
+        }
+        // The dispatcher serializes ordinary requests across connections. Releasing
+        // `state` before a synchronous guest query would still block that queue. Reads
+        // return retained evidence and coalesce a wake for the existing observer instead.
+        if matches!(
+            &request,
+            ResizeRequest::Read { .. } | ResizeRequest::Current { .. }
+        ) {
+            if state.lifecycle != RuntimeLifecycle::Running || state.user_pause.is_some() {
+                state.resize.mark_pending_paused();
+            }
+            self.resize_observer.wake.notify_one();
+        }
+        let operations = match request {
+            ResizeRequest::Hello => Vec::new(),
+            ResizeRequest::Apply { target, .. } => {
+                vec![self.apply_tracked_target(&mut state, target)?]
+            }
+            ResizeRequest::ApplyPair {
+                online, total_mib, ..
+            } => {
+                let cpu = ResizeTarget::Cpus { online };
+                let memory = ResizeTarget::Memory { total_mib };
+                if self.vm.cpu_state().is_none() || self.vm.memory_state().is_none() {
+                    return Err(FramedControlError::rejected(
+                        "resize_unavailable",
+                        "both devices must support live resize",
+                    ));
+                }
+                if !state.resize.admits(&cpu)
+                    || !state.resize.admits(&memory)
+                    || state.revision.checked_add(2).is_none()
+                {
+                    return Err(FramedControlError::rejected(
+                        "resize_generation_exhausted",
+                        "unable to record both resize operations",
+                    ));
+                }
+                // The memory setter checks fresh pressure before touching either device.
+                // Keep the lock through both admissions so no control request interleaves.
+                let memory = self.apply_tracked_target(&mut state, memory)?;
+                let cpu = self
+                    .apply_tracked_target(&mut state, cpu)
+                    .map_err(|mut error| {
+                        error.effect = microsandbox_protocol::control::ErrorEffect::Unknown;
+                        error.message = format!(
+                            "memory target was accepted before CPU update failed: {}",
+                            error.message
+                        );
+                        error
+                    })?;
+                vec![cpu, memory]
+            }
+            ResizeRequest::Read { id, .. } => {
+                if state.resize.get(&id).is_none() {
+                    return Err(FramedControlError::rejected(
+                        "resize_history_unavailable",
+                        "resize identity is unknown or no longer retained in this runtime",
+                    ));
+                }
+                vec![state.resize.get(&id).unwrap().clone()]
+            }
+            ResizeRequest::Current { .. } => state.resize.current(),
+        };
+        Ok(ResizeResponse {
+            tracking: state.resize.tracking(),
+            operations,
+        })
+    }
+
+    fn apply_tracked_target(
+        &self,
+        state: &mut ExecutorState,
+        target: ResizeTarget,
+    ) -> Result<microsandbox_protocol::resize::ResizeOperation, FramedControlError> {
+        let id = format!("resize-{}", new_runtime_boot_id());
+        let command = match target {
+            ResizeTarget::Cpus { online } => ControlRequest::CpuTarget { online },
+            ResizeTarget::Memory { total_mib } => ControlRequest::MemoryTarget { total_mib },
+        };
+        let result = self.execute_locked(state, command, Some(id.clone()));
+        if !result.ok {
+            if result.error_code.as_deref() == Some("memory_pressure") {
+                return Err(FramedControlError::rejected(
+                    "memory_pressure",
+                    result
+                        .error
+                        .unwrap_or_else(|| "insufficient available guest memory".into()),
+                ));
+            }
+            return Err(FramedControlError {
+                code: result.error_code.unwrap_or_else(|| "resize_failed".into()),
+                message: result
+                    .error
+                    .unwrap_or_else(|| "resize was not accepted".into()),
+                effect: microsandbox_protocol::control::ErrorEffect::Unknown,
+            });
+        }
+        Ok(state
+            .resize
+            .get(&id)
+            .expect("successful resize is recorded before reply")
+            .clone())
     }
 
     /// Return the current immutable boot identity and mutation revision.
@@ -238,6 +432,7 @@ impl RuntimeControlExecutor {
             request.operation,
             microsandbox_protocol::jobs::JobOperation::Hello
                 | microsandbox_protocol::jobs::JobOperation::Start { .. }
+                | microsandbox_protocol::jobs::JobOperation::StartWithBindings { .. }
         ) && !self
             .signal_workload
             .ordinary_writer()
@@ -269,6 +464,7 @@ impl RuntimeControlExecutor {
             && matches!(
                 request.operation,
                 microsandbox_protocol::jobs::JobOperation::Start { .. }
+                    | microsandbox_protocol::jobs::JobOperation::StartWithBindings { .. }
                     | microsandbox_protocol::jobs::JobOperation::Write { .. }
                     | microsandbox_protocol::jobs::JobOperation::Eof { .. }
             )
@@ -307,7 +503,24 @@ impl RuntimeControlExecutor {
         &self,
         state: &mut ExecutorState,
         request: ControlRequest,
+        resize_id: Option<String>,
     ) -> ControlResponse {
+        let resize_target = match &request {
+            ControlRequest::CpuTarget { online } => Some(ResizeTarget::Cpus { online: *online }),
+            ControlRequest::MemoryTarget { total_mib } => Some(ResizeTarget::Memory {
+                total_mib: *total_mib,
+            }),
+            _ => None,
+        };
+        if resize_target
+            .as_ref()
+            .is_some_and(|target| !state.resize.admits(target))
+        {
+            return control_error(
+                "resize_generation_exhausted",
+                "resize generation cannot advance",
+            );
+        }
         // Capturing an active job without its host ownership would restore an unattachable
         // process. Gate every full-capture entry point, including legacy and descriptor forms.
         if matches!(
@@ -373,6 +586,15 @@ impl RuntimeControlExecutor {
                     | ControlRequest::BranchCreate { .. }
                     | ControlRequest::BranchCreateMemfd { .. }
             );
+        if mutation
+            && state.retention.record().pending
+                == Some(crate::retention::RetentionTransition::Start)
+        {
+            return control_error(
+                "runtime_busy",
+                "runtime activation has not confirmed its configuration",
+            );
+        }
         if mutation && state.lifecycle != RuntimeLifecycle::Running && !resident_operation {
             return control_error(
                 "runtime_busy",
@@ -380,21 +602,107 @@ impl RuntimeControlExecutor {
             );
         }
 
+        if let ControlRequest::MemoryTarget { total_mib } = &request
+            && let Some(reason) = self.unsafe_memory_shrink(*total_mib)
+        {
+            return control_error("memory_pressure", reason);
+        }
+
+        if mutation {
+            // Even a failed capture can pause and resume the VM without advancing the public
+            // revision. Invalidate in-flight guest evidence before attempting any mutation.
+            state.resize.invalidate_observation();
+            self.resize_observer.wake.notify_one();
+        }
         let pause_policy = match &request {
             ControlRequest::PauseWithGuestFlush { guest_flush } => Some(*guest_flush),
             _ => None,
         };
+        let configuration_change = matches!(
+            request,
+            ControlRequest::CpuTarget { .. }
+                | ControlRequest::MemoryTarget { .. }
+                | ControlRequest::RootDiskGrow { .. }
+                | ControlRequest::SecretsUpdate { .. }
+        );
+        let mut next_source = if configuration_change {
+            let source = state
+                .retention
+                .record()
+                .confirmed
+                .as_ref()
+                .filter(|confirmed| confirmed.owner == state.retention.record().owner)
+                .and_then(|confirmed| confirmed.source.clone());
+            let next_source = source.and_then(|source| retained_source_after(source, &request));
+            if let Err(error) = state.retention.begin_modify() {
+                return control_error(
+                    "configuration_not_applied",
+                    format!(
+                        "change refused before application: cannot record configuration transition: {error}"
+                    ),
+                );
+            }
+            next_source
+        } else {
+            None
+        };
         let response = match request {
             ControlRequest::DiskCheckpointCreate {
+                retain_configuration,
+                retain_configuration_block_capacity,
+                retain_configuration_exec_limits,
+                retain_configuration_freeze_resources,
+                retain_configuration_storage,
                 checkpoint_id,
                 guest_flush,
             } => {
+                if retain_configuration_block_capacity == Some(true)
+                    && retain_configuration_storage != Some(true)
+                {
+                    return control_error(
+                        "invalid_request",
+                        "block capacity requires mounted storage evidence",
+                    );
+                }
+                if (retain_configuration_storage == Some(true)
+                    || retain_configuration_exec_limits == Some(true)
+                    || retain_configuration_freeze_resources == Some(true))
+                    && retain_configuration != Some(true)
+                {
+                    return control_error(
+                        "invalid_request",
+                        "optional evidence requires configuration capture",
+                    );
+                }
                 state.lifecycle = RuntimeLifecycle::Quiescing;
+                let configuration = retain_configuration.unwrap_or(false).then(|| {
+                    crate::retention::ConfigurationCaptureContext::new(
+                        &state.retention,
+                        &self.retention_db,
+                        self.runtime_script_root.as_ref(),
+                        (retain_configuration_storage == Some(true))
+                            .then_some(&self.mounted_filesystems),
+                        (retain_configuration_block_capacity == Some(true))
+                            .then_some(&self.managed_block_mounts),
+                        // Ready belongs to this executor's guest and the policy is immutable.
+                        // Older guests omit it; never manufacture current defaults as evidence.
+                        (retain_configuration_exec_limits == Some(true))
+                            .then(|| {
+                                self.signal_workload
+                                    .ready()
+                                    .ok()
+                                    .and_then(|(_, ready)| ready.public.exec_limits)
+                            })
+                            .flatten(),
+                        retain_configuration_freeze_resources == Some(true),
+                    )
+                });
                 match state.checkpoint.capture_disk(
                     &self.vm,
                     &checkpoint_id,
                     state.user_pause.as_ref(),
                     guest_flush,
+                    configuration.as_ref(),
                 ) {
                     Ok(result) => {
                         state.lifecycle = if state.user_pause.is_some() {
@@ -561,12 +869,57 @@ impl RuntimeControlExecutor {
                 }
             }
             ControlRequest::CheckpointCreate {
+                retain_configuration,
+                retain_configuration_block_capacity,
+                retain_configuration_exec_limits,
+                retain_configuration_freeze_resources,
+                retain_configuration_storage,
                 guest_flush,
                 checkpoint_id,
                 intent,
                 record_integrity,
             } => {
+                if retain_configuration_block_capacity == Some(true)
+                    && retain_configuration_storage != Some(true)
+                {
+                    return control_error(
+                        "invalid_request",
+                        "block capacity requires mounted storage evidence",
+                    );
+                }
+                if (retain_configuration_storage == Some(true)
+                    || retain_configuration_exec_limits == Some(true)
+                    || retain_configuration_freeze_resources == Some(true))
+                    && retain_configuration != Some(true)
+                {
+                    return control_error(
+                        "invalid_request",
+                        "optional evidence requires configuration capture",
+                    );
+                }
                 state.lifecycle = RuntimeLifecycle::Quiescing;
+                let configuration = retain_configuration.unwrap_or(false).then(|| {
+                    crate::retention::ConfigurationCaptureContext::new(
+                        &state.retention,
+                        &self.retention_db,
+                        self.runtime_script_root.as_ref(),
+                        (retain_configuration_storage == Some(true))
+                            .then_some(&self.mounted_filesystems),
+                        (retain_configuration_block_capacity == Some(true))
+                            .then_some(&self.managed_block_mounts),
+                        // Ready belongs to this executor's guest and the policy is immutable.
+                        // Older guests omit it; never manufacture current defaults as evidence.
+                        (retain_configuration_exec_limits == Some(true))
+                            .then(|| {
+                                self.signal_workload
+                                    .ready()
+                                    .ok()
+                                    .and_then(|(_, ready)| ready.public.exec_limits)
+                            })
+                            .flatten(),
+                        retain_configuration_freeze_resources == Some(true),
+                    )
+                });
                 match state.checkpoint.capture(
                     &self.vm,
                     &checkpoint_id,
@@ -584,6 +937,7 @@ impl RuntimeControlExecutor {
                     state.user_pause.as_ref(),
                     record_integrity,
                     guest_flush,
+                    configuration.as_ref(),
                 ) {
                     Ok(result) => {
                         state.lifecycle = if state.user_pause.is_some() {
@@ -627,6 +981,50 @@ impl RuntimeControlExecutor {
                 ..
             })
         );
+        if response.ok
+            && let Some(target) = resize_target
+        {
+            let (accepted, status) = match &target {
+                ResizeTarget::Cpus { online } => {
+                    let observed = response
+                        .cpu
+                        .as_ref()
+                        .expect("CPU setter returns its accepted state");
+                    (
+                        ResizeTarget::Cpus {
+                            online: observed.requested_online,
+                        },
+                        ResourceResizeStatus {
+                            resource: ResourceKind::Cpus,
+                            requested: online.to_string(),
+                            actual: observed.actual_online.to_string(),
+                            enforced: observed.enforced.to_string(),
+                            state: ResourceConvergenceState::Accepted,
+                        },
+                    )
+                }
+                ResizeTarget::Memory { total_mib } => {
+                    let observed = response
+                        .memory
+                        .as_ref()
+                        .expect("memory setter returns its accepted state");
+                    (
+                        ResizeTarget::Memory {
+                            total_mib: observed.target_mib,
+                        },
+                        ResourceResizeStatus {
+                            resource: ResourceKind::Memory,
+                            requested: format!("{total_mib} MiB"),
+                            actual: format!("{} MiB", observed.current_mib),
+                            enforced: format!("{} MiB", observed.target_mib),
+                            state: ResourceConvergenceState::Accepted,
+                        },
+                    )
+                }
+            };
+            let id = resize_id.unwrap_or_else(|| format!("legacy-{}", new_runtime_boot_id()));
+            state.resize.accepted(id, target, accepted, status);
+        }
         if mutation && (response.ok || partial) {
             match state.revision.checked_add(1) {
                 Some(revision) => state.revision = revision,
@@ -639,6 +1037,36 @@ impl RuntimeControlExecutor {
                 }
             }
         }
+        if configuration_change && response.ok {
+            // Native setters clamp/round requests. Persist their accepted target, not the
+            // caller's unbounded number and not guest convergence/plugged capacity.
+            if let Some(source) = next_source.as_mut() {
+                if let Some(memory) = response.memory {
+                    source["resources"]["memory_mib"] = memory.target_mib.into();
+                }
+                if let Some(cpu) = response.cpu {
+                    source["resources"]["cpus"] = cpu.enforced.into();
+                }
+            }
+            if let Err(error) = state.retention.confirm(next_source) {
+                // The revision already advanced because the effect happened. Preserve the pending
+                // fence and report through the existing envelope, including to legacy JSON callers.
+                return ControlResponse {
+                    ok: false,
+                    error_code: Some("configuration_outcome_unknown".into()),
+                    error: Some(format!(
+                        "change may have applied but configuration confirmation failed; \
+                         outcome uncertain; the runtime remains running: {error}"
+                    )),
+                    // A Complete secret result otherwise takes precedence over ok=false in
+                    // framed projection and would hide the failed durable confirmation.
+                    secret_result: None,
+                    ..response
+                };
+            }
+        }
+        // Failed operations retain the pending fence. In particular, a partial secret batch
+        // cannot turn the previous confirmed configuration back into current evidence.
         response
     }
 
@@ -681,6 +1109,12 @@ impl RuntimeControlExecutor {
                 control_protocols: Some(vec!["json".into(), "cbor".into()]),
                 ok: true,
                 capabilities: Some(ControlCapabilities {
+                    resize_operations: true,
+                    configuration_capture: true,
+                    configuration_block_capacity: true,
+                    configuration_exec_limits: true,
+                    configuration_freeze_resources: true,
+                    configuration_storage: true,
                     cpu_resize: self.vm.cpu_resize_supported(),
                     memory_resize: self.vm.memory_resize_supported(),
                     secrets_update: self.secrets_update_supported(),
@@ -790,6 +1224,71 @@ impl RuntimeControlExecutor {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn retained_source_after(
+    mut source: serde_json::Value,
+    request: &ControlRequest,
+) -> Option<serde_json::Value> {
+    match request {
+        ControlRequest::CpuTarget { online } => {
+            *source.get_mut("resources")?.get_mut("cpus")? = (*online).into();
+        }
+        ControlRequest::MemoryTarget { total_mib } => {
+            *source.get_mut("resources")?.get_mut("memory_mib")? = (*total_mib).into();
+        }
+        ControlRequest::RootDiskGrow { size_bytes } => {
+            let image = source.get_mut("image")?.get_mut("Oci")?;
+            if image
+                .get("root_disk")
+                .is_none_or(serde_json::Value::is_null)
+            {
+                image["root_disk"] = serde_json::json!({"kind": "managed"});
+            }
+            let root = image.get_mut("root_disk")?;
+            if !matches!(root.get("kind")?.as_str()?, "managed" | "flat") {
+                return None;
+            }
+            if size_bytes % (1024 * 1024) != 0 {
+                return None;
+            }
+            root["size_mib"] = (size_bytes / (1024 * 1024)).into();
+        }
+        ControlRequest::SecretsUpdate { changes } => {
+            if changes.is_empty() {
+                return Some(source);
+            }
+            let secrets = source.get_mut("network")?.get_mut("secrets")?;
+            let mut config: microsandbox_types::SecretsConfig =
+                serde_json::from_value(secrets.clone()).ok()?;
+            for change in changes {
+                match change {
+                    SecretLiveChange::Remove { name } => {
+                        config.secrets.retain(|entry| entry.env_var != *name);
+                    }
+                    SecretLiveChange::SetAllowedHosts { name, hosts } => {
+                        let entry = config
+                            .secrets
+                            .iter_mut()
+                            .find(|entry| entry.env_var == *name)?;
+                        entry.allowed_hosts = hosts
+                            .iter()
+                            .map(|host| microsandbox_types::HostPattern::parse(host))
+                            .collect();
+                    }
+                    SecretLiveChange::Rotate { .. } => {
+                        // Legacy control carries resolved values, not source-reference provenance.
+                        // Never persist that plaintext as user-declared source or keep a stale
+                        // reference. The source-aware mutation handoff must supply this evidence.
+                        return None;
+                    }
+                }
+            }
+            *secrets = serde_json::to_value(config).ok()?;
+        }
+        _ => {}
+    }
+    Some(source)
+}
+
 fn unsupported_lifecycle_request(
     request: &ControlRequest,
     clock_sync: bool,
@@ -831,6 +1330,7 @@ fn checkpoint_response(
     error: Option<String>,
 ) -> ControlResponse {
     let checkpoint = result.map(|result| CheckpointControlState {
+        configuration: result.configuration,
         checkpoint_id: result.checkpoint_id,
         checkpoint_root: result.checkpoint_root,
         path: result.path,
@@ -852,13 +1352,10 @@ fn checkpoint_response(
 }
 
 fn persist_runtime_boot_id(runtime_dir: &Path, boot_id: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(runtime_dir)?;
+    microsandbox_utils::private_file::create_private_dir_all(runtime_dir)?;
     let target = runtime_dir.join(RUNTIME_BOOT_ID_FILE);
     let temporary = unique_temporary_path(runtime_dir, RUNTIME_BOOT_ID_FILE);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
     file.write_all(boot_id.as_bytes())?;
     file.write_all(b"\n")?;
     // This file is diagnostic/live discovery, not a restart journal. Fencing uses the new
@@ -947,6 +1444,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_projection_preserves_ceilings_and_does_not_invent_secret_provenance() {
+        let source = serde_json::json!({
+            "resources": {"cpus": 1, "memory_mib": 256, "max_cpus": 4, "max_memory_mib": 1024},
+            "image": {"Oci": {"reference": "alpine"}}
+        });
+        let cpu = retained_source_after(source.clone(), &ControlRequest::CpuTarget { online: 2 })
+            .unwrap();
+        assert_eq!(cpu["resources"]["cpus"], 2);
+        assert_eq!(cpu["resources"]["max_cpus"], 4);
+        let memory = retained_source_after(
+            source.clone(),
+            &ControlRequest::MemoryTarget { total_mib: 512 },
+        )
+        .unwrap();
+        assert_eq!(memory["resources"]["memory_mib"], 512);
+        assert_eq!(memory["resources"]["max_memory_mib"], 1024);
+        let disk = retained_source_after(
+            source.clone(),
+            &ControlRequest::RootDiskGrow {
+                size_bytes: 8192 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(disk["image"]["Oci"]["root_disk"]["kind"], "managed");
+        assert_eq!(disk["image"]["Oci"]["root_disk"]["size_mib"], 8192);
+        assert!(
+            retained_source_after(source, &ControlRequest::SecretsUpdate { changes: vec![] })
+                .is_some()
+        );
+    }
+
+    #[test]
     fn unsupported_pause_and_resume_refuse_before_idempotent_mutation() {
         for request in [ControlRequest::Pause, ControlRequest::Resume] {
             let refused = unsupported_lifecycle_request(&request, false).unwrap();
@@ -990,3 +1519,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "resize_read_tests.rs"]
+mod resize_read_tests;

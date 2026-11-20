@@ -1,7 +1,6 @@
 //! `msb remove` command — remove a stopped sandbox.
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
 
 use crate::ui;
 
@@ -44,7 +43,7 @@ pub async fn run(args: RemoveArgs) -> anyhow::Result<()> {
     for name in &names {
         if args.force {
             // Kill the sandbox first if it's running.
-            if let Ok(handle) = Sandbox::get(name).await {
+            if let Ok(handle) = crate::commands::common::sandbox_record(name).await {
                 let _ = handle.kill().await;
             }
         }
@@ -55,7 +54,11 @@ pub async fn run(args: RemoveArgs) -> anyhow::Result<()> {
             ui::Spinner::start("Removing", name)
         };
 
-        match Sandbox::remove(name).await {
+        match crate::commands::common::selected_context()?
+            .sandboxes()
+            .remove(name)
+            .await
+        {
             Ok(()) => {
                 spinner.finish_success("Removed");
             }

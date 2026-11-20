@@ -6,6 +6,8 @@
 //!
 //!     cargo nextest run -p microsandbox --test stdin --run-ignored=only --test-threads 1
 
+use std::time::Duration;
+
 use microsandbox::{ExecEvent, Sandbox};
 use sha2::{Digest, Sha256};
 use test_utils::msb_test;
@@ -178,14 +180,56 @@ async fn stdin_pipe_streams_chunks_in_order() {
     assert_eq!(actual_sha, expected_sha);
 }
 
+/// A child may exit without consuming all provided stdin. Completion must cancel
+/// the remaining input rather than wait forever for a reader that is gone.
+#[msb_test]
+async fn stdin_bytes_allows_child_to_exit_without_draining_input() {
+    let name = "stdin-early-exit";
+    let sandbox = Sandbox::builder(name)
+        .image("mirror.gcr.io/library/alpine")
+        .cpus(1)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    // This intentionally races exit against pending input. Whether a write gets
+    // far enough to fail with EPIPE is irrelevant to the terminal exit status.
+    let output = sandbox
+        .exec_with("sh", |exec| {
+            exec.args([
+                "-c",
+                "dd bs=1 count=16 of=/tmp/prefix.bin 2>/dev/null && wc -c /tmp/prefix.bin",
+            ])
+            .stdin_bytes(vec![b'z'; ONE_MIB])
+            .timeout(Duration::from_secs(10))
+        })
+        .await;
+
+    stop_and_remove(name).await;
+
+    let output = output.expect("complete exec without draining stdin");
+    assert_eq!(output.status().code, 0, "guest command exited non-zero");
+    assert_eq!(
+        output
+            .stdout()
+            .expect("stdout is utf8")
+            .split_whitespace()
+            .next(),
+        Some("16"),
+        "child should have read exactly 16 bytes"
+    );
+}
+
 /// Broken-pipe test: the child reads only a short prefix of stdin and
-/// exits, closing its read end before the host's full payload has been
+/// closes its read end before the host's full payload has been
 /// delivered. The agent's stdin write fails with EPIPE and surfaces
 /// mid-stream as `ExecEvent::StdinError`, while the session itself
 /// still produces a normal `Exited { code: 0 }` event — the stdin
 /// failure is non-terminal.
 #[msb_test]
-async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
+async fn stdin_bytes_reports_broken_pipe_when_child_closes_stdin_early() {
     let name = "stdin-broken-pipe";
     let payload = vec![b'z'; ONE_MIB];
 
@@ -200,11 +244,20 @@ async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
 
     let mut handle = sandbox
         .exec_stream_with("sh", |exec| {
+            // Keep the session alive after closing stdin: an immediate exit can retire
+            // pending input before the agent attempts the write that would return EPIPE.
+            // The host releases the child only after observing the non-terminal error.
             exec.args([
                 "-c",
-                "dd bs=1 count=16 of=/tmp/prefix.bin 2>/dev/null && wc -c /tmp/prefix.bin",
+                concat!(
+                    "trap 'exit 0' TERM; ",
+                    "dd bs=1 count=16 of=/tmp/prefix.bin 2>/dev/null && ",
+                    "wc -c /tmp/prefix.bin || exit 1; ",
+                    "exec 0<&-; while :; do sleep 1; done",
+                ),
             ])
             .stdin_bytes(payload)
+            .timeout(Duration::from_secs(10))
         })
         .await
         .expect("start exec");
@@ -218,6 +271,10 @@ async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
             ExecEvent::StdinError(payload) => {
                 if stdin_error.is_none() {
                     stdin_error = Some(payload);
+                    handle
+                        .signal(libc::SIGTERM)
+                        .await
+                        .expect("release child after stdin error");
                 }
             }
             ExecEvent::Exited { code } => {
@@ -275,7 +332,6 @@ fn parse_wc_and_sha(stdout: &str) -> (String, String) {
 /// retained input or a PTY. Run in one VM so each mode exercises the same guest agent.
 #[msb_test]
 async fn stdin_null_finite_retained_and_pty_lifetimes() {
-    use std::time::Duration;
     use tokio::time::timeout;
 
     let name = "stdin-mode-lifetimes";

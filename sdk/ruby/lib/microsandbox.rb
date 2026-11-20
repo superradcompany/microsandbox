@@ -2,6 +2,10 @@
 
 require_relative "microsandbox/version"
 
+module Microsandbox
+  ServiceTarget = Data.define(:sandbox, :port)
+end
+
 # Platform gems stage the binary under lib/microsandbox/<major.minor>/ (one per
 # Ruby ABI); source builds produce the flat path. Try the ABI dir first. When
 # both misses are plain "no such file", either message will do; but a binary
@@ -21,6 +25,13 @@ end
 require_relative "microsandbox/errors"
 
 module Microsandbox
+  class Service
+    def target
+      value = _target
+      value && ServiceTarget.new(sandbox: value.fetch("sandbox"), port: value.fetch("port"))
+    end
+  end
+
   class HttpBuilder
     attr_reader :network_message, :secret_message, :response, :format, :message
 
@@ -32,6 +43,7 @@ module Microsandbox
     end
 
     def deny_response_format(value)
+      value = value.to_s if value.is_a?(Symbol)
       raise ArgumentError, "deny_response_format must be text or json" unless ["text", "json"].include?(value)
 
       @format = value
@@ -59,6 +71,22 @@ module Microsandbox
       @secret_message = value
       self
     end
+  end
+
+  # Progress is best effort. Always call result to obtain the sandbox or failure.
+  class PullSession
+    include Enumerable
+
+    def each
+      return enum_for(:each) unless block_given?
+
+      while (event = next_event)
+        yield event
+      end
+      self
+    end
+
+    def progress = enum_for(:each)
   end
 
   class SandboxBuilder
@@ -107,49 +135,14 @@ module Microsandbox
       self
     end
   end
-
-  class Filesystem
-    def initialize(sandbox)
-      @sandbox = sandbox
-    end
-
-    def read(path) = @sandbox.fs_read(path)
-    def write(path, data) = @sandbox.fs_write(path, data)
-    def mkdir(path) = @sandbox.fs_mkdir(path)
-    def list(path) = @sandbox.fs_list(path)
-    def stat(path) = @sandbox.fs_stat(path)
-    def exists?(path) = @sandbox.fs_exists?(path)
-    def copy(from, to) = @sandbox.fs_copy(from, to)
-    def rename(from, to) = @sandbox.fs_rename(from, to)
-    def remove(path) = @sandbox.fs_remove(path)
-    def remove_dir(path) = @sandbox.fs_remove_dir(path)
-    def copy_from_host(host_path, guest_path) = @sandbox.fs_copy_from_host(host_path, guest_path)
-    def copy_to_host(guest_path, host_path) = @sandbox.fs_copy_to_host(guest_path, host_path)
-  end
-
-  class Sandbox
-    def self.with(name, **options)
-      sandbox = create(name, **options)
-      return sandbox unless block_given?
-
-      begin
-        yield sandbox
-      ensure
-        primary_error = $!
-        begin
-          sandbox.stop
-        rescue StandardError
-          raise if primary_error.nil?
-        end
-      end
-    end
-
-    def fs
-      @fs ||= Filesystem.new(self)
-    end
-  end
 end
 
 require_relative "microsandbox/jobs"
 
 require_relative "microsandbox/storage"
+
+require_relative "microsandbox/lifetime"
+
+require_relative "microsandbox/filesystem"
+
+require_relative "microsandbox/context"

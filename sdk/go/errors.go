@@ -2,8 +2,11 @@ package microsandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -123,8 +126,8 @@ const (
 	// the FFI boundary (typically an SDK bug or a caller passing bad JSON).
 	ErrInvalidArgument
 
-	// ErrInvalidHandle indicates the sandbox handle is stale, closed, or
-	// was never valid.
+	// ErrInvalidHandle indicates a handle (a sandbox, Service, job or other
+	// native object) is stale, closed, or was never valid.
 	ErrInvalidHandle
 
 	// ErrBufferTooSmall indicates the FFI response exceeded the fixed
@@ -177,6 +180,28 @@ const (
 	// its result is unknown. The message says whether sending the same change
 	// again retries it.
 	ErrModificationNotConfirmed
+	// ErrServiceNotFound indicates no visible Service has the slug.
+	ErrServiceNotFound
+	// ErrServiceAlreadyExists indicates the slug is unavailable.
+	ErrServiceAlreadyExists
+	// ErrService indicates a Service change was refused or its outcome is
+	// unknown. Use errors.As with *ServiceError for the reason.
+	ErrService
+	// ErrCloudOnly indicates a Service call on the local backend; Services need a cloud backend.
+	ErrCloudOnly
+
+	// ErrSnapshotImport retains whether a failed archive import committed its batch.
+	ErrSnapshotImport
+	// ErrSnapshotVerification retains the whole-group verification report.
+	ErrSnapshotVerification
+	// ErrSnapshotRemovalRecovery means removal committed but cleanup needs recovery.
+	ErrSnapshotRemovalRecovery
+	// ErrSnapshotGroupRemovalRecovery means whole-history removal committed but needs cleanup.
+	ErrSnapshotGroupRemovalRecovery
+	// ErrResizeTimeout indicates a live resize did not converge before its deadline.
+	ErrResizeTimeout
+	// ErrResizeWait indicates observation failed without proving a final resize outcome.
+	ErrResizeWait
 )
 
 func (k ErrorKind) String() string {
@@ -201,6 +226,10 @@ func (k ErrorKind) String() string {
 		return "ExecTimeout"
 	case ErrStopTimeout:
 		return "StopTimeout"
+	case ErrResizeWait:
+		return "ResizeWait"
+	case ErrResizeTimeout:
+		return "ResizeTimeout"
 	case ErrExecFailed:
 		return "ExecFailed"
 	case ErrFilesystem:
@@ -225,6 +254,14 @@ func (k ErrorKind) String() string {
 		return "SnapshotIntegrity"
 	case ErrSnapshotMigration:
 		return "SnapshotMigration"
+	case ErrSnapshotImport:
+		return "SnapshotImport"
+	case ErrSnapshotGroupRemovalRecovery:
+		return "SnapshotGroupRemovalRecovery"
+	case ErrSnapshotRemovalRecovery:
+		return "SnapshotRemovalRecovery"
+	case ErrSnapshotVerification:
+		return "SnapshotVerification"
 	case ErrSnapshotSourceRecovery:
 		return "SnapshotSourceRecovery"
 	case ErrPatchFailed:
@@ -259,12 +296,20 @@ func (k ErrorKind) String() string {
 		return "MetricsUnavailable"
 	case ErrUnsupportedOperation:
 		return "UnsupportedOperation"
+	case ErrCloudOnly:
+		return "CloudOnly"
 	case ErrModificationNotConfirmed:
 		return "ModificationNotConfirmed"
 	case ErrInternal:
 		return "Internal"
 	case ErrNoDefaultCommand:
 		return "NoDefaultCommand"
+	case ErrServiceNotFound:
+		return "ServiceNotFound"
+	case ErrServiceAlreadyExists:
+		return "ServiceAlreadyExists"
+	case ErrService:
+		return "Service"
 	default:
 		return "Unknown"
 	}
@@ -276,15 +321,76 @@ type Error struct {
 	Kind    ErrorKind
 	Message string
 	Cause   error
+	// Changed says whether a failed Service create, update, enable, disable or remove may have
+	// been applied. It is empty for errors from other operations.
+	Changed ChangeState
 }
 
-// PublishedSnapshotArtifact names an artifact published despite source recovery failure.
-type PublishedSnapshotArtifact struct {
+// PublishedSnapshot names an artifact published despite source recovery failure.
+type PublishedSnapshot struct {
 	Kind       string
 	Path       string
 	SnapshotID string
 	Digest     string
+	// HeadUpdate describes this publication; nil means no group outcome was reported.
+	HeadUpdate *SnapshotHeadUpdate
 }
+
+// SnapshotImportOutcome describes publication certainty, not whether the call succeeded.
+type SnapshotImportOutcome string
+
+const (
+	SnapshotImportNotCommitted SnapshotImportOutcome = "not_committed"
+	SnapshotImportCommitted    SnapshotImportOutcome = "committed"
+	SnapshotImportUnknown      SnapshotImportOutcome = "unknown"
+)
+
+// SnapshotImportDetails identifies the attempt and preserves its original diagnostic.
+type SnapshotImportDetails struct {
+	OperationID string
+	Archives    []string
+	GroupPath   *string
+	Outcome     SnapshotImportOutcome
+	Detail      string
+}
+
+// SnapshotImportError may report committed work. Inspect Details before retrying.
+type SnapshotImportError struct {
+	Details SnapshotImportDetails
+	err     *Error
+}
+
+func (e *SnapshotImportError) Error() string { return e.err.Message }
+func (e *SnapshotImportError) Unwrap() error { return e.err }
+
+// SnapshotRemovalRecoveryError preserves a committed removal when catalog cleanup fails.
+type SnapshotRemovalRecoveryError struct {
+	Result *CheckpointRemoveResult
+	Detail string
+	err    *Error
+}
+
+func (e *SnapshotRemovalRecoveryError) Error() string { return e.err.Message }
+func (e *SnapshotRemovalRecoveryError) Unwrap() error { return e.err }
+
+// SnapshotGroupRemovalRecoveryError preserves a committed removal when catalog cleanup fails.
+type SnapshotGroupRemovalRecoveryError struct {
+	Result *SnapshotRemoveResult
+	Detail string
+	err    *Error
+}
+
+func (e *SnapshotGroupRemovalRecoveryError) Error() string { return e.err.Message }
+func (e *SnapshotGroupRemovalRecoveryError) Unwrap() error { return e.err }
+
+// SnapshotVerificationError preserves per-member results without treating corruption as success.
+type SnapshotVerificationError struct {
+	Report *SnapshotGroupVerifyReport
+	err    *Error
+}
+
+func (e *SnapshotVerificationError) Error() string { return e.err.Message }
+func (e *SnapshotVerificationError) Unwrap() error { return e.err }
 
 // SnapshotSourceRecoveryDetails contains recovery locators. Their presence does not
 // imply the source is running, safely paused, or eligible for ordinary resume.
@@ -293,7 +399,7 @@ type SnapshotSourceRecoveryDetails struct {
 	CheckpointID     string
 	CheckpointRoot   string
 	CheckpointPath   string
-	Artifact         *PublishedSnapshotArtifact
+	Artifact         *PublishedSnapshot
 	Detail           string
 	PublicationError *string
 }
@@ -309,6 +415,78 @@ func (e *SnapshotSourceRecoveryError) Error() string { return e.err.Error() }
 
 // Unwrap preserves access to the standard SDK error kind.
 func (e *SnapshotSourceRecoveryError) Unwrap() error { return e.err }
+
+// ResizeTimeoutError reports a live resize wait that expired, with the last
+// observed status. Status is empty when no read completed before the deadline.
+// Use errors.As to obtain this type; IsKind also recognizes ErrResizeTimeout.
+type ResizeTimeoutError struct {
+	Status []ResourceResizeStatus
+	err    *Error
+}
+
+func (e *ResizeTimeoutError) Error() string { return e.err.Error() }
+
+// Unwrap preserves access to the standard SDK error kind.
+func (e *ResizeTimeoutError) Unwrap() error { return e.err }
+
+// ServiceErrorReason says why a Service change did not complete.
+type ServiceErrorReason string
+
+const (
+	// ServiceReasonQuotaExceeded means the organization Service limit was reached.
+	ServiceReasonQuotaExceeded ServiceErrorReason = "service_quota_exceeded"
+	// ServiceReasonSandboxLimitExceeded means the target sandbox's Service limit was reached.
+	ServiceReasonSandboxLimitExceeded ServiceErrorReason = "sandbox_service_limit_exceeded"
+	// ServiceReasonConflict means the Service changed; get it before retrying.
+	ServiceReasonConflict ServiceErrorReason = "service_conflict"
+	// ServiceReasonDetached means the Service is detached; set a target.
+	ServiceReasonDetached ServiceErrorReason = "service_detached"
+	// ServiceReasonTargetUnreachable means the target cannot be reached; retry later.
+	ServiceReasonTargetUnreachable ServiceErrorReason = "target_unreachable"
+	// ServiceReasonTargetNotRunning means the target sandbox is not running; start it, then retry.
+	ServiceReasonTargetNotRunning ServiceErrorReason = "sandbox_not_running"
+	// ServiceReasonChangesPaused means Service changes are paused; retry later.
+	ServiceReasonChangesPaused ServiceErrorReason = "service_changes_paused"
+	// ServiceReasonOutcomeUnknown means the change may have been applied; get and check the Service.
+	ServiceReasonOutcomeUnknown ServiceErrorReason = "outcome_unknown"
+	// ServiceReasonOther is an unrecognized reason; the ServiceError raw fields preserve the refusal.
+	ServiceReasonOther ServiceErrorReason = "other"
+)
+
+// ChangeState says whether a failed Service change may have been applied.
+type ChangeState string
+
+const (
+	// ChangeUnchanged means nothing changed.
+	ChangeUnchanged ChangeState = "unchanged"
+	// ChangeUnknown means the change may have been applied; get and check the Service.
+	ChangeUnknown ChangeState = "unknown"
+)
+
+// ServiceError reports a refused Service change or one whose outcome is unknown.
+// Use errors.As to obtain this type; IsKind also recognizes ErrService.
+type ServiceError struct {
+	// Slug of the Service the change addressed.
+	Slug string
+	// Reason says why the change did not complete.
+	Reason ServiceErrorReason
+	// RetryAfter is the retry delay returned with the refusal, or zero when none was returned.
+	RetryAfter time.Duration
+	// Changed says whether the change may have been applied.
+	Changed ChangeState
+	// RawCode is the raw error code returned with a ServiceReasonOther refusal, or empty otherwise.
+	RawCode string
+	// RawStatus is the HTTP status returned with a ServiceReasonOther refusal, or zero otherwise.
+	RawStatus int
+	// RawMessage is the raw message returned with a ServiceReasonOther refusal, or empty otherwise.
+	RawMessage string
+	err        *Error
+}
+
+func (e *ServiceError) Error() string { return e.err.Error() }
+
+// Unwrap preserves access to the standard SDK error kind.
+func (e *ServiceError) Unwrap() error { return e.err }
 
 // Error implements the error interface.
 //
@@ -354,6 +532,41 @@ func wrapFFI(err error) error {
 	}
 	var fe *ffi.Error
 	if errors.As(err, &fe) {
+		if fe.Kind == ffi.KindSnapshotRemovalRecovery && len(fe.Removal) != 0 {
+			var result CheckpointRemoveResult
+			if json.Unmarshal(fe.Removal, &result) == nil {
+				return &SnapshotRemovalRecoveryError{Result: &result, Detail: fe.Detail, err: &Error{Kind: ErrSnapshotRemovalRecovery, Message: fe.Message, Cause: fe}}
+			}
+		}
+		if fe.Kind == ffi.KindSnapshotGroupRemovalRecovery && len(fe.Removal) != 0 {
+			var result SnapshotRemoveResult
+			if json.Unmarshal(fe.Removal, &result) == nil {
+				return &SnapshotGroupRemovalRecoveryError{Result: &result, Detail: fe.Detail, err: &Error{Kind: ErrSnapshotGroupRemovalRecovery, Message: fe.Message, Cause: fe}}
+			}
+		}
+		if fe.Kind == ffi.KindSnapshotVerification && len(fe.Report) != 0 {
+			var report SnapshotGroupVerifyReport
+			if json.Unmarshal(fe.Report, &report) == nil {
+				return &SnapshotVerificationError{Report: &report, err: &Error{Kind: ErrSnapshotVerification, Message: fe.Message, Cause: fe}}
+			}
+		}
+		if fe.Kind == ffi.KindSnapshotImport && fe.Import != nil {
+			d := fe.Import
+			return &SnapshotImportError{
+				Details: SnapshotImportDetails{
+					OperationID: d.OperationID, Archives: append([]string(nil), d.Archives...),
+					GroupPath: cloneStringPtr(d.GroupPath), Outcome: SnapshotImportOutcome(d.Outcome), Detail: d.Detail,
+				},
+				err: &Error{Kind: ErrSnapshotImport, Message: fe.Message, Cause: fe},
+			}
+		}
+		baseError := func(kind ErrorKind) *Error {
+			base := &Error{Kind: kind, Message: fe.Message}
+			if fe.Changed != "" {
+				base.Changed = changeStateFromFFI(fe.Changed)
+			}
+			return base
+		}
 		if fe.Kind == ffi.KindSnapshotSourceRecovery && fe.Recovery != nil {
 			r := fe.Recovery
 			recovery := SnapshotSourceRecoveryDetails{
@@ -362,20 +575,110 @@ func wrapFFI(err error) error {
 				Detail: r.Detail, PublicationError: cloneStringPtr(r.PublicationError),
 			}
 			if a := r.Artifact; a != nil {
-				recovery.Artifact = &PublishedSnapshotArtifact{
+				recovery.Artifact = &PublishedSnapshot{
 					Kind: a.Kind, Path: a.Path, SnapshotID: a.SnapshotID, Digest: a.Digest,
+					HeadUpdate: snapshotHeadUpdateFromInfo(a.HeadUpdate),
 				}
 			}
 			return &SnapshotSourceRecoveryError{
-				Recovery: recovery, err: &Error{Kind: ErrSnapshotSourceRecovery, Message: fe.Message},
+				Recovery: recovery, err: baseError(ErrSnapshotSourceRecovery),
 			}
 		}
-		return &Error{Kind: kindFromFFI(fe.Kind), Message: fe.Message}
+		if fe.Kind == ffi.KindResizeWait {
+			var details ResizeWaitError
+			if json.Unmarshal(fe.ResizeWait, &details) == nil && details.Reason != "" {
+				details.err = baseError(ErrResizeWait)
+				return &details
+			}
+		}
+		if fe.Kind == ffi.KindResizeTimeout {
+			status := []ResourceResizeStatus{}
+			if len(fe.ResizeStatus) > 0 {
+				if parsed, err := parseResizeStatus(string(fe.ResizeStatus)); err == nil && parsed != nil {
+					status = parsed
+				}
+			}
+			return &ResizeTimeoutError{
+				Status: status, err: baseError(ErrResizeTimeout),
+			}
+		}
+		if fe.Kind == ffi.KindService && fe.Service != nil {
+			details := fe.Service
+			retryAfter := retryAfterFromMillis(details.RetryAfterMs)
+			base := baseError(ErrService)
+			if base.Changed == "" {
+				base.Changed = ChangeUnknown
+			}
+			return &ServiceError{
+				Slug: details.Slug, Reason: serviceReasonFromFFI(details.Reason),
+				RetryAfter: retryAfter, Changed: base.Changed,
+				RawCode: details.RawCode, RawStatus: details.RawStatus, RawMessage: details.RawMessage,
+				err: base,
+			}
+		}
+		return baseError(kindFromFFI(fe.Kind))
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return &Error{Kind: ErrCancelled, Message: err.Error(), Cause: err}
 	}
 	return &Error{Kind: ErrInternal, Message: err.Error(), Cause: err}
+}
+
+func retryAfterFromMillis(ms *uint64) time.Duration {
+	if ms == nil {
+		return 0
+	}
+	const maxDurationMillis = uint64(math.MaxInt64) / uint64(time.Millisecond)
+	if *ms > maxDurationMillis {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(*ms) * time.Millisecond
+}
+
+// wrapServiceChange ensures every failed Service change reports whether it may have been applied.
+func wrapServiceChange(err error) error {
+	var undispatched *ffi.UndispatchedServiceChangeError
+	requestNotSent := errors.As(err, &undispatched)
+	err = wrapFFI(err)
+	if err == nil {
+		return nil
+	}
+
+	var base *Error
+	if !errors.As(err, &base) || base.Changed != "" {
+		return err
+	}
+
+	if requestNotSent {
+		base.Changed = ChangeUnchanged
+	} else {
+		base.Changed = ChangeUnknown
+	}
+	var serviceErr *ServiceError
+	if errors.As(err, &serviceErr) {
+		serviceErr.Changed = base.Changed
+	}
+	return err
+}
+
+// serviceReasonFromFFI maps a reason this SDK version does not list to ServiceReasonOther.
+func serviceReasonFromFFI(reason string) ServiceErrorReason {
+	switch known := ServiceErrorReason(reason); known {
+	case ServiceReasonQuotaExceeded, ServiceReasonSandboxLimitExceeded,
+		ServiceReasonConflict, ServiceReasonDetached, ServiceReasonTargetUnreachable,
+		ServiceReasonTargetNotRunning, ServiceReasonChangesPaused, ServiceReasonOutcomeUnknown:
+		return known
+	default:
+		return ServiceReasonOther
+	}
+}
+
+// changeStateFromFFI fails closed: anything but "unchanged" means the change may have applied.
+func changeStateFromFFI(changed string) ChangeState {
+	if ChangeState(changed) == ChangeUnchanged {
+		return ChangeUnchanged
+	}
+	return ChangeUnknown
 }
 
 func kindFromFFI(kind string) ErrorKind {
@@ -398,6 +701,10 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrExecTimeout
 	case ffi.KindStopTimeout:
 		return ErrStopTimeout
+	case ffi.KindResizeWait:
+		return ErrResizeWait
+	case ffi.KindResizeTimeout:
+		return ErrResizeTimeout
 	case ffi.KindNoDefaultCommand:
 		return ErrNoDefaultCommand
 	case ffi.KindFilesystem:
@@ -418,6 +725,14 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrSnapshotIntegrity
 	case ffi.KindSnapshotMigration:
 		return ErrSnapshotMigration
+	case ffi.KindSnapshotImport:
+		return ErrSnapshotImport
+	case ffi.KindSnapshotGroupRemovalRecovery:
+		return ErrSnapshotGroupRemovalRecovery
+	case ffi.KindSnapshotRemovalRecovery:
+		return ErrSnapshotRemovalRecovery
+	case ffi.KindSnapshotVerification:
+		return ErrSnapshotVerification
 	case ffi.KindSnapshotSourceRecovery:
 		return ErrSnapshotSourceRecovery
 	case ffi.KindPatchFailed:
@@ -446,8 +761,16 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrMetricsUnavailable
 	case ffi.KindUnsupportedOperation:
 		return ErrUnsupportedOperation
+	case ffi.KindCloudOnly:
+		return ErrCloudOnly
 	case ffi.KindModificationNotConfirmed:
 		return ErrModificationNotConfirmed
+	case ffi.KindServiceNotFound:
+		return ErrServiceNotFound
+	case ffi.KindServiceAlreadyExists:
+		return ErrServiceAlreadyExists
+	case ffi.KindService:
+		return ErrService
 	default:
 		return ErrInternal
 	}

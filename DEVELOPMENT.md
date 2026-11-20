@@ -60,6 +60,14 @@ Verify the installation:
 msb --version
 ```
 
+## Unreleased resize-observation dependencies
+
+The resize/telemetry branch pins native Rust crates through workspace Git patches and pins the guest firmware through `vendor/libkrunfw`. No package publication or version bump is needed to build these changes. Initialize the recorded submodule revision with `git submodule update --init vendor/libkrunfw` and explicitly run `just build-libkrunfw` after changing that revision, then rebuild the CLI/SDK artifacts. The ordinary dependency check accepts an existing firmware filename and does not prove it was built from the recorded source commit.
+
+Use the newly built firmware for local qualification (set `MSB_PATH` to the newly built runtime and `MSB_LIBKRUNFW_PATH` to the firmware’s absolute path), and use the matching newly built `agentd`. An older firmware can still run supported workloads, but it lacks authoritative guest-readiness observations; resize observation/wait must report unsupported instead of claiming completion. Never replace that refusal with a target-equals-current heuristic.
+
+The workspace Git patches do not propagate to downstream crates. Before publishing dependent packages, the maintainer must publish the native release and replace those patches with the released dependencies. Until then, qualify from this checkout and retain exact source/binary identities in test reports.
+
 ## Build & Install Loop
 
 The core development cycle is:
@@ -69,6 +77,8 @@ just build && just install
 ```
 
 This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows.
+
+For Linux development or tests that need shared libraries from the checkout, set the search path for that invocation from the repository root, for example `LD_LIBRARY_PATH="$PWD/build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cargo test -p microsandbox-runtime --lib`.
 
 On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64). `just build-agentd` and `just build-libkrunfw` use a Linux build backend for the guest/kernel artifacts, then link/install Windows-native outputs. The backend is selected with `MSB_WINDOWS_LINUX_BUILD_BACKEND=auto|docker|wsl` and defaults to `auto`, which prefers Docker Linux containers and falls back to Ubuntu WSL. Set `MSB_WSL_DISTRO=<name>` when your WSL distro is not named `Ubuntu`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
 
@@ -398,6 +408,8 @@ To publish the final release, bump the accepted candidate source to the final ve
 If runner retirement or another workflow issue blocks a tagged release before publication, merge the workflow fix to `main`, cancel the blocked run, and dispatch **Release** on `main` with `release_tag` set to the existing tag (for example, `v0.7.12`). Leave this input empty for a build-only run. Do not move or recreate the tag.
 
 Recovery requires an unpublished tag whose commit is already in `main` and whose workspace version matches its name. The workflow resolves that commit once, records it in the run summary, and pins every build and publication checkout to it. All platform builds, artifact checks, and the production SDK smoke test still gate publication. A GitHub release that already exists is rejected; partial publication after that point needs a separate recovery assessment. Post-release lockfile maintenance continues to target current `main`.
+
+Ubuntu package installation in Check and active Release jobs uses bounded retries, then falls back to Kernel.org for x86_64 or MIT Ubuntu Ports for ARM64. The fallback copies the runner's sources into a temporary configuration, preserves suites, components, architecture restrictions, signing keys, and third-party repositories, and refreshes a separate index directory before installation. APT signature and expiration checks remain enabled. Mirrors can lag upstream, so unavailable package versions still fail rather than bypassing verification or forcing a downgrade. Release recovery takes these CI helpers from the workflow revision through a same-run artifact while all product source checkouts remain pinned to the tag. The APT mirror checks workflow exercises a blocked-primary install on both runner architectures.
 
 ### npm publishing and provenance
 

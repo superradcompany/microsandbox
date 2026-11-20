@@ -12,6 +12,7 @@ from microsandbox import (
     InvalidConfigError,
     Sandbox,
     SandboxNotFoundError,
+    SandboxStatus,
     Snapshot,
 )
 
@@ -27,7 +28,7 @@ async def test_cow_resident_capture_and_child_isolation():
         await source.exec("sh", ["-c", "echo source > /dev/shm/sdk-marker"])
         await source.pause()
         paused = await Sandbox.get(name)
-        assert str(paused.status) == "paused"
+        assert await paused.status() == SandboxStatus.PAUSED
         branched = await paused.fork(f"{name}-paused-branch")
         branches.append(branched)
         assert (await branched.exec("cat", ["/dev/shm/sdk-marker"])).stdout_text.strip() == "source"
@@ -50,7 +51,7 @@ async def test_cow_resident_capture_and_child_isolation():
     finally:
 
         async def cleanup(sandbox):
-            if str((await Sandbox.get(await sandbox.name)).status) == "paused":
+            if await sandbox.status() == SandboxStatus.PAUSED:
                 await sandbox.resume()
             await sandbox.stop()
 
@@ -79,7 +80,7 @@ async def test_cancel_batch_releases_staging_and_preserves_completed_children():
         for _ in range(300):
             try:
                 first = await Sandbox.get(names[0])
-                if str(first.status) == "running":
+                if await first.status() == SandboxStatus.RUNNING:
                     break
             except SandboxNotFoundError:
                 # The batch may not have registered its first child yet. Retry after
@@ -98,8 +99,9 @@ async def test_cancel_batch_releases_staging_and_preserves_completed_children():
                 break
             await asyncio.sleep(0.05)
         assert not list(staging.glob(".branch-batch-*")), "cancelled batch retained its staging"
-        assert str((await Sandbox.get(name)).status) == "running"
-        assert str((await Sandbox.get(names[0])).status) == "running"
+        assert await source.status() == SandboxStatus.RUNNING
+        survivor = await Sandbox.get(names[0])
+        assert await survivor.status() == SandboxStatus.RUNNING
     finally:
         if not task.done():
             task.cancel()
@@ -111,7 +113,7 @@ async def test_cancel_batch_releases_staging_and_preserves_completed_children():
                 child = await Sandbox.get(child_name)
             except Exception:
                 continue
-            if str(child.status) in {"running", "paused"}:
+            if await child.status() in {SandboxStatus.RUNNING, SandboxStatus.PAUSED}:
                 await child.stop()
         await source.stop()
 

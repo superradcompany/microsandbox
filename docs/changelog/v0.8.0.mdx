@@ -1,0 +1,53 @@
+---
+title: "v0.8.0"
+sidebarTitle: "v0.8.0"
+description: "SDK contexts, unified resources, portable snapshots, and optional smaller SDK packages."
+icon: "bolt"
+---
+
+## Highlights
+
+### SDK contexts and unified resources
+
+Explicit local and remote contexts keep related operations on the same destination. Resource lookups return objects that can execute commands, access files, and prepare stopped sandboxes when needed. Live inspection reads current backend state.
+
+```typescript
+import { Sandbox } from "microsandbox";
+
+const sandbox = await Sandbox.builder("worker").image("python").create();
+const output = await sandbox.shell("echo ready");
+```
+
+See [Migrating from v0.7 to v0.8](/migrations/v0.8) for context selection, resource lookups, inspection, and API replacements.
+
+### Snapshot histories and portable restore
+
+`Snapshot` represents a history, while `Checkpoint` represents one immutable capture. The CLI separates creating a history from appending checkpoints. Snapshot loading supports explicit import limits, and restore workflows can retain saved configuration and observe resource resizing.
+
+```bash
+msb snapshot create history --sandbox worker
+msb snapshot checkpoint history
+```
+
+### Smaller SDK packages
+
+TypeScript, Python, and Go offer local-only and remote-only distributions alongside the full SDK. Applications can install the provider they need. Local execution still requires a compatible runtime; remote-only applications do not need one.
+
+### Sandboxfile support
+
+The CLI accepts a Sandboxfile with `--file`, so sandbox configuration can live alongside application code.
+
+```bash
+msb run --file Sandboxfile
+```
+
+## Fixes
+
+- Kill and drain verify runtime process ownership before sending signals, and Linux releases exited VM processes.
+- Named volumes are resolved before sandbox creation.
+- Cloud execution uses the sandbox's own working directory, shell, and default command. Invalid working directories return a typed error, and Cloud creation resolves environment-backed secret references.
+- Remote-only Rust builds retain lifecycle APIs. Linux builds preserve `$ORIGIN` runtime library paths.
+
+## Upgrade guidance
+
+Use the [v0.7 to v0.8 migration guide](/migrations/v0.8) for API replacements, package installation, runtime compatibility, and upgrade precautions.

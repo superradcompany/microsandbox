@@ -12,9 +12,19 @@ name = "_microsandbox"
 crate-type = ["cdylib"]
 path = "src/lib.rs"
 
+[features]
+# Full remains the default distribution. Lean builds select exactly one provider
+# and deliberately exclude both runtime download and embedded binary features.
+default = ["full"]
+full = ["local", "remote", "microsandbox/download-binaries", "microsandbox/keyring"]
+local = ["microsandbox/local", "microsandbox/net"]
+remote = ["microsandbox/cloud", "microsandbox/net"]
+# Distinct extension entry points and the shared Python core namespace.
+provider-package = []
+
 [dependencies]
-microsandbox = { workspace = true, default-features = true, features = ["ssh"] }
-microsandbox-network.workspace = true
+microsandbox = { workspace = true, default-features = false, features = ["ssh"] }
+microsandbox-network = { workspace = true, default-features = false }
 chrono = { workspace = true }
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 # Maturin enables extension-module in pyproject.toml when packaging wheels.
@@ -26,3 +36,9 @@ tempfile = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 typed-path = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_IO", "Win32_System_Threading"] }

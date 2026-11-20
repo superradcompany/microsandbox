@@ -1150,7 +1150,7 @@ func TestForkOptionsKeepBranchAliases(t *testing.T) {
 	}
 	// Deprecated option aliases remain assignable to the fork method types.
 	var _ func(*Sandbox, context.Context, string, ...BranchOption) (*Sandbox, error) = (*Sandbox).Fork
-	var _ func(*SandboxHandle, context.Context, []string, ...BranchOption) ([]BranchOutcome, error) = (*SandboxHandle).ForkMany
+	var _ func(*Sandbox, context.Context, []string, ...BranchOption) ([]BranchOutcome, error) = (*Sandbox).ForkMany
 	if _, ok := reflect.TypeOf(RestoreConfig{}).FieldByName("Forked"); !ok {
 		t.Fatal("restore lost the deprecated Forked field")
 	}
@@ -1181,5 +1181,18 @@ func TestWithInterceptTLSPreservesNetworkWithoutMutatingInput(t *testing.T) {
 	WithNetwork(&NetworkConfig{})(&config)
 	if buildFFINetwork(config.Network).TLS != nil {
 		t.Fatal("later network configuration did not replace TLS settings")
+	}
+}
+
+func TestNamedVolumeOptionsAtFFIBoundary(t *testing.T) {
+	for _, opts := range []NamedVolumeOptions{
+		{}, {Mode: NamedVolumeExisting}, {Mode: NamedVolumeCreate, Kind: VolumeKindDir},
+		{Mode: NamedVolumeEnsureExists, Kind: VolumeKindDisk, SizeMiB: 128},
+	} {
+		mount := Mount.NamedWith("cache", MountOptions{}, opts)
+		wire := buildFFICreateOptions(SandboxConfig{Volumes: map[string]MountConfig{"/data": mount}}).Volumes["/data"]
+		if wire.NamedMode != string(opts.Mode) || wire.NamedKind != string(opts.Kind) || wire.SizeMiB != opts.SizeMiB {
+			t.Fatalf("wrong named mount wire options for %+v: %+v", opts, wire)
+		}
 	}
 }

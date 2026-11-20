@@ -79,6 +79,21 @@ pub async fn binding_diagnose_storage(
     config_json: &str,
     selection_json: &str,
 ) -> MicrosandboxResult<String> {
+    binding_diagnose_storage_in(
+        crate::context::configured_context().as_ref(),
+        config_json,
+        selection_json,
+    )
+    .await
+}
+
+#[cfg(feature = "local")]
+#[doc(hidden)]
+pub async fn binding_diagnose_storage_in(
+    context: &dyn crate::Context,
+    config_json: &str,
+    selection_json: &str,
+) -> MicrosandboxResult<String> {
     let config: RuntimeConfigInput = serde_json::from_str(config_json).map_err(|_| {
         MicrosandboxError::InvalidConfig("invalid storage diagnostic configuration".into())
     })?;
@@ -88,7 +103,7 @@ pub async fn binding_diagnose_storage(
                 "storage diagnostics require named sandboxes or an explicit all selection".into(),
             )
         })?;
-    let diagnosis = super::diagnose_storage(config.options(), selection).await?;
+    let diagnosis = super::diagnose_storage_in(context, config.options(), selection).await?;
     Ok(serde_json::to_string(&diagnosis)?)
 }
 

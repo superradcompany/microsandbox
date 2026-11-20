@@ -19,6 +19,7 @@ use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecOutputAck, ExecRequest, ExecResize, ExecStarted, ExecStderr,
     ExecStdin, ExecStdinAck, ExecStdinError, ExecStdout,
 };
+use microsandbox_protocol::exec_bindings::{BoundExecRequest, ExecBindingOverrides};
 use microsandbox_protocol::exec_control::ExecControlDiscovery;
 use microsandbox_protocol::jobs::*;
 use microsandbox_protocol::message::MessageType;
@@ -273,15 +274,43 @@ impl JobManager {
                 "job request targets a different runtime generation",
             );
         }
-        if let JobOperation::Start {
-            id,
-            command,
-            no_stdin,
-            input_base64,
-            timeout_ms,
-        } = request.operation
-        {
-            return self.start(id, command, no_stdin, input_base64, timeout_ms, running);
+        match request.operation {
+            JobOperation::Start {
+                id,
+                command,
+                no_stdin,
+                input_base64,
+                timeout_ms,
+            } => {
+                return self.start(
+                    id,
+                    command,
+                    None,
+                    no_stdin,
+                    input_base64,
+                    timeout_ms,
+                    running,
+                );
+            }
+            JobOperation::StartWithBindings {
+                id,
+                command,
+                binding_overrides,
+                no_stdin,
+                input_base64,
+                timeout_ms,
+            } => {
+                return self.start(
+                    id,
+                    command,
+                    Some(binding_overrides),
+                    no_stdin,
+                    input_base64,
+                    timeout_ms,
+                    running,
+                );
+            }
+            _ => {}
         }
         let mut entries = self.entries.lock().unwrap();
         if let JobOperation::List { all, limit, cursor } = request.operation {
@@ -545,12 +574,19 @@ impl JobManager {
         self: &Arc<Self>,
         id: JobId,
         command: ExecRequest,
+        binding_overrides: Option<ExecBindingOverrides>,
         no_stdin: bool,
         input_base64: Option<String>,
         timeout_ms: Option<u64>,
         running: bool,
     ) -> JobResponse {
-        let bytes = match serde_json::to_vec(&(&command, no_stdin, &input_base64, timeout_ms)) {
+        // Keep historical fingerprints byte-for-byte for ordinary and legacy jobs.
+        let inputs = (&command, no_stdin, &input_base64, timeout_ms);
+        let encoded = match &binding_overrides {
+            Some(proof) => serde_json::to_vec(&(inputs, proof)),
+            None => serde_json::to_vec(&inputs),
+        };
+        let bytes = match encoded {
             Ok(bytes) => bytes,
             Err(_) => return JobResponse::error("invalid_options", "invalid exec request"),
         };
@@ -591,6 +627,22 @@ impl JobManager {
                     "job identity was already used for a different command",
                 )
             };
+        }
+        // Check before recording the job or spawning its host task. The relay independently
+        // enforces the same requirement when this job actually crosses into the guest.
+        match self.relay_idle.command_bindings.as_deref() {
+            Some(bindings) => {
+                if let Err(reason) = bindings.check(&command, binding_overrides.as_ref()) {
+                    return JobResponse::error("missing_restore_binding", reason);
+                }
+            }
+            None if binding_overrides.is_some() => {
+                return JobResponse::error(
+                    "unsupported_feature",
+                    "exec binding admission was not negotiated",
+                );
+            }
+            None => {}
         }
         let mut admitted = self.admitted.lock().unwrap();
         if admitted.contains(&id) {
@@ -685,6 +737,7 @@ impl JobManager {
                 .run(
                     id,
                     command,
+                    binding_overrides,
                     no_stdin,
                     initial_input,
                     timeout_ms,
@@ -746,6 +799,7 @@ impl JobManager {
         self: Arc<Self>,
         id: JobId,
         command: ExecRequest,
+        binding_overrides: Option<ExecBindingOverrides>,
         no_stdin: bool,
         initial_input: Option<Vec<u8>>,
         timeout_ms: Option<u64>,
@@ -771,10 +825,23 @@ impl JobManager {
             let _managed_connection = self
                 .relay_idle
                 .register_managed_connection(capability.connection);
-            let stream = client
-                .stream(TypedMessage::new(MessageType::ExecRequest, &command))
-                .await
-                .map_err(|e| e.to_string())?;
+            let stream = match binding_overrides {
+                Some(binding_overrides) => {
+                    let request = BoundExecRequest {
+                        command: &command,
+                        binding_overrides,
+                    };
+                    client
+                        .stream(TypedMessage::new(MessageType::ExecRequest, &request))
+                        .await
+                }
+                None => {
+                    client
+                        .stream(TypedMessage::new(MessageType::ExecRequest, &command))
+                        .await
+                }
+            }
+            .map_err(|e| e.to_string())?;
 
             let (sender, mut output) = stream.into_parts();
             let policy = client.ready().agent.exec_limits;
@@ -1135,6 +1202,52 @@ mod tests {
             true,
         )
     }
+    #[tokio::test]
+    async fn deferred_binding_refused_job_leaves_no_record_or_id_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut manager = manager(root.path());
+        Arc::get_mut(&mut Arc::get_mut(&mut manager).unwrap().relay_idle)
+            .unwrap()
+            .command_bindings = Some(Arc::new(
+            microsandbox_protocol::exec_bindings::DeferredCommandBindings {
+                env: [("TOKEN".into(), "deploy".into())].into(),
+                ..Default::default()
+            },
+        ));
+        let mut command = command();
+        command.env = vec!["TOKEN=example".into()];
+        let first = request(
+            &manager,
+            JobOperation::Start {
+                id: id(1),
+                command: command.clone(),
+                no_stdin: true,
+                input_base64: None,
+                timeout_ms: None,
+            },
+        );
+        assert!(
+            matches!(first, JobResponse::Error { ref code, .. } if code == "missing_restore_binding")
+        );
+        assert!(manager.entries.lock().unwrap().is_empty());
+        assert!(manager.admitted.lock().unwrap().is_empty());
+        let next = request(
+            &manager,
+            JobOperation::StartWithBindings {
+                id: id(1),
+                command,
+                binding_overrides: ExecBindingOverrides {
+                    explicit_argv: true,
+                    env_keys: ["TOKEN".into()].into(),
+                },
+                no_stdin: true,
+                input_base64: None,
+                timeout_ms: None,
+            },
+        );
+        assert!(matches!(next, JobResponse::Info { .. }));
+    }
+
     fn start(manager: &Arc<JobManager>, n: u64) -> JobResponse {
         request(
             manager,

@@ -1,3 +1,6 @@
+// Explicit preparation calls measure readiness and concurrent convergence.
+// Ordinary shell/exec examples should rely on automatic preparation.
+
 // Import the in-tree build so this live example always exercises the current checkout's native module.
 import { Sandbox, SandboxReplacedError } from "../../../sdk/node-ts/dist/index.js";
 
@@ -59,22 +62,23 @@ async function runConcurrencyChecks(): Promise<void> {
 
   await raced[0].stop();
   const handles = await Promise.all(candidates.map(() => Sandbox.get(raceName)));
-  const connected = await measured("concurrent_connect_or_start", () =>
-    Promise.all(handles.map((handle) => handle.connectOrStart())),
+  await measured("concurrent_ensure_running", () =>
+    Promise.all(handles.map((sandbox) => sandbox.ensureRunning())),
   );
+  const connected = handles;
   assert(
     connected.every((sandbox) => sandbox.id === raceId),
-    "concurrent connectOrStart callers selected different identities",
+    "concurrent ensureRunning callers selected different identities",
   );
   assert((await readMarker(connected[0])) === marker, "start race lost persisted configuration");
 
   await connected[0].stop();
-  const detached = await measured("connect_or_start_detached", async () =>
-    (await Sandbox.get(raceName)).connectOrStart({ detached: true }),
+  const detached = await measured("start_detached", async () =>
+    Sandbox.startDetached(raceName),
   );
   assert(
     detached.id === raceId && !detached.ownsLifecycle,
-    "detached connectOrStart changed identity or took lifecycle ownership",
+    "detached ensureRunning changed identity or took lifecycle ownership",
   );
 
   const forced = await measured("restart_force", () =>
@@ -134,8 +138,9 @@ try {
   assert((await readMarker(resumed)) === "original", "start lost persisted configuration");
 
   const handle = await Sandbox.get(name);
-  const connected = await measured("connect_or_start", () => handle.connectOrStart());
-  assert(connected.id === originalId, "connectOrStart changed the persisted identity");
+  await measured("ensure_running", () => handle.ensureRunning());
+  const connected = handle;
+  assert(connected.id === originalId, "ensureRunning changed the persisted identity");
 
   await measured("wait_for_running", () => connected.waitForStatus("running"));
   await measured("exec", async () => {

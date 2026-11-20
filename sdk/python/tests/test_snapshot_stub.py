@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 
-def test_batch_load_preserves_single_load_options_and_returns_handles() -> None:
+def test_batch_load_preserves_single_load_options_and_returns_resources() -> None:
     stub = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
     tree = ast.parse(stub.read_text())
     snapshot = next(
@@ -20,9 +20,10 @@ def test_batch_load_preserves_single_load_options_and_returns_handles() -> None:
     assert ast.unparse(batch.args.args[0].annotation) == "Sequence[str | os.PathLike[str]]"
     assert [arg.arg for arg in batch.args.kwonlyargs] == [
         arg.arg for arg in single.args.kwonlyargs
-    ] == ["dest", "base", "group", "set_head"]
+    ] == ["dest", "base", "group", "set_head", "maximum_disk_bytes"]
     assert [ast.dump(value) for value in batch.args.kw_defaults] == [
         ast.dump(value) for value in single.args.kw_defaults
     ]
-    assert ast.unparse(single.returns) == "SnapshotHandle"
-    assert ast.unparse(batch.returns) == "list[SnapshotHandle]"
+    assert ast.unparse(single.returns) == "Snapshot"
+    # Snapshot.list is also an SDK method in this scope.
+    assert ast.unparse(batch.returns) == "builtins.list[Snapshot]"

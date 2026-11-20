@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+#[cfg(test)]
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -317,6 +318,9 @@ impl RuntimeOwnedRootDisk {
         let stage = tempfile::Builder::new()
             .prefix(".compact-")
             .tempdir_in(parent)
+            .map_err(RootDiskRolloverError::pre_rebind)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_directory(stage.path())
             .map_err(RootDiskRolloverError::pre_rebind)?;
         let prefix = &self.state.layers[plan.prefix()];
         let boundary = prefix.last().expect("nonempty compact prefix");
@@ -976,6 +980,9 @@ pub fn grow_stopped_root(runtime_dir: &Path, target: u64) -> Result<bool, String
         .prefix(".grow-")
         .tempdir_in(super::layout::host_root(runtime_dir)?)
         .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    microsandbox_utils::private_file::harden_existing_directory(stage.path())
+        .map_err(|error| error.to_string())?;
     let mut next = state.clone();
     if next.launch_base.is_none() {
         next.launch_base = state.layers.first().map(|layer| layer.path.clone());
@@ -987,6 +994,9 @@ pub fn grow_stopped_root(runtime_dir: &Path, target: u64) -> Result<bool, String
             .join(layer.path.file_name().ok_or("invalid root layer name")?);
         if index == last {
             microsandbox_utils::copy::fast_copy(&layer.path, &path).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            microsandbox_utils::private_file::harden_existing_file(&path)
+                .map_err(|error| error.to_string())?;
             layer.layer_id = new_id("layer");
             layer.integrity_root = None;
         } else {
@@ -1153,7 +1163,8 @@ fn publish_local_layer_closure(
     use super::local_disk::{LocalDiskAdmissions, link_exact};
 
     let directory = root.join("layers");
-    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    microsandbox_utils::private_file::create_private_dir_all(&directory)
+        .map_err(|e| e.to_string())?;
     let targets = layers
         .iter()
         .map(|layer| directory.join(format!("{}.{}", layer.layer_id, layer.format.as_str())))
@@ -1183,11 +1194,17 @@ fn publish_local_layer_closure(
                 // Relocate just that physical layer, never a linked source inode. This is the
                 // existing conversion path, not permission to change a captured predecessor.
                 let staging = tempfile::tempdir_in(&directory).map_err(|e| e.to_string())?;
+                #[cfg(unix)]
+                microsandbox_utils::private_file::harden_existing_directory(staging.path())
+                    .map_err(|error| error.to_string())?;
                 let staged = staging.path().join("layer.qcow2");
                 microsandbox_utils::copy::fast_copy(&layer.path, &staged)
                     .map_err(|e| e.to_string())?;
                 microsandbox_image::checkpoint::relocate_qcow2_backing(&staged, previous)
                     .map_err(|e| e.to_string())?;
+                #[cfg(unix)]
+                microsandbox_utils::private_file::harden_existing_file(&staged)
+                    .map_err(|error| error.to_string())?;
                 if integrity.is_some() {
                     integrity = Some(
                         sparse_file_integrity(&staged)
@@ -1210,7 +1227,8 @@ fn publish_layer_closure(
     layers: &[RootDiskLayer],
 ) -> Result<Vec<Option<String>>, String> {
     let directory = root.join("layers");
-    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    microsandbox_utils::private_file::create_private_dir_all(&directory)
+        .map_err(|error| error.to_string())?;
     let mut integrities = Vec::with_capacity(layers.len());
     for (index, layer) in layers.iter().enumerate() {
         let target = directory.join(format!("{}.{}", layer.layer_id, layer.format.as_str()));
@@ -1218,6 +1236,9 @@ fn publish_layer_closure(
             // Published names differ from the active journal. Reflink/copy before rewriting:
             // the running VM and earlier checkpoints may still reference the source inode.
             let staging = tempfile::tempdir_in(&directory).map_err(|error| error.to_string())?;
+            #[cfg(unix)]
+            microsandbox_utils::private_file::harden_existing_directory(staging.path())
+                .map_err(|error| error.to_string())?;
             let staged = staging.path().join("layer.qcow2");
             microsandbox_utils::copy::fast_copy(&layer.path, &staged)
                 .map_err(|error| error.to_string())?;
@@ -1228,6 +1249,9 @@ fn publish_layer_closure(
                 previous.format.as_str()
             ));
             microsandbox_image::checkpoint::relocate_qcow2_backing(&staged, &backing)
+                .map_err(|error| error.to_string())?;
+            #[cfg(unix)]
+            microsandbox_utils::private_file::harden_existing_file(&staged)
                 .map_err(|error| error.to_string())?;
             let expected = layer
                 .integrity_root
@@ -1351,16 +1375,14 @@ fn write_state_with_sync(
     let parent = path
         .parent()
         .ok_or_else(|| RootDiskRolloverError::pre_rebind("root-disk state path has no parent"))?;
-    std::fs::create_dir_all(parent).map_err(RootDiskRolloverError::pre_rebind)?;
+    microsandbox_utils::private_file::create_private_dir_all(parent)
+        .map_err(RootDiskRolloverError::pre_rebind)?;
     let temporary = parent.join(format!(
         ".{ROOT_DISK_STATE_FILE}.{}.tmp",
         rand::random::<u64>()
     ));
     let bytes = serde_json::to_vec(state).map_err(RootDiskRolloverError::pre_rebind)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
+    let mut file = microsandbox_utils::private_file::create_new(&temporary)
         .map_err(RootDiskRolloverError::pre_rebind)?;
     file.write_all(&bytes)
         .map_err(RootDiskRolloverError::pre_rebind)?;
@@ -1788,6 +1810,14 @@ mod tests {
         };
         let path = directory.path().join(ROOT_DISK_STATE_FILE);
         write_state(&path, &state).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         let successor = directory.path().join("successor.qcow2");
         microsandbox_image::checkpoint::create_qcow2_overlay(&successor, 4096, &base, "raw")
             .await
@@ -1969,6 +1999,8 @@ mod tests {
             network: Default::default(),
             #[cfg(feature = "net")]
             deployment_profile: Default::default(),
+            #[cfg(feature = "net")]
+            multi_tenant: Default::default(),
             #[cfg(feature = "net")]
             sandbox_slot: 1,
             checkpoint_restore: None,

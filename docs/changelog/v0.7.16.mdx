@@ -1,0 +1,46 @@
+---
+title: "v0.7.16"
+sidebarTitle: "v0.7.16"
+description: "Services, network reliability, Cloud API fixes, and runtime updates."
+icon: "bolt"
+---
+
+November 18, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.16) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.15...v0.7.16)
+
+## Highlights
+
+### Services
+
+Services expose a sandbox port through a stable public HTTPS URL. The feature is available in all five SDKs and the CLI. Select Cloud with `MSB_BACKEND=cloud` and your API key, then target a running sandbox.
+
+```typescript
+import { Service } from "microsandbox";
+
+const service = await Service.builder("my-app")
+  .target("my-sandbox", 8080)
+  .create();
+console.log(service.url);
+```
+
+See [Services](/sandboxes/services), the [CLI reference](/cli/service-commands), and the language-specific SDK references.
+
+## Security fixes
+
+- Host-managed files use owner-only permissions and clear inherited ACLs. Existing files can be tightened with [permission repair](/migrations/v0.7#repair-file-permissions).
+- Guest extended-attribute operations are limited to ordinary user attributes, excluding reserved Microsandbox and OverlayFS namespaces, host ACLs, and security labels.
+- The public network policy blocks access to host and local-network addresses over global IPv6.
+- DNS rebind protection checks local-discovery names, reverse lookups, and response metadata against the allowed network policy.
+
+## Fixes
+
+- The network stack revalidates SNI DNS bindings when a connection reconnects.
+- SDKs decode every Cloud sandbox status, including newer service states.
+- Cloud modifications use canonical sandbox change endpoints.
+- Guest bulk-cleanup bursts no longer stop the guest.
+- libkrun and multigrain firmware were updated.
+- Rust 1.100 toolchain checks and the port test build were repaired.
+- Release builds can fall back to an Ubuntu package mirror when the primary mirror is unavailable.
+
+## Upgrade notes
+
+Services are Cloud-only. Restart local sandboxes with the updated runtime to apply guest and network fixes. Updating binaries alone does not tighten permissions on existing files; follow [permission repair](/migrations/v0.7#repair-file-permissions). Keep the runtime and firmware from the same release bundle.

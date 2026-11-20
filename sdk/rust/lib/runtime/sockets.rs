@@ -13,7 +13,7 @@ use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 
 use crate::MicrosandboxResult;
-use crate::backend::LocalBackend;
+use crate::context::LocalContext;
 use crate::runtime::launch_contract::LaunchContract;
 
 //--------------------------------------------------------------------------------------------------
@@ -34,7 +34,7 @@ enum AgentPipeProbe {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl LocalBackend {
+impl LocalContext {
     pub(crate) fn agent_socket_paths(&self, name: &str) -> Vec<PathBuf> {
         agent_socket_paths_in(
             &self.config().run_dir(),
@@ -92,7 +92,7 @@ impl LocalBackend {
 
 /// Return agent socket paths for the default backend, or the default home when it is cloud.
 pub(crate) fn default_agent_socket_paths(name: &str) -> Vec<PathBuf> {
-    let backend = crate::backend::default_backend();
+    let backend = crate::context::default_local_context();
     if let Some(local) = backend.as_local() {
         return local.agent_socket_paths(name);
     }
@@ -288,18 +288,17 @@ mod tests {
     use microsandbox_runtime::ipc::RuntimeSocketPaths;
     use tempfile::tempdir;
 
-    use crate::backend::LocalBackend;
+    use crate::context::LocalContext;
 
     #[tokio::test]
     async fn test_agent_socket_candidates_follow_explicit_local_backend_paths() {
         let temp = tempdir().unwrap();
         let home = temp.path().join("msb-home");
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(home.join("config.json"))
             .managed_config_path(home.join("managed.json"))
             .home(&home)
             .build()
-            .await
             .unwrap();
 
         let candidates = backend.agent_socket_paths("sdk-socket-test");
@@ -347,12 +346,11 @@ mod tests {
         #[cfg(not(unix))]
         let temp = tempfile::Builder::new().prefix("msb").tempdir().unwrap();
         let home = temp.path().join("msb-home");
-        let backend = LocalBackend::builder()
+        let backend = LocalContext::builder()
             .config_path(home.join("config.json"))
             .managed_config_path(home.join("managed.json"))
             .home(&home)
             .build()
-            .await
             .unwrap();
 
         let resolved = backend

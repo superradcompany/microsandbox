@@ -2,7 +2,7 @@
 //!
 //! [`GlobalConfigPatch`] reads and writes sparse user settings in `config.json`.
 //! [`GlobalConfig`] holds resolved settings after defaults and patches are applied.
-//! [`LocalBackend`](crate::backend::LocalBackend) owns the configuration layers
+//! [`LocalContext`](crate::context::LocalContext) owns the configuration layers
 //! and caches their resolved values. Accessors live on
 //! explicit backend instances, with [`config`] providing an ambient
 //! helper for the active local backend. See D6.7 Layer 2a in
@@ -14,6 +14,7 @@
 //! one resolved `msb` binary).
 
 pub(crate) mod backend;
+mod dns;
 pub(crate) mod layers;
 mod persistence;
 mod registry;
@@ -35,7 +36,7 @@ use microsandbox_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{BackendKind, Profile};
+use crate::context::{ContextKind, Profile};
 #[cfg(feature = "local")]
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -146,7 +147,7 @@ static SDK_LIBKRUNFW_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 pub struct GlobalConfig {
     /// Backends permitted on this device. `None` allows both; an empty list is invalid.
     /// Managed values replace user restrictions, including an explicit null clear.
-    pub allowed_backends: Option<Vec<BackendKind>>,
+    pub allowed_backends: Option<Vec<ContextKind>>,
 
     /// Profile selected when no backend or profile is explicitly requested.
     /// Empty or absent uses the local backend fallback.
@@ -208,6 +209,10 @@ pub struct GlobalConfig {
     /// Snapshot capture and restore limits.
     #[config_patch(nested)]
     pub snapshots: SnapshotsConfig,
+
+    /// Host-owned DNS settings.
+    #[config_patch(nested)]
+    pub dns: HostDnsConfig,
 }
 
 /// Compatibility alias for the backend-owned global configuration.
@@ -708,11 +713,11 @@ impl Default for BlockWritebackConfig {
 /// Return the active default backend's local config.
 ///
 /// This is the ambient convenience path for callers that do not explicitly
-/// construct a [`LocalBackend`](crate::backend::LocalBackend). It returns
+/// construct a [`LocalContext`](crate::context::LocalContext). It returns
 /// [`MicrosandboxError::Unsupported`] when the active backend is cloud.
 #[cfg(feature = "local")]
 pub fn config() -> MicrosandboxResult<Arc<GlobalConfig>> {
-    let backend = crate::backend::default_backend();
+    let backend = crate::context::configured_context();
     let local = backend
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(Operation::Config))?;
@@ -805,6 +810,7 @@ fn resolve_default_home() -> PathBuf {
 //--------------------------------------------------------------------------------------------------
 
 pub use backend::{BackendContext, ContextProfile};
+pub use dns::{HostDnsConfig, HostDnsConfigPatch};
 pub(crate) use registry::RegistrySettingsPatch;
 pub use registry::{
     RegistriesConfig, RegistriesConfigPatch, RegistryAuthEntry, RegistryConfig,
@@ -835,10 +841,10 @@ mod tests {
     #[test]
     fn test_saved_patch_preserves_values_across_all_sections() {
         let expected = serde_json::json!({
-            "allowed_backends": ["local", "cloud"],
+            "allowed_backends": ["local", "remote"],
             "active_profile": "work",
             "profiles": {"work": {
-                "backend": "cloud",
+                "kind": "remote",
                 "url": "https://api.example.test",
                 "api_key_ref": "env:MSB_TEST_API_KEY"
             }},
@@ -903,9 +909,12 @@ mod tests {
             },
             "ssh": {"inactivity_timeout_secs": 45},
             "metrics": {"capacity": 128},
-            "snapshots": {"max_filesystem_state_mib": 64}
+            "snapshots": {"max_filesystem_state_mib": 64},
+            "dns": {"nameservers": ["9.9.9.9", "2620:fe::fe"]}
         });
-        let config: GlobalConfig = serde_json::from_value(expected.clone()).unwrap();
+        let mut previous = expected.clone();
+        previous["allowed_backends"] = serde_json::json!(["local", "cloud"]);
+        let config: GlobalConfig = serde_json::from_value(previous).unwrap();
         let patch: GlobalConfigPatch = saved_patch(&config);
         let mut resolved = GlobalConfig::default();
         patch.apply_to(&mut resolved);
@@ -1035,7 +1044,7 @@ mod tests {
 
         // Fields skipped within an atomic map entry must not retain the replaced entry's values.
         let profile = &resolved.profiles["work"];
-        assert_eq!(profile.backend, crate::backend::ProfileBackend::Local);
+        assert_eq!(profile.kind, crate::context::ProfileKind::Local);
         assert_eq!(profile.url, None);
         assert_eq!(profile.api_key_ref, None);
         assert!(resolved.profiles.contains_key("keep"));
