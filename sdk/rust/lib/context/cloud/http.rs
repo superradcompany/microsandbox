@@ -179,17 +179,15 @@ impl RemoteContext {
 
     /// `GET /v1/sandboxes/by-name/:name`.
     pub async fn get_sandbox(&self, name: &str) -> MicrosandboxResult<CloudCreateSandboxResponse> {
-        let url = format!(
-            "{}/v1/sandboxes/by-name/{}",
-            self.inner.url,
-            urlencoding(name)
-        );
+        let path = format!("/v1/sandboxes/by-name/{}", urlencoding(name));
+        let url = format!("{}{path}", self.inner.url);
+        let op = format!("GET {path}");
         let resp = self
             .request(Method::GET, &url)
             .send()
             .await
-            .map_err(|e| cloud_io_error("GET /v1/sandboxes/by-name/:name", e))?;
-        decode_json(resp, "GET /v1/sandboxes/by-name/:name").await
+            .map_err(|e| cloud_io_error(&op, e))?;
+        decode_json(resp, &op).await
     }
 
     /// `GET /v1/sandboxes/:id` for identity-safe receiver operations.
@@ -197,13 +195,15 @@ impl RemoteContext {
         &self,
         id: &str,
     ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
-        let url = format!("{}/v1/sandboxes/{}", self.inner.url, urlencoding(id));
+        let path = format!("/v1/sandboxes/{}", urlencoding(id));
+        let url = format!("{}{path}", self.inner.url);
+        let op = format!("GET {path}");
         let resp = self
             .request(Method::GET, &url)
             .send()
             .await
-            .map_err(|e| cloud_io_error("GET /v1/sandboxes/:id", e))?;
-        decode_json(resp, "GET /v1/sandboxes/:id").await
+            .map_err(|e| cloud_io_error(&op, e))?;
+        decode_json(resp, &op).await
     }
 
     /// `POST /v1/sandboxes/by-name/:name/start`, waiting for readiness.
@@ -211,11 +211,9 @@ impl RemoteContext {
         &self,
         name: &str,
     ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
-        let url = format!(
-            "{}/v1/sandboxes/by-name/{}/start",
-            self.inner.url,
-            urlencoding(name)
-        );
+        let path = format!("/v1/sandboxes/by-name/{}/start", urlencoding(name));
+        let url = format!("{}{path}", self.inner.url);
+        let op = format!("POST {path}");
         let query = CloudSandboxWaitQuery {
             start: None,
             wait_for: "running",
@@ -228,8 +226,8 @@ impl RemoteContext {
             .timeout(CLOUD_READY_HTTP_TIMEOUT)
             .send()
             .await
-            .map_err(|e| cloud_io_error("POST start", e))?;
-        decode_json(resp, "POST /v1/sandboxes/by-name/:name/start").await
+            .map_err(|e| cloud_io_error(&op, e))?;
+        decode_json(resp, &op).await
     }
 
     /// `POST /v1/sandboxes/:id/start`, waiting for readiness.
@@ -237,7 +235,9 @@ impl RemoteContext {
         &self,
         id: &str,
     ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
-        let url = format!("{}/v1/sandboxes/{}/start", self.inner.url, urlencoding(id));
+        let path = format!("/v1/sandboxes/{}/start", urlencoding(id));
+        let url = format!("{}{path}", self.inner.url);
+        let op = format!("POST {path}");
         let query = CloudSandboxWaitQuery {
             start: None,
             wait_for: "running",
@@ -250,8 +250,8 @@ impl RemoteContext {
             .timeout(CLOUD_READY_HTTP_TIMEOUT)
             .send()
             .await
-            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/start", e))?;
-        decode_json(resp, "POST /v1/sandboxes/:id/start").await
+            .map_err(|e| cloud_io_error(&op, e))?;
+        decode_json(resp, &op).await
     }
 
     /// `POST /v1/sandboxes/:id/plan`, a dry run whose body carries no secret value.
@@ -290,18 +290,16 @@ impl RemoteContext {
 
     /// `POST /v1/sandboxes/by-name/:name/stop`.
     pub async fn stop_sandbox(&self, name: &str) -> MicrosandboxResult<CloudCreateSandboxResponse> {
-        let url = format!(
-            "{}/v1/sandboxes/by-name/{}/stop",
-            self.inner.url,
-            urlencoding(name)
-        );
+        let path = format!("/v1/sandboxes/by-name/{}/stop", urlencoding(name));
+        let url = format!("{}{path}", self.inner.url);
+        let op = format!("POST {path}");
         let resp = self
             .request(Method::POST, &url)
             .json(&serde_json::json!({}))
             .send()
             .await
-            .map_err(|e| cloud_io_error("POST stop", e))?;
-        decode_json(resp, "POST /v1/sandboxes/by-name/:name/stop").await
+            .map_err(|e| cloud_io_error(&op, e))?;
+        decode_json(resp, &op).await
     }
 
     /// `POST /v1/sandboxes/:id/stop` for identity-safe receiver operations.
@@ -309,30 +307,30 @@ impl RemoteContext {
         &self,
         id: &str,
     ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
-        let url = format!("{}/v1/sandboxes/{}/stop", self.inner.url, urlencoding(id));
+        let path = format!("/v1/sandboxes/{}/stop", urlencoding(id));
+        let url = format!("{}{path}", self.inner.url);
+        let op = format!("POST {path}");
         let resp = self
             .request(Method::POST, &url)
             .json(&serde_json::json!({}))
             .send()
             .await
-            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/stop", e))?;
-        decode_json(resp, "POST /v1/sandboxes/:id/stop").await
+            .map_err(|e| cloud_io_error(&op, e))?;
+        decode_json(resp, &op).await
     }
 
     /// `DELETE /v1/sandboxes/by-name/:name`. Returns the typed `MessageResponse`
     /// returned by the API.
     pub async fn destroy_sandbox(&self, name: &str) -> MicrosandboxResult<CloudMessageResponse> {
-        let url = format!(
-            "{}/v1/sandboxes/by-name/{}",
-            self.inner.url,
-            urlencoding(name)
-        );
+        let path = format!("/v1/sandboxes/by-name/{}", urlencoding(name));
+        let url = format!("{}{path}", self.inner.url);
+        let op = format!("DELETE {path}");
         let resp = self
             .request(Method::DELETE, &url)
             .send()
             .await
-            .map_err(|e| cloud_io_error("DELETE /v1/sandboxes/by-name/:name", e))?;
-        decode_json(resp, "DELETE /v1/sandboxes/by-name/:name").await
+            .map_err(|e| cloud_io_error(&op, e))?;
+        decode_json(resp, &op).await
     }
 
     /// `DELETE /v1/sandboxes/:id` for identity-safe receiver operations.
@@ -340,13 +338,15 @@ impl RemoteContext {
         &self,
         id: &str,
     ) -> MicrosandboxResult<CloudMessageResponse> {
-        let url = format!("{}/v1/sandboxes/{}", self.inner.url, urlencoding(id));
+        let path = format!("/v1/sandboxes/{}", urlencoding(id));
+        let url = format!("{}{path}", self.inner.url);
+        let op = format!("DELETE {path}");
         let resp = self
             .request(Method::DELETE, &url)
             .send()
             .await
-            .map_err(|e| cloud_io_error("DELETE /v1/sandboxes/:id", e))?;
-        decode_json(resp, "DELETE /v1/sandboxes/:id").await
+            .map_err(|e| cloud_io_error(&op, e))?;
+        decode_json(resp, &op).await
     }
 
     /// Stream logs from `GET /v1/sandboxes/:id/logs`.
@@ -714,6 +714,17 @@ pub(super) fn cloud_http_error(
         Some("invalid_request") | Some("invalid_sandbox_config") | Some("invalid_volume_path") => {
             return MicrosandboxError::InvalidConfig(message);
         }
+        Some(
+            "invalid_pagination"
+            | "invalid_snapshot_name"
+            | "invalid_snapshot_path"
+            | "invalid_snapshot_source"
+            | microsandbox_types::CLOUD_MODIFICATION_FAILED,
+        ) if matches!(status, 400 | 422) => {
+            // Preserve known API client-rejection contracts without classifying
+            // an unrecognized proxy response from its HTTP status alone.
+            return MicrosandboxError::InvalidConfig(message);
+        }
         Some("orchestrator_unreachable") | Some("nomad_job_failed") => {
             return MicrosandboxError::Runtime(message);
         }
@@ -726,8 +737,9 @@ pub(super) fn cloud_http_error(
         _ => {}
     }
 
+    // A proxy or a misrouted request can also return 400/422. Only the explicit
+    // validation codes above establish that the caller's configuration is wrong.
     match status {
-        400 | 422 => MicrosandboxError::InvalidConfig(message),
         404 if op.contains("/v1/snapshots") || op.contains("/v1/snapshot-operations") => {
             MicrosandboxError::SnapshotNotFound(message)
         }
@@ -947,7 +959,157 @@ pub(super) fn urlencoding(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
     use super::*;
+    use crate::test_support;
+
+    #[test]
+    fn unexpected_http_errors_preserve_status_and_server_message() {
+        let raw = "Connection header did not include upgrade";
+        for status in [400, 405, 422, 500, 503] {
+            for body in [
+                None,
+                Some(
+                    serde_json::from_value::<CloudErrorBody>(
+                        serde_json::json!({"error": {"code": "routing_error", "message": raw}}),
+                    )
+                    .unwrap(),
+                ),
+            ] {
+                let error = cloud_http_error(status, body.as_ref(), raw, "GET /v1/sandboxes");
+                let MicrosandboxError::CloudHttp {
+                    status: actual,
+                    code,
+                    message,
+                } = error
+                else {
+                    panic!("unexpected server error was misclassified: {error:?}");
+                };
+                assert_eq!(actual, status);
+                assert_eq!(code.as_deref(), body.as_ref().map(|_| "routing_error"));
+                assert_eq!(message, format!("GET /v1/sandboxes: {raw}"));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_validation_codes_keep_invalid_config_classification() {
+        for code in [
+            "invalid_request",
+            "invalid_sandbox_config",
+            "invalid_volume_path",
+            "invalid_pagination",
+            "invalid_snapshot_name",
+            "invalid_snapshot_path",
+            "invalid_snapshot_source",
+            microsandbox_types::CLOUD_MODIFICATION_FAILED,
+        ] {
+            for status in [400, 422] {
+                // Both API error envelopes have shipped; keep their existing classification.
+                for value in [
+                    serde_json::json!({"code": code, "message": "invalid field"}),
+                    serde_json::json!({"error": {"code": code, "message": "invalid field"}}),
+                ] {
+                    let body = serde_json::from_value(value).unwrap();
+                    assert!(matches!(
+                        cloud_http_error(status, Some(&body), "", "POST /v1/sandboxes"),
+                        MicrosandboxError::InvalidConfig(message) if message.contains("invalid field")
+                    ));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_errors_identify_the_actual_encoded_request_path() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = test_support::cloud_backend(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "test-key-not-for-diagnostics",
+        )
+        .unwrap();
+        let operations = [
+            ("GET", "/v1/sandboxes/by-name/team%20agent%2Fone"),
+            ("POST", "/v1/sandboxes/by-name/team%20agent%2Fone/start"),
+            ("POST", "/v1/sandboxes/by-name/team%20agent%2Fone/stop"),
+            ("DELETE", "/v1/sandboxes/by-name/team%20agent%2Fone"),
+            ("GET", "/v1/sandboxes/sandbox-id"),
+            ("POST", "/v1/sandboxes/sandbox-id/start"),
+            ("POST", "/v1/sandboxes/sandbox-id/stop"),
+            ("DELETE", "/v1/sandboxes/sandbox-id"),
+        ];
+        let server = tokio::spawn(async move {
+            for (method, path) in operations {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let query = if path.ends_with("/start") {
+                    "?wait_for=running&wait_timeout=90"
+                } else {
+                    ""
+                };
+                assert_eq!(line.trim(), format!("{method} {path}{query} HTTP/1.1"));
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':')
+                        && key.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).await.unwrap();
+                let body = "Connection header did not include upgrade";
+                reader.get_mut().write_all(format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                ).as_bytes()).await.unwrap();
+            }
+        });
+        for (index, (method, path)) in operations.into_iter().enumerate() {
+            let error = tokio::time::timeout(Duration::from_secs(5), async {
+                match index {
+                    0 => backend.get_sandbox("team agent/one").await.unwrap_err(),
+                    1 => backend.start_sandbox("team agent/one").await.unwrap_err(),
+                    2 => backend.stop_sandbox("team agent/one").await.unwrap_err(),
+                    3 => backend.destroy_sandbox("team agent/one").await.unwrap_err(),
+                    4 => backend.get_sandbox_by_id("sandbox-id").await.unwrap_err(),
+                    5 => backend.start_sandbox_by_id("sandbox-id").await.unwrap_err(),
+                    6 => backend.stop_sandbox_by_id("sandbox-id").await.unwrap_err(),
+                    _ => backend
+                        .destroy_sandbox_by_id("sandbox-id")
+                        .await
+                        .unwrap_err(),
+                }
+            })
+            .await
+            .unwrap();
+            let MicrosandboxError::CloudHttp {
+                status,
+                code,
+                message,
+            } = error
+            else {
+                panic!("unexpected server error was misclassified: {error:?}");
+            };
+            assert_eq!(status, 400);
+            assert_eq!(code, None);
+            assert_eq!(
+                message,
+                format!("{method} {path}: Connection header did not include upgrade")
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn unauthorized_errors_keep_their_type_and_explain_credential_recovery() {
