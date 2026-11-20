@@ -297,6 +297,8 @@ def generate_certificate(root, command_log):
 def run_mode(root, home, env, command_log, name, tls):
     sink = UpstreamSink(root, tls)
     try:
+        # Exercise the secret guard explicitly in both modes. Default-allowed
+        # TCP traffic without secrets may correctly bypass HTTP inspection.
         args = [
             "create",
             IMAGE,
@@ -312,6 +314,8 @@ def run_mode(root, home, env, command_log, name, tls):
             "allow",
             "--net-rule",
             f"allow@{HOST}",
+            "--secret",
+            f"{SECRET_ENV}@{HOST}",
         ]
         if tls:
             args.extend(
@@ -321,8 +325,6 @@ def run_mode(root, home, env, command_log, name, tls):
                     str(sink.port),
                     "--tls-no-verify-upstream-for",
                     HOST,
-                    "--secret",
-                    f"{SECRET_ENV}@{HOST}",
                 ]
             )
 
