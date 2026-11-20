@@ -38,7 +38,7 @@ In TypeScript and Python, use `await ctx.snapshots.get(name)` or `await ctx.chec
 
 Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSandbox` for ordinary resource operations. Use the matching resource or collection for lookups and lists. These calls honor the configured backend and use local when unset. An API key alone supplies credentials.
 
-Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. Use the selected context’s collections to keep related operations on the same provider.
+Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. See [context selection](/operations/backends#sdk-contexts) for complete language examples. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. Use the selected context’s collections to keep related operations on the same provider.
 
 ### Use the returned resource directly
 
@@ -79,7 +79,7 @@ output = sb.shell("echo ready")
 ```
 </CodeGroup>
 
-Explicit static `start` and `start_detached` are strict: they start an existing stopped resource and fail if it is already running. They do not perform connect-or-start. There is no separate instance `start`; use `ensure_running` only when you need explicit preparation ahead of work. Ordinary execution needs no preparation call.
+Explicit static `start` and `start_detached` are strict: they start an existing stopped resource and fail if it is already running. They do not perform connect-or-start. There is no separate instance `start`; use `ensure_running` only when you need [explicit preparation ahead of work](/sandboxes/lifecycle#prepare-ahead-of-time). Ordinary execution needs no preparation call.
 
 When preparation starts a stopped local sandbox, the receiving resource retains the new run's ownership. Connecting to an already running sandbox acquires no new shutdown ownership. Remote resources do not gain client-scope shutdown ownership. Use explicit stop or destroy when that is the intended action. See [lifecycle](/sandboxes/lifecycle) for cleanup and detachment.
 
@@ -117,25 +117,23 @@ Rust `sandbox.launch_info()` returns optional `SandboxLaunchInfo` for the receiv
 
 Key-only constructors now honor `MSB_API_URL`. To pin an endpoint, pass its URL explicitly. In Rust, replace `new(url, key)` with `with_url(url, key)` and `with_api_key(key)` with `new(key)`. In Go, use `NewRemoteContextWithURL(url, key)` for the two-argument form.
 
-TypeScript keeps `new RemoteContext({ apiKey })` and adds `RemoteContext.withUrl(url, apiKey, options?)`. Python keeps `RemoteContext(api_key=...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Ruby keeps `RemoteContext.new(api_key: ...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Existing URL options/keywords remain supported. Builders, explicit environment loading and named profiles retain their roles.
+TypeScript keeps `new RemoteContext({ apiKey })` and adds `RemoteContext.withUrl(url, apiKey, options?)`. Python keeps `RemoteContext(api_key=...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Ruby keeps `RemoteContext.new(api_key: ...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Existing URL options/keywords remain supported. Builders, explicit environment loading and named profiles retain their roles. See [remote endpoints](/cloud/connect#another-endpoint).
 
 This is a public source API change. Runtime protocols, stored configuration, resource identity and the local fallback are unchanged.
 
 ### Remote context derivation and authentication
 
-Use Rust `to_builder()` or TypeScript `toBuilder()` to derive through the existing fluent builder. Python uses `replace(...)`, Ruby uses `with(...)`, and Go uses `WithOptions(...)`; these SDKs do not gain context builders. Derivation preserves captured configuration and native-provider ownership. Existing resources keep their original credentials and endpoint.
+Use Rust `to_builder()` or TypeScript `toBuilder()` to derive through the existing fluent builder. Python uses `replace(...)`, Ruby uses `with(...)`, and Go uses `WithOptions(...)`; these SDKs do not gain context builders. Derivation preserves captured configuration and native-provider ownership. Existing resources keep their original credentials and endpoint. See [the language examples](/cloud/connect#more-options).
 
 Rust custom HTTP clients now use the context's API key for Authorization, consistently with agent connections. A different default Authorization header on a supplied `reqwest::Client` no longer overrides that key. Pass the intended credential to `RemoteContext` or its derived builder. Custom transport, timeout and user-agent settings retain their existing precedence. Runtime protocols and persisted configuration formats are unchanged.
 
 ### Resource selectors and state accessors
 
-Explicit resource-type `local()` / `remote()` selectors return the existing plural collections before builder/create/get/list. Go uses `SandboxLocal()` / `SandboxRemote()` and corresponding Volume/Snapshot functions. Remote selection reads environment credentials; unqualified calls use the configured destination.
+Explicit resource-type `local()` / `remote()` selectors return the existing plural collections before builder/create/get/list. Go uses `SandboxLocal()` / `SandboxRemote()` and corresponding Volume/Snapshot functions. Remote selection reads environment credentials; unqualified calls use the configured destination. See [usage and feature availability](/cloud/connect#resource-selectors).
 
 Rust's previous instance `.local()` and `.cloud()` state accessors are now `.local_state()` and `.remote_state()`. Public `SandboxCloudState` and `VolumeCloudState` become `SandboxRemoteState` and `VolumeRemoteState`. This source-breaking rename frees the resource-type selector names. State access remains synchronous and does not replace live inspection. Runtime protocols and persisted field spellings are unchanged.
 
-CLI `--local` / `--remote` override ordinary and managed active-profile selection but still enforce `allowed_backends`. Remote flags use environment credentials; omit them for named-profile credential resolution. `MSB_BACKEND=remote` is accepted alongside legacy `cloud`. Diagnostic JSON uses `remote` for the remote kind. Explicit flag-selected contexts use the existing `programmatic` source value.
-
-
+CLI `--local` / `--remote` override ordinary and managed active-profile selection but still enforce `allowed_backends`. Remote flags use environment credentials; omit them for named-profile credential resolution. `MSB_BACKEND=remote` is accepted alongside legacy `cloud`. Diagnostic JSON uses `remote` for the remote kind. Explicit flag-selected contexts use the existing `programmatic` source value. See [CLI precedence](/cloud/connect#precedence).
 
 ### Configuration result shape
 
@@ -148,7 +146,6 @@ Rust uses `inspection.runtime()` and pattern matching on `inspection.settings`, 
 In TypeScript, Python and Go, inspected log levels and local pull policies use the same choices as creation. Replace comparisons against the persisted spelling `IfMissing` with `"if-missing"`, `PullPolicy.IF_MISSING`, or `PullPolicyIfMissing`, respectively. Go named-volume options and snapshot state kinds also use named string types.
 
 Do not feed the result back into a creation builder. Keep creation input separately if your application needs to reproduce a task; a redacted inspection response cannot supply withheld source references or credentials. Fetching an existing resource preserves its returned runtime settings for shell and default-command execution without an explicit `ensure_running` call.
-
 
 ### Typed resource and job values
 
@@ -181,7 +178,7 @@ Keep an untouched copy of important archives before testing imports or restores.
 
 ## SDK distribution migration
 
-These packages are planned for v0.8 and are not part of the published v0.7 releases. When available, install matching SDK and native-library versions.
+These packages are unreleased and are not part of v0.7.15. When available, install matching SDK and native-library versions.
 
 Keep `npm install microsandbox` or `pip install microsandbox` to keep the full package. Switching to a smaller package is optional. The [API migration](/migrations/v0.8#sdk-api-migration) applies independently of package selection.
 
@@ -217,7 +214,7 @@ sb = await Sandbox.create("worker", image="python")
 
 Python uses separate distributions, not `microsandbox[local]` or `microsandbox[remote]` extras. Each owns a separate import package. npm uses separately installable scoped packages, not `microsandbox/local` or `microsandbox/remote` subpath imports.
 
-Local and remote packages can be installed together. Existing objects keep their original connection. A remote-only installation requires a [RemoteContext](/migrations/v0.8#remote-context-construction); trying to run locally reports a missing-package error.
+Local and remote packages can be installed together. Existing objects keep their original connection. A remote-only installation requires a [RemoteContext](/cloud/connect#sdk-contexts); trying to run locally reports a missing-package error.
 
 ### Provision Go FFI explicitly
 
@@ -259,7 +256,7 @@ Use `remote.NewContext(path, apiKey)` with `MSB_API_URL` or the hosted default; 
 
 ## Existing local storage
 
-The protected storage layout was introduced in v0.7.12. It is not a new v0.8 migration. If an older sandbox cannot start because its storage needs attention, use [Sandbox storage migration](/migrations/v0.7#sandbox-storage-migration). Do not recreate the sandbox or remove migration records to bypass a refusal.
+The protected storage layout was introduced in v0.7.12. It is not a new v0.8 migration. If an older sandbox cannot start because its storage needs attention, use [Sandbox storage migration](/repairs/sandbox-storage). Do not recreate the sandbox or remove migration records to bypass a refusal.
 
 ## Returning to an older release
 
