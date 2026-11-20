@@ -45,8 +45,6 @@ use std::path::Path;
 
 pub(crate) mod runtime_paths;
 
-pub use dns::{HostDnsConfig, HostDnsConfigPatch};
-
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -812,6 +810,7 @@ fn resolve_default_home() -> PathBuf {
 //--------------------------------------------------------------------------------------------------
 
 pub use backend::{BackendContext, ContextProfile};
+pub use dns::{HostDnsConfig, HostDnsConfigPatch};
 pub(crate) use registry::RegistrySettingsPatch;
 pub use registry::{
     RegistriesConfig, RegistriesConfigPatch, RegistryAuthEntry, RegistryConfig,
