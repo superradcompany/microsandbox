@@ -1727,6 +1727,8 @@ export type JsSftpClient = SftpClient
 
 /** A backend-neutral snapshot artifact. */
 export declare class Snapshot {
+  /** Whether this native library enforces import byte limits. */
+  static supportsImportBudget(): boolean
   /**
    * Consume destination options; the receiver always selects the source and backend.
    *
@@ -2313,6 +2315,8 @@ export interface LoadOpts {
   group?: string
   /** Select the unique imported tip even when it is not a fast-forward. */
   setHead?: boolean
+  /** Maximum logical bytes imported; omit for unlimited. */
+  maximumDiskBytes?: number;
 }
 
 /** One captured log entry from `exec.log`. */

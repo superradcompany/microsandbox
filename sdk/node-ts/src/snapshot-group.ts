@@ -47,6 +47,7 @@ export class SnapshotLoadOptions {
   private options: NapiLoadOpts = {};
   base(value: string): this { this.options.base = value; return this; }
   destDir(value: string): this { this.options.dest = value; return this; }
+  maximumDiskBytes(value: number): this { this.options.maximumDiskBytes = value; return this; }
   setHead(): this { this.options.setHead = true; return this; }
   /** @internal */
   toNative(): NapiLoadOpts { return { ...this.options }; }
@@ -96,6 +97,7 @@ export class Snapshot {
 
   static async loadWith(group: string, files: string[], configure: (options: SnapshotLoadOptions) => SnapshotLoadOptions): Promise<SnapshotImportResult> {
     const options = configure(new SnapshotLoadOptions()).toNative();
+    if (options.maximumDiskBytes != null && !napi.Snapshot.supportsImportBudget?.()) throw new UnsupportedError("Snapshot import size limits require an updated native SDK");
     const result = await withMappedErrors(() => napi.SnapshotGroup.load(group, [...files], options));
     return wrapImportResult(result);
   }

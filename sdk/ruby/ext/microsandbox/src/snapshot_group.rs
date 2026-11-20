@@ -485,12 +485,17 @@ pub(super) fn load_in(
     let parsed = scan_args::<(String, Vec<String>), (), (), (), RHash, ()>(args)?;
     let (group, files) = parsed.required;
     let keywords = parsed.keywords;
-    reject_unknown_keywords(ruby, keywords, &["dest", "base", "set_head"])?;
+    reject_unknown_keywords(
+        ruby,
+        keywords,
+        &["dest", "base", "set_head", "maximum_disk_bytes"],
+    )?;
     let options = microsandbox_core::snapshot::LoadOpts {
         group: None,
         dest: keyword::<String>(keywords, "dest")?.map(Into::into),
         base: keyword(keywords, "base")?,
         set_head: keyword::<bool>(keywords, "set_head")?.unwrap_or(false),
+        maximum_disk_bytes: keyword(keywords, "maximum_disk_bytes")?,
     };
     let files = files
         .into_iter()

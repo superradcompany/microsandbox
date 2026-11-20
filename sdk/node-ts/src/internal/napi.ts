@@ -670,6 +670,7 @@ export interface NapiService {
 //-----------------------------------------------------------------------------
 
 export interface NapiSnapshotStatic {
+  supportsImportBudget?(): boolean;
   open(pathOrName: string): Promise<NapiSnapshot>;
   get(nameOrDigest: string): Promise<NapiSnapshot>;
   list(): Promise<NapiSnapshot[]>;
@@ -690,6 +691,7 @@ export interface NapiLoadOpts {
   base?: string;
   group?: string;
   setHead?: boolean;
+  maximumDiskBytes?: number;
 }
 
 export interface NapiHeadUpdate {
