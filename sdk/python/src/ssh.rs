@@ -73,7 +73,7 @@ impl PySandboxSshOps {
         let ssh = Self {
             inner: self.inner.clone(),
         };
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let client = ssh
                 .inner
                 .open_client_with(|builder| {
@@ -114,7 +114,7 @@ impl PySandboxSshOps {
         let ssh = Self {
             inner: self.inner.clone(),
         };
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let server = ssh
                 .inner
                 .prepare_server_with(|builder| {
@@ -218,7 +218,7 @@ impl PySshClient {
         tty: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let client = guard.as_ref().ok_or_else(crate::error::consumed)?;
             let output = client
@@ -238,7 +238,7 @@ impl PySshClient {
         detach_keys: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let client = guard.as_ref().ok_or_else(crate::error::consumed)?;
             client
@@ -260,7 +260,7 @@ impl PySshClient {
     /// Open an SFTP session over this SSH connection.
     fn sftp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let client = guard.as_ref().ok_or_else(crate::error::consumed)?;
             let sftp = client.sftp().await.map_err(to_py_err)?;
@@ -271,7 +271,7 @@ impl PySshClient {
     /// Close this SSH client session.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let client = {
                 let mut guard = inner.lock().await;
                 guard.take().ok_or_else(crate::error::consumed)?
@@ -299,7 +299,7 @@ impl PySftpClient {
     /// Read a file into memory.
     fn read<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             let data = sftp.read(path).await.map_err(sftp_py_err)?;
@@ -315,7 +315,7 @@ impl PySftpClient {
         data: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             let mut file = sftp.create(path).await.map_err(sftp_py_err)?;
@@ -328,7 +328,7 @@ impl PySftpClient {
     /// Create a directory.
     fn mkdir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.create_dir(path).await.map_err(sftp_py_err)
@@ -338,7 +338,7 @@ impl PySftpClient {
     /// Remove a file.
     fn remove_file<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.remove_file(path).await.map_err(sftp_py_err)
@@ -348,7 +348,7 @@ impl PySftpClient {
     /// Remove an empty directory.
     fn remove_dir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.remove_dir(path).await.map_err(sftp_py_err)
@@ -363,7 +363,7 @@ impl PySftpClient {
         new_path: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.rename(old_path, new_path).await.map_err(sftp_py_err)
@@ -373,7 +373,7 @@ impl PySftpClient {
     /// Resolve a path to its canonical absolute form.
     fn real_path<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.canonicalize(path).await.map_err(sftp_py_err)
@@ -383,7 +383,7 @@ impl PySftpClient {
     /// Read a symlink target.
     fn read_link<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.read_link(path).await.map_err(sftp_py_err)
@@ -398,7 +398,7 @@ impl PySftpClient {
         link_path: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.symlink(target, link_path).await.map_err(sftp_py_err)
@@ -408,7 +408,7 @@ impl PySftpClient {
     /// Close this SFTP session.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let sftp = {
                 let mut guard = inner.lock().await;
                 guard.take().ok_or_else(crate::error::consumed)?
@@ -450,7 +450,7 @@ impl PySshServer {
     /// Serve one SSH transport over this process's stdin/stdout.
     fn serve_connection<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let server = {
                 let guard = inner.lock().await;
                 guard.as_ref().ok_or_else(crate::error::consumed)?.clone()

@@ -181,7 +181,7 @@ impl PyImage {
         }
         #[cfg(feature = "local")]
         {
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let backend =
                     resolve_local(microsandbox::Operation::ImageGet).map_err(to_py_err)?;
                 let local = backend.as_local().expect("checked above");
@@ -204,7 +204,7 @@ impl PyImage {
         }
         #[cfg(feature = "local")]
         {
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let backend =
                     resolve_local(microsandbox::Operation::ImageList).map_err(to_py_err)?;
                 let local = backend.as_local().expect("checked above");
@@ -227,7 +227,7 @@ impl PyImage {
         }
         #[cfg(feature = "local")]
         {
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let backend =
                     resolve_local(microsandbox::Operation::ImageInspect).map_err(to_py_err)?;
                 let local = backend.as_local().expect("checked above");
@@ -251,7 +251,7 @@ impl PyImage {
         }
         #[cfg(feature = "local")]
         {
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let backend =
                     resolve_local(microsandbox::Operation::ImageRemove).map_err(to_py_err)?;
                 let local = backend.as_local().expect("checked above");
@@ -274,7 +274,7 @@ impl PyImage {
         }
         #[cfg(feature = "local")]
         {
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let backend =
                     resolve_local(microsandbox::Operation::ImagePrune).map_err(to_py_err)?;
                 let local = backend.as_local().expect("checked above");
@@ -304,7 +304,7 @@ impl PyImage {
         }
         #[cfg(feature = "local")]
         {
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let backend =
                     resolve_local(microsandbox::Operation::ImageLoad).map_err(to_py_err)?;
                 let local = backend.as_local().expect("checked above");
@@ -373,7 +373,7 @@ impl PyImage {
                 ));
             }
 
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let backend =
                     resolve_local(microsandbox::Operation::ImageSave).map_err(to_py_err)?;
                 let local = backend.as_local().expect("checked above");
@@ -464,7 +464,7 @@ impl PyImageHandle {
         #[cfg(feature = "local")]
         {
             let reference = self.reference.clone();
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let backend =
                     resolve_local(microsandbox::Operation::ImageInspect).map_err(to_py_err)?;
                 let local = backend.as_local().expect("checked above");
@@ -488,7 +488,7 @@ impl PyImageHandle {
         #[cfg(feature = "local")]
         {
             let reference = self.reference.clone();
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::runtime::future_into_py(py, async move {
                 let backend =
                     resolve_local(microsandbox::Operation::ImageRemove).map_err(to_py_err)?;
                 let local = backend.as_local().expect("checked above");

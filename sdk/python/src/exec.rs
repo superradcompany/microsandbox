@@ -130,7 +130,7 @@ impl PyExecHandle {
     /// Receive the next event. Returns None when the stream ends.
     fn recv<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut guard = inner.lock().await;
             match guard.recv().await {
                 Some(event) => {
@@ -146,7 +146,7 @@ impl PyExecHandle {
     /// Reuses a terminal outcome already observed by wait, collect, or recv.
     fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut guard = inner.lock().await;
             let status = guard.wait().await.map_err(to_py_err)?;
             Ok((status.code, status.success))
@@ -157,7 +157,7 @@ impl PyExecHandle {
     /// Retains completion for later waits without retaining output for replay.
     fn collect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut guard = inner.lock().await;
             let output = guard.collect().await.map_err(to_py_err)?;
             Ok(PyExecOutput::from_rust(output))
@@ -167,7 +167,7 @@ impl PyExecHandle {
     /// Send a signal to the running process.
     fn signal<'py>(&self, py: Python<'py>, sig: i32) -> PyResult<Bound<'py, PyAny>> {
         let control = self.control.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             control.signal(sig).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -176,7 +176,7 @@ impl PyExecHandle {
     /// Kill the running process (SIGKILL).
     fn kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let control = self.control.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             control.kill().await.map_err(to_py_err)?;
             Ok(())
         })
@@ -185,7 +185,7 @@ impl PyExecHandle {
     /// Resize the pseudo-terminal for this exec session.
     fn resize<'py>(&self, py: Python<'py>, rows: u16, cols: u16) -> PyResult<Bound<'py, PyAny>> {
         let control = self.control.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             control.resize(rows, cols).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -199,7 +199,7 @@ impl PyExecHandle {
     /// Async iterator next — returns the next ExecEvent or raises StopAsyncIteration.
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let mut guard = inner.lock().await;
             match guard.recv().await {
                 Some(event) => Ok(convert_exec_event(event)),
@@ -218,7 +218,7 @@ impl PyExecSink {
     /// Write data to the process stdin.
     fn write<'py>(&self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.write(&data).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -227,7 +227,7 @@ impl PyExecSink {
     /// Close the sink. Sends EOF in non-TTY pipe mode; PTY mode stays open.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.close().await.map_err(to_py_err)?;
             Ok(())
         })

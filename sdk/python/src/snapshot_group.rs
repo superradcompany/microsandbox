@@ -99,7 +99,7 @@ impl PySnapshotGroup {
     /// Observe the history and saved source association without changing its selection.
     fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let group = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let info = group.inspect().await.map_err(to_py_err)?;
             let value = serde_json::to_value(info).map_err(|error| to_py_err(error.into()))?;
             Python::attach(|py| crate::conversion::json_value_to_py(py, value))
@@ -109,7 +109,7 @@ impl PySnapshotGroup {
     /// Remove the entire history without bypassing readers or external dependents.
     fn remove<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let group = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(PySnapshotRemoveResult {
                 inner: group.remove().await.map_err(to_py_err)?,
             })
@@ -119,7 +119,7 @@ impl PySnapshotGroup {
     /// Verify every selected member, preserving a complete report on verification errors.
     fn verify<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let group = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let report = group.verify().await.map_err(to_py_err)?;
             let value = serde_json::to_value(report).map_err(|error| to_py_err(error.into()))?;
             Python::attach(|py| crate::conversion::json_value_to_py(py, value))
@@ -147,7 +147,7 @@ impl PySnapshotGroup {
                 maximum_disk_bytes,
             },
         );
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(PySnapshotImportResult {
                 inner: prepared
                     .map_err(to_py_err)?
@@ -161,7 +161,7 @@ impl PySnapshotGroup {
     #[staticmethod]
     fn open<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyAny>> {
         let pending = RustGroup::open(path);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(Self {
                 inner: pending.await.map_err(to_py_err)?,
             })
@@ -170,7 +170,7 @@ impl PySnapshotGroup {
 
     #[staticmethod]
     fn get<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(Self {
                 inner: RustGroup::get(name).await.map_err(to_py_err)?,
             })
@@ -179,7 +179,7 @@ impl PySnapshotGroup {
 
     #[staticmethod]
     fn list<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(RustGroup::list()
                 .await
                 .map_err(to_py_err)?
@@ -204,7 +204,7 @@ impl PySnapshotGroup {
             kwargs,
         )?;
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(crate::sandbox::PySandbox::from_rust(
                 inner
                     .spawn_sandbox_with(|_| builder)
@@ -228,7 +228,7 @@ impl PySnapshotGroup {
             kwargs,
         )?;
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let (progress, task) = inner
                 .spawn_sandbox_with_progress_with(|_| builder)
                 .await
@@ -244,7 +244,7 @@ impl PySnapshotGroup {
 
     fn head<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let group = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(group
                 .head()
                 .await
@@ -255,7 +255,7 @@ impl PySnapshotGroup {
 
     fn get_checkpoint<'py>(&self, py: Python<'py>, member: String) -> PyResult<Bound<'py, PyAny>> {
         let group = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(PySnapshot::from_rust(
                 group.get_checkpoint(member).await.map_err(to_py_err)?,
             ))
@@ -264,7 +264,7 @@ impl PySnapshotGroup {
 
     fn checkpoints<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let group = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(group
                 .checkpoints()
                 .await
@@ -277,7 +277,7 @@ impl PySnapshotGroup {
 
     fn set_head<'py>(&self, py: Python<'py>, member: String) -> PyResult<Bound<'py, PyAny>> {
         let group = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let update = group.set_head(member).await.map_err(to_py_err)?;
             Python::attach(|py| head_update_to_py(py, &update))
         })
@@ -285,7 +285,7 @@ impl PySnapshotGroup {
 
     fn clear_head<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let group = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let update = group.clear_head().await.map_err(to_py_err)?;
             Python::attach(|py| head_update_to_py(py, &update))
         })
@@ -312,7 +312,7 @@ impl PySnapshotGroup {
             record_integrity,
             guest_flush,
         )?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(PyCheckpointCaptureResult {
                 inner: group
                     .checkpoint_with(|_| options)

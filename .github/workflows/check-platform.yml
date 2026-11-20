@@ -271,13 +271,17 @@ jobs:
           cd ../..
           uv run --project sdk/python --no-sync pytest sdk/python/tests
 
-      - name: Upload Python wheel for native failure reproduction
-        if: failure() && steps.python-check.outcome == 'failure'
+      - name: Upload tested Python wheel
+        # Retain successful candidates too, so the exact Linux crash reproduction
+        # can be repeated locally against the fixed artifact.
+        if: ${{ !cancelled() && steps.python-check.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: python-failure-wheel-${{ inputs.target }}
+          name: python-wheel-${{ inputs.target }}
           path: sdk/python/dist/*.whl
           if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 0
 
   go-build:
     name: Go build (${{ inputs.target }})

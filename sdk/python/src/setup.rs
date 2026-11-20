@@ -56,7 +56,7 @@ pub fn install_runtime<'py>(
             microsandbox::setup::binding_runtime_config(&config_json).map_err(to_py_err)?;
         let options =
             microsandbox::setup::binding_install_options(&options_json).map_err(to_py_err)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let runtime = microsandbox::setup::install_runtime(&config, options)
                 .await
                 .map_err(to_py_err)?;
@@ -84,7 +84,7 @@ pub fn ensure_runtime<'py>(
             microsandbox::setup::binding_runtime_config(&config_json).map_err(to_py_err)?;
         let options =
             microsandbox::setup::binding_install_options(&options_json).map_err(to_py_err)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let runtime = microsandbox::setup::ensure_runtime(&config, options)
                 .await
                 .map_err(to_py_err)?;
@@ -138,7 +138,7 @@ pub fn diagnose_storage<'py>(
     }
     #[cfg(feature = "local")]
     {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             microsandbox::setup::binding_diagnose_storage(&config_json, &selection_json)
                 .await
                 .map_err(to_py_err)
