@@ -50,7 +50,10 @@ use windows_sys::Win32::System::Threading::{
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 #[cfg(feature = "net")]
-use microsandbox_network::{ResolvedNetworkConfig, config::EnvNetworkSecretResolver};
+use microsandbox_network::{
+    ResolvedNetworkConfig,
+    config::{EnvNetworkSecretResolver, MultiTenantConfig},
+};
 use microsandbox_protocol::{
     bootstrap::{
         BootstrapBlockRoot, BootstrapBlockRootUpper, BootstrapDirMount, BootstrapDiskMount,
@@ -62,6 +65,8 @@ use microsandbox_protocol::{
 use microsandbox_runtime::ipc::SandboxLifecycleGuard;
 use microsandbox_runtime::launch::{FileMountConfig, LaunchConfig, Lifecycle};
 use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
+#[cfg(feature = "net")]
+use microsandbox_types::DeploymentProfile;
 use microsandbox_types::{CommandResolutionError, SandboxLogLevel, resolve_default_command};
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -334,6 +339,11 @@ impl LocalContext {
         launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
+
+        #[cfg(feature = "net")]
+        launch_contract::validate_multi_tenant_config(&resolved_runtime.msb_path, config, global)
+            .await?;
+
         launch_contract::validate_nested_virt(&resolved_runtime.msb_path, config, launch_contract)
             .await?;
         if config.checkpoint_restore.as_ref().is_some_and(|restore| {
@@ -2334,6 +2344,16 @@ fn machine_cli_args(
         }),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
+
+        #[cfg(feature = "net")]
+        multi_tenant: if config.spec.deployment_profile == DeploymentProfile::MultiTenant {
+            MultiTenantConfig {
+                nameservers: local.config().dns.nameservers.clone(),
+            }
+        } else {
+            MultiTenantConfig::default()
+        },
+
         bootstrap: guest_bootstrap(config),
         ..Default::default()
     };

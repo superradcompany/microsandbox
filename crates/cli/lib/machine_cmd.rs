@@ -373,6 +373,8 @@ pub fn run(args: MachineArgs) -> ! {
         #[cfg(feature = "net")]
         deployment_profile: launch.deployment_profile,
         #[cfg(feature = "net")]
+        multi_tenant: launch.multi_tenant,
+        #[cfg(feature = "net")]
         sandbox_slot: launch.sandbox_slot,
         checkpoint_restore: launch.checkpoint_restore,
     };

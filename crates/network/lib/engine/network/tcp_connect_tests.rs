@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 
 use super::test_support::{GuestDevice, ipv6_loopback_unavailable};
 use super::{HostRoutes, SmoltcpNetwork};
-use crate::config::{EnvNetworkSecretResolver, NetworkConfig};
+use crate::config::{EnvNetworkSecretResolver, MultiTenantConfig, NetworkConfig};
 use crate::policy::NetworkPolicy;
 use crate::proxy::OutboundProxy;
 
@@ -125,6 +125,7 @@ async fn check_connect(ipv6: bool, listening: bool) {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         2,
         Default::default(),
+        &MultiTenantConfig::default(),
         HostRoutes {
             ipv4: true,
             ipv6: true,
@@ -255,6 +256,7 @@ async fn check_stalled_ipv6_fallback() {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         2,
         Default::default(),
+        &MultiTenantConfig::default(),
         HostRoutes {
             ipv4: true,
             ipv6: true,

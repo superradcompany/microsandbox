@@ -3218,6 +3218,7 @@ mod layering_tests {
             ssh: _,
             metrics: _,
             snapshots: _,
+            dns: _,
         } = crate::config::GlobalConfig::default();
         // Every global field is mapped here, excluded below, or handled separately.
         // Each mapped field has its own null semantics; omission always stays sparse.
@@ -3350,6 +3351,7 @@ mod layering_tests {
             json!({"ssh":{"inactivity_timeout_secs":30}}),
             json!({"metrics":{"capacity":128}}),
             json!({"snapshots":{"max_filesystem_state_mib":64}}),
+            json!({"dns":{"nameservers":["9.9.9.9"]}}),
             json!({"sandbox_defaults":{"oci":{"root_disk":{"kind":"tmpfs"},"upper_size_mib":null}}}),
         ] {
             let global: GlobalConfigPatch = serde_json::from_value(input.clone()).unwrap();

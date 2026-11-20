@@ -14,6 +14,7 @@
 //! one resolved `msb` binary).
 
 pub(crate) mod backend;
+mod dns;
 pub(crate) mod layers;
 mod persistence;
 mod registry;
@@ -208,6 +209,10 @@ pub struct GlobalConfig {
     /// Snapshot capture and restore limits.
     #[config_patch(nested)]
     pub snapshots: SnapshotsConfig,
+
+    /// Host-owned DNS settings.
+    #[config_patch(nested)]
+    pub dns: HostDnsConfig,
 }
 
 /// Compatibility alias for the backend-owned global configuration.
@@ -805,6 +810,7 @@ fn resolve_default_home() -> PathBuf {
 //--------------------------------------------------------------------------------------------------
 
 pub use backend::{BackendContext, ContextProfile};
+pub use dns::{HostDnsConfig, HostDnsConfigPatch};
 pub(crate) use registry::RegistrySettingsPatch;
 pub use registry::{
     RegistriesConfig, RegistriesConfigPatch, RegistryAuthEntry, RegistryConfig,
@@ -903,7 +909,8 @@ mod tests {
             },
             "ssh": {"inactivity_timeout_secs": 45},
             "metrics": {"capacity": 128},
-            "snapshots": {"max_filesystem_state_mib": 64}
+            "snapshots": {"max_filesystem_state_mib": 64},
+            "dns": {"nameservers": ["9.9.9.9", "2620:fe::fe"]}
         });
         let mut previous = expected.clone();
         previous["allowed_backends"] = serde_json::json!(["local", "cloud"]);
