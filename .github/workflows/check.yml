@@ -1875,8 +1875,19 @@ jobs:
           # self-provisioning batch cannot supply that fixture.
           # The six saved-config assertions consume records produced by the dedicated step below.
           saved_config_tests="$(python3 scripts/smoke/cli/saved-config-integration.py --nextest-filter)"
-          cargo-nextest nextest run \
+          # Keep the extraction inside job-owned build output. An interrupted
+          # nextest run can leave its automatic /tmp archive behind; build/ is
+          # reclaimed at job finish and again before the next job starts.
+          mkdir -p build/nextest
+          cargo-nextest nextest list \
             --archive-file build/rust-integration-tests.tar.zst \
+            --extract-to build/nextest \
+            --workspace-remap "${{ github.workspace }}" \
+            --list-type binaries-only
+          cargo-nextest nextest run \
+            --cargo-metadata build/nextest/target/nextest/cargo-metadata.json \
+            --binaries-metadata build/nextest/target/nextest/binaries-metadata.json \
+            --target-dir-remap build/nextest/target \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
             -E "not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or binary(=portable_defaults_live) or test(/^context::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^context::local::snapshot::/) or test(/^context::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/)) and not ($saved_config_tests)" \
