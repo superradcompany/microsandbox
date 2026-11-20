@@ -2111,6 +2111,46 @@ mod tests {
         assert_eq!(resolve(&path).await.unwrap().patch, 9);
     }
 
+    #[tokio::test]
+    #[ignore = "requires an actual unpatched runtime, isolated MSB_HOME, and MSB_LAUNCH_TEST_IMAGE"]
+    async fn released_runtime_without_protected_storage_is_refused_before_create() {
+        use crate::Sandbox;
+
+        let path =
+            PathBuf::from(std::env::var_os("MSB_PATH").expect("explicit historical runtime"));
+        let advertised = capabilities(&path).await.unwrap();
+        assert!(
+            !advertised.protected_guest_state,
+            "fixture must lack protected storage"
+        );
+        let image = std::env::var("MSB_LAUNCH_TEST_IMAGE").expect("explicit preloaded image");
+        let name = "cross-version";
+        let result = Sandbox::builder(name)
+            .image(image)
+            .memory(256)
+            .create()
+            .await;
+        // Clean up even if admission regresses, then fail rather than treating a
+        // successful launch on an unprotected runtime as compatibility coverage.
+        let error = match result {
+            Ok(sandbox) => {
+                sandbox.destroy().await.unwrap();
+                panic!("unprotected runtime was allowed to create a sandbox");
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("does not advertise protected sandbox state"),
+            "{error}"
+        );
+        assert!(
+            Sandbox::get(name).await.is_err(),
+            "refused create left a sandbox record"
+        );
+    }
+
     #[cfg(feature = "net")]
     #[tokio::test]
     #[ignore = "requires an isolated MSB_HOME, matching MSB_PATH/firmware/agent, and MSB_LAUNCH_TEST_IMAGE"]

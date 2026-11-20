@@ -18,6 +18,8 @@ import lifecycle_evidence as evidence
 
 SCRIPTS = Path(__file__).resolve().parent
 RELEASE = "0.7.16"
+# Test every release in the previous minor line, including security admission failures.
+LAUNCH_RELEASES = tuple(f"0.7.{patch}" for patch in range(17))
 TESTS = (
     "sandbox::field_presence::tests::runtime_presence_records_preserve_known_and_unknown_fields",
     "sandbox::network_presence_tests::live_network_default_evidence_projects_without_reinventing_old_intent",
@@ -40,16 +42,16 @@ def previous_writer(root):
     return binary
 
 
-def launch_qualification(args, root, image):
-    """Run the candidate SDK against matched current and released runtime bundles."""
+def released_launch_runtime(args, root, version):
+    """Download a complete verified release; never pair an old host with new firmware."""
     helpers = runpy.run_path(str(SCRIPTS / "snapshot-compatibility.py"))
     platform = helpers["release_asset"]().removeprefix("msb-")
     bundle_name = f"microsandbox-{platform}.tar.gz"
     agent_name = f"agentd-{platform.rsplit('-', 1)[1]}"
-    released = root / "released-runtime"
+    released = root / ("released-" + version)
     released.mkdir()
     for name in ("checksums.sha256", bundle_name, agent_name):
-        url = f"https://github.com/superradcompany/microsandbox/releases/download/v{RELEASE}/{name}"
+        url = f"https://github.com/superradcompany/microsandbox/releases/download/v{version}/{name}"
         with urllib.request.urlopen(url, timeout=90) as response, (released / name).open("wb") as output:
             shutil.copyfileobj(response, output)
     checksums = (released / "checksums.sha256").read_text()
@@ -64,36 +66,68 @@ def launch_qualification(args, root, image):
     if sys.platform == "darwin":
         subprocess.run(["codesign", "--entitlements", args.workspace / "msb-entitlements.plist",
                         "--force", "-s", "-", runtime], check=True)
-    cases = [(RELEASE, runtime, firmwares[0], released / agent_name),
-             ("candidate", args.binary, args.firmware, args.agent)]
-    test = "runtime::launch_contract::tests::released_runtime_preserves_lifecycle_data_and_network_policy"
-    for label, binary, firmware, agent in cases:
-        home = root / ("launch-" + label)
-        env = evidence.environment(binary, firmware, home, agent)
-        env.update(MSB_LAUNCH_TEST_IMAGE="alpine:3.23", MSB_LAUNCH_TEST_NAME="cross-version")
-        runner = evidence.Runner(args.binary, env, root / ("launch-" + label + "-logs"))
-        runner.run("load", "image", "load", "--input", image)
-        passed = False
+    actual = subprocess.check_output([runtime, "--version"], text=True, timeout=15).strip()
+    if actual != "msb " + version:
+        raise ValueError(f"downloaded runtime version mismatch: {actual}")
+    return runtime, firmwares[0], released / agent_name
+
+
+def qualify_launch_runtime(args, root, image, label, binary, firmware, agent):
+    """Keep expected security refusals separate from successful VM lifecycle tests."""
+    home = root / ("launch-" + label)
+    env = evidence.environment(binary, firmware, home, agent)
+    env.update(MSB_LAUNCH_TEST_IMAGE="alpine:3.23", MSB_LAUNCH_TEST_NAME="cross-version")
+    advertisement = json.loads(subprocess.check_output([binary, "__launch-protocol"], env=env, text=True, timeout=15))
+    protected = advertisement.get("protected_guest_state") is True
+    # This boundary is pinned independently of the probe: a regression that drops
+    # the security capability must fail, not silently turn a lifecycle test into a refusal.
+    expected_protected = label not in {f"0.7.{patch}" for patch in range(12)}
+    if protected != expected_protected:
+        raise ValueError(f"unexpected protected-storage capability for {label}: {protected}")
+    case = ("released_runtime_preserves_lifecycle_data_and_network_policy" if protected
+            else "released_runtime_without_protected_storage_is_refused_before_create")
+    test = "runtime::launch_contract::tests::" + case
+    runner = evidence.Runner(args.binary, env, root / ("launch-" + label + "-logs"))
+    runner.run("load", "image", "load", "--input", image)
+    passed = False
+    try:
+        if args.test_binary:
+            tests = evidence.Runner(args.test_binary, env, runner.output / "sdk")
+            tests.run("lifecycle" if protected else "security-refusal", "--ignored", "--exact", test)
+            log = tests.output / ("lifecycle.stdout" if protected else "security-refusal.stdout")
+            if "1 passed;" not in log.read_text():
+                raise RuntimeError(f"missing test: {test}")
+        else:
+            tests = evidence.Runner("cargo-nextest", env, runner.output / "sdk")
+            tests.run("lifecycle" if protected else "security-refusal", "nextest", "run", "--archive-file", args.archive,
+                      "--workspace-remap", args.workspace, "--run-ignored=only", "-E", f"test(={test})")
+        passed = True
+    finally:
+        if not passed:
+            runner.run("cleanup", "rm", "--force", "cross-version", required=False)
+    version = subprocess.check_output([binary, "--version"], env=env, text=True, timeout=15).strip()
+    status = "lifecycle_passed" if protected else "security_refusal_verified"
+    (runner.output / "report.json").write_text(json.dumps({"cases": [{"runtime": version, "status": status}]}))
+    print(f"{version}: {status}", flush=True)
+
+
+def launch_qualification(args, root, image):
+    failures = []
+    for version in LAUNCH_RELEASES:
         try:
-            if args.test_binary:
-                tests = evidence.Runner(args.test_binary, env, runner.output / "sdk")
-                tests.run("lifecycle", "--ignored", "--exact", test)
-                if "1 passed;" not in (tests.output / "lifecycle.stdout").read_text():
-                    raise RuntimeError(f"missing test: {test}")
-            else:
-                tests = evidence.Runner("cargo-nextest", env, runner.output / "sdk")
-                tests.run("lifecycle", "nextest", "run", "--archive-file", args.archive,
-                          "--workspace-remap", args.workspace, "--run-ignored=only", "-E", f"test(={test})")
-            passed = True
-        finally:
-            # Successful tests assert removal themselves. Also clean up a failed
-            # or interrupted test, without reporting an expected missing sandbox.
-            if not passed:
-                runner.run("cleanup", "rm", "--force", "cross-version", required=False)
-        version = subprocess.check_output([binary, "--version"], env=env, text=True, timeout=15).strip()
-        (runner.output / "report.json").write_text(json.dumps({"cases": [{
-            "runtime": version, "status": "passed"}]}))
-        print(f"passed candidate SDK / {label} runtime lifecycle and deny-all policy", flush=True)
+            runtime = released_launch_runtime(args, root, version)
+            qualify_launch_runtime(args, root, image, version, *runtime)
+        except Exception as error:
+            # Finish the independent pairings and retain each failure in diagnostics.
+            failures.append(version)
+            output = root / ("launch-" + version + "-logs")
+            output.mkdir(exist_ok=True)
+            (output / "report.json").write_text(json.dumps({"cases": [{
+                "runtime": version, "status": "failed", "error": str(error)}]}))
+            print(f"{version}: failed: {error}", file=sys.stderr, flush=True)
+    qualify_launch_runtime(args, root, image, "candidate", args.binary, args.firmware, args.agent)
+    if failures:
+        raise RuntimeError("runtime qualification failed: " + ", ".join(failures))
 
 
 def command_image(source, destination):

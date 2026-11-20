@@ -1,6 +1,7 @@
 """Diagnostics survive disposable homes without publishing private records."""
 
 from contextlib import redirect_stderr
+from argparse import Namespace
 import importlib.util
 import io
 import json
@@ -58,6 +59,34 @@ class SavedConfigIntegrationTests(unittest.TestCase):
                 for private in (str(roots[0]), "private-argument", "private-stdout", "private-configuration"):
                     self.assertNotIn(private, raw)
                 self.assertEqual([path.name for path in output.iterdir()], ["diagnostics.json"])
+
+    def test_security_capability_changes_do_not_silently_change_matrix_expectations(self):
+        args = Namespace(binary=Path("/candidate"))
+        for label, advertised in (("candidate", False), ("0.7.12", False), ("0.7.11", True)):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with mock.patch.object(HARNESS.subprocess, "check_output", return_value=json.dumps({
+                        "protocols": [2], "protected_guest_state": advertised})), \
+                        mock.patch.object(HARNESS.evidence, "Runner") as runner:
+                    with self.assertRaisesRegex(ValueError, "unexpected protected-storage capability"):
+                        HARNESS.qualify_launch_runtime(args, root, root / "image", label,
+                                                       root / "msb", root / "firmware", root / "agent")
+                    runner.assert_not_called()
+
+    def test_one_failed_release_does_not_skip_other_pairings_or_hide_failure(self):
+        args = Namespace(binary=Path("/candidate"), firmware=Path("/firmware"), agent=Path("/agent"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(HARNESS, "LAUNCH_RELEASES", ("0.7.12", "0.7.13")), \
+                    mock.patch.object(HARNESS, "released_launch_runtime", side_effect=[
+                        RuntimeError("checksum mismatch"), (Path("/old"), Path("/old-fw"), Path("/old-agent"))]), \
+                    mock.patch.object(HARNESS, "qualify_launch_runtime") as qualify, redirect_stderr(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, "runtime qualification failed: 0.7.12"):
+                    HARNESS.launch_qualification(args, root, root / "image")
+            self.assertEqual([call.args[3] for call in qualify.call_args_list], ["0.7.13", "candidate"])
+            report = json.loads((root / "launch-0.7.12-logs/report.json").read_text())
+            self.assertEqual(report["cases"][0]["status"], "failed")
+            self.assertEqual(report["cases"][0]["error"], "checksum mismatch")
 
     def test_stderr_is_bounded_and_missing_logs_do_not_mask_failure(self):
         with tempfile.TemporaryDirectory() as directory:
