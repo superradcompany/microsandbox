@@ -660,6 +660,9 @@ jobs:
           foreach ($filter in @(
             'image::cleanup::tests',
             'context::local::snapshot::store::tests',
+            'checkpoint_store',
+            'consumed_capture',
+            'full_snapshot_publication_removes_its_capture_directory',
             'external_import_alias_has_one_row_and_preserves_distinct_copies',
             'import_requires_durable_ownership_and_recovers_failed_completion',
             'storage::usage::local_usage::tests',

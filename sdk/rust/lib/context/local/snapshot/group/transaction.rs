@@ -1065,6 +1065,7 @@ mod tests {
                     key.clone(),
                     Member {
                         path: member.path.clone(),
+                        source_lineage: member.source_lineage.clone(),
                         digest: member.digest.clone(),
                         parent: member.parent.clone(),
                         name: None,

@@ -48,6 +48,8 @@ struct CapturedFullSnapshot {
     labels: BTreeMap<String, String>,
     fs_state_limit: usize,
     source_recovery: Option<SnapshotSourceRecoveryError>,
+    /// Release the operation-owned capture only after its contents have been consumed.
+    _capture_cleanup: Option<ConsumedCapture>,
 }
 
 /// Admission mode is local control flow, not part of the portable capture configuration.
@@ -92,6 +94,9 @@ struct SnapshotDiskSource {
     sealed_layer_id: Option<DiskLayerId>,
 }
 
+/// Recovery failures retain their capture locator and never create this guard.
+struct ConsumedCapture(PathBuf);
+
 struct SnapshotDiskClosure {
     /// Private capture evidence; never copied into portable metadata wholesale.
     configuration: Option<CapturedSandboxConfiguration>,
@@ -119,6 +124,16 @@ impl SnapshotDiskSource {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl Drop for ConsumedCapture {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "failed to remove consumed full capture directory");
+        }
+    }
+}
 
 impl Drop for SnapshotDiskClosure {
     fn drop(&mut self) {
@@ -671,17 +686,19 @@ async fn stage_full_snapshot(
         let staging_dir = staging.path().to_path_buf();
         let checkpoint_source = captured.checkpoint_path.clone();
         let checkpoint_destination = staging_dir.join(CHECKPOINT_DIRECTORY);
-        let checkpoint_destination_for_copy = checkpoint_destination.clone();
         let materialize_started = Instant::now();
-        let materialized = tokio::task::spawn_blocking(move || {
-            materialize_checkpoint_closure(&checkpoint_source, &checkpoint_destination_for_copy)
-        })
-        .await
-        .map_err(|error| MicrosandboxError::Custom(format!("checkpoint copy task: {error}")))?;
-        if let Err(error) = materialized {
-            let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-            return Err(error.into());
-        }
+        let _staging = copy_capture_into_staging(
+            staging,
+            captured._capture_cleanup.take(),
+            move |destination| {
+                materialize_checkpoint_closure(
+                    &checkpoint_source,
+                    &destination.join(CHECKPOINT_DIRECTORY),
+                )
+                .map_err(Into::into)
+            },
+        )
+        .await?;
         let materialize_us = materialize_started.elapsed().as_micros();
         let closure_verify_started = Instant::now();
         CheckpointClosure::open(
@@ -742,6 +759,22 @@ async fn stage_full_snapshot(
         }),
         Err(error) => Err(capture_publication_failure(error, source_recovery)),
     }
+}
+
+/// A cancelled waiter cannot revoke either directory while the blocking copy still uses it.
+/// Returning the destination guard also cleans up a detached worker's result after cancellation.
+async fn copy_capture_into_staging(
+    staging: tempfile::TempDir,
+    cleanup: Option<ConsumedCapture>,
+    copy: impl FnOnce(&Path) -> MicrosandboxResult<()> + Send + 'static,
+) -> MicrosandboxResult<tempfile::TempDir> {
+    tokio::task::spawn_blocking(move || {
+        let _cleanup = cleanup;
+        copy(staging.path())?;
+        Ok(staging)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("checkpoint copy task: {error}")))?
 }
 
 /// Capture a disk or full snapshot directly into an archive without creating
@@ -1054,6 +1087,15 @@ async fn publish_full_archive(
     })
 }
 
+/// The expected path is derived from the selected local source, never an arbitrary runtime path.
+fn consumed_capture(
+    expected: PathBuf,
+    returned: &Path,
+    recovery_failed: bool,
+) -> Option<ConsumedCapture> {
+    (!recovery_failed && returned == expected).then(|| ConsumedCapture(expected))
+}
+
 /// Capture and validate runtime-owned checkpoint state without choosing its final representation.
 ///
 /// Installed snapshots and direct archives share this boundary so both publish byte-for-byte the
@@ -1096,6 +1138,15 @@ async fn capture_full_snapshot(
         )
         .await?;
     let checkpoint = outcome.checkpoint;
+    let capture_cleanup = consumed_capture(
+        local
+            .sandboxes_dir()
+            .join(source_sandbox)
+            .join("checkpoints")
+            .join(&checkpoint_id),
+        &checkpoint.path,
+        outcome.recovery_error.is_some(),
+    );
     let fs_state_limit = local.config().fs_state_limit();
     let validated = (|| {
         if checkpoint.checkpoint_id != checkpoint_id {
@@ -1237,6 +1288,7 @@ async fn capture_full_snapshot(
                     publication_error: None,
                 }
             }),
+            _capture_cleanup: capture_cleanup,
             checkpoint_path: checkpoint.path,
             checkpoint_root,
             manifest,
@@ -2782,6 +2834,7 @@ mod tests {
             manifest,
             labels: BTreeMap::new(),
             fs_state_limit: crate::test_support::DEFAULT_FS_STATE_LIMIT,
+            _capture_cleanup: None,
         }
     }
 
@@ -3170,6 +3223,122 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(archive.path(), out);
+    }
+
+    #[tokio::test]
+    async fn consumed_capture_survives_cancellation_until_the_blocking_copy_finishes() {
+        let home = tempfile::tempdir().unwrap();
+        let capture = home.path().join("capture");
+        std::fs::create_dir(&capture).unwrap();
+        std::fs::write(capture.join("object"), b"complete capture").unwrap();
+        let staging = tempfile::tempdir_in(home.path()).unwrap();
+        let staging_path = staging.path().to_path_buf();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let (finished, copied) = tokio::sync::oneshot::channel();
+        let source = capture.clone();
+        let waiter = tokio::spawn(copy_capture_into_staging(
+            staging,
+            Some(ConsumedCapture(capture.clone())),
+            move |destination| {
+                started.send(()).unwrap();
+                proceed.recv().unwrap();
+                let bytes = std::fs::read(source.join("object"))?;
+                std::fs::write(destination.join("object"), &bytes)?;
+                finished.send(bytes).unwrap();
+                Ok(())
+            },
+        ));
+        ready.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(capture.is_dir() && staging_path.is_dir());
+
+        release.send(()).unwrap();
+        assert_eq!(copied.await.unwrap(), b"complete capture");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while capture.exists() || staging_path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn consumed_capture_requires_resumed_source_and_expected_path() {
+        let expected = PathBuf::from("/sandbox/checkpoints/checkpoint_1");
+        let owned = consumed_capture(expected.clone(), &expected, false).unwrap();
+        assert_eq!(owned.0, expected);
+        std::mem::forget(owned);
+        assert!(consumed_capture(expected.clone(), &expected, true).is_none());
+        assert!(consumed_capture(expected, Path::new("/elsewhere/checkpoint_1"), false).is_none());
+    }
+
+    #[tokio::test]
+    async fn full_snapshot_publication_removes_its_capture_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(temp.path().join("home"))
+            .build()
+            .unwrap();
+        fixture_source(&local).await;
+        for archive in [false, true] {
+            let capture = temp
+                .path()
+                .join(if archive { "archive" } else { "installed" });
+            let mut captured = captured_fixture(&capture, None);
+            captured._capture_cleanup = Some(ConsumedCapture(capture.clone()));
+            let root = captured.checkpoint_root.clone();
+            let out = temp.path().join(if archive { "out.tar" } else { "out" });
+            let target = SnapshotDestination {
+                name: "snapshot",
+                path: &out,
+                force: false,
+            };
+            if archive {
+                let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
+                publish_full_archive(target, "box", captured, lineage, true, Instant::now(), 0)
+                    .await
+                    .unwrap();
+                assert!(out.is_file());
+            } else {
+                stage_full_snapshot(
+                    target,
+                    "box",
+                    captured,
+                    temp.path().to_path_buf(),
+                    Instant::now(),
+                    0,
+                )
+                .await
+                .unwrap();
+                CheckpointClosure::open(
+                    out.join(CHECKPOINT_DIRECTORY),
+                    Some(&root),
+                    crate::test_support::DEFAULT_FS_STATE_LIMIT,
+                )
+                .unwrap();
+            }
+            assert!(!capture.exists());
+        }
+
+        let capture = temp.path().join("failed");
+        let mut captured = captured_fixture(&capture, None);
+        captured._capture_cleanup = Some(ConsumedCapture(capture.clone()));
+        assert!(capture.exists());
+        let out = temp.path().join("out.tar");
+        let target = SnapshotDestination {
+            name: "snapshot",
+            path: &out,
+            force: false,
+        };
+        let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
+
+        publish_full_archive(target, "box", captured, lineage, true, Instant::now(), 0)
+            .await
+            .unwrap_err();
+
+        assert!(!capture.exists());
     }
 
     #[test]
