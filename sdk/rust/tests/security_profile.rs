@@ -6,8 +6,14 @@
 //!
 //!     cargo nextest run -p microsandbox --test security_profile --run-ignored=only
 
+use std::time::Duration;
+
 use microsandbox::{Sandbox, sandbox::SecurityProfile};
 use test_utils::msb_test;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
 
 const IMAGE: &str = "mirror.gcr.io/library/alpine";
 
@@ -37,6 +43,7 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
         .cpus(1)
         .memory(256)
         .replace()
+        .max_duration(Duration::from_secs(120))
         .create()
         .await
         .expect("create default sandbox");
@@ -44,6 +51,7 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
     assert_no_new_privs(&default, "0").await;
     assert_cap_sys_admin(&default, true).await;
     assert_mount_tmpfs(&default, true).await;
+    assert_non_root_device_access(&default).await;
     stop_and_remove(default_name).await;
 
     let restricted = Sandbox::builder(restricted_name)
@@ -51,6 +59,7 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
         .cpus(1)
         .memory(256)
         .replace()
+        .max_duration(Duration::from_secs(120))
         .security(SecurityProfile::Restricted)
         .volume("/mnt/msb-restricted-flags", |m| m.tmpfs().size(16))
         .create()
@@ -66,7 +75,25 @@ async fn default_profile_keeps_guest_privileges_restricted_profile_hardens() {
     )
     .await;
     assert_mount_tmpfs(&restricted, false).await;
+    assert_non_root_device_access(&restricted).await;
     stop_and_remove(restricted_name).await;
+}
+
+async fn assert_non_root_device_access(sandbox: &Sandbox) {
+    let script = concat!(
+        "test \"$(id -u)\" = 1000 && ",
+        "test -c /dev/fuse && test -c /dev/net/tun && ",
+        "exec 3<>/dev/fuse && exec 4<>/dev/net/tun",
+    );
+    let output = sandbox
+        .exec_with("sh", |e| e.args(["-c", script]).user("1000:1000"))
+        .await
+        .expect("run non-root device probe");
+    assert!(
+        output.status().success,
+        "non-root device access failed: {}",
+        output.stderr().unwrap_or_default()
+    );
 }
 
 async fn assert_no_new_privs(sandbox: &Sandbox, expected: &str) {
