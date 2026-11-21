@@ -57,7 +57,7 @@ fn test_user_xattrs_work_in_every_stat_virtualization_mode() {
 }
 
 #[test]
-fn test_host_xattr_namespaces_are_rejected_in_every_stat_virtualization_mode() {
+fn test_host_xattr_namespaces_are_hidden_in_every_stat_virtualization_mode() {
     let protected_names = [
         "system.posix_acl_access",
         "system.posix_acl_default",
@@ -88,9 +88,15 @@ fn test_host_xattr_namespaces_are_rejected_in_every_stat_virtualization_mode() {
                 sb.fs.setxattr(sb.ctx(), entry.inode, &key, b"value", 0),
                 LINUX_EACCES,
             );
+            // Reads see no such attribute: the guest kernel's execve reads
+            // security.capability and fails the exec on any other error.
             TestSandbox::assert_errno(
                 sb.fs.getxattr(sb.ctx(), entry.inode, &key, 64),
-                LINUX_EACCES,
+                LINUX_ENODATA,
+            );
+            TestSandbox::assert_errno(
+                sb.fs.getxattr(sb.ctx(), entry.inode, &key, 0),
+                LINUX_ENODATA,
             );
             TestSandbox::assert_errno(sb.fs.removexattr(sb.ctx(), entry.inode, &key), LINUX_EACCES);
         }
@@ -312,13 +318,13 @@ fn test_setxattr_override_rejected() {
 }
 
 #[test]
-fn test_getxattr_override_rejected() {
+fn test_getxattr_override_hidden() {
     let sb = TestSandbox::new();
     let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();
     let result = sb
         .fs
         .getxattr(sb.ctx(), entry.inode, OVERRIDE_XATTR_KEY, 256);
-    TestSandbox::assert_errno(result, LINUX_EACCES);
+    TestSandbox::assert_errno(result, LINUX_ENODATA);
 }
 
 #[test]
