@@ -202,7 +202,7 @@ pub fn copy_file_handles(src: &File, dst: &File) -> io::Result<(u64, FastCopyStr
         if unsafe {
             libc::ioctl(
                 dst.as_raw_fd(),
-                0x4004_9409_u64 as libc::c_ulong,
+                0x4004_9409_u64 as libc::Ioctl,
                 src.as_raw_fd(),
             )
         } == 0
