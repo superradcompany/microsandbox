@@ -57,8 +57,7 @@ class Smoke:
             self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
         else:
             # macOS's default per-user temp path is too long for the runtime's Unix sockets.
-            # The CLI can return the physical /private/tmp path on macOS during publication.
-            self.root = Path(tempfile.mkdtemp(prefix="msb-smoke-", dir="/tmp" if os.name == "posix" else None)).resolve()
+            self.root = Path(tempfile.mkdtemp(prefix="msb-smoke-", dir="/tmp" if os.name == "posix" else None))
         self.logs = self.root / "logs"
         self.logs.mkdir()
         self.home = self.root / "home"
@@ -138,9 +137,7 @@ class Smoke:
         self.run("restore-" + name, "restore", snapshot, "--name", name, *options)
 
     def stop(self, name):
-        # Guest filesystem flushes can exceed five seconds on a busy runner.
-        # Keep graceful completion within the normal operation/suite deadlines.
-        self.run("stop-" + name, "stop", name)
+        self.run("stop-" + name, "stop", name, "--timeout", "5")
         self.active.remove(name)
 
     def check_markers(self, name, value, ram=True):
