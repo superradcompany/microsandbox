@@ -3182,11 +3182,14 @@ async fn handle_message_with_charge(
             };
             match credit.kind {
                 BulkKind::Filesystem => {
-                    let result = state
-                        .read_sessions
-                        .get(&msg.id)
-                        .ok_or_else(|| format!("unknown filesystem read session: {}", msg.id))
-                        .and_then(|session| session.apply_credit(credit));
+                    let result = match state.read_sessions.get(&msg.id) {
+                        Some(session) => session.apply_credit(credit),
+                        // A read retires when its terminal response is published, while the
+                        // host may still be crediting the records it has just consumed. That
+                        // late credit has no recipient; it must not cancel a transfer that
+                        // already completed or manufacture a second terminal response.
+                        None => Ok(()),
+                    };
                     if let Err(error) = result {
                         encode_bulk_fs_failure(msg.id, error, out_buf)?;
                         cancel_bulk_correlation(msg.id, BulkKind::Filesystem, state, &session_tx);
@@ -5183,6 +5186,282 @@ mod tests {
         })
         .await
         .expect("late-credit TCP tail did not complete");
+    }
+
+    /// Drives filesystem reads through the message handler and plays the serial loop's part
+    /// for their output, so a test decides exactly when a read retires relative to credit.
+    struct FsReadHarness {
+        state: AgentState,
+        activity: ActivityTracker,
+        sender: SessionOutputSender,
+        output: tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
+        config: AgentdConfig,
+        workload: WorkloadLatch,
+        heartbeat: heartbeat::HeartbeatControl,
+        received: HashMap<u32, Vec<u8>>,
+        events: HashMap<u32, Vec<MessageType>>,
+    }
+
+    impl FsReadHarness {
+        fn new() -> Self {
+            let (sender, output) = SessionOutputSender::channel();
+            Self {
+                state: AgentState::default(),
+                activity: ActivityTracker::new(),
+                sender,
+                output,
+                config: AgentdConfig {
+                    exec_limits: None,
+                    user: None,
+                    security_profile: Default::default(),
+                    default_cwd: None,
+                    default_env: Vec::new(),
+                },
+                workload: crate::workload::tests::fake_latch(),
+                heartbeat: heartbeat::HeartbeatControl::default(),
+                received: HashMap::new(),
+                events: HashMap::new(),
+            }
+        }
+
+        /// Handles one host message and returns the control replies it encoded.
+        async fn send(&mut self, message: Message) -> Vec<Message> {
+            let mut out = Vec::new();
+            handle_message(
+                message,
+                &mut self.state,
+                &mut self.activity,
+                &mut self.sender,
+                &mut out,
+                &self.config,
+                &mut self.workload,
+                &self.heartbeat,
+            )
+            .await
+            .unwrap();
+            let mut bytes = BytesMut::from(out.as_slice());
+            let mut replies = Vec::new();
+            while let Some(frame) = codec::try_decode_frame_from_bytes(&mut bytes).unwrap() {
+                let DecodedFrame::Control(reply) = frame else {
+                    panic!("handler encoded a bulk record");
+                };
+                if reply.t != MessageType::WorkloadTransportCredit {
+                    replies.push(reply);
+                }
+            }
+            replies
+        }
+
+        async fn credit(&mut self, id: u32, flow: BulkFlow, consumed: u64) -> Vec<Message> {
+            let credit = BulkCredit {
+                kind: BulkKind::Filesystem,
+                flow,
+                consumed_offset: consumed,
+                credit_limit: consumed + DEFAULT_BULK_WINDOW,
+            };
+            self.send(Message::with_payload(MessageType::BulkCredit, id, &credit).unwrap())
+                .await
+        }
+
+        /// Opens `path` and starts a raw-bulk read of the whole file as `id`.
+        async fn start_read(&mut self, id: u32, path: &std::path::Path) {
+            use microsandbox_protocol::bulk::BulkOffer;
+            use microsandbox_protocol::fs::{FsOp, FsOpenOptions, FsResponseData};
+
+            let open = FsRequest {
+                op: FsOp::OpenFile {
+                    path: path.to_string_lossy().into_owned(),
+                    options: FsOpenOptions {
+                        read: true,
+                        ..Default::default()
+                    },
+                },
+                bulk: None,
+            };
+            let replies = self
+                .send(Message::with_payload(MessageType::FsRequest, id, &open).unwrap())
+                .await;
+            let Some(FsResponseData::Handle(handle)) =
+                replies[0].payload::<FsResponse>().unwrap().data
+            else {
+                panic!("file did not open");
+            };
+            let read = FsRequest {
+                op: FsOp::Read {
+                    handle,
+                    offset: 0,
+                    len: None,
+                },
+                bulk: Some(BulkOffer::filesystem_read()),
+            };
+            let replies = self
+                .send(Message::with_payload(MessageType::FsRequest, id, &read).unwrap())
+                .await;
+            assert_eq!(replies.len(), 1);
+            assert_eq!(replies[0].t, MessageType::BulkAccepted);
+            assert!(self.state.read_sessions.contains_key(&id));
+        }
+
+        /// Takes one output event the way the serial loop does: raw output that completes a
+        /// session retires it before the next host message is handled.
+        async fn pump(&mut self) {
+            let envelope = self.output.recv().await.expect("session output closed");
+            match envelope.output {
+                SessionOutput::Bulk(output) => {
+                    let received = self.received.entry(envelope.id).or_default();
+                    assert_eq!(output.record.offset, received.len() as u64);
+                    received.extend_from_slice(&output.record.payload);
+                }
+                SessionOutput::Raw(mut output) => {
+                    let message = codec::try_decode_from_buf(&mut output.frame)
+                        .unwrap()
+                        .unwrap();
+                    if message.t == MessageType::FsResponse {
+                        assert!(
+                            message.payload::<FsResponse>().unwrap().ok,
+                            "read {} failed",
+                            envelope.id
+                        );
+                    }
+                    self.events.entry(envelope.id).or_default().push(message.t);
+                    complete_raw_session(
+                        envelope.id,
+                        output.completion,
+                        &mut self.state.read_sessions,
+                        &mut self.state.tcp_sessions,
+                    );
+                    if output.completion.is_some() {
+                        clear_bulk_receive_state(&mut self.state, envelope.id);
+                    }
+                }
+                _ => panic!("unexpected filesystem read output"),
+            }
+        }
+
+        fn received_len(&self, id: u32) -> u64 {
+            self.received.get(&id).map_or(0, |bytes| bytes.len() as u64)
+        }
+
+        fn retired(&self, id: u32) -> bool {
+            self.events
+                .get(&id)
+                .is_some_and(|events| events.last() == Some(&MessageType::FsResponse))
+        }
+    }
+
+    fn late_credit_test_dir(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("msb-agentd-{name}-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn late_filesystem_read_credit_is_ignored_without_disturbing_live_reads() {
+        test_timeout(async {
+            let dir = late_credit_test_dir("late-fs-credit");
+            let small = b"a read that completes inside its first window".to_vec();
+            let large = (0..3 * DEFAULT_BULK_WINDOW as usize + 17)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>();
+            std::fs::write(dir.join("small"), &small).unwrap();
+            std::fs::write(dir.join("large"), &large).unwrap();
+            let mut harness = FsReadHarness::new();
+
+            // Read 2 stalls at its first window while read 1 runs to its terminal response.
+            harness.start_read(1, &dir.join("small")).await;
+            harness.start_read(2, &dir.join("large")).await;
+            while !harness.retired(1) || harness.received_len(2) < DEFAULT_BULK_WINDOW {
+                harness.pump().await;
+            }
+            assert_eq!(harness.received[&1], small);
+            assert_eq!(
+                harness.events[&1],
+                [MessageType::BulkFinish, MessageType::FsResponse]
+            );
+            assert!(!harness.state.read_sessions.contains_key(&1));
+            assert_eq!(harness.received_len(2), DEFAULT_BULK_WINDOW);
+
+            // The host's credit for read 1's records arrives only now, after the read retired;
+            // so does credit for an id that never had a read.
+            for id in [1, 99] {
+                let replies = harness
+                    .credit(id, BulkFlow::GuestToHost, small.len() as u64)
+                    .await;
+                assert!(
+                    replies.is_empty(),
+                    "credit for read {id}, which has no session, must not cancel it or emit \
+                     another terminal: {:?}",
+                    replies.iter().map(|reply| reply.t).collect::<Vec<_>>()
+                );
+            }
+            assert!(matches!(
+                harness.output.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
+            assert_eq!(harness.events[&1].len(), 2);
+            assert!(!harness.events.contains_key(&99));
+
+            // Read 2 is untouched: crediting it as the host consumes its records finishes it.
+            assert!(harness.state.read_sessions.contains_key(&2));
+            let mut credited = 0;
+            while !harness.retired(2) {
+                let consumed = harness.received_len(2);
+                if consumed > credited {
+                    assert!(
+                        harness
+                            .credit(2, BulkFlow::GuestToHost, consumed)
+                            .await
+                            .is_empty()
+                    );
+                    credited = consumed;
+                }
+                harness.pump().await;
+            }
+            assert_eq!(harness.received[&2], large);
+            assert_eq!(
+                harness.events[&2],
+                [MessageType::BulkFinish, MessageType::FsResponse]
+            );
+            assert!(harness.state.read_sessions.is_empty());
+            std::fs::remove_dir_all(dir).unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn invalid_credit_for_a_live_filesystem_read_still_fails_it() {
+        test_timeout(async {
+            let dir = late_credit_test_dir("invalid-fs-credit");
+            let large = vec![7; 2 * DEFAULT_BULK_WINDOW as usize];
+            std::fs::write(dir.join("large"), &large).unwrap();
+            let mut harness = FsReadHarness::new();
+            harness.start_read(3, &dir.join("large")).await;
+            while harness.received_len(3) < DEFAULT_BULK_WINDOW {
+                harness.pump().await;
+            }
+
+            let replies = harness.credit(3, BulkFlow::HostToGuest, 0).await;
+            assert_eq!(
+                replies.iter().map(|reply| reply.t).collect::<Vec<_>>(),
+                [MessageType::BulkCancel, MessageType::FsResponse]
+            );
+            let response = replies[1].payload::<FsResponse>().unwrap();
+            assert!(!response.ok);
+            assert!(
+                response
+                    .error
+                    .unwrap()
+                    .contains("credit for another kind or flow")
+            );
+            assert!(!harness.state.read_sessions.contains_key(&3));
+            std::fs::remove_dir_all(dir).unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]
