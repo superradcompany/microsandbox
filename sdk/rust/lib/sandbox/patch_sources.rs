@@ -7,7 +7,7 @@ use std::fs::Permissions;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf, absolute};
 use std::sync::{Arc, LazyLock};
 
@@ -89,47 +89,60 @@ impl Budget {
             .bytes
             .checked_add(bytes)
             .ok_or_else(|| io::Error::other("copy byte budget overflow"))?;
+
         if self.bytes > MAX_BYTES {
             return Err(io::Error::other("copy sources exceed 64 MiB"));
         }
+
         Ok(())
     }
+
     fn entry(&mut self, depth: usize) -> io::Result<()> {
         self.entries += 1;
+
         if self.entries > MAX_ENTRIES || depth > MAX_DEPTH {
             return Err(io::Error::other("copy entry or depth budget exceeded"));
         }
+
         Ok(())
     }
+
     fn file(&mut self, file: File, destination: &Path) -> io::Result<()> {
         let metadata = file.metadata()?;
         if !metadata.is_file() {
             return Err(io::Error::other("copy source is not regular"));
         }
+
         if metadata.len() > MAX_BYTES - self.bytes {
             return Err(io::Error::other(
                 "copy source exceeds remaining byte budget",
             ));
         }
+
         let mut output = File::options()
             .write(true)
             .create_new(true)
             .open(destination)?;
+
         // A concurrent writer may grow the file after fstat. Bound the actual read too.
         let count = io::copy(&mut file.take(MAX_BYTES - self.bytes + 1), &mut output)?;
         self.add(count)?;
         output.flush()?;
-        #[cfg(unix)]
-        output.set_permissions(Permissions::from_mode(0o600))?;
-        #[cfg(unix)]
-        self.modes.insert(
-            destination.to_path_buf(),
-            metadata.permissions().mode() & 0o7777,
-        );
+
         // Staging belongs to this process, regardless of who owned the input.
         // Leave owner access intact; consumers apply the separately retained mode.
+        #[cfg(unix)]
+        {
+            output.set_permissions(Permissions::from_mode(0o600))?;
+            self.modes.insert(
+                destination.to_path_buf(),
+                metadata.permissions().mode() & 0o7777,
+            );
+        }
+
         Ok(())
     }
+
     /// Stage the host directory `source`; read errors name the host path involved.
     fn directory(
         &mut self,
@@ -138,35 +151,60 @@ impl Budget {
         destination: &Path,
         depth: usize,
     ) -> io::Result<()> {
-        let source_device = device(&file).map_err(with_path(source))?;
+        let source_device = device(&file).map_err(|err| path_error(source, err))?;
+
         #[cfg(unix)]
-        let permissions = file.metadata().map_err(with_path(source))?.permissions();
-        let directory = Dir::from_std_file(file.try_clone().map_err(with_path(source))?);
+        let permissions = file
+            .metadata()
+            .map_err(|err| path_error(source, err))?
+            .permissions();
+
+        let directory =
+            Dir::from_std_file(file.try_clone().map_err(|err| path_error(source, err))?);
         fs::create_dir(destination)?;
+
         #[cfg(unix)]
         fs::set_permissions(destination, Permissions::from_mode(0o700))?;
-        for entry in directory.entries().map_err(with_path(source))? {
-            let entry = entry.map_err(with_path(source))?;
+
+        for entry in directory.entries().map_err(|err| path_error(source, err))? {
+            let entry = entry.map_err(|err| path_error(source, err))?;
             let name = PathBuf::from(entry.file_name());
             let source_child = source.join(&name);
-            self.entry(depth + 1).map_err(with_path(&source_child))?;
+
+            self.entry(depth + 1)
+                .map_err(|err| path_error(&source_child, err))?;
 
             // Opening a device can have side effects, so reject special entries first.
-            let file_type = entry.file_type().map_err(with_path(&source_child))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|err| path_error(&source_child, err))?;
             if !file_type.is_file() && !file_type.is_dir() {
-                return Err(with_path(&source_child)(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "copy source is not a regular file or directory",
-                )));
+                return Err(path_error(
+                    &source_child,
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "copy source is not a regular file or directory",
+                    ),
+                ));
             }
+
             #[cfg(target_os = "linux")]
-            let child = files::open_child(&file, &name, file_type.is_dir())
-                .map_err(with_path(&source_child))?;
+            let child = {
+                let kind = if file_type.is_dir() {
+                    files::SourceKind::Directory
+                } else {
+                    files::SourceKind::Regular
+                };
+                files::open_child(&file, &name, kind)
+                    .map_err(|err| path_error(&source_child, err))?
+            };
+
             #[cfg(not(target_os = "linux"))]
             let child = {
                 let mut options = OpenOptions::new();
                 options.read(true);
                 options._cap_fs_ext_follow(FollowSymlinks::No);
+
                 #[cfg(unix)]
                 options.custom_flags(
                     libc::O_NONBLOCK
@@ -176,28 +214,38 @@ impl Budget {
                             0
                         },
                 );
+
                 directory
                     .open_with(&name, &options)
-                    .map_err(with_path(&source_child))?
+                    .map_err(|err| path_error(&source_child, err))?
                     .into_std()
             };
-            if device(&child).map_err(with_path(&source_child))? != source_device {
-                return Err(with_path(&source_child)(io::Error::other(
-                    "copy source crosses a filesystem",
-                )));
+
+            if device(&child).map_err(|err| path_error(&source_child, err))? != source_device {
+                return Err(path_error(
+                    &source_child,
+                    io::Error::other("copy source crosses a filesystem"),
+                ));
             }
 
             let output = destination.join(name);
-            if child.metadata().map_err(with_path(&source_child))?.is_dir() {
+            let is_dir = child
+                .metadata()
+                .map_err(|err| path_error(&source_child, err))?
+                .is_dir();
+
+            if is_dir {
                 self.directory(child, &source_child, &output, depth + 1)?;
             } else {
                 self.file(child, &output)
-                    .map_err(with_path(&source_child))?;
+                    .map_err(|err| path_error(&source_child, err))?;
             }
         }
+
         #[cfg(unix)]
         self.modes
             .insert(destination.to_path_buf(), permissions.mode() & 0o7777);
+
         Ok(())
     }
 }
@@ -234,20 +282,23 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
     if !enabled {
         return Ok(Prepared::default());
     }
+
     let mut budget = Budget {
         bytes: 0,
         entries: 0,
         modes: HashMap::new(),
     };
     let mut sources = Vec::with_capacity(patches.len().min(MAX_ENTRIES));
+
     for patch in patches {
         budget.entry(0).map_err(source_failure)?;
         let source = match patch {
-            Patch::CopyFile { src, .. } | Patch::CopyDir { src, .. } => Some(
-                absolute(src)
-                    .map_err(with_path(src))
-                    .map_err(source_failure)?,
-            ),
+            Patch::CopyFile { src, .. } | Patch::CopyDir { src, .. } => {
+                let resolved = absolute(src)
+                    .map_err(|err| path_error(src, err))
+                    .map_err(source_failure)?;
+                Some(resolved)
+            }
             Patch::Text { content, .. } | Patch::Append { content, .. } => {
                 budget.add(content.len() as u64).map_err(source_failure)?;
                 None
@@ -260,11 +311,13 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
         };
         sources.push(source);
     }
+
     let permit = CAPACITY
         .clone()
         .acquire_owned()
         .await
         .map_err(|error| MicrosandboxError::PatchFailed(error.to_string()))?;
+
     // Bound inline payloads and acquire capacity before cloning their bytes.
     // Resolve host paths before the wait without canonicalizing away symlinks.
     let mut patches = patches.to_vec();
@@ -273,20 +326,24 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
             *src = source.expect("copy source was resolved");
         }
     }
+
     tokio::task::spawn_blocking(move || {
         let stage = Builder::new().prefix("msb-copy-").tempdir()?;
         let mut prepared = Vec::new();
+
         for (index, mut patch) in patches.into_iter().enumerate() {
             match &mut patch {
                 Patch::CopyFile { src, .. } => {
                     let output = stage.path().join(index.to_string());
-                    let source = files::open_regular(src, false).map_err(with_path(src))?;
-                    budget.file(source, &output).map_err(with_path(src))?;
+                    let source = files::open_regular(src).map_err(|err| path_error(src, err))?;
+                    budget
+                        .file(source, &output)
+                        .map_err(|err| path_error(src, err))?;
                     *src = output;
                 }
                 Patch::CopyDir { src, .. } => {
                     let output = stage.path().join(index.to_string());
-                    let source = files::open_directory(src).map_err(with_path(src))?;
+                    let source = files::open_directory(src).map_err(|err| path_error(src, err))?;
                     budget.directory(source, src, &output, 0)?;
                     *src = output;
                 }
@@ -294,6 +351,7 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
             }
             prepared.push(patch);
         }
+
         Ok::<_, io::Error>(Prepared {
             modes: budget.modes,
             patches: Some(prepared),
@@ -311,14 +369,13 @@ fn source_failure(error: io::Error) -> MicrosandboxError {
 }
 
 /// Prefix an error with the host source path it concerns.
-fn with_path(path: &Path) -> impl FnOnce(io::Error) -> io::Error + '_ {
-    move |error| io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+fn path_error(path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }
 
 fn device(file: &File) -> io::Result<u64> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         Ok(file.metadata()?.dev())
     }
     #[cfg(not(unix))]
