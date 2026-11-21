@@ -361,6 +361,7 @@ pub fn run(args: MachineArgs) -> ! {
         mounts: launch.mounts,
         owned_volumes: launch.owned_volumes,
         file_mounts: launch.file_mounts,
+        mount_host_paths_encoded: launch.mount_host_paths_encoded,
         disks,
         vsock: launch.vsock,
         backends: vec![],

@@ -647,15 +647,23 @@ impl LocalContext {
                 // pull, archive decode, child materialization, a `--replace` deletion) has already
                 // happened, as with the runtime's own boot-time failure. Older runtimes follow
                 // root symlinks, so only a runtime that refuses them is checked.
-                let enforce = match crate::setup::resolve_runtime(self.config()) {
-                    Ok(runtime) => launch_contract::resolve(&runtime.msb_path)
+                let runtime = match crate::setup::resolve_runtime(self.config()) {
+                    Ok(runtime) => Some(runtime),
+                    Err(MicrosandboxError::RuntimeNotInstalled(_)) => None,
+                    Err(error) => return Err(error),
+                };
+                let enforce = match &runtime {
+                    Some(runtime) => launch_contract::resolve(&runtime.msb_path)
                         .await?
                         .refuses_symlinked_bind_roots(),
-                    Err(MicrosandboxError::RuntimeNotInstalled(_)) => true,
-                    Err(error) => return Err(error),
+                    None => true,
                 };
                 if enforce {
                     super::super::host_paths::check_bind_roots_do_not_follow_symlinks(&config)?;
+                }
+                // External-mount mappings can add a bind host path with `,`, `;` or `:`.
+                if let Some(runtime) = &runtime {
+                    launch_contract::validate_mount_host_paths(&runtime.msb_path, &config).await?;
                 }
 
                 if !installed_file_sources.is_empty() {

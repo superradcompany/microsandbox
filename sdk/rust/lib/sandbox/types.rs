@@ -665,13 +665,10 @@ impl MountBuilder {
                 host_permissions,
             },
             MountKind::Bind(host) => {
-                // The spawn → VM wire format encodes mount specs as
-                // `tag:host[:opts]`. Embedded separators in the host
-                // path would collide with that grammar and could
-                // silently inject policy options. Reject at the SDK
-                // boundary so callers get a clear error. Windows drive
-                // prefixes are the one allowed colon shape.
-                validate_host_path_wire_safe(&host, "bind host path")?;
+                // Spawn percent-encodes a host path with `,`, `;` or `:`
+                // on the VM wire, so they cannot inject options. A runtime
+                // that cannot decode it is refused at launch.
+                validate_host_path_utf8(&host, "bind host path")?;
                 VolumeMount::Bind {
                     host,
                     guest: self.guest,
@@ -1321,7 +1318,7 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
             host_permissions,
             ..
         } => {
-            validate_host_path_wire_safe(host, "bind host path")?;
+            validate_host_path_utf8(host, "bind host path")?;
             validate_virtiofs_policies(*stat_virtualization, *host_permissions, options)?;
         }
         VolumeMount::Named {
@@ -1364,6 +1361,17 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
     Ok(())
 }
 
+/// A bind host path with wire separators travels percent-encoded, so it only
+/// needs to be UTF-8 here; launch refuses runtimes that cannot decode it.
+fn validate_host_path_utf8(path: &Path, label: &str) -> crate::MicrosandboxResult<()> {
+    if path.to_str().is_none() {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "{label} must be valid UTF-8"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_host_path_wire_safe(path: &Path, label: &str) -> crate::MicrosandboxResult<()> {
     let Some(path) = path.to_str() else {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
@@ -1371,28 +1379,12 @@ fn validate_host_path_wire_safe(path: &Path, label: &str) -> crate::Microsandbox
         )));
     };
 
-    if path.contains(',') || path.contains(';') || has_forbidden_host_path_colon(path) {
+    if microsandbox_utils::mount_host_path_has_wire_separator(path) {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
             "{label} must not contain ',', ':', or ';': {path}"
         )));
     }
     Ok(())
-}
-
-fn has_forbidden_host_path_colon(path: &str) -> bool {
-    path.char_indices().any(|(index, c)| {
-        c == ':' && {
-            #[cfg(windows)]
-            {
-                !microsandbox_utils::is_windows_drive_separator_at(path, index)
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = index;
-                true
-            }
-        }
-    })
 }
 
 fn validate_fstype(fstype: &str) -> crate::MicrosandboxResult<()> {

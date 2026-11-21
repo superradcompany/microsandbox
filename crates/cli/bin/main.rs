@@ -433,6 +433,7 @@ fn main() {
                     ),
                     exec_limits: true,
                     multi_tenant: cfg!(feature = "net"),
+                    mount_host_path_encoding: true,
                 })
                 .expect("serialize capabilities");
             capabilities["deferred_command_bindings"] = true.into();

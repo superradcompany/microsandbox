@@ -364,9 +364,9 @@ describe("MountBuilder", () => {
     },
   );
 
-  it("rejects commas in bind host paths at build time", () => {
-    const builder = new MountBuilder("/data").bind("/host/with,comma");
-    expect(() => builder.build()).toThrow(/must not contain ','/);
+  it("accepts `,`, `;` and `:` in bind host paths at build time", () => {
+    const builder = new MountBuilder("/data").bind("/host/Smith, John;x:y");
+    expect(() => builder.build()).not.toThrow();
   });
 });
 

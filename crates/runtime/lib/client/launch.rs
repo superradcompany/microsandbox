@@ -127,6 +127,11 @@ pub struct LaunchCapabilities {
     /// Older runtimes omit this capability.
     #[serde(default)]
     pub multi_tenant: bool,
+
+    /// The launch field `mount_host_paths_encoded` is honored by the runtime.
+    /// Older runtimes omit this capability.
+    #[serde(default)]
+    pub mount_host_path_encoding: bool,
 }
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this sandbox.
@@ -268,6 +273,12 @@ pub struct LaunchConfig {
     /// Isolated host-file mounts handled by the single-file backend.
     #[serde(default)]
     pub file_mounts: Vec<FileMountConfig>,
+
+    /// The host path in every `mounts` and `file_mounts` spec is percent-encoded, so it may
+    /// contain `,`, `;` and `:`. Omitted when false, so runtimes that predate the field keep
+    /// accepting ordinary launches; without it, host paths are taken as written.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mount_host_paths_encoded: bool,
 
     /// Disk-image volume mounts as `id:host_path:format[:ro]`.
     pub disks: Vec<String>,
@@ -773,6 +784,21 @@ mod tests {
             decode(encoded).unwrap().fs_state_limit_bytes,
             Some(64 * 1024 * 1024)
         );
+    }
+
+    #[test]
+    fn mount_host_paths_encoded_is_omitted_by_default_and_survives_the_handoff() {
+        let default = serde_json::to_value(LaunchConfig::default()).unwrap();
+        assert!(default.get("mount_host_paths_encoded").is_none());
+        assert!(!decode(default).unwrap().mount_host_paths_encoded);
+
+        let config = LaunchConfig {
+            mount_host_paths_encoded: true,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(config).unwrap();
+        assert_eq!(encoded["mount_host_paths_encoded"], true);
+        assert!(decode(encoded).unwrap().mount_host_paths_encoded);
     }
 
     #[cfg(feature = "net")]

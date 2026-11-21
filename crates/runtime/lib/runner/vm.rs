@@ -380,6 +380,9 @@ pub struct VmConfig {
     /// Isolated host-file mounts backed by synthetic one-entry filesystems.
     pub file_mounts: Vec<FileMountConfig>,
 
+    /// The host path in every `mounts` and `file_mounts` spec is percent-encoded.
+    pub mount_host_paths_encoded: bool,
+
     /// Disk-image volume mounts attached as extra virtio-blk devices.
     pub disks: Vec<DiskMountSpec>,
 
@@ -2367,7 +2370,7 @@ fn build_vm(
             });
             continue;
         };
-        let parsed = parse_mount_spec(&file_mount.mount)
+        let parsed = parse_mount_spec(&file_mount.mount, vm.mount_host_paths_encoded)
             .map_err(|e| RuntimeError::Custom(format!("file mount {:?}: {e}", file_mount.mount)))?;
         let tag = parsed.tag;
         let host_path = PathBuf::from(&parsed.host_path);
@@ -2511,7 +2514,7 @@ fn build_vm(
                 continue;
             }
         };
-        let parsed = parse_mount_spec(mount_spec)
+        let parsed = parse_mount_spec(mount_spec, vm.mount_host_paths_encoded)
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
         let tag = parsed.tag;
@@ -3835,7 +3838,7 @@ struct ParsedMountSpec {
 /// default no-follow root resolution; its absence keeps the protective default on.
 /// `uid=`/`gid=` set the guest owner presented for host files that have no per-file
 /// override (see [`ParsedMountSpec::override_uid`]); they must be given together.
-fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
+fn parse_mount_spec(spec: &str, host_path_encoded: bool) -> Result<ParsedMountSpec, String> {
     let (tag, rest) = spec
         .split_once(':')
         .ok_or_else(|| format!("expected tag:host_path[:opts] shape, got {spec:?}"))?;
@@ -3853,6 +3856,13 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
             "mount options must use tag:host_path:opts syntax, got comma in host path {host_path:?}"
         ));
     }
+    // A launch that says so percent-encodes the host path, so it may contain
+    // `,`, `;` and `:`. Otherwise the path is taken as written.
+    let host_path = if host_path_encoded {
+        microsandbox_utils::decode_mount_host_path(host_path)?
+    } else {
+        host_path.to_string()
+    };
 
     let mut stat_virtualization = StatVirtualization::Strict;
     let mut host_permissions = HostPermissions::Private;
@@ -4612,6 +4622,7 @@ mod tests {
             rootfs_upper_spec: None,
             mounts: Vec::new(),
             file_mounts: Vec::new(),
+            mount_host_paths_encoded: false,
             owned_volumes: Vec::new(),
             disks: Vec::new(),
             vsock: Vec::new(),
@@ -4843,7 +4854,7 @@ mod tests {
 
     #[test]
     fn test_parse_mount_spec_minimal() {
-        let p = parse_mount_spec("foo:/host/data").unwrap();
+        let p = parse_mount_spec("foo:/host/data", false).unwrap();
         assert_eq!(p.tag, "foo");
         assert_eq!(p.host_path, "/host/data");
         assert!(matches!(p.stat_virtualization, StatVirtualization::Strict));
@@ -4854,26 +4865,69 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mount_spec_decodes_wire_separators_in_encoded_host_path() {
+        for host in [
+            "/Users/a/Smith, John",
+            "/data/a;b:c",
+            "/data/100% done",
+            r"C:\Users\用户\a,b;c",
+        ] {
+            let spec = format!(
+                "fm:{}:ro,stat-virt=strict",
+                microsandbox_utils::encode_mount_host_path(host)
+            );
+            let p = parse_mount_spec(&spec, true).unwrap();
+            assert_eq!(p.host_path, host);
+            assert!(p.readonly);
+            let p = parse_mount_spec(
+                &format!("fm:{}", microsandbox_utils::encode_mount_host_path(host)),
+                true,
+            )
+            .unwrap();
+            assert_eq!(p.host_path, host);
+            assert!(!p.readonly);
+        }
+        // A comma in a host path must not be able to inject options.
+        let injected = microsandbox_utils::encode_mount_host_path("/data/x:rw,stat-virt=off");
+        let p = parse_mount_spec(&format!("fm:{injected}:ro"), true).unwrap();
+        assert_eq!(p.host_path, "/data/x:rw,stat-virt=off");
+        assert!(p.readonly);
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Strict));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_keeps_raw_host_path_without_encoding_flag() {
+        // Launchers that do not set the flag send host paths as written, and a
+        // `%` in them is an ordinary character.
+        for host in ["/x/My%20Files", "/data/100% done", "/data/%41", "/data/%"] {
+            let p = parse_mount_spec(&format!("fm:{host}:ro"), false).unwrap();
+            assert_eq!(p.host_path, host);
+            assert!(p.readonly);
+        }
+    }
+
+    #[test]
     fn test_parse_mount_spec_uid_gid() {
-        let p = parse_mount_spec("home:/host/home:uid=1000,gid=1000").unwrap();
+        let p = parse_mount_spec("home:/host/home:uid=1000,gid=1000", false).unwrap();
         assert_eq!(p.override_uid, Some(1000));
         assert_eq!(p.override_gid, Some(1000));
 
         // uid 0 (root) is a valid, distinct value from "unset".
-        let p = parse_mount_spec("home:/host/home:uid=0,gid=0").unwrap();
+        let p = parse_mount_spec("home:/host/home:uid=0,gid=0", false).unwrap();
         assert_eq!(p.override_uid, Some(0));
         assert_eq!(p.override_gid, Some(0));
     }
 
     #[test]
     fn test_parse_mount_spec_uid_gid_must_be_paired() {
-        assert!(parse_mount_spec("home:/host/home:uid=1000").is_err());
-        assert!(parse_mount_spec("home:/host/home:gid=1000").is_err());
+        assert!(parse_mount_spec("home:/host/home:uid=1000", false).is_err());
+        assert!(parse_mount_spec("home:/host/home:gid=1000", false).is_err());
     }
 
     #[test]
     fn test_parse_mount_spec_uid_gid_reject_stat_virt_off() {
-        let err = parse_mount_spec("home:/host/home:uid=1000,gid=1000,stat-virt=off").unwrap_err();
+        let err =
+            parse_mount_spec("home:/host/home:uid=1000,gid=1000,stat-virt=off", false).unwrap_err();
         assert!(
             err.contains("cannot be combined with stat-virt=off"),
             "{err}"
@@ -4882,13 +4936,16 @@ mod tests {
 
     #[test]
     fn test_parse_mount_spec_rejects_invalid_uid() {
-        assert!(parse_mount_spec("home:/host/home:uid=abc,gid=1000").is_err());
+        assert!(parse_mount_spec("home:/host/home:uid=abc,gid=1000", false).is_err());
     }
 
     #[test]
     fn test_parse_mount_spec_with_ro_and_policies() {
-        let p = parse_mount_spec("foo:/host/data:ro,noexec,stat-virt=relaxed,host-perms=mirror")
-            .unwrap();
+        let p = parse_mount_spec(
+            "foo:/host/data:ro,noexec,stat-virt=relaxed,host-perms=mirror",
+            false,
+        )
+        .unwrap();
         assert_eq!(p.host_path, "/host/data");
         assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
         assert!(matches!(p.host_permissions, HostPermissions::Mirror));
@@ -4897,7 +4954,7 @@ mod tests {
 
     #[test]
     fn test_parse_mount_spec_stat_virt_off() {
-        let p = parse_mount_spec("foo:/host/data:stat-virt=off").unwrap();
+        let p = parse_mount_spec("foo:/host/data:stat-virt=off", false).unwrap();
         assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
         assert!(!p.readonly);
     }
@@ -4906,16 +4963,20 @@ mod tests {
     fn test_parse_mount_spec_follow_root_symlinks_default_protected() {
         // Absent token: protected by default (follow_root_symlinks stays false,
         // which the construction site inverts into no_symlink_root = true).
-        let p = parse_mount_spec("foo:/host/data").unwrap();
+        let p = parse_mount_spec("foo:/host/data", false).unwrap();
         assert!(!p.follow_root_symlinks);
     }
 
     #[test]
     fn test_parse_mount_spec_follow_root_symlinks_opt_out() {
-        let p = parse_mount_spec("foo:/host/data:follow-root-symlinks").unwrap();
+        let p = parse_mount_spec("foo:/host/data:follow-root-symlinks", false).unwrap();
         assert!(p.follow_root_symlinks);
         // Coexists with other options.
-        let p = parse_mount_spec("foo:/host/data:ro,follow-root-symlinks,stat-virt=off").unwrap();
+        let p = parse_mount_spec(
+            "foo:/host/data:ro,follow-root-symlinks,stat-virt=off",
+            false,
+        )
+        .unwrap();
         assert!(p.follow_root_symlinks);
         assert!(p.readonly);
         assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
@@ -4923,26 +4984,29 @@ mod tests {
 
     #[test]
     fn test_parse_mount_spec_rejects_duplicate_follow_root_symlinks() {
-        let err = parse_mount_spec("foo:/host/data:follow-root-symlinks,follow-root-symlinks")
-            .unwrap_err();
+        let err = parse_mount_spec(
+            "foo:/host/data:follow-root-symlinks,follow-root-symlinks",
+            false,
+        )
+        .unwrap_err();
         assert!(err.contains("follow-root-symlinks"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_quota_in_mib() {
-        let p = parse_mount_spec("foo:/host/data:quota=2048").unwrap();
+        let p = parse_mount_spec("foo:/host/data:quota=2048", false).unwrap();
         assert_eq!(p.quota_bytes, Some(2048 * 1024 * 1024));
     }
 
     #[test]
     fn test_parse_mount_spec_quota_default_none() {
-        let p = parse_mount_spec("foo:/host/data:ro").unwrap();
+        let p = parse_mount_spec("foo:/host/data:ro", false).unwrap();
         assert_eq!(p.quota_bytes, None);
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_duplicate_quota() {
-        let err = parse_mount_spec("foo:/host/data:quota=1,quota=2").unwrap_err();
+        let err = parse_mount_spec("foo:/host/data:quota=1,quota=2", false).unwrap_err();
         assert!(
             err.contains("`quota` specified more than once"),
             "got: {err}"
@@ -4951,75 +5015,76 @@ mod tests {
 
     #[test]
     fn test_parse_mount_spec_rejects_non_numeric_quota() {
-        let err = parse_mount_spec("foo:/host/data:quota=big").unwrap_err();
+        let err = parse_mount_spec("foo:/host/data:quota=big", false).unwrap_err();
         assert!(err.contains("invalid quota"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_unknown_key() {
-        let err = parse_mount_spec("foo:/host/data:bogus=1").unwrap_err();
+        let err = parse_mount_spec("foo:/host/data:bogus=1", false).unwrap_err();
         assert!(err.contains("unknown mount option"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_invalid_stat_virt() {
-        let err = parse_mount_spec("foo:/host/data:stat-virt=nope").unwrap_err();
+        let err = parse_mount_spec("foo:/host/data:stat-virt=nope", false).unwrap_err();
         assert!(err.contains("invalid stat-virt"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_invalid_host_perms() {
-        let err = parse_mount_spec("foo:/host/data:host-perms=public").unwrap_err();
+        let err = parse_mount_spec("foo:/host/data:host-perms=public", false).unwrap_err();
         assert!(err.contains("invalid host-perms"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_missing_colon_errors() {
-        let err = parse_mount_spec("nopath").unwrap_err();
+        let err = parse_mount_spec("nopath", false).unwrap_err();
         assert!(err.contains("expected tag:host_path"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_empty_tag_errors() {
-        let err = parse_mount_spec(":/host").unwrap_err();
+        let err = parse_mount_spec(":/host", false).unwrap_err();
         assert!(err.contains("empty tag"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_with_flags_before_policies() {
-        let p = parse_mount_spec("foo:/host/data:ro,nosuid,stat-virt=relaxed").unwrap();
+        let p = parse_mount_spec("foo:/host/data:ro,nosuid,stat-virt=relaxed", false).unwrap();
         assert_eq!(p.host_path, "/host/data");
         assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_duplicate_stat_virt() {
-        let err = parse_mount_spec("foo:/host:stat-virt=strict,stat-virt=off").unwrap_err();
+        let err = parse_mount_spec("foo:/host:stat-virt=strict,stat-virt=off", false).unwrap_err();
         assert!(err.contains("more than once"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_legacy_comma_options() {
-        let err = parse_mount_spec("foo:/host/data,stat-virt=off").unwrap_err();
+        let err = parse_mount_spec("foo:/host/data,stat-virt=off", false).unwrap_err();
         assert!(err.contains("tag:host_path:opts"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_duplicate_flags() {
-        let err = parse_mount_spec("foo:/host:ro,rw").unwrap_err();
+        let err = parse_mount_spec("foo:/host:ro,rw", false).unwrap_err();
         assert!(err.contains("ro`/`rw"), "got: {err}");
     }
 
     #[test]
     fn test_parse_mount_spec_rejects_unsupported_flags() {
-        let err = parse_mount_spec("foo:/host:exec").unwrap_err();
+        let err = parse_mount_spec("foo:/host:exec", false).unwrap_err();
         assert!(err.contains("unsupported mount option"), "got: {err}");
     }
 
     #[test]
     #[cfg(windows)]
     fn test_parse_mount_spec_accepts_windows_drive_path() {
-        let p = parse_mount_spec(r"work:C:\Users\Stephen\data:ro,host-perms=mirror").unwrap();
+        let p =
+            parse_mount_spec(r"work:C:\Users\Stephen\data:ro,host-perms=mirror", false).unwrap();
         assert_eq!(p.tag, "work");
         assert_eq!(p.host_path, r"C:\Users\Stephen\data");
         assert!(matches!(p.host_permissions, HostPermissions::Mirror));
