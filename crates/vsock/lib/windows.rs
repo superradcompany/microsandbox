@@ -634,19 +634,13 @@ fn named_pipe_worker(path: PathBuf, shared: Arc<SharedState>) {
 /// before closing has been delivered, then the stream ends.
 fn pump(read: &mut PendingIo, write: &mut PendingIo, shared: &SharedState) {
     loop {
-        let (outgoing, read_capacity) = {
+        let outgoing = {
             let mut state = shared.state.lock().unwrap();
             if state.terminate {
                 return;
             }
             let count = state.outgoing.len().min(IO_CHUNK_SIZE);
-            let bytes = state.outgoing.drain(..count).collect::<Vec<_>>();
-            let capacity = if state.read_shutdown {
-                0
-            } else {
-                MAX_BUFFERED_BYTES.saturating_sub(state.incoming.len())
-            };
-            (bytes, capacity)
+            state.outgoing.drain(..count).collect::<Vec<_>>()
         };
 
         if !outgoing.is_empty() {
@@ -671,6 +665,16 @@ fn pump(read: &mut PendingIo, write: &mut PendingIo, shared: &SharedState) {
             }
         }
 
+        // Measure the room only after the write: a guest read during it frees
+        // room and sets the wake event, which write_all consumes.
+        let read_capacity = {
+            let state = shared.state.lock().unwrap();
+            if state.read_shutdown {
+                0
+            } else {
+                MAX_BUFFERED_BYTES.saturating_sub(state.incoming.len())
+            }
+        };
         if !read.pending
             && read_capacity > 0
             && let Err(error) = read.start_read(read_capacity.min(IO_CHUNK_SIZE))
@@ -1140,6 +1144,44 @@ mod tests {
         // cleanly after the reply.
         assert_eq!(guest_read_up_to(&*endpoint, 1 << 20), b"final reply");
         assert_eq!(endpoint.read(&mut [0_u8; 16]).unwrap(), 0);
+    }
+
+    #[test]
+    fn room_the_guest_frees_during_a_write_is_read_into_after_it() {
+        let name = pipe_name("roomafterwrite");
+        let server = host_pipe(&name);
+        // One write chunk, larger than the pipe buffers, so the relay's
+        // write stays pending until the Host reads it.
+        const WRITE: usize = 32 * 1024;
+        const TAIL: &[u8] = b"sent once the guest made room";
+        let (filled_tx, filled_rx) = std::sync::mpsc::channel();
+        let (drained_tx, drained_rx) = std::sync::mpsc::channel::<()>();
+        let host = std::thread::spawn(move || {
+            host_accept(&server);
+            host_write_all(&server, &pattern(MAX_BUFFERED_BYTES, 5));
+            filled_tx.send(()).unwrap();
+            drained_rx.recv().unwrap();
+            assert_eq!(host_read_exact(&server, WRITE), pattern(WRITE, 6));
+            host_write_all(&server, TAIL);
+        });
+        let endpoint = guest_connect(&name);
+        filled_rx.recv_timeout(DEADLINE).unwrap();
+        // Let the last Host bytes reach the guest buffer, so it is full and
+        // the relay has no read pending.
+        std::thread::sleep(Duration::from_millis(200));
+        guest_write_all(&*endpoint, &pattern(WRITE, 6));
+        // The relay is now blocked in that write; empty the guest buffer
+        // under it.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            guest_read_up_to(&*endpoint, MAX_BUFFERED_BYTES),
+            pattern(MAX_BUFFERED_BYTES, 5)
+        );
+        drained_tx.send(()).unwrap();
+        // Once the write completes the relay must read again; nothing else
+        // will wake it.
+        assert_eq!(guest_read_up_to(&*endpoint, TAIL.len()), TAIL);
+        host.join().unwrap();
     }
 
     #[test]
