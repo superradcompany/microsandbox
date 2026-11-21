@@ -185,6 +185,9 @@ pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
     FsWriteSink, SandboxFsOps,
 };
+#[cfg(feature = "cloud")]
+pub(crate) use handle::get_identified_handle;
+pub(crate) use handle::restart_by_stop_and_start;
 pub use handle::{
     DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, DestroyOptions, RestartOptions, SandboxRecord,
 };

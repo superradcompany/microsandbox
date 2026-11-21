@@ -1090,6 +1090,8 @@ func (s *Sandbox) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox,
 
 Restart this exact sandbox. Defaults to graceful shutdown, a ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Use `WithRestartForce`, `WithRestartTimeout`, and `WithRestartDetached` for explicit controls.
 
+For a running Cloud sandbox, positive restart timeouts are rounded up to whole seconds and cannot exceed 60 seconds. Larger values fail before the restart request is sent.
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Destroy()</span>
 
 ```go
