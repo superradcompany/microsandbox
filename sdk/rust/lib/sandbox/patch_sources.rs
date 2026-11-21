@@ -48,6 +48,12 @@ pub(crate) struct Prepared {
     capacity: Option<OwnedSemaphorePermit>,
 }
 
+/// Retains the process-wide patch staging capacity permit after staged files are consumed.
+#[derive(Debug)]
+pub(crate) struct CapacityGuard {
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
 struct Budget {
     modes: HashMap<PathBuf, u32>,
     bytes: u64,
@@ -65,6 +71,15 @@ impl Prepared {
 
     pub(crate) fn patches<'a>(&'a self, original: &'a [Patch]) -> &'a [Patch] {
         self.patches.as_deref().unwrap_or(original)
+    }
+
+    /// Remove the staged source directory on the current thread and keep only the
+    /// capacity permit until the caller's downstream payload is also removed.
+    pub(crate) fn into_capacity_guard(mut self) -> CapacityGuard {
+        drop(self.stage.take());
+        CapacityGuard {
+            _permit: self.capacity.take(),
+        }
     }
 }
 

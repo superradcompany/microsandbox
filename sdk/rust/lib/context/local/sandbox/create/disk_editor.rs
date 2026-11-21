@@ -257,21 +257,25 @@ async fn write_edit_stream(
     scratch: std::path::PathBuf,
     patches: Vec<Patch>,
     bounded_patch_sources: bool,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxResult<patch_sources::CapacityGuard> {
     let prepared = patch_sources::prepare(&patches, bounded_patch_sources).await?;
-    tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
-        microsandbox_utils::private_file::create_private_directory(&scratch)?;
-        let mut stream = EditStream {
-            manifest: BufWriter::new(File::create_new(scratch.join("edits"))?),
-            payload: BufWriter::new(File::create_new(scratch.join("payload"))?),
-        };
-        for patch in prepared.patches(&patches) {
-            stream.push(patch, &prepared)?;
-        }
-        stream.manifest.flush()?;
-        stream.payload.flush()?;
-        Ok(())
-    })
+    tokio::task::spawn_blocking(
+        move || -> MicrosandboxResult<patch_sources::CapacityGuard> {
+            microsandbox_utils::private_file::create_private_directory(&scratch)?;
+            let mut stream = EditStream {
+                manifest: BufWriter::new(File::create_new(scratch.join("edits"))?),
+                payload: BufWriter::new(File::create_new(scratch.join("payload"))?),
+            };
+            for patch in prepared.patches(&patches) {
+                stream.push(patch, &prepared)?;
+            }
+            stream.manifest.flush()?;
+            stream.payload.flush()?;
+            // Release the staged source copy now, but retain the process-wide batch
+            // permit until the caller removes `scratch/payload`.
+            Ok(prepared.into_capacity_guard())
+        },
+    )
     .await
     .map_err(|e| MicrosandboxError::PatchFailed(e.to_string()))?
 }
@@ -288,11 +292,15 @@ pub(super) async fn apply(
     // if the original create future is dropped. Scratch is never published with the child.
     tokio::spawn(async move {
         let patches = std::mem::take(&mut config.spec.patches);
+        // Declare the capacity guard before `temp` so `temp` is always removed before
+        // releasing the two-batch permit, including on early error or cancellation.
+        #[allow(unused_assignments)]
+        let mut _capacity: Option<patch_sources::CapacityGuard> = None;
         let temp = tempfile::Builder::new()
             .prefix(".editor-")
             .tempdir_in(stage.path())?;
         let scratch = temp.path().join("guest");
-        write_edit_stream(scratch.clone(), patches, bounded_patch_sources).await?;
+        _capacity = Some(write_edit_stream(scratch.clone(), patches, bounded_patch_sources).await?);
         serde_json::to_writer(
             File::create_new(temp.path().join("chain"))?,
             &config.snapshot_upper_layers,
