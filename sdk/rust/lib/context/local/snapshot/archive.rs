@@ -452,6 +452,8 @@ impl LocalContext {
             )?;
         }
         delta::resolve(self, &inventory, child_stage, cache_stage.path(), base).await?;
+        // Extraction and dependency resolution leave private copies in child staging.
+        let extracted_stage = child_stage.for_child_private_sources();
 
         if let SnapshotState::Checkpoint(state) = &manifest.state {
             let member_dir = child_stage.join(&member.snapshot_id);
@@ -465,7 +467,7 @@ impl LocalContext {
                     &extracted_closure,
                     &state.checkpoint_root,
                     &state.checkpoint_id,
-                    child_stage,
+                    &extracted_stage,
                     &manifest.root_disk,
                     choices,
                     self.config().fs_state_limit(),
@@ -573,7 +575,7 @@ impl LocalContext {
         let mut materialized = super::materialize_file_snapshot_for_child(
             &sources,
             file.virtual_size,
-            child_stage,
+            &extracted_stage,
             &manifest.root_disk,
         )
         .await?;
@@ -581,7 +583,7 @@ impl LocalContext {
         materialized.disk_mounts = super::materialize_owned_volumes(
             &manifest.owned_volumes()?,
             &child_stage.join(&member.snapshot_id),
-            child_stage,
+            &extracted_stage,
             choices,
         )
         .await?;
