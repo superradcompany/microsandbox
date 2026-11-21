@@ -664,11 +664,8 @@ impl LocalContext {
         };
 
         // Build the command.
+        // A detached runtime's Windows creation flags are set by `spawn_runtime_command`.
         let mut cmd = Command::new(&msb_path);
-        #[cfg(windows)]
-        if matches!(mode, SpawnMode::Detached) {
-            cmd.creation_flags(DETACHED_SPAWN_FLAGS | CREATE_BREAKAWAY_FROM_JOB);
-        }
         cmd.args(visible);
         if config.storage_reader.is_some() {
             // An old executable rejects this argument during CLI parsing, before opening a disk,
@@ -1076,18 +1073,22 @@ fn spawn_runtime_command(
     };
     #[cfg(windows)]
     if matches!(_mode, SpawnMode::Detached) {
+        // A detached runtime leaves the launcher's job so it outlives the launcher.
+        cmd.creation_flags(DETACHED_SPAWN_FLAGS | CREATE_BREAKAWAY_FROM_JOB);
         return match cmd.spawn() {
             // A launcher job without JOB_OBJECT_LIMIT_BREAKAWAY_OK (Task Scheduler, some
             // terminals and CI agents) makes CreateProcess with CREATE_BREAKAWAY_FROM_JOB fail
             // with ERROR_ACCESS_DENIED. Jobs nest since Windows 8, so start the runtime inside
-            // the launcher's job instead; it then ends with that job, as it may.
+            // the launcher's job instead.
             Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                cmd.creation_flags(DETACHED_SPAWN_FLAGS);
+                let child = cmd.spawn()?;
                 tracing::warn!(
                     "detached spawn: the launcher's job object forbids breakaway, so the sandbox \
-                     runtime starts inside it and will be terminated when that job ends"
+                     runtime started inside it; it inherits the job's limits and may be \
+                     terminated with that job"
                 );
-                cmd.creation_flags(DETACHED_SPAWN_FLAGS);
-                cmd.spawn()
+                Ok(child)
             }
             result => result,
         };
@@ -3152,9 +3153,7 @@ mod tests {
 
         let comspec = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
         let mut command = tokio::process::Command::new(comspec);
-        command
-            .args(["/d", "/c", "exit 7"])
-            .creation_flags(super::DETACHED_SPAWN_FLAGS | super::CREATE_BREAKAWAY_FROM_JOB);
+        command.args(["/d", "/c", "exit 7"]);
         let mut child =
             super::spawn_runtime_command(&mut command, super::SpawnMode::Detached, None)
                 .expect("detached spawn inside a job without breakaway");
@@ -3164,9 +3163,9 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn windows_detached_spawn_inside_job_without_breakaway() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+    #[tokio::test]
+    async fn windows_detached_spawn_inside_job_without_breakaway() {
+        let child = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "runtime::spawn::tests::windows_detached_spawn_job_child",
@@ -3174,8 +3173,16 @@ mod tests {
                 "--test-threads=1",
             ])
             .env("MSB_TEST_JOB_WITHOUT_BREAKAWAY", "1")
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
             .unwrap();
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+                .await
+                .expect("the child that spawns inside a job did not finish")
+                .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
