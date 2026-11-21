@@ -10,6 +10,7 @@ use microsandbox_protocol::snapshot_patch::{Action, Edit, RECEIPT};
 use microsandbox_types::Patch;
 
 use super::restore::RestoreStaging;
+use crate::sandbox::patch_sources::{self, Prepared};
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 
 //--------------------------------------------------------------------------------------------------
@@ -38,18 +39,31 @@ impl EditStream {
         Ok(())
     }
 
-    fn directory(&mut self, dir: &Dir, path: &[u8], replace: bool) -> MicrosandboxResult<()> {
+    fn directory(
+        &mut self,
+        dir: &Dir,
+        source_path: &Path,
+        path: &[u8],
+        replace: bool,
+        sources: &Prepared,
+    ) -> MicrosandboxResult<()> {
         let handle = dir.try_clone()?.into_std_file();
+        let dir_mode = match sources.mode(source_path) {
+            Some(0) => 0o755,
+            Some(mode) => mode,
+            None => mode(&handle, 0o755)?,
+        };
         self.record(
             path,
             Action::CopyDirectory {
-                mode: mode(&handle, 0o755)?,
+                mode: dir_mode,
                 replace,
             },
         )?;
         for entry in dir.entries()? {
             let entry = entry?;
             let name = entry.file_name();
+            let source_child = source_path.join(&name);
             let mut child = path.to_vec();
             child.push(b'/');
             child.extend_from_slice(name.as_encoded_bytes());
@@ -65,7 +79,13 @@ impl EditStream {
                 )?;
             } else if kind.is_dir() {
                 let fd = cap_primitives::fs::open_dir_nofollow(&handle, Path::new(&name))?;
-                self.directory(&Dir::from_std_file(fd), &child, true)?;
+                self.directory(
+                    &Dir::from_std_file(fd),
+                    &source_child,
+                    &child,
+                    true,
+                    sources,
+                )?;
             } else if kind.is_file() {
                 let mut options = cap_std::fs::OpenOptions::new();
                 options
@@ -80,6 +100,7 @@ impl EditStream {
                     dir.open_with(&name, &options)?.into_std(),
                     &child,
                     None,
+                    sources.mode(&source_child),
                     true,
                 )?;
             } else {
@@ -96,6 +117,7 @@ impl EditStream {
         mut file: File,
         path: &[u8],
         requested: Option<u32>,
+        staged_mode: Option<u32>,
         replace: bool,
     ) -> MicrosandboxResult<()> {
         if !file.metadata()?.is_file() {
@@ -103,12 +125,26 @@ impl EditStream {
                 "copy source must be a regular file".into(),
             ));
         }
-        let mode = requested.unwrap_or(mode(&file, 0o644)?);
+        let file_mode = match requested {
+            Some(mode) => mode,
+            None => match staged_mode {
+                Some(0) => 0o644,
+                Some(mode) => mode,
+                None => mode(&file, 0o644)?,
+            },
+        };
         let len = io::copy(&mut file, &mut self.payload)?;
-        self.record(path, Action::Write { mode, replace, len })
+        self.record(
+            path,
+            Action::Write {
+                mode: file_mode,
+                replace,
+                len,
+            },
+        )
     }
 
-    fn push(&mut self, patch: &Patch) -> MicrosandboxResult<()> {
+    fn push(&mut self, patch: &Patch, sources: &Prepared) -> MicrosandboxResult<()> {
         match patch {
             Patch::Text {
                 path,
@@ -133,8 +169,10 @@ impl EditStream {
             }
             Patch::CopyDir { src, dst, replace } => self.directory(
                 &Dir::open_ambient_dir(src, cap_std::ambient_authority())?,
+                src,
                 dst.as_bytes(),
                 *replace,
+                sources,
             ),
             Patch::CopyFile {
                 src,
@@ -149,7 +187,13 @@ impl EditStream {
                     use std::os::unix::fs::OpenOptionsExt;
                     options.custom_flags(libc::O_NONBLOCK);
                 }
-                self.copy_file(options.open(src)?, dst.as_bytes(), *mode, *replace)
+                self.copy_file(
+                    options.open(src)?,
+                    dst.as_bytes(),
+                    *mode,
+                    sources.mode(src),
+                    *replace,
+                )
             }
             Patch::Symlink {
                 target,
@@ -209,40 +253,51 @@ fn mode(file: &File, fallback: u32) -> io::Result<u32> {
     Ok(fallback)
 }
 
+async fn write_edit_stream(
+    scratch: std::path::PathBuf,
+    patches: Vec<Patch>,
+    bounded_patch_sources: bool,
+) -> MicrosandboxResult<()> {
+    let prepared = patch_sources::prepare(&patches, bounded_patch_sources).await?;
+    tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
+        microsandbox_utils::private_file::create_private_directory(&scratch)?;
+        let mut stream = EditStream {
+            manifest: BufWriter::new(File::create_new(scratch.join("edits"))?),
+            payload: BufWriter::new(File::create_new(scratch.join("payload"))?),
+        };
+        for patch in prepared.patches(&patches) {
+            stream.push(patch, &prepared)?;
+        }
+        stream.manifest.flush()?;
+        stream.payload.flush()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| MicrosandboxError::PatchFailed(e.to_string()))?
+}
+
 pub(super) async fn apply(
     mut config: SandboxConfig,
     stage: RestoreStaging,
     msb: std::path::PathBuf,
     firmware: std::path::PathBuf,
     image: super::ResolvedOciImage,
+    bounded_patch_sources: bool,
 ) -> MicrosandboxResult<(SandboxConfig, RestoreStaging, super::ResolvedOciImage)> {
     // Keep the reservation and its disk leases until the VMM has really exited, even
     // if the original create future is dropped. Scratch is never published with the child.
     tokio::spawn(async move {
-        let (config, stage, temp, scratch) =
-            tokio::task::spawn_blocking(move || -> MicrosandboxResult<_> {
-                let temp = tempfile::Builder::new()
-                    .prefix(".editor-")
-                    .tempdir_in(stage.path())?;
-                let scratch = temp.path().join("guest");
-                microsandbox_utils::private_file::create_private_directory(&scratch)?;
-                let mut stream = EditStream {
-                    manifest: BufWriter::new(File::create_new(scratch.join("edits"))?),
-                    payload: BufWriter::new(File::create_new(scratch.join("payload"))?),
-                };
-                for patch in std::mem::take(&mut config.spec.patches) {
-                    stream.push(&patch)?;
-                }
-                stream.manifest.flush()?;
-                stream.payload.flush()?;
-                serde_json::to_writer(
-                    File::create_new(temp.path().join("chain"))?,
-                    &config.snapshot_upper_layers,
-                )?;
-                Ok((config, stage, temp, std::fs::canonicalize(scratch)?))
-            })
-            .await
-            .map_err(|e| MicrosandboxError::PatchFailed(e.to_string()))??;
+        let patches = std::mem::take(&mut config.spec.patches);
+        let temp = tempfile::Builder::new()
+            .prefix(".editor-")
+            .tempdir_in(stage.path())?;
+        let scratch = temp.path().join("guest");
+        write_edit_stream(scratch.clone(), patches, bounded_patch_sources).await?;
+        serde_json::to_writer(
+            File::create_new(temp.path().join("chain"))?,
+            &config.snapshot_upper_layers,
+        )?;
+        let scratch = std::fs::canonicalize(scratch)?;
         let mut command = tokio::process::Command::new(msb);
         command
             .arg("__snapshot-editor")
@@ -290,4 +345,74 @@ pub(super) async fn apply(
     })
     .await
     .map_err(|e| MicrosandboxError::PatchFailed(e.to_string()))?
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn snapshot_edit_stream_enforces_bounded_patch_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("source");
+        std::fs::create_dir(&source).unwrap();
+        let file = source.join("data");
+        std::fs::write(&file, b"payload").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&file, source.join("alias")).unwrap();
+
+        let patches = vec![Patch::CopyDir {
+            src: source.clone(),
+            dst: "/copied".into(),
+            replace: false,
+        }];
+
+        let bounded_scratch = root.join("bounded-symlink");
+        assert!(
+            write_edit_stream(bounded_scratch.clone(), patches.clone(), true)
+                .await
+                .is_err()
+        );
+        assert!(!bounded_scratch.exists());
+
+        let unbounded_scratch = root.join("unbounded-symlink");
+        write_edit_stream(unbounded_scratch, patches.clone(), false)
+            .await
+            .unwrap();
+
+        std::fs::remove_file(source.join("alias")).unwrap();
+        let clean_scratch = root.join("bounded-clean");
+        write_edit_stream(clean_scratch.clone(), patches.clone(), true)
+            .await
+            .unwrap();
+        let manifest = std::fs::read_to_string(clean_scratch.join("edits")).unwrap();
+        let edits: Vec<Edit> = manifest
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(edits.iter().any(|edit| matches!(
+            &edit.action,
+            Action::Write { mode, len: 7, .. } if *mode == 0o640
+        )));
+
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_len(65 * 1024 * 1024)
+            .unwrap();
+        let oversized_scratch = root.join("bounded-oversized");
+        let error = write_edit_stream(oversized_scratch.clone(), patches, true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("byte budget"), "{error}");
+        assert!(!oversized_scratch.exists());
+    }
 }

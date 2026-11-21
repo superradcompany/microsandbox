@@ -467,6 +467,7 @@ impl LocalContext {
                 runtime.msb_path,
                 runtime.libkrunfw_path,
                 image,
+                self.config().runtime.bounded_patch_sources,
             )
             .await?;
             config = prepared;

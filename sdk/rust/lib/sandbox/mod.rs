@@ -55,7 +55,7 @@ mod network_presence_tests;
 #[cfg(feature = "local")]
 mod patch;
 #[cfg(feature = "local")]
-mod patch_sources;
+pub(crate) mod patch_sources;
 #[cfg(feature = "local")]
 pub(crate) mod storage_preview;
 mod storage_recovery;

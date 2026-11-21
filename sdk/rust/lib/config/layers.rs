@@ -49,6 +49,18 @@ pub(crate) struct ConfigLayers<P> {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl GlobalConfig {
+    /// Validate host runtime settings this platform cannot honor.
+    pub(crate) fn validate_runtime(&self) -> MicrosandboxResult<()> {
+        if cfg!(not(unix)) && self.runtime.bounded_patch_sources {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.bounded_patch_sources is supported only on Unix hosts".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl BackendConfig {
     /// Borrow the settings captured by the sandbox's backend, independent of ambient routing.
     pub(crate) fn for_backend(backend: &dyn crate::context::Context) -> Option<&Self> {
@@ -151,6 +163,7 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
+        resolved.validate_runtime()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         self.validate_backend_policy()?;
 
@@ -178,6 +191,7 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
+        resolved.validate_runtime()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         self.validate_backend_policy()?;
         Ok(self)
@@ -615,6 +629,37 @@ mod tests {
             layers.resolved_config().sandbox_defaults.oci.root_disk,
             Some(RootDisk::Tmpfs { .. }),
         ));
+    }
+
+    #[test]
+    fn local_preparation_accepts_bounded_patch_sources_only_on_unix() {
+        for (user, managed) in [
+            (r#"{"runtime":{"bounded_patch_sources":true}}"#, "{}"),
+            ("{}", r#"{"runtime":{"bounded_patch_sources":true}}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            let result = layers.prepare_for_local_backend(Default::default());
+
+            #[cfg(unix)]
+            assert!(
+                result
+                    .unwrap()
+                    .resolved_config()
+                    .runtime
+                    .bounded_patch_sources
+            );
+            #[cfg(not(unix))]
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("runtime.bounded_patch_sources is supported only on Unix")
+            );
+        }
     }
 
     #[test]
