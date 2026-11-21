@@ -1660,19 +1660,20 @@ mod tests {
             EXEC_CONTROL_REQUEST, EXEC_CONTROL_RESPONSE, ExecControlAdvertisement,
             ExecControlReady, ExecControlRequest, ExecControlResponse,
         };
+        use microsandbox_protocol::transport::LocalTransportReady;
         use microsandbox_protocol::wire::Envelope;
 
         let temp = tempfile::tempdir().unwrap();
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
-        let ready = Ready {
-            local_transport: Some(
-                microsandbox_protocol::transport::LocalTransportReady::shared_arena_v1(),
-            ),
-            ..Default::default()
-        };
+
         let control_path = temp.path().join("control.sock");
         let control_listener = UnixListener::bind(&control_path).unwrap();
+
+        let ready = Ready {
+            local_transport: Some(LocalTransportReady::shared_arena_v1()),
+            ..Default::default()
+        };
         let capability = ExecControlReady {
             version: 1,
             endpoint: control_path.to_string_lossy().into_owned(),
@@ -1683,10 +1684,13 @@ mod tests {
             exec_control: &capability,
         };
         let ready_msg = Message::with_payload(MessageType::Ready, 0, &advertisement).unwrap();
+
         let expected = Bytes::from_static(b"socket payload");
         let expected_server = expected.clone();
+
         let control_server = tokio::spawn(async move {
             let (mut socket, _) = control_listener.accept().await.unwrap();
+
             let hello_frame = codec::read_raw_frame(&mut socket).await.unwrap();
             let hello = Envelope::decode(&hello_frame.body)
                 .unwrap()
@@ -1698,12 +1702,15 @@ mod tests {
                 .frame(0, 1)
                 .unwrap();
             codec::write_raw_frame(&mut socket, &frame).await.unwrap();
+
             let request_frame = codec::read_raw_frame(&mut socket).await.unwrap();
             let request = Envelope::decode(&request_frame.body).unwrap();
             assert_eq!(request.t, EXEC_CONTROL_REQUEST);
+
             let request = request.payload::<ExecControlRequest>().unwrap();
             assert_eq!((request.id, request.signal), (91, 15));
             assert_eq!(request.connection, [17; 16]);
+
             let response = Envelope::new(
                 welcome.generation,
                 EXEC_CONTROL_RESPONSE,
@@ -1716,6 +1723,7 @@ mod tests {
                 .await
                 .unwrap();
         });
+
         let (stop_tx, stop_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -1728,6 +1736,7 @@ mod tests {
             assert_eq!(frame.id, 1);
             assert_eq!(frame.flags, FLAG_BULK);
             assert_eq!(&frame.body[12..], expected_server.as_ref());
+
             let _ = stop_rx.await;
         });
 
@@ -1737,6 +1746,7 @@ mod tests {
         )
         .await
         .unwrap();
+
         client
             .send_bulk(BulkRecord {
                 id: 1,
@@ -1747,6 +1757,7 @@ mod tests {
             })
             .await
             .unwrap();
+
         tokio::time::timeout(
             Duration::from_secs(2),
             client.send(91, MessageType::ExecSignal, &ExecSignal { signal: 15 }),
@@ -1754,10 +1765,12 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+
         tokio::time::timeout(Duration::from_secs(1), control_server)
             .await
             .unwrap()
             .unwrap();
+
         stop_tx.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(1), server)
             .await
