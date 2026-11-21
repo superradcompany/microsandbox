@@ -148,6 +148,12 @@ fn capture_linked(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<Pa
         .iter()
         .filter(|(inode, _)| !excluded.contains(inode))
         .map(|(inode, data)| {
+            if data.retained.lock().unwrap().is_some() {
+                // Only owned state can carry a file that has no host name.
+                return Err(invalid_state(
+                    "an open file was unlinked or replaced and has no path to capture",
+                ));
+            }
             let path = data.path();
             let relative = path
                 .strip_prefix(&fs.root)

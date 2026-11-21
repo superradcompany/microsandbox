@@ -3552,3 +3552,353 @@ fn dax_namespace_change_keeps_mapping(replace: bool, fail_refresh: bool) {
     .unwrap();
     assert!(seen.lock().unwrap().is_empty());
 }
+
+//--------------------------------------------------------------------------------------------------
+// Open files after unlink and rename-over
+//--------------------------------------------------------------------------------------------------
+
+/// How long a test waits for one step of another thread.
+const STEP_LIMIT: Duration = Duration::from_secs(10);
+
+fn create_with(
+    fs: &PassthroughFs,
+    ctx: Context,
+    name: &CStr,
+    mode: u32,
+    bytes: &[u8],
+) -> (u64, u64) {
+    let (entry, handle, _) = fs
+        .create(
+            ctx,
+            ROOT_INODE,
+            name,
+            S_IFREG | mode,
+            false,
+            (LINUX_O_CREAT | LINUX_O_RDWR | LINUX_O_TRUNC) as u32,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+    let handle = handle.unwrap();
+    let mut reader = SourceReader {
+        bytes: bytes.to_vec(),
+        pos: 0,
+    };
+    fs.write(
+        ctx,
+        entry.inode,
+        handle,
+        &mut reader,
+        bytes.len() as u32,
+        0,
+        None,
+        false,
+        false,
+        0,
+    )
+    .unwrap();
+    (entry.inode, handle)
+}
+
+fn read_all(fs: &PassthroughFs, inode: u64, handle: u64) -> io::Result<Vec<u8>> {
+    let mut writer = CaptureWriter { bytes: Vec::new() };
+    fs.read(context(), inode, handle, &mut writer, 4096, 0, None, 0)?;
+    Ok(writer.bytes)
+}
+
+/// A file the guest still has open keeps working after its name is replaced
+/// or removed, as POSIX requires: fstat, read, write and chmod on the handle.
+fn open_file_survives_name_loss(replace: bool) {
+    let temp = TempDir::new();
+    let fs = fs_for(&temp.path);
+    let owner = Context {
+        uid: 111,
+        gid: 222,
+        pid: 0,
+    };
+    let (inode, handle) = create_with(&fs, owner, c"data", 0o640, b"old contents");
+
+    if replace {
+        let (tmp_inode, tmp_handle) = create_with(&fs, context(), c"tmp", 0o600, b"new");
+        fs.release(context(), tmp_inode, 0, tmp_handle, false, false, None)
+            .unwrap();
+        fs.rename(context(), ROOT_INODE, c"tmp", ROOT_INODE, c"data", 0)
+            .unwrap();
+        assert_eq!(std::fs::read(temp.path.join("data")).unwrap(), b"new");
+        let current = fs.lookup(context(), ROOT_INODE, c"data").unwrap();
+        assert_eq!(current.inode, tmp_inode);
+        assert_eq!(current.attr.st_size, 3);
+        assert_eq!(current.attr.st_mode & 0o7777, 0o600);
+    } else {
+        fs.unlink(context(), ROOT_INODE, c"data").unwrap();
+        assert!(!temp.path.join("data").exists());
+        expect_errno(fs.lookup(context(), ROOT_INODE, c"data"), LINUX_ENOENT);
+    }
+
+    // fstat through the inode (Linux sends no handle) and through the handle.
+    for fh in [None, Some(handle)] {
+        let (st, _) = fs.getattr(context(), inode, fh).unwrap();
+        assert_eq!(st.st_ino, inode);
+        assert_eq!(st.st_size, 12);
+        assert_eq!((st.st_uid, st.st_gid), (111, 222));
+        assert_eq!(st.st_mode, S_IFREG | 0o640);
+    }
+    assert_eq!(read_all(&fs, inode, handle).unwrap(), b"old contents");
+
+    let mut reader = SourceReader {
+        bytes: b" + more".to_vec(),
+        pos: 0,
+    };
+    fs.write(
+        context(),
+        inode,
+        handle,
+        &mut reader,
+        7,
+        12,
+        None,
+        false,
+        false,
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        read_all(&fs, inode, handle).unwrap(),
+        b"old contents + more"
+    );
+    assert_eq!(fs.getattr(context(), inode, None).unwrap().0.st_size, 19);
+
+    let attr = stat64 {
+        st_mode: S_IFREG | 0o600,
+        ..Default::default()
+    };
+    let (st, _) = fs
+        .setattr(context(), inode, attr, Some(handle), SetattrValid::MODE)
+        .unwrap();
+    assert_eq!(st.st_mode, S_IFREG | 0o600);
+    fs.flush(context(), inode, handle, 0).unwrap();
+    fs.fsync(context(), inode, false, handle).unwrap();
+
+    // The surviving name is untouched by writes to the old object.
+    if replace {
+        assert_eq!(std::fs::read(temp.path.join("data")).unwrap(), b"new");
+    }
+
+    // The last release drops the detached inode.
+    fs.release(context(), inode, 0, handle, false, false, None)
+        .unwrap();
+    expect_errno(fs.getattr(context(), inode, None), LINUX_ESTALE);
+    assert!(!fs.inodes.read().unwrap().by_inode.contains_key(&inode));
+}
+
+#[test]
+fn open_file_survives_rename_over() {
+    open_file_survives_name_loss(true);
+}
+
+#[test]
+fn open_file_survives_unlink() {
+    open_file_survives_name_loss(false);
+}
+
+/// Pinning an open file before its name goes away is best effort on a mount
+/// without an owned checkpoint: a host-corrupted metadata stream fails the
+/// pin's stat read, yet the unlink or rename-over goes ahead and the guest's
+/// handle keeps working through the fallback pin. The fallback reads the
+/// override by path after the host operation; with `corrupt_replacement` the
+/// replacing file's override is unreadable too, and the pin still holds.
+fn unreadable_metadata_does_not_block_name_loss(replace: bool, corrupt_replacement: bool) {
+    let temp = TempDir::new();
+    let fs = fs_for(&temp.path);
+    let (inode, handle) = create_with(&fs, context(), c"data", 0o640, b"old contents");
+    let path = fs.inode(inode).unwrap().path();
+    std::fs::write(ads_override_path(&path), b"not an override").unwrap();
+    expect_errno(read_override_stream(&ads_override_path(&path)), LINUX_EIO);
+
+    if replace {
+        let (tmp_inode, tmp_handle) = create_with(&fs, context(), c"tmp", 0o600, b"new");
+        fs.release(context(), tmp_inode, 0, tmp_handle, false, false, None)
+            .unwrap();
+        if corrupt_replacement {
+            let tmp_path = fs.inode(tmp_inode).unwrap().path();
+            std::fs::write(ads_override_path(&tmp_path), b"not an override").unwrap();
+        }
+        fs.rename(context(), ROOT_INODE, c"tmp", ROOT_INODE, c"data", 0)
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        if corrupt_replacement {
+            expect_errno(read_override_stream(&ads_override_path(&path)), LINUX_EIO);
+        }
+    } else {
+        fs.unlink(context(), ROOT_INODE, c"data").unwrap();
+        assert!(!path.exists());
+    }
+
+    for fh in [None, Some(handle)] {
+        let (st, _) = fs.getattr(context(), inode, fh).unwrap();
+        assert_eq!(st.st_ino, inode);
+        assert_eq!(st.st_size, 12);
+    }
+    assert_eq!(read_all(&fs, inode, handle).unwrap(), b"old contents");
+    let mut reader = SourceReader {
+        bytes: b" + more".to_vec(),
+        pos: 0,
+    };
+    fs.write(
+        context(),
+        inode,
+        handle,
+        &mut reader,
+        7,
+        12,
+        None,
+        false,
+        false,
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        read_all(&fs, inode, handle).unwrap(),
+        b"old contents + more"
+    );
+
+    fs.release(context(), inode, 0, handle, false, false, None)
+        .unwrap();
+    expect_errno(fs.getattr(context(), inode, None), LINUX_ESTALE);
+}
+
+#[test]
+fn unreadable_metadata_does_not_block_rename_over() {
+    unreadable_metadata_does_not_block_name_loss(true, false);
+}
+
+#[test]
+fn unreadable_metadata_does_not_block_unlink() {
+    unreadable_metadata_does_not_block_name_loss(false, false);
+}
+
+#[test]
+fn unreadable_metadata_on_both_sides_does_not_drop_a_renamed_over_file() {
+    unreadable_metadata_does_not_block_name_loss(true, true);
+}
+
+/// A handle whose file is not its inode's object (an open by path that raced
+/// a rename-over reaches the replacing file) is never pinned as that inode's
+/// retained file.
+#[test]
+fn retain_skips_a_handle_holding_another_file() {
+    let temp = TempDir::new();
+    let fs = fs_for(&temp.path);
+    let (old, handle) = create_with(&fs, context(), c"data", 0o644, b"old");
+    fs.release(context(), old, 0, handle, false, false, None)
+        .unwrap();
+    std::fs::write(temp.path.join("other"), b"other").unwrap();
+    let other = File::open(temp.path.join("other")).unwrap();
+    fs.handles.write().unwrap().insert(
+        u64::MAX,
+        Arc::new(HandleData {
+            inode: old,
+            flags: 0,
+            file: Mutex::new(other),
+        }),
+    );
+    let data = fs.inode(old).unwrap();
+    assert!(!fs.retain_open_file(&data));
+    assert!(data.retained.lock().unwrap().is_none());
+    fs.handles.write().unwrap().remove(&u64::MAX);
+}
+
+/// A lookup of a hard link inside the unlink's window, after the host
+/// removed the name, gives the unlinked inode its other name: the update
+/// must not leave it retained while it is still named.
+#[test]
+fn a_lookup_of_a_hard_link_inside_the_unlink_window_keeps_the_inode_unretained() {
+    let temp = TempDir::new();
+    let fs = fs_for(&temp.path);
+    let (data, handle) = create_with(&fs, context(), c"data", 0o644, b"linked");
+    std::fs::hard_link(temp.path.join("data"), temp.path.join("alias")).unwrap();
+
+    let (lookup_tx, lookup_rx) = std::sync::mpsc::channel::<()>();
+    let (looked_up_tx, looked_up_rx) = std::sync::mpsc::channel::<()>();
+    let looked_up = std::thread::scope(|scope| {
+        let looker = scope.spawn(|| {
+            let lookup_rx = lookup_rx;
+            lookup_rx
+                .recv_timeout(STEP_LIMIT)
+                .expect("unlink reaching its host unlink hook");
+            let inode = fs.lookup(context(), ROOT_INODE, c"alias").unwrap().inode;
+            looked_up_tx.send(()).unwrap();
+            inode
+        });
+        remove_ops::AFTER_HOST_UNLINK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                lookup_tx.send(()).unwrap();
+                looked_up_rx
+                    .recv_timeout(STEP_LIMIT)
+                    .expect("alias looked up");
+            }));
+        });
+        fs.unlink(context(), ROOT_INODE, c"data").unwrap();
+        remove_ops::AFTER_HOST_UNLINK.with(|hook| hook.borrow_mut().take());
+        looker.join().unwrap()
+    });
+
+    assert_eq!(looked_up, data, "the hard link names the same inode");
+    {
+        let inodes = fs.inodes.read().unwrap();
+        let inode = inodes.by_inode.get(&data).expect("named inode tracked");
+        assert!(
+            inode.retained.lock().unwrap().is_none(),
+            "a named inode is retained"
+        );
+        assert!(inode.path().ends_with("alias"), "{:?}", inode.path());
+        assert!(
+            !inodes.by_path.keys().any(|path| path.ends_with("data")),
+            "the unlinked name is still tracked"
+        );
+    }
+    fs.release(context(), data, 0, handle, false, false, None)
+        .unwrap();
+    // Closing the last handle must not reap the inode from under its name.
+    let alias = fs.lookup(context(), ROOT_INODE, c"alias").unwrap().inode;
+    assert_eq!(alias, data, "the alias keeps its inode after the close");
+    let (handle, _) = fs
+        .open(context(), alias, false, libc::O_RDONLY as u32)
+        .unwrap();
+    assert_eq!(read_all(&fs, alias, handle.unwrap()).unwrap(), b"linked");
+}
+
+/// The host replaced the file at a guest-looked-up name, then the guest
+/// unlinks the name: the unlink removes the host's file, but must not pin it
+/// as the content of the guest's old inode.
+#[test]
+fn an_unlink_after_a_host_replace_does_not_pin_the_hosts_file_to_the_old_inode() {
+    for owned in [false, true] {
+        let temp = TempDir::new();
+        let fs = if owned {
+            owned_fs_for(&temp.path, crate::OwnedDirectoryCheckpoint::default())
+        } else {
+            fs_for(&temp.path)
+        };
+        let (data, handle) = create_with(&fs, context(), c"data", 0o644, b"old");
+        let old_identity = fs.inodes.read().unwrap().by_inode[&data].identity;
+        std::fs::write(temp.path.join("host.tmp"), b"host file").unwrap();
+        std::fs::rename(temp.path.join("host.tmp"), temp.path.join("data")).unwrap();
+        let host_identity = fs.path_identity(&temp.path.join("data")).unwrap();
+        assert_ne!(old_identity, host_identity);
+
+        fs.unlink(context(), ROOT_INODE, c"data").unwrap();
+        assert!(!temp.path.join("data").exists());
+        if let Some(inode) = fs.inodes.read().unwrap().by_inode.get(&data)
+            && let Some(file) = inode.retained.lock().unwrap().as_ref()
+        {
+            assert_ne!(
+                mobility::file_identity(file).ok(),
+                host_identity,
+                "owned {owned}: the old inode pins the host's file"
+            );
+        }
+        fs.release(context(), data, 0, handle, false, false, None)
+            .unwrap();
+    }
+}

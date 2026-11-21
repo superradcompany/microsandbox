@@ -37,15 +37,7 @@ impl PassthroughFs {
         if kill_priv && flags as i32 & LINUX_O_TRUNC != 0 {
             self.clear_priv_bits(data.as_ref())?;
         }
-        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        self.handles.write().unwrap().insert(
-            handle,
-            Arc::new(HandleData {
-                inode,
-                flags,
-                file: Mutex::new(file),
-            }),
-        );
+        let handle = self.insert_handle(inode, flags, file)?;
         Ok((Some(handle), OpenOptions::empty()))
     }
 

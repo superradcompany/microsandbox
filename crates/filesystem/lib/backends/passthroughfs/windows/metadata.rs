@@ -173,13 +173,22 @@ impl PassthroughFs {
         Ok(())
     }
 
-    pub(super) fn do_getattr(&self, inode: u64) -> io::Result<(stat64, Duration)> {
+    pub(super) fn do_getattr(
+        &self,
+        inode: u64,
+        handle: Option<u64>,
+    ) -> io::Result<(stat64, Duration)> {
         if self.cfg.inject_init && inode == INIT_INODE {
             return Ok((init_stat(), self.cfg.attr_timeout));
         }
 
         let data = self.inode(inode)?;
-        let metadata = self.inode_metadata(&data)?;
+        // An open handle names the object itself, even while its path is being
+        // replaced and before the inode bookkeeping catches up.
+        let metadata = match handle.map(|handle| self.handle(inode, handle)) {
+            Some(Ok(handle)) => handle.file.lock().unwrap().metadata().map_err(host_error)?,
+            _ => self.inode_metadata(&data)?,
+        };
         Ok((
             self.stat_from_metadata(&metadata, data.as_ref())?,
             self.cfg.attr_timeout,
@@ -306,6 +315,6 @@ impl PassthroughFs {
             }
         }
 
-        self.do_getattr(inode)
+        self.do_getattr(inode, handle)
     }
 }
