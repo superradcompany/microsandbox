@@ -29,7 +29,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 /// Context sentinel that preserves a configuration error instead of silently
 /// running local workloads after explicit Cloud selection fails.
 #[derive(Clone)]
-pub(super) struct ConfigurationErrorBackend {
+pub(crate) struct ConfigurationErrorBackend {
     message: String,
 }
 
@@ -39,7 +39,7 @@ pub(super) struct ConfigurationErrorBackend {
 
 impl ConfigurationErrorBackend {
     /// Preserve the resolver error text for every subsequent operation.
-    pub(super) fn new(error: MicrosandboxError) -> Self {
+    pub(crate) fn new(error: MicrosandboxError) -> Self {
         let message = match error {
             MicrosandboxError::InvalidConfig(message) => message,
             error => error.to_string(),

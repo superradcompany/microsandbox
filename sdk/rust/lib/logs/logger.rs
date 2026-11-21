@@ -27,18 +27,24 @@ use crate::context::sandbox::LogStream;
 //--------------------------------------------------------------------------------------------------
 
 /// Take the log directory and host file policy from one retained default backend.
-pub(super) fn default_logger(name: &str) -> SandboxLogger {
+pub(super) fn default_logger(name: &str) -> MicrosandboxResult<SandboxLogger> {
     let backend = crate::context::default_local_context();
+    logger_for_default_backend(backend.as_ref(), name)
+}
+
+fn logger_for_default_backend(
+    backend: &dyn crate::context::Context,
+    name: &str,
+) -> MicrosandboxResult<SandboxLogger> {
     if let Some(local) = backend.as_local() {
-        return SandboxLogger::for_local(local, name);
+        return Ok(SandboxLogger::for_local(local, name));
     }
-    SandboxLogger::new(
-        name.to_string(),
-        microsandbox_utils::resolve_home()
-            .join(microsandbox_utils::SANDBOXES_SUBDIR)
-            .join(name)
-            .join("logs"),
-    )
+    // Propagate configuration failures (for example, unsupported `runtime.strict_host_files`)
+    // instead of silently falling back to unrestricted host file opens.
+    backend.info()?;
+    Err(crate::MicrosandboxError::InvalidConfig(
+        "default local backend is unavailable".into(),
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -57,6 +63,7 @@ pub struct SandboxLogger {
 
 impl SandboxLogger {
     /// Construct a logger for a named sandbox rooted at `log_dir`.
+    #[cfg(test)]
     pub(crate) fn new(name: String, log_dir: PathBuf) -> Self {
         Self {
             name,
@@ -176,5 +183,32 @@ impl RegisteredSandboxLogger {
         )
         .await?;
         Ok(Box::pin(stream) as LogStream)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MicrosandboxError;
+    use crate::context::ConfigurationErrorBackend;
+
+    #[test]
+    fn failed_default_local_setup_propagates_error_instead_of_disabling_strict_mode() {
+        let backend = ConfigurationErrorBackend::new(MicrosandboxError::InvalidConfig(
+            "runtime.strict_host_files is supported only on Unix hosts".into(),
+        ));
+        let error = logger_for_default_backend(&backend, "sbx")
+            .err()
+            .expect("misconfigured backend must not fall back to unrestricted logger");
+        assert!(
+            error
+                .to_string()
+                .contains("runtime.strict_host_files is supported only on Unix hosts"),
+            "{error}"
+        );
     }
 }

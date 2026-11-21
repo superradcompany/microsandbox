@@ -148,7 +148,14 @@ pub struct LogSnapshot {
 /// Compute the on-disk log directory for a sandbox name.
 #[cfg(feature = "local")]
 pub fn log_dir_for(name: &str) -> PathBuf {
-    default_logger(name).log_dir
+    default_logger(name)
+        .map(|logger| logger.log_dir)
+        .unwrap_or_else(|_| {
+            microsandbox_utils::resolve_home()
+                .join(microsandbox_utils::SANDBOXES_SUBDIR)
+                .join(name)
+                .join("logs")
+        })
 }
 
 /// Compute the on-disk log directory for an explicit local backend.
@@ -234,7 +241,7 @@ pub(crate) async fn read_logs_snapshot_local(
 /// lines written between the snapshot drain and follow startup.
 #[cfg(feature = "local")]
 pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogSnapshot> {
-    default_logger(name).read_snapshot(opts).await
+    default_logger(name)?.read_snapshot(opts).await
 }
 
 #[cfg(feature = "local")]
@@ -284,7 +291,7 @@ pub async fn log_stream(
     name: &str,
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
-    let logger = default_logger(name);
+    let logger = default_logger(name)?;
     log_stream_from_dir(name, logger.log_dir, opts, logger.strict_host_files).await
 }
 
