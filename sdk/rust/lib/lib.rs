@@ -6,6 +6,7 @@
 #[cfg(doctest)]
 mod api_boundary;
 mod error;
+mod host_file;
 #[cfg(test)]
 mod test_support;
 #[cfg(any(feature = "local", feature = "cloud"))]

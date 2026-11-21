@@ -17,6 +17,7 @@ use microsandbox_utils::log_text::{base64_decode, split_leading_timestamp, strip
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+use crate::host_file::{self, HostFileKind};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::cursor::{FilePosition, LogCursor};
@@ -49,9 +50,15 @@ impl FileHandle {
     /// `Ok(None)` if the file doesn't exist (treated as "producer
     /// hasn't created it yet, retry later"); other I/O errors
     /// propagate.
-    pub(super) async fn open(path: &Path) -> MicrosandboxResult<Option<Self>> {
-        let file = match tokio::fs::File::open(path).await {
-            Ok(f) => f,
+    pub(super) async fn open(path: &Path, strict: bool) -> MicrosandboxResult<Option<Self>> {
+        let path = path.to_path_buf();
+        let file = match tokio::task::spawn_blocking(move || {
+            host_file::open(&path, HostFileKind::Regular, false, strict)
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Runtime(format!("log open worker: {error}")))?
+        {
+            Ok(f) => tokio::fs::File::from_std(f),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(MicrosandboxError::Io(e)),
         };
@@ -354,6 +361,36 @@ mod tests {
     }
 
     // -- parse_jsonl ---------------------------------------------------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_open_keeps_links_by_default_and_refuses_them_when_strict() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let real = root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let path = real.join("exec.log");
+        std::fs::write(&path, b"private log").unwrap();
+        symlink(&path, root.join("linked.log")).unwrap();
+        symlink(&real, root.join("linked-dir")).unwrap();
+        assert!(FileHandle::open(&path, true).await.unwrap().is_some());
+        for link in [root.join("linked.log"), root.join("linked-dir/exec.log")] {
+            let mut handle = FileHandle::open(&link, false).await.unwrap().unwrap();
+            let mut data = Vec::new();
+            handle.file.read_to_end(&mut data).await.unwrap();
+            assert_eq!(data, b"private log");
+            assert!(FileHandle::open(&link, true).await.is_err());
+        }
+        assert!(FileHandle::open(&real, false).await.is_err());
+        assert!(
+            FileHandle::open(&root.join("missing.log"), true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn jsonl_parses_single_complete_line() {
