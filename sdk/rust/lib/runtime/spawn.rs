@@ -36,7 +36,8 @@ use tokio::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    ERROR_ACCESS_DENIED, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    SetHandleInformation,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Console::{
@@ -666,8 +667,7 @@ impl LocalContext {
         let mut cmd = Command::new(&msb_path);
         #[cfg(windows)]
         if matches!(mode, SpawnMode::Detached) {
-            let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
-            cmd.creation_flags(flags);
+            cmd.creation_flags(DETACHED_SPAWN_FLAGS | CREATE_BREAKAWAY_FROM_JOB);
         }
         cmd.args(visible);
         if config.storage_reader.is_some() {
@@ -1074,8 +1074,30 @@ fn spawn_runtime_command(
     } else {
         None
     };
+    #[cfg(windows)]
+    if matches!(_mode, SpawnMode::Detached) {
+        return match cmd.spawn() {
+            // A launcher job without JOB_OBJECT_LIMIT_BREAKAWAY_OK (Task Scheduler, some
+            // terminals and CI agents) makes CreateProcess with CREATE_BREAKAWAY_FROM_JOB fail
+            // with ERROR_ACCESS_DENIED. Jobs nest since Windows 8, so start the runtime inside
+            // the launcher's job instead; it then ends with that job, as it may.
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                tracing::warn!(
+                    "detached spawn: the launcher's job object forbids breakaway, so the sandbox \
+                     runtime starts inside it and will be terminated when that job ends"
+                );
+                cmd.creation_flags(DETACHED_SPAWN_FLAGS);
+                cmd.spawn()
+            }
+            result => result,
+        };
+    }
     cmd.spawn()
 }
+
+/// Creation flags of a detached runtime, apart from leaving the launcher's job.
+#[cfg(windows)]
+const DETACHED_SPAWN_FLAGS: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
 
 fn block_writeback_policy(
     config: &RuntimeConfig,
@@ -3105,6 +3127,62 @@ mod tests {
         };
         assert_eq!(error.raw_os_error(), Some(5));
         assert_eq!(handles.map(windows_handle_flags), original);
+    }
+
+    /// Child half of `windows_detached_spawn_inside_job_without_breakaway`. It runs only in
+    /// the child process that test starts, because it moves its whole process into a job.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_detached_spawn_job_child() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        if std::env::var_os("MSB_TEST_JOB_WITHOUT_BREAKAWAY").is_none() {
+            return;
+        }
+        // A job without JOB_OBJECT_LIMIT_BREAKAWAY_OK, as Task Scheduler, some terminals and
+        // CI agents give their children. Jobs nest, so this works inside the runner's own job.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        assert!(!job.is_null(), "{}", std::io::Error::last_os_error());
+        let assigned = unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) };
+        assert_ne!(assigned, 0, "{}", std::io::Error::last_os_error());
+        // The job lives while this process is in it.
+        unsafe { CloseHandle(job) };
+
+        let comspec = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
+        let mut command = tokio::process::Command::new(comspec);
+        command
+            .args(["/d", "/c", "exit 7"])
+            .creation_flags(super::DETACHED_SPAWN_FLAGS | super::CREATE_BREAKAWAY_FROM_JOB);
+        let mut child =
+            super::spawn_runtime_command(&mut command, super::SpawnMode::Detached, None)
+                .expect("detached spawn inside a job without breakaway");
+        let status = child.wait().await.unwrap();
+        assert_eq!(status.code(), Some(7));
+        println!("detached-spawn-inside-job-ok");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_detached_spawn_inside_job_without_breakaway() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::spawn::tests::windows_detached_spawn_job_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("MSB_TEST_JOB_WITHOUT_BREAKAWAY", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("detached-spawn-inside-job-ok"),
+            "child failed: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status
+        );
     }
 
     #[test]
