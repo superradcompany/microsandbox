@@ -553,48 +553,123 @@ pub(super) fn windows_file_identity(file: &File) -> io::Result<(u32, u32, u32)> 
 }
 
 /// Guest RAM must not inherit broad read permissions from a custom cache parent.
+///
+/// The grant names the account's user SID, which elevated and non-elevated runs of one
+/// Windows user share. OWNER RIGHTS would follow the owner instead, and an elevated run
+/// makes BUILTIN\Administrators the owner, which a later non-elevated run is not.
+///
+/// Setting a DACL propagates its inheritable entries to every existing child, so a directory
+/// that already has exactly the target DACL is left alone: otherwise every open would rewrite
+/// the whole populated cache. A directory with any other DACL (for example the earlier
+/// OWNER RIGHTS grant) is hardened, which also repairs its existing children once.
 #[cfg(windows)]
 fn restrict_cache_directory(path: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    if cache_directory_is_restricted(path)? {
+        return Ok(());
+    }
+    microsandbox_utils::private_file::harden_existing_directory(path)
+}
+
+/// Whether `path` is a plain directory with a trusted owner and exactly the DACL that
+/// hardening sets: protected, one inheritable full-access grant to the token user.
+#[cfg(windows)]
+fn cache_directory_is_restricted(path: &Path) -> io::Result<bool> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid,
+        GetAce, GetSecurityDescriptorControl, GetTokenInformation, IsWellKnownSid,
+        OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, TOKEN_QUERY,
+        TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
-    // OWNER RIGHTS follows the actual owner; SYSTEM is retained for OS maintenance. Children
-    // inherit these ACEs. This is local-user confidentiality, not an adversarial-host boundary.
-    let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)\0"
-        .encode_utf16()
-        .collect();
-    let mut descriptor = std::ptr::null_mut();
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        )
-    } == 0
-    {
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    // READ_CONTROL | FILE_READ_ATTRIBUTES; backup semantics, open the reparse point itself.
+    let directory = std::fs::OpenOptions::new()
+        .access_mode(0x0002_0080)
+        .share_mode(0x7)
+        .custom_flags(0x0220_0000)
+        .open(path)?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
+        // Let hardening report the problem.
+        return Ok(false);
+    }
+
+    let mut token = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let success = unsafe {
-        SetFileSecurityW(
-            path.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            descriptor,
+    let mut length = 0;
+    unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut length) };
+    let mut user = vec![0usize; (length as usize).div_ceil(size_of::<usize>()).max(1)];
+    let queried = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            user.as_mut_ptr().cast(),
+            length,
+            &mut length,
         )
     };
-    let result = if success == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    };
-    unsafe {
-        LocalFree(descriptor);
+    let query_error = io::Error::last_os_error();
+    unsafe { CloseHandle(token) };
+    if queried == 0 {
+        return Err(query_error);
     }
-    result
+    let user_sid = unsafe { (*(user.as_ptr() as *const TOKEN_USER)).User.Sid };
+
+    let (mut owner, mut dacl, mut descriptor): (PSID, _, _) = (null_mut(), null_mut(), null_mut());
+    let error = unsafe {
+        GetSecurityInfo(
+            directory.as_raw_handle() as _,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            &mut dacl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if error != 0 {
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    let restricted = 'check: {
+        let (mut control, mut revision) = (0u16, 0u32);
+        if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
+            break 'check false;
+        }
+        let owner_trusted = !owner.is_null()
+            && (unsafe { EqualSid(owner, user_sid) } != 0
+                || unsafe { IsWellKnownSid(owner, WinLocalSystemSid) } != 0
+                || unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } != 0);
+        if !owner_trusted
+            || control & SE_DACL_PROTECTED == 0
+            || dacl.is_null()
+            || unsafe { (*dacl).AceCount } != 1
+        {
+            break 'check false;
+        }
+        let mut ace = null_mut();
+        if unsafe { GetAce(dacl, 0, &mut ace) } == 0 {
+            break 'check false;
+        }
+        let header = unsafe { *(ace as *const ACE_HEADER) };
+        let entry = ace as *const ACCESS_ALLOWED_ACE;
+        let sid = unsafe { std::ptr::addr_of!((*entry).SidStart) as PSID };
+        header.AceType == ACCESS_ALLOWED_ACE_TYPE
+            && u32::from(header.AceFlags) == OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+            && unsafe { (*entry).Mask } == FILE_ALL_ACCESS
+            && unsafe { EqualSid(sid, user_sid) } != 0
+    };
+    unsafe { LocalFree(descriptor) };
+    Ok(restricted)
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -1028,5 +1103,129 @@ mod tests {
             .read_exact_at(&mut actual, cache.page_size * 2)
             .unwrap();
         assert_eq!(actual, bytes);
+    }
+
+    /// The ACL of `path` as `protected=...`, `rules=sid|type|rights|inheritance;...` and
+    /// `user=<current user SID>` lines, read through PowerShell.
+    #[cfg(windows)]
+    fn windows_acl(path: &Path) -> String {
+        let script = "$a = Get-Acl -LiteralPath $env:MSB_TEST_ACL_PATH; \
+             $u = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; \
+             $r = $a.Access | ForEach-Object { \
+               $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value + '|' + \
+               $_.AccessControlType + '|' + $_.FileSystemRights + '|' + $_.InheritanceFlags }; \
+             'protected=' + $a.AreAccessRulesProtected; \
+             'rules=' + ($r -join ';'); \
+             'user=' + $u; \
+             'sddl=' + $a.Sddl";
+        let output = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("MSB_TEST_ACL_PATH", path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "Get-Acl {}: {}\nstdout:\n{stdout}\nstderr:\n{}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout
+    }
+
+    #[cfg(windows)]
+    fn windows_acl_field(text: &str, name: &str) -> String {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix(name))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The cache grants the user's SID, not OWNER RIGHTS, so a directory an elevated run
+    /// created (owned by BUILTIN\Administrators) stays usable by a non-elevated run.
+    #[cfg(windows)]
+    #[test]
+    fn windows_cache_directories_grant_the_user_sid_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("memory");
+        let cache = MemoryCache::open(&root).unwrap();
+        for directory in [root.as_path(), cache.root.as_path()] {
+            let text = windows_acl(directory);
+            let user = windows_acl_field(&text, "user=");
+            assert!(user.starts_with("S-1-5-"), "{text}");
+            assert_eq!(windows_acl_field(&text, "protected="), "True", "{text}");
+            assert_eq!(
+                windows_acl_field(&text, "rules="),
+                format!("{user}|Allow|FullControl|ContainerInherit, ObjectInherit"),
+                "{text}"
+            );
+        }
+    }
+
+    /// Writes `sddl`'s DACL and its control bits to `path` with SetFileSecurityW, which does
+    /// not apply inheritance from the parent or to children.
+    #[cfg(windows)]
+    fn write_dacl(path: &Path, sddl: &str) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::{
+            DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+        };
+
+        let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let written =
+            unsafe { SetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
+        let error = io::Error::last_os_error();
+        unsafe { LocalFree(descriptor as HLOCAL) };
+        assert_ne!(written, 0, "{error}");
+    }
+
+    /// Reopening a cache whose directories already carry the target DACL must not set it
+    /// again: setting a DACL through SetSecurityInfo walks and rewrites every existing child.
+    ///
+    /// The probe is a child with an empty DACL written by SetFileSecurityW, which marks it
+    /// protected (`D:P`) without the auto-inherited bit. A DACL write on the parent leaves its
+    /// entries alone but still rewrites it, adding that bit (`D:PAI`).
+    #[cfg(windows)]
+    #[test]
+    fn windows_reopen_leaves_a_restricted_cache_as_is() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("memory");
+        let cache = MemoryCache::open(&root).unwrap();
+        let probe = cache.root.join("probe");
+        std::fs::write(&probe, b"probe").unwrap();
+        write_dacl(&probe, "D:");
+        let before = windows_acl(&probe);
+        assert!(
+            windows_acl_field(&before, "sddl=").ends_with("D:P"),
+            "{before}"
+        );
+
+        MemoryCache::open(&root).unwrap();
+        let after = windows_acl(&probe);
+        assert_eq!(
+            windows_acl_field(&after, "sddl="),
+            windows_acl_field(&before, "sddl="),
+            "reopening set the cache's DACL again and rewrote its children: {after}"
+        );
     }
 }
