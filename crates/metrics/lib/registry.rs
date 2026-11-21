@@ -7,6 +7,10 @@
 
 use std::ffi::CString;
 use std::fmt;
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
@@ -375,6 +379,77 @@ impl MetricsRegistry {
         let reg = try_open_existing(&cname, capacity, map_len)?
             .ok_or_else(|| MetricsError::Custom("registry disappeared during open".into()))?;
         Ok(reg)
+    }
+
+    /// Read a one-slot registry file into an independent in-memory snapshot.
+    ///
+    /// The source file is never memory-mapped. Truncating or replacing it after
+    /// this call cannot invalidate the returned snapshot. Invalid sizes and
+    /// layouts are rejected; a busy writer is retried at most four times.
+    /// Only the current registry ABI is accepted. Existing named-registry readers
+    /// keep their compatibility behavior; this adds no writer format.
+    ///
+    /// Producer and reader must share a PID namespace: subsequent snapshot reads
+    /// use the recorded PID for the usual dead-owner checks. Mutating the returned
+    /// registry changes only this private copy, never the source file.
+    #[cfg(unix)]
+    pub fn read_file_snapshot(file: &File) -> MetricsResult<Self> {
+        const SEQ_OFFSET: usize = std::mem::offset_of!(Slot, seq);
+        const PREFIX_LEN: usize = SEQ_OFFSET + std::mem::size_of::<AtomicU64>();
+        let length = registry_size(1);
+        for _ in 0..4 {
+            if file.metadata()?.len() != length as u64 {
+                return Err(MetricsError::Custom("invalid file registry size".into()));
+            }
+            let mut before = [0u8; PREFIX_LEN];
+            file.read_exact_at(&mut before, HEADER_SIZE as u64)?;
+            let seq = u64::from_ne_bytes(before[SEQ_OFFSET..PREFIX_LEN].try_into().unwrap());
+            if seq & 1 != 0 {
+                continue;
+            }
+            let mut bytes = vec![0u8; length];
+            file.read_exact_at(&mut bytes, 0)?;
+            let mut after = [0u8; PREFIX_LEN];
+            file.read_exact_at(&mut after, HEADER_SIZE as u64)?;
+            if before != after || before != bytes[HEADER_SIZE..HEADER_SIZE + PREFIX_LEN] {
+                continue;
+            }
+            // The mapping is anonymous and private. Only the bounded byte copy is
+            // untrusted; subsequent reads cannot SIGBUS after a source file resize.
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    length,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let mapping = MappedRegion {
+                ptr: NonNull::new(ptr.cast()).unwrap(),
+                len: length,
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), length);
+            }
+            let header = unsafe { &*mapping.ptr.as_ptr().cast::<Header>() };
+            validate_header(header, Some(1))?;
+            if header.state.load(Ordering::Acquire) != HEADER_STATE_READY {
+                return Err(MetricsError::Custom("file registry is not ready".into()));
+            }
+            return Ok(Self {
+                inner: Arc::new(RegistryInner {
+                    name: CString::new("file-snapshot").unwrap(),
+                    mapping,
+                    capacity: 1,
+                }),
+            });
+        }
+        Err(MetricsError::Custom("file registry writer is busy".into()))
     }
 
     /// Reserve a slot for an upcoming sandbox spawn.
@@ -2238,6 +2313,177 @@ mod tests {
         assert_eq!(item.memory_total_bytes, None);
         assert_eq!(item.memory_available_bytes, None);
         cleanup(&name);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_snapshot_survives_source_changes_and_rejects_invalid_input() {
+        use std::io::Write;
+
+        let name = unique_name("file");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reservation = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "alpine",
+                memory_limit_bytes: 1024,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reservation.slot,
+                generation: reservation.generation,
+                run_id: 19,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 123);
+        // Save bytes emitted by the actual registry writer, not a fabricated receipt.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(registry.inner.mapping.ptr.as_ptr(), registry_size(1))
+        }
+        .to_vec();
+        cleanup(&name);
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&bytes).unwrap();
+
+        let snapshot = MetricsRegistry::read_file_snapshot(&file).unwrap();
+        file.set_len(0).unwrap();
+        let sample = snapshot.identified_at(0, true).unwrap();
+        assert_eq!(sample.metric.sandbox_id, 7);
+        assert_eq!(sample.metric.run_id, 19);
+        assert_eq!(sample.metric.memory_bytes, 123);
+        assert!(MetricsRegistry::read_file_snapshot(&file).is_err());
+
+        file.write_all_at(&bytes, 0).unwrap();
+        file.write_all_at(&1_u64.to_ne_bytes(), (HEADER_SIZE + 16) as u64)
+            .unwrap();
+        assert!(
+            MetricsRegistry::read_file_snapshot(&file).is_err(),
+            "busy source was accepted"
+        );
+        file.write_all_at(&bytes, 0).unwrap();
+        file.write_all_at(
+            &HEADER_STATE_INITIALIZING.to_ne_bytes(),
+            std::mem::offset_of!(Header, state) as u64,
+        )
+        .unwrap();
+        assert!(
+            MetricsRegistry::read_file_snapshot(&file).is_err(),
+            "initializing header was accepted"
+        );
+
+        file.write_all_at(&bytes, 0).unwrap();
+        file.write_all_at(&0_u64.to_ne_bytes(), 0).unwrap();
+        assert!(
+            MetricsRegistry::read_file_snapshot(&file).is_err(),
+            "bad header was accepted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_snapshots_remain_coherent_while_a_mapped_producer_writes() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::sync::atomic::AtomicBool;
+
+        let name = unique_name("fp");
+        let template = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let length = registry_size(1);
+        let bytes =
+            unsafe { std::slice::from_raw_parts(template.inner.mapping.ptr.as_ptr(), length) };
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        cleanup(&name);
+        drop(template);
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED);
+        let producer = MetricsRegistry {
+            inner: Arc::new(RegistryInner {
+                name: CString::new("mapped-file-producer").unwrap(),
+                mapping: MappedRegion {
+                    ptr: NonNull::new(ptr.cast()).unwrap(),
+                    len: length,
+                },
+                capacity: 1,
+            }),
+        };
+        let reservation = producer
+            .reserve(ReserveSlot {
+                sandbox_id: 1,
+                name: "file-pressure",
+                memory_limit_bytes: 1024,
+            })
+            .unwrap();
+        let writer = producer
+            .activate_writer(ActivateSlot {
+                slot: reservation.slot,
+                generation: reservation.generation,
+                run_id: 1,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 0);
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = stop.clone();
+        let writing = thread::spawn(move || {
+            let slot = writer.registry.slot(writer.slot);
+            let mut count = 0;
+            while !writer_stop.load(Ordering::Acquire) {
+                count += 1;
+                // Use the published seqlock, with a deliberate long partial update
+                // so a file read must distinguish completed and incomplete samples.
+                slot.seq.fetch_add(1, Ordering::AcqRel);
+                slot.memory_bytes.store(count, Ordering::Relaxed);
+                thread::yield_now();
+                slot.disk_read_bytes.store(count, Ordering::Relaxed);
+                slot.disk_write_bytes.store(count, Ordering::Relaxed);
+                slot.net_rx_bytes.store(count, Ordering::Relaxed);
+                slot.net_tx_bytes.store(count, Ordering::Relaxed);
+                slot.seq.fetch_add(1, Ordering::Release);
+                thread::yield_now();
+            }
+        });
+        let mut accepted = 0;
+        let mut inconsistent = None;
+        for _ in 0..30_000 {
+            let Ok(snapshot) = MetricsRegistry::read_file_snapshot(&file) else {
+                continue;
+            };
+            let sample = snapshot.identified_at(0, false).unwrap().metric;
+            accepted += 1;
+            if [
+                sample.disk_read_bytes,
+                sample.disk_write_bytes,
+                sample.net_rx_bytes,
+                sample.net_tx_bytes,
+            ]
+            .iter()
+            .any(|value| *value != sample.memory_bytes)
+            {
+                inconsistent = Some(sample);
+                break;
+            }
+        }
+        stop.store(true, Ordering::Release);
+        writing.join().unwrap();
+        assert!(
+            inconsistent.is_none(),
+            "accepted a torn sample: {inconsistent:?}"
+        );
+        assert!(accepted > 0, "no complete samples were observed");
     }
 
     #[test]
