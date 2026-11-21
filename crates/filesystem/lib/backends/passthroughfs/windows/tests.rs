@@ -3552,3 +3552,128 @@ fn dax_namespace_change_keeps_mapping(replace: bool, fail_refresh: bool) {
     .unwrap();
     assert!(seen.lock().unwrap().is_empty());
 }
+
+//--------------------------------------------------------------------------------------------------
+// Directory moves by the host onto stale cached names
+//--------------------------------------------------------------------------------------------------
+
+/// Look up a relative path component by component.
+fn lookup_relative(fs: &PassthroughFs, path: &str) -> io::Result<Entry> {
+    let mut parent = ROOT_INODE;
+    let mut entry = None;
+    for name in path.split('/') {
+        let name = std::ffi::CString::new(name).unwrap();
+        let found = fs.lookup(context(), parent, &name)?;
+        parent = found.inode;
+        entry = Some(found);
+    }
+    Ok(entry.expect("non-empty path"))
+}
+
+/// Every name and identity points at a tracked inode, and every tracked inode
+/// other than the root has a name (nothing in the guest holds a removed file).
+fn assert_every_inode_named(fs: &PassthroughFs, step: &str) {
+    let inodes = fs.inodes.read().unwrap();
+    for (path, data) in &inodes.by_path {
+        assert!(
+            inodes
+                .by_inode
+                .get(&data.inode)
+                .is_some_and(|tracked| Arc::ptr_eq(tracked, data)),
+            "{step}: {path:?} names untracked inode {}",
+            data.inode
+        );
+    }
+    for (identity, data) in &inodes.by_identity {
+        assert!(
+            inodes
+                .by_inode
+                .get(&data.inode)
+                .is_some_and(|tracked| Arc::ptr_eq(tracked, data)),
+            "{step}: identity {identity:?} points at untracked inode {}",
+            data.inode
+        );
+    }
+    for (&inode, data) in &inodes.by_inode {
+        if inode == ROOT_INODE {
+            continue;
+        }
+        assert!(
+            inodes
+                .by_path
+                .values()
+                .any(|alias| Arc::ptr_eq(alias, data)),
+            "{step}: inode {inode} is tracked without a name"
+        );
+    }
+}
+
+/// A directory the host moves onto a name whose stale children are still
+/// cached (the guest removed the emptied directory, and its child's entry
+/// stayed): the moved child takes the cached name, and the stale inode that
+/// held it is finished, not left tracked without a name.
+#[test]
+fn a_host_directory_move_onto_stale_cached_children_finishes_them() {
+    let temp = TempDir::new();
+    for (path, contents) in [("d/c", "moved"), ("e/c", "stale")] {
+        std::fs::create_dir_all(temp.path.join(path).parent().unwrap()).unwrap();
+        std::fs::write(temp.path.join(path), contents).unwrap();
+    }
+    let fs = fs_for(&temp.path);
+    let moved = lookup_relative(&fs, "d/c").unwrap().inode;
+    let stale = lookup_relative(&fs, "e/c").unwrap().inode;
+    std::fs::remove_file(temp.path.join("e/c")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"e").unwrap();
+    std::fs::rename(temp.path.join("d"), temp.path.join("e")).unwrap();
+
+    lookup_relative(&fs, "e").unwrap();
+    assert_eq!(lookup_relative(&fs, "e/c").unwrap().inode, moved);
+    assert!(
+        !fs.inodes.read().unwrap().by_inode.contains_key(&stale),
+        "the stale child is still tracked"
+    );
+    assert_every_inode_named(&fs, "host directory move onto stale children");
+}
+
+/// The same with the stale child opened and closed by the guest before the
+/// lookup that follows the move.
+fn stale_child_closed_before_a_host_move_takes_its_name_is_dropped(owned: bool) {
+    let temp = TempDir::new();
+    for (path, contents) in [("d/c", "moved"), ("e/c", "stale")] {
+        std::fs::create_dir_all(temp.path.join(path).parent().unwrap()).unwrap();
+        std::fs::write(temp.path.join(path), contents).unwrap();
+    }
+    let fs = if owned {
+        owned_fs_for(&temp.path, crate::OwnedDirectoryCheckpoint::default())
+    } else {
+        fs_for(&temp.path)
+    };
+    let moved = lookup_relative(&fs, "d/c").unwrap().inode;
+    let stale = lookup_relative(&fs, "e/c").unwrap().inode;
+    let (handle, _) = fs
+        .open(context(), stale, false, LINUX_O_RDWR as u32)
+        .unwrap();
+    fs.release(context(), stale, 0, handle.unwrap(), false, false, None)
+        .unwrap();
+    std::fs::remove_file(temp.path.join("e/c")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"e").unwrap();
+    std::fs::rename(temp.path.join("d"), temp.path.join("e")).unwrap();
+
+    lookup_relative(&fs, "e").unwrap();
+    assert_eq!(lookup_relative(&fs, "e/c").unwrap().inode, moved);
+    assert!(
+        !fs.inodes.read().unwrap().by_inode.contains_key(&stale),
+        "owned {owned}: the closed stale child is still tracked"
+    );
+    assert_every_inode_named(&fs, "stale child closed first");
+}
+
+#[test]
+fn a_stale_child_closed_before_a_host_move_takes_its_name_is_dropped_on_a_plain_mount() {
+    stale_child_closed_before_a_host_move_takes_its_name_is_dropped(false);
+}
+
+#[test]
+fn a_stale_child_closed_before_a_host_move_takes_its_name_is_dropped_on_an_owned_mount() {
+    stale_child_closed_before_a_host_move_takes_its_name_is_dropped(true);
+}

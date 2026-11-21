@@ -192,7 +192,9 @@ impl PassthroughFs {
         if let Some(data) = inodes.by_path.get(&path).cloned() {
             // A cached alias (hard link) can outlive the canonical name.
             if identity.is_some() && data.identity == identity {
-                Self::follow_host_rename(&mut inodes, &data, &path, |p| self.path_identity(p));
+                let displaced =
+                    Self::follow_host_rename(&mut inodes, &data, &path, |p| self.path_identity(p));
+                self.finish_displaced(&mut inodes, displaced);
             }
             return Ok(data);
         }
@@ -207,7 +209,9 @@ impl PassthroughFs {
                 *data.retained.lock().unwrap() = None;
                 *data.retained_stat.lock().unwrap() = None;
             } else {
-                Self::follow_host_rename(&mut inodes, &data, &path, |p| self.path_identity(p));
+                let displaced =
+                    Self::follow_host_rename(&mut inodes, &data, &path, |p| self.path_identity(p));
+                self.finish_displaced(&mut inodes, displaced);
             }
             return Ok(data);
         }
@@ -236,18 +240,19 @@ impl PassthroughFs {
     /// Otherwise every operation through the inode (stat, open, and the
     /// readdir of its directory) fails until the sandbox restarts. A live
     /// hard link keeps its canonical path.
+    /// Returns the inodes whose cached names the moved descendants took.
     fn follow_host_rename(
         inodes: &mut InodeTable,
         data: &Arc<InodeData>,
         path: &Path,
         identity_of: impl Fn(&Path) -> io::Result<Option<(u32, u64)>>,
-    ) {
+    ) -> Vec<Arc<InodeData>> {
         if data.retained.lock().unwrap().is_some() {
-            return;
+            return Vec::new();
         }
         let canonical = data.path();
         if canonical == path || identity_of(&canonical).ok().flatten() == data.identity {
-            return;
+            return Vec::new();
         }
         if inodes
             .by_path
@@ -257,7 +262,15 @@ impl PassthroughFs {
             inodes.by_path.remove(&canonical);
         }
         *data.path.write().unwrap() = path.to_path_buf();
-        Self::follow_host_rename_descendants(inodes, data, &canonical, path, &identity_of);
+        Self::follow_host_rename_descendants(inodes, data, &canonical, path, &identity_of)
+    }
+
+    /// A name a moved descendant took from a stale cached entry: that inode
+    /// lost it as in an unlink.
+    fn finish_displaced(&self, inodes: &mut InodeTable, displaced: Vec<Arc<InodeData>>) {
+        for data in displaced {
+            self.finish_removed_alias(inodes, &data);
+        }
     }
 
     /// A directory renamed on the host takes its cached descendants along:
@@ -274,7 +287,7 @@ impl PassthroughFs {
         old: &Path,
         new: &Path,
         identity_of: &impl Fn(&Path) -> io::Result<Option<(u32, u64)>>,
-    ) {
+    ) -> Vec<Arc<InodeData>> {
         let rewritten = |p: &Path| -> Option<PathBuf> {
             if p == old {
                 return None;
@@ -298,12 +311,18 @@ impl PassthroughFs {
             .collect::<Vec<_>>();
         // All sources out before any insert: on an upward move a target can be
         // another source's key (`p/c/c/f` -> `p/c/f`). A target held by a
-        // non-source entry is stale, since the host now has this object there.
+        // non-source entry is stale, since the host now has this object there: it
+        // is returned, to be finished as an unlink.
         for (source, _, _) in &moved {
             inodes.by_path.remove(source);
         }
+        let mut displaced = Vec::new();
         for (_, target, data) in moved {
-            inodes.by_path.insert(target, data);
+            if let Some(stale) = inodes.by_path.insert(target, data.clone())
+                && !Arc::ptr_eq(&stale, &data)
+            {
+                displaced.push(stale);
+            }
         }
         for data in inodes.by_inode.values() {
             if Arc::ptr_eq(data, repaired) {
@@ -315,6 +334,7 @@ impl PassthroughFs {
                 *data.path.write().unwrap() = target;
             }
         }
+        displaced
     }
 
     pub(super) fn child_path(&self, parent: u64, name: &CStr) -> io::Result<PathBuf> {
