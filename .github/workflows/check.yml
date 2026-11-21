@@ -1718,9 +1718,10 @@ jobs:
           python3 -m unittest discover -s scripts/smoke/cli -p test_managed_job_integration.py
 
       - name: Snapshot and branch live smoke
-        # The short operation deadline excludes image setup and bounded cleanup.
+        # Checkpoint copies and restored boots share the runner with other VM jobs.
+        # Bound operations without using the normal latency as a failure deadline.
         # Leave both layouts enough failure-path time to stop VMs and save evidence.
-        timeout-minutes: 15
+        timeout-minutes: 25
         env:
           MSB_LIBKRUNFW_PATH: ${{ github.workspace }}/build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
           MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
@@ -1729,13 +1730,11 @@ jobs:
           status=0
           # Short isolated homes avoid Unix socket limits and cross-layout reuse.
           # Run both even if one fails so the artifact reports retain both outcomes.
-          # Allow aggregate I/O contention across the many operations on shared runners;
-          # each operation still has its independent 30-second deadline.
           for layout in managed flat; do
             python3 scripts/smoke/cli/snapshot-branch.py \
               --binary "${{ github.workspace }}/build/msb" \
               --output "/tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-$layout" \
-              --layout "$layout" --suite-timeout 240 || status=$?
+              --layout "$layout" --timeout 90 --suite-timeout 300 || status=$?
           done
           exit "$status"
 
