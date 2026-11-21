@@ -10,8 +10,12 @@ use std::fmt;
 #[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
+use std::io;
+#[cfg(unix)]
+use std::mem::{offset_of, size_of};
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
 use std::thread;
@@ -394,31 +398,37 @@ impl MetricsRegistry {
     /// registry changes only this private copy, never the source file.
     #[cfg(unix)]
     pub fn read_file_snapshot(file: &File) -> MetricsResult<Self> {
-        const SEQ_OFFSET: usize = std::mem::offset_of!(Slot, seq);
-        const PREFIX_LEN: usize = SEQ_OFFSET + std::mem::size_of::<AtomicU64>();
+        const SEQ_OFFSET: usize = offset_of!(Slot, seq);
+        const PREFIX_LEN: usize = SEQ_OFFSET + size_of::<AtomicU64>();
+
         let length = registry_size(1);
+
         for _ in 0..4 {
             if file.metadata()?.len() != length as u64 {
                 return Err(MetricsError::Custom("invalid file registry size".into()));
             }
+
             let mut before = [0u8; PREFIX_LEN];
             file.read_exact_at(&mut before, HEADER_SIZE as u64)?;
             let seq = u64::from_ne_bytes(before[SEQ_OFFSET..PREFIX_LEN].try_into().unwrap());
             if seq & 1 != 0 {
                 continue;
             }
+
             let mut bytes = vec![0u8; length];
             file.read_exact_at(&mut bytes, 0)?;
+
             let mut after = [0u8; PREFIX_LEN];
             file.read_exact_at(&mut after, HEADER_SIZE as u64)?;
             if before != after || before != bytes[HEADER_SIZE..HEADER_SIZE + PREFIX_LEN] {
                 continue;
             }
+
             // The mapping is anonymous and private. Only the bounded byte copy is
             // untrusted; subsequent reads cannot SIGBUS after a source file resize.
             let ptr = unsafe {
                 libc::mmap(
-                    std::ptr::null_mut(),
+                    ptr::null_mut(),
                     length,
                     libc::PROT_READ | libc::PROT_WRITE,
                     libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
@@ -427,20 +437,23 @@ impl MetricsRegistry {
                 )
             };
             if ptr == libc::MAP_FAILED {
-                return Err(std::io::Error::last_os_error().into());
+                return Err(io::Error::last_os_error().into());
             }
+
             let mapping = MappedRegion {
                 ptr: NonNull::new(ptr.cast()).unwrap(),
                 len: length,
             };
             unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), length);
+                ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), length);
             }
+
             let header = unsafe { &*mapping.ptr.as_ptr().cast::<Header>() };
             validate_header(header, Some(1))?;
             if header.state.load(Ordering::Acquire) != HEADER_STATE_READY {
                 return Err(MetricsError::Custom("file registry is not ready".into()));
             }
+
             return Ok(Self {
                 inner: Arc::new(RegistryInner {
                     name: CString::new("file-snapshot").unwrap(),
@@ -449,6 +462,7 @@ impl MetricsRegistry {
                 }),
             });
         }
+
         Err(MetricsError::Custom("file registry writer is busy".into()))
     }
 
@@ -2319,6 +2333,7 @@ mod tests {
     #[test]
     fn file_snapshot_survives_source_changes_and_rejects_invalid_input() {
         use std::io::Write;
+        use std::slice;
 
         let name = unique_name("file");
         let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
@@ -2339,17 +2354,19 @@ mod tests {
             })
             .unwrap();
         write_minimal_sample(&writer, 123);
+
         // Save bytes emitted by the actual registry writer, not a fabricated receipt.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(registry.inner.mapping.ptr.as_ptr(), registry_size(1))
-        }
-        .to_vec();
+        let bytes =
+            unsafe { slice::from_raw_parts(registry.inner.mapping.ptr.as_ptr(), registry_size(1)) }
+                .to_vec();
         cleanup(&name);
+
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(&bytes).unwrap();
 
         let snapshot = MetricsRegistry::read_file_snapshot(&file).unwrap();
         file.set_len(0).unwrap();
+
         let sample = snapshot.identified_at(0, true).unwrap();
         assert_eq!(sample.metric.sandbox_id, 7);
         assert_eq!(sample.metric.run_id, 19);
@@ -2357,16 +2374,20 @@ mod tests {
         assert!(MetricsRegistry::read_file_snapshot(&file).is_err());
 
         file.write_all_at(&bytes, 0).unwrap();
-        file.write_all_at(&1_u64.to_ne_bytes(), (HEADER_SIZE + 16) as u64)
-            .unwrap();
+        file.write_all_at(
+            &1_u64.to_ne_bytes(),
+            (HEADER_SIZE + offset_of!(Slot, seq)) as u64,
+        )
+        .unwrap();
         assert!(
             MetricsRegistry::read_file_snapshot(&file).is_err(),
             "busy source was accepted"
         );
+
         file.write_all_at(&bytes, 0).unwrap();
         file.write_all_at(
             &HEADER_STATE_INITIALIZING.to_ne_bytes(),
-            std::mem::offset_of!(Header, state) as u64,
+            offset_of!(Header, state) as u64,
         )
         .unwrap();
         assert!(
@@ -2387,20 +2408,22 @@ mod tests {
     fn file_snapshots_remain_coherent_while_a_mapped_producer_writes() {
         use std::io::Write;
         use std::os::fd::AsRawFd;
+        use std::slice;
         use std::sync::atomic::AtomicBool;
 
         let name = unique_name("fp");
         let template = MetricsRegistry::open_or_create(&name, 1).unwrap();
         let length = registry_size(1);
-        let bytes =
-            unsafe { std::slice::from_raw_parts(template.inner.mapping.ptr.as_ptr(), length) };
+        let bytes = unsafe { slice::from_raw_parts(template.inner.mapping.ptr.as_ptr(), length) };
+
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(bytes).unwrap();
         cleanup(&name);
         drop(template);
+
         let ptr = unsafe {
             libc::mmap(
-                std::ptr::null_mut(),
+                ptr::null_mut(),
                 length,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
@@ -2409,6 +2432,7 @@ mod tests {
             )
         };
         assert_ne!(ptr, libc::MAP_FAILED);
+
         let producer = MetricsRegistry {
             inner: Arc::new(RegistryInner {
                 name: CString::new("mapped-file-producer").unwrap(),
@@ -2436,11 +2460,13 @@ mod tests {
             })
             .unwrap();
         write_minimal_sample(&writer, 0);
+
         let stop = Arc::new(AtomicBool::new(false));
         let writer_stop = stop.clone();
         let writing = thread::spawn(move || {
             let slot = writer.registry.slot(writer.slot);
             let mut count = 0;
+
             while !writer_stop.load(Ordering::Acquire) {
                 count += 1;
                 // Use the published seqlock, with a deliberate long partial update
@@ -2456,14 +2482,18 @@ mod tests {
                 thread::yield_now();
             }
         });
+
         let mut accepted = 0;
         let mut inconsistent = None;
+
         for _ in 0..30_000 {
             let Ok(snapshot) = MetricsRegistry::read_file_snapshot(&file) else {
                 continue;
             };
+
             let sample = snapshot.identified_at(0, false).unwrap().metric;
             accepted += 1;
+
             if [
                 sample.disk_read_bytes,
                 sample.disk_write_bytes,
@@ -2477,8 +2507,10 @@ mod tests {
                 break;
             }
         }
+
         stop.store(true, Ordering::Release);
         writing.join().unwrap();
+
         assert!(
             inconsistent.is_none(),
             "accepted a torn sample: {inconsistent:?}"
