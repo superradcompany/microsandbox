@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_types::{
-    HttpDenyResponseFormat, NetworkRateLimitDirection, NetworkRateLimiterConfig, RateLimiterConfig,
-    ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig, TokenBucketConfig,
+    HttpDenyResponseFormat, MAX_DNS_REVALIDATION_GRACE_SECS, NetworkRateLimitDirection,
+    NetworkRateLimiterConfig, RateLimiterConfig, ScopedUpstreamCaCert, ScopedVerifyUpstream,
+    TlsConfig, TokenBucketConfig,
 };
 use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
@@ -452,6 +453,22 @@ impl NetworkBuilder {
         match TcpAcceptQueueSize::try_from(size) {
             Ok(size) => self.config.tcp_accept_queue_size = Some(size),
             Err(err) => self.errors.push(err.into()),
+        }
+        self
+    }
+
+    /// Set how many seconds after a DNS answer's TTL a TLS reconnect may still revalidate an
+    /// address that answer returned. Defaults to 60.
+    ///
+    /// Zero requires a fresh, policy-filtered answer to contain the address. Values above
+    /// [`MAX_DNS_REVALIDATION_GRACE_SECS`] record
+    /// [`BuildError::InvalidDnsRevalidationGrace`].
+    pub fn dns_revalidation_grace_secs(mut self, secs: u64) -> Self {
+        if secs > MAX_DNS_REVALIDATION_GRACE_SECS {
+            self.errors
+                .push(BuildError::InvalidDnsRevalidationGrace { secs });
+        } else {
+            self.config.dns_revalidation_grace_secs = Some(secs);
         }
         self
     }
@@ -1219,6 +1236,34 @@ mod tests {
                 "{invalid}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn dns_revalidation_grace_is_unset_by_default_and_rejects_values_above_the_maximum() {
+        let default = NetworkBuilder::new().build().unwrap();
+        let strict = NetworkBuilder::new()
+            .dns_revalidation_grace_secs(0)
+            .build()
+            .unwrap();
+        let longest = NetworkBuilder::new()
+            .dns_revalidation_grace_secs(MAX_DNS_REVALIDATION_GRACE_SECS)
+            .build()
+            .unwrap();
+        let err = NetworkBuilder::new()
+            .dns_revalidation_grace_secs(MAX_DNS_REVALIDATION_GRACE_SECS + 1)
+            .build()
+            .unwrap_err();
+
+        assert_eq!(default.dns_revalidation_grace_secs, None);
+        assert_eq!(strict.dns_revalidation_grace_secs, Some(0));
+        assert_eq!(
+            longest.dns_revalidation_grace_secs,
+            Some(MAX_DNS_REVALIDATION_GRACE_SECS)
+        );
+        assert!(
+            matches!(err, BuildError::InvalidDnsRevalidationGrace { secs } if secs == 3601),
+            "{err}"
+        );
     }
 
     /// Network builder happy path returns the config unchanged.

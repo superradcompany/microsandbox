@@ -138,6 +138,13 @@ where
         })
     }
 
+    /// When the binding between `key` and `member` expires, if it is still
+    /// live at `now`.
+    pub fn expires_at(&self, key: &K, member: &M, now: Instant) -> Option<Instant> {
+        let expiry = self.by_key.get(key)?.get(member)?;
+        (expiry.expires_at > now).then_some(expiry.expires_at)
+    }
+
     /// Visit live bindings at one instant without changing their expiry or ordering.
     /// Callers can use this under their own read lock to build a consistent snapshot.
     pub fn visit_live_bindings(&self, now: Instant, mut visitor: impl FnMut(&K, &M)) {
@@ -265,6 +272,24 @@ mod tests {
         bindings.sort_unstable();
         assert_eq!(bindings, [("live", 1), ("live", 2)]);
         assert_eq!(index.binding_count(), 3);
+    }
+
+    #[test]
+    fn expires_at_reports_only_live_bindings() {
+        let mut index = TtlReverseIndex::<&str, i32>::default();
+        let now = Instant::now();
+        index.insert("alpha", [1], Duration::from_secs(5), now);
+
+        assert_eq!(
+            index.expires_at(&"alpha", &1, now),
+            Some(now + Duration::from_secs(5))
+        );
+        assert_eq!(index.expires_at(&"alpha", &2, now), None);
+        assert_eq!(index.expires_at(&"beta", &1, now), None);
+        assert_eq!(
+            index.expires_at(&"alpha", &1, now + Duration::from_secs(5)),
+            None
+        );
     }
 
     #[test]

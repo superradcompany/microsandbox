@@ -95,6 +95,13 @@ pub enum BuildError {
         source: InvalidTcpAcceptQueueSize,
     },
 
+    /// The SNI revalidation grace period exceeds the supported maximum.
+    #[error("invalid DNS revalidation grace period {secs}s: must be at most 3600 seconds")]
+    InvalidDnsRevalidationGrace {
+        /// Requested grace period in seconds.
+        secs: u64,
+    },
+
     /// A NAT64 prefix must be an IPv6 `/96` network.
     #[error("invalid NAT64 prefix `{raw}`: prefix must be IPv6 /96")]
     InvalidNat64Prefix {

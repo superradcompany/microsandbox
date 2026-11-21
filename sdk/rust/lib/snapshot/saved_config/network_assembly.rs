@@ -157,6 +157,7 @@ fn policy_patch(input: &NetworkSpecPatch) -> NetworkSpecPatch {
         max_inbound_tcp_connections: input.max_inbound_tcp_connections,
         max_udp_connections: input.max_udp_connections,
         tcp_accept_queue_size: input.tcp_accept_queue_size,
+        dns_revalidation_grace_secs: input.dns_revalidation_grace_secs,
         nat64_prefixes: input.nat64_prefixes.clone(),
         rate_limiter: input.rate_limiter.clone(),
         http: input.http.clone(),
@@ -188,6 +189,7 @@ fn copy_policy(source: &NetworkSpec, target: &mut NetworkSpec) {
     target.max_inbound_tcp_connections = source.max_inbound_tcp_connections;
     target.max_udp_connections = source.max_udp_connections;
     target.tcp_accept_queue_size = source.tcp_accept_queue_size;
+    target.dns_revalidation_grace_secs = source.dns_revalidation_grace_secs;
     target.rate_limiter = source.rate_limiter.clone();
     target.nat64_prefixes = source.nat64_prefixes.clone();
     target.http = source.http.clone();
@@ -229,6 +231,7 @@ fn field(path: &str) -> MicrosandboxResult<NetworkPolicyClear> {
         "network.max_inbound_tcp_connections" => MaxInboundTcpConnections,
         "network.max_udp_connections" => MaxUdpConnections,
         "network.tcp_accept_queue_size" => TcpAcceptQueueSize,
+        "network.dns_revalidation_grace_secs" => DnsRevalidationGrace,
         "network.rate_limiter.egress" => EgressRateLimit,
         "network.rate_limiter.ingress" => IngressRateLimit,
         "network.nat64_prefixes" => Nat64Prefixes,
@@ -301,6 +304,9 @@ fn reset(field: NetworkPolicyClear, policy: &mut NetworkSpec) {
         }
         MaxUdpConnections => policy.max_udp_connections = defaults.max_udp_connections,
         TcpAcceptQueueSize => policy.tcp_accept_queue_size = defaults.tcp_accept_queue_size,
+        DnsRevalidationGrace => {
+            policy.dns_revalidation_grace_secs = defaults.dns_revalidation_grace_secs
+        }
         EgressRateLimit => {
             policy
                 .rate_limiter

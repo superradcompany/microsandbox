@@ -245,6 +245,9 @@ pub struct PortRange {
 pub enum HostnameSource<'a> {
     /// Hostname the client sent in its TLS handshake, normalized for matching.
     Sni(&'a str),
+    /// Authority of a plain-HTTP request. Matches like [`Self::Sni`], but an
+    /// address accepted only by SNI revalidation does not count for it.
+    HttpAuthority(&'a str),
     /// The client supplied no hostname; use only unexpired DNS answers.
     CacheOnly,
     /// The connection has started, but the client has not sent a hostname yet.
@@ -257,6 +260,7 @@ impl HostnameSource<'_> {
     pub fn label(&self) -> &'static str {
         match self {
             HostnameSource::Sni(_) => "sni",
+            HostnameSource::HttpAuthority(_) => "http-authority",
             HostnameSource::CacheOnly => "cache",
             HostnameSource::Deferred => "deferred",
         }
@@ -1154,7 +1158,9 @@ impl From<bool> for DestinationMatch {
 /// IP rules use the address alone. Domain rules also use the client's hostname:
 ///
 /// - With SNI, an allow needs both a matching name and an unexpired DNS answer
-///   tying it to `addr`. A deny needs only the name, so choosing an IP directly
+///   tying it to `addr`, or an unexpired SNI revalidation of that exact name.
+///   A plain-HTTP authority matches the same way, except that SNI
+///   revalidations do not count for it. A deny needs only the name, so choosing an IP directly
 ///   cannot bypass a blocked domain. Claiming an allowed name cannot grant
 ///   access to an unrelated IP.
 /// - Without SNI, use only unexpired DNS answers for the address.
@@ -1173,10 +1179,13 @@ fn matches_egress_destination_with_source(
         Destination::Cidr(network) => matches_cidr(network, addr, shared).into(),
         Destination::Group(group) => matches_group(*group, addr, shared).into(),
         Destination::Domain(domain) => match source {
-            HostnameSource::Sni(name) => {
+            HostnameSource::Sni(name) | HostnameSource::HttpAuthority(name) => {
                 let name_matches = name == domain.as_str();
-                let cache_matches =
-                    || shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str());
+                let cache_matches = || {
+                    shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str())
+                        || (matches!(source, HostnameSource::Sni(_))
+                            && shared.sni_renewed_hostname(addr, name))
+                };
                 (name_matches && (action.is_deny() || cache_matches())).into()
             }
             HostnameSource::CacheOnly => shared
@@ -1185,12 +1194,13 @@ fn matches_egress_destination_with_source(
             HostnameSource::Deferred => DestinationMatch::Defer,
         },
         Destination::DomainSuffix(suffix) => match source {
-            HostnameSource::Sni(name) => {
+            HostnameSource::Sni(name) | HostnameSource::HttpAuthority(name) => {
                 let name_matches = matches_suffix(name, suffix.as_str());
                 let cache_matches = || {
                     shared.any_resolved_hostname(addr, |hostname| {
                         matches_suffix(hostname, suffix.as_str())
-                    })
+                    }) || (matches!(source, HostnameSource::Sni(_))
+                        && shared.sni_renewed_hostname(addr, name))
                 };
                 (name_matches && (action.is_deny() || cache_matches())).into()
             }

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
 use ipnetwork::{Ipv4Network, Ipv6Network};
-use microsandbox_types::HttpConfig;
+use microsandbox_types::{DEFAULT_DNS_REVALIDATION_GRACE_SECS, HttpConfig};
 use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
 pub use microsandbox_utils::wake_pipe::WakePipe;
 use parking_lot::RwLock;
@@ -37,6 +37,16 @@ pub(crate) const MAX_RESOLVED_HOSTNAME_BINDINGS: usize = 16_384;
 
 /// Maximum live bindings for one normalized hostname, across both families.
 pub(crate) const MAX_BINDINGS_PER_HOSTNAME: usize = 1_024;
+
+/// How long an address stays eligible for SNI revalidation after the DNS
+/// answer that bound it to a hostname expires.
+///
+/// Resolvers that load-balance by returning one address per answer move on
+/// to another pool member while clients keep using the address they cached.
+/// This is a policy grace period, not DNS semantics: it never authorizes a
+/// connection by itself, see [`SharedState::renew_recent_resolved_hostname`].
+pub(crate) const REVALIDATION_GRACE: Duration =
+    Duration::from_secs(DEFAULT_DNS_REVALIDATION_GRACE_SECS);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -81,6 +91,21 @@ pub struct SharedState {
 
     /// Resolved hostname index used to map destination IPs back to queried hostnames.
     resolved_hostnames: RwLock<TtlReverseIndex<ResolvedHostnameKey, IpAddr>>,
+
+    /// Bindings from policy-filtered DNS answers, kept for
+    /// [`REVALIDATION_GRACE`] beyond their TTL. Consulted only by SNI
+    /// revalidation; never used to match policy rules directly. Lock order:
+    /// `resolved_hostnames` before `recent_hostnames`.
+    recent_hostnames: RwLock<TtlReverseIndex<ResolvedHostnameKey, IpAddr>>,
+
+    /// Grace period applied to `recent_hostnames`.
+    revalidation_grace: Duration,
+
+    /// Addresses that SNI revalidation accepted from `recent_hostnames`.
+    /// Only checks that carry the same SNI name read this; ordinary DNS
+    /// binding lookups do not, so traffic without SNI cannot use them.
+    /// Lock order: `recent_hostnames` before `sni_renewed_hostnames`.
+    sni_renewed_hostnames: RwLock<TtlReverseIndex<ResolvedHostnameKey, IpAddr>>,
 
     /// Per-sandbox gateway IPv4. Set once at boot; used by
     /// `DestinationGroup::Host` rule matching and `host.microsandbox.internal`
@@ -148,6 +173,9 @@ impl SharedState {
             proxy_wake: WakePipe::new(),
             termination_hook: Mutex::new(None),
             resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
+            recent_hostnames: RwLock::new(TtlReverseIndex::default()),
+            revalidation_grace: REVALIDATION_GRACE,
+            sni_renewed_hostnames: RwLock::new(TtlReverseIndex::default()),
             gateway_ipv4: OnceLock::new(),
             gateway_ipv6: OnceLock::new(),
             host_ipv4: OnceLock::new(),
@@ -158,6 +186,13 @@ impl SharedState {
             metrics: NetworkMetrics::default(),
             http: OnceLock::new(),
         }
+    }
+
+    /// Set the SNI revalidation grace period. Called once at boot, before the
+    /// state is shared.
+    pub(crate) fn with_revalidation_grace(mut self, grace: Duration) -> Self {
+        self.revalidation_grace = grace;
+        self
     }
 
     /// Set the per-sandbox gateway IPs. Called once at boot. Each family is
@@ -300,6 +335,10 @@ impl SharedState {
     ///
     /// Returns `false` if the complete answer would exceed either the hostname
     /// or sandbox binding limit; existing bindings are preserved on rejection.
+    ///
+    /// Accepted answers are also remembered for [`REVALIDATION_GRACE`] beyond
+    /// their TTL. That copy is best effort: when it is full, revalidation
+    /// simply falls back to requiring a fresh answer with the same address.
     pub fn cache_resolved_hostname(
         &self,
         domain: &str,
@@ -309,38 +348,110 @@ impl SharedState {
     ) -> bool {
         let hostname = normalize_hostname(domain);
         let key = ResolvedHostnameKey { hostname, family };
-        let addrs = addrs.into_iter().map(normalize_ip_addr);
+        let addrs: Vec<IpAddr> = addrs.into_iter().map(normalize_ip_addr).collect();
 
         let now = Instant::now();
         let mut index = self.resolved_hostnames.write();
+        let capacity = Self::binding_capacity(&mut index, &key.hostname, now);
+        if !index.try_extend(key.clone(), addrs.iter().copied(), ttl, now, capacity) {
+            return false;
+        }
+
+        let mut recent = self.recent_hostnames.write();
+        let recent_capacity = Self::binding_capacity(&mut recent, &key.hostname, now);
+        let recent_ttl = ttl.saturating_add(self.revalidation_grace);
+        let _ = recent.try_extend(key, addrs, recent_ttl, now, recent_capacity);
+        true
+    }
+
+    /// Clear the resolved addresses for a hostname within the given address family.
+    ///
+    /// This also ends the revalidation grace period of those addresses.
+    pub fn clear_resolved_hostname(&self, domain: &str, family: ResolvedHostnameFamily) {
+        let hostname = normalize_hostname(domain);
+        let key = ResolvedHostnameKey { hostname, family };
+        let now = Instant::now();
+        let mut index = self.resolved_hostnames.write();
+        let mut recent = self.recent_hostnames.write();
+        index.remove(&key, now);
+        recent.remove(&key, now);
+        self.sni_renewed_hostnames.write().remove(&key, now);
+    }
+
+    /// Accept `addr` for connections whose SNI is `domain`, if an earlier DNS
+    /// answer bound it within the last [`REVALIDATION_GRACE`] beyond that
+    /// answer's TTL. The acceptance lasts for `ttl`, but never beyond the end
+    /// of that grace period.
+    ///
+    /// SNI revalidation calls this only after a fresh policy-filtered answer
+    /// for `domain` succeeded without `addr`, so the name still resolves and is
+    /// still allowed. The renewal is visible only through
+    /// [`Self::sni_renewed_hostname`], never as an ordinary DNS binding, and it
+    /// never extends the grace period itself; only a DNS answer that contains
+    /// `addr` does. Returns `false` when `addr` was not bound recently or the
+    /// binding limit is reached.
+    pub(crate) fn renew_recent_resolved_hostname(
+        &self,
+        domain: &str,
+        family: ResolvedHostnameFamily,
+        addr: IpAddr,
+        ttl: Duration,
+    ) -> bool {
+        let hostname = normalize_hostname(domain);
+        let key = ResolvedHostnameKey { hostname, family };
+        let addr = normalize_ip_addr(addr);
+
+        let now = Instant::now();
+        let recent = self.recent_hostnames.read();
+        let Some(grace_ends_at) = recent.expires_at(&key, &addr, now) else {
+            return false;
+        };
+        let ttl = ttl.min(grace_ends_at.saturating_duration_since(now));
+
+        let mut renewed = self.sni_renewed_hostnames.write();
+        let capacity = Self::binding_capacity(&mut renewed, &key.hostname, now);
+        renewed.try_extend(key, [addr], ttl, now, capacity)
+    }
+
+    /// Returns `true` when SNI revalidation accepted `addr` for exactly
+    /// `sni` from a recent DNS answer and that acceptance has not expired.
+    ///
+    /// Callers must already have matched `sni` against the rule or pattern
+    /// they are checking; this proves only the address binding.
+    pub fn sni_renewed_hostname(&self, addr: IpAddr, sni: &str) -> bool {
+        let addr = normalize_ip_addr(addr);
+        let hostname = normalize_hostname(sni);
+
+        self.sni_renewed_hostnames
+            .read()
+            .member_matches(&addr, Instant::now(), |key| key.hostname == hostname)
+    }
+
+    /// Total binding capacity for `try_extend` after evicting expired entries.
+    ///
+    /// Only new bindings consume slots, bounded by both the per-hostname and the
+    /// per-sandbox limit.
+    fn binding_capacity(
+        index: &mut TtlReverseIndex<ResolvedHostnameKey, IpAddr>,
+        hostname: &str,
+        now: Instant,
+    ) -> usize {
         index.evict_expired(now);
 
         let bindings_for = |family| {
             index.member_count(&ResolvedHostnameKey {
-                hostname: key.hostname.clone(),
+                hostname: hostname.to_owned(),
                 family,
             })
         };
-
-        let ipv4_bindings = bindings_for(ResolvedHostnameFamily::Ipv4);
-        let ipv6_bindings = bindings_for(ResolvedHostnameFamily::Ipv6);
-        let hostname_bindings = ipv4_bindings + ipv6_bindings;
+        let hostname_bindings =
+            bindings_for(ResolvedHostnameFamily::Ipv4) + bindings_for(ResolvedHostnameFamily::Ipv6);
 
         let total_bindings = index.binding_count();
         let hostname_slots = MAX_BINDINGS_PER_HOSTNAME.saturating_sub(hostname_bindings);
         let sandbox_slots = MAX_RESOLVED_HOSTNAME_BINDINGS.saturating_sub(total_bindings);
-        let available_slots = hostname_slots.min(sandbox_slots);
 
-        // try_extend takes a total capacity; only new bindings consume slots.
-        let capacity = total_bindings + available_slots;
-        index.try_extend(key, addrs, ttl, now, capacity)
-    }
-
-    /// Clear the resolved addresses for a hostname within the given address family.
-    pub fn clear_resolved_hostname(&self, domain: &str, family: ResolvedHostnameFamily) {
-        let hostname = normalize_hostname(domain);
-        let key = ResolvedHostnameKey { hostname, family };
-        self.resolved_hostnames.write().remove(&key, Instant::now());
+        total_bindings + hostname_slots.min(sandbox_slots)
     }
 
     /// Returns `true` when any resolved hostname for `addr` satisfies `predicate`.
@@ -373,8 +484,15 @@ impl SharedState {
     /// This runs outside the hot egress read path. If the index is currently
     /// busy, cleanup is skipped and retried on the next maintenance pass.
     pub fn cleanup_resolved_hostnames(&self) {
+        let now = Instant::now();
         if let Some(mut idx) = self.resolved_hostnames.try_write() {
-            idx.evict_expired(Instant::now());
+            idx.evict_expired(now);
+        }
+        if let Some(mut idx) = self.recent_hostnames.try_write() {
+            idx.evict_expired(now);
+        }
+        if let Some(mut idx) = self.sni_renewed_hostnames.try_write() {
+            idx.evict_expired(now);
         }
     }
 
@@ -471,6 +589,10 @@ impl Default for NetworkMetrics {
         }
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
 
 pub(crate) fn normalize_hostname(domain: &str) -> String {
     domain.trim_end_matches('.').to_ascii_lowercase()
@@ -609,6 +731,119 @@ mod tests {
         state.clear_resolved_hostname("fonts.example", ResolvedHostnameFamily::Ipv4);
         assert!(!state.any_resolved_hostname(first, |h| h == "fonts.example"));
         assert!(!state.any_resolved_hostname(second, |h| h == "fonts.example"));
+    }
+
+    #[test]
+    fn recent_bindings_renew_only_within_the_grace_period() {
+        let state = SharedState::new(4);
+        let bound: IpAddr = "198.51.100.23".parse().unwrap();
+        let unrelated: IpAddr = "198.51.100.99".parse().unwrap();
+        let renew = |domain: &str, family, addr| {
+            state.renew_recent_resolved_hostname(domain, family, addr, Duration::from_secs(30))
+        };
+
+        state.cache_resolved_hostname(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            [bound],
+            Duration::ZERO,
+        );
+
+        // An expired answer stays out of rule matching until a renewal.
+        assert!(!state.any_resolved_hostname(bound, |h| h == "pool.example"));
+        assert!(!renew(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            unrelated
+        ));
+        assert!(!renew("other.example", ResolvedHostnameFamily::Ipv4, bound));
+        assert!(!renew("pool.example", ResolvedHostnameFamily::Ipv6, bound));
+        assert!(!state.any_resolved_hostname(unrelated, |h| h == "pool.example"));
+
+        assert!(renew("POOL.example.", ResolvedHostnameFamily::Ipv4, bound));
+        assert!(state.sni_renewed_hostname(bound, "pool.example"));
+        assert!(!state.sni_renewed_hostname(bound, "other.example"));
+        assert!(
+            !state.any_resolved_hostname(bound, |h| h == "pool.example"),
+            "a renewal must not reach checks without SNI"
+        );
+
+        state.clear_resolved_hostname("pool.example", ResolvedHostnameFamily::Ipv4);
+        assert!(!state.sni_renewed_hostname(bound, "pool.example"));
+        assert!(
+            !renew("pool.example", ResolvedHostnameFamily::Ipv4, bound),
+            "clearing a hostname ends its grace period"
+        );
+    }
+
+    #[test]
+    fn recent_bindings_expire_after_the_grace_period() {
+        let state = SharedState::new(4).with_revalidation_grace(Duration::ZERO);
+        let bound: IpAddr = "198.51.100.23".parse().unwrap();
+
+        state.cache_resolved_hostname(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            [bound],
+            Duration::ZERO,
+        );
+
+        assert!(!state.renew_recent_resolved_hostname(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            bound,
+            Duration::from_secs(30),
+        ));
+    }
+
+    #[test]
+    fn renewals_end_with_the_original_grace_period() {
+        let grace = Duration::from_millis(50);
+        let state = SharedState::new(4).with_revalidation_grace(grace);
+        let bound: IpAddr = "198.51.100.23".parse().unwrap();
+
+        state.cache_resolved_hostname(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            [bound],
+            Duration::ZERO,
+        );
+        // A long-lived fresh answer must not stretch the renewal past the
+        // grace period of the answer that originally returned the address.
+        assert!(state.renew_recent_resolved_hostname(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            bound,
+            Duration::from_secs(86_400),
+        ));
+        assert!(state.sni_renewed_hostname(bound, "pool.example"));
+
+        std::thread::sleep(grace + Duration::from_millis(20));
+        assert!(!state.sni_renewed_hostname(bound, "pool.example"));
+    }
+
+    #[test]
+    fn rejected_answers_start_no_grace_period() {
+        let state = SharedState::new(4);
+        let rejected: IpAddr = "198.51.100.23".parse().unwrap();
+
+        // One hostname cannot hold more than its binding limit.
+        let full = (0..MAX_BINDINGS_PER_HOSTNAME as u32)
+            .map(|n| IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + n)))
+            .chain([rejected]);
+        assert!(!state.cache_resolved_hostname(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            full,
+            Duration::ZERO,
+        ));
+
+        assert!(!state.renew_recent_resolved_hostname(
+            "pool.example",
+            ResolvedHostnameFamily::Ipv4,
+            rejected,
+            Duration::from_secs(30),
+        ));
     }
 
     #[test]

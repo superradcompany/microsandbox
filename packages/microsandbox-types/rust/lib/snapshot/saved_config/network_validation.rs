@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    Destination, HostPattern, PortProtocol, SecretEntry, SecretSubstitution, SnapshotManifestResult,
+    Destination, HostPattern, MAX_DNS_REVALIDATION_GRACE_SECS, PortProtocol, SecretEntry,
+    SecretSubstitution, SnapshotManifestResult,
 };
 
 use super::SavedValue;
@@ -108,6 +109,18 @@ impl SavedNetworkConfig {
                 "SCFG_VALUE",
                 "active.network.tcp_accept_queue_size",
                 "queue depth must be between 1 and 2147483647",
+            );
+        }
+        if let Some(grace) = self
+            .dns_revalidation_grace_secs
+            .as_ref()
+            .and_then(SavedValue::value)
+            && *grace > MAX_DNS_REVALIDATION_GRACE_SECS
+        {
+            return invalid(
+                "SCFG_VALUE",
+                "active.network.dns_revalidation_grace_secs",
+                "grace period must be between 0 and 3600 seconds",
             );
         }
         if let Some(rate) = self.rate_limiter.as_ref().and_then(SavedValue::value) {
