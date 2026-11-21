@@ -82,7 +82,7 @@ use crate::context::local::volume::ResolvedNamedVolume;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
 #[cfg(unix)]
-use crate::host_file::{self, HostFileKind};
+use crate::host_file::{self, HostFileAccess, HostFileKind, HostFilePolicy};
 #[cfg(windows)]
 use crate::runtime::handle::WindowsJob;
 use crate::runtime::handle::{ProcessHandle, StartupProcess};
@@ -1843,7 +1843,14 @@ fn lock_disk_image_unix(
     volume_name: Option<&str>,
     strict: bool,
 ) -> MicrosandboxResult<File> {
-    let file = host_file::open(path, HostFileKind::Disk, !readonly, strict).map_err(|err| {
+    let access = if readonly {
+        HostFileAccess::ReadOnly
+    } else {
+        HostFileAccess::ReadWrite
+    };
+    let policy = HostFilePolicy::from_strict(strict);
+
+    let file = host_file::open(path, HostFileKind::Disk, access, policy).map_err(|err| {
         MicrosandboxError::InvalidConfig(format!("open disk image lock {}: {err}", path.display()))
     })?;
 

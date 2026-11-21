@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 
 use super::watch::LogRegistration;
 use super::{LogEntry, LogOptions, LogSnapshot, LogStreamOptions};
-use crate::MicrosandboxResult;
-use crate::context::LocalContext;
 use crate::context::sandbox::LogStream;
+use crate::context::{Context, LocalContext, default_local_context};
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -28,21 +28,23 @@ use crate::context::sandbox::LogStream;
 
 /// Take the log directory and host file policy from one retained default backend.
 pub(super) fn default_logger(name: &str) -> MicrosandboxResult<SandboxLogger> {
-    let backend = crate::context::default_local_context();
+    let backend = default_local_context();
     logger_for_default_backend(backend.as_ref(), name)
 }
 
 fn logger_for_default_backend(
-    backend: &dyn crate::context::Context,
+    backend: &dyn Context,
     name: &str,
 ) -> MicrosandboxResult<SandboxLogger> {
     if let Some(local) = backend.as_local() {
         return Ok(SandboxLogger::for_local(local, name));
     }
+
     // Propagate configuration failures (for example, unsupported `runtime.strict_host_files`)
     // instead of silently falling back to unrestricted host file opens.
     backend.info()?;
-    Err(crate::MicrosandboxError::InvalidConfig(
+
+    Err(MicrosandboxError::InvalidConfig(
         "default local backend is unavailable".into(),
     ))
 }

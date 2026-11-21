@@ -29,6 +29,27 @@ pub(crate) enum HostFileKind {
     Disk,
 }
 
+/// Access mode requested when opening a host file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostFileAccess {
+    /// Open read-only.
+    ReadOnly,
+
+    /// Open read-write.
+    #[cfg(unix)]
+    ReadWrite,
+}
+
+/// Symlink and path-traversal policy applied when opening a host file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostFilePolicy {
+    /// Follow symlinks normally while still validating the opened inode type.
+    Standard,
+
+    /// Reject symlinks and parent (`..`) components throughout the path.
+    Strict,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -51,28 +72,47 @@ impl HostFileKind {
     }
 }
 
+impl HostFileAccess {
+    fn is_writable(self) -> bool {
+        match self {
+            Self::ReadOnly => false,
+            #[cfg(unix)]
+            Self::ReadWrite => true,
+        }
+    }
+}
+
+impl HostFilePolicy {
+    pub(crate) fn from_strict(strict: bool) -> Self {
+        if strict { Self::Strict } else { Self::Standard }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
 /// Open a host file and keep it only if the opened inode is of the expected kind.
 ///
-/// On Unix, opens never wait for a FIFO peer. `strict` also rejects symlinks in every
-/// path component, including parent directories, and is unsupported elsewhere.
+/// On Unix, opens never wait for a FIFO peer. [`HostFilePolicy::Strict`] also rejects
+/// symlinks in every path component, including parent directories, and is unsupported elsewhere.
 pub(crate) fn open(
     path: &Path,
     kind: HostFileKind,
-    writable: bool,
-    strict: bool,
+    access: HostFileAccess,
+    policy: HostFilePolicy,
 ) -> io::Result<File> {
-    let file = if strict {
-        open_without_symlinks(path, writable)?
-    } else {
-        let mut options = OpenOptions::new();
-        options.read(true).write(writable);
-        #[cfg(unix)]
-        options.custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
-        options.open(path)?
+    let file = match policy {
+        HostFilePolicy::Strict => open_without_symlinks(path, access)?,
+        HostFilePolicy::Standard => {
+            let mut options = OpenOptions::new();
+            options.read(true).write(access.is_writable());
+
+            #[cfg(unix)]
+            options.custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
+
+            options.open(path)?
+        }
     };
 
     if !kind.admits(file.metadata()?.file_type()) {
@@ -81,19 +121,22 @@ pub(crate) fn open(
             kind.rejection(),
         ));
     }
+
     Ok(file)
 }
 
 #[cfg(unix)]
-fn open_without_symlinks(path: &Path, writable: bool) -> io::Result<File> {
+fn open_without_symlinks(path: &Path, access: HostFileAccess) -> io::Result<File> {
     // Retain each directory while opening the next. A concurrent rename cannot
     // redirect later components to a symlink or a different ancestor.
-    let mut directory =
-        open_search_directory(Path::new(if path.is_absolute() { "/" } else { "." }))?;
+    let anchor = if path.is_absolute() { "/" } else { "." };
+    let mut directory = open_search_directory(Path::new(anchor))?;
+
     let mut components = path
         .components()
         .filter(|part| !matches!(part, Component::RootDir | Component::CurDir))
         .peekable();
+
     while let Some(component) = components.next() {
         let Component::Normal(part) = component else {
             return Err(io::Error::new(
@@ -101,24 +144,24 @@ fn open_without_symlinks(path: &Path, writable: bool) -> io::Result<File> {
                 "strict host paths cannot contain parent components",
             ));
         };
+
         let name = CString::new(part.as_bytes())?;
         let final_component = components.peek().is_none();
-        let flags = libc::O_NOFOLLOW
-            | libc::O_NONBLOCK
-            | libc::O_CLOEXEC
-            | if final_component {
-                if writable {
-                    libc::O_RDWR
-                } else {
-                    libc::O_RDONLY
-                }
+        let component_flags = if final_component {
+            if access.is_writable() {
+                libc::O_RDWR
             } else {
-                search_directory_flags()
-            };
+                libc::O_RDONLY
+            }
+        } else {
+            search_directory_flags()
+        };
+        let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | component_flags;
 
         let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 {
             let error = io::Error::last_os_error();
+
             // A refused symlink is ELOOP, or ENOTDIR when a directory is expected.
             // The open already refused it; this lookup only names the setting responsible.
             if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
@@ -129,6 +172,7 @@ fn open_without_symlinks(path: &Path, writable: bool) -> io::Result<File> {
                     format!("runtime.strict_host_files rejects symlink {part:?} in host path"),
                 ));
             }
+
             return Err(error);
         }
 
@@ -136,8 +180,10 @@ fn open_without_symlinks(path: &Path, writable: bool) -> io::Result<File> {
         if final_component {
             return Ok(file);
         }
+
         directory = file;
     }
+
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "host source has no filename",
@@ -182,7 +228,7 @@ fn is_symlink_at(directory: &File, name: &CStr) -> bool {
 }
 
 #[cfg(not(unix))]
-fn open_without_symlinks(_path: &Path, _writable: bool) -> io::Result<File> {
+fn open_without_symlinks(_path: &Path, _access: HostFileAccess) -> io::Result<File> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "strict host file opens require Unix",
@@ -195,8 +241,9 @@ fn open_without_symlinks(_path: &Path, _writable: bool) -> io::Result<File> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::fs::{self, Permissions};
     use std::io::Read;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -206,11 +253,12 @@ mod tests {
     #[test]
     fn fifo_opens_fail_without_waiting_for_a_peer() {
         const PROBE: &str = "MSB_HOST_FILE_FIFO_PROBE";
+
         if let Some(path) = std::env::var_os(PROBE) {
             for kind in [HostFileKind::Regular, HostFileKind::Disk] {
-                for strict in [false, true] {
-                    for writable in [false, true] {
-                        let error = open(Path::new(&path), kind, writable, strict).unwrap_err();
+                for policy in [HostFilePolicy::Standard, HostFilePolicy::Strict] {
+                    for access in [HostFileAccess::ReadOnly, HostFileAccess::ReadWrite] {
+                        let error = open(Path::new(&path), kind, access, policy).unwrap_err();
                         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
                     }
                 }
@@ -222,6 +270,7 @@ mod tests {
         let path = temp.path().canonicalize().unwrap().join("pipe");
         let name = CString::new(path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -231,6 +280,7 @@ mod tests {
             .env(PROBE, &path)
             .spawn()
             .unwrap();
+
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -250,12 +300,27 @@ mod tests {
     fn disk_kind_admits_block_devices_but_no_other_special_files() {
         let temp = tempfile::tempdir().unwrap();
         let regular = temp.path().join("disk.raw");
-        std::fs::write(&regular, b"disk").unwrap();
+        fs::write(&regular, b"disk").unwrap();
 
         for kind in [HostFileKind::Regular, HostFileKind::Disk] {
-            assert!(open(&regular, kind, false, false).is_ok());
+            assert!(
+                open(
+                    &regular,
+                    kind,
+                    HostFileAccess::ReadOnly,
+                    HostFilePolicy::Standard
+                )
+                .is_ok()
+            );
+
             for special in [temp.path(), Path::new("/dev/null")] {
-                let error = open(special, kind, false, false).unwrap_err();
+                let error = open(
+                    special,
+                    kind,
+                    HostFileAccess::ReadOnly,
+                    HostFilePolicy::Standard,
+                )
+                .unwrap_err();
                 assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
                 assert_eq!(error.to_string(), kind.rejection());
             }
@@ -263,13 +328,14 @@ mod tests {
 
         // Unprivileged tests cannot create or usually open a block device, so check
         // admission against a real one's type. Some containers expose none.
-        let Some(device) = std::fs::read_dir("/dev")
+        let Some(device) = fs::read_dir("/dev")
             .unwrap()
             .filter_map(Result::ok)
             .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_block_device()))
         else {
             return;
         };
+
         let file_type = device.file_type().unwrap();
         assert!(HostFileKind::Disk.admits(file_type));
         assert!(!HostFileKind::Regular.admits(file_type));
@@ -280,15 +346,31 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let real = root.join("real");
-        std::fs::create_dir(&real).unwrap();
+        fs::create_dir(&real).unwrap();
+
         let path = real.join("file");
-        std::fs::write(&path, b"contents").unwrap();
+        fs::write(&path, b"contents").unwrap();
         symlink(&real, root.join("linked-dir")).unwrap();
         symlink(&path, root.join("linked-file")).unwrap();
 
         let dotted = real.join("..").join("real").join("file");
-        assert!(open(&dotted, HostFileKind::Regular, false, false).is_ok());
-        let error = open(&dotted, HostFileKind::Regular, false, true).unwrap_err();
+        assert!(
+            open(
+                &dotted,
+                HostFileKind::Regular,
+                HostFileAccess::ReadOnly,
+                HostFilePolicy::Standard
+            )
+            .is_ok()
+        );
+
+        let error = open(
+            &dotted,
+            HostFileKind::Regular,
+            HostFileAccess::ReadOnly,
+            HostFilePolicy::Strict,
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("parent components"), "{error}");
 
@@ -296,15 +378,33 @@ mod tests {
             (root.join("linked-dir").join("file"), "\"linked-dir\""),
             (root.join("linked-file"), "\"linked-file\""),
         ] {
-            assert!(open(&link, HostFileKind::Regular, false, false).is_ok());
-            let error = open(&link, HostFileKind::Regular, false, true).unwrap_err();
+            assert!(
+                open(
+                    &link,
+                    HostFileKind::Regular,
+                    HostFileAccess::ReadOnly,
+                    HostFilePolicy::Standard
+                )
+                .is_ok()
+            );
+
+            let error = open(
+                &link,
+                HostFileKind::Regular,
+                HostFileAccess::ReadOnly,
+                HostFilePolicy::Strict,
+            )
+            .unwrap_err();
             let message = error.to_string();
             assert!(message.contains("runtime.strict_host_files"), "{message}");
             assert!(message.contains(name), "{message}");
         }
 
-        for (writable, mode) in [(false, libc::O_RDONLY), (true, libc::O_RDWR)] {
-            let file = open(&path, HostFileKind::Regular, writable, true).unwrap();
+        for (access, mode) in [
+            (HostFileAccess::ReadOnly, libc::O_RDONLY),
+            (HostFileAccess::ReadWrite, libc::O_RDWR),
+        ] {
+            let file = open(&path, HostFileKind::Regular, access, HostFilePolicy::Strict).unwrap();
             let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
             assert_eq!(flags & libc::O_ACCMODE, mode);
         }
@@ -313,23 +413,39 @@ mod tests {
     #[test]
     fn strict_relative_paths_resolve_from_the_current_directory() {
         const PROBE: &str = "MSB_HOST_FILE_RELATIVE_PROBE";
+
         if std::env::var_os(PROBE).is_some() {
             let mut contents = String::new();
-            open(Path::new("real/file"), HostFileKind::Regular, false, true)
-                .unwrap()
-                .read_to_string(&mut contents)
-                .unwrap();
+            open(
+                Path::new("real/file"),
+                HostFileKind::Regular,
+                HostFileAccess::ReadOnly,
+                HostFilePolicy::Strict,
+            )
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
             assert_eq!(contents, "relative");
-            assert!(open(Path::new("linked/file"), HostFileKind::Regular, false, true).is_err());
+
+            assert!(
+                open(
+                    Path::new("linked/file"),
+                    HostFileKind::Regular,
+                    HostFileAccess::ReadOnly,
+                    HostFilePolicy::Strict,
+                )
+                .is_err()
+            );
             return;
         }
 
         // Only an isolated child may run with a different working directory.
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        std::fs::create_dir(root.join("real")).unwrap();
-        std::fs::write(root.join("real/file"), b"relative").unwrap();
+        fs::create_dir(root.join("real")).unwrap();
+        fs::write(root.join("real/file"), b"relative").unwrap();
         symlink(root.join("real"), root.join("linked")).unwrap();
+
         let status = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -345,19 +461,29 @@ mod tests {
 
     #[test]
     fn strict_opens_only_need_search_permission_on_parent_directories() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temporary = tempfile::tempdir().unwrap();
         let parent = temporary.path().canonicalize().unwrap().join("search-only");
-        std::fs::create_dir(&parent).unwrap();
-        let path = parent.join("image.raw");
-        std::fs::write(&path, b"disk").unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o111)).unwrap();
+        fs::create_dir(&parent).unwrap();
 
-        let ordinary = open(&path, HostFileKind::Disk, false, false);
-        let strict = open(&path, HostFileKind::Disk, false, true);
+        let path = parent.join("image.raw");
+        fs::write(&path, b"disk").unwrap();
+        fs::set_permissions(&parent, Permissions::from_mode(0o111)).unwrap();
+
+        let ordinary = open(
+            &path,
+            HostFileKind::Disk,
+            HostFileAccess::ReadOnly,
+            HostFilePolicy::Standard,
+        );
+        let strict = open(
+            &path,
+            HostFileKind::Disk,
+            HostFileAccess::ReadOnly,
+            HostFilePolicy::Strict,
+        );
+
         // Restore permissions before any assertion so the fixture can always be removed.
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&parent, Permissions::from_mode(0o700)).unwrap();
 
         assert!(ordinary.is_ok(), "ordinary open failed: {ordinary:?}");
         let mut file = strict.unwrap();
