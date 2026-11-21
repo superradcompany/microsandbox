@@ -327,6 +327,7 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 | Field | Default | Description |
 |-------|---------|-------------|
+| `bounded_patch_sources` | `false` | Stage host patch payloads before applying the batch. Limit each batch to 64 MiB, 4096 entries, and 32 directory levels; allow two staged batches per process. Reject special files and any symlink in a copy source path, including parent directories such as `/tmp`, `/var`, and `/etc` on macOS. Unix only; Linux needs kernel 5.6 or newer and `/proc`. |
 | `block_writeback` | `{ "mode": "auto" }` | Buffered host writeback containment and live pressure sharing on Linux. Pool pressure never rejects sandbox creation; unconfigured `auto` is a no-op on other hosts. |
 | `placement_profiles` | `{}` | Host-owned named CPU and NUMA placement profiles selectable by sandboxes |
 
