@@ -939,6 +939,16 @@ fn root_name(name: &str, flat: bool, format: &str) -> bool {
     if format == "raw" {
         return name == if flat { "rootfs.raw" } else { "upper.ext4" };
     }
+    // A 0.7.6 fork links the parent's last sealed qcow2 layer into the child under its journal
+    // layer id.
+    if format == "qcow2"
+        && name
+            .strip_suffix(".qcow2")
+            .and_then(|s| s.strip_prefix("layer_"))
+            .is_some_and(hex32)
+    {
+        return true;
+    }
     let prefix = if flat { "root-" } else { "upper-" };
     let Some(stem) = name
         .strip_prefix(prefix)

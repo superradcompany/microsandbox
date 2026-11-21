@@ -1229,6 +1229,75 @@ mod tests {
         assert!(report.aliases.is_empty());
     }
 
+    fn push_layer(root: &Path, name: &str, layer: &Path, id: char) {
+        let journal = root.join(name).join("runtime/root-disk.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+        value["layers"].as_array_mut().unwrap().push(serde_json::json!({"layer_id":format!("layer_{}", id.to_string().repeat(32)), "path":layer, "format":"qcow2", "integrity_root":null}));
+        fs::write(&journal, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    /// A 0.7.6 fork links the parent layer into the child under its journal layer id.
+    fn fork_linking_layer(root: &Path, parent_layer: &Path) -> PathBuf {
+        let linked = root
+            .join("child")
+            .join(format!("layer_{}.qcow2", "b".repeat(32)));
+        fs::hard_link(parent_layer, &linked).unwrap();
+        push_layer(root, "child", &linked, 'b');
+        let head = root.join("child/upper-restore-0123456789abcdef.qcow2");
+        fs::write(&head, vec![23; 65536]).unwrap();
+        push_layer(root, "child", &head, 'c');
+        linked
+    }
+
+    #[test]
+    fn fork_linking_sealed_layer_by_layer_id_is_accounted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let rows = [record(1, "parent"), record(2, "child")];
+        let parent = initialize(&root, &rows[0], true);
+        let child = initialize(&root, &rows[1], false);
+        share_base(&root, "parent", "child");
+        let head = root
+            .join("parent")
+            .join(format!("upper-{}.qcow2", "d".repeat(32)));
+        fs::write(&head, vec![24; 65536]).unwrap();
+        push_layer(&root, "parent", &head, 'd');
+        let sealed = root
+            .join("parent")
+            .join(format!("upper-{}.qcow2", "b".repeat(32)));
+        let linked = fork_linking_layer(&root, &sealed);
+        for (current, bindings, peer_path) in [(1, &parent, &linked), (2, &child, &sealed)] {
+            let report =
+                discover(&root, &root.join("volumes"), current, bindings, &rows, &[]).unwrap();
+            assert!(report.reasons.is_empty(), "{:?}", report.reasons);
+            assert!(report.aliases.iter().any(|alias| alias.path == *peer_path));
+        }
+    }
+
+    #[test]
+    fn fork_linking_writable_head_by_layer_id_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let rows = [record(1, "parent"), record(2, "child")];
+        initialize(&root, &rows[0], true);
+        let child = initialize(&root, &rows[1], false);
+        share_base(&root, "parent", "child");
+        let head = root
+            .join("parent")
+            .join(format!("upper-{}.qcow2", "b".repeat(32)));
+        fork_linking_layer(&root, &head);
+        let report = discover(&root, &root.join("volumes"), 2, &child, &rows, &[]).unwrap();
+        assert!(
+            report
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("unsealed")),
+            "{:?}",
+            report.reasons
+        );
+    }
+
     #[test]
     fn protected_peer_writable_original_base_is_still_a_writer() {
         let temp = tempfile::tempdir().unwrap();
