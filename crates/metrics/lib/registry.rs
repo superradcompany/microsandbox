@@ -394,21 +394,24 @@ impl MetricsRegistry {
     /// registry changes only this private copy, never the source file.
     #[cfg(unix)]
     pub fn read_file_snapshot(file: &File) -> MetricsResult<Self> {
+        const SEQ_OFFSET: usize = std::mem::offset_of!(Slot, seq);
+        const PREFIX_LEN: usize = SEQ_OFFSET + std::mem::size_of::<AtomicU64>();
         let length = registry_size(1);
         for _ in 0..4 {
             if file.metadata()?.len() != length as u64 {
                 return Err(MetricsError::Custom("invalid file registry size".into()));
             }
-            let mut before = [0u8; 24];
+            let mut before = [0u8; PREFIX_LEN];
             file.read_exact_at(&mut before, HEADER_SIZE as u64)?;
-            if u64::from_ne_bytes(before[16..24].try_into().unwrap()) & 1 != 0 {
+            let seq = u64::from_ne_bytes(before[SEQ_OFFSET..PREFIX_LEN].try_into().unwrap());
+            if seq & 1 != 0 {
                 continue;
             }
             let mut bytes = vec![0u8; length];
             file.read_exact_at(&mut bytes, 0)?;
-            let mut after = [0u8; 24];
+            let mut after = [0u8; PREFIX_LEN];
             file.read_exact_at(&mut after, HEADER_SIZE as u64)?;
-            if before != after || before != bytes[HEADER_SIZE..HEADER_SIZE + 24] {
+            if before != after || before != bytes[HEADER_SIZE..HEADER_SIZE + PREFIX_LEN] {
                 continue;
             }
             // The mapping is anonymous and private. Only the bounded byte copy is
