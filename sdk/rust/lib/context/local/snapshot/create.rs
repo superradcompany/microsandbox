@@ -2210,6 +2210,12 @@ fn validate_snapshot_name(name: &str) -> MicrosandboxResult<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckpointDurability {
+    Durable,
+    Transient,
+}
+
 /// Materialize only the members of a published checkpoint closure.
 ///
 /// The immutable root is copied last, so an interrupted copy never looks like a published
@@ -2220,7 +2226,12 @@ pub(crate) fn materialize_checkpoint_closure(
     destination: &Path,
     copy_files: bool,
 ) -> std::io::Result<()> {
-    materialize_checkpoint_tree(source, destination, true, copy_files)
+    materialize_checkpoint_tree(
+        source,
+        destination,
+        CheckpointDurability::Durable,
+        copy_files,
+    )
 }
 
 /// Construction-only closure: retain independent links, but do not make disposable staging
@@ -2230,7 +2241,12 @@ pub(crate) fn stage_checkpoint_closure(
     destination: &Path,
     copy_files: bool,
 ) -> std::io::Result<()> {
-    materialize_checkpoint_tree(source, destination, false, copy_files)
+    materialize_checkpoint_tree(
+        source,
+        destination,
+        CheckpointDurability::Transient,
+        copy_files,
+    )
 }
 
 /// Retain immutable local capture files without copying RAM or publishing a snapshot.
@@ -2278,7 +2294,7 @@ fn link_local_branch_member(source: &Path, destination: &Path) -> std::io::Resul
 fn materialize_checkpoint_tree(
     source: &Path,
     destination: &Path,
-    durable: bool,
+    durability: CheckpointDurability,
     copy_files: bool,
 ) -> std::io::Result<()> {
     let source_metadata = std::fs::symlink_metadata(source)?;
@@ -2297,7 +2313,7 @@ fn materialize_checkpoint_tree(
                 copy_checkpoint_directory(
                     &source_member,
                     &destination.join(member),
-                    durable,
+                    durability,
                     copy_files,
                 )?;
             }
@@ -2317,26 +2333,30 @@ fn materialize_checkpoint_tree(
         &destination.join("checkpoint.json"),
         copy_files,
     )?;
-    if durable {
+
+    if durability == CheckpointDurability::Durable {
         sync_directory(destination)?;
     }
+
     Ok(())
 }
 
 fn copy_checkpoint_directory(
     source: &Path,
     destination: &Path,
-    durable: bool,
+    durability: CheckpointDurability,
     copy_files: bool,
 ) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
+
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let metadata = std::fs::symlink_metadata(&source_path)?;
+
         if metadata.file_type().is_dir() {
-            copy_checkpoint_directory(&source_path, &destination_path, durable, copy_files)?;
+            copy_checkpoint_directory(&source_path, &destination_path, durability, copy_files)?;
         } else if metadata.file_type().is_file() {
             copy_checkpoint_file(&source_path, &destination_path, copy_files)?;
         } else {
@@ -2349,9 +2369,11 @@ fn copy_checkpoint_directory(
             ));
         }
     }
-    if durable {
+
+    if durability == CheckpointDurability::Durable {
         sync_directory(destination)?;
     }
+
     Ok(())
 }
 

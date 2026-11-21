@@ -290,8 +290,8 @@ pub(crate) async fn adopt_local_branch_for_child(
         let target_path = target.clone();
         let worker_storage = child_stage.clone();
         tokio::task::spawn_blocking(move || {
-            let _storage = worker_storage;
-            if unchanged_header && !_storage.copy_snapshot_files {
+            let storage = worker_storage;
+            if unchanged_header && !storage.copy_snapshot_files {
                 std::fs::hard_link(&source_path, &target_path)
             } else {
                 // Relocate conflicting names without mutating a shared captured inode.
@@ -299,7 +299,7 @@ pub(crate) async fn adopt_local_branch_for_child(
                     &source_path,
                     &target_path,
                     previous.as_deref(),
-                    _storage.copy_snapshot_files,
+                    storage.copy_snapshot_files,
                 )
             }
         })
