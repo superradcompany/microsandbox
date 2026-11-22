@@ -467,7 +467,7 @@ impl LocalContext {
                 runtime.msb_path,
                 runtime.libkrunfw_path,
                 image,
-                self.config().runtime.bounded_patch_sources,
+                self.patch_source_staging().clone(),
             )
             .await?;
             config = prepared;
@@ -880,7 +880,7 @@ impl LocalContext {
                                 &config.spec.patches,
                                 &layer_erofs_paths,
                                 &preparation.at(&flat_patch_spool),
-                                self.config().runtime.bounded_patch_sources,
+                                self.patch_source_staging(),
                             ),
                         )
                         .await
@@ -910,7 +910,7 @@ impl LocalContext {
                                 build_upper_tree(
                                     &config.spec.patches,
                                     &layer_erofs_paths,
-                                    self.config().runtime.bounded_patch_sources,
+                                    self.patch_source_staging(),
                                 ),
                             )
                             .await?,
@@ -1071,7 +1071,7 @@ impl LocalContext {
                     apply_patches(
                         &config.spec.image,
                         &config.spec.patches,
-                        self.config().runtime.bounded_patch_sources,
+                        self.patch_source_staging(),
                     )
                     .await?;
                 }

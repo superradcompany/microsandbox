@@ -256,9 +256,9 @@ fn mode(file: &File, fallback: u32) -> io::Result<u32> {
 async fn write_edit_stream(
     scratch: std::path::PathBuf,
     patches: Vec<Patch>,
-    bounded_patch_sources: bool,
+    patch_sources: &patch_sources::StagingPolicy,
 ) -> MicrosandboxResult<patch_sources::CapacityGuard> {
-    let prepared = patch_sources::prepare(&patches, bounded_patch_sources).await?;
+    let prepared = patch_sources::prepare(&patches, patch_sources).await?;
     tokio::task::spawn_blocking(
         move || -> MicrosandboxResult<patch_sources::CapacityGuard> {
             microsandbox_utils::private_file::create_private_directory(&scratch)?;
@@ -271,7 +271,7 @@ async fn write_edit_stream(
             }
             stream.manifest.flush()?;
             stream.payload.flush()?;
-            // Release the staged source copy now, but retain the process-wide batch
+            // Release the staged source copy now, but retain the batch staging
             // permit until the caller removes `scratch/payload`.
             Ok(prepared.into_capacity_guard())
         },
@@ -286,21 +286,21 @@ pub(super) async fn apply(
     msb: std::path::PathBuf,
     firmware: std::path::PathBuf,
     image: super::ResolvedOciImage,
-    bounded_patch_sources: bool,
+    patch_sources: patch_sources::StagingPolicy,
 ) -> MicrosandboxResult<(SandboxConfig, RestoreStaging, super::ResolvedOciImage)> {
     // Keep the reservation and its disk leases until the VMM has really exited, even
     // if the original create future is dropped. Scratch is never published with the child.
     tokio::spawn(async move {
         let patches = std::mem::take(&mut config.spec.patches);
         // Declare the capacity guard before `temp` so `temp` is always removed before
-        // releasing the two-batch permit, including on early error or cancellation.
+        // releasing the staging permit, including on early error or cancellation.
         #[allow(unused_assignments)]
         let mut _capacity: Option<patch_sources::CapacityGuard> = None;
         let temp = tempfile::Builder::new()
             .prefix(".editor-")
             .tempdir_in(stage.path())?;
         let scratch = temp.path().join("guest");
-        _capacity = Some(write_edit_stream(scratch.clone(), patches, bounded_patch_sources).await?);
+        _capacity = Some(write_edit_stream(scratch.clone(), patches, &patch_sources).await?);
         serde_json::to_writer(
             File::create_new(temp.path().join("chain"))?,
             &config.snapshot_upper_layers,
@@ -383,21 +383,23 @@ mod tests {
         }];
 
         let bounded_scratch = root.join("bounded-symlink");
+        let enabled = patch_sources::StagingPolicy::enabled_default();
         assert!(
-            write_edit_stream(bounded_scratch.clone(), patches.clone(), true)
+            write_edit_stream(bounded_scratch.clone(), patches.clone(), &enabled)
                 .await
                 .is_err()
         );
         assert!(!bounded_scratch.exists());
 
         let unbounded_scratch = root.join("unbounded-symlink");
-        write_edit_stream(unbounded_scratch, patches.clone(), false)
+        let disabled = patch_sources::StagingPolicy::disabled();
+        write_edit_stream(unbounded_scratch, patches.clone(), &disabled)
             .await
             .unwrap();
 
         std::fs::remove_file(source.join("alias")).unwrap();
         let clean_scratch = root.join("bounded-clean");
-        write_edit_stream(clean_scratch.clone(), patches.clone(), true)
+        write_edit_stream(clean_scratch.clone(), patches.clone(), &enabled)
             .await
             .unwrap();
         let manifest = std::fs::read_to_string(clean_scratch.join("edits")).unwrap();
@@ -417,7 +419,7 @@ mod tests {
             .set_len(65 * 1024 * 1024)
             .unwrap();
         let oversized_scratch = root.join("bounded-oversized");
-        let error = write_edit_stream(oversized_scratch.clone(), patches, true)
+        let error = write_edit_stream(oversized_scratch.clone(), patches, &enabled)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("byte budget"), "{error}");

@@ -86,6 +86,7 @@ struct LocalContextInner {
     control_sessions: control::ControlSessions,
     metrics_lookup: metrics_lookup::MetricsLookup,
     pub(crate) metrics_registry_names: Vec<String>,
+    patch_source_staging: crate::sandbox::patch_sources::StagingPolicy,
 }
 
 /// Fluent builder for [`LocalContext`]. Construct via [`LocalContext::builder`].
@@ -142,6 +143,9 @@ impl LocalContext {
         {
             metrics_registry_names.push(legacy.clone());
         }
+        let patch_source_staging = crate::sandbox::patch_sources::StagingPolicy::from_config(
+            &config.resolved_config().runtime.patch_sources,
+        );
         Self {
             inner: Arc::new(LocalContextInner {
                 config,
@@ -151,8 +155,13 @@ impl LocalContext {
                 control_sessions: control::ControlSessions::default(),
                 metrics_lookup: metrics_lookup::MetricsLookup::default(),
                 metrics_registry_names,
+                patch_source_staging,
             }),
         }
+    }
+
+    pub(crate) fn patch_source_staging(&self) -> &crate::sandbox::patch_sources::StagingPolicy {
+        &self.inner.patch_source_staging
     }
 
     /// Eagerly construct a `LocalContext` from `~/.microsandbox/config.json`,

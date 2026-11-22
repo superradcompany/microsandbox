@@ -6,10 +6,11 @@ use std::collections::HashMap;
 use std::fs::Permissions;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::num::NonZero;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf, absolute};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 #[cfg(not(target_os = "linux"))]
 use cap_primitives::fs::FollowSymlinks;
@@ -23,22 +24,21 @@ use tempfile::{Builder, TempDir};
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::config::PatchSourcesConfig;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 mod files;
 
 //--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-const MAX_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_ENTRIES: usize = 4096;
-const MAX_DEPTH: usize = 32;
-static CAPACITY: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
-
-//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Runtime policy and concurrency limiter for host-copy patch staging.
+#[derive(Clone, Debug)]
+pub(crate) struct StagingPolicy {
+    config: PatchSourcesConfig,
+    capacity: Option<Arc<Semaphore>>,
+}
 
 #[derive(Default)]
 pub(crate) struct Prepared {
@@ -48,7 +48,7 @@ pub(crate) struct Prepared {
     capacity: Option<OwnedSemaphorePermit>,
 }
 
-/// Retains the process-wide patch staging capacity permit after staged files are consumed.
+/// Retains the staging capacity permit after staged files are consumed.
 #[derive(Debug)]
 pub(crate) struct CapacityGuard {
     _permit: Option<OwnedSemaphorePermit>,
@@ -58,11 +58,44 @@ struct Budget {
     modes: HashMap<PathBuf, u32>,
     bytes: u64,
     entries: usize,
+    max_bytes: Option<u64>,
+    max_entries: Option<usize>,
+    max_depth: Option<usize>,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl StagingPolicy {
+    pub(crate) fn from_config(config: &PatchSourcesConfig) -> Self {
+        let capacity = if config.enabled {
+            config
+                .max_concurrent_batches
+                .map(|limit| Arc::new(Semaphore::new(limit.get())))
+        } else {
+            None
+        };
+
+        Self {
+            config: config.clone(),
+            capacity,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disabled() -> Self {
+        Self::from_config(&PatchSourcesConfig::default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enabled_default() -> Self {
+        Self::from_config(&PatchSourcesConfig {
+            enabled: true,
+            ..PatchSourcesConfig::default()
+        })
+    }
+}
 
 impl Prepared {
     pub(crate) fn mode(&self, path: &Path) -> Option<u32> {
@@ -84,14 +117,29 @@ impl Prepared {
 }
 
 impl Budget {
+    fn from_config(config: &PatchSourcesConfig) -> Self {
+        Self {
+            modes: HashMap::new(),
+            bytes: 0,
+            entries: 0,
+            max_bytes: config.max_bytes.map(NonZero::get),
+            max_entries: config.max_entries.map(NonZero::get),
+            max_depth: config.max_depth.map(NonZero::get),
+        }
+    }
+
     fn add(&mut self, bytes: u64) -> io::Result<()> {
         self.bytes = self
             .bytes
             .checked_add(bytes)
             .ok_or_else(|| io::Error::other("copy byte budget overflow"))?;
 
-        if self.bytes > MAX_BYTES {
-            return Err(io::Error::other("copy sources exceed 64 MiB"));
+        if let Some(max_bytes) = self.max_bytes
+            && self.bytes > max_bytes
+        {
+            return Err(io::Error::other(format!(
+                "copy sources exceed {max_bytes} bytes"
+            )));
         }
 
         Ok(())
@@ -100,20 +148,30 @@ impl Budget {
     fn entry(&mut self, depth: usize) -> io::Result<()> {
         self.entries += 1;
 
-        if self.entries > MAX_ENTRIES || depth > MAX_DEPTH {
-            return Err(io::Error::other("copy entry or depth budget exceeded"));
+        if let Some(max_entries) = self.max_entries
+            && self.entries > max_entries
+        {
+            return Err(io::Error::other("copy entry budget exceeded"));
+        }
+
+        if let Some(max_depth) = self.max_depth
+            && depth > max_depth
+        {
+            return Err(io::Error::other("copy depth budget exceeded"));
         }
 
         Ok(())
     }
 
-    fn file(&mut self, file: File, destination: &Path) -> io::Result<()> {
+    fn file(&mut self, mut file: File, destination: &Path) -> io::Result<()> {
         let metadata = file.metadata()?;
         if !metadata.is_file() {
             return Err(io::Error::other("copy source is not regular"));
         }
 
-        if metadata.len() > MAX_BYTES - self.bytes {
+        if let Some(max_bytes) = self.max_bytes
+            && metadata.len() > max_bytes - self.bytes
+        {
             return Err(io::Error::other(
                 "copy source exceeds remaining byte budget",
             ));
@@ -125,7 +183,10 @@ impl Budget {
             .open(destination)?;
 
         // A concurrent writer may grow the file after fstat. Bound the actual read too.
-        let count = io::copy(&mut file.take(MAX_BYTES - self.bytes + 1), &mut output)?;
+        let count = match self.max_bytes {
+            Some(max_bytes) => io::copy(&mut file.take(max_bytes - self.bytes + 1), &mut output)?,
+            None => io::copy(&mut file, &mut output)?,
+        };
         self.add(count)?;
         output.flush()?;
 
@@ -278,22 +339,27 @@ impl Drop for Prepared {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxResult<Prepared> {
-    if !enabled {
+pub(crate) async fn prepare(
+    patches: &[Patch],
+    policy: &StagingPolicy,
+) -> MicrosandboxResult<Prepared> {
+    if !policy.config.enabled {
         return Ok(Prepared::default());
     }
 
-    let mut budget = Budget {
-        bytes: 0,
-        entries: 0,
-        modes: HashMap::new(),
+    let mut budget = Budget::from_config(&policy.config);
+    let initial_cap = match budget.max_entries {
+        Some(max_entries) => patches.len().min(max_entries),
+        None => patches.len(),
     };
-    let mut sources = Vec::with_capacity(patches.len().min(MAX_ENTRIES));
+    let mut sources = Vec::with_capacity(initial_cap);
+    let mut has_copy_sources = false;
 
     for patch in patches {
         budget.entry(0).map_err(source_failure)?;
         let source = match patch {
             Patch::CopyFile { src, .. } | Patch::CopyDir { src, .. } => {
+                has_copy_sources = true;
                 let resolved = absolute(src)
                     .map_err(|err| path_error(src, err))
                     .map_err(source_failure)?;
@@ -312,11 +378,20 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
         sources.push(source);
     }
 
-    let permit = CAPACITY
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| MicrosandboxError::PatchFailed(error.to_string()))?;
+    if !has_copy_sources {
+        return Ok(Prepared::default());
+    }
+
+    let permit = match &policy.capacity {
+        Some(semaphore) => Some(
+            semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|error| MicrosandboxError::PatchFailed(error.to_string()))?,
+        ),
+        None => None,
+    };
 
     // Bound inline payloads and acquire capacity before cloning their bytes.
     // Resolve host paths before the wait without canonicalizing away symlinks.
@@ -356,7 +431,7 @@ pub(crate) async fn prepare(patches: &[Patch], enabled: bool) -> MicrosandboxRes
             modes: budget.modes,
             patches: Some(prepared),
             stage: Some(stage),
-            capacity: Some(permit),
+            capacity: permit,
         })
     })
     .await
@@ -412,11 +487,10 @@ mod tests {
         // make the newly owned file unreadable to this process.
         fs::set_permissions(&source_path, Permissions::from_mode(0o040)).unwrap();
         let destination = source.path().join("staged");
-        let mut budget = Budget {
-            modes: HashMap::new(),
-            bytes: 0,
-            entries: 0,
-        };
+        let mut budget = Budget::from_config(&PatchSourcesConfig {
+            enabled: true,
+            ..PatchSourcesConfig::default()
+        });
         budget.file(file, &destination).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"group readable");
         assert_eq!(budget.modes[&destination], 0o040);
@@ -437,7 +511,8 @@ mod tests {
             mode: None,
             replace: false,
         }];
-        let result = prepare(&patches, true).await;
+        let policy = StagingPolicy::enabled_default();
+        let result = prepare(&patches, &policy).await;
         fs::set_permissions(root.join("search-only"), Permissions::from_mode(0o700)).unwrap();
         let prepared = result.unwrap();
         let [Patch::CopyFile { src, .. }] = prepared.patches(&patches) else {
@@ -457,7 +532,8 @@ mod tests {
             mode: None,
             replace: false,
         }];
-        let prepared = prepare(&patches, true).await.unwrap();
+        let policy = StagingPolicy::enabled_default();
+        let prepared = prepare(&patches, &policy).await.unwrap();
         fs::write(&file, b"replacement").unwrap();
         let [Patch::CopyFile { src, .. }] = prepared.patches(&patches) else {
             panic!("copy patch missing")
@@ -476,6 +552,7 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
         let socket = source.join("socket");
         let _listener = UnixListener::bind(&socket).unwrap();
+        let policy = StagingPolicy::enabled_default();
         let copy_file = |src: &Path| Patch::CopyFile {
             src: src.to_path_buf(),
             dst: "/copied".into(),
@@ -498,7 +575,7 @@ mod tests {
             });
             std::thread::sleep(Duration::from_millis(100));
 
-            let result = prepare(std::slice::from_ref(&patch), true).await;
+            let result = prepare(std::slice::from_ref(&patch), &policy).await;
             let opened_by_staging = wait.recv_timeout(Duration::from_millis(200)).is_ok();
             let _reader = File::options()
                 .read(true)
@@ -515,7 +592,7 @@ mod tests {
             assert!(message.contains("not a regular file"), "{message}");
         }
 
-        let Err(error) = prepare(&[copy_file(&socket)], true).await else {
+        let Err(error) = prepare(&[copy_file(&socket)], &policy).await else {
             panic!("socket was staged");
         };
         let message = error.to_string();
@@ -523,7 +600,7 @@ mod tests {
         assert!(message.contains("not a regular file"), "{message}");
 
         fs::remove_file(&socket).unwrap();
-        let Err(error) = prepare(&[copy_dir], true).await else {
+        let Err(error) = prepare(&[copy_dir], &policy).await else {
             panic!("FIFO entry was staged");
         };
         let message = error.to_string();
@@ -550,7 +627,8 @@ mod tests {
             mode: None,
             replace: false,
         }];
-        let prepared = runtime.block_on(prepare(&patches, true)).unwrap();
+        let policy = StagingPolicy::enabled_default();
+        let prepared = runtime.block_on(prepare(&patches, &policy)).unwrap();
         let [Patch::CopyFile { src, .. }] = prepared.patches(&patches) else {
             panic!("copy patch missing")
         };
@@ -576,5 +654,135 @@ mod tests {
             }
             panic!("staged batch was not removed");
         });
+    }
+
+    #[tokio::test]
+    async fn custom_and_unbounded_limits_apply_independently() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let nested = root.join("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("data");
+        fs::write(&file, b"0123456789").unwrap();
+
+        let patches = [Patch::CopyDir {
+            src: root.join("a"),
+            dst: "/a".into(),
+            replace: false,
+        }];
+
+        // Tight byte cap rejects a 10-byte file; disabling max_bytes allows it.
+        let tight_bytes = StagingPolicy::from_config(&PatchSourcesConfig {
+            enabled: true,
+            max_bytes: NonZero::new(5),
+            ..PatchSourcesConfig::default()
+        });
+        assert!(prepare(&patches, &tight_bytes).await.is_err());
+
+        let unbounded_bytes = StagingPolicy::from_config(&PatchSourcesConfig {
+            enabled: true,
+            max_bytes: None,
+            ..PatchSourcesConfig::default()
+        });
+        assert!(prepare(&patches, &unbounded_bytes).await.is_ok());
+
+        // Tight depth cap rejects a/b/data (depth 2); disabling max_depth allows it.
+        let tight_depth = StagingPolicy::from_config(&PatchSourcesConfig {
+            enabled: true,
+            max_depth: NonZero::new(1),
+            ..PatchSourcesConfig::default()
+        });
+        assert!(prepare(&patches, &tight_depth).await.is_err());
+
+        let unbounded_depth = StagingPolicy::from_config(&PatchSourcesConfig {
+            enabled: true,
+            max_depth: None,
+            ..PatchSourcesConfig::default()
+        });
+        assert!(prepare(&patches, &unbounded_depth).await.is_ok());
+
+        // Tight entry cap rejects the batch; disabling max_entries allows it.
+        let tight_entries = StagingPolicy::from_config(&PatchSourcesConfig {
+            enabled: true,
+            max_entries: NonZero::new(2),
+            ..PatchSourcesConfig::default()
+        });
+        assert!(prepare(&patches, &tight_entries).await.is_err());
+
+        let unbounded_entries = StagingPolicy::from_config(&PatchSourcesConfig {
+            enabled: true,
+            max_entries: None,
+            ..PatchSourcesConfig::default()
+        });
+        assert!(prepare(&patches, &unbounded_entries).await.is_ok());
+
+        // Disabling max_concurrent_batches allows multiple batches to stay live at once.
+        let unbounded_concurrency = StagingPolicy::from_config(&PatchSourcesConfig {
+            enabled: true,
+            max_concurrent_batches: None,
+            ..PatchSourcesConfig::default()
+        });
+        let first = prepare(&patches, &unbounded_concurrency).await.unwrap();
+        let second = prepare(&patches, &unbounded_concurrency).await.unwrap();
+        let third = prepare(&patches, &unbounded_concurrency).await.unwrap();
+        drop((first, second, third));
+    }
+
+    #[tokio::test]
+    async fn inline_only_batches_do_not_consume_staging_permits() {
+        let fixture = tempfile::tempdir().unwrap();
+        let file = fixture.path().canonicalize().unwrap().join("data");
+        fs::write(&file, b"hello").unwrap();
+
+        let policy = StagingPolicy::from_config(&PatchSourcesConfig {
+            enabled: true,
+            max_bytes: NonZero::new(10),
+            max_concurrent_batches: NonZero::new(1),
+            ..PatchSourcesConfig::default()
+        });
+
+        // Hold the sole staging permit with a host-copy batch.
+        let _held = prepare(
+            &[Patch::CopyFile {
+                src: file,
+                dst: "/data".into(),
+                mode: None,
+                replace: false,
+            }],
+            &policy,
+        )
+        .await
+        .unwrap();
+
+        // An inline-only batch must still succeed immediately without waiting for a permit,
+        // while still enforcing the configured byte budget.
+        let inline_ok = tokio::time::timeout(
+            Duration::from_millis(200),
+            prepare(
+                &[Patch::Text {
+                    path: "/note".into(),
+                    content: "short".into(),
+                    mode: None,
+                    replace: true,
+                }],
+                &policy,
+            ),
+        )
+        .await
+        .expect("inline batch blocked on host-copy staging permit")
+        .unwrap();
+        assert!(inline_ok.stage.is_none());
+
+        let inline_too_large = prepare(
+            &[Patch::Text {
+                path: "/note".into(),
+                content: "exceeds-ten-bytes".into(),
+                mode: None,
+                replace: true,
+            }],
+            &policy,
+        )
+        .await;
+        assert!(inline_too_large.is_err());
     }
 }

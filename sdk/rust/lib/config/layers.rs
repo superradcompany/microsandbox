@@ -52,9 +52,9 @@ pub(crate) struct ConfigLayers<P> {
 impl GlobalConfig {
     /// Validate host runtime settings this platform cannot honor.
     pub(crate) fn validate_runtime(&self) -> MicrosandboxResult<()> {
-        if cfg!(not(unix)) && self.runtime.bounded_patch_sources {
+        if cfg!(not(unix)) && self.runtime.patch_sources.enabled {
             return Err(MicrosandboxError::InvalidConfig(
-                "runtime.bounded_patch_sources is supported only on Unix hosts".into(),
+                "runtime.patch_sources.enabled is supported only on Unix hosts".into(),
             ));
         }
         Ok(())
@@ -632,10 +632,10 @@ mod tests {
     }
 
     #[test]
-    fn local_preparation_accepts_bounded_patch_sources_only_on_unix() {
+    fn local_preparation_accepts_patch_sources_only_on_unix() {
         for (user, managed) in [
-            (r#"{"runtime":{"bounded_patch_sources":true}}"#, "{}"),
-            ("{}", r#"{"runtime":{"bounded_patch_sources":true}}"#),
+            (r#"{"runtime":{"patch_sources":{"enabled":true}}}"#, "{}"),
+            ("{}", r#"{"runtime":{"patch_sources":{"enabled":true}}}"#),
         ] {
             let layers = BackendConfig::new(
                 serde_json::from_str(user).unwrap(),
@@ -644,21 +644,63 @@ mod tests {
             let result = layers.prepare_for_local_backend(Default::default());
 
             #[cfg(unix)]
-            assert!(
-                result
-                    .unwrap()
-                    .resolved_config()
-                    .runtime
-                    .bounded_patch_sources
-            );
+            {
+                let prepared = result.unwrap();
+                let patch_sources = &prepared.resolved_config().runtime.patch_sources;
+                assert!(patch_sources.enabled);
+                assert_eq!(
+                    patch_sources.max_bytes.map(std::num::NonZero::get),
+                    Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_BYTES)
+                );
+                assert_eq!(
+                    patch_sources.max_entries.map(std::num::NonZero::get),
+                    Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_ENTRIES)
+                );
+                assert_eq!(
+                    patch_sources.max_depth.map(std::num::NonZero::get),
+                    Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_DEPTH)
+                );
+                assert_eq!(
+                    patch_sources
+                        .max_concurrent_batches
+                        .map(std::num::NonZero::get),
+                    Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_CONCURRENT_BATCHES)
+                );
+            }
             #[cfg(not(unix))]
             assert!(
                 result
                     .err()
                     .unwrap()
                     .to_string()
-                    .contains("runtime.bounded_patch_sources is supported only on Unix")
+                    .contains("runtime.patch_sources.enabled is supported only on Unix")
             );
+        }
+
+        #[cfg(unix)]
+        {
+            let layers = BackendConfig::new(
+                serde_json::from_str(
+                    r#"{"runtime":{"patch_sources":{"enabled":true,"max_bytes":null,"max_entries":1024,"max_concurrent_batches":null}}}"#,
+                )
+                .unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            );
+            let prepared = layers
+                .prepare_for_local_backend(Default::default())
+                .unwrap();
+            let patch_sources = &prepared.resolved_config().runtime.patch_sources;
+            assert!(patch_sources.enabled);
+            assert_eq!(patch_sources.max_bytes, None);
+            assert_eq!(
+                patch_sources.max_entries.map(std::num::NonZero::get),
+                Some(1024)
+            );
+            assert_eq!(
+                patch_sources.max_depth.map(std::num::NonZero::get),
+                Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_DEPTH)
+            );
+            assert_eq!(patch_sources.max_concurrent_batches, None);
         }
     }
 
