@@ -1,12 +1,35 @@
 //! Conversion between owned-generation metadata and the Windows ADS/sidecar stat store.
 
+use std::os::windows::{
+    fs::FileExt,
+    io::{AsRawHandle, FromRawHandle},
+};
+
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT,
+    FILE_SYNCHRONOUS_IO_NONALERT, NTCREATEFILE_CREATE_DISPOSITION, NtCreateFile,
+};
+use windows_sys::Win32::Foundation::{
+    ERROR_DELETE_PENDING, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError,
+    STATUS_DELETE_PENDING, UNICODE_STRING,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, ExtendedFileIdType, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_ID_INFO,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, OpenFileById,
+};
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
 use super::*;
 
-use std::os::windows::{fs::FileExt, io::AsRawHandle};
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
 
-use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_READ_ATTRIBUTES, GetFileInformationByHandle,
-};
+/// `IO_STATUS_BLOCK.Information` after NtCreateFile created the file.
+const FILE_CREATED: usize = 2;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -32,31 +55,75 @@ impl PassthroughFs {
         Ok(stat)
     }
 
-    /// Retain the inode-scoped metadata stream alongside an unlinked file.
-    /// The caller has either validated the live path or just privately materialized it.
+    /// Retain the inode-scoped metadata stream alongside an unlinked file,
+    /// and return it with the metadata it holds. The stream is opened
+    /// relative to `file`, which the caller has checked holds the inode's
+    /// object, never by path: a host rename-over of the name would otherwise
+    /// read, or create, the replacing file's stream. A file without a stream
+    /// gets one holding `initial`.
+    ///
+    /// Returns `None` when the store does not follow the file, or when the
+    /// file has no name left, so its metadata can only be kept in memory.
     pub(super) fn pin_owned_stat(
         &self,
-        path: &Path,
-        current: OverrideStat,
-    ) -> io::Result<Option<File>> {
+        file: &File,
+        initial: OverrideStat,
+    ) -> io::Result<Option<(File, OverrideStat)>> {
         if !self.stat_follows_file() {
             return Ok(None);
         }
-        let path = ads_override_path(path);
-        match read_override_stream(&path) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                write_override_stream(&path, current)?
+
+        // A handle opened through a name the host has since replaced can no
+        // longer open the file's streams (they report delete pending), so
+        // they are opened through a handle reopened by file ID, which no name
+        // holds. Where that reopen is not available, such as a share without
+        // open by ID, the checked handle itself is used; it then reports
+        // delete pending only if the host replaced its name.
+        let reopened = reopen_by_id(file).ok();
+        let file = reopened.as_ref().unwrap_or(file);
+        let access = if self.cfg.readonly {
+            FILE_GENERIC_READ
+        } else {
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE
+        };
+        match open_override_stream_at(file, access, FILE_OPEN) {
+            Ok((stream, _)) => {
+                let stat = read_stat_file(&stream)?;
+                return Ok(Some((stream, stat)));
             }
-            Err(error) => return Err(error),
+            // The file has no name left: its metadata stays in memory.
+            Err(error) if is_delete_pending(&error) => return Ok(None),
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                return Err(host_error(error));
+            }
+            Err(_) => {}
         }
-        StdOpenOptions::new()
-            .read(true)
-            .write(!self.cfg.readonly)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)
-            .map(Some)
-            .map_err(host_error)
+
+        let (stream, created) = match open_override_stream_at(
+            file,
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_OPEN_IF,
+        ) {
+            Ok(opened) => opened,
+            Err(error) if is_delete_pending(&error) => return Ok(None),
+            Err(error) => return Err(host_error(error)),
+        };
+        let stat = if created {
+            write_stat_file(&stream, initial)?;
+            stream.sync_data().map_err(host_error)?;
+            initial
+        } else {
+            read_stat_file(&stream)?
+        };
+        if self.cfg.readonly {
+            return match open_override_stream_at(file, FILE_GENERIC_READ, FILE_OPEN) {
+                Ok((stream, _)) => Ok(Some((stream, stat))),
+                Err(error) if is_delete_pending(&error) => Ok(None),
+                Err(error) => Err(host_error(error)),
+            };
+        }
+
+        Ok(Some((stream, stat)))
     }
 
     /// Sidecar paths are not inode-scoped like ADS. Tracked hardlink aliases
@@ -110,21 +177,8 @@ pub(super) fn read_retained_stat(data: &InodeData) -> io::Result<Option<Override
     let Some(file) = retained.as_ref() else {
         return Ok(None);
     };
-    let mut bytes = [0; OVERRIDE_SIZE];
-    if file.metadata().map_err(host_error)?.len() != OVERRIDE_SIZE as u64 {
-        return Err(linux_error(LINUX_EIO));
-    }
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let read = file
-            .seek_read(&mut bytes[offset..], offset as u64)
-            .map_err(host_error)?;
-        if read == 0 {
-            return Err(linux_error(LINUX_EIO));
-        }
-        offset += read;
-    }
-    OverrideStat::from_bytes(&bytes).map(Some)
+
+    read_stat_file(file).map(Some)
 }
 
 pub(super) fn write_retained_stat(data: &InodeData, stat: OverrideStat) -> io::Result<bool> {
@@ -132,17 +186,8 @@ pub(super) fn write_retained_stat(data: &InodeData, stat: OverrideStat) -> io::R
     let Some(file) = retained.as_ref() else {
         return Ok(false);
     };
-    let bytes = stat.as_bytes();
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let written = file
-            .seek_write(&bytes[offset..], offset as u64)
-            .map_err(host_error)?;
-        if written == 0 {
-            return Err(linux_error(LINUX_EIO));
-        }
-        offset += written;
-    }
+
+    write_stat_file(file, stat)?;
     Ok(true)
 }
 
@@ -229,6 +274,152 @@ pub(in crate::backends::passthroughfs) fn clear_owned_payload_metadata(
         }
     }
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
+fn read_stat_file(file: &File) -> io::Result<OverrideStat> {
+    let mut bytes = [0; OVERRIDE_SIZE];
+    if file.metadata().map_err(host_error)?.len() != OVERRIDE_SIZE as u64 {
+        return Err(linux_error(LINUX_EIO));
+    }
+
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let read = file
+            .seek_read(&mut bytes[offset..], offset as u64)
+            .map_err(host_error)?;
+        if read == 0 {
+            return Err(linux_error(LINUX_EIO));
+        }
+        offset += read;
+    }
+    OverrideStat::from_bytes(&bytes)
+}
+
+fn write_stat_file(file: &File, stat: OverrideStat) -> io::Result<()> {
+    let bytes = stat.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let written = file
+            .seek_write(&bytes[offset..], offset as u64)
+            .map_err(host_error)?;
+        if written == 0 {
+            return Err(linux_error(LINUX_EIO));
+        }
+        offset += written;
+    }
+    Ok(())
+}
+
+/// Open the metadata stream of the file `file` holds, relative to that
+/// handle. Also returns whether the open created the stream. Errors are the
+/// host's, not yet mapped to Linux.
+fn open_override_stream_at(
+    file: &File,
+    access: u32,
+    disposition: NTCREATEFILE_CREATE_DISPOSITION,
+) -> io::Result<(File, bool)> {
+    let mut name: Vec<u16> = format!(":{ADS_STREAM_NAME}").encode_utf16().collect();
+    // The name is a short constant, so its length in bytes fits.
+    let name_bytes = (name.len() * 2) as u16;
+    let name = UNICODE_STRING {
+        Length: name_bytes,
+        MaximumLength: name_bytes,
+        Buffer: name.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: file.as_raw_handle(),
+        ObjectName: &name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+
+    // SAFETY: every pointer refers to a live local for the duration of the
+    // synchronous call, and `file` keeps the root handle open until it returns.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            access,
+            &attributes,
+            &mut status_block,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            disposition,
+            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status == STATUS_DELETE_PENDING {
+        return Err(io::Error::from_raw_os_error(ERROR_DELETE_PENDING as i32));
+    }
+    if status < 0 {
+        // SAFETY: RtlNtStatusToDosError only maps the status code.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+
+    // SAFETY: NtCreateFile succeeded, so handle is a new handle we now own.
+    let stream = unsafe { File::from_raw_handle(handle) };
+    Ok((stream, status_block.Information == FILE_CREATED))
+}
+
+/// Reopen the file `file` holds by its file ID. Unlike `file`, the new handle
+/// was not opened through a name, so the host replacing that name leaves it
+/// usable. Fails once the file has no name left, and where the filesystem
+/// cannot open files by ID.
+fn reopen_by_id(file: &File) -> io::Result<File> {
+    let mut info = FILE_ID_INFO::default();
+    // SAFETY: file owns a live handle and info is a FILE_ID_INFO of the size passed.
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&mut info as *mut FILE_ID_INFO).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let id = FILE_ID_DESCRIPTOR {
+        dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
+        Type: ExtendedFileIdType,
+        Anonymous: FILE_ID_DESCRIPTOR_0 {
+            ExtendedFileId: info.FileId,
+        },
+    };
+    // SAFETY: file is a live handle on the volume that holds the file, and id
+    // is a complete descriptor; the call only reads both.
+    let handle = unsafe {
+        OpenFileById(
+            file.as_raw_handle(),
+            &id,
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: OpenFileById succeeded, so handle is a new handle we now own.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+fn is_delete_pending(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(ERROR_DELETE_PENDING as i32)
 }
 
 //--------------------------------------------------------------------------------------------------

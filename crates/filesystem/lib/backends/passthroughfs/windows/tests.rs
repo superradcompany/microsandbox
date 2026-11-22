@@ -4083,3 +4083,123 @@ fn an_unlink_after_a_host_replace_does_not_pin_the_hosts_file_to_the_old_inode()
             .unwrap();
     }
 }
+
+/// The host renames another file over a name the guest renames over, inside
+/// the window after the pin found the name still holding the inode's file and
+/// before it pins the file's metadata stream. The replacing file gets no
+/// stream when it had none and keeps its own when it had one. When the old
+/// file keeps another host name, its own stream is pinned (a host-created old
+/// file has none, so the pin creates one) and a chmod through the old file
+/// lands there. When it has no name left, its metadata stays in memory, where
+/// the chmod shows. Either way the guest rename succeeds.
+#[test]
+fn a_host_rename_over_inside_the_pin_leaves_the_replacing_metadata_alone() {
+    for owned in [false, true] {
+        for guest_created in [false, true] {
+            for replacement_stream in [false, true] {
+                for other_link in [false, true] {
+                    let case = format!(
+                        "owned {owned}, guest created {guest_created}, \
+                         replacement stream {replacement_stream}, other link {other_link}"
+                    );
+                    let temp = TempDir::new();
+                    let path = temp.path.join("data");
+                    let alias = temp.path.join("alias");
+                    let host = temp.path.join("host.tmp");
+                    let witness = temp.path.join("witness");
+                    if !guest_created {
+                        std::fs::write(&path, b"old").unwrap();
+                    }
+                    let fs = if owned {
+                        owned_fs_for(&temp.path, crate::OwnedDirectoryCheckpoint::default())
+                    } else {
+                        fs_for(&temp.path)
+                    };
+                    assert_ads_store(&fs);
+                    let owner = Context {
+                        uid: 111,
+                        gid: 222,
+                        pid: 0,
+                    };
+                    let (data, handle) = if guest_created {
+                        create_with(&fs, owner, c"data", 0o640, b"old")
+                    } else {
+                        let data = fs.lookup(context(), ROOT_INODE, c"data").unwrap().inode;
+                        let (handle, _) = fs
+                            .open(context(), data, false, LINUX_O_RDWR as u32)
+                            .unwrap();
+                        (data, handle.unwrap())
+                    };
+                    if other_link {
+                        std::fs::hard_link(&path, &alias).unwrap();
+                    }
+                    std::fs::write(&host, b"host file").unwrap();
+                    std::fs::hard_link(&host, &witness).unwrap();
+                    if replacement_stream {
+                        write_override_stream(
+                            &ads_override_path(&host),
+                            OverrideStat::new(333, 444, S_IFREG | 0o444, 0),
+                        )
+                        .unwrap();
+                    }
+                    let (src, src_handle) = create_with(&fs, context(), c"src", 0o600, b"src");
+                    fs.release(context(), src, 0, src_handle, false, false, None)
+                        .unwrap();
+
+                    let (from, to) = (host.clone(), path.clone());
+                    remove_ops::AFTER_PIN_CHECK.with(|hook| {
+                        *hook.borrow_mut() =
+                            Some(Box::new(move || std::fs::rename(from, to).unwrap()));
+                    });
+                    fs.rename(context(), ROOT_INODE, c"src", ROOT_INODE, c"data", 0)
+                        .unwrap();
+                    let pending = remove_ops::AFTER_PIN_CHECK.with(|hook| hook.borrow_mut().take());
+                    assert!(pending.is_none(), "{case}: the pin hook did not run");
+                    let attr = stat64 {
+                        st_mode: S_IFREG | 0o604,
+                        ..Default::default()
+                    };
+                    fs.setattr(owner, data, attr, Some(handle), SetattrValid::MODE)
+                        .unwrap();
+
+                    let (uid, gid) = if guest_created { (111, 222) } else { (0, 0) };
+                    assert_eq!(std::fs::read(&witness).unwrap(), b"host file", "{case}");
+                    let replacing = read_override_stream(&ads_override_path(&witness));
+                    if replacement_stream {
+                        let stat = replacing.unwrap();
+                        let (stat_uid, stat_gid, stat_mode) = (stat.uid, stat.gid, stat.mode);
+                        assert_eq!(
+                            (stat_uid, stat_gid, stat_mode),
+                            (333, 444, S_IFREG | 0o444),
+                            "{case}"
+                        );
+                    } else {
+                        assert_eq!(
+                            replacing.map(|_| ()).unwrap_err().raw_os_error(),
+                            Some(LINUX_ENOENT),
+                            "{case}: the replacing file got a metadata stream"
+                        );
+                    }
+                    if other_link {
+                        let own = read_override_stream(&ads_override_path(&alias)).unwrap();
+                        let (own_uid, own_gid, own_mode) = (own.uid, own.gid, own.mode);
+                        assert_eq!(
+                            (own_uid, own_gid, own_mode),
+                            (uid, gid, S_IFREG | 0o604),
+                            "{case}: the chmod missed the old file's own stream"
+                        );
+                    }
+                    let (st, _) = fs.getattr(context(), data, Some(handle)).unwrap();
+                    assert_eq!(
+                        (st.st_uid, st.st_gid, st.st_mode),
+                        (uid, gid, S_IFREG | 0o604),
+                        "{case}"
+                    );
+                    assert_eq!(read_all(&fs, data, handle).unwrap(), b"old", "{case}");
+                    fs.release(context(), data, 0, handle, false, false, None)
+                        .unwrap();
+                }
+            }
+        }
+    }
+}
