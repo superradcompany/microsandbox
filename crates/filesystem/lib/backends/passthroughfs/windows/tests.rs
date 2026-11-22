@@ -3554,7 +3554,7 @@ fn dax_namespace_change_keeps_mapping(replace: bool, fail_refresh: bool) {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Guest renames and names cached under the destination
+// Tests: guest renames and names cached under the destination
 //--------------------------------------------------------------------------------------------------
 
 /// How long a test waits for one step of another thread.
