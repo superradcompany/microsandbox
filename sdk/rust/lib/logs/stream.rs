@@ -14,6 +14,7 @@ use futures::Stream;
 use futures::stream;
 use notify::Watcher;
 
+use crate::host_file::HostFilePolicy;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::cursor::{FilePosition, LogCursor};
@@ -68,7 +69,7 @@ pub(crate) struct LogFileConfig {
 /// Per-reader rotation policy. `max_index == 0` denotes a
 /// non-rotating file. `max_index > 0` enables the chain walker.
 struct RotationConfig {
-    host_file_policy: crate::host_file::HostFilePolicy,
+    host_file_policy: HostFilePolicy,
     log_dir: PathBuf,
     filename: String,
     max_index: usize,
@@ -226,7 +227,7 @@ impl LogEngine {
         start: &LogStreamStart,
         until: Option<DateTime<Utc>>,
         follow: bool,
-        host_file_policy: crate::host_file::HostFilePolicy,
+        host_file_policy: HostFilePolicy,
     ) -> MicrosandboxResult<Self> {
         let mode = if follow {
             FollowMode::standalone(&log_dir)?
@@ -255,7 +256,7 @@ impl LogEngine {
         start: &LogStreamStart,
         until: Option<DateTime<Utc>>,
         subscription: LogSubscription,
-        host_file_policy: crate::host_file::HostFilePolicy,
+        host_file_policy: HostFilePolicy,
     ) -> MicrosandboxResult<Self> {
         Self::assemble(
             log_dir,
@@ -278,7 +279,7 @@ impl LogEngine {
         start: &LogStreamStart,
         until: Option<DateTime<Utc>>,
         follow: FollowMode,
-        host_file_policy: crate::host_file::HostFilePolicy,
+        host_file_policy: HostFilePolicy,
     ) -> MicrosandboxResult<Self> {
         let since = match start {
             LogStreamStart::Since(t) => Some(*t),
@@ -539,7 +540,7 @@ impl Reader {
         sources: &[LogSource],
         start: &LogStreamStart,
         initial_position: FilePosition,
-        host_file_policy: crate::host_file::HostFilePolicy,
+        host_file_policy: HostFilePolicy,
     ) -> MicrosandboxResult<Self> {
         let rotation = RotationConfig {
             host_file_policy,
@@ -792,7 +793,7 @@ mod tests {
             &opts.start,
             opts.until,
             opts.follow,
-            crate::host_file::HostFilePolicy::Standard,
+            HostFilePolicy::Standard,
         )
         .await
     }

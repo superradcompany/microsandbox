@@ -5,11 +5,14 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use microsandbox_types::DeploymentProfile;
+
 use super::{
     GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PathsConfigPatch,
     persistence::ManagedConfig, registry::RegistrySettingsPatch,
 };
 use crate::context::{ContextKind, ContextSelectionSource};
+use crate::host_file::HostFilePolicy;
 use crate::sandbox::restore_resources::RestoreResources;
 #[cfg(feature = "ssh")]
 use crate::sandbox::ssh::SshTimeoutPatch;
@@ -66,17 +69,15 @@ impl GlobalConfig {
     /// when `deployment_profile` is `multi-tenant`.
     pub(crate) fn strict_host_files(&self) -> bool {
         self.runtime.strict_host_files
-            || (cfg!(unix)
-                && self.deployment_profile
-                    == Some(microsandbox_types::DeploymentProfile::MultiTenant))
+            || (cfg!(unix) && self.deployment_profile == Some(DeploymentProfile::MultiTenant))
     }
 
     /// Host file open policy anchored at `self.home()` when strict mode is active.
-    pub(crate) fn host_file_policy(&self) -> crate::host_file::HostFilePolicy {
+    pub(crate) fn host_file_policy(&self) -> HostFilePolicy {
         if self.strict_host_files() {
-            crate::host_file::HostFilePolicy::strict_beneath(self.home())
+            HostFilePolicy::strict_beneath(self.home())
         } else {
-            crate::host_file::HostFilePolicy::Standard
+            HostFilePolicy::Standard
         }
     }
 }

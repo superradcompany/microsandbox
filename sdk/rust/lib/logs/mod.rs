@@ -82,6 +82,8 @@ use std::path::PathBuf;
 use futures::Stream;
 
 #[cfg(feature = "local")]
+use crate::host_file::HostFilePolicy;
+#[cfg(feature = "local")]
 use logger::default_logger;
 #[cfg(feature = "local")]
 use stream::{LogEngine, LogFileConfig, LogFileFormat};
@@ -249,7 +251,7 @@ async fn read_logs_snapshot_from_dir(
     name: &str,
     log_dir: PathBuf,
     opts: &LogOptions,
-    host_file_policy: crate::host_file::HostFilePolicy,
+    host_file_policy: HostFilePolicy,
 ) -> MicrosandboxResult<LogSnapshot> {
     crate::sandbox::validate_sandbox_name(name)?;
     let stream_opts = LogStreamOptions {
@@ -311,7 +313,7 @@ async fn log_stream_from_dir(
     name: &str,
     log_dir: PathBuf,
     opts: &LogStreamOptions,
-    host_file_policy: crate::host_file::HostFilePolicy,
+    host_file_policy: HostFilePolicy,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     crate::sandbox::validate_sandbox_name(name)?;
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
@@ -341,7 +343,7 @@ pub(crate) async fn log_stream_from_dir_registry(
     log_dir: PathBuf,
     opts: &LogStreamOptions,
     subscription: watch::LogSubscription,
-    host_file_policy: crate::host_file::HostFilePolicy,
+    host_file_policy: HostFilePolicy,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     crate::sandbox::validate_sandbox_name(name)?;
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
