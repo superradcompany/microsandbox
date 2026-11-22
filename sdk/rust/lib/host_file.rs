@@ -103,7 +103,7 @@ pub(crate) fn open(
     policy: HostFilePolicy,
 ) -> io::Result<File> {
     let file = match policy {
-        HostFilePolicy::Strict => open_without_symlinks(path, access)?,
+        HostFilePolicy::Strict => open_without_symlinks(path, kind, access)?,
         HostFilePolicy::Standard => {
             let mut options = OpenOptions::new();
             options.read(true).write(access.is_writable());
@@ -126,7 +126,11 @@ pub(crate) fn open(
 }
 
 #[cfg(unix)]
-fn open_without_symlinks(path: &Path, access: HostFileAccess) -> io::Result<File> {
+fn open_without_symlinks(
+    path: &Path,
+    kind: HostFileKind,
+    access: HostFileAccess,
+) -> io::Result<File> {
     // Retain each directory while opening the next. A concurrent rename cannot
     // redirect later components to a symlink or a different ancestor.
     let anchor = if path.is_absolute() { "/" } else { "." };
@@ -147,6 +151,15 @@ fn open_without_symlinks(path: &Path, access: HostFileAccess) -> io::Result<File
 
         let name = CString::new(part.as_bytes())?;
         let final_component = components.peek().is_none();
+
+        #[cfg(target_os = "linux")]
+        let component_flags = if final_component {
+            libc::O_PATH
+        } else {
+            search_directory_flags()
+        };
+
+        #[cfg(not(target_os = "linux"))]
         let component_flags = if final_component {
             if access.is_writable() {
                 libc::O_RDWR
@@ -156,6 +169,7 @@ fn open_without_symlinks(path: &Path, access: HostFileAccess) -> io::Result<File
         } else {
             search_directory_flags()
         };
+
         let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | component_flags;
 
         let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
@@ -178,7 +192,14 @@ fn open_without_symlinks(path: &Path, access: HostFileAccess) -> io::Result<File
 
         let file = unsafe { File::from_raw_fd(fd) };
         if final_component {
-            return Ok(file);
+            #[cfg(target_os = "linux")]
+            return reopen_pinned(&file, kind, access);
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = kind;
+                return Ok(file);
+            }
         }
 
         directory = file;
@@ -188,6 +209,27 @@ fn open_without_symlinks(path: &Path, access: HostFileAccess) -> io::Result<File
         io::ErrorKind::InvalidInput,
         "host source has no filename",
     ))
+}
+
+/// Reopen an `O_PATH`-pinned inode through procfs after validating its file type.
+///
+/// Checking the pinned inode first ensures special files such as FIFOs or devices
+/// are never opened before being rejected.
+#[cfg(target_os = "linux")]
+fn reopen_pinned(pinned: &File, kind: HostFileKind, access: HostFileAccess) -> io::Result<File> {
+    if !kind.admits(pinned.metadata()?.file_type()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            kind.rejection(),
+        ));
+    }
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(access.is_writable())
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
+    options.open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
 }
 
 #[cfg(unix)]
@@ -228,7 +270,11 @@ fn is_symlink_at(directory: &File, name: &CStr) -> bool {
 }
 
 #[cfg(not(unix))]
-fn open_without_symlinks(_path: &Path, _access: HostFileAccess) -> io::Result<File> {
+fn open_without_symlinks(
+    _path: &Path,
+    _kind: HostFileKind,
+    _access: HostFileAccess,
+) -> io::Result<File> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "strict host file opens require Unix",
