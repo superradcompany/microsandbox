@@ -57,7 +57,28 @@ impl GlobalConfig {
                 "runtime.patch_sources.enabled is supported only on Unix hosts".into(),
             ));
         }
+
+        if let Some(limit) = self.runtime.patch_sources.max_concurrent_batches
+            && limit.get() > tokio::sync::Semaphore::MAX_PERMITS
+        {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "runtime.patch_sources.max_concurrent_batches must be at most {}",
+                tokio::sync::Semaphore::MAX_PERMITS
+            )));
+        }
+
         Ok(())
+    }
+
+    /// Effective patch source staging policy, applying the `multi-tenant` floor on Unix.
+    pub(crate) fn effective_patch_sources(&self) -> crate::config::PatchSourcesConfig {
+        let mut config = self.runtime.patch_sources.clone();
+        if cfg!(unix)
+            && self.deployment_profile == Some(microsandbox_types::DeploymentProfile::MultiTenant)
+        {
+            config.enabled = true;
+        }
+        config
     }
 }
 
@@ -701,7 +722,47 @@ mod tests {
                 Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_DEPTH)
             );
             assert_eq!(patch_sources.max_concurrent_batches, None);
+
+            // `deployment_profile: "multi-tenant"` enables patch source staging automatically
+            // on Unix while preserving custom/null limit overrides.
+            let multi_tenant = BackendConfig::new(
+                serde_json::from_str(
+                    r#"{"deployment_profile":"multi-tenant","runtime":{"patch_sources":{"max_bytes":null,"max_concurrent_batches":8}}}"#,
+                )
+                .unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            );
+            let effective = multi_tenant
+                .prepare_for_local_backend(Default::default())
+                .unwrap()
+                .resolved_config()
+                .effective_patch_sources();
+            assert!(effective.enabled);
+            assert_eq!(effective.max_bytes, None);
+            assert_eq!(
+                effective.max_concurrent_batches.map(std::num::NonZero::get),
+                Some(8)
+            );
         }
+
+        // Concurrency limits exceeding tokio's Semaphore::MAX_PERMITS are rejected cleanly.
+        let too_many_permits = BackendConfig::new(
+            serde_json::from_str(&format!(
+                r#"{{"runtime":{{"patch_sources":{{"max_concurrent_batches":{}}}}}}}"#,
+                usize::MAX
+            ))
+            .unwrap(),
+            serde_json::from_str("{}").unwrap(),
+        );
+        let err = too_many_permits
+            .prepare_for_local_backend(Default::default())
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("runtime.patch_sources.max_concurrent_batches must be at most"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -72,7 +72,7 @@ impl StagingPolicy {
         let capacity = if config.enabled {
             config
                 .max_concurrent_batches
-                .map(|limit| Arc::new(Semaphore::new(limit.get())))
+                .map(|limit| Arc::new(Semaphore::new(limit.get().min(Semaphore::MAX_PERMITS))))
         } else {
             None
         };
@@ -184,7 +184,10 @@ impl Budget {
 
         // A concurrent writer may grow the file after fstat. Bound the actual read too.
         let count = match self.max_bytes {
-            Some(max_bytes) => io::copy(&mut file.take(max_bytes - self.bytes + 1), &mut output)?,
+            Some(max_bytes) => io::copy(
+                &mut file.take((max_bytes - self.bytes).saturating_add(1)),
+                &mut output,
+            )?,
             None => io::copy(&mut file, &mut output)?,
         };
         self.add(count)?;
@@ -685,6 +688,14 @@ mod tests {
             ..PatchSourcesConfig::default()
         });
         assert!(prepare(&patches, &unbounded_bytes).await.is_ok());
+
+        // `u64::MAX` must not overflow when bounding the copy reader.
+        let max_u64_bytes = StagingPolicy::from_config(&PatchSourcesConfig {
+            enabled: true,
+            max_bytes: NonZero::new(u64::MAX),
+            ..PatchSourcesConfig::default()
+        });
+        assert!(prepare(&patches, &max_u64_bytes).await.is_ok());
 
         // Tight depth cap rejects a/b/data (depth 2); disabling max_depth allows it.
         let tight_depth = StagingPolicy::from_config(&PatchSourcesConfig {

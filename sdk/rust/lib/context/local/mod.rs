@@ -144,7 +144,7 @@ impl LocalContext {
             metrics_registry_names.push(legacy.clone());
         }
         let patch_source_staging = crate::sandbox::patch_sources::StagingPolicy::from_config(
-            &config.resolved_config().runtime.patch_sources,
+            &config.resolved_config().effective_patch_sources(),
         );
         Self {
             inner: Arc::new(LocalContextInner {
