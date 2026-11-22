@@ -196,6 +196,7 @@ impl Event {
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
+
         Ok(Self(handle))
     }
 
@@ -220,6 +221,7 @@ impl PendingIo {
     /// Start a read of up to `count` bytes into the buffer.
     fn start_read(&mut self, count: usize) -> io::Result<()> {
         self.prepare();
+
         let started = unsafe {
             ReadFile(
                 self.pipe,
@@ -229,6 +231,7 @@ impl PendingIo {
                 &mut *self.overlapped,
             )
         };
+
         self.started(started)
     }
 
@@ -236,6 +239,7 @@ impl PendingIo {
     fn start_write(&mut self, bytes: Vec<u8>) -> io::Result<()> {
         self.prepare();
         self.buffer = bytes;
+
         let started = unsafe {
             WriteFile(
                 self.pipe,
@@ -245,6 +249,7 @@ impl PendingIo {
                 &mut *self.overlapped,
             )
         };
+
         self.started(started)
     }
 
@@ -262,6 +267,7 @@ impl PendingIo {
                 return Err(error);
             }
         }
+
         self.pending = true;
         Ok(())
     }
@@ -271,13 +277,16 @@ impl PendingIo {
         let mut transferred = 0;
         let ok = unsafe { GetOverlappedResult(self.pipe, &*self.overlapped, &mut transferred, 0) };
         self.pending = false;
+
         if ok == 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(ERROR_MORE_DATA as i32) {
                 return Ok(transferred as usize);
             }
+
             return Err(error);
         }
+
         Ok(transferred as usize)
     }
 
@@ -288,12 +297,14 @@ impl PendingIo {
         if !self.pending {
             return 0;
         }
+
         let mut transferred = 0;
         let ok = unsafe {
             CancelIoEx(self.pipe, &*self.overlapped);
             GetOverlappedResult(self.pipe, &*self.overlapped, &mut transferred, 1)
         };
         self.pending = false;
+
         if ok == 0 { 0 } else { transferred as usize }
     }
 }
@@ -538,6 +549,7 @@ fn wait_for(io: &PendingIo, wake: &Event) -> io::Result<bool> {
     if result == WAIT_FAILED {
         return Err(io::Error::last_os_error());
     }
+
     Ok(result == WAIT_OBJECT_0)
 }
 
@@ -546,6 +558,7 @@ fn wait_for_wake(wake: &Event) -> io::Result<()> {
     if unsafe { WaitForMultipleObjects(1, &wake.0, 0, INFINITE) } == WAIT_FAILED {
         return Err(io::Error::last_os_error());
     }
+
     Ok(())
 }
 
@@ -556,6 +569,7 @@ fn write_all(write: &mut PendingIo, bytes: Vec<u8>, shared: &SharedState) -> IoW
     if let Err(error) = write.start_write(bytes) {
         return IoWait::Completed(Err(error));
     }
+
     loop {
         match wait_for(write, &shared.wake_worker) {
             Ok(true) => {
@@ -593,6 +607,7 @@ fn named_pipe_worker(path: PathBuf, shared: Arc<SharedState>) {
             return;
         }
     };
+
     // Declared after the handle, so both are dropped (cancelled and reaped)
     // before it is closed.
     let (mut read, mut write) = match (
@@ -605,20 +620,24 @@ fn named_pipe_worker(path: PathBuf, shared: Arc<SharedState>) {
             return;
         }
     };
+
     {
         let mut state = shared.state.lock().unwrap();
         if state.terminate {
             return;
         }
+
         state.connection = ConnectionState::Connected;
     }
     let _ = shared.notifier.notify();
 
     pump(&mut read, &mut write, &shared);
+
     // A read that completed while the connection was ending still carries
     // Host bytes: hand them over unless the guest end is gone.
     write.cancel();
     let count = read.cancel();
+
     if count > 0 && !shared.terminating() {
         shared
             .state
@@ -642,6 +661,7 @@ fn pump(read: &mut PendingIo, write: &mut PendingIo, shared: &SharedState) {
             if state.terminate {
                 return;
             }
+
             let count = state.outgoing.len().min(IO_CHUNK_SIZE);
             state.outgoing.drain(..count).collect::<Vec<_>>()
         };
@@ -687,6 +707,7 @@ fn pump(read: &mut PendingIo, write: &mut PendingIo, shared: &SharedState) {
             } else {
                 shared.fail(error);
             }
+
             return;
         }
 
@@ -740,6 +761,7 @@ fn deliver(read: &mut PendingIo, shared: &SharedState) -> bool {
                     .extend(&read.buffer[..count]);
                 let _ = shared.notifier.notify();
             }
+
             true
         }
         Err(error) if is_pipe_closed(&error) => {
@@ -886,6 +908,7 @@ mod tests {
             )
         };
         assert_ne!(server, INVALID_HANDLE_VALUE);
+
         PipeHandle(server)
     }
 
@@ -912,17 +935,20 @@ mod tests {
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
+
         Ok(read as usize)
     }
 
     fn host_read_exact(server: &PipeHandle, count: usize) -> Vec<u8> {
         let mut out = vec![0; count];
         let mut filled = 0;
+
         while filled < count {
             let read = host_read(server, &mut out[filled..]).unwrap();
             assert!(read > 0);
             filled += read;
         }
+
         out
     }
 
@@ -955,11 +981,13 @@ mod tests {
                 VsockNotifier::new().unwrap(),
             )
             .unwrap();
+
         let deadline = Instant::now() + DEADLINE;
         while endpoint.connect_state().unwrap() != VsockConnectState::Connected {
             assert!(Instant::now() < deadline, "named-pipe connect timed out");
             thread::yield_now();
         }
+
         endpoint
     }
 
@@ -982,6 +1010,7 @@ mod tests {
         let deadline = Instant::now() + DEADLINE;
         let mut out = Vec::with_capacity(count);
         let mut chunk = vec![0; 70_000];
+
         while out.len() < count {
             let want = (count - out.len()).min(chunk.len());
             match endpoint.read(&mut chunk[..want]) {
@@ -994,6 +1023,7 @@ mod tests {
                 Err(error) => panic!("guest read failed: {error}"),
             }
         }
+
         out
     }
 
@@ -1010,6 +1040,7 @@ mod tests {
         thread::spawn(move || {
             let _ = sender.send(host());
         });
+
         receiver
             .recv_timeout(DEADLINE)
             .expect("Host end did not finish in time")
@@ -1017,11 +1048,14 @@ mod tests {
 
     #[test]
     fn host_replies_reach_the_guest_without_a_polling_interval() {
+        const ROUNDS: usize = 200;
+
         let name = pipe_name("latency");
         let server = host_pipe(&name);
-        const ROUNDS: usize = 200;
+
         let host = thread::spawn(move || {
             host_accept(&server);
+
             let mut request = [0_u8; 8];
             for _ in 0..ROUNDS {
                 let mut filled = 0;
@@ -1031,6 +1065,7 @@ mod tests {
                 host_write_all(&server, &request);
             }
         });
+
         let endpoint = guest_connect(&name);
         let mut round_trips = Vec::with_capacity(ROUNDS);
         for round in 0..ROUNDS {
@@ -1040,9 +1075,12 @@ mod tests {
             assert_eq!(guest_read_up_to(&*endpoint, 8), request);
             round_trips.push(started.elapsed());
         }
+
         host.join().unwrap();
+
         round_trips.sort();
         let median = round_trips[ROUNDS / 2];
+
         // A polling relay waits one Windows timer tick (about 15.6 ms) per
         // reply, so every round trip costs at least that; a blocking read
         // takes well under a millisecond. Half a tick separates the two with
@@ -1056,16 +1094,20 @@ mod tests {
 
     #[test]
     fn streams_larger_than_a_read_arrive_whole_and_in_order() {
+        const LENGTH: usize = 300_000;
+
         let name = pipe_name("large");
         let server = host_pipe(&name);
-        const LENGTH: usize = 300_000;
+
         let host = thread::spawn(move || {
             host_accept(&server);
             assert_eq!(host_read_exact(&server, LENGTH), pattern(LENGTH, 1));
             host_write_all(&server, &pattern(LENGTH, 2));
         });
+
         let endpoint = guest_connect(&name);
         guest_write_all(&*endpoint, &pattern(LENGTH, 1));
+
         assert_eq!(guest_read_up_to(&*endpoint, LENGTH), pattern(LENGTH, 2));
         host.join().unwrap();
     }
@@ -1074,15 +1116,19 @@ mod tests {
     fn host_closing_mid_stream_ends_the_stream_after_its_bytes() {
         let name = pipe_name("hostclose");
         let server = host_pipe(&name);
+
         let host = thread::spawn(move || {
             host_accept(&server);
             host_write_all(&server, b"partial reply");
             // The Host goes away in the middle of a reply.
             drop(server);
         });
+
         let endpoint = guest_connect(&name);
         host.join().unwrap();
+
         assert_eq!(guest_read_up_to(&*endpoint, 1 << 20), b"partial reply");
+
         let deadline = Instant::now() + DEADLINE;
         loop {
             match endpoint.write(b"more") {
@@ -1106,6 +1152,7 @@ mod tests {
     fn host_replying_then_closing_while_the_guest_still_sends_delivers_the_reply_then_eof() {
         let name = pipe_name("replyclose");
         let server = host_pipe(&name);
+
         let host = thread::spawn(move || {
             host_accept(&server);
             // Read only the start of the guest's stream, answer, and close
@@ -1114,6 +1161,7 @@ mod tests {
             host_write_all(&server, b"final reply");
             drop(server);
         });
+
         let endpoint = guest_connect(&name);
         // Far more than the pipe buffers: the relay is still writing it when
         // the Host closes.
@@ -1132,7 +1180,9 @@ mod tests {
                 Err(_) => break,
             }
         }
+
         host.join().unwrap();
+
         // guest_read_up_to fails on any read error; the stream must end
         // cleanly after the reply.
         assert_eq!(guest_read_up_to(&*endpoint, 1 << 20), b"final reply");
@@ -1141,14 +1191,17 @@ mod tests {
 
     #[test]
     fn room_the_guest_frees_during_a_write_is_read_into_after_it() {
-        let name = pipe_name("roomafterwrite");
-        let server = host_pipe(&name);
         // One write chunk, larger than the pipe buffers, so the relay's
         // write stays pending until the Host reads it.
         const WRITE: usize = 32 * 1024;
         const TAIL: &[u8] = b"sent once the guest made room";
+
+        let name = pipe_name("roomafterwrite");
+        let server = host_pipe(&name);
+
         let (filled_tx, filled_rx) = mpsc::channel();
         let (drained_tx, drained_rx) = mpsc::channel::<()>();
+
         let host = thread::spawn(move || {
             host_accept(&server);
             host_write_all(&server, &pattern(MAX_BUFFERED_BYTES, 5));
@@ -1157,20 +1210,26 @@ mod tests {
             assert_eq!(host_read_exact(&server, WRITE), pattern(WRITE, 6));
             host_write_all(&server, TAIL);
         });
+
         let endpoint = guest_connect(&name);
         filled_rx.recv_timeout(DEADLINE).unwrap();
+
         // Let the last Host bytes reach the guest buffer, so it is full and
         // the relay has no read pending.
         thread::sleep(Duration::from_millis(200));
         guest_write_all(&*endpoint, &pattern(WRITE, 6));
+
         // The relay is now blocked in that write; empty the guest buffer
         // under it.
         thread::sleep(Duration::from_millis(100));
+
         assert_eq!(
             guest_read_up_to(&*endpoint, MAX_BUFFERED_BYTES),
             pattern(MAX_BUFFERED_BYTES, 5)
         );
+
         drained_tx.send(()).unwrap();
+
         // Once the write completes the relay must read again; nothing else
         // will wake it.
         assert_eq!(guest_read_up_to(&*endpoint, TAIL.len()), TAIL);
@@ -1183,18 +1242,23 @@ mod tests {
         let server = host_pipe(&name);
         let accepted = Arc::new(Barrier::new(2));
         let host_accepted = Arc::clone(&accepted);
+
         let host = thread::spawn(move || {
             host_accept(&server);
             host_accepted.wait();
             server
         });
+
         let endpoint = guest_connect(&name);
         accepted.wait();
         let server = host.join().unwrap();
+
         // The relay's read is pending: the Host has written nothing.
         thread::sleep(Duration::from_millis(50));
         drop(endpoint);
+
         let result = within_deadline(move || host_read(&server, &mut [0_u8; 16]));
+
         assert!(
             result.is_err(),
             "the relay kept its pipe end open: {result:?}"
@@ -1207,19 +1271,23 @@ mod tests {
         let server = host_pipe(&name);
         let accepted = Arc::new(Barrier::new(2));
         let host_accepted = Arc::clone(&accepted);
+
         let host = thread::spawn(move || {
             host_accept(&server);
             host_accepted.wait();
             server
         });
+
         let endpoint = guest_connect(&name);
         accepted.wait();
         let server = host.join().unwrap();
+
         // Far more than the pipe buffers while the Host reads nothing, so the
         // relay's write cannot complete.
         guest_write_all(&*endpoint, &pattern(1 << 20, 3));
         thread::sleep(Duration::from_millis(100));
         drop(endpoint);
+
         let drained = within_deadline(move || {
             let mut buf = vec![0_u8; 65_536];
             let mut total = 0;
@@ -1230,6 +1298,7 @@ mod tests {
                 }
             }
         });
+
         assert!(
             drained.0 < 1 << 20,
             "the whole write went through: {drained:?}"
@@ -1238,8 +1307,10 @@ mod tests {
 
     #[test]
     fn many_concurrent_connections_each_keep_their_own_stream() {
-        let name = pipe_name("many");
         const CONNECTIONS: usize = 32;
+
+        let name = pipe_name("many");
+
         let hosts = (0..CONNECTIONS)
             .map(|_| {
                 let server = host_pipe(&name);
@@ -1253,6 +1324,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
+
         let guests = (0..CONNECTIONS)
             .map(|index| {
                 let name = name.clone();
@@ -1267,6 +1339,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
+
         for guest in guests {
             guest.join().unwrap();
         }
