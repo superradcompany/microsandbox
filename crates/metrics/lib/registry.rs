@@ -15,7 +15,9 @@ use std::io;
 use std::mem::{offset_of, size_of};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
-use std::ptr::{self, NonNull};
+#[cfg(unix)]
+use std::ptr;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
 use std::thread;
