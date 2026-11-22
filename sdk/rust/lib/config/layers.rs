@@ -6,9 +6,10 @@ use std::{
 };
 
 use microsandbox_types::DeploymentProfile;
+use tokio::sync::Semaphore;
 
 use super::{
-    GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PathsConfigPatch,
+    GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PatchesConfig, PathsConfigPatch,
     persistence::ManagedConfig, registry::RegistrySettingsPatch,
 };
 use crate::context::{ContextKind, ContextSelectionSource};
@@ -60,6 +61,22 @@ impl GlobalConfig {
                 "runtime.strict_host_files is supported only on Unix hosts".into(),
             ));
         }
+
+        if cfg!(not(unix)) && self.runtime.patches.stage {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.patches.stage is supported only on Unix hosts".into(),
+            ));
+        }
+
+        if let Some(limit) = self.runtime.patches.max_concurrent_batches
+            && limit.get() > Semaphore::MAX_PERMITS
+        {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "runtime.patches.max_concurrent_batches must be at most {}",
+                Semaphore::MAX_PERMITS
+            )));
+        }
+
         Ok(())
     }
 
@@ -79,6 +96,15 @@ impl GlobalConfig {
         } else {
             HostFilePolicy::Standard
         }
+    }
+
+    /// Effective patch staging policy, applying the `multi-tenant` floor on Unix.
+    pub(crate) fn effective_patches(&self) -> PatchesConfig {
+        let mut config = self.runtime.patches.clone();
+        if cfg!(unix) && self.deployment_profile == Some(DeploymentProfile::MultiTenant) {
+            config.stage = true;
+        }
+        config
     }
 }
 
@@ -690,6 +716,120 @@ mod tests {
                     .strict_host_files()
             );
         }
+    }
+
+    #[test]
+    fn local_preparation_accepts_patch_staging_only_on_unix() {
+        #[cfg(unix)]
+        use std::num::NonZero;
+
+        #[cfg(unix)]
+        use crate::config::{
+            DEFAULT_PATCH_MAX_BYTES, DEFAULT_PATCH_MAX_CONCURRENT_BATCHES, DEFAULT_PATCH_MAX_DEPTH,
+            DEFAULT_PATCH_MAX_ENTRIES,
+        };
+
+        for (user, managed) in [
+            (r#"{"runtime":{"patches":{"stage":true}}}"#, "{}"),
+            ("{}", r#"{"runtime":{"patches":{"stage":true}}}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            let result = layers.prepare_for_local_backend(Default::default());
+
+            #[cfg(unix)]
+            {
+                let prepared = result.unwrap();
+                let patches = &prepared.resolved_config().runtime.patches;
+                assert!(patches.stage);
+                assert_eq!(
+                    patches.max_bytes.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_BYTES)
+                );
+                assert_eq!(
+                    patches.max_entries.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_ENTRIES)
+                );
+                assert_eq!(
+                    patches.max_depth.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_DEPTH)
+                );
+                assert_eq!(
+                    patches.max_concurrent_batches.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_CONCURRENT_BATCHES)
+                );
+            }
+            #[cfg(not(unix))]
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("runtime.patches.stage is supported only on Unix")
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let layers = BackendConfig::new(
+                serde_json::from_str(
+                    r#"{"runtime":{"patches":{"stage":true,"max_bytes":null,"max_entries":1024,"max_concurrent_batches":null}}}"#,
+                )
+                .unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            );
+            let prepared = layers
+                .prepare_for_local_backend(Default::default())
+                .unwrap();
+            let patches = &prepared.resolved_config().runtime.patches;
+            assert!(patches.stage);
+            assert_eq!(patches.max_bytes, None);
+            assert_eq!(patches.max_entries.map(NonZero::get), Some(1024));
+            assert_eq!(
+                patches.max_depth.map(NonZero::get),
+                Some(DEFAULT_PATCH_MAX_DEPTH)
+            );
+            assert_eq!(patches.max_concurrent_batches, None);
+
+            // `deployment_profile: "multi-tenant"` enables patch staging automatically
+            // on Unix while preserving custom/null limit overrides.
+            let multi_tenant = BackendConfig::new(
+                serde_json::from_str(
+                    r#"{"deployment_profile":"multi-tenant","runtime":{"patches":{"max_bytes":null,"max_concurrent_batches":8}}}"#,
+                )
+                .unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            );
+            let effective = multi_tenant
+                .prepare_for_local_backend(Default::default())
+                .unwrap()
+                .resolved_config()
+                .effective_patches();
+            assert!(effective.stage);
+            assert_eq!(effective.max_bytes, None);
+            assert_eq!(effective.max_concurrent_batches.map(NonZero::get), Some(8));
+        }
+
+        // Concurrency limits exceeding tokio's Semaphore::MAX_PERMITS are rejected cleanly.
+        let too_many_permits = BackendConfig::new(
+            serde_json::from_str(&format!(
+                r#"{{"runtime":{{"patches":{{"max_concurrent_batches":{}}}}}}}"#,
+                usize::MAX
+            ))
+            .unwrap(),
+            serde_json::from_str("{}").unwrap(),
+        );
+        let err = too_many_permits
+            .prepare_for_local_backend(Default::default())
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("runtime.patches.max_concurrent_batches must be at most"),
+            "{err}"
+        );
     }
 
     #[test]

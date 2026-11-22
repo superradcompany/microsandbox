@@ -67,6 +67,18 @@ pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 /// Default SSH session inactivity timeout in seconds.
 pub const DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS: u64 = 600;
 
+/// Default maximum total payload size for a staged patch batch (64 MiB).
+pub const DEFAULT_PATCH_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Default maximum number of entries across a staged patch batch.
+pub const DEFAULT_PATCH_MAX_ENTRIES: usize = 4096;
+
+/// Default maximum directory nesting depth for staged copy-directory patches.
+pub const DEFAULT_PATCH_MAX_DEPTH: usize = 32;
+
+/// Default maximum number of concurrent staged host-copy batches per backend.
+pub const DEFAULT_PATCH_MAX_CONCURRENT_BATCHES: usize = 2;
+
 /// Default value for `metrics_sample_interval_ms` fields.
 pub fn default_metrics_sample_interval() -> Option<NonZero<u64>> {
     NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
@@ -407,12 +419,59 @@ pub struct RuntimeConfig {
     /// strict paths must not contain parent (`..`) components.
     pub strict_host_files: bool,
 
+    /// Host-copy patch staging and resource-limit policy.
+    #[config_patch(nested)]
+    pub patches: PatchesConfig,
+
     /// Buffered host writeback containment and pressure-sharing policy.
     pub block_writeback: BlockWritebackConfig,
 
     /// Host-owned placement profiles selectable by sandbox name.
     #[config_patch(merge)]
     pub placement_profiles: BTreeMap<String, PlacementProfile>,
+}
+
+/// Host-copy patch staging and resource-limit policy.
+///
+/// Each numeric cap defaults to a conservative built-in limit when omitted.
+/// Setting a limit to `None` (`null` in JSON) disables that specific limit
+/// while keeping the remaining checks active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[derive(ConfigPatch)]
+#[config_patch(serde)]
+pub struct PatchesConfig {
+    /// Stage host-copy patch sources before applying a batch, rejecting symlinks
+    /// and special files. Defaults to `false`. Unix only.
+    pub stage: bool,
+
+    /// Maximum total bytes across inline and host-copy patches in one batch.
+    /// `None` (`null`) disables the byte limit.
+    pub max_bytes: Option<NonZero<u64>>,
+
+    /// Maximum total patch and directory-entry count in one batch.
+    /// `None` (`null`) disables the entry limit.
+    pub max_entries: Option<NonZero<usize>>,
+
+    /// Maximum directory nesting depth for `CopyDir` sources.
+    /// `None` (`null`) disables the depth limit.
+    pub max_depth: Option<NonZero<usize>>,
+
+    /// Maximum concurrent staged host-copy batches per backend instance.
+    /// `None` (`null`) disables the concurrency limit.
+    pub max_concurrent_batches: Option<NonZero<usize>>,
+}
+
+impl Default for PatchesConfig {
+    fn default() -> Self {
+        Self {
+            stage: false,
+            max_bytes: NonZero::new(DEFAULT_PATCH_MAX_BYTES),
+            max_entries: NonZero::new(DEFAULT_PATCH_MAX_ENTRIES),
+            max_depth: NonZero::new(DEFAULT_PATCH_MAX_DEPTH),
+            max_concurrent_batches: NonZero::new(DEFAULT_PATCH_MAX_CONCURRENT_BATCHES),
+        }
+    }
 }
 
 /// Controls buffered host dirty data for writable raw disks.
@@ -908,6 +967,13 @@ mod tests {
             },
             "runtime": {
                 "strict_host_files": true,
+                "patches": {
+                    "stage": true,
+                    "max_bytes": 134217728,
+                    "max_entries": 8192,
+                    "max_depth": null,
+                    "max_concurrent_batches": 8
+                },
                 "block_writeback": {"mode": "fixed", "per_disk_mib": 1280, "pool_mib": 5120},
                 "placement_profiles": {"latency": {
                     "numa": {"mode": "prefer_single"},
