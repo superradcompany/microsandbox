@@ -71,6 +71,10 @@ pub fn decode_mount_host_path(text: &str) -> Result<String, String> {
     String::from_utf8(out).map_err(|_| format!("mount host path is not valid UTF-8: {text:?}"))
 }
 
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
 /// The value of one ASCII hex digit. `u8::from_str_radix` is not used for
 /// escapes because it also accepts a leading `+`.
 fn hex_digit(byte: u8) -> Option<u8> {
