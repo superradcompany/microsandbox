@@ -81,8 +81,9 @@ use crate::context::local::creation::CreationStorage;
 use crate::context::local::volume::ResolvedNamedVolume;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
+use crate::host_file::HostFilePolicy;
 #[cfg(unix)]
-use crate::host_file::{self, HostFileAccess, HostFileKind, HostFilePolicy};
+use crate::host_file::{self, HostFileAccess, HostFileKind};
 #[cfg(windows)]
 use crate::runtime::handle::WindowsJob;
 use crate::runtime::handle::{ProcessHandle, StartupProcess};
