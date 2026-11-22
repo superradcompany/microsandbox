@@ -139,6 +139,8 @@ msb restart worker
 ```
 </CodeGroup>
 
+For a running Cloud sandbox, positive restart timeouts are rounded up to whole seconds and cannot exceed 60 seconds. Larger values fail before the restart request is sent.
+
 If graceful shutdown times out, restart fails without starting a new VM. For a sandbox that will not stop, see [Stop an unresponsive sandbox](#stop-an-unresponsive-sandbox).
 
 ## Reuse or create a named sandbox

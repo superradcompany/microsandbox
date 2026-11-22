@@ -187,6 +187,9 @@ pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
     FsWriteSink, SandboxFsOps,
 };
+#[cfg(feature = "cloud")]
+pub(crate) use handle::get_identified_handle;
+pub(crate) use handle::restart_by_stop_and_start;
 pub use handle::{
     DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, DestroyOptions, RestartOptions, SandboxRecord,
 };
@@ -883,8 +886,7 @@ impl Sandbox {
             .backend
             .as_local()
             .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxLogger))?;
-        let log_dir = crate::logs::log_dir_for_local(local, &self.name);
-        Ok(crate::logs::SandboxLogger::new(self.name.clone(), log_dir))
+        Ok(crate::logs::SandboxLogger::for_local(local, &self.name))
     }
 
     /// Check whether agentd is reachable without refreshing the sandbox idle timer.

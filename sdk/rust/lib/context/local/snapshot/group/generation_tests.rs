@@ -1035,7 +1035,13 @@ async fn removal_flush_failure_retains_complete_view_and_old_generation() {
     add(&directory, 1, None).await;
     add(&directory, 2, Some(1)).await;
     let path = directory.join(id(2).as_str());
-    let _pin = lease::deletion(&path).unwrap().unwrap();
+    // Parallel subprocess tests can briefly inherit setup's writer descriptor.
+    let mut pin = None;
+    assert_released(|| {
+        pin = lease::deletion(&path).unwrap();
+        pin.is_some()
+    });
+    let _pin = pin.unwrap();
     let _lock = group::lock_group(&directory).unwrap();
     let error = remove_with_flush(&directory, id(2).as_str(), Some(id(1).to_string()), |_| {
         Err(io::Error::other("injected durability failure"))

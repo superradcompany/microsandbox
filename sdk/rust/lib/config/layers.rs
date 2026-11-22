@@ -13,6 +13,7 @@ use super::{
     persistence::ManagedConfig, registry::RegistrySettingsPatch,
 };
 use crate::context::{ContextKind, ContextSelectionSource};
+use crate::host_file::HostFilePolicy;
 use crate::sandbox::restore_resources::RestoreResources;
 #[cfg(feature = "ssh")]
 use crate::sandbox::ssh::SshTimeoutPatch;
@@ -55,6 +56,12 @@ pub(crate) struct ConfigLayers<P> {
 impl GlobalConfig {
     /// Validate host runtime settings this platform cannot honor.
     pub(crate) fn validate_runtime(&self) -> MicrosandboxResult<()> {
+        if cfg!(not(unix)) && self.runtime.strict_host_files {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.strict_host_files is supported only on Unix hosts".into(),
+            ));
+        }
+
         if cfg!(not(unix)) && self.runtime.patches.stage {
             return Err(MicrosandboxError::InvalidConfig(
                 "runtime.patches.stage is supported only on Unix hosts".into(),
@@ -71,6 +78,24 @@ impl GlobalConfig {
         }
 
         Ok(())
+    }
+
+    /// Whether SDK host file opens enforce symlink-free traversal.
+    ///
+    /// Enabled explicitly via `runtime.strict_host_files` or automatically on Unix
+    /// when `deployment_profile` is `multi-tenant`.
+    pub(crate) fn strict_host_files(&self) -> bool {
+        self.runtime.strict_host_files
+            || (cfg!(unix) && self.deployment_profile == Some(DeploymentProfile::MultiTenant))
+    }
+
+    /// Host file open policy anchored at `self.home()` when strict mode is active.
+    pub(crate) fn host_file_policy(&self) -> HostFilePolicy {
+        if self.strict_host_files() {
+            HostFilePolicy::strict_beneath(self.home())
+        } else {
+            HostFilePolicy::Standard
+        }
     }
 
     /// Effective patch staging policy, applying the `multi-tenant` floor on Unix.
@@ -651,6 +676,46 @@ mod tests {
             layers.resolved_config().sandbox_defaults.oci.root_disk,
             Some(RootDisk::Tmpfs { .. }),
         ));
+    }
+
+    #[test]
+    fn local_preparation_accepts_strict_host_files_only_on_unix() {
+        for (user, managed) in [
+            (r#"{"runtime":{"strict_host_files":true}}"#, "{}"),
+            ("{}", r#"{"runtime":{"strict_host_files":true}}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            let result = layers.prepare_for_local_backend(Default::default());
+
+            #[cfg(unix)]
+            assert!(result.unwrap().resolved_config().strict_host_files());
+            #[cfg(not(unix))]
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("runtime.strict_host_files is supported only on Unix")
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let multi_tenant = BackendConfig::new(
+                serde_json::from_str(r#"{"deployment_profile":"multi-tenant"}"#).unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            );
+            assert!(
+                multi_tenant
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap()
+                    .resolved_config()
+                    .strict_host_files()
+            );
+        }
     }
 
     #[test]

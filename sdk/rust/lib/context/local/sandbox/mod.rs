@@ -1639,8 +1639,6 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::net::UnixListener;
     #[cfg(unix)]
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
-    #[cfg(unix)]
     use std::process::Command;
     use std::sync::Arc;
     #[cfg(unix)]
@@ -2123,6 +2121,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn kill_waits_for_start_publication_and_terminates_the_created_run() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::process::Stdio;
+
+        use super::signal_tests::{child_lines, cleanup_child, expect_line};
+
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = Arc::new(
             crate::test_support::local_backend_builder(home.path())
@@ -2185,7 +2188,8 @@ mod tests {
         journal
             .confirm(Some(serde_json::to_value(&source).unwrap()))
             .unwrap();
-        // Signal dispatch requires the runtime's inherited ownership descriptor.
+        // Publish a child with the runtime's inherited identity descriptor. A plain sleep
+        // process is deliberately treated as a recycled PID and must not be signaled.
         let lifecycle = microsandbox_runtime::ipc::acquire_lifecycle_guard(
             &backend.config().run_dir(),
             "kill-start",
@@ -2198,10 +2202,12 @@ mod tests {
                 "--exact",
                 "context::local::sandbox::signal_tests::lifecycle_signal_child",
                 "--nocapture",
+                "--format",
+                "terse",
             ])
             .env("MSB_LIFECYCLE_SIGNAL_CHILD", "1")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped());
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
         unsafe {
             command.pre_exec(move || {
                 // Duplicate first in case the source already uses the fixed FD.
@@ -2216,12 +2222,9 @@ mod tests {
             });
         }
         let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
-            super::signal_tests::cleanup_child(&mut child);
+            cleanup_child(&mut child);
         });
-        super::signal_tests::expect_line(
-            &super::signal_tests::child_lines(child.stdout.take().unwrap()),
-            "ready",
-        );
+        expect_line(&child_lines(child.stdout.take().unwrap()), "ready");
         let pid = child.id() as i32;
         let published = run_entity::Entity::update_many()
             .col_expr(

@@ -868,6 +868,8 @@ restart(options?: { force?: boolean; timeoutMs?: number; detached?: boolean }): 
 
 Restart this exact sandbox. Defaults to graceful shutdown, a 10_000 ms timeout, and attached local start. A stopped, crashed, or created sandbox starts directly; `Starting` is observed until it settles. Set `force` to kill, `timeoutMs` to change how long shutdown can take, or `detached` for a local background start.
 
+For a running Cloud sandbox, positive restart timeouts are rounded up to whole seconds and cannot exceed 60 seconds. Larger values fail before the restart request is sent.
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">destroy()</span>
 
 ```typescript
