@@ -1074,10 +1074,12 @@ fn spawn_runtime_command(
     } else {
         None
     };
+
     #[cfg(windows)]
     if matches!(_mode, SpawnMode::Detached) {
         // A detached runtime leaves the launcher's job so it outlives the launcher.
         cmd.creation_flags(DETACHED_SPAWN_FLAGS | CREATE_BREAKAWAY_FROM_JOB);
+
         return match cmd.spawn() {
             // A launcher job without JOB_OBJECT_LIMIT_BREAKAWAY_OK (Task Scheduler, some
             // terminals and CI agents) makes CreateProcess with CREATE_BREAKAWAY_FROM_JOB fail
@@ -1086,6 +1088,7 @@ fn spawn_runtime_command(
             Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
                 cmd.creation_flags(DETACHED_SPAWN_FLAGS);
                 let child = cmd.spawn()?;
+
                 tracing::warn!(
                     "detached spawn: the launcher's job object forbids breakaway, so the sandbox \
                      runtime started inside it; it inherits the job's limits and may be \
@@ -1096,6 +1099,7 @@ fn spawn_runtime_command(
             result => result,
         };
     }
+
     cmd.spawn()
 }
 
@@ -2826,6 +2830,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::num::NonZero;
     use std::path::{Path, PathBuf};
+    #[cfg(windows)]
+    use std::{env, io, process::Stdio, ptr, time::Duration};
 
     use microsandbox_protocol::{
         bootstrap::{BootstrapBlockRoot, BootstrapEnvVar, BootstrapMountFlags},
@@ -2834,6 +2840,14 @@ mod tests {
     use microsandbox_types::HandoffInit;
     use sea_orm::{ActiveModelTrait, Set};
     use tempfile::tempdir;
+    #[cfg(windows)]
+    use tokio::{process::Command, time::timeout};
+    #[cfg(windows)]
+    use windows_sys::Win32::Foundation::CloseHandle;
+    #[cfg(windows)]
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+    #[cfg(windows)]
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
     use microsandbox_runtime::launch::{
         CheckpointRestoreConfig, LaunchConfig, RootfsUpperLayerConfig,
@@ -2846,6 +2860,8 @@ mod tests {
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
+    #[cfg(windows)]
+    use super::{SpawnMode, spawn_runtime_command};
     use super::{block_writeback_policy, is_owned_restored_disk, machine_cli_args};
     use crate::db::entity::volume as volume_entity;
     use crate::{
@@ -3134,29 +3150,26 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_detached_spawn_job_child() {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
-        use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
-        if std::env::var_os("MSB_TEST_JOB_WITHOUT_BREAKAWAY").is_none() {
+        if env::var_os("MSB_TEST_JOB_WITHOUT_BREAKAWAY").is_none() {
             return;
         }
+
         // A job without JOB_OBJECT_LIMIT_BREAKAWAY_OK, as Task Scheduler, some terminals and
         // CI agents give their children. Jobs nest, so this works inside the runner's own job.
-        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        assert!(!job.is_null(), "{}", std::io::Error::last_os_error());
+        let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        assert!(!job.is_null(), "{}", io::Error::last_os_error());
         let assigned = unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) };
-        assert_ne!(assigned, 0, "{}", std::io::Error::last_os_error());
+        assert_ne!(assigned, 0, "{}", io::Error::last_os_error());
         // The job lives while this process is in it.
         unsafe { CloseHandle(job) };
 
-        let comspec = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
-        let mut command = tokio::process::Command::new(comspec);
+        let comspec = env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
+        let mut command = Command::new(comspec);
         command.args(["/d", "/c", "exit 7"]);
-        let mut child =
-            super::spawn_runtime_command(&mut command, super::SpawnMode::Detached, None)
-                .expect("detached spawn inside a job without breakaway");
+        let mut child = spawn_runtime_command(&mut command, SpawnMode::Detached, None)
+            .expect("detached spawn inside a job without breakaway");
         let status = child.wait().await.unwrap();
+
         assert_eq!(status.code(), Some(7));
         println!("detached-spawn-inside-job-ok");
     }
@@ -3164,7 +3177,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_detached_spawn_inside_job_without_breakaway() {
-        let child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        let child = Command::new(env::current_exe().unwrap())
             .args([
                 "--exact",
                 "runtime::spawn::tests::windows_detached_spawn_job_child",
@@ -3172,16 +3185,17 @@ mod tests {
                 "--test-threads=1",
             ])
             .env("MSB_TEST_JOB_WITHOUT_BREAKAWAY", "1")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
-                .await
-                .expect("the child that spawns inside a job did not finish")
-                .unwrap();
+
+        let output = timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .expect("the child that spawns inside a job did not finish")
+            .unwrap();
+
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
