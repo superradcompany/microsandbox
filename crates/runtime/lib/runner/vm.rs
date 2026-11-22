@@ -4539,11 +4539,11 @@ mod tests {
         let fs = PassthroughFs::new(host_directory_mount_config(&parsed)).unwrap();
         fs.init(FsOptions::empty()).unwrap();
 
-        let entry = fs.lookup(fs_context(), 1, c"config.txt").unwrap();
-        assert_eq!(entry.attr.st_size, 3);
-        assert_eq!(entry.entry_timeout, Duration::ZERO);
-        assert_eq!(entry.attr_timeout, Duration::ZERO);
-        let (_, attr_timeout) = fs.getattr(fs_context(), entry.inode, None).unwrap();
+        let original = fs.lookup(fs_context(), 1, c"config.txt").unwrap();
+        assert_eq!(original.attr.st_size, 3);
+        assert_eq!(original.entry_timeout, Duration::ZERO);
+        assert_eq!(original.attr_timeout, Duration::ZERO);
+        let (_, attr_timeout) = fs.getattr(fs_context(), original.inode, None).unwrap();
         assert_eq!(attr_timeout, Duration::ZERO);
 
         // An atomic save: write a temporary file and rename it over the original.
@@ -4554,6 +4554,10 @@ mod tests {
         assert_eq!(entry.attr.st_size as u64, b"new contents".len() as u64);
         assert_eq!(entry.entry_timeout, Duration::ZERO);
         assert_eq!(entry.attr_timeout, Duration::ZERO);
+        // The Windows backend still gives a name the host replaced its old
+        // inode; that is a backend change of its own.
+        #[cfg(unix)]
+        assert_ne!(entry.inode, original.inode);
     }
 
     #[cfg(unix)]
