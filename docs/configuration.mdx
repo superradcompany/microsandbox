@@ -327,7 +327,7 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `strict_host_files` | `false` | Reject symlinks, including parent directories, when the SDK opens sandbox log files and disk-image locks. Unix only. |
+| `strict_host_files` | `false` | Reject symlinks when the SDK opens sandbox log files and disk-image locks. Enabled automatically on Unix when `deployment_profile` is `"multi-tenant"`. Paths beneath `home` are anchored at `home` so OS symlinks above `home` (such as `/var` on macOS) remain valid. Unix only. |
 | `block_writeback` | `{ "mode": "auto" }` | Buffered host writeback containment and live pressure sharing on Linux. Pool pressure never rejects sandbox creation; unconfigured `auto` is a no-op on other hosts. |
 | `placement_profiles` | `{}` | Host-owned named CPU and NUMA placement profiles selectable by sandboxes |
 

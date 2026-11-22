@@ -20,6 +20,7 @@ use super::watch::LogRegistration;
 use super::{LogEntry, LogOptions, LogSnapshot, LogStreamOptions};
 use crate::context::sandbox::LogStream;
 use crate::context::{Context, LocalContext, default_local_context};
+use crate::host_file::HostFilePolicy;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -60,7 +61,7 @@ fn logger_for_default_backend(
 pub struct SandboxLogger {
     name: String,
     pub(super) log_dir: PathBuf,
-    pub(super) strict_host_files: bool,
+    pub(super) host_file_policy: HostFilePolicy,
 }
 
 impl SandboxLogger {
@@ -70,7 +71,7 @@ impl SandboxLogger {
         Self {
             name,
             log_dir,
-            strict_host_files: false,
+            host_file_policy: HostFilePolicy::Standard,
         }
     }
 
@@ -80,7 +81,7 @@ impl SandboxLogger {
         Self {
             name: name.to_string(),
             log_dir: super::log_dir_for_local(local, name),
-            strict_host_files: local.config().runtime.strict_host_files,
+            host_file_policy: local.config().host_file_policy(),
         }
     }
 
@@ -105,7 +106,7 @@ impl SandboxLogger {
             &self.name,
             self.log_dir.clone(),
             opts,
-            self.strict_host_files,
+            self.host_file_policy.clone(),
         )
         .await
     }
@@ -117,7 +118,7 @@ impl SandboxLogger {
             &self.name,
             self.log_dir.clone(),
             opts,
-            self.strict_host_files,
+            self.host_file_policy.clone(),
         )
         .await?;
         Ok(Box::pin(stream) as LogStream)
@@ -181,7 +182,7 @@ impl RegisteredSandboxLogger {
             self.logger.log_dir.clone(),
             opts,
             subscription,
-            self.logger.strict_host_files,
+            self.logger.host_file_policy.clone(),
         )
         .await?;
         Ok(Box::pin(stream) as LogStream)

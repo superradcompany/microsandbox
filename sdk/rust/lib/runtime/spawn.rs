@@ -454,11 +454,11 @@ impl LocalContext {
         let named_volumes = self.resolve_named_volumes(config).await?;
         let owned_root = self.sandboxes_dir().join(&config.spec.name);
         super::owned_volumes::validate(&owned_root, &config.spec.mounts)?;
-        let disk_locks = lock_disk_mounts(
+        let disk_locks = lock_disk_mounts_with_policy(
             config,
             &named_volumes,
             &owned_root,
-            self.config().runtime.strict_host_files,
+            &self.config().host_file_policy(),
         )?;
         let metrics_reservation = if config.effective_metrics_interval().is_some() {
             reserve_metrics_slot(self, config, sandbox_id)
@@ -1714,11 +1714,22 @@ fn patch_sigchld_handler_uses_alt_stack() {
     }
 }
 
+#[cfg(test)]
 fn lock_disk_mounts(
     config: &SandboxConfig,
     named_volumes: &HashMap<String, ResolvedNamedVolume>,
     sandbox_dir: &Path,
     strict: bool,
+) -> MicrosandboxResult<Vec<File>> {
+    let policy = HostFilePolicy::from_strict(strict);
+    lock_disk_mounts_with_policy(config, named_volumes, sandbox_dir, &policy)
+}
+
+fn lock_disk_mounts_with_policy(
+    config: &SandboxConfig,
+    named_volumes: &HashMap<String, ResolvedNamedVolume>,
+    sandbox_dir: &Path,
+    policy: &HostFilePolicy,
 ) -> MicrosandboxResult<Vec<File>> {
     let mut locks = Vec::new();
     let mut requests = Vec::new();
@@ -1803,11 +1814,12 @@ fn lock_disk_mounts(
                 request.label
             )));
         }
+        let strict = *policy != HostFilePolicy::Standard;
         locks.push(lock_disk_image(
             if strict { &request.path } else { &canonical },
             request.readonly,
             request.volume_name.as_deref(),
-            strict,
+            policy,
         )?);
     }
 
@@ -1818,16 +1830,16 @@ fn lock_disk_image(
     path: &Path,
     readonly: bool,
     volume_name: Option<&str>,
-    strict: bool,
+    policy: &HostFilePolicy,
 ) -> MicrosandboxResult<File> {
     #[cfg(unix)]
     {
-        lock_disk_image_unix(path, readonly, volume_name, strict)
+        lock_disk_image_unix_with_policy(path, readonly, volume_name, policy)
     }
 
     #[cfg(windows)]
     {
-        if strict {
+        if *policy != HostFilePolicy::Standard {
             return Err(MicrosandboxError::InvalidConfig(
                 "strict host file opens require Unix".into(),
             ));
@@ -1837,18 +1849,28 @@ fn lock_disk_image(
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn lock_disk_image_unix(
     path: &Path,
     readonly: bool,
     volume_name: Option<&str>,
     strict: bool,
 ) -> MicrosandboxResult<File> {
+    let policy = HostFilePolicy::from_strict(strict);
+    lock_disk_image_unix_with_policy(path, readonly, volume_name, &policy)
+}
+
+fn lock_disk_image_unix_with_policy(
+    path: &Path,
+    readonly: bool,
+    volume_name: Option<&str>,
+    policy: &HostFilePolicy,
+) -> MicrosandboxResult<File> {
     let access = if readonly {
         HostFileAccess::ReadOnly
     } else {
         HostFileAccess::ReadWrite
     };
-    let policy = HostFilePolicy::from_strict(strict);
 
     let file = host_file::open(path, HostFileKind::Disk, access, policy).map_err(|err| {
         MicrosandboxError::InvalidConfig(format!("open disk image lock {}: {err}", path.display()))

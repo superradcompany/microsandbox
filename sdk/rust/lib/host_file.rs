@@ -1,5 +1,7 @@
 //! Bounded host file admission. Validate the opened inode, never stat then reopen.
 
+#[cfg(target_os = "linux")]
+use std::ffi::OsStr;
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
 use std::fs::{File, FileType, OpenOptions};
@@ -12,7 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 #[cfg(unix)]
 use std::path::Component;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -41,13 +43,19 @@ pub(crate) enum HostFileAccess {
 }
 
 /// Symlink and path-traversal policy applied when opening a host file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostFilePolicy {
     /// Follow symlinks normally while still validating the opened inode type.
     Standard,
 
     /// Reject symlinks and parent (`..`) components throughout the path.
+    #[cfg_attr(not(test), allow(dead_code))]
     Strict,
+
+    /// Anchor at a trusted host root directory and reject symlinks and parent (`..`)
+    /// components strictly beneath it (falling back to full-path strict checks if
+    /// the target lies outside the root).
+    StrictBeneath(PathBuf),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -83,8 +91,13 @@ impl HostFileAccess {
 }
 
 impl HostFilePolicy {
+    #[cfg(test)]
     pub(crate) fn from_strict(strict: bool) -> Self {
         if strict { Self::Strict } else { Self::Standard }
+    }
+
+    pub(crate) fn strict_beneath(root: PathBuf) -> Self {
+        Self::StrictBeneath(root)
     }
 }
 
@@ -94,16 +107,20 @@ impl HostFilePolicy {
 
 /// Open a host file and keep it only if the opened inode is of the expected kind.
 ///
-/// On Unix, opens never wait for a FIFO peer. [`HostFilePolicy::Strict`] also rejects
-/// symlinks in every path component, including parent directories, and is unsupported elsewhere.
+/// On Unix, opens never wait for a FIFO peer. [`HostFilePolicy::Strict`] rejects
+/// symlinks in every path component, while [`HostFilePolicy::StrictBeneath`] opens
+/// the trusted root once and enforces symlink-free traversal beneath it.
 pub(crate) fn open(
     path: &Path,
     kind: HostFileKind,
     access: HostFileAccess,
-    policy: HostFilePolicy,
+    policy: &HostFilePolicy,
 ) -> io::Result<File> {
     let file = match policy {
         HostFilePolicy::Strict => open_without_symlinks(path, kind, access)?,
+        HostFilePolicy::StrictBeneath(root) => {
+            open_beneath_without_symlinks(root, path, kind, access)?
+        }
         HostFilePolicy::Standard => {
             let mut options = OpenOptions::new();
             options.read(true).write(access.is_writable());
@@ -131,11 +148,35 @@ fn open_without_symlinks(
     kind: HostFileKind,
     access: HostFileAccess,
 ) -> io::Result<File> {
+    let anchor = if path.is_absolute() { "/" } else { "." };
+    let directory = open_search_directory(Path::new(anchor))?;
+    open_components_without_symlinks(directory, path, kind, access)
+}
+
+#[cfg(unix)]
+fn open_beneath_without_symlinks(
+    root: &Path,
+    path: &Path,
+    kind: HostFileKind,
+    access: HostFileAccess,
+) -> io::Result<File> {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return open_without_symlinks(path, kind, access);
+    };
+
+    let directory = open_search_directory(root)?;
+    open_components_without_symlinks(directory, relative, kind, access)
+}
+
+#[cfg(unix)]
+fn open_components_without_symlinks(
+    mut directory: File,
+    path: &Path,
+    kind: HostFileKind,
+    access: HostFileAccess,
+) -> io::Result<File> {
     // Retain each directory while opening the next. A concurrent rename cannot
     // redirect later components to a symlink or a different ancestor.
-    let anchor = if path.is_absolute() { "/" } else { "." };
-    let mut directory = open_search_directory(Path::new(anchor))?;
-
     let mut components = path
         .components()
         .filter(|part| !matches!(part, Component::RootDir | Component::CurDir))
@@ -193,7 +234,7 @@ fn open_without_symlinks(
         let file = unsafe { File::from_raw_fd(fd) };
         if final_component {
             #[cfg(target_os = "linux")]
-            return reopen_pinned(&file, kind, access);
+            return reopen_pinned(&file, part, kind, access);
 
             #[cfg(not(target_os = "linux"))]
             {
@@ -214,10 +255,24 @@ fn open_without_symlinks(
 /// Reopen an `O_PATH`-pinned inode through procfs after validating its file type.
 ///
 /// Checking the pinned inode first ensures special files such as FIFOs or devices
-/// are never opened before being rejected.
+/// are never opened before being rejected, and catches final symlinks which Linux
+/// `openat(O_PATH | O_NOFOLLOW)` returns as an `O_PATH` descriptor instead of `ELOOP`.
 #[cfg(target_os = "linux")]
-fn reopen_pinned(pinned: &File, kind: HostFileKind, access: HostFileAccess) -> io::Result<File> {
-    if !kind.admits(pinned.metadata()?.file_type()) {
+fn reopen_pinned(
+    pinned: &File,
+    part: &OsStr,
+    kind: HostFileKind,
+    access: HostFileAccess,
+) -> io::Result<File> {
+    let file_type = pinned.metadata()?.file_type();
+    if file_type.is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("runtime.strict_host_files rejects symlink {part:?} in host path"),
+        ));
+    }
+
+    if !kind.admits(file_type) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             kind.rejection(),
@@ -281,6 +336,19 @@ fn open_without_symlinks(
     ))
 }
 
+#[cfg(not(unix))]
+fn open_beneath_without_symlinks(
+    _root: &Path,
+    _path: &Path,
+    _kind: HostFileKind,
+    _access: HostFileAccess,
+) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "strict host file opens require Unix",
+    ))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -304,7 +372,7 @@ mod tests {
             for kind in [HostFileKind::Regular, HostFileKind::Disk] {
                 for policy in [HostFilePolicy::Standard, HostFilePolicy::Strict] {
                     for access in [HostFileAccess::ReadOnly, HostFileAccess::ReadWrite] {
-                        let error = open(Path::new(&path), kind, access, policy).unwrap_err();
+                        let error = open(Path::new(&path), kind, access, &policy).unwrap_err();
                         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
                     }
                 }
@@ -354,7 +422,7 @@ mod tests {
                     &regular,
                     kind,
                     HostFileAccess::ReadOnly,
-                    HostFilePolicy::Standard
+                    &HostFilePolicy::Standard
                 )
                 .is_ok()
             );
@@ -364,7 +432,7 @@ mod tests {
                     special,
                     kind,
                     HostFileAccess::ReadOnly,
-                    HostFilePolicy::Standard,
+                    &HostFilePolicy::Standard,
                 )
                 .unwrap_err();
                 assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -405,7 +473,7 @@ mod tests {
                 &dotted,
                 HostFileKind::Regular,
                 HostFileAccess::ReadOnly,
-                HostFilePolicy::Standard
+                &HostFilePolicy::Standard
             )
             .is_ok()
         );
@@ -414,7 +482,7 @@ mod tests {
             &dotted,
             HostFileKind::Regular,
             HostFileAccess::ReadOnly,
-            HostFilePolicy::Strict,
+            &HostFilePolicy::Strict,
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -429,7 +497,7 @@ mod tests {
                     &link,
                     HostFileKind::Regular,
                     HostFileAccess::ReadOnly,
-                    HostFilePolicy::Standard
+                    &HostFilePolicy::Standard
                 )
                 .is_ok()
             );
@@ -438,7 +506,7 @@ mod tests {
                 &link,
                 HostFileKind::Regular,
                 HostFileAccess::ReadOnly,
-                HostFilePolicy::Strict,
+                &HostFilePolicy::Strict,
             )
             .unwrap_err();
             let message = error.to_string();
@@ -450,7 +518,13 @@ mod tests {
             (HostFileAccess::ReadOnly, libc::O_RDONLY),
             (HostFileAccess::ReadWrite, libc::O_RDWR),
         ] {
-            let file = open(&path, HostFileKind::Regular, access, HostFilePolicy::Strict).unwrap();
+            let file = open(
+                &path,
+                HostFileKind::Regular,
+                access,
+                &HostFilePolicy::Strict,
+            )
+            .unwrap();
             let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
             assert_eq!(flags & libc::O_ACCMODE, mode);
         }
@@ -466,7 +540,7 @@ mod tests {
                 Path::new("real/file"),
                 HostFileKind::Regular,
                 HostFileAccess::ReadOnly,
-                HostFilePolicy::Strict,
+                &HostFilePolicy::Strict,
             )
             .unwrap()
             .read_to_string(&mut contents)
@@ -478,7 +552,7 @@ mod tests {
                     Path::new("linked/file"),
                     HostFileKind::Regular,
                     HostFileAccess::ReadOnly,
-                    HostFilePolicy::Strict,
+                    &HostFilePolicy::Strict,
                 )
                 .is_err()
             );
@@ -519,13 +593,13 @@ mod tests {
             &path,
             HostFileKind::Disk,
             HostFileAccess::ReadOnly,
-            HostFilePolicy::Standard,
+            &HostFilePolicy::Standard,
         );
         let strict = open(
             &path,
             HostFileKind::Disk,
             HostFileAccess::ReadOnly,
-            HostFilePolicy::Strict,
+            &HostFilePolicy::Strict,
         );
 
         // Restore permissions before any assertion so the fixture can always be removed.
@@ -536,5 +610,45 @@ mod tests {
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
         assert_eq!(contents, "disk");
+    }
+
+    #[test]
+    fn strict_beneath_allows_symlinked_root_while_rejecting_child_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let real_home = base.join("real-home");
+        let logs = real_home.join("sandboxes/sbx/logs");
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(logs.join("exec.log"), b"ok").unwrap();
+
+        // Simulate a symlinked MSB_HOME (or macOS /var -> /private/var above home).
+        let symlinked_home = base.join("home-link");
+        symlink(&real_home, &symlinked_home).unwrap();
+        symlink(logs.join("exec.log"), logs.join("alias.log")).unwrap();
+
+        let policy = HostFilePolicy::strict_beneath(symlinked_home.clone());
+
+        let mut contents = String::new();
+        open(
+            &symlinked_home.join("sandboxes/sbx/logs/exec.log"),
+            HostFileKind::Regular,
+            HostFileAccess::ReadOnly,
+            &policy,
+        )
+        .unwrap()
+        .read_to_string(&mut contents)
+        .unwrap();
+        assert_eq!(contents, "ok");
+
+        let error = open(
+            &symlinked_home.join("sandboxes/sbx/logs/alias.log"),
+            HostFileKind::Regular,
+            HostFileAccess::ReadOnly,
+            &policy,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("runtime.strict_host_files"), "{message}");
+        assert!(message.contains("\"alias.log\""), "{message}");
     }
 }

@@ -59,6 +59,26 @@ impl GlobalConfig {
         }
         Ok(())
     }
+
+    /// Whether SDK host file opens enforce symlink-free traversal.
+    ///
+    /// Enabled explicitly via `runtime.strict_host_files` or automatically on Unix
+    /// when `deployment_profile` is `multi-tenant`.
+    pub(crate) fn strict_host_files(&self) -> bool {
+        self.runtime.strict_host_files
+            || (cfg!(unix)
+                && self.deployment_profile
+                    == Some(microsandbox_types::DeploymentProfile::MultiTenant))
+    }
+
+    /// Host file open policy anchored at `self.home()` when strict mode is active.
+    pub(crate) fn host_file_policy(&self) -> crate::host_file::HostFilePolicy {
+        if self.strict_host_files() {
+            crate::host_file::HostFilePolicy::strict_beneath(self.home())
+        } else {
+            crate::host_file::HostFilePolicy::Standard
+        }
+    }
 }
 
 impl BackendConfig {
@@ -644,7 +664,7 @@ mod tests {
             let result = layers.prepare_for_local_backend(Default::default());
 
             #[cfg(unix)]
-            assert!(result.unwrap().resolved_config().runtime.strict_host_files);
+            assert!(result.unwrap().resolved_config().strict_host_files());
             #[cfg(not(unix))]
             assert!(
                 result
@@ -652,6 +672,21 @@ mod tests {
                     .unwrap()
                     .to_string()
                     .contains("runtime.strict_host_files is supported only on Unix")
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let multi_tenant = BackendConfig::new(
+                serde_json::from_str(r#"{"deployment_profile":"multi-tenant"}"#).unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            );
+            assert!(
+                multi_tenant
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap()
+                    .resolved_config()
+                    .strict_host_files()
             );
         }
     }

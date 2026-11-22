@@ -50,16 +50,19 @@ impl FileHandle {
     /// `Ok(None)` if the file doesn't exist (treated as "producer
     /// hasn't created it yet, retry later"); other I/O errors
     /// propagate.
-    pub(super) async fn open(path: &Path, strict: bool) -> MicrosandboxResult<Option<Self>> {
+    pub(super) async fn open(
+        path: &Path,
+        policy: &HostFilePolicy,
+    ) -> MicrosandboxResult<Option<Self>> {
         let path = path.to_path_buf();
-        let policy = HostFilePolicy::from_strict(strict);
+        let policy = policy.clone();
 
         let file = match tokio::task::spawn_blocking(move || {
             host_file::open(
                 &path,
                 HostFileKind::Regular,
                 HostFileAccess::ReadOnly,
-                policy,
+                &policy,
             )
         })
         .await
@@ -382,17 +385,19 @@ mod tests {
         std::fs::write(&path, b"private log").unwrap();
         symlink(&path, root.join("linked.log")).unwrap();
         symlink(&real, root.join("linked-dir")).unwrap();
-        assert!(FileHandle::open(&path, true).await.unwrap().is_some());
+        let strict = HostFilePolicy::Strict;
+        let standard = HostFilePolicy::Standard;
+        assert!(FileHandle::open(&path, &strict).await.unwrap().is_some());
         for link in [root.join("linked.log"), root.join("linked-dir/exec.log")] {
-            let mut handle = FileHandle::open(&link, false).await.unwrap().unwrap();
+            let mut handle = FileHandle::open(&link, &standard).await.unwrap().unwrap();
             let mut data = Vec::new();
             handle.file.read_to_end(&mut data).await.unwrap();
             assert_eq!(data, b"private log");
-            assert!(FileHandle::open(&link, true).await.is_err());
+            assert!(FileHandle::open(&link, &strict).await.is_err());
         }
-        assert!(FileHandle::open(&real, false).await.is_err());
+        assert!(FileHandle::open(&real, &standard).await.is_err());
         assert!(
-            FileHandle::open(&root.join("missing.log"), true)
+            FileHandle::open(&root.join("missing.log"), &strict)
                 .await
                 .unwrap()
                 .is_none()

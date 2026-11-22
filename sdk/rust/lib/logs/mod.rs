@@ -249,7 +249,7 @@ async fn read_logs_snapshot_from_dir(
     name: &str,
     log_dir: PathBuf,
     opts: &LogOptions,
-    strict_host_files: bool,
+    host_file_policy: crate::host_file::HostFilePolicy,
 ) -> MicrosandboxResult<LogSnapshot> {
     crate::sandbox::validate_sandbox_name(name)?;
     let stream_opts = LogStreamOptions {
@@ -271,7 +271,7 @@ async fn read_logs_snapshot_from_dir(
         &stream_opts.start,
         stream_opts.until,
         stream_opts.follow,
-        strict_host_files,
+        host_file_policy,
     )
     .await?;
     let (mut entries, cursor) = engine.drain_sorted_snapshot().await?;
@@ -292,7 +292,7 @@ pub async fn log_stream(
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     let logger = default_logger(name)?;
-    log_stream_from_dir(name, logger.log_dir, opts, logger.strict_host_files).await
+    log_stream_from_dir(name, logger.log_dir, opts, logger.host_file_policy).await
 }
 
 /// Stream log entries through an explicit local backend.
@@ -303,7 +303,7 @@ pub(crate) async fn log_stream_local(
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     let logger = SandboxLogger::for_local(local, name);
-    log_stream_from_dir(name, logger.log_dir, opts, logger.strict_host_files).await
+    log_stream_from_dir(name, logger.log_dir, opts, logger.host_file_policy).await
 }
 
 #[cfg(feature = "local")]
@@ -311,7 +311,7 @@ async fn log_stream_from_dir(
     name: &str,
     log_dir: PathBuf,
     opts: &LogStreamOptions,
-    strict_host_files: bool,
+    host_file_policy: crate::host_file::HostFilePolicy,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     crate::sandbox::validate_sandbox_name(name)?;
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
@@ -325,7 +325,7 @@ async fn log_stream_from_dir(
         &opts.start,
         opts.until,
         opts.follow,
-        strict_host_files,
+        host_file_policy,
     )
     .await?;
     Ok(engine.into_stream())
@@ -341,7 +341,7 @@ pub(crate) async fn log_stream_from_dir_registry(
     log_dir: PathBuf,
     opts: &LogStreamOptions,
     subscription: watch::LogSubscription,
-    strict_host_files: bool,
+    host_file_policy: crate::host_file::HostFilePolicy,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     crate::sandbox::validate_sandbox_name(name)?;
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
@@ -355,7 +355,7 @@ pub(crate) async fn log_stream_from_dir_registry(
         &opts.start,
         opts.until,
         subscription,
-        strict_host_files,
+        host_file_policy,
     )
     .await?;
     Ok(engine.into_stream())
