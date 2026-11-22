@@ -127,6 +127,11 @@ pub struct LaunchCapabilities {
     /// Older runtimes omit this capability.
     #[serde(default)]
     pub multi_tenant: bool,
+
+    /// The launch field `share_elevated_sandboxes` is honored by the runtime.
+    /// Older runtimes omit this capability and reject the field.
+    #[serde(default)]
+    pub share_elevated_sandboxes: bool,
 }
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this sandbox.
@@ -244,6 +249,12 @@ pub struct LaunchConfig {
     /// Host-global dirty-credit pool shared fairly by live writable disks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_writeback_pool_bytes: Option<u64>,
+
+    /// On Windows, share an elevated runtime's pipes with non-elevated runs in its sign-in
+    /// session. Omitted when off, so runtimes that predate the field keep accepting
+    /// ordinary launches; off keeps the UAC boundary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub share_elevated_sandboxes: bool,
 
     /// User workload to start after boot, if any.
     pub startup: Option<StartupCommand>,
@@ -773,6 +784,23 @@ mod tests {
             decode(encoded).unwrap().fs_state_limit_bytes,
             Some(64 * 1024 * 1024)
         );
+    }
+
+    #[test]
+    fn share_elevated_sandboxes_is_omitted_by_default_and_survives_the_handoff() {
+        let default = serde_json::to_value(LaunchConfig::default()).unwrap();
+
+        assert!(default.get("share_elevated_sandboxes").is_none());
+        assert!(!decode(default).unwrap().share_elevated_sandboxes);
+
+        let config = LaunchConfig {
+            share_elevated_sandboxes: true,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(config).unwrap();
+
+        assert_eq!(encoded["share_elevated_sandboxes"], true);
+        assert!(decode(encoded).unwrap().share_elevated_sandboxes);
     }
 
     #[cfg(feature = "net")]

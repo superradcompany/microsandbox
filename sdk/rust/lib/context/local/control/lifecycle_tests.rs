@@ -143,7 +143,7 @@ async fn live_replacement_before_discovery_and_between_probe_and_hello() {
                     .await
                     .err()
                     .unwrap();
-                assert!(matches!(&*error, ControlClientError::RuntimeChanged));
+                assert!(matches!(&*error.error, ControlClientError::RuntimeChanged));
                 assert!(!current.entry.invalidated.is_cancelled());
                 let reused = local.control_session(&name).await.unwrap().unwrap();
                 assert!(Arc::ptr_eq(&current.entry, &reused.entry));

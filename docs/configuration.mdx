@@ -323,12 +323,13 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 ## `runtime`
 
-<Tooltip tip="Host runtime placement and block-device writeback settings do not apply to managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Host runtime placement, block-device writeback and Windows elevation settings do not apply to managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `block_writeback` | `{ "mode": "auto" }` | Buffered host writeback containment and live pressure sharing on Linux. Pool pressure never rejects sandbox creation; unconfigured `auto` is a no-op on other hosts. |
 | `placement_profiles` | `{}` | Host-owned named CPU and NUMA placement profiles selectable by sandboxes |
+| `share_elevated_sandboxes` | `false` | Windows only. Lets non-elevated `msb` runs of the same user in the same sign-in session reach sandboxes that an elevated (administrator) `msb` starts |
 
 ### `runtime.placement_profiles`
 
@@ -379,6 +380,38 @@ Existing VMMs observe membership changes within 250 ms. If a disk already owns m
 </Accordion>
 
 See the [performance guide](/sandboxes/optimization) for choosing and measuring runtime settings.
+
+### `runtime.share_elevated_sandboxes`
+
+On Windows, lets non-elevated `msb` runs of the same user, in the same sign-in session, drive sandboxes that an elevated (administrator) `msb` starts:
+
+<CodeGroup>
+```json JSON
+{
+  "runtime": {
+    "share_elevated_sandboxes": true
+  }
+}
+```
+</CodeGroup>
+
+With User Account Control, an administrator signs in with a split token: an elevated shell runs with the full token, a normal shell with the filtered one. By default Windows keeps the two apart at the sandbox runtime's pipes. A non-elevated `msb` can still list a sandbox an elevated `msb` started and read its metrics, but `exec`, a graceful `stop` and other commands that talk to the runtime fail with access denied (a graceful `stop` asks the sandbox to shut down over one of those pipes). A forced stop (`msb stop --force`) may still work, because Windows lets the non-elevated token terminate the runtime process. The SDK adds to the error:
+
+```text
+the sandbox was most likely started by an elevated (administrator) process, and this process is not elevated. Run this process elevated, or stop the sandbox from an elevated process and then start it again from this one. To let non-elevated processes in the same sign-in session reach sandboxes that elevated processes start, set runtime.share_elevated_sandboxes to true in the microsandbox config file (~/.microsandbox/config.json by default) and start the sandbox again from an elevated process
+```
+
+and `msb` adds a hint to run it from an elevated terminal, or to stop the sandbox from one and start it again from this one.
+
+With the setting on, the elevated runtime's pipes also grant read and write access to the logon SID of the sign-in that started the runtime, which the elevated and non-elevated tokens of that sign-in share. Nothing else changes: Windows already lets that token wait for and terminate the runtime process, and never read its memory or change its security, with or without the setting. The trade-off is that the UAC boundary no longer protects those sandboxes: any non-elevated program of the same user in that sign-in session can drive them, including running commands in the guest and reaching what the sandbox mounts or can access on the network. Leave it off when non-elevated programs should not reach sandboxes that you start as administrator.
+
+<Accordion title="When the setting applies">
+
+The setting applies when an elevated `msb` starts or restarts a sandbox; restart running sandboxes after changing it. Only an elevated `msb` of an account with a split token sends it to the runtime; it has no effect in non-elevated runs, for accounts without a split token, or on other hosts. A runtime that does not support it is refused at launch with an upgrade-required error.
+
+It reaches only non-elevated runs in the same sign-in session as the elevated `msb`, because the pipes grant that sign-in's logon SID rather than the account. Each sign-in has its own logon SID. A scheduled task that runs with an interactive logon in that session is the same sign-in and is reached. Another sign-in of the same account stays refused: a second Remote Desktop session, an SSH logon, a service, a scheduled task set to run whether the user is signed in or not (S4U or stored password), and elevation with another account's credentials, which always signs in anew.
+
+</Accordion>
 
 ## `registries`
 

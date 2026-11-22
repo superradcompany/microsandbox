@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use microsandbox_db::entity::run;
+use microsandbox_utils::elevation_share;
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::Foundation::{
     ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -129,6 +130,17 @@ impl RuntimeProcess {
         path: &Path,
         timeout: Duration,
     ) -> MicrosandboxResult<crate::agent::AgentClient> {
+        self.connect_agent_as(path, timeout, elevation_share::explain_access_denied)
+            .await
+    }
+
+    /// [`Self::connect_agent`] with a failed pipe open explained by `explain`.
+    async fn connect_agent_as(
+        &self,
+        path: &Path,
+        timeout: Duration,
+        explain: impl FnOnce(io::Error) -> io::Error,
+    ) -> MicrosandboxResult<crate::agent::AgentClient> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if !self.alive()? {
@@ -156,7 +168,7 @@ impl RuntimeProcess {
                 {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(explain(error).into()),
             }
         }
     }
@@ -201,6 +213,10 @@ fn changed() -> MicrosandboxError {
 mod tests {
     use super::*;
     use std::process::{Child, Command, Stdio};
+
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Security::{TokenElevationTypeDefault, TokenElevationTypeLimited};
 
     struct ChildFixture(Child);
 
@@ -307,6 +323,60 @@ mod tests {
         );
         assert!(process.alive().unwrap());
     }
+
+    /// A non-elevated process whose shutdown request is refused the agent pipe gets the
+    /// explained denial; any other process gets the plain access-denied error.
+    #[tokio::test]
+    async fn a_refused_shutdown_connection_is_explained_as_an_elevated_sandbox() {
+        let process = RuntimeProcess::capture(std::process::id() as i32)
+            .unwrap()
+            .unwrap();
+        let path = format!(r"\\.\pipe\msb-owner-denied-test-{}", std::process::id());
+        // Inbound only, so the client's read/write open is refused with access denied, as an
+        // elevated runtime's unshared pipe refuses a non-elevated client.
+        let _server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .access_outbound(false)
+            .create(&path)
+            .unwrap();
+        let explain_as = |elevation| {
+            move |error: io::Error| elevation_share::explain_access_denied_as(error, elevation)
+        };
+
+        let explained = process
+            .connect_agent_as(
+                Path::new(&path),
+                Duration::from_secs(1),
+                explain_as(TokenElevationTypeLimited),
+            )
+            .await
+            .err()
+            .unwrap();
+        let plain = process
+            .connect_agent_as(
+                Path::new(&path),
+                Duration::from_secs(1),
+                explain_as(TokenElevationTypeDefault),
+            )
+            .await
+            .err()
+            .unwrap();
+
+        assert!(
+            elevation_share::has_elevated_sandbox_denial(&explained),
+            "{explained}"
+        );
+        let MicrosandboxError::Io(plain) = plain else {
+            panic!("the refused open is no longer an I/O error");
+        };
+        assert_eq!(
+            plain.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED as i32),
+            "{plain}"
+        );
+        assert!(!elevation_share::is_elevated_sandbox_denial(&plain));
+    }
+
     #[test]
     #[ignore = "subprocess fixture controlled by the ownership tests"]
     fn ownership_child() {

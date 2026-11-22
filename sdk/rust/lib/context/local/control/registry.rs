@@ -1,6 +1,7 @@
 //! One bounded registry per backend, with shared setup and independent waiters.
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, Mutex, Weak};
 
 use microsandbox_control_client::{
@@ -31,6 +32,24 @@ pub(super) struct RuntimeKey {
 }
 
 pub(super) type SharedError = Arc<ControlClientError>;
+
+/// A failed session setup, as every caller that waited on it gets it.
+#[derive(Clone, Debug)]
+pub(super) struct SetupError {
+    pub error: SharedError,
+    /// Why the connect failed, when the connector kept more than the error's kind.
+    pub cause: Option<Arc<io::Error>>,
+}
+
+/// A connector whose connect failure can carry a cause past the protocol client, whose
+/// error keeps only the error kind.
+pub(super) trait SessionConnector: VerifiedControlConnector {
+    /// Why the last connect failed, if this connector kept it.
+    fn setup_cause(&self) -> Option<Arc<io::Error>> {
+        None
+    }
+}
+
 type Entries = Mutex<HashMap<RuntimeKey, Arc<Entry>>>;
 
 pub(crate) struct ControlSessions {
@@ -44,14 +63,14 @@ pub(super) struct Entry {
     state: Mutex<EntryState>,
     changed: Notify,
     pub invalidated: CancellationToken,
-    pub connector: Arc<dyn VerifiedControlConnector>,
+    pub connector: Arc<dyn SessionConnector>,
     pub job_requests: Arc<tokio::sync::Semaphore>,
 }
 
 enum EntryState {
     Connecting { waiters: usize },
     Ready(ControlConnection),
-    Invalid(SharedError),
+    Invalid(SetupError),
 }
 
 struct Waiter(Arc<Entry>);
@@ -92,8 +111,8 @@ impl ControlSessions {
     pub(super) async fn get(
         &self,
         key: RuntimeKey,
-        connector: Arc<dyn VerifiedControlConnector>,
-    ) -> Result<ControlSession, SharedError> {
+        connector: Arc<dyn SessionConnector>,
+    ) -> Result<ControlSession, SetupError> {
         // Retire known dead entries before testing capacity. No registry lock
         // crosses verification I/O, and no live entry is evicted to make space.
         let candidates = {
@@ -118,7 +137,10 @@ impl ControlSessions {
             } else {
                 match tokio::time::timeout_at(until, entry.connector.verify_session(until)).await {
                     Ok(result) => result.is_err(),
-                    Err(_) => return Err(Arc::new(ClientError::new(ErrorKind::Timeout).into())),
+                    Err(_) => {
+                        let error = Arc::new(ClientError::new(ErrorKind::Timeout).into());
+                        return Err(SetupError::from(error));
+                    }
                 }
             };
             if failed {
@@ -144,11 +166,12 @@ impl ControlSessions {
                         *waiters += 1;
                         (entry.clone(), false)
                     }
-                    _ => return Err(changed()),
+                    _ => return Err(changed().into()),
                 }
             } else {
                 if entries.len() >= self.limit {
-                    return Err(Arc::new(ClientError::new(ErrorKind::Capacity).into()));
+                    let error = Arc::new(ClientError::new(ErrorKind::Capacity).into());
+                    return Err(SetupError::from(error));
                 }
                 let entry = Arc::new(Entry {
                     key,
@@ -190,9 +213,7 @@ impl ControlSessions {
 
 impl Entry {
     pub fn invalidate(&self, error: SharedError) {
-        *self.state.lock().unwrap() = EntryState::Invalid(error);
-        self.invalidated.cancel();
-        self.changed.notify_waiters();
+        self.fail(error.into());
     }
 
     pub fn is_closed(&self) -> bool {
@@ -204,6 +225,12 @@ impl Entry {
             EntryState::Invalid(_) => true,
             EntryState::Connecting { .. } => false,
         }
+    }
+
+    fn fail(&self, error: SetupError) {
+        *self.state.lock().unwrap() = EntryState::Invalid(error);
+        self.invalidated.cancel();
+        self.changed.notify_waiters();
     }
 
     async fn run(self: Arc<Self>, registry: Weak<Entries>) {
@@ -230,7 +257,11 @@ impl Entry {
         let connection = match result {
             Ok(connection) => connection,
             Err(error) => {
-                self.invalidate(Arc::new(error));
+                // The connector that ran the connect is the one that can tell why it failed.
+                self.fail(SetupError {
+                    error: Arc::new(error),
+                    cause: self.connector.setup_cause(),
+                });
                 return;
             }
         };
@@ -253,7 +284,7 @@ impl Entry {
 }
 
 impl Waiter {
-    async fn wait(self) -> Result<ControlSession, SharedError> {
+    async fn wait(self) -> Result<ControlSession, SetupError> {
         loop {
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
@@ -273,6 +304,12 @@ impl Waiter {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl From<SharedError> for SetupError {
+    fn from(error: SharedError) -> Self {
+        Self { error, cause: None }
+    }
+}
 
 impl Default for ControlSessions {
     fn default() -> Self {
@@ -296,7 +333,8 @@ impl Drop for Waiter {
         if let EntryState::Connecting { waiters } = &mut *state {
             *waiters -= 1;
             if *waiters == 0 {
-                *state = EntryState::Invalid(Arc::new(ClientError::new(ErrorKind::Closed).into()));
+                let error = Arc::new(ClientError::new(ErrorKind::Closed).into());
+                *state = EntryState::Invalid(SetupError::from(error));
                 self.0.invalidated.cancel();
                 self.0.changed.notify_waiters();
             }

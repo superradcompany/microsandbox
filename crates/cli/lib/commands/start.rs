@@ -55,7 +55,7 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
             Err(e) => {
                 spinner.finish_clear();
                 if !args.quiet {
-                    ui::error(&format!("{e}"));
+                    ui::sandbox_error(&e);
                 }
                 failed = true;
             }

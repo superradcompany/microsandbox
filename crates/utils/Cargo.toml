@@ -25,3 +25,6 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Memory", "Win32_System_Pipes"] }

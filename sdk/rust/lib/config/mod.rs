@@ -19,6 +19,8 @@ pub(crate) mod layers;
 mod persistence;
 mod registry;
 
+#[cfg(windows)]
+use std::io;
 use std::{
     collections::{BTreeMap, HashMap},
     num::NonZero,
@@ -34,7 +36,11 @@ use microsandbox_types::{
     ConfigPatch, CpuPlacement, DeploymentProfile, OutboundProxy, PlacementProfile, RootDisk,
     TransparentHugePagePolicy,
 };
+#[cfg(windows)]
+use microsandbox_utils::elevation_share;
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use windows_sys::Win32::Security::TOKEN_ELEVATION_TYPE;
 
 use crate::context::{ContextKind, Profile};
 #[cfg(feature = "local")]
@@ -404,6 +410,12 @@ pub struct RuntimeConfig {
     /// Host-owned placement profiles selectable by sandbox name.
     #[config_patch(merge)]
     pub placement_profiles: BTreeMap<String, PlacementProfile>,
+
+    /// On Windows, let non-elevated runs in the same sign-in session reach sandboxes that an
+    /// elevated (administrator) run starts: they can connect to, exec in and stop them. Off
+    /// keeps the UAC boundary, and a non-elevated run gets an access-denied error explaining
+    /// it.
+    pub share_elevated_sandboxes: bool,
 }
 
 /// Controls buffered host dirty data for writable raw disks.
@@ -498,6 +510,21 @@ impl GlobalConfig {
     pub(crate) fn fs_state_limit_override(&self) -> Option<u64> {
         (self.snapshots.max_filesystem_state_mib != FS_STATE_LIMIT_DEFAULT_MIB)
             .then(|| self.fs_state_limit() as u64)
+    }
+
+    /// Whether a launch asks the runtime to share elevated sandboxes with non-elevated runs:
+    /// the setting is on and `launcher_can_share` (see [`launched_runtimes_can_share`]) says
+    /// the runtimes this process launches would act on it. The launcher is consulted only
+    /// when the setting is on, and its error fails the launch.
+    pub(crate) fn share_elevated_sandboxes_with(
+        &self,
+        launcher_can_share: impl FnOnce() -> MicrosandboxResult<bool>,
+    ) -> MicrosandboxResult<bool> {
+        if !self.runtime.share_elevated_sandboxes {
+            return Ok(false);
+        }
+
+        launcher_can_share()
     }
 
     /// Resolve and structurally validate a host-owned placement profile.
@@ -800,9 +827,38 @@ pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
     config()?.resolve_libkrunfw_path()
 }
 
+/// Whether a runtime this process launches, with this process's token, shares elevated
+/// sandboxes when asked: only the full half of a Windows split token does. An unreadable
+/// token is an error, so an opt-in is never dropped silently.
+#[cfg(windows)]
+pub(crate) fn launched_runtimes_can_share() -> MicrosandboxResult<bool> {
+    launched_runtimes_can_share_as(elevation_share::elevation_type())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn launched_runtimes_can_share() -> MicrosandboxResult<bool> {
+    Ok(false)
+}
+
 /// Resolve the default home directory (`~/.microsandbox`, or non-empty `$MSB_HOME`).
 fn resolve_default_home() -> PathBuf {
     microsandbox_utils::resolve_home()
+}
+
+/// [`launched_runtimes_can_share`] for the result of reading this process's token elevation
+/// type.
+#[cfg(windows)]
+fn launched_runtimes_can_share_as(
+    elevation: io::Result<TOKEN_ELEVATION_TYPE>,
+) -> MicrosandboxResult<bool> {
+    let elevation = elevation.map_err(|error| {
+        MicrosandboxError::Runtime(format!(
+            "could not read this process's token elevation type while \
+             runtime.share_elevated_sandboxes is on: {error}"
+        ))
+    })?;
+
+    Ok(elevation_share::shares_with_non_elevated(true, elevation))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -827,6 +883,11 @@ pub use runtime_paths::set_sdk_packaged_msb_path;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use windows_sys::Win32::Security::{
+        TokenElevationTypeDefault, TokenElevationTypeFull, TokenElevationTypeLimited,
+    };
+
     use super::*;
 
     fn saved_patch(config: &GlobalConfig) -> GlobalConfigPatch {
@@ -893,7 +954,8 @@ mod tests {
                 "placement_profiles": {"latency": {
                     "numa": {"mode": "prefer_single"},
                     "memory": {"mode": "follow_cpu"}
-                }}
+                }},
+                "share_elevated_sandboxes": true
             },
             "registries": {
                 "ca_certs": "/configured/ca.pem",
@@ -1228,6 +1290,61 @@ mod tests {
         assert!(
             error.to_string().contains(
                 "placement profile `missing` is not defined in runtime.placement_profiles"
+            )
+        );
+    }
+
+    #[test]
+    fn test_share_elevated_sandboxes_defaults_off_and_asks_the_launcher_only_when_on() {
+        let default: GlobalConfig = serde_json::from_str("{}").unwrap();
+        let opted_in: GlobalConfig =
+            serde_json::from_str(r#"{"runtime":{"share_elevated_sandboxes":true}}"#).unwrap();
+
+        assert!(!default.runtime.share_elevated_sandboxes);
+        assert!(opted_in.runtime.share_elevated_sandboxes);
+        for elevated in [false, true] {
+            assert!(
+                !default
+                    .share_elevated_sandboxes_with(|| unreachable!("asked with the setting off"))
+                    .unwrap()
+            );
+            assert_eq!(
+                opted_in
+                    .share_elevated_sandboxes_with(|| Ok(elevated))
+                    .unwrap(),
+                elevated
+            );
+        }
+
+        let error = opted_in
+            .share_elevated_sandboxes_with(|| Err(MicrosandboxError::Runtime("injected".into())))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("injected"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_launched_runtimes_share_only_from_an_elevated_split_token_and_fail_unread() {
+        for (elevation, expected) in [
+            (TokenElevationTypeDefault, false),
+            (TokenElevationTypeFull, true),
+            (TokenElevationTypeLimited, false),
+        ] {
+            let shares = launched_runtimes_can_share_as(Ok(elevation)).unwrap();
+
+            assert_eq!(shares, expected, "elevation type {elevation}");
+        }
+
+        let error =
+            launched_runtimes_can_share_as(Err(io::Error::from_raw_os_error(5))).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "runtime error: could not read this process's token elevation type while \
+                 runtime.share_elevated_sandboxes is on: {}",
+                io::Error::from_raw_os_error(5)
             )
         );
     }

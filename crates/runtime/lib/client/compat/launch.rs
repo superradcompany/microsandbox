@@ -185,6 +185,8 @@ impl PreviousLaunch {
             memory_cache_dir: self.memory_cache_dir,
             block_writeback_limit_bytes: self.block_writeback_limit_bytes,
             block_writeback_pool_bytes: self.block_writeback_pool_bytes,
+            // Previous launch formats never shared an elevated runtime.
+            share_elevated_sandboxes: false,
             startup: self.startup,
             lifecycle: self.lifecycle,
             metrics: self.metrics,

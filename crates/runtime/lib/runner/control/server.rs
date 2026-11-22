@@ -19,6 +19,8 @@ use super::dispatch::{
     invalid, reply_bytes,
 };
 use super::handler::{ControlContext, Reply};
+#[cfg(windows)]
+use crate::runner::elevation::create_shared_pipe;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -104,7 +106,7 @@ pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> io
                     };
                     let mut options = ServerOptions::new();
                     options.pipe_mode(PipeMode::Byte).first_pipe_instance(first);
-                    let server = match options.create(&pipe_name) {
+                    let server = match create_shared_pipe(&options, &pipe_name) {
                         Ok(server) => server,
                         Err(error) => {
                             tracing::warn!("control: pipe create failed: {error}");

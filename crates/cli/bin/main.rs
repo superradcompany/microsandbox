@@ -433,6 +433,7 @@ fn main() {
                     ),
                     exec_limits: true,
                     multi_tenant: cfg!(feature = "net"),
+                    share_elevated_sandboxes: cfg!(windows),
                 })
                 .expect("serialize capabilities");
             capabilities["deferred_command_bindings"] = true.into();
@@ -676,6 +677,11 @@ fn render_anyhow_error(err: &anyhow::Error) -> i32 {
             lines.push(microsandbox_cli::ui::ErrorLine::Hint(hint));
         }
         microsandbox_cli::ui::error_with_lines(setup_err.title(), &lines);
+        return 1;
+    }
+    #[cfg(windows)]
+    if microsandbox_cli::ui::has_elevated_sandbox_denial(err.as_ref()) {
+        microsandbox_cli::ui::sandbox_error(err.as_ref());
         return 1;
     }
     if find_unsupported_feature_in_chain(err) {

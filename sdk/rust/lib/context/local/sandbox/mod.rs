@@ -31,6 +31,8 @@ use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::{Digest, GlobalCache};
 #[cfg(unix)]
 use microsandbox_runtime::ipc::SandboxSocketPaths;
+#[cfg(windows)]
+use microsandbox_utils::elevation_share;
 use sea_orm::{
     ColumnTrait, Condition, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect,
     sea_query::Expr,
@@ -479,17 +481,9 @@ impl LocalContext {
         #[cfg(windows)]
         {
             if pid.is_some_and(Self::pid_is_alive) {
-                match self.request_agent_shutdown(name, model.id).await {
-                    Ok(()) => {}
-                    Err(error @ crate::MicrosandboxError::SandboxReplaced { .. }) => {
-                        return Err(error);
-                    }
-                    Err(error) => {
-                        return Err(crate::MicrosandboxError::Runtime(format!(
-                            "windows drain requires the agent shutdown path, but the agent endpoint is unavailable: {error}"
-                        )));
-                    }
-                }
+                self.request_agent_shutdown(name, model.id)
+                    .await
+                    .map_err(drain_shutdown_error)?;
             }
             Ok(())
         }
@@ -1581,6 +1575,21 @@ fn sandbox_replaced(name: &str, expected_id: i32, actual_id: i32) -> crate::Micr
     }
 }
 
+/// The error a Windows drain reports when its agent shutdown request failed. A replaced
+/// sandbox and an explained elevated sandbox denial are kept as they are, so callers can
+/// still recognize them (`msb` adds its hint to the denial); anything else says the drain
+/// needs the agent shutdown path.
+#[cfg(windows)]
+fn drain_shutdown_error(error: crate::MicrosandboxError) -> crate::MicrosandboxError {
+    match error {
+        error @ crate::MicrosandboxError::SandboxReplaced { .. } => error,
+        error if elevation_share::has_elevated_sandbox_denial(&error) => error,
+        error => crate::MicrosandboxError::Runtime(format!(
+            "windows drain requires the agent shutdown path, but the agent endpoint is unavailable: {error}"
+        )),
+    }
+}
+
 fn encode_list_cursor(id: i32) -> String {
     URL_SAFE_NO_PAD.encode(id.to_string())
 }
@@ -1635,6 +1644,8 @@ async fn filter_sandbox_ids(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(windows)]
+    use std::io;
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::net::UnixListener;
@@ -1650,8 +1661,16 @@ mod tests {
     use microsandbox_migration::{Migrator, MigratorTrait};
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
+    #[cfg(windows)]
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    #[cfg(windows)]
+    use windows_sys::Win32::Security::TokenElevationTypeLimited;
 
     use super::{SpawnMode, sandbox_entity};
+    #[cfg(windows)]
+    use super::{drain_shutdown_error, elevation_share, sandbox_replaced};
+    #[cfg(windows)]
+    use crate::MicrosandboxError;
     use crate::config::layers::BackendConfig;
     use crate::context::{Context, ContextSelectionSource, LocalContext, SandboxOps};
     use crate::logs::{LogOptions, LogSource};
@@ -1668,6 +1687,37 @@ mod tests {
 
         assert_eq!(backend.default_stop_timeout(), DEFAULT_STOP_TIMEOUT);
         assert!(backend.should_force_kill_after_stop_timeout());
+    }
+
+    /// A Windows drain whose agent shutdown request a non-elevated process was refused
+    /// reports the explained denial as it is, so `msb` can still add its hint; a replaced
+    /// sandbox is kept too, and any other failure says the drain needs the agent shutdown
+    /// path.
+    #[cfg(windows)]
+    #[test]
+    fn windows_drain_keeps_an_elevated_sandbox_denial() {
+        let denied = || io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32);
+        let explained =
+            elevation_share::explain_access_denied_as(denied(), TokenElevationTypeLimited);
+
+        let explained = drain_shutdown_error(MicrosandboxError::Io(explained));
+        let replaced = drain_shutdown_error(sandbox_replaced("test", 1, 2));
+        let unavailable = drain_shutdown_error(MicrosandboxError::Io(denied()));
+
+        assert!(
+            matches!(&explained, MicrosandboxError::Io(_))
+                && elevation_share::has_elevated_sandbox_denial(&explained),
+            "{explained}"
+        );
+        assert!(
+            matches!(replaced, MicrosandboxError::SandboxReplaced { .. }),
+            "{replaced}"
+        );
+        assert!(
+            matches!(&unavailable, MicrosandboxError::Runtime(message)
+                if message.starts_with("windows drain requires the agent shutdown path")),
+            "{unavailable}"
+        );
     }
 
     /// Open both pools at `db_path` for tests, with migrations applied.
