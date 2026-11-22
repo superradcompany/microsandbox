@@ -147,6 +147,12 @@ impl StatStore {
         Ok(())
     }
 
+    /// Whether an override is a stream of the file itself, which follows the
+    /// file through renames, rather than an entry under its path.
+    pub(super) fn follows_file(&self) -> bool {
+        matches!(self.backend, StatStoreBackend::AlternateDataStream)
+    }
+
     pub(super) fn read(&self, path: &Path) -> io::Result<Option<OverrideStat>> {
         let override_path = self.override_file_path(path)?;
         let result = match self.backend {

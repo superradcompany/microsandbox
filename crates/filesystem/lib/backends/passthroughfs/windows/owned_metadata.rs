@@ -39,11 +39,7 @@ impl PassthroughFs {
         path: &Path,
         current: OverrideStat,
     ) -> io::Result<Option<File>> {
-        if !self
-            .stat_store
-            .as_ref()
-            .is_some_and(|store| matches!(store.backend, StatStoreBackend::AlternateDataStream))
-        {
+        if !self.stat_follows_file() {
             return Ok(None);
         }
         let path = ads_override_path(path);
