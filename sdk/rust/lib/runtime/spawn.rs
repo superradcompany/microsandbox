@@ -1860,6 +1860,7 @@ fn lock_disk_image_unix(
     lock_disk_image_unix_with_policy(path, readonly, volume_name, &policy)
 }
 
+#[cfg(unix)]
 fn lock_disk_image_unix_with_policy(
     path: &Path,
     readonly: bool,
