@@ -466,7 +466,7 @@ For local pulls without managed `auth`, microsandbox resolves credentials in thi
 | Field | Default | Description |
 |-------|---------|-------------|
 | `max_filesystem_state_mib` | `4` | Largest virtio-fs backend state, in MiB, that one filesystem device can carry through a full snapshot. Valid values are `1` through `4095`. |
-| `copy_files` | `false` | Give files that new snapshots, restored sandboxes, and branched sandboxes keep their own inodes instead of hardlinks. Copies preserve sparse extents and may use reflinks. Files copied instead of hardlinked by this setting are owner-only on Linux and macOS. |
+| `copy_files` | `false` | Give files that new snapshots, restored sandboxes, and branched sandboxes keep their own inodes instead of hardlinks. Enabled automatically when `deployment_profile` is `"multi-tenant"`. Copies preserve sparse extents and may use reflinks. Files copied instead of hardlinked by this setting are owner-only on Linux and macOS. |
 
 With `copy_files` enabled, the files a new artifact or sandbox keeps do not share inodes with their source. This can increase storage use and copy time. Temporary handoff files for a live branch stay hardlinked to the source sandbox until the branch is created. The default keeps hardlink optimizations. It does not change snapshot formats or eager memory restore, and it does not remove hardlinks already present in existing artifacts.
 

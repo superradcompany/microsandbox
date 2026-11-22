@@ -73,7 +73,7 @@ impl CreationStorage {
         }
         Ok(Self {
             path: local.sandboxes_dir().join(name),
-            copy_snapshot_files: local.config().snapshots.copy_files,
+            copy_snapshot_files: local.config().copy_snapshot_files(),
             owner: StorageOwner::Reserved {
                 _lock: Arc::new(file),
             },

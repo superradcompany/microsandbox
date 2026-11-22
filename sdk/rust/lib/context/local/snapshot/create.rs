@@ -1276,7 +1276,7 @@ async fn capture_full_snapshot(
             _ => None,
         };
         Ok(CapturedFullSnapshot {
-            copy_files: local.config().snapshots.copy_files,
+            copy_files: local.config().copy_snapshot_files(),
             #[cfg(feature = "net")]
             sealed_ca,
             source_recovery: outcome.recovery_error.as_ref().map(|detail| {
@@ -1791,7 +1791,7 @@ async fn capture_disk_source(
             &disk.owned_volumes,
         )?;
     }
-    disk.copy_files = local.config().snapshots.copy_files;
+    disk.copy_files = local.config().copy_snapshot_files();
     // A live runtime owns the lifecycle lock, not this SDK call. If the source was replaced
     // between lookup and capture, never publish its disk under the original image/config.
     let current = sandbox_entity::Entity::find()

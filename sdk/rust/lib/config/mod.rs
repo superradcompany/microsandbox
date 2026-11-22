@@ -440,6 +440,14 @@ pub enum BlockWritebackConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl GlobalConfig {
+    /// Whether lasting snapshot captures, restores, and branches should materialize
+    /// independent inodes instead of hardlinks.
+    ///
+    /// Enabled when explicitly configured or under the `multi-tenant` deployment profile.
+    pub(crate) fn copy_snapshot_files(&self) -> bool {
+        self.snapshots.copy_files || self.deployment_profile == Some(DeploymentProfile::MultiTenant)
+    }
+
     /// Resolve the executable from the same complete pair used for sandbox launches.
     #[cfg(feature = "local")]
     pub fn resolve_msb_path(&self) -> MicrosandboxResult<PathBuf> {
@@ -1129,6 +1137,7 @@ mod tests {
         let cfg: GlobalConfig =
             serde_json::from_str(r#"{"deployment_profile":"multi-tenant"}"#).unwrap();
         assert_eq!(cfg.deployment_profile, Some(DeploymentProfile::MultiTenant));
+        assert!(cfg.copy_snapshot_files());
 
         let json = serde_json::to_value(cfg).unwrap();
         assert_eq!(json["deployment_profile"], "multi-tenant");
