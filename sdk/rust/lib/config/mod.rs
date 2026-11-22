@@ -239,6 +239,10 @@ pub struct SshConfig {
 pub struct SnapshotsConfig {
     /// Virtio-fs backend state budget per device, in MiB. Valid values are 1 through 4095.
     pub max_filesystem_state_mib: u32,
+    /// Give files kept by new snapshots, restores, and local branches independent inodes
+    /// instead of hard links. Defaults to false. Copies may use reflinks or sparse extents,
+    /// but never share inodes. Transient branch handoff files stay linked to their source.
+    pub copy_files: bool,
 }
 
 /// Live metrics registry configuration.
@@ -436,6 +440,14 @@ pub enum BlockWritebackConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl GlobalConfig {
+    /// Whether lasting snapshot captures, restores, and branches should materialize
+    /// independent inodes instead of hardlinks.
+    ///
+    /// Enabled when explicitly configured or under the `multi-tenant` deployment profile.
+    pub(crate) fn copy_snapshot_files(&self) -> bool {
+        self.snapshots.copy_files || self.deployment_profile == Some(DeploymentProfile::MultiTenant)
+    }
+
     /// Resolve the executable from the same complete pair used for sandbox launches.
     #[cfg(feature = "local")]
     pub fn resolve_msb_path(&self) -> MicrosandboxResult<PathBuf> {
@@ -675,6 +687,7 @@ impl Default for SnapshotsConfig {
     fn default() -> Self {
         Self {
             max_filesystem_state_mib: FS_STATE_LIMIT_DEFAULT_MIB,
+            copy_files: false,
         }
     }
 }
@@ -909,7 +922,7 @@ mod tests {
             },
             "ssh": {"inactivity_timeout_secs": 45},
             "metrics": {"capacity": 128},
-            "snapshots": {"max_filesystem_state_mib": 64},
+            "snapshots": {"max_filesystem_state_mib": 64, "copy_files": true},
             "dns": {"nameservers": ["9.9.9.9", "2620:fe::fe"]}
         });
         let mut previous = expected.clone();
@@ -1124,6 +1137,7 @@ mod tests {
         let cfg: GlobalConfig =
             serde_json::from_str(r#"{"deployment_profile":"multi-tenant"}"#).unwrap();
         assert_eq!(cfg.deployment_profile, Some(DeploymentProfile::MultiTenant));
+        assert!(cfg.copy_snapshot_files());
 
         let json = serde_json::to_value(cfg).unwrap();
         assert_eq!(json["deployment_profile"], "multi-tenant");

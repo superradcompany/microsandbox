@@ -10,6 +10,8 @@ use microsandbox_types::VolumeMount;
 use crate::context::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
+use super::super::copy::{copy_private_payload, private_staging};
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -55,8 +57,14 @@ pub(crate) async fn materialize_owned_volumes(
 
                         let _lease = pin;
                         std::fs::create_dir_all(&parent)?;
-                        let stage =
-                            stage_owned_disk(&source, &parent, &mount_id, &generation, readonly)?;
+                        let stage = stage_owned_disk(
+                            &source,
+                            &parent,
+                            &mount_id,
+                            &generation,
+                            readonly,
+                            _storage.copy_snapshot_files,
+                        )?;
                         Ok::<_, MicrosandboxError>(stage)
                     })
                 }
@@ -104,9 +112,7 @@ pub(crate) async fn materialize_owned_volumes(
                             ));
                         }
                         std::fs::create_dir_all(&parent)?;
-                        let staging = tempfile::Builder::new()
-                            .prefix(".owned-directory-restore-")
-                            .tempdir_in(parent)?;
+                        let staging = private_staging(&parent, ".owned-directory-restore-", "")?;
                         snapshot.materialize(&source, &staging.path().join("data"))?;
                         Ok(staging)
                     })
@@ -133,10 +139,9 @@ fn stage_owned_disk(
     mount_id: &str,
     generation: &DiskGenerationManifest,
     readonly: bool,
+    copy_files: bool,
 ) -> MicrosandboxResult<tempfile::TempDir> {
-    let stage = tempfile::Builder::new()
-        .prefix(".owned-disk-restore-")
-        .tempdir_in(parent)?;
+    let stage = private_staging(parent, ".owned-disk-restore-", "")?;
     let directory = stage.path().join("owned-volumes").join(mount_id);
     std::fs::create_dir_all(&directory)?;
     let mut layers: Vec<RuntimeOwnedRootLayer> = Vec::with_capacity(generation.layers.len() + 1);
@@ -149,9 +154,9 @@ fn stage_owned_disk(
         // Successors need private inodes because relocating a qcow2 header writes to it.
         // No captured layer is ever opened as the child's writable head.
         if index == 0 {
-            super::copy_child_disk_layer(&source, &target, None)?;
+            super::copy_child_disk_layer(&source, &target, None, copy_files)?;
         } else {
-            microsandbox_utils::copy::fast_copy(&source, &target)?;
+            copy_private_payload(&source, &target)?;
         }
         if std::fs::metadata(&target)?.len() != layer.file_size {
             return Err(invalid(
