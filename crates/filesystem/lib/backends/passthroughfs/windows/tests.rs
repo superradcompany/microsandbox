@@ -3554,7 +3554,7 @@ fn dax_namespace_change_keeps_mapping(replace: bool, fail_refresh: bool) {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Directory moves by the host onto stale cached names
+// Tests: directory moves by the host onto stale cached names
 //--------------------------------------------------------------------------------------------------
 
 /// Look up a relative path component by component.
