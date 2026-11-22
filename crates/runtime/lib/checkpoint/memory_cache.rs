@@ -1252,4 +1252,69 @@ mod tests {
             "reopening set the cache's DACL again and rewrote its children: {after}"
         );
     }
+
+    /// Reopening a cache that an earlier release restricted with the OWNER RIGHTS grant gives
+    /// both directories the user SID grant, and with it the entries they already hold, which
+    /// had inherited only the old grant.
+    #[cfg(windows)]
+    #[test]
+    fn windows_reopen_repairs_an_owner_rights_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("memory");
+        let namespace = root.join("snapshots");
+        std::fs::create_dir_all(&namespace).unwrap();
+
+        // The DACL that earlier releases set on both cache directories: OWNER RIGHTS (S-1-3-4)
+        // and SYSTEM (S-1-5-18), inherited by every new child.
+        for directory in [&root, &namespace] {
+            write_dacl(directory, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)");
+            let text = windows_acl(directory);
+            assert_eq!(windows_acl_field(&text, "protected="), "True", "{text}");
+            assert_eq!(
+                windows_acl_field(&text, "rules="),
+                "S-1-3-4|Allow|FullControl|ContainerInherit, ObjectInherit;\
+                 S-1-5-18|Allow|FullControl|ContainerInherit, ObjectInherit",
+                "{text}"
+            );
+        }
+
+        let entries = [root.join("entry"), namespace.join("entry")];
+        for entry in &entries {
+            std::fs::write(entry, b"entry").unwrap();
+            let text = windows_acl(entry);
+            assert_eq!(windows_acl_field(&text, "protected="), "False", "{text}");
+            assert_eq!(
+                windows_acl_field(&text, "rules="),
+                "S-1-3-4|Allow|FullControl|None;S-1-5-18|Allow|FullControl|None",
+                "{text}"
+            );
+        }
+
+        let cache = MemoryCache::open(&root).unwrap();
+
+        assert_eq!(cache.root, namespace);
+        for directory in [&root, &namespace] {
+            let text = windows_acl(directory);
+            let user = windows_acl_field(&text, "user=");
+            assert!(user.starts_with("S-1-5-"), "{text}");
+            assert_eq!(windows_acl_field(&text, "protected="), "True", "{text}");
+            assert_eq!(
+                windows_acl_field(&text, "rules="),
+                format!("{user}|Allow|FullControl|ContainerInherit, ObjectInherit"),
+                "the old OWNER RIGHTS grant on {} was not repaired: {text}",
+                directory.display()
+            );
+        }
+        for entry in &entries {
+            let text = windows_acl(entry);
+            let user = windows_acl_field(&text, "user=");
+            assert_eq!(windows_acl_field(&text, "protected="), "False", "{text}");
+            assert_eq!(
+                windows_acl_field(&text, "rules="),
+                format!("{user}|Allow|FullControl|None"),
+                "the grant {} inherited from the old cache was not repaired: {text}",
+                entry.display()
+            );
+        }
+    }
 }
