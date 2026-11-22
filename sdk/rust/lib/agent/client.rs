@@ -119,6 +119,22 @@ impl AgentClient {
             .map(Self::from_transport)
     }
 
+    /// Connect to a local relay with bulk payloads kept on the byte stream.
+    ///
+    /// Shared-memory upgrades are disabled even when the peer advertises them.
+    /// Exec signals retain the advertised control route. The deadline bounds
+    /// the handshake.
+    pub async fn connect_in_band_with_deadline(
+        sock_path: impl AsRef<Path>,
+        deadline: Instant,
+    ) -> AgentClientResult<Self> {
+        microsandbox_agent_client::OptimizedAgentClient::connect_in_band_with_deadline(
+            sock_path, deadline,
+        )
+        .await
+        .map(Self::from_transport)
+    }
+
     /// Resolve a sandbox name to its agent socket path and connect.
     #[cfg(feature = "local")]
     pub async fn connect_sandbox(name: &str) -> AgentClientResult<Self> {
