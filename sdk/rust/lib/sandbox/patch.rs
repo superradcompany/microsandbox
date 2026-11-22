@@ -27,7 +27,7 @@ use microsandbox_image::tree::{
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
-use super::patch_sources::Prepared;
+use super::patch_sources::{PatchStaging, Prepared};
 use super::types::{Patch, RootfsSource};
 use crate::MicrosandboxResult;
 use crate::context::local::creation::CreationStorage;
@@ -732,7 +732,7 @@ impl RootedPatchFs {
 pub(crate) async fn apply_patches(
     image: &RootfsSource,
     patches: &[Patch],
-    patch_sources: &super::patch_sources::StagingPolicy,
+    patch_staging: &PatchStaging,
 ) -> MicrosandboxResult<()> {
     if patches.is_empty() {
         return Ok(());
@@ -759,7 +759,7 @@ pub(crate) async fn apply_patches(
     // Windows, where POSIX modes and symlink patches are predictably
     // unsupported and must not fail after earlier patches have been applied.
     validate_bind_patches(patches)?;
-    let prepared = Arc::new(super::patch_sources::prepare(patches, patch_sources).await?);
+    let prepared = Arc::new(patch_staging.prepare(patches).await?);
     let patches = prepared.patches(patches);
 
     let root =
@@ -792,9 +792,9 @@ pub(crate) async fn apply_patches(
 pub(crate) async fn build_upper_tree(
     patches: &[Patch],
     lower_erofs: &[PathBuf],
-    patch_sources: &super::patch_sources::StagingPolicy,
+    patch_staging: &PatchStaging,
 ) -> MicrosandboxResult<FileTree> {
-    let prepared = super::patch_sources::prepare(patches, patch_sources).await?;
+    let prepared = patch_staging.prepare(patches).await?;
     let patches = prepared.patches(patches);
     // Pre-open all EROFS readers once — avoids repeated open/parse/close
     // per path lookup (hundreds of file opens for multi-patch scenarios).
@@ -811,9 +811,9 @@ pub(crate) async fn build_flat_tree(
     patches: &[Patch],
     lower_erofs: &[PathBuf],
     spool_path: &CreationStorage,
-    patch_sources: &super::patch_sources::StagingPolicy,
+    patch_staging: &PatchStaging,
 ) -> MicrosandboxResult<FileTree> {
-    let prepared = super::patch_sources::prepare(patches, patch_sources).await?;
+    let prepared = patch_staging.prepare(patches).await?;
     let patches = prepared.patches(patches);
     let lower_erofs = lower_erofs.to_vec();
     let spool_path = spool_path.clone();
@@ -2289,16 +2289,15 @@ fn root_open_error(path: &Path, reason: &str) -> crate::MicrosandboxError {
 
 #[cfg(test)]
 mod tests {
-    use super::super::patch_sources::StagingPolicy;
     use super::*;
 
     use microsandbox_image::erofs::write_erofs;
 
-    fn staging_policy(bounded: bool) -> StagingPolicy {
+    fn patch_staging(bounded: bool) -> PatchStaging {
         if bounded {
-            StagingPolicy::enabled_default()
+            PatchStaging::enabled_default()
         } else {
-            StagingPolicy::disabled()
+            PatchStaging::disabled()
         }
     }
 
@@ -2307,7 +2306,7 @@ mod tests {
         patches: &[Patch],
         bounded: bool,
     ) -> MicrosandboxResult<()> {
-        super::apply_patches(image, patches, &staging_policy(bounded)).await
+        super::apply_patches(image, patches, &patch_staging(bounded)).await
     }
 
     async fn build_upper_tree(
@@ -2315,7 +2314,7 @@ mod tests {
         lower_erofs: &[PathBuf],
         bounded: bool,
     ) -> MicrosandboxResult<FileTree> {
-        super::build_upper_tree(patches, lower_erofs, &staging_policy(bounded)).await
+        super::build_upper_tree(patches, lower_erofs, &patch_staging(bounded)).await
     }
 
     async fn build_flat_tree(
@@ -2324,7 +2323,7 @@ mod tests {
         spool_path: &CreationStorage,
         bounded: bool,
     ) -> MicrosandboxResult<FileTree> {
-        super::build_flat_tree(patches, lower_erofs, spool_path, &staging_policy(bounded)).await
+        super::build_flat_tree(patches, lower_erofs, spool_path, &patch_staging(bounded)).await
     }
 
     fn bind_root(path: PathBuf, follow_root_symlinks: bool) -> RootfsSource {

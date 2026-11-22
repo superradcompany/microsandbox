@@ -5,8 +5,11 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use microsandbox_types::DeploymentProfile;
+use tokio::sync::Semaphore;
+
 use super::{
-    GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PathsConfigPatch,
+    GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PatchesConfig, PathsConfigPatch,
     persistence::ManagedConfig, registry::RegistrySettingsPatch,
 };
 use crate::context::{ContextKind, ContextSelectionSource};
@@ -52,31 +55,29 @@ pub(crate) struct ConfigLayers<P> {
 impl GlobalConfig {
     /// Validate host runtime settings this platform cannot honor.
     pub(crate) fn validate_runtime(&self) -> MicrosandboxResult<()> {
-        if cfg!(not(unix)) && self.runtime.patch_sources.enabled {
+        if cfg!(not(unix)) && self.runtime.patches.stage {
             return Err(MicrosandboxError::InvalidConfig(
-                "runtime.patch_sources.enabled is supported only on Unix hosts".into(),
+                "runtime.patches.stage is supported only on Unix hosts".into(),
             ));
         }
 
-        if let Some(limit) = self.runtime.patch_sources.max_concurrent_batches
-            && limit.get() > tokio::sync::Semaphore::MAX_PERMITS
+        if let Some(limit) = self.runtime.patches.max_concurrent_batches
+            && limit.get() > Semaphore::MAX_PERMITS
         {
             return Err(MicrosandboxError::InvalidConfig(format!(
-                "runtime.patch_sources.max_concurrent_batches must be at most {}",
-                tokio::sync::Semaphore::MAX_PERMITS
+                "runtime.patches.max_concurrent_batches must be at most {}",
+                Semaphore::MAX_PERMITS
             )));
         }
 
         Ok(())
     }
 
-    /// Effective patch source staging policy, applying the `multi-tenant` floor on Unix.
-    pub(crate) fn effective_patch_sources(&self) -> crate::config::PatchSourcesConfig {
-        let mut config = self.runtime.patch_sources.clone();
-        if cfg!(unix)
-            && self.deployment_profile == Some(microsandbox_types::DeploymentProfile::MultiTenant)
-        {
-            config.enabled = true;
+    /// Effective patch staging policy, applying the `multi-tenant` floor on Unix.
+    pub(crate) fn effective_patches(&self) -> PatchesConfig {
+        let mut config = self.runtime.patches.clone();
+        if cfg!(unix) && self.deployment_profile == Some(DeploymentProfile::MultiTenant) {
+            config.stage = true;
         }
         config
     }
@@ -653,10 +654,19 @@ mod tests {
     }
 
     #[test]
-    fn local_preparation_accepts_patch_sources_only_on_unix() {
+    fn local_preparation_accepts_patch_staging_only_on_unix() {
+        #[cfg(unix)]
+        use std::num::NonZero;
+
+        #[cfg(unix)]
+        use crate::config::{
+            DEFAULT_PATCH_MAX_BYTES, DEFAULT_PATCH_MAX_CONCURRENT_BATCHES, DEFAULT_PATCH_MAX_DEPTH,
+            DEFAULT_PATCH_MAX_ENTRIES,
+        };
+
         for (user, managed) in [
-            (r#"{"runtime":{"patch_sources":{"enabled":true}}}"#, "{}"),
-            ("{}", r#"{"runtime":{"patch_sources":{"enabled":true}}}"#),
+            (r#"{"runtime":{"patches":{"stage":true}}}"#, "{}"),
+            ("{}", r#"{"runtime":{"patches":{"stage":true}}}"#),
         ] {
             let layers = BackendConfig::new(
                 serde_json::from_str(user).unwrap(),
@@ -667,25 +677,23 @@ mod tests {
             #[cfg(unix)]
             {
                 let prepared = result.unwrap();
-                let patch_sources = &prepared.resolved_config().runtime.patch_sources;
-                assert!(patch_sources.enabled);
+                let patches = &prepared.resolved_config().runtime.patches;
+                assert!(patches.stage);
                 assert_eq!(
-                    patch_sources.max_bytes.map(std::num::NonZero::get),
-                    Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_BYTES)
+                    patches.max_bytes.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_BYTES)
                 );
                 assert_eq!(
-                    patch_sources.max_entries.map(std::num::NonZero::get),
-                    Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_ENTRIES)
+                    patches.max_entries.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_ENTRIES)
                 );
                 assert_eq!(
-                    patch_sources.max_depth.map(std::num::NonZero::get),
-                    Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_DEPTH)
+                    patches.max_depth.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_DEPTH)
                 );
                 assert_eq!(
-                    patch_sources
-                        .max_concurrent_batches
-                        .map(std::num::NonZero::get),
-                    Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_CONCURRENT_BATCHES)
+                    patches.max_concurrent_batches.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_CONCURRENT_BATCHES)
                 );
             }
             #[cfg(not(unix))]
@@ -694,7 +702,7 @@ mod tests {
                     .err()
                     .unwrap()
                     .to_string()
-                    .contains("runtime.patch_sources.enabled is supported only on Unix")
+                    .contains("runtime.patches.stage is supported only on Unix")
             );
         }
 
@@ -702,7 +710,7 @@ mod tests {
         {
             let layers = BackendConfig::new(
                 serde_json::from_str(
-                    r#"{"runtime":{"patch_sources":{"enabled":true,"max_bytes":null,"max_entries":1024,"max_concurrent_batches":null}}}"#,
+                    r#"{"runtime":{"patches":{"stage":true,"max_bytes":null,"max_entries":1024,"max_concurrent_batches":null}}}"#,
                 )
                 .unwrap(),
                 serde_json::from_str("{}").unwrap(),
@@ -710,24 +718,21 @@ mod tests {
             let prepared = layers
                 .prepare_for_local_backend(Default::default())
                 .unwrap();
-            let patch_sources = &prepared.resolved_config().runtime.patch_sources;
-            assert!(patch_sources.enabled);
-            assert_eq!(patch_sources.max_bytes, None);
+            let patches = &prepared.resolved_config().runtime.patches;
+            assert!(patches.stage);
+            assert_eq!(patches.max_bytes, None);
+            assert_eq!(patches.max_entries.map(NonZero::get), Some(1024));
             assert_eq!(
-                patch_sources.max_entries.map(std::num::NonZero::get),
-                Some(1024)
+                patches.max_depth.map(NonZero::get),
+                Some(DEFAULT_PATCH_MAX_DEPTH)
             );
-            assert_eq!(
-                patch_sources.max_depth.map(std::num::NonZero::get),
-                Some(crate::config::DEFAULT_PATCH_SOURCE_MAX_DEPTH)
-            );
-            assert_eq!(patch_sources.max_concurrent_batches, None);
+            assert_eq!(patches.max_concurrent_batches, None);
 
-            // `deployment_profile: "multi-tenant"` enables patch source staging automatically
+            // `deployment_profile: "multi-tenant"` enables patch staging automatically
             // on Unix while preserving custom/null limit overrides.
             let multi_tenant = BackendConfig::new(
                 serde_json::from_str(
-                    r#"{"deployment_profile":"multi-tenant","runtime":{"patch_sources":{"max_bytes":null,"max_concurrent_batches":8}}}"#,
+                    r#"{"deployment_profile":"multi-tenant","runtime":{"patches":{"max_bytes":null,"max_concurrent_batches":8}}}"#,
                 )
                 .unwrap(),
                 serde_json::from_str("{}").unwrap(),
@@ -736,19 +741,16 @@ mod tests {
                 .prepare_for_local_backend(Default::default())
                 .unwrap()
                 .resolved_config()
-                .effective_patch_sources();
-            assert!(effective.enabled);
+                .effective_patches();
+            assert!(effective.stage);
             assert_eq!(effective.max_bytes, None);
-            assert_eq!(
-                effective.max_concurrent_batches.map(std::num::NonZero::get),
-                Some(8)
-            );
+            assert_eq!(effective.max_concurrent_batches.map(NonZero::get), Some(8));
         }
 
         // Concurrency limits exceeding tokio's Semaphore::MAX_PERMITS are rejected cleanly.
         let too_many_permits = BackendConfig::new(
             serde_json::from_str(&format!(
-                r#"{{"runtime":{{"patch_sources":{{"max_concurrent_batches":{}}}}}}}"#,
+                r#"{{"runtime":{{"patches":{{"max_concurrent_batches":{}}}}}}}"#,
                 usize::MAX
             ))
             .unwrap(),
@@ -760,7 +762,7 @@ mod tests {
             .unwrap();
         assert!(
             err.to_string()
-                .contains("runtime.patch_sources.max_concurrent_batches must be at most"),
+                .contains("runtime.patches.max_concurrent_batches must be at most"),
             "{err}"
         );
     }
