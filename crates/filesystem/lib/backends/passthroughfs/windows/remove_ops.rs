@@ -1,5 +1,7 @@
 //! Removal and rename operations for the Windows passthrough backend.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::os::windows::io::AsRawHandle;
 
 use windows_sys::Win32::Foundation::{
@@ -21,27 +23,13 @@ use super::*;
 const FILE_RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
 const FILE_RENAME_POSIX_SEMANTICS: u32 = 0x2;
 
-//--------------------------------------------------------------------------------------------------
-// Test hooks
-//--------------------------------------------------------------------------------------------------
-
 #[cfg(test)]
 thread_local! {
     /// Runs on the unlinking thread after the host deletion and before the
     /// inode table follows it, so a test can act inside that window.
-    pub(super) static AFTER_HOST_UNLINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_HOST_UNLINK: RefCell<Option<Box<dyn FnOnce()>>> =
+        const { RefCell::new(None) };
 }
-
-#[cfg(test)]
-fn after_host_unlink() {
-    if let Some(hook) = AFTER_HOST_UNLINK.with(|hook| hook.borrow_mut().take()) {
-        hook();
-    }
-}
-
-#[cfg(not(test))]
-fn after_host_unlink() {}
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -458,3 +446,17 @@ impl PassthroughFs {
         }
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+fn after_host_unlink() {
+    if let Some(hook) = AFTER_HOST_UNLINK.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn after_host_unlink() {}

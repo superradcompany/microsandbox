@@ -3554,7 +3554,7 @@ fn dax_namespace_change_keeps_mapping(replace: bool, fail_refresh: bool) {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Open files after unlink and rename-over
+// Tests: open files after unlink and rename-over
 //--------------------------------------------------------------------------------------------------
 
 /// How long a test waits for one step of another thread.
