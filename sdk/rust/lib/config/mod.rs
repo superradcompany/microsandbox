@@ -402,6 +402,11 @@ pub struct OciSandboxDefaults {
 #[derive(ConfigPatch)]
 #[config_patch(serde)]
 pub struct RuntimeConfig {
+    /// Reject symlinks in SDK log-reader and disk-lock paths, including ancestors.
+    /// Off by default so existing symlinked host paths keep working. Unix only;
+    /// strict paths must not contain parent (`..`) components.
+    pub strict_host_files: bool,
+
     /// Buffered host writeback containment and pressure-sharing policy.
     pub block_writeback: BlockWritebackConfig,
 
@@ -902,6 +907,7 @@ mod tests {
                 "disable_metrics_sample": true
             },
             "runtime": {
+                "strict_host_files": true,
                 "block_writeback": {"mode": "fixed", "per_disk_mib": 1280, "pool_mib": 5120},
                 "placement_profiles": {"latency": {
                     "numa": {"mode": "prefer_single"},
