@@ -16,6 +16,14 @@ use microsandbox_image::checkpoint::{
 use super::object_pipeline::{ObjectPipelineTiming, consume_verified_objects};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// `ACE_HEADER::AceType` of an access-allowed entry, `ACCESS_ALLOWED_ACE_TYPE` in winnt.h.
+#[cfg(windows)]
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -576,7 +584,7 @@ fn restrict_cache_directory(path: &Path) -> io::Result<()> {
 fn cache_directory_is_restricted(path: &Path) -> io::Result<bool> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::os::windows::io::AsRawHandle;
-    use std::ptr::null_mut;
+    use std::ptr::{addr_of, null_mut};
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
@@ -588,14 +596,14 @@ fn cache_directory_is_restricted(path: &Path) -> io::Result<bool> {
     use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
     // READ_CONTROL | FILE_READ_ATTRIBUTES; backup semantics, open the reparse point itself.
-    let directory = std::fs::OpenOptions::new()
+    let directory = OpenOptions::new()
         .access_mode(0x0002_0080)
         .share_mode(0x7)
         .custom_flags(0x0220_0000)
         .open(path)?;
     let metadata = directory.metadata()?;
+
     if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
         // Let hardening report the problem.
         return Ok(false);
@@ -605,6 +613,7 @@ fn cache_directory_is_restricted(path: &Path) -> io::Result<bool> {
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error());
     }
+
     let mut length = 0;
     unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut length) };
     let mut user = vec![0usize; (length as usize).div_ceil(size_of::<usize>()).max(1)];
@@ -619,6 +628,7 @@ fn cache_directory_is_restricted(path: &Path) -> io::Result<bool> {
     };
     let query_error = io::Error::last_os_error();
     unsafe { CloseHandle(token) };
+
     if queried == 0 {
         return Err(query_error);
     }
@@ -640,11 +650,13 @@ fn cache_directory_is_restricted(path: &Path) -> io::Result<bool> {
     if error != 0 {
         return Err(io::Error::from_raw_os_error(error as i32));
     }
+
     let restricted = 'check: {
         let (mut control, mut revision) = (0u16, 0u32);
         if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
             break 'check false;
         }
+
         let owner_trusted = !owner.is_null()
             && (unsafe { EqualSid(owner, user_sid) } != 0
                 || unsafe { IsWellKnownSid(owner, WinLocalSystemSid) } != 0
@@ -656,19 +668,22 @@ fn cache_directory_is_restricted(path: &Path) -> io::Result<bool> {
         {
             break 'check false;
         }
+
         let mut ace = null_mut();
         if unsafe { GetAce(dacl, 0, &mut ace) } == 0 {
             break 'check false;
         }
+
         let header = unsafe { *(ace as *const ACE_HEADER) };
         let entry = ace as *const ACCESS_ALLOWED_ACE;
-        let sid = unsafe { std::ptr::addr_of!((*entry).SidStart) as PSID };
+        let sid = unsafe { addr_of!((*entry).SidStart) as PSID };
         header.AceType == ACCESS_ALLOWED_ACE_TYPE
             && u32::from(header.AceFlags) == OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
             && unsafe { (*entry).Mask } == FILE_ALL_ACCESS
             && unsafe { EqualSid(sid, user_sid) } != 0
     };
     unsafe { LocalFree(descriptor) };
+
     Ok(restricted)
 }
 
@@ -1109,6 +1124,8 @@ mod tests {
     /// `user=<current user SID>` lines, read through PowerShell.
     #[cfg(windows)]
     fn windows_acl(path: &Path) -> String {
+        use std::process::Command;
+
         let script = "$a = Get-Acl -LiteralPath $env:MSB_TEST_ACL_PATH; \
              $u = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; \
              $r = $a.Access | ForEach-Object { \
@@ -1118,12 +1135,13 @@ mod tests {
              'rules=' + ($r -join ';'); \
              'user=' + $u; \
              'sddl=' + $a.Sddl";
-        let output = std::process::Command::new("powershell.exe")
+        let output = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .env("MSB_TEST_ACL_PATH", path)
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
         assert!(
             output.status.success(),
             "Get-Acl {}: {}\nstdout:\n{stdout}\nstderr:\n{}",
@@ -1150,6 +1168,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("memory");
         let cache = MemoryCache::open(&root).unwrap();
+
         for directory in [root.as_path(), cache.root.as_path()] {
             let text = windows_acl(directory);
             let user = windows_acl_field(&text, "user=");
@@ -1168,6 +1187,7 @@ mod tests {
     #[cfg(windows)]
     fn write_dacl(path: &Path, sddl: &str) {
         use std::os::windows::ffi::OsStrExt;
+        use std::ptr::null_mut;
         use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
         use windows_sys::Win32::Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -1177,25 +1197,27 @@ mod tests {
         };
 
         let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
-        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
         assert_ne!(
             unsafe {
                 ConvertStringSecurityDescriptorToSecurityDescriptorW(
                     sddl.as_ptr(),
                     SDDL_REVISION_1,
                     &mut descriptor,
-                    std::ptr::null_mut(),
+                    null_mut(),
                 )
             },
             0,
             "{}",
             io::Error::last_os_error()
         );
+
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let written =
             unsafe { SetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
         let error = io::Error::last_os_error();
         unsafe { LocalFree(descriptor as HLOCAL) };
+
         assert_ne!(written, 0, "{error}");
     }
 
@@ -1215,6 +1237,7 @@ mod tests {
         std::fs::write(&probe, b"probe").unwrap();
         write_dacl(&probe, "D:");
         let before = windows_acl(&probe);
+
         assert!(
             windows_acl_field(&before, "sddl=").ends_with("D:P"),
             "{before}"
@@ -1222,6 +1245,7 @@ mod tests {
 
         MemoryCache::open(&root).unwrap();
         let after = windows_acl(&probe);
+
         assert_eq!(
             windows_acl_field(&after, "sddl="),
             windows_acl_field(&before, "sddl="),
