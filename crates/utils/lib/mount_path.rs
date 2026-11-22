@@ -36,6 +36,7 @@ pub fn encode_mount_host_path(path: &str) -> String {
             c => out.push(c),
         }
     }
+
     out
 }
 
@@ -47,6 +48,7 @@ pub fn decode_mount_host_path(text: &str) -> Result<String, String> {
     if !text.contains('%') {
         return Ok(text.to_string());
     }
+
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -65,6 +67,7 @@ pub fn decode_mount_host_path(text: &str) -> Result<String, String> {
             index += 1;
         }
     }
+
     String::from_utf8(out).map_err(|_| format!("mount host path is not valid UTF-8: {text:?}"))
 }
 
@@ -95,12 +98,14 @@ mod tests {
             "/data/%2C literal",
         ] {
             let encoded = encode_mount_host_path(path);
+
             let after_drive = if cfg!(windows) && is_windows_drive_path_text(path) {
                 assert_eq!(&encoded[..2], &path[..2], "drive colon kept: {encoded}");
                 &encoded[2..]
             } else {
                 &encoded[..]
             };
+
             assert!(!after_drive.contains([',', ';', ':']), "{encoded}");
             assert_eq!(decode_mount_host_path(&encoded).unwrap(), path);
         }

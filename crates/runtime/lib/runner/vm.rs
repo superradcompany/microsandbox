@@ -3856,6 +3856,7 @@ fn parse_mount_spec(spec: &str, host_path_encoded: bool) -> Result<ParsedMountSp
             "mount options must use tag:host_path:opts syntax, got comma in host path {host_path:?}"
         ));
     }
+
     // A launch that says so percent-encodes the host path, so it may contain
     // `,`, `;` and `:`. Otherwise the path is taken as written.
     let host_path = if host_path_encoded {
@@ -4879,6 +4880,7 @@ mod tests {
             let p = parse_mount_spec(&spec, true).unwrap();
             assert_eq!(p.host_path, host);
             assert!(p.readonly);
+
             let p = parse_mount_spec(
                 &format!("fm:{}", microsandbox_utils::encode_mount_host_path(host)),
                 true,
@@ -4887,9 +4889,11 @@ mod tests {
             assert_eq!(p.host_path, host);
             assert!(!p.readonly);
         }
+
         // A comma in a host path must not be able to inject options.
         let injected = microsandbox_utils::encode_mount_host_path("/data/x:rw,stat-virt=off");
         let p = parse_mount_spec(&format!("fm:{injected}:ro"), true).unwrap();
+
         assert_eq!(p.host_path, "/data/x:rw,stat-virt=off");
         assert!(p.readonly);
         assert!(matches!(p.stat_virtualization, StatVirtualization::Strict));

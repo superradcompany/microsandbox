@@ -968,6 +968,7 @@ pub(crate) async fn validate_mount_host_paths(
     if !super::spawn::mount_host_paths_need_encoding(config) {
         return Ok(());
     }
+
     let supported = capabilities(path).await.is_ok_and(|capabilities| {
         capabilities.protocols.contains(&2) && capabilities.mount_host_path_encoding
     });
@@ -979,6 +980,7 @@ pub(crate) async fn validate_mount_host_paths(
             )),
         ));
     }
+
     Ok(())
 }
 
@@ -2015,6 +2017,7 @@ mod tests {
     async fn bind_host_path_wire_separators_require_an_explicit_runtime_capability() {
         let _fixture_guard = PROBE_FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
+
         // Host paths without separators travel as written, so no runtime is probed.
         let raw = crate::sandbox::SandboxBuilder::new("raw")
             .image("/tmp/rootfs")
@@ -2049,6 +2052,7 @@ mod tests {
         ] {
             let path = script(dir.path(), "old-mounts", response);
             let error = validate_mount_host_paths(&path, &config).await.unwrap_err();
+
             assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
             assert!(error.to_string().contains("upgrade msb"), "{error}");
             assert!(
@@ -2075,6 +2079,7 @@ mod tests {
         validate_mount_host_paths(&path, &config).await.unwrap();
         let payload = contract.encode_for_runtime(&path, &encoded).await.unwrap();
         assert_eq!(payload["mount_host_paths_encoded"], true);
+
         let payload = contract
             .encode_for_runtime(&path, &LaunchConfig::default())
             .await

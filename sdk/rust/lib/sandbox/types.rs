@@ -1369,6 +1369,7 @@ fn validate_host_path_utf8(path: &Path, label: &str) -> crate::MicrosandboxResul
             "{label} must be valid UTF-8"
         )));
     }
+
     Ok(())
 }
 

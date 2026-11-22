@@ -2901,6 +2901,7 @@ mod tests {
                 encode,
             );
         }
+
         let (tag, rest) = mounts[0].split_once(':').unwrap();
         assert_eq!(tag, super::guest_mount_tag("/shared"));
         let (host, options) = rest.split_once(':').unwrap();
@@ -2910,6 +2911,7 @@ mod tests {
             "/Users/a/Smith, John;x:y"
         );
         assert!(options.contains("quota=64"));
+
         // Unencoded launches keep the host path as written.
         assert!(
             mounts[1].contains(":/Users/a/Smith, John;x:y:"),
@@ -2944,6 +2946,7 @@ mod tests {
                 .any(|pair| pair[0] == "--mount" && pair[1] == expected),
             "missing encoded --mount arg in {rendered:?}"
         );
+
         // Once a launch is encoded, every host path in it is.
         let other_tag = super::guest_mount_tag("/other");
         let other = format!(
@@ -2969,6 +2972,7 @@ mod tests {
             .build()
             .await
             .unwrap();
+
         assert!(!super::mount_host_paths_need_encoding(&config));
 
         let rendered = render_args(&config);
@@ -3002,6 +3006,7 @@ mod tests {
 
         let file_mounts = super::resolve_file_mounts(&config).unwrap();
         let (filename, tag) = &file_mounts["/etc/app.conf"];
+
         assert_eq!(filename, "app.conf");
 
         let rendered = render_args_with_file_mounts(&config, &file_mounts);

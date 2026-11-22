@@ -661,6 +661,7 @@ impl LocalContext {
                 if enforce {
                     super::super::host_paths::check_bind_roots_do_not_follow_symlinks(&config)?;
                 }
+
                 // External-mount mappings can add a bind host path with `,`, `;` or `:`.
                 if let Some(runtime) = &runtime {
                     launch_contract::validate_mount_host_paths(&runtime.msb_path, &config).await?;
