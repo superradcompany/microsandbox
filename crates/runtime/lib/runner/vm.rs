@@ -4554,8 +4554,8 @@ mod tests {
         assert_eq!(entry.attr.st_size as u64, b"new contents".len() as u64);
         assert_eq!(entry.entry_timeout, Duration::ZERO);
         assert_eq!(entry.attr_timeout, Duration::ZERO);
-        // The Windows backend still gives a name the host replaced its old
-        // inode; that is a backend change of its own.
+        // On Windows a name the host replaced keeps its old inode; changing
+        // that is a separate fix in the Windows backend.
         #[cfg(unix)]
         assert_ne!(entry.inode, original.inode);
     }
