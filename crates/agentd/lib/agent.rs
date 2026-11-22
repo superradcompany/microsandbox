@@ -4400,11 +4400,15 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 mod tests {
     use super::*;
     use std::os::fd::OwnedFd;
+    use std::path::Path;
 
     use bytes::Bytes;
+    use microsandbox_protocol::bulk::BulkOffer;
+    use microsandbox_protocol::fs::{FsOp, FsOpenOptions, FsResponseData};
     use microsandbox_protocol::transport::relay_client_id_range;
     use microsandbox_protocol::{exec::ExecLimits, message::PROTOCOL_VERSION};
     use tokio::io::AsyncReadExt;
+    use tokio::sync::mpsc::Receiver;
     use tokio::sync::mpsc::error::TryRecvError;
 
     async fn test_timeout<F: Future>(future: F) -> F::Output {
@@ -5194,7 +5198,7 @@ mod tests {
         state: AgentState,
         activity: ActivityTracker,
         sender: SessionOutputSender,
-        output: tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
+        output: Receiver<SessionOutputEnvelope>,
         config: AgentdConfig,
         workload: WorkloadLatch,
         heartbeat: heartbeat::HeartbeatControl,
@@ -5239,6 +5243,7 @@ mod tests {
             )
             .await
             .unwrap();
+
             let mut bytes = BytesMut::from(out.as_slice());
             let mut replies = Vec::new();
             while let Some(frame) = codec::try_decode_frame_from_bytes(&mut bytes).unwrap() {
@@ -5249,6 +5254,7 @@ mod tests {
                     replies.push(reply);
                 }
             }
+
             replies
         }
 
@@ -5259,15 +5265,13 @@ mod tests {
                 consumed_offset: consumed,
                 credit_limit: consumed + DEFAULT_BULK_WINDOW,
             };
+
             self.send(Message::with_payload(MessageType::BulkCredit, id, &credit).unwrap())
                 .await
         }
 
         /// Opens `path` and starts a raw-bulk read of the whole file as `id`.
-        async fn start_read(&mut self, id: u32, path: &std::path::Path) {
-            use microsandbox_protocol::bulk::BulkOffer;
-            use microsandbox_protocol::fs::{FsOp, FsOpenOptions, FsResponseData};
-
+        async fn start_read(&mut self, id: u32, path: &Path) {
             let open = FsRequest {
                 op: FsOp::OpenFile {
                     path: path.to_string_lossy().into_owned(),
@@ -5286,6 +5290,7 @@ mod tests {
             else {
                 panic!("file did not open");
             };
+
             let read = FsRequest {
                 op: FsOp::Read {
                     handle,
@@ -5297,6 +5302,7 @@ mod tests {
             let replies = self
                 .send(Message::with_payload(MessageType::FsRequest, id, &read).unwrap())
                 .await;
+
             assert_eq!(replies.len(), 1);
             assert_eq!(replies[0].t, MessageType::BulkAccepted);
             assert!(self.state.read_sessions.contains_key(&id));
@@ -5349,35 +5355,25 @@ mod tests {
         }
     }
 
-    fn late_credit_test_dir(name: &str) -> std::path::PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("msb-agentd-{name}-{}-{unique}", std::process::id()));
-        std::fs::create_dir(&dir).unwrap();
-        dir
-    }
-
     #[tokio::test]
     async fn late_filesystem_read_credit_is_ignored_without_disturbing_live_reads() {
         test_timeout(async {
-            let dir = late_credit_test_dir("late-fs-credit");
+            let dir = tempfile::tempdir().unwrap();
             let small = b"a read that completes inside its first window".to_vec();
             let large = (0..3 * DEFAULT_BULK_WINDOW as usize + 17)
                 .map(|index| (index % 251) as u8)
                 .collect::<Vec<_>>();
-            std::fs::write(dir.join("small"), &small).unwrap();
-            std::fs::write(dir.join("large"), &large).unwrap();
+            std::fs::write(dir.path().join("small"), &small).unwrap();
+            std::fs::write(dir.path().join("large"), &large).unwrap();
             let mut harness = FsReadHarness::new();
 
             // Read 2 stalls at its first window while read 1 runs to its terminal response.
-            harness.start_read(1, &dir.join("small")).await;
-            harness.start_read(2, &dir.join("large")).await;
+            harness.start_read(1, &dir.path().join("small")).await;
+            harness.start_read(2, &dir.path().join("large")).await;
             while !harness.retired(1) || harness.received_len(2) < DEFAULT_BULK_WINDOW {
                 harness.pump().await;
             }
+
             assert_eq!(harness.received[&1], small);
             assert_eq!(
                 harness.events[&1],
@@ -5422,13 +5418,13 @@ mod tests {
                 }
                 harness.pump().await;
             }
+
             assert_eq!(harness.received[&2], large);
             assert_eq!(
                 harness.events[&2],
                 [MessageType::BulkFinish, MessageType::FsResponse]
             );
             assert!(harness.state.read_sessions.is_empty());
-            std::fs::remove_dir_all(dir).unwrap();
         })
         .await;
     }
@@ -5436,16 +5432,17 @@ mod tests {
     #[tokio::test]
     async fn invalid_credit_for_a_live_filesystem_read_still_fails_it() {
         test_timeout(async {
-            let dir = late_credit_test_dir("invalid-fs-credit");
+            let dir = tempfile::tempdir().unwrap();
             let large = vec![7; 2 * DEFAULT_BULK_WINDOW as usize];
-            std::fs::write(dir.join("large"), &large).unwrap();
+            std::fs::write(dir.path().join("large"), &large).unwrap();
             let mut harness = FsReadHarness::new();
-            harness.start_read(3, &dir.join("large")).await;
+            harness.start_read(3, &dir.path().join("large")).await;
             while harness.received_len(3) < DEFAULT_BULK_WINDOW {
                 harness.pump().await;
             }
 
             let replies = harness.credit(3, BulkFlow::HostToGuest, 0).await;
+
             assert_eq!(
                 replies.iter().map(|reply| reply.t).collect::<Vec<_>>(),
                 [MessageType::BulkCancel, MessageType::FsResponse]
@@ -5459,7 +5456,6 @@ mod tests {
                     .contains("credit for another kind or flow")
             );
             assert!(!harness.state.read_sessions.contains_key(&3));
-            std::fs::remove_dir_all(dir).unwrap();
         })
         .await;
     }
