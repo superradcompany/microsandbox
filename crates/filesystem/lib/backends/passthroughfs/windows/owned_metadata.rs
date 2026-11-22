@@ -32,7 +32,7 @@ impl PassthroughFs {
         Ok(stat)
     }
 
-    /// Retain the inode-scoped metadata stream alongside an owned unlinked file.
+    /// Retain the inode-scoped metadata stream alongside an unlinked file.
     /// The caller has either validated the live path or just privately materialized it.
     pub(super) fn pin_owned_stat(
         &self,

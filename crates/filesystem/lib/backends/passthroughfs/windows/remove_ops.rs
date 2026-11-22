@@ -245,11 +245,24 @@ impl PassthroughFs {
             .open(path)
             .ok()?;
         reject_reparse_metadata(&file.metadata().ok()?).ok()?;
-        Self::holds_own_object(&data, &file).then_some(PreparedOwnedUnlink {
+        if !Self::holds_own_object(&data, &file) {
+            return None;
+        }
+
+        // Pin the file's own metadata stream too, so that a chmod or chown
+        // made while the file has no name is stored with the file, where a
+        // lookup of another hard link reads it. Without it the change stays
+        // in memory only.
+        let stat_file = self
+            .pin_owned_stat(path, current)
+            .ok()
+            .flatten()
+            .filter(|stat_file| Self::holds_own_object(&data, stat_file));
+        Some(PreparedOwnedUnlink {
             data,
             file,
             stat: current,
-            stat_file: None,
+            stat_file,
         })
     }
 

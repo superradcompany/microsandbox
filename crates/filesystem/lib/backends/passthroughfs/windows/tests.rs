@@ -3782,6 +3782,76 @@ fn unreadable_metadata_on_both_sides_does_not_drop_a_renamed_over_file() {
     unreadable_metadata_does_not_block_name_loss(true, true);
 }
 
+/// A chmod on an open file after its name is gone survives a later lookup of
+/// a hard link the guest had not looked up, also when the guest closes the
+/// file first: the change is stored with the file, not under its old name.
+fn chmod_after_name_loss_survives_a_hard_link_lookup(replace: bool, close_first: bool) {
+    let temp = TempDir::new();
+    let fs = fs_for(&temp.path);
+    assert_ads_store(&fs);
+    let owner = Context {
+        uid: 111,
+        gid: 222,
+        pid: 0,
+    };
+    let (inode, handle) = create_with(&fs, owner, c"data", 0o644, b"old");
+    std::fs::hard_link(temp.path.join("data"), temp.path.join("link")).unwrap();
+
+    if replace {
+        let (tmp_inode, tmp_handle) = create_with(&fs, context(), c"tmp", 0o644, b"new");
+        fs.release(context(), tmp_inode, 0, tmp_handle, false, false, None)
+            .unwrap();
+        fs.rename(context(), ROOT_INODE, c"tmp", ROOT_INODE, c"data", 0)
+            .unwrap();
+    } else {
+        fs.unlink(context(), ROOT_INODE, c"data").unwrap();
+    }
+    let attr = stat64 {
+        st_mode: S_IFREG | 0o600,
+        ..Default::default()
+    };
+    let (st, _) = fs
+        .setattr(context(), inode, attr, Some(handle), SetattrValid::MODE)
+        .unwrap();
+    assert_eq!(st.st_mode, S_IFREG | 0o600);
+    if close_first {
+        fs.release(context(), inode, 0, handle, false, false, None)
+            .unwrap();
+        fs.forget(context(), inode, 1);
+    }
+
+    let link = fs.lookup(context(), ROOT_INODE, c"link").unwrap();
+
+    assert_eq!(link.attr.st_mode, S_IFREG | 0o600);
+    assert_eq!((link.attr.st_uid, link.attr.st_gid), (111, 222));
+    assert_override(&temp.path.join("link"), 111, 222, S_IFREG | 0o600, 0);
+    if !close_first {
+        assert_eq!(link.inode, inode);
+        fs.release(context(), inode, 0, handle, false, false, None)
+            .unwrap();
+    }
+}
+
+#[test]
+fn chmod_after_unlink_survives_a_hard_link_lookup() {
+    chmod_after_name_loss_survives_a_hard_link_lookup(false, false);
+}
+
+#[test]
+fn chmod_after_rename_over_survives_a_hard_link_lookup() {
+    chmod_after_name_loss_survives_a_hard_link_lookup(true, false);
+}
+
+#[test]
+fn chmod_after_unlink_survives_closing_before_a_hard_link_lookup() {
+    chmod_after_name_loss_survives_a_hard_link_lookup(false, true);
+}
+
+#[test]
+fn chmod_after_rename_over_survives_closing_before_a_hard_link_lookup() {
+    chmod_after_name_loss_survives_a_hard_link_lookup(true, true);
+}
+
 /// A handle whose file is not its inode's object (an open by path that raced
 /// a rename-over reaches the replacing file) is never pinned as that inode's
 /// retained file.
