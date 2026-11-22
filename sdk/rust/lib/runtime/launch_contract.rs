@@ -45,6 +45,8 @@ static CAPABILITIES: LazyLock<Mutex<HashMap<PathBuf, CachedCapabilities>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_VERSION_OUTPUT: u64 = 4096;
+/// The feature named when a runtime cannot decode encoded mount host paths.
+const MOUNT_HOST_PATH_ENCODING: &str = "bind mount host paths containing ',', ';' or ':'";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -956,9 +958,6 @@ pub(crate) async fn validate_guest_clock(
     }
     Ok(())
 }
-
-/// The feature named when a runtime cannot decode encoded mount host paths.
-const MOUNT_HOST_PATH_ENCODING: &str = "bind mount host paths containing ',', ';' or ':'";
 
 /// Probe mount host path encoding only when a bind host path contains a wire separator.
 /// Runtimes that predate the capability would split such a path into mount options.
