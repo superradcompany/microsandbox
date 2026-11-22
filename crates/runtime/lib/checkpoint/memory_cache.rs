@@ -1120,36 +1120,51 @@ mod tests {
         assert_eq!(actual, bytes);
     }
 
-    /// The ACL of `path` as `protected=...`, `rules=sid|type|rights|inheritance;...` and
-    /// `user=<current user SID>` lines, read through PowerShell.
+    /// The ACL of each of `paths` as `protected=...`, `rules=sid|type|rights|inheritance;...`,
+    /// `user=<current user SID>` and `sddl=...` lines, read in one PowerShell run: starting
+    /// PowerShell takes seconds, many more on arm64 runners.
     #[cfg(windows)]
-    fn windows_acl(path: &Path) -> String {
+    fn windows_acls(paths: &[&Path]) -> Vec<String> {
         use std::process::Command;
 
-        let script = "$a = Get-Acl -LiteralPath $env:MSB_TEST_ACL_PATH; \
-             $u = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; \
-             $r = $a.Access | ForEach-Object { \
-               $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value + '|' + \
-               $_.AccessControlType + '|' + $_.FileSystemRights + '|' + $_.InheritanceFlags }; \
-             'protected=' + $a.AreAccessRulesProtected; \
-             'rules=' + ($r -join ';'); \
-             'user=' + $u; \
-             'sddl=' + $a.Sddl";
+        let script = "$u = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; \
+             foreach ($p in ($env:MSB_TEST_ACL_PATHS -split [char]10)) { \
+               $a = Get-Acl -LiteralPath $p; \
+               $r = $a.Access | ForEach-Object { \
+                 $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value + '|' + \
+                 $_.AccessControlType + '|' + $_.FileSystemRights + '|' + $_.InheritanceFlags }; \
+               'protected=' + $a.AreAccessRulesProtected; \
+               'rules=' + ($r -join ';'); \
+               'user=' + $u; \
+               'sddl=' + $a.Sddl; \
+               '--' }";
+        // Windows paths cannot contain a newline, so it separates them.
+        let joined = paths
+            .iter()
+            .map(|path| path.to_str().expect("test paths are UTF-8"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let output = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .env("MSB_TEST_ACL_PATH", path)
+            .env("MSB_TEST_ACL_PATHS", joined)
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
 
         assert!(
             output.status.success(),
-            "Get-Acl {}: {}\nstdout:\n{stdout}\nstderr:\n{}",
-            path.display(),
+            "Get-Acl {paths:?}: {}\nstdout:\n{stdout}\nstderr:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
-        stdout
+        let acls = stdout
+            .split("\n--")
+            .map(str::trim)
+            .filter(|acl| !acl.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(acls.len(), paths.len(), "Get-Acl {paths:?}:\n{stdout}");
+        acls
     }
 
     #[cfg(windows)]
@@ -1169,8 +1184,7 @@ mod tests {
         let root = temp.path().join("memory");
         let cache = MemoryCache::open(&root).unwrap();
 
-        for directory in [root.as_path(), cache.root.as_path()] {
-            let text = windows_acl(directory);
+        for text in windows_acls(&[&root, &cache.root]) {
             let user = windows_acl_field(&text, "user=");
             assert!(user.starts_with("S-1-5-"), "{text}");
             assert_eq!(windows_acl_field(&text, "protected="), "True", "{text}");
@@ -1236,7 +1250,7 @@ mod tests {
         let probe = cache.root.join("probe");
         std::fs::write(&probe, b"probe").unwrap();
         write_dacl(&probe, "D:");
-        let before = windows_acl(&probe);
+        let before = windows_acls(&[&probe]).remove(0);
 
         assert!(
             windows_acl_field(&before, "sddl=").ends_with("D:P"),
@@ -1244,7 +1258,7 @@ mod tests {
         );
 
         MemoryCache::open(&root).unwrap();
-        let after = windows_acl(&probe);
+        let after = windows_acls(&[&probe]).remove(0);
 
         assert_eq!(
             windows_acl_field(&after, "sddl="),
@@ -1268,49 +1282,62 @@ mod tests {
         // and SYSTEM (S-1-5-18), inherited by every new child.
         for directory in [&root, &namespace] {
             write_dacl(directory, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)");
-            let text = windows_acl(directory);
-            assert_eq!(windows_acl_field(&text, "protected="), "True", "{text}");
-            assert_eq!(
-                windows_acl_field(&text, "rules="),
-                "S-1-3-4|Allow|FullControl|ContainerInherit, ObjectInherit;\
-                 S-1-5-18|Allow|FullControl|ContainerInherit, ObjectInherit",
-                "{text}"
-            );
         }
 
         let entries = [root.join("entry"), namespace.join("entry")];
         for entry in &entries {
             std::fs::write(entry, b"entry").unwrap();
-            let text = windows_acl(entry);
-            assert_eq!(windows_acl_field(&text, "protected="), "False", "{text}");
+        }
+
+        let before = windows_acls(&[&root, &namespace, &entries[0], &entries[1]]);
+        for (directory, text) in [&root, &namespace].into_iter().zip(&before[..2]) {
+            let path = directory.display();
             assert_eq!(
-                windows_acl_field(&text, "rules="),
+                windows_acl_field(text, "protected="),
+                "True",
+                "{path}: {text}"
+            );
+            assert_eq!(
+                windows_acl_field(text, "rules="),
+                "S-1-3-4|Allow|FullControl|ContainerInherit, ObjectInherit;\
+                 S-1-5-18|Allow|FullControl|ContainerInherit, ObjectInherit",
+                "{path}: {text}"
+            );
+        }
+        for (entry, text) in entries.iter().zip(&before[2..]) {
+            let path = entry.display();
+            assert_eq!(
+                windows_acl_field(text, "protected="),
+                "False",
+                "{path}: {text}"
+            );
+            assert_eq!(
+                windows_acl_field(text, "rules="),
                 "S-1-3-4|Allow|FullControl|None;S-1-5-18|Allow|FullControl|None",
-                "{text}"
+                "{path}: {text}"
             );
         }
 
         let cache = MemoryCache::open(&root).unwrap();
+        let after = windows_acls(&[&root, &namespace, &entries[0], &entries[1]]);
 
         assert_eq!(cache.root, namespace);
-        for directory in [&root, &namespace] {
-            let text = windows_acl(directory);
-            let user = windows_acl_field(&text, "user=");
+        for (directory, text) in [&root, &namespace].into_iter().zip(&after[..2]) {
+            let user = windows_acl_field(text, "user=");
             assert!(user.starts_with("S-1-5-"), "{text}");
-            assert_eq!(windows_acl_field(&text, "protected="), "True", "{text}");
+            assert_eq!(windows_acl_field(text, "protected="), "True", "{text}");
             assert_eq!(
-                windows_acl_field(&text, "rules="),
+                windows_acl_field(text, "rules="),
                 format!("{user}|Allow|FullControl|ContainerInherit, ObjectInherit"),
                 "the old OWNER RIGHTS grant on {} was not repaired: {text}",
                 directory.display()
             );
         }
-        for entry in &entries {
-            let text = windows_acl(entry);
-            let user = windows_acl_field(&text, "user=");
-            assert_eq!(windows_acl_field(&text, "protected="), "False", "{text}");
+        for (entry, text) in entries.iter().zip(&after[2..]) {
+            let user = windows_acl_field(text, "user=");
+            assert_eq!(windows_acl_field(text, "protected="), "False", "{text}");
             assert_eq!(
-                windows_acl_field(&text, "rules="),
+                windows_acl_field(text, "rules="),
                 format!("{user}|Allow|FullControl|None"),
                 "the grant {} inherited from the old cache was not repaired: {text}",
                 entry.display()
