@@ -3627,6 +3627,7 @@ fn a_host_directory_move_onto_stale_cached_children_finishes_them() {
     std::fs::rename(temp.path.join("d"), temp.path.join("e")).unwrap();
 
     lookup_relative(&fs, "e").unwrap();
+
     assert_eq!(lookup_relative(&fs, "e/c").unwrap().inode, moved);
     assert!(
         !fs.inodes.read().unwrap().by_inode.contains_key(&stale),
@@ -3660,6 +3661,7 @@ fn stale_child_closed_before_a_host_move_takes_its_name_is_dropped(owned: bool) 
     std::fs::rename(temp.path.join("d"), temp.path.join("e")).unwrap();
 
     lookup_relative(&fs, "e").unwrap();
+
     assert_eq!(lookup_relative(&fs, "e/c").unwrap().inode, moved);
     assert!(
         !fs.inodes.read().unwrap().by_inode.contains_key(&stale),
@@ -3676,4 +3678,267 @@ fn a_stale_child_closed_before_a_host_move_takes_its_name_is_dropped_on_a_plain_
 #[test]
 fn a_stale_child_closed_before_a_host_move_takes_its_name_is_dropped_on_an_owned_mount() {
     stale_child_closed_before_a_host_move_takes_its_name_is_dropped(true);
+}
+
+/// A stale directory the guest still has open when a host directory move
+/// takes its cached name follows the directory to its new name: listing it
+/// through its open handle and creating in it reach its own entries, not the
+/// moved directory's, and a lookup of the new name finds it. Its cached
+/// child goes along, whether or not the moved directory's child of the same
+/// name is cached too; that child keeps an inode of its own.
+fn stale_directory_open_when_a_host_move_takes_its_name_stays_usable(cache_moved_child: bool) {
+    let temp = TempDir::new();
+    for path in ["d/sub/other", "d/sub/own", "e/sub/own"] {
+        std::fs::create_dir_all(temp.path.join(path)).unwrap();
+    }
+    let fs = fs_for(&temp.path);
+    let moved = lookup_relative(&fs, "d/sub").unwrap().inode;
+    let moved_child = cache_moved_child.then(|| lookup_relative(&fs, "d/sub/own").unwrap().inode);
+    let stale = lookup_relative(&fs, "e/sub").unwrap().inode;
+    let stale_child = lookup_relative(&fs, "e/sub/own").unwrap().inode;
+    let (handle, _) = fs
+        .opendir(context(), stale, LINUX_O_DIRECTORY as u32)
+        .unwrap();
+    let handle = handle.unwrap();
+
+    std::fs::rename(temp.path.join("e/sub"), temp.path.join("kept")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"e").unwrap();
+    std::fs::rename(temp.path.join("d"), temp.path.join("e")).unwrap();
+
+    lookup_relative(&fs, "e").unwrap();
+
+    assert_eq!(lookup_relative(&fs, "e/sub").unwrap().inode, moved);
+    assert_eq!(
+        fs.inode(stale_child).unwrap().path(),
+        fs.root.join("kept").join("own")
+    );
+    assert_every_inode_named(&fs, "open directory followed");
+
+    let entries = fs.readdir(context(), stale, handle, 4096, 0).unwrap();
+    let names: Vec<_> = entries.iter().map(|entry| entry.name).collect();
+
+    assert_eq!(names, [b".".as_slice(), b"..", b"own"]);
+
+    let child = lookup_relative(&fs, "e/sub/own").unwrap().inode;
+
+    assert_ne!(child, stale_child);
+    if let Some(moved_child) = moved_child {
+        assert_eq!(child, moved_child);
+    }
+    assert_eq!(lookup_relative(&fs, "kept/own").unwrap().inode, stale_child);
+
+    fs.mkdir(
+        context(),
+        stale,
+        c"new",
+        S_IFDIR | 0o755,
+        0,
+        Extensions::default(),
+    )
+    .unwrap();
+
+    assert!(temp.path.join("kept/new").is_dir());
+    assert!(!temp.path.join("e/sub/new").exists());
+    assert!(fs.getattr(context(), stale, None).is_ok());
+    assert_eq!(lookup_relative(&fs, "kept").unwrap().inode, stale);
+    assert_every_inode_named(&fs, "open directory used");
+
+    fs.releasedir(context(), stale, 0, handle).unwrap();
+}
+
+#[test]
+fn a_stale_directory_open_when_a_host_move_takes_its_name_stays_usable() {
+    stale_directory_open_when_a_host_move_takes_its_name_stays_usable(false);
+}
+
+#[test]
+fn a_stale_directory_open_when_a_host_move_takes_its_cached_child_name_stays_usable() {
+    stale_directory_open_when_a_host_move_takes_its_name_stays_usable(true);
+}
+
+/// A stale child the guest still has open, which the host moves onto a name
+/// the guest has cached for a file the host deleted, follows to that name:
+/// the cached entry is finished, and a lookup of the name finds the child.
+#[test]
+fn a_stale_child_followed_onto_a_stale_cached_name_takes_it() {
+    let temp = TempDir::new();
+    for (path, contents) in [("d/c", "moved"), ("e/c", "stale"), ("kept", "gone")] {
+        std::fs::create_dir_all(temp.path.join(path).parent().unwrap()).unwrap();
+        std::fs::write(temp.path.join(path), contents).unwrap();
+    }
+    let fs = fs_for(&temp.path);
+    let moved = lookup_relative(&fs, "d/c").unwrap().inode;
+    let stale = lookup_relative(&fs, "e/c").unwrap().inode;
+    let gone = lookup_relative(&fs, "kept").unwrap().inode;
+    let (handle, _) = fs
+        .open(context(), stale, false, LINUX_O_RDWR as u32)
+        .unwrap();
+    let handle = handle.unwrap();
+
+    std::fs::remove_file(temp.path.join("kept")).unwrap();
+    std::fs::rename(temp.path.join("e/c"), temp.path.join("kept")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"e").unwrap();
+    std::fs::rename(temp.path.join("d"), temp.path.join("e")).unwrap();
+
+    lookup_relative(&fs, "e").unwrap();
+
+    assert_eq!(lookup_relative(&fs, "e/c").unwrap().inode, moved);
+    assert_eq!(lookup_relative(&fs, "kept").unwrap().inode, stale);
+    assert!(!fs.inodes.read().unwrap().by_inode.contains_key(&gone));
+
+    let mut writer = CaptureWriter { bytes: Vec::new() };
+    fs.read(context(), stale, handle, &mut writer, 5, 0, None, 0)
+        .unwrap();
+
+    assert_eq!(writer.bytes, b"stale");
+    assert_every_inode_named(&fs, "followed onto a stale cached name");
+
+    fs.release(context(), stale, 0, handle, false, false, None)
+        .unwrap();
+}
+
+/// A stale child the guest still has open when the host deleted it and then
+/// moved a directory onto its cached name has no name to follow: it is
+/// dropped, and an operation through it by path must not reach the moved
+/// file that holds the name now.
+#[test]
+fn a_deleted_stale_child_open_when_a_host_move_takes_its_name_is_dropped() {
+    let temp = TempDir::new();
+    for (path, contents) in [("d/c", "moved"), ("e/c", "stale")] {
+        std::fs::create_dir_all(temp.path.join(path).parent().unwrap()).unwrap();
+        std::fs::write(temp.path.join(path), contents).unwrap();
+    }
+    let fs = fs_for(&temp.path);
+    let moved = lookup_relative(&fs, "d/c").unwrap().inode;
+    let stale = lookup_relative(&fs, "e/c").unwrap().inode;
+    let (handle, _) = fs
+        .open(context(), stale, false, LINUX_O_RDWR as u32)
+        .unwrap();
+    let handle = handle.unwrap();
+
+    std::fs::remove_file(temp.path.join("e/c")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"e").unwrap();
+    std::fs::rename(temp.path.join("d"), temp.path.join("e")).unwrap();
+
+    lookup_relative(&fs, "e").unwrap();
+
+    assert_eq!(lookup_relative(&fs, "e/c").unwrap().inode, moved);
+
+    let truncate = stat64 {
+        st_size: 0,
+        ..Default::default()
+    };
+    let result = fs.setattr(context(), stale, truncate, None, SetattrValid::SIZE);
+
+    expect_errno(result, LINUX_EBADF);
+    assert_eq!(std::fs::read(temp.path.join("e/c")).unwrap(), b"moved");
+    assert!(!fs.inodes.read().unwrap().by_inode.contains_key(&stale));
+    assert_every_inode_named(&fs, "deleted open child dropped");
+
+    let _ = fs.release(context(), stale, 0, handle, false, false, None);
+}
+
+/// A stale child the guest still has open when a host directory move takes
+/// its cached name stays tracked: writes through its handle keep working,
+/// and a lookup of the name the host moved it to finds the same inode.
+#[test]
+fn a_stale_child_open_when_a_host_move_takes_its_name_stays_usable() {
+    let temp = TempDir::new();
+    for (path, contents) in [("d/c", "moved"), ("e/c", "stale")] {
+        std::fs::create_dir_all(temp.path.join(path).parent().unwrap()).unwrap();
+        std::fs::write(temp.path.join(path), contents).unwrap();
+    }
+    let fs = fs_for(&temp.path);
+    let moved = lookup_relative(&fs, "d/c").unwrap().inode;
+    let stale = lookup_relative(&fs, "e/c").unwrap().inode;
+    let (handle, _) = fs
+        .open(context(), stale, false, LINUX_O_RDWR as u32)
+        .unwrap();
+    let handle = handle.unwrap();
+
+    std::fs::rename(temp.path.join("e/c"), temp.path.join("kept")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"e").unwrap();
+    std::fs::rename(temp.path.join("d"), temp.path.join("e")).unwrap();
+
+    lookup_relative(&fs, "e").unwrap();
+
+    assert_eq!(lookup_relative(&fs, "e/c").unwrap().inode, moved);
+
+    let mut reader = SourceReader {
+        bytes: b" still open".to_vec(),
+        pos: 0,
+    };
+    let written = fs
+        .write(
+            context(),
+            stale,
+            handle,
+            &mut reader,
+            11,
+            5,
+            None,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+
+    assert_eq!(written, 11);
+    assert_eq!(
+        std::fs::read(temp.path.join("kept")).unwrap(),
+        b"stale still open"
+    );
+    assert_eq!(std::fs::read(temp.path.join("e/c")).unwrap(), b"moved");
+    assert_eq!(lookup_relative(&fs, "kept").unwrap().inode, stale);
+
+    fs.release(context(), stale, 0, handle, false, false, None)
+        .unwrap();
+}
+
+/// A stale child the guest still has open when a host directory move takes
+/// its cached name keeps reporting and changing its own file: getattr and
+/// chmod through it must not reach the moved file that holds the name now.
+#[test]
+fn a_stale_child_open_when_a_host_move_takes_its_name_keeps_its_metadata() {
+    let temp = TempDir::new();
+    for (path, contents) in [("d/c", "moved"), ("e/c", "stale contents")] {
+        std::fs::create_dir_all(temp.path.join(path).parent().unwrap()).unwrap();
+        std::fs::write(temp.path.join(path), contents).unwrap();
+    }
+    let fs = fs_for(&temp.path);
+    assert_ads_store(&fs);
+    let moved = lookup_relative(&fs, "d/c").unwrap();
+    let stale = lookup_relative(&fs, "e/c").unwrap().inode;
+    let (handle, _) = fs
+        .open(context(), stale, false, LINUX_O_RDWR as u32)
+        .unwrap();
+    let handle = handle.unwrap();
+
+    std::fs::rename(temp.path.join("e/c"), temp.path.join("kept")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"e").unwrap();
+    std::fs::rename(temp.path.join("d"), temp.path.join("e")).unwrap();
+
+    lookup_relative(&fs, "e").unwrap();
+
+    assert_eq!(lookup_relative(&fs, "e/c").unwrap().inode, moved.inode);
+
+    let (st, _) = fs.getattr(context(), stale, Some(handle)).unwrap();
+    let attr = stat64 {
+        st_mode: S_IFREG | 0o600,
+        ..Default::default()
+    };
+    fs.setattr(context(), stale, attr, Some(handle), SetattrValid::MODE)
+        .unwrap();
+
+    let entry = lookup_relative(&fs, "e/c").unwrap();
+    let kept = lookup_relative(&fs, "kept").unwrap();
+
+    assert_eq!(st.st_size, 14);
+    assert_eq!(entry.attr.st_size, 5);
+    assert_eq!(entry.attr.st_mode, moved.attr.st_mode);
+    assert_eq!(kept.inode, stale);
+    assert_eq!(kept.attr.st_mode, S_IFREG | 0o600);
+
+    fs.release(context(), stale, 0, handle, false, false, None)
+        .unwrap();
 }

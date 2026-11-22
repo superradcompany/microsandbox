@@ -1,6 +1,16 @@
 //! Inode, handle, and lookup helpers for the Windows passthrough backend.
 
-use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+use std::collections::BTreeSet;
+use std::ffi::CString;
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::ptr::null;
+
+use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdType, GetFinalPathNameByHandleW,
+    OpenFileById, VOLUME_NAME_DOS,
+};
 
 use super::*;
 
@@ -265,12 +275,148 @@ impl PassthroughFs {
         Self::follow_host_rename_descendants(inodes, data, &canonical, path, &identity_of)
     }
 
-    /// A name a moved descendant took from a stale cached entry: that inode
-    /// lost it as in an unlink.
+    /// Names a moved descendant took from stale cached entries. An inode that
+    /// held one follows its file to the name the file has now, found by its
+    /// file id, taking its cached descendants along as a host rename does, so
+    /// reads, writes, listings and metadata through it, by handle or by path,
+    /// reach its own file or directory and not the one that took its old
+    /// name. A stale entry the followed name or a descendant takes over is
+    /// finished the same way. An inode whose file is gone, or has no name the
+    /// guest can reach, lost its name as in an unlink.
     fn finish_displaced(&self, inodes: &mut InodeTable, displaced: Vec<Arc<InodeData>>) {
-        for data in displaced {
-            self.finish_removed_alias(inodes, &data);
+        if displaced.is_empty() {
+            return;
         }
+        // Opened once for the whole batch: this runs under the table lock.
+        let root = self.open_root_by_name();
+        let mut pending = displaced;
+        let mut seen = BTreeSet::new();
+        while let Some(data) = pending.pop() {
+            // Displaced only through another name, or already followed in
+            // this batch: it still holds a live name of its own.
+            let canonical = data.path();
+            if data.identity.is_some()
+                && inodes
+                    .by_path
+                    .get(&canonical)
+                    .is_some_and(|alias| Arc::ptr_eq(alias, &data))
+                && self.path_identity(&canonical).ok().flatten() == data.identity
+            {
+                continue;
+            }
+            // A host racing these moves could hand an inode back; finish it
+            // instead of following it again.
+            let name = match &root {
+                Ok(root) if seen.insert(data.inode) => self.current_name(&data, root),
+                Ok(_) => Ok(None),
+                Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
+            };
+            let path = match name {
+                Ok(Some(path)) => path,
+                Ok(None) => {
+                    self.finish_removed_alias(inodes, &data);
+                    continue;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        ?error,
+                        inode = data.inode,
+                        "cannot find the host name of a displaced inode"
+                    );
+                    self.finish_removed_alias(inodes, &data);
+                    continue;
+                }
+            };
+
+            let old = data.path();
+            *data.path.write().unwrap() = path.clone();
+            if inodes
+                .by_path
+                .get(&old)
+                .is_some_and(|alias| Arc::ptr_eq(alias, &data))
+            {
+                inodes.by_path.remove(&old);
+            }
+            if let Some(stale) = inodes.by_path.insert(path.clone(), data.clone())
+                && !Arc::ptr_eq(&stale, &data)
+            {
+                pending.push(stale);
+            }
+            // Only a directory with cached descendants has any to take along;
+            // the walk over every tracked inode is skipped otherwise.
+            let has_descendants = inodes
+                .by_path
+                .range(old.clone()..)
+                .find(|(key, _)| **key != old)
+                .is_some_and(|(key, _)| key.starts_with(&old));
+            if has_descendants {
+                pending.extend(Self::follow_host_rename_descendants(
+                    inodes,
+                    &data,
+                    &old,
+                    &path,
+                    &|p: &Path| self.path_identity(p),
+                ));
+            }
+        }
+    }
+
+    /// The mount root opened for asking a file's name by its file id, with
+    /// the root's own final path to take the file's path relative to.
+    fn open_root_by_name(&self) -> io::Result<(File, PathBuf)> {
+        let root = StdOpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&self.root)
+            .map_err(host_error)?;
+        let root_path = final_path(&root)?;
+        Ok((root, root_path))
+    }
+
+    /// The path under the mount root that names the file or directory of
+    /// `data` now. `None` when it is on another volume or its name is not one
+    /// the guest can reach.
+    fn current_name(
+        &self,
+        data: &InodeData,
+        (root, root_path): &(File, PathBuf),
+    ) -> io::Result<Option<PathBuf>> {
+        let Some(identity) = data.identity else {
+            return Ok(None);
+        };
+        let file = open_by_file_index(root, identity.1)?;
+        if mobility::file_identity(&file)? != identity {
+            return Ok(None);
+        }
+
+        let host = final_path(&file)?;
+        let Ok(relative) = host.strip_prefix(root_path) else {
+            return Ok(None);
+        };
+        let mut path = self.root.clone();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Ok(None);
+            };
+            let Some(name) = name.to_str().and_then(|name| CString::new(name).ok()) else {
+                return Ok(None);
+            };
+            let Ok(name) = validate_component(&name) else {
+                return Ok(None);
+            };
+            path.push(name);
+        }
+
+        // The name is checked by path as a lookup checks it, with no reparse
+        // point on the way, and read again: the host may have moved the file
+        // once more since its name was asked.
+        if path == self.root
+            || self.safe_metadata(&path).is_err()
+            || self.path_identity(&path)? != Some(identity)
+        {
+            return Ok(None);
+        }
+        Ok(Some(path))
     }
 
     /// A directory renamed on the host takes its cached descendants along:
@@ -370,5 +516,68 @@ impl PassthroughFs {
             .filter(|data| data.inode == inode)
             .cloned()
             .ok_or_else(|| linux_error(LINUX_EBADF))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Open, for reading attributes, the file or directory with the file index
+/// `index` on the volume `volume` is on.
+fn open_by_file_index(volume: &File, index: u64) -> io::Result<File> {
+    let descriptor = FILE_ID_DESCRIPTOR {
+        dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32,
+        Type: FileIdType,
+        Anonymous: FILE_ID_DESCRIPTOR_0 {
+            FileId: index as i64,
+        },
+    };
+
+    // SAFETY: the volume handle is open for the duration of the call, the
+    // descriptor is initialized and outlives it, and no security attributes
+    // are passed.
+    let handle = unsafe {
+        OpenFileById(
+            volume.as_raw_handle() as HANDLE,
+            &descriptor,
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null(),
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(host_error(io::Error::last_os_error()));
+    }
+
+    // SAFETY: OpenFileById returned a new handle, owned from here by the File.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+/// The normalized host path of an open file, in the `\\?\` form
+/// `std::fs::canonicalize` returns (`\\?\C:\...` or `\\?\UNC\...`).
+fn final_path(file: &File) -> io::Result<PathBuf> {
+    let mut buffer = vec![0u16; 512];
+    loop {
+        // SAFETY: the handle is open for the duration of the call, and the
+        // buffer is writable for the length passed, counted in UTF-16 units.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle() as HANDLE,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        } as usize;
+        if len == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if len < buffer.len() {
+            buffer.truncate(len);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        // Too small: `len` is the size needed, terminating null included.
+        buffer.resize(len.max(buffer.len() + 1), 0);
     }
 }
