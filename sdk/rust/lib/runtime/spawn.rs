@@ -113,6 +113,9 @@ static WINDOWS_SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(windows)]
 const STARTUP_PIPE_HASH_HEX_LEN: usize = 32;
+/// Creation flags of a detached runtime, apart from leaving the launcher's job.
+#[cfg(windows)]
+const DETACHED_SPAWN_FLAGS: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
 #[cfg(target_os = "linux")]
 const AUTO_BLOCK_WRITEBACK_LIMIT_BYTES: u64 = 1536 * 1024 * 1024;
 #[cfg(target_os = "linux")]
@@ -1095,10 +1098,6 @@ fn spawn_runtime_command(
     }
     cmd.spawn()
 }
-
-/// Creation flags of a detached runtime, apart from leaving the launcher's job.
-#[cfg(windows)]
-const DETACHED_SPAWN_FLAGS: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
 
 fn block_writeback_policy(
     config: &RuntimeConfig,
