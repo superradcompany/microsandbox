@@ -608,7 +608,7 @@ Plan or apply a configuration change. The returned plan labels each change `"liv
 
 `cpus` and `memory` resize live within the [`maxCpus`](#sandboxbuilder-maxcpus) / [`maxMemory`](#sandboxbuilder-maxmemory) ceilings; raising a ceiling requires a restart.
 
-`rootDiskSize` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
+`rootDiskSize` grows owned managed and flat ext4 roots live, including checkpoint-backed roots. Tmpfs root disks can change in either direction on the next boot. User-supplied disk images are rejected.
 
 Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 

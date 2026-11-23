@@ -649,7 +649,7 @@ Plan or apply a configuration change. The returned plan uses [`ModificationDispo
 
 `cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart.
 
-`root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
+`root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots. Tmpfs root disks can change in either direction on the next boot. User-supplied disk images are rejected.
 
 Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 

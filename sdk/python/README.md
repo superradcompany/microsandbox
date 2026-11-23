@@ -99,7 +99,7 @@ child = await sandbox.fork("experiment")
 await child.stop()
 ```
 
-Use `await sandbox.fork_many(["alice", "bob"])` to capture once for several children. Inspect every returned outcome: one child's startup failure does not remove successful siblings. See the [fork API reference](https://docs.microsandbox.dev/sdk/python/sandbox#forking).
+Use `await sandbox.fork_many(["alice", "bob"])` to capture once for several children. Inspect every returned outcome: one child's startup failure does not remove successful siblings. See the [fork API reference](https://docs.microsandbox.dev/sdk/python/snapshots#forking).
 
 Restoring starts from a saved snapshot instead. Use `cow_memory=True` to request copy-on-write memory for a full-snapshot restore. A generation describes snapshot-history progression; a branch describes a distinct path through that history. The former live branch APIs and old CoW restore names remain deprecated aliases. See [restore migration notes](https://docs.microsandbox.dev/sandboxes/snapshots#migrating-restore-options) for the old-to-new names and language-specific deprecation notices.
 
