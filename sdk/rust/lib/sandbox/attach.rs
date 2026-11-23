@@ -37,6 +37,7 @@ const MAX_TERMINAL_INPUT_BACKLOG: usize = 64 * 1024 * 1024;
 /// editing, Ctrl+C → SIGINT).
 #[derive(Debug, Clone, Default)]
 pub struct AttachOptions {
+    inherited_argv: bool,
     /// Arguments.
     pub(crate) args: Vec<String>,
 
@@ -112,6 +113,12 @@ struct TerminalInput {
 //--------------------------------------------------------------------------------------------------
 
 impl AttachOptionsBuilder {
+    /// Mark a program or arguments resolved from sandbox defaults by a higher-level client.
+    pub fn with_inherited_command(mut self, inherited: bool) -> Self {
+        self.options.inherited_argv = inherited;
+        self
+    }
+
     /// Prepend arguments resolved by a higher-level execution helper.
     pub(crate) fn prepend_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
         self.options.args.splice(0..0, args);
@@ -534,15 +541,23 @@ pub(crate) mod agent {
     };
 
     pub(crate) async fn attach(
-        backend: &dyn crate::backend::Backend,
+        backend: &dyn crate::context::Context,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
         opts_builder: AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        let opts = opts_builder.build()?;
-
         let client = Arc::new(super::super::fs::agent::connect_agent(backend, name).await?);
+        attach_on_client(client, config, cmd, opts_builder).await
+    }
+
+    pub(crate) async fn attach_on_client(
+        client: Arc<crate::agent::AgentClient>,
+        config: &SandboxConfig,
+        cmd: String,
+        opts_builder: AttachOptionsBuilder,
+    ) -> MicrosandboxResult<i32> {
+        let opts = opts_builder.build()?;
 
         let detach_keys = match &opts.detach_keys {
             Some(spec) => DetachKeys::parse(spec)?,
@@ -565,7 +580,9 @@ pub(crate) mod agent {
         );
 
         let mut protocol = AttachProtocol::new(&client)?;
-        let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
+        let (id, mut rx) = client
+            .stream_exec(&req, &opts.env, !opts.inherited_argv)
+            .await?;
 
         crossterm::terminal::enable_raw_mode()
             .map_err(|e| crate::MicrosandboxError::Terminal(e.to_string()))?;
@@ -705,7 +722,7 @@ pub(crate) mod agent {
 
     use microsandbox_protocol::{exec::ExecResize, message::MessageType};
 
-    use crate::backend::Backend;
+    use crate::context::Context;
     use crate::{
         MicrosandboxError, MicrosandboxResult,
         sandbox::{
@@ -722,15 +739,23 @@ pub(crate) mod agent {
     };
 
     pub(crate) async fn attach(
-        backend: &dyn Backend,
+        backend: &dyn Context,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
         opts_builder: AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        let opts = opts_builder.build()?;
-
         let client = Arc::new(super::super::fs::agent::connect_agent(backend, name).await?);
+        attach_on_client(client, config, cmd, opts_builder).await
+    }
+
+    pub(crate) async fn attach_on_client(
+        client: Arc<crate::agent::AgentClient>,
+        config: &SandboxConfig,
+        cmd: String,
+        opts_builder: AttachOptionsBuilder,
+    ) -> MicrosandboxResult<i32> {
+        let opts = opts_builder.build()?;
 
         let detach_keys = match &opts.detach_keys {
             Some(spec) => DetachKeys::parse(spec)?,
@@ -752,7 +777,9 @@ pub(crate) mod agent {
             cols,
         );
         let mut protocol = AttachProtocol::new(&client)?;
-        let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
+        let (id, mut rx) = client
+            .stream_exec(&req, &opts.env, !opts.inherited_argv)
+            .await?;
 
         let mut terminal_guard = WindowsTerminalGuard::enter()?;
         let mut terminal_events = WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;

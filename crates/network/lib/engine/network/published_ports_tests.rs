@@ -11,7 +11,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::test_support::{GuestDevice, ipv6_loopback_unavailable};
 use super::{HostRoutes, SmoltcpNetwork};
-use crate::config::{EnvNetworkSecretResolver, NetworkConfig, PortProtocol, PublishedPort};
+use crate::config::{
+    EnvNetworkSecretResolver, MultiTenantConfig, NetworkConfig, PortProtocol, PublishedPort,
+};
 use crate::policy::NetworkPolicy;
 
 //--------------------------------------------------------------------------------------------------
@@ -76,9 +78,11 @@ async fn start_fails_when_a_published_port_is_taken() {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         7,
         microsandbox_types::DeploymentProfile::SingleTenant,
+        &MultiTenantConfig::default(),
         HostRoutes {
             ipv4: false,
             ipv6: false,
+            ..HostRoutes::default()
         },
     )
     .unwrap();
@@ -122,9 +126,11 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
         config.resolve(&EnvNetworkSecretResolver).unwrap(),
         7,
         microsandbox_types::DeploymentProfile::SingleTenant,
+        &MultiTenantConfig::default(),
         HostRoutes {
             ipv4: false,
             ipv6: false,
+            ..HostRoutes::default()
         },
     )
     .unwrap();

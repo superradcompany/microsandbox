@@ -45,8 +45,8 @@ async fn native_diagnosis_serializes_guest_mounts_from_the_selected_catalog() {
         HostPermissions, OwnedVolumeStorage, StatVirtualization, VolumeMount, owned_volume_mount_id,
     };
 
-    use crate::backend::{Backend, BackendSelectionSource, LocalBackend, with_backend};
     use crate::config::layers::BackendConfig;
+    use crate::context::{Context, ContextSelectionSource, LocalContext};
 
     let home = microsandbox_runtime::checkpoint::migration::private_preview_parent().unwrap();
     let (config, mut writer) = catalog(home.path()).await;
@@ -68,24 +68,26 @@ async fn native_diagnosis_serializes_guest_mounts_from_the_selected_catalog() {
     )
     .await;
     insert(&mut writer, "invalid", "invalid saved configuration").await;
-    let local = LocalBackend::from_backend_config(
+    let local = LocalContext::from_backend_config(
         BackendConfig::new(
             GlobalConfigPatch::from_present_fields(config),
             Default::default(),
         ),
-        BackendSelectionSource::Programmatic,
+        ContextSelectionSource::Programmatic,
         None,
     );
-    let backend: Arc<dyn Backend> = Arc::new(local);
+    let backend: Arc<dyn Context> = Arc::new(local);
     // All four native SDKs return this exact JSON to their language decoder. Exercise the
     // actual catalog read and wire serialization instead of constructing a report by hand.
-    let wire = with_backend(
-        backend,
-        crate::setup::binding_diagnose_storage(
+    let wire = async {
+        let destination: std::sync::Arc<dyn crate::Context> = backend;
+        crate::setup::binding_diagnose_storage_in(
+            destination.as_ref(),
             "{}",
             r#"{"named":["mounted","invalid","missing"]}"#,
-        ),
-    )
+        )
+        .await
+    }
     .await
     .unwrap();
     let report: serde_json::Value = serde_json::from_str(&wire).unwrap();
@@ -159,8 +161,8 @@ async fn storage_preview_blockers_never_authorize_an_incomplete_or_terminal_targ
 
 #[tokio::test]
 async fn storage_preview_cancel_preserves_released_schema_version_and_rows() {
-    use crate::backend::{BackendSelectionSource, LocalBackend};
     use crate::config::layers::BackendConfig;
+    use crate::context::{ContextSelectionSource, LocalContext};
     let temp = microsandbox_runtime::checkpoint::migration::private_preview_parent().unwrap();
     let scratch = microsandbox_runtime::checkpoint::migration::private_preview_parent().unwrap();
     let (config, mut legacy) = catalog(temp.path()).await;
@@ -193,12 +195,12 @@ async fn storage_preview_cancel_preserves_released_schema_version_and_rows() {
     let sandbox = config.sandboxes_dir().join("legacy-view");
     fs::create_dir_all(sandbox.join("runtime")).unwrap();
     fs::write(sandbox.join("upper.ext4"), vec![23; 131_072]).unwrap();
-    let local = LocalBackend::from_backend_config(
+    let local = LocalContext::from_backend_config(
         BackendConfig::new(
             GlobalConfigPatch::from_present_fields(config),
             Default::default(),
         ),
-        BackendSelectionSource::Programmatic,
+        ContextSelectionSource::Programmatic,
         None,
     );
     let options = crate::sandbox::StorageRecoveryOptions {
@@ -718,7 +720,7 @@ fn scoped_diagnosis_preserves_captured_home_and_config_without_backend_initializ
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
 
-    use crate::backend::{Backend, LocalBackend, with_backend};
+    use crate::context::{Context, LocalContext};
 
     let _guard = crate::test_support::lock_env();
     let names = [
@@ -777,13 +779,13 @@ fn scoped_diagnosis_preserves_captured_home_and_config_without_backend_initializ
             std::env::remove_var("MSB_PATH");
             std::env::remove_var("MSB_LIBKRUNFW_PATH");
         }
-        let mut builder = LocalBackend::builder()
+        let mut builder = LocalContext::builder()
             .config_path(&config_file)
             .managed_config_path(&managed_file);
         if explicit_home {
             builder = builder.home(&home);
         }
-        let local = Arc::new(builder.build_lazy().unwrap());
+        let local = Arc::new(builder.build().unwrap());
         assert!(!home.exists());
         // A later environment change and even an invalid original config file cannot
         // change a backend already selected by the caller.
@@ -799,9 +801,12 @@ fn scoped_diagnosis_preserves_captured_home_and_config_without_backend_initializ
                 .join(microsandbox_utils::DB_SUBDIR)
                 .join(microsandbox_utils::DB_FILENAME);
             let before = fs::read(&db).unwrap();
-            let backend: Arc<dyn Backend> = local.clone();
-            with_backend(backend, async {
-                let sources = inspection_config(GlobalConfigPatch::new()).unwrap();
+            let backend: Arc<dyn Context> = local.clone();
+            async {
+                let destination: std::sync::Arc<dyn crate::Context> = backend;
+
+                let sources =
+                    inspection_config_in(destination.as_ref(), GlobalConfigPatch::new()).unwrap();
                 assert_eq!(sources.resolved_config().home(), home);
                 assert_eq!(
                     sources.resolved_config().snapshots_dir(),
@@ -811,13 +816,17 @@ fn scoped_diagnosis_preserves_captured_home_and_config_without_backend_initializ
                     sources.resolved_config().paths.agentd,
                     Some(base.join("captured-agentd"))
                 );
-                let report = diagnose_storage(GlobalConfigPatch::new(), StorageSelection::All)
-                    .await
-                    .unwrap();
+                let report = diagnose_storage_in(
+                    destination.as_ref(),
+                    GlobalConfigPatch::new(),
+                    StorageSelection::All,
+                )
+                .await
+                .unwrap();
                 assert_eq!(report.home, home);
                 assert_eq!(report.sandboxes.len(), 1);
                 assert_eq!(report.sandboxes[0].name, "captured-only");
-            })
+            }
             .await;
             assert_eq!(fs::read(&db).unwrap(), before);
             let migrations: i64 = sqlx::query_scalar(

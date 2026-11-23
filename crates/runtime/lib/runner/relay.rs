@@ -41,19 +41,26 @@ use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE, MAX_WIRE_FRAME};
 #[cfg(test)]
 use microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION;
 use microsandbox_protocol::core::{
-    CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThaw,
-    WorkloadThawMode, WorkloadThawed,
+    CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThawed,
 };
 use microsandbox_protocol::exec::{
     ExecFailed, ExecFailureKind, ExecOutputAck, ExecRequest, ExecSignal, ExecStderr, ExecStdout,
 };
+use microsandbox_protocol::exec_bindings::{DeferredCommandBindings, ExecBindingAdvertisement};
 use microsandbox_protocol::exec_control::{
     EXEC_CONTROL_VERSION, ExecControlAdvertisement, ExecControlReady,
 };
 use microsandbox_protocol::fs::{FsRequest, FsResponse};
+use microsandbox_protocol::init_observation::ObservedReady;
 use microsandbox_protocol::message::{
     FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message,
     MessageType,
+};
+use microsandbox_protocol::resources::{
+    RESOURCE_OBSERVATION_RELAY_VERSION, ResourceRelayAdvertisement,
+};
+use microsandbox_protocol::restore_transport::{
+    GuestReady, GuestThaw as WorkloadThaw, GuestThawMode as WorkloadThawMode,
 };
 use microsandbox_protocol::tcp::{TcpConnect, TcpFailed};
 #[cfg(unix)]
@@ -65,7 +72,8 @@ use microsandbox_protocol::transport::{
     try_decode_relay_client_disconnected_ack_from_bytes,
 };
 use microsandbox_protocol::transport::{RelayClientConnected, RelayClientDisconnectedAck};
-#[cfg(test)]
+use microsandbox_protocol::wire::Envelope;
+
 use microsandbox_types::ExecLimits;
 #[cfg(unix)]
 use microsandbox_utils::wake_pipe::WakePipe;
@@ -229,6 +237,8 @@ struct ClientState {
 /// Host-side execution ownership used by the idle monitor.
 #[derive(Default)]
 pub(crate) struct RelayIdleState {
+    /// Captured before accepting clients; shared with detached-job admission.
+    pub(crate) command_bindings: Option<Arc<DeferredCommandBindings>>,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     managed_connections: StdMutex<HashSet<[u8; 16]>>,
 }
@@ -275,6 +285,7 @@ struct ControlAdmission {
 /// copied, and cancellation releases reservations without dropping any already accepted frame.
 #[derive(Clone)]
 pub(crate) struct ControlWriter {
+    command_bindings: Option<Arc<DeferredCommandBindings>>,
     pub(crate) exec_controls: Arc<ExecControlRegistry>,
     /// Sandbox-wide execution admission, accounting, and pending stdin routing.
     execution_tracker: Arc<ExecutionTracker>,
@@ -494,6 +505,8 @@ struct GuestFrameMerger {
 /// for client connections on a Unix domain socket. Frames are routed between
 /// clients and the guest agent without decoding.
 pub struct AgentRelay {
+    binding_boot_id: Option<String>,
+    pub(super) required_exec_limits: Option<ExecLimits>,
     idle_state: Arc<RelayIdleState>,
     restored_input: RestoreInput,
     /// Shared ring buffers + wake pipes for console backend communication.
@@ -765,6 +778,7 @@ impl ControlWriter {
     fn from_sender(tx: mpsc::Sender<ControlWrite>) -> Self {
         Self {
             tx,
+            command_bindings: None,
             exec_controls: Arc::new(ExecControlRegistry::default()),
             execution_tracker: Arc::new(ExecutionTracker::default()),
             data_bytes: Arc::new(Semaphore::new(AGENT_WRITE_DATA_BYTES)),
@@ -901,26 +915,34 @@ impl GuestFrameMerger {
             return self.push_raw(lane_frame);
         }
 
-        let message = decode_frame(lane_frame.frame.data.as_ref())?;
-        let key = (incarnation, message.id);
-        match message.t {
-            MessageType::BulkAccepted => {
+        // Route well-formed future names opaquely. A typed Message decoder
+        // rejects an unknown name and used to tear down the whole VM here.
+        // Bulk ordering still applies to terminal frames regardless of name.
+        let message =
+            Envelope::decode(&lane_frame.frame.data[LEN_PREFIX_SIZE + FRAME_HEADER_SIZE..])
+                .map_err(|error| {
+                    RuntimeError::Custom(format!("decode routing envelope: {error}"))
+                })?;
+        let id = lane_frame.frame.id;
+        let key = (incarnation, id);
+        match MessageType::from_wire_str(&message.t) {
+            Some(MessageType::BulkAccepted) => {
                 let accepted: BulkAccepted = message.payload().map_err(|error| {
                     RuntimeError::Custom(format!("decode bulk acceptance: {error}"))
                 })?;
                 let Some(flow) = self.flows.get_mut(&key) else {
-                    if self.is_retired(incarnation, message.id) {
+                    if self.is_retired(incarnation, id) {
                         return Ok(Vec::new());
                     }
                     return Err(RuntimeError::Custom(format!(
                         "bulk acceptance for unregistered correlation {}",
-                        message.id
+                        id
                     )));
                 };
                 if flow.accepted_forwarded {
                     return Err(RuntimeError::Custom(format!(
                         "duplicate bulk acceptance for correlation {}",
-                        message.id
+                        id
                     )));
                 }
                 flow.accepted_forwarded = true;
@@ -928,7 +950,7 @@ impl GuestFrameMerger {
                 if !flow.guest_to_host && !flow.pending_raw.is_empty() {
                     return Err(RuntimeError::Custom(format!(
                         "guest sent raw records for disabled flow {}",
-                        message.id
+                        id
                     )));
                 }
 
@@ -936,7 +958,7 @@ impl GuestFrameMerger {
                 self.drain_flow(key, &mut ready)?;
                 Ok(ready)
             }
-            MessageType::BulkFinish => {
+            Some(MessageType::BulkFinish) => {
                 let finish: BulkFinish = message.payload().map_err(|error| {
                     RuntimeError::Custom(format!("decode bulk finish: {error}"))
                 })?;
@@ -945,12 +967,12 @@ impl GuestFrameMerger {
                 }
 
                 let Some(flow) = self.flows.get_mut(&key) else {
-                    return if self.is_retired(incarnation, message.id) {
+                    return if self.is_retired(incarnation, id) {
                         Ok(Vec::new())
                     } else {
                         Err(RuntimeError::Custom(format!(
                             "bulk finish for unregistered correlation {}",
-                            message.id
+                            id
                         )))
                     };
                 };
@@ -965,7 +987,7 @@ impl GuestFrameMerger {
                 if !flow.accepted_forwarded || !flow.guest_to_host {
                     return Err(RuntimeError::Custom(format!(
                         "bulk finish arrived for inactive guest-to-host flow {}",
-                        message.id
+                        id
                     )));
                 }
                 if finish.final_offset < flow.next_raw_offset {
@@ -977,7 +999,7 @@ impl GuestFrameMerger {
                 if flow.pending_finish.is_some() {
                     return Err(RuntimeError::Custom(format!(
                         "duplicate bulk finish for correlation {}",
-                        message.id
+                        id
                     )));
                 }
                 flow.pending_finish = Some((finish.final_offset, lane_frame));
@@ -985,14 +1007,14 @@ impl GuestFrameMerger {
                 self.drain_flow(key, &mut ready)?;
                 Ok(ready)
             }
-            MessageType::BulkCancel => {
+            Some(MessageType::BulkCancel) => {
                 let Some(flow) = self.flows.get_mut(&key) else {
-                    return if self.is_retired(incarnation, message.id) {
+                    return if self.is_retired(incarnation, id) {
                         Ok(Vec::new())
                     } else {
                         Err(RuntimeError::Custom(format!(
                             "bulk cancellation for unregistered correlation {}",
-                            message.id
+                            id
                         )))
                     };
                 };
@@ -1004,7 +1026,7 @@ impl GuestFrameMerger {
             }
             _ if lane_frame.frame.flags & FLAG_TERMINAL != 0 => {
                 let Some(flow) = self.flows.get_mut(&key) else {
-                    return if self.is_retired(incarnation, message.id) {
+                    return if self.is_retired(incarnation, id) {
                         Ok(Vec::new())
                     } else {
                         Ok(vec![lane_frame])
@@ -1020,13 +1042,13 @@ impl GuestFrameMerger {
                     || flow.pending_finish.is_none()
                 {
                     self.flows.remove(&key);
-                    self.retire(incarnation, message.id)?;
+                    self.retire(incarnation, id)?;
                     return Ok(vec![lane_frame]);
                 }
                 if flow.pending_terminal.replace(lane_frame).is_some() {
                     return Err(RuntimeError::Custom(format!(
                         "duplicate terminal frame for bulk correlation {}",
-                        message.id
+                        id
                     )));
                 }
                 Ok(Vec::new())
@@ -1267,6 +1289,8 @@ impl AgentRelay {
         tracing::info!("agent relay listening on {}", agent_sock_path.display());
 
         Ok(Self {
+            binding_boot_id: None,
+            required_exec_limits: None,
             idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
@@ -1299,6 +1323,8 @@ impl AgentRelay {
         bulk_shared: Option<Arc<ConsoleSharedState>>,
     ) -> Self {
         Self {
+            binding_boot_id: None,
+            required_exec_limits: None,
             idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
@@ -1331,6 +1357,18 @@ impl AgentRelay {
             self.endpoint.display()
         );
         Ok(())
+    }
+
+    /// Install the requirements from the run-admission transaction before serving clients.
+    pub(crate) fn install_command_bindings(
+        &mut self,
+        bindings: Option<DeferredCommandBindings>,
+        boot_id: &str,
+    ) {
+        self.binding_boot_id = bindings.as_ref().map(|_| boot_id.to_owned());
+        Arc::get_mut(&mut self.idle_state)
+            .expect("relay idle state shared before run admission")
+            .command_bindings = bindings.map(Arc::new);
     }
 
     /// Share live client ownership with the host idle monitor and job manager.
@@ -1467,10 +1505,10 @@ impl AgentRelay {
                                 .into(),
                         ));
                     }
-                    let ready: Ready = msg.payload().map_err(|error| {
+                    let ready: GuestReady = msg.payload().map_err(|error| {
                         RuntimeError::Custom(format!("decode core.ready payload: {error}"))
                     })?;
-                    self.select_ready_transport(&ready)?;
+                    self.select_ready_transport(&ready.public)?;
                     tracing::info!(
                         dual_port = self.dual_port_active,
                         "agent relay: received core.ready from agentd"
@@ -1481,7 +1519,7 @@ impl AgentRelay {
                         // This capability describes only the already authenticated local SDK
                         // hop. Agentd remains unaware of shared mappings and the guest generation
                         // stays unchanged.
-                        ready.local_transport = Some(LocalTransportReady::shared_arena_v1());
+                        ready.public.local_transport = Some(LocalTransportReady::shared_arena_v1());
                         ready
                     };
                     // Capture the complete client-facing capability set, including the existing
@@ -1492,13 +1530,12 @@ impl AgentRelay {
                         self.dual_port_active,
                     );
                     let mut client_ready =
-                        Message::with_payload(MessageType::Ready, msg.id, &ready).map_err(
-                            |error| {
+                        Message::with_payload(MessageType::Ready, msg.id, &ready.client_ready())
+                            .map_err(|error| {
                                 RuntimeError::Custom(format!(
                                     "encode SDK-facing core.ready payload: {error}"
                                 ))
-                            },
-                        )?;
+                            })?;
                     client_ready.v = msg.v;
                     let mut client_ready_frame = Vec::new();
                     codec::encode_to_buf(&client_ready, &mut client_ready_frame).map_err(
@@ -1623,6 +1660,11 @@ impl AgentRelay {
 
     /// Match the readiness capability to the physical binding or retain combined fallback.
     fn select_ready_transport(&mut self, ready: &Ready) -> RuntimeResult<()> {
+        if self.required_exec_limits.is_some() && self.required_exec_limits != ready.exec_limits {
+            return Err(RuntimeError::Custom(
+                "guest cannot confirm the retained execution limits".into(),
+            ));
+        }
         self.range_lease_active = ready
             .relay_lease
             .as_ref()
@@ -1794,6 +1836,16 @@ impl AgentRelay {
     }
 
     fn thaw_restored_workload(&mut self, restored: &RestoredAgentState) -> RuntimeResult<()> {
+        let mode = if restored.ready.restore_tcp_reset_version == Some(1) {
+            WorkloadThawMode::RestoreResetTcp
+        } else {
+            let warning = "Restored guest cannot reset inherited TCP connections before thaw. Interrupted connections may wait for a timeout.";
+            tracing::warn!("{warning}");
+            if let Some(writer) = &self.log_writer {
+                writer.write_system(warning);
+            }
+            WorkloadThawMode::Restore
+        };
         if !self.restored_input.control.is_empty() || !self.restored_input.bulk.is_empty() {
             return Err(RuntimeError::Custom(
                 "restored transport did not start at a complete-frame boundary".into(),
@@ -1812,7 +1864,7 @@ impl AgentRelay {
             RESTORE_CONTROL_ID,
             &WorkloadThaw {
                 attempt_id: restored.attempt_id.clone(),
-                mode: WorkloadThawMode::Restore,
+                mode,
             },
         )
         .map_err(|error| RuntimeError::Custom(format!("encode restored workload thaw: {error}")))?;
@@ -1925,24 +1977,26 @@ impl AgentRelay {
 
     fn install_restored_ready(&mut self, restored: &RestoredAgentState) -> RuntimeResult<()> {
         // Guest RAM already contains the completed bulk binding: no new boot hello is sent.
-        if restored.ready.bulk_transport.is_some() && self.bulk_shared.is_none() {
+        if restored.ready.public.bulk_transport.is_some() && self.bulk_shared.is_none() {
             return Err(RuntimeError::Custom(
                 "restored agent requires its captured bulk console lane".into(),
             ));
         }
         self.bulk_connection_id = restored
             .ready
+            .public
             .bulk_transport
             .as_ref()
             .map(|ready| ready.connection_id);
-        self.select_ready_transport(&restored.ready)?;
+        self.select_ready_transport(&restored.ready.public)?;
         self.shared.workload_control.install_ready(
             restored.protocol_generation,
             restored.ready.clone(),
             self.dual_port_active,
         );
-        let mut ready = Message::with_payload(MessageType::Ready, 0, &restored.ready)
-            .map_err(|error| RuntimeError::Custom(format!("encode restored ready: {error}")))?;
+        let mut ready =
+            Message::with_payload(MessageType::Ready, 0, &restored.ready.client_ready())
+                .map_err(|error| RuntimeError::Custom(format!("encode restored ready: {error}")))?;
         ready.v = restored.protocol_generation;
         let mut frame = Vec::new();
         codec::encode_to_buf(&ready, &mut frame).map_err(|error| {
@@ -1973,12 +2027,12 @@ impl AgentRelay {
         })?;
         let ready_message = codec::decode_message_frame(&ready_frame)
             .map_err(|error| RuntimeError::Custom(format!("decode relay Ready: {error}")))?;
-        let ready_payload = ready_message.payload::<Ready>().map_err(|error| {
+        let ready_payload = ready_message.payload::<ObservedReady>().map_err(|error| {
             RuntimeError::Custom(format!("decode relay Ready payload: {error}"))
         })?;
         // Only bundled peers with bounded, nonblocking guest input and range retirement can
         // advertise the stronger delivery contract. Older agents retain their existing path.
-        let exec_control_supported = ready_payload.workload_transport_barrier_version
+        let exec_control_supported = ready_payload.ready.workload_transport_barrier_version
             == Some(microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION)
             && self.range_lease_active;
 
@@ -1992,10 +2046,13 @@ impl AgentRelay {
 
         // Bounded channel for client reader tasks to send frames to the ring writer.
         // Backpressure prevents unbounded memory growth from client floods.
-        let (agent_tx, agent_rx) = ControlWriter::new();
+        let (mut agent_tx, agent_rx) = ControlWriter::new();
+        agent_tx
+            .command_bindings
+            .clone_from(&self.idle_state.command_bindings);
         agent_tx
             .execution_tracker
-            .install(ready_payload.exec_limits)
+            .install(ready_payload.ready.exec_limits)
             .map_err(RuntimeError::Custom)?;
         agent_tx
             .exec_controls
@@ -2188,7 +2245,15 @@ impl AgentRelay {
                                     endpoint: crate::control::control_socket_path_for(&self.endpoint).to_string_lossy().into_owned(),
                                     connection: connection.token(),
                                 };
-                                let advertisement = ExecControlAdvertisement { ready: &ready_payload, exec_control: &capability };
+                                let advertisement = ResourceRelayAdvertisement {
+                                    ready: ExecControlAdvertisement { ready: &ready_payload, exec_control: &capability },
+                                    relay_resource_observation: RESOURCE_OBSERVATION_RELAY_VERSION,
+                                };
+                                let advertisement = ExecBindingAdvertisement {
+                                    ready: advertisement,
+                                    relay_exec_bindings: self.binding_boot_id.as_ref().map(|_| 1),
+                                    binding_boot_id: self.binding_boot_id.clone(),
+                                };
                                 let mut ready = Message::with_payload(MessageType::Ready, 0, &advertisement)
                                     .map_err(|error| RuntimeError::Custom(format!("encode exec control Ready: {error}")))?;
                                 ready.v = ready_message.v;
@@ -2196,7 +2261,27 @@ impl AgentRelay {
                                 codec::encode_to_buf(&ready, &mut encoded)
                                     .map_err(|error| RuntimeError::Custom(format!("encode exec control Ready frame: {error}")))?;
                                 encoded
-                            } else { ready_frame.clone() };
+                            } else {
+                                // Older guests remain usable; the SDK separately checks their
+                                // generation before sending the new query. The host owns this
+                                // field: guest Ready is decoded into Ready before this wrapping.
+                                let advertisement = ResourceRelayAdvertisement {
+                                    ready: &ready_payload,
+                                    relay_resource_observation: RESOURCE_OBSERVATION_RELAY_VERSION,
+                                };
+                                let advertisement = ExecBindingAdvertisement {
+                                    ready: advertisement,
+                                    relay_exec_bindings: self.binding_boot_id.as_ref().map(|_| 1),
+                                    binding_boot_id: self.binding_boot_id.clone(),
+                                };
+                                let mut ready = Message::with_payload(MessageType::Ready, 0, &advertisement)
+                                    .map_err(|error| RuntimeError::Custom(format!("encode resource relay Ready: {error}")))?;
+                                ready.v = ready_message.v;
+                                let mut encoded = Vec::new();
+                                codec::encode_to_buf(&ready, &mut encoded)
+                                    .map_err(|error| RuntimeError::Custom(format!("encode resource relay Ready frame: {error}")))?;
+                                encoded
+                            };
 
                             let mut handshake = Vec::with_capacity(8 + ready_frame.len());
                             handshake.extend_from_slice(&id_start.to_be_bytes());
@@ -2485,10 +2570,7 @@ fn persist_restore_activation(
 
     let target = runtime_dir.join("restore-activation.json");
     let temporary = runtime_dir.join(format!(".restore-activation.{}.tmp", rand::random::<u64>()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
     serde_json::to_writer(
         &mut file,
         &RestoreActivationRecord {
@@ -2672,6 +2754,24 @@ fn try_extract_frame(buf: &mut BytesMut) -> RuntimeResult<Option<RawFrame>> {
     let flags = data[8];
 
     Ok(Some(RawFrame { data, id, flags }))
+}
+
+/// Convert an admitted host request to the existing guest contract. Old guest agents
+/// never receive provenance, and a refusal cannot reserve a slot or reach the console.
+fn admit_bound_exec(
+    bindings: &DeferredCommandBindings,
+    message: &Message,
+) -> Result<Bytes, &'static str> {
+    let guest = Message {
+        v: message.v,
+        t: message.t,
+        id: message.id,
+        flags: message.flags,
+        p: bindings.admit_payload(&message.p)?,
+    };
+    let mut bytes = Vec::new();
+    codec::encode_to_buf(&guest, &mut bytes).map_err(|_| "cannot encode admitted command")?;
+    Ok(Bytes::from(bytes))
 }
 
 /// Decode raw frame bytes into a protocol `Message`.
@@ -4645,7 +4745,7 @@ async fn client_reader_task(
             }
         };
         #[cfg(not(unix))]
-        let frame = {
+        let mut frame = {
             let pending_frame = read_raw_frame(&mut reader);
             tokio::pin!(pending_frame);
 
@@ -4812,6 +4912,11 @@ async fn client_reader_task(
             .then(|| decode_frame(frame.data.as_ref()).ok())
             .flatten();
         let message_type = decoded_message.as_ref().map(|message| message.t);
+        // A guest with a newer decoder might interpret an unfamiliar session opener.
+        // A guarded relay must understand the opener before passing it to that guest.
+        if is_session_start && agent_tx.command_bindings.is_some() && decoded_message.is_none() {
+            break;
+        }
         // A suspended guest cannot reject new work itself. Existing stream data keeps the
         // bounded transport path; this does not touch guest slot ownership or bulk state.
         if is_session_start && resident_paused.load(Ordering::Acquire) {
@@ -4848,6 +4953,41 @@ async fn client_reader_task(
         let mut input_len = None;
         if let Some(message) = decoded_message.as_ref() {
             if message.t == MessageType::ExecRequest {
+                if let Some(bindings) = agent_tx.command_bindings.as_deref() {
+                    match admit_bound_exec(bindings, message) {
+                        Ok(bytes) => frame.data = bytes,
+                        Err(reason) => {
+                            let failure = ExecFailed {
+                                kind: ExecFailureKind::PermissionDenied,
+                                errno: None,
+                                errno_name: None,
+                                message: reason.into(),
+                                stage: Some("restore_binding".into()),
+                            };
+                            let Ok(mut response) = Message::with_payload(
+                                MessageType::ExecFailed,
+                                message.id,
+                                &failure,
+                            ) else {
+                                break;
+                            };
+                            response.v = message.v;
+                            // A signal can race rejection. Finish this unused correlation so
+                            // the controller reports a terminal without waiting for guest spawn.
+                            if let Some(client) = clients.lock().await.get(&slot)
+                                && !client.active_sessions.contains(&message.id)
+                                && let Some(control) = client.exec_control.as_ref()
+                            {
+                                control.mark_finished(message.id);
+                            }
+                            if queue_client_rejection(&write_tx, &write_budget, &response).is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                }
                 match agent_tx.execution_tracker.admit(message) {
                     Ok(exec_admission::Admission::Full) => {
                         let failure = ExecFailed {
@@ -7549,6 +7689,69 @@ mod tests {
     }
 
     #[test]
+    fn guest_merger_routes_unknown_names_without_losing_bulk_order() {
+        let id = 19;
+        let budget = Arc::new(Semaphore::new(64 * 1024));
+        let mut merger = GuestFrameMerger::default();
+        // A future ordinary reply must not require a typed Message variant.
+        let envelope = Envelope::new(10, "future.observation", &serde_json::json!({})).unwrap();
+        let mut ordinary = Vec::new();
+        codec::encode_raw_to_buf(&envelope.frame(id, 0).unwrap(), &mut ordinary).unwrap();
+        assert_eq!(merger.push(lane_frame(ordinary, &budget)).unwrap().len(), 1);
+
+        merger.register(TEST_INCARNATION, id).unwrap();
+        merger
+            .push(lane_frame(
+                encoded_message_id(MessageType::BulkAccepted, id, &bulk_accepted()),
+                &budget,
+            ))
+            .unwrap();
+        assert!(
+            merger
+                .push(lane_frame(
+                    encoded_message_id(
+                        MessageType::BulkFinish,
+                        id,
+                        &BulkFinish {
+                            kind: BulkKind::Filesystem,
+                            flow: BulkFlow::GuestToHost,
+                            final_offset: 3,
+                        },
+                    ),
+                    &budget,
+                ))
+                .unwrap()
+                .is_empty()
+        );
+        let mut terminal = Vec::new();
+        codec::encode_raw_to_buf(&envelope.frame(id, FLAG_TERMINAL).unwrap(), &mut terminal)
+            .unwrap();
+        assert!(
+            merger
+                .push(lane_frame(terminal.clone(), &budget))
+                .unwrap()
+                .is_empty()
+        );
+        let ready = merger
+            .push(lane_frame(encoded_raw(id, 0, b"abc"), &budget))
+            .unwrap();
+        assert_eq!(ready.len(), 3);
+        assert_eq!(ready[2].frame.data.as_ref(), terminal);
+        assert!(!merger.flows.contains_key(&(TEST_INCARNATION, id)));
+        // A completed future operation must not poison later, known traffic.
+        assert_eq!(
+            merger
+                .push(lane_frame(
+                    encoded_message_id(MessageType::Pong, id + 1, &serde_json::json!({})),
+                    &budget,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn guest_merger_restores_cross_lane_stream_order() {
         let id = 17;
         for ok in [true, false] {
@@ -8884,14 +9087,20 @@ mod tests {
             relay = relay.with_bind_identity_map(None, 0);
         }
 
+        let observation = microsandbox_protocol::init_observation::InitObservation::Handoff {
+            path: "/sbin/init".into(),
+        };
         let ready = encoded_message(
             MessageType::Ready,
-            &Ready {
-                boot_time_ns: 0,
-                init_time_ns: 0,
-                ready_time_ns: 0,
-                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
-                ..Default::default()
+            &ObservedReady {
+                ready: Ready {
+                    boot_time_ns: 0,
+                    init_time_ns: 0,
+                    ready_time_ns: 0,
+                    workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+                    ..Default::default()
+                },
+                init_observation: Some(observation.clone()),
             },
         );
         shared.tx_ring.push(ready.clone()).unwrap();
@@ -8901,16 +9110,19 @@ mod tests {
 
         let _private = shared.workload_control.start();
         let (_, captured_ready) = shared.workload_control.ready().unwrap();
+        assert_eq!(captured_ready.init_observation, Some(observation.clone()));
         #[cfg(unix)]
         assert_eq!(
-            captured_ready.local_transport,
+            captured_ready.public.local_transport,
             Some(LocalTransportReady::shared_arena_v1())
         );
         #[cfg(not(unix))]
-        assert!(captured_ready.local_transport.is_none());
+        assert!(captured_ready.public.local_transport.is_none());
 
         let cached = relay.ready_frame.as_ref().expect("SDK-facing ready frame");
-        let cached_ready: Ready = decode_frame(cached).unwrap().payload().unwrap();
+        let cached_observed: ObservedReady = decode_frame(cached).unwrap().payload().unwrap();
+        assert_eq!(cached_observed.init_observation, Some(observation));
+        let cached_ready = cached_observed.ready;
         #[cfg(unix)]
         assert_eq!(
             cached_ready.local_transport,
@@ -9100,13 +9312,19 @@ mod tests {
             inherited_memory: None,
             external_mount_reports: Vec::new(),
             protocol_generation: microsandbox_protocol::message::PROTOCOL_VERSION,
-            ready: Ready {
-                boot_time_ns: 11,
-                init_time_ns: 22,
-                ready_time_ns: 33,
-                agent_version: "test-agent".into(),
-                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
-                ..Default::default()
+            ready: GuestReady {
+                applied_security_profile: None,
+                init_observation: None,
+                restore_tcp_reset_version: Some(1),
+                freeze_resources_version: None,
+                public: Ready {
+                    boot_time_ns: 11,
+                    init_time_ns: 22,
+                    ready_time_ns: 33,
+                    agent_version: "test-agent".into(),
+                    workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+                    ..Default::default()
+                },
             },
             attempt_id: attempt_id.into(),
             host_input: Default::default(),
@@ -9117,13 +9335,19 @@ mod tests {
 
     #[tokio::test]
     async fn restored_workload_thaw_uses_private_attempt_scoped_exchange() {
-        for policy in [
-            None,
-            Some(ExecLimits {
-                max_executions: 7,
-                input_limit: 32768,
-                ..Default::default()
-            }),
+        for (version, expected_mode, policy) in [
+            (None, WorkloadThawMode::Restore, None),
+            (Some(2), WorkloadThawMode::Restore, None),
+            (
+                Some(1),
+                WorkloadThawMode::RestoreResetTcp,
+                Some(ExecLimits {
+                    max_executions: 7,
+                    input_limit: 32768,
+                    output_limit: 1024 * 1024,
+                    ..Default::default()
+                }),
+            ),
         ] {
             // Console capacity is now a byte budget, not a count of queued frames.
             let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
@@ -9132,7 +9356,8 @@ mod tests {
                 .await
                 .unwrap();
             let mut restored = restored_agent("checkpoint-attempt");
-            restored.ready.exec_limits = policy;
+            restored.ready.restore_tcp_reset_version = version;
+            restored.ready.public.exec_limits = policy;
             relay.install_restored_ready(&restored).unwrap();
 
             let guest_shared = Arc::clone(&shared);
@@ -9155,7 +9380,7 @@ mod tests {
                 assert_eq!(request.t, MessageType::WorkloadThaw);
                 assert_eq!(
                     request.payload::<WorkloadThaw>().unwrap().mode,
-                    WorkloadThawMode::Restore
+                    expected_mode
                 );
                 assert_eq!(
                     request.payload::<WorkloadThaw>().unwrap().attempt_id,
@@ -9201,6 +9426,33 @@ mod tests {
             assert!(shared.workload_control.admit(false, 100).unwrap());
             assert!(!shared.workload_control.admit(false, 1).unwrap());
         }
+    }
+
+    #[test]
+    fn retained_execution_limits_require_exact_guest_confirmation() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let path = test_agent_endpoint("restore-ready-exec-limits");
+        let mut relay = AgentRelay::new_deferred(&path, shared, None);
+        let policy = ExecLimits {
+            max_executions: 2,
+            ..Default::default()
+        };
+        relay.required_exec_limits = Some(policy);
+        let mut restored = restored_agent("limits");
+        for offered in [None, Some(ExecLimits::default())] {
+            restored.ready.public.exec_limits = offered;
+            assert!(
+                relay
+                    .install_restored_ready(&restored)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot confirm")
+            );
+            assert!(relay.ready_frame.is_none());
+        }
+        restored.ready.public.exec_limits = Some(policy);
+        relay.install_restored_ready(&restored).unwrap();
+        assert!(relay.ready_frame.is_some());
     }
 
     #[tokio::test]
@@ -11614,9 +11866,9 @@ mod tests {
         next_session_id: Arc<AtomicU64>,
         start: u32,
         end: u32,
+        write_tx: mpsc::UnboundedSender<ClientWrite>,
     ) {
         let (merge_tx, _merge_rx) = mpsc::channel(1);
-        let (write_tx, _write_rx) = mpsc::unbounded_channel();
         let (_disconnect_tx, disconnect_rx) = watch::channel(false);
         #[cfg(unix)]
         let (local_write_tx, _local_write_rx) = mpsc::unbounded_channel();
@@ -11645,6 +11897,79 @@ mod tests {
             local_write_tx,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn deferred_binding_refuses_legacy_before_guest_dispatch() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (reader, mut client) = tokio::io::duplex(8192);
+            let (mut agent, mut guest) = ControlWriter::new();
+            agent.command_bindings = Some(Arc::new(DeferredCommandBindings {
+                env: [("TOKEN".into(), "deploy".into())].into(),
+                ..Default::default()
+            }));
+            let (write_tx, mut responses) = mpsc::unbounded_channel();
+            let (drain_tx, _drain_rx) = mpsc::channel(1);
+            let registry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+            let reader = tokio::spawn(namespace_client_reader_task(
+                0,
+                reader,
+                agent,
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(Mutex::new(HashSet::from([0]))),
+                drain_tx,
+                registry.clone(),
+                Arc::new(AtomicU64::new(1)),
+                10,
+                20,
+                write_tx,
+            ));
+            let mut payload =
+                serde_json::json!({"cmd":"touch","args":["/tmp/ran"],"env":["TOKEN=example"], "future_guest_field":17});
+            let send = |id, payload: &serde_json::Value| {
+                let message = Message::with_payload(MessageType::ExecRequest, id, payload).unwrap();
+                let mut frame = Vec::new();
+                codec::encode_to_buf(&message, &mut frame).unwrap();
+                frame
+            };
+            // Both requests have the same guest environment. Only one declares its origin.
+            client.write_all(&send(10, &payload)).await.unwrap();
+            let rejection = responses.recv().await.unwrap();
+            let ClientWriteData::Inline(bytes) = &rejection.data else {
+                panic!("expected exec terminal")
+            };
+            let terminal = decode_frame(bytes).unwrap();
+            assert_eq!(terminal.id, 10);
+            assert_eq!(terminal.t, MessageType::ExecFailed);
+            assert_eq!(
+                terminal.payload::<ExecFailed>().unwrap().stage.as_deref(),
+                Some("restore_binding")
+            );
+            assert!(registry.lock().unwrap().is_empty());
+            assert!(guest.try_recv().is_err());
+
+            payload["binding_overrides"] =
+                serde_json::json!({"explicit_argv":true,"env_keys":["TOKEN"]});
+            client.write_all(&send(11, &payload)).await.unwrap();
+            let delivered = guest.recv().await.unwrap();
+            let message = decode_frame(&delivered.data).unwrap();
+            assert_eq!(message.id, 11);
+            assert_eq!(message.payload::<serde_json::Value>().unwrap()["future_guest_field"], 17);
+            assert_eq!(
+                message.payload::<ExecRequest>().unwrap().env,
+                ["TOKEN=example"]
+            );
+            assert!(
+                message
+                    .payload::<microsandbox_protocol::exec_bindings::ExecBindingDiscovery>()
+                    .unwrap()
+                    .binding_overrides
+                    .is_none()
+            );
+            reader.abort();
+        })
+        .await
+        .expect("binding admission stalled the connection");
     }
 
     #[tokio::test]
@@ -11696,6 +12021,7 @@ mod tests {
                         sequence.clone(),
                         10,
                         20,
+                        mpsc::unbounded_channel().0,
                     ));
                     let id = if flags == FLAG_SHUTDOWN { 0 } else { 10 };
                     write_fragmented(&mut client, &packet(name, id, flags)).await;
@@ -11740,6 +12066,7 @@ mod tests {
                 Arc::new(AtomicU64::new(0)),
                 10,
                 20,
+                mpsc::unbounded_channel().0,
             ));
             let mut future = packet("core.future", 10, 0);
             // Keep a future field in the exact frame to catch decode/re-encode.

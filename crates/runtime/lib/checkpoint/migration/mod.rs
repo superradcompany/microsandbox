@@ -2,8 +2,8 @@
 
 mod budget;
 mod engine;
-mod io;
-mod namespace;
+pub(super) mod io;
+pub(in crate::checkpoint) mod namespace;
 mod preview;
 mod source;
 mod types;

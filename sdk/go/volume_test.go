@@ -80,8 +80,8 @@ func TestCloudVolumeFsTargetUsesImmutableID(t *testing.T) {
 }
 
 func TestDefaultVolumeCannotBeRemoved(t *testing.T) {
-	handle := &VolumeHandle{isDefault: true}
-	err := handle.Remove(context.Background())
+	handle := &Volume{isDefault: true}
+	err := handle.Destroy(context.Background())
 	if !IsKind(err, ErrUnsupportedOperation) {
 		t.Fatalf("Remove() = %v, want ErrUnsupportedOperation", err)
 	}

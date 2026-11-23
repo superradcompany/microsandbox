@@ -90,8 +90,9 @@ pub struct JobInfo {
     pub timed_out: bool,
 }
 
-/// Origin of one captured output record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Origin of one captured output record. Parse a source name using its wire spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum JobOutputSource {
     /// Command stdout.
@@ -169,6 +170,21 @@ pub enum JobOperation {
         /// Optional finite pipe input (at most 64 KiB), followed by EOF.
         input_base64: Option<String>,
         /// Host-enforced elapsed execution limit in milliseconds.
+        timeout_ms: Option<u64>,
+    },
+    /// Start with caller origin evidence negotiated on this runtime's relay.
+    StartWithBindings {
+        /// Idempotency key shared by all retries of this request.
+        id: JobId,
+        /// Ordinary command passed to the guest after admission.
+        command: ExecRequest,
+        /// Explicit caller overrides before defaults were merged.
+        binding_overrides: crate::exec_bindings::ExecBindingOverrides,
+        /// Close stdin after confirmed spawn.
+        no_stdin: bool,
+        /// Optional finite pipe input.
+        input_base64: Option<String>,
+        /// Host execution timeout.
         timeout_ms: Option<u64>,
     },
     /// List active or all retained jobs.

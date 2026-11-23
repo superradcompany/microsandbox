@@ -441,10 +441,7 @@ HTTP *HTTPConfig
 
 <Tooltip tip="Not configurable on microsandbox cloud, which always returns the default JSON responses."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Omitting `HTTP` enables JSON denial responses. When supplying `HTTPConfig`,
-set `DenyResponse: true` to keep them enabled; `false` disables them. An empty format
-defaults to JSON. `NetworkDenyMessage` and `SecretDenyMessage` customize the respective
-messages. See [HTTP denial responses](/networking/overview#http-denial-responses).
+Omitting `HTTP` selects JSON denial responses on supporting local runtimes and the supported legacy behavior on older runtimes. When supplying `HTTPConfig`, set `DenyResponse: true` to keep responses enabled; `false` disables them. An empty format defaults to JSON, and explicit settings require runtime support. `NetworkDenyMessage` and `SecretDenyMessage` customize the respective messages. See [HTTP denial responses](/networking/overview#http-denial-responses).
 
 ### PolicyRule
 
@@ -582,7 +579,7 @@ Host-scoped upstream certificate verification override.
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.RateLimiter</a></p>
 
-<Tooltip tip="Host-side network rate limiting is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Host-side network rate limiting is not available on our managed cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 type NetworkRateLimiterConfig struct {

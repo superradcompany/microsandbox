@@ -15,10 +15,11 @@ async def test_volume_lifecycle_metadata_and_host_fs(volume_factory):
     assert handle.name == volume.name
     assert handle.kind is VolumeKind.DIRECTORY
     assert handle.disk_format is None
-    assert handle.quota_mib == 64
-    assert handle.labels["team"] == "python"
+    info = await handle.info()
+    assert info["quota_mib"] == 64
+    assert info["labels"]["team"] == "python"
     assert handle.created_at is not None
-    assert handle.used_bytes >= 0
+    assert info["used_bytes"] is None or info["used_bytes"] >= 0
 
     volumes = await Volume.list()
     assert any(item.name == volume.name for item in volumes)

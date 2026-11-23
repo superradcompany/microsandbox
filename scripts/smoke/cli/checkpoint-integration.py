@@ -22,8 +22,12 @@ CASES = (
 )
 
 
-def test_command(archive, workspace, binary, test):
-    return ["cargo-nextest", "nextest", "run", "--archive-file", str(archive),
+def test_command(extracted, workspace, binary, test):
+    target = extracted / "target"
+    return ["cargo-nextest", "nextest", "run",
+            "--cargo-metadata", str(target / "nextest/cargo-metadata.json"),
+            "--binaries-metadata", str(target / "nextest/binaries-metadata.json"),
+            "--target-dir-remap", str(target),
             "--workspace-remap", str(workspace), "--run-ignored=only", "--test-threads", "1",
             "--no-tests", "fail", "-E", f"binary(={binary}) & test(={test})"]
 
@@ -102,21 +106,36 @@ class Suite:
         if errors or resident:
             raise RuntimeError(f"fixture cleanup failed: {errors}; resident={resident}")
 
+    def prepare_fixture(self):
+        self.msb("source", "create", self.args.image, "--name", "ci-source",
+                 "--memory", "256M", "--max-memory", "256M", "--cpus", "1",
+                 "--root-disk", "128M", "--tmpfs", "/work:16M", "--no-net")
+        self.msb("checksum", "exec", "ci-source", "--", "sh", "-ec",
+                 "dd if=/dev/urandom of=/work/payload bs=1M count=4; "
+                 "sha256sum /work/payload > /work/hash")
+        self.msb("capture", "snapshot", "create", "ci-progress", "--name", "baseline",
+                 "--sandbox", "ci-source", "--full")
+        self.msb("stop-source", "stop", "ci-source")
+        self.msb("warm", "restore", self.env["MSB_PROGRESS_SNAPSHOT"],
+                 "--name", "ci-warm", "--cow-mem")
+        self.msb("verify-warm", "exec", "ci-warm", "--", "sha256sum", "-c", "/work/hash")
+        self.msb("stop-warm", "stop", "ci-warm")
+        self.msb("remove-warm", "remove", "ci-warm")
+
     def execute(self):
+        # Each case uses the same binaries. Extract once instead of unpacking
+        # the multi-gigabyte workspace six times under the fixture deadline.
+        with tempfile.TemporaryDirectory(prefix="msb-checkpoint-tests-") as directory:
+            extracted = Path(directory)
+            self.run("extract-tests", ["cargo-nextest", "nextest", "list",
+                     "--archive-file", str(self.args.archive), "--extract-to", str(extracted),
+                     "--workspace-remap", str(self.args.workspace),
+                     "--list-type", "binaries-only"])
+            self.execute_cases(extracted)
+
+    def execute_cases(self, extracted):
         try:
-            self.msb("source", "create", self.args.image, "--name", "ci-source",
-                     "--memory", "256M", "--max-memory", "256M", "--cpus", "1",
-                     "--root-disk", "128M", "--tmpfs", "/work:16M", "--no-net")
-            self.msb("checksum", "exec", "ci-source", "--", "sh", "-ec",
-                     "dd if=/dev/urandom of=/work/payload bs=1M count=4; "
-                     "sha256sum /work/payload > /work/hash")
-            self.msb("capture", "snapshot", "create", "baseline", "--group", "ci-progress",
-                     "--from-sandbox", "ci-source", "--full")
-            self.msb("stop-source", "stop", "ci-source")
-            self.msb("warm", "restore", self.env["MSB_PROGRESS_SNAPSHOT"],
-                     "--name", "ci-warm", "--cow-mem")
-            self.msb("stop-warm", "stop", "ci-warm")
-            self.msb("remove-warm", "remove", "ci-warm")
+            self.prepare_fixture()
             shim = self.output / "slow-eager.so"
             self.run("compile-shim", ["cc", "-shared", "-fPIC", "-O2", "-o", str(shim),
                                      str(self.args.workspace / "scripts/smoke/cli/slow-eager-preload.c"),
@@ -132,7 +151,7 @@ class Suite:
                                MSB_TEST_EAGER_TRACE=str(self.output / f"{label}.jsonl"),
                                MSB_TEST_EAGER_PREFIX=str(self.home))
                 try:
-                    self.run(label, test_command(self.args.archive, self.args.workspace,
+                    self.run(label, test_command(extracted, self.args.workspace,
                                                 binary, test), env=env)
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                     failures.append(str(error))

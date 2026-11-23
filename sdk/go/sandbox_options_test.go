@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,13 +12,27 @@ import (
 	"time"
 )
 
-func TestLifecycleConvergenceOptions(t *testing.T) {
-	connect := connectOrStartOptions{}
-	WithConnectOrStartDetached()(&connect)
-	if !connect.detached {
-		t.Fatal("WithConnectOrStartDetached did not enable detached mode")
+// The largest whole-second duration fits on the wire even though adding a second would overflow.
+func TestLifecycleLimitWirePrecision(t *testing.T) {
+	limit := time.Duration(math.MaxInt64).Truncate(time.Second)
+	want := uint64(limit / time.Second)
+	create := SandboxConfig{MaxDuration: limit}
+	if err := prepareSandboxCreateConfig(&create); err != nil {
+		t.Fatal(err)
 	}
+	if got := buildFFICreateOptions(create).MaxDurationSecs; got != want {
+		t.Fatalf("create max duration = %d, want %d", got, want)
+	}
+	restore := RestoreConfig{IdleTimeout: &limit}
+	if err := validateRestoreConfig(restore); err != nil {
+		t.Fatal(err)
+	}
+	if got := buildFFIRestoreOptions("snapshot", restore).IdleTimeoutSecs; got == nil || *got != want {
+		t.Fatalf("restore idle timeout %v did not encode %d seconds", got, want)
+	}
+}
 
+func TestLifecycleConvergenceOptions(t *testing.T) {
 	restart := restartOptions{}
 	WithRestartForce()(&restart)
 	WithRestartTimeout(3 * time.Second)(&restart)
@@ -74,7 +89,7 @@ func marshalRestoreOptions[T SnapshotSeed](t *testing.T, snapshot T) map[string]
 }
 
 func TestRestorePreservesTypedReference(t *testing.T) {
-	snapshot := &SnapshotArtifact{
+	snapshot := &Checkpoint{
 		reference:     "baseline",
 		referenceKind: "path",
 	}

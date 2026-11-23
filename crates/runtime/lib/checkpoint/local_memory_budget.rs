@@ -150,6 +150,7 @@ pub(super) fn reserve(
     let probe = tempfile::Builder::new()
         .prefix(".reflink-probe-")
         .tempdir_in(disk)?;
+    microsandbox_utils::private_file::harden_existing_directory(probe.path())?;
     let source = probe.path().join("source");
     std::fs::write(&source, [1; 8192])?;
     let reflink = microsandbox_utils::copy::reflink(&source, &probe.path().join("clone")).is_ok();

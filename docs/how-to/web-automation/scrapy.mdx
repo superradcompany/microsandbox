@@ -70,12 +70,12 @@ Capture the prepared environment:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap create scrapy-runtime \
+msb snap create scrapy-base --name scrapy-runtime \
   --sandbox scrapy-base --integrity
 ```
 
 ```powershell Windows
-msb snap create scrapy-runtime `
+msb snap create scrapy-base --name scrapy-runtime `
   --sandbox scrapy-base --integrity
 ```
 </CodeGroup>
@@ -84,7 +84,7 @@ Verify the snapshot before using it:
 
 <CodeGroup>
 ```sh Shell
-msb snap verify scrapy-base:scrapy-runtime
+msb snap verify scrapy-base --checkpoint scrapy-runtime
 ```
 </CodeGroup>
 
@@ -98,7 +98,7 @@ The destination name must be unused. Restore installs the deny-by-default allowl
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snap restore scrapy-base:scrapy-runtime --name scrapy-books \
+msb create --from-snapshot scrapy-base --checkpoint scrapy-runtime --name scrapy-books \
   --user 65534:65534 --memory 1G --max-duration 2m \
   --net-default deny \
   --net-rule 'allow@books.toscrape.com:tcp:443' \
@@ -113,7 +113,7 @@ msb stop scrapy-books
 ```
 
 ```powershell Windows
-msb snap restore scrapy-base:scrapy-runtime --name scrapy-books `
+msb create --from-snapshot scrapy-base --checkpoint scrapy-runtime --name scrapy-books `
   --user 65534:65534 --memory 1G --max-duration 2m `
   --net-default deny `
   --net-rule 'allow@books.toscrape.com:tcp:443' `
@@ -170,9 +170,11 @@ Remove the reusable snapshot:
 
 <CodeGroup>
 ```sh Shell
-msb snap rm scrapy-base:scrapy-runtime
+msb snap rm scrapy-base --checkpoint scrapy-runtime
 ```
 </CodeGroup>
+
+This removes the checkpoint and keeps the `scrapy-base` history. To reuse the group name on a fresh run, first confirm it contains no checkpoints you need with `msb snap ls scrapy-base`, then remove it with `msb snap rm scrapy-base --all`.
 
 </Step>
 

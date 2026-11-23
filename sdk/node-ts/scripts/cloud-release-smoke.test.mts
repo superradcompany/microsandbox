@@ -14,7 +14,7 @@ function fakeSdk(options: {
 } = {}) {
   const calls: Array<[string, unknown]> = [];
   const builder: Record<string, unknown> = {};
-  for (const method of ["image", "cpus", "memory", "ephemeral", "maxDuration", "idleTimeout"]) {
+  for (const method of ["image", "cpus", "memory", "ephemeral", "maxDurationSeconds", "idleTimeoutSeconds"]) {
     builder[method] = (value: unknown) => { calls.push([method, value]); return builder; };
   }
   builder.create = async () => {
@@ -32,7 +32,7 @@ test("candidate creates a bounded ephemeral sandbox and executes a command", asy
   const { sdk, calls } = fakeSdk();
   await exercise(sdk, "release-smoke-1-1");
   assert.ok(calls.some(([key, value]) => key === "ephemeral" && value === true));
-  assert.ok(calls.some(([key, value]) => key === "maxDuration" && value === 600));
+  assert.ok(calls.some(([key, value]) => key === "maxDurationSeconds" && value === 600));
 });
 
 test("create rejection blocks release", async () => {

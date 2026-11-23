@@ -592,15 +592,25 @@ fn version_parse_orders_release_versions() {
     assert!(parse_version("0.6.1").unwrap() > parse_version("v0.6.0").unwrap());
     assert!(parse_version("0.5.10").unwrap() < MIN_DOWNGRADE_VERSION);
     assert_eq!(parse_version(" v0.6.18 ").unwrap(), Version::new(0, 6, 18));
-    for input in [
-        "0.6",
-        "0.6.18.1",
-        "0.6.18-preview",
-        "0.6.18+build",
-        "invalid",
-    ] {
+    for input in ["0.6", "0.6.18.1", "0.8.0-rc.01", "0.8.0-", "invalid"] {
         assert!(parse_version(input).is_err());
     }
+}
+
+#[test]
+fn version_parse_preserves_rc_metadata_and_precedence() {
+    let rc = parse_version(" v0.8.0-rc.2+build.42 ").unwrap();
+    assert_eq!(rc.to_string(), "0.8.0-rc.2+build.42");
+    assert!(
+        rc.cmp_precedence(&parse_version("0.8.0-rc.10").unwrap())
+            .is_lt()
+    );
+    assert!(rc.cmp_precedence(&parse_version("0.8.0").unwrap()).is_lt());
+    assert!(rc.cmp_precedence(&parse_version("0.7.16").unwrap()).is_gt());
+    assert!(
+        rc.cmp_precedence(&parse_version("0.8.0-rc.2+other").unwrap())
+            .is_eq()
+    );
 }
 
 #[test]

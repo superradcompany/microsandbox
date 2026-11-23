@@ -34,7 +34,7 @@ pub(crate) enum LeakedReapVerdict {
 /// Checking the recorded start time and image before termination prevents a recycled PID from
 /// causing an unrelated process to be killed.
 pub(crate) async fn reap_leaked_runtime_process(
-    local_backend: &crate::backend::LocalBackend,
+    local_backend: &crate::context::LocalContext,
     sandbox_id: i32,
     name: &str,
 ) -> MicrosandboxResult<LeakedReapVerdict> {

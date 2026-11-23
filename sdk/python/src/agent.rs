@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use microsandbox::{AgentBridge, BridgeFrame};
 use pyo3::prelude::*;
@@ -31,19 +30,30 @@ impl PyAgentClient {
     fn connect_sandbox<'py>(
         py: Python<'py>,
         name: String,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let timeout = timeout_duration(timeout)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let bridge = match timeout {
-                Some(timeout) => AgentBridge::connect_sandbox_with_timeout(&name, timeout).await,
-                None => AgentBridge::connect_sandbox(&name).await,
-            }
-            .map_err(to_py_err_agent)?;
-            Ok(Self {
-                inner: Arc::new(bridge),
+        #[cfg(not(feature = "local"))]
+        {
+            Err(crate::error::to_py_err(
+                microsandbox::MicrosandboxError::local_only(microsandbox::Operation::AgentConnect),
+            ))
+        }
+        #[cfg(feature = "local")]
+        {
+            let timeout = crate::helpers::timeout_input(timeout)?;
+            crate::runtime::future_into_py(py, async move {
+                let bridge = match timeout {
+                    Some(timeout) => {
+                        AgentBridge::connect_sandbox_with_timeout(&name, timeout).await
+                    }
+                    None => AgentBridge::connect_sandbox(&name).await,
+                }
+                .map_err(to_py_err_agent)?;
+                Ok(Self {
+                    inner: Arc::new(bridge),
+                })
             })
-        })
+        }
     }
 
     /// Connect to an agentd relay socket by path.
@@ -52,10 +62,10 @@ impl PyAgentClient {
     fn connect<'py>(
         py: Python<'py>,
         path: String,
-        timeout: Option<f64>,
+        timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let timeout = timeout_duration(timeout)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let timeout = crate::helpers::timeout_input(timeout)?;
+        crate::runtime::future_into_py(py, async move {
             let bridge = match timeout {
                 Some(timeout) => AgentBridge::connect_path_with_timeout(&path, timeout).await,
                 None => AgentBridge::connect_path(&path).await,
@@ -72,8 +82,17 @@ impl PyAgentClient {
     /// Sandbox names are limited to 128 UTF-8 bytes.
     #[staticmethod]
     fn socket_path(name: String) -> PyResult<String> {
-        let path = microsandbox::agent::AgentClient::socket_path(&name).map_err(to_py_err)?;
-        Ok(path.to_string_lossy().into_owned())
+        #[cfg(not(feature = "local"))]
+        {
+            Err(crate::error::to_py_err(
+                microsandbox::MicrosandboxError::local_only(microsandbox::Operation::AgentConnect),
+            ))
+        }
+        #[cfg(feature = "local")]
+        {
+            let path = microsandbox::agent::AgentClient::socket_path(&name).map_err(to_py_err)?;
+            Ok(path.to_string_lossy().into_owned())
+        }
     }
 
     /// Send one frame and await a single response frame.
@@ -84,7 +103,7 @@ impl PyAgentClient {
         body: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let frame = inner.request(flags, body).await.map_err(to_py_err_agent)?;
             frame_to_py(frame)
         })
@@ -98,7 +117,7 @@ impl PyAgentClient {
         body: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let (id, handle) = inner
                 .stream_open(flags, body)
                 .await
@@ -115,7 +134,7 @@ impl PyAgentClient {
     /// Pull the next frame from a stream. Returns `None` at EOF.
     fn stream_next<'py>(&self, py: Python<'py>, handle: u64) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             match inner.stream_next(handle).await.map_err(to_py_err_agent)? {
                 Some(frame) => frame_to_py(frame).map(Some),
                 None => Ok(None),
@@ -126,7 +145,7 @@ impl PyAgentClient {
     /// Close a stream handle. Idempotent.
     fn stream_close<'py>(&self, py: Python<'py>, handle: u64) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.stream_close(handle).await;
             Ok(())
         })
@@ -141,7 +160,7 @@ impl PyAgentClient {
         body: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.send(id, flags, body).await.map_err(to_py_err_agent)?;
             Ok(())
         })
@@ -158,7 +177,7 @@ impl PyAgentClient {
     /// Close the connection. Idempotent.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             inner.close().await;
             Ok(())
         })
@@ -181,8 +200,4 @@ fn frame_to_py(frame: BridgeFrame) -> PyResult<Py<PyAny>> {
 
 fn to_py_err_agent(err: microsandbox::AgentClientError) -> PyErr {
     to_py_err(microsandbox::MicrosandboxError::AgentClient(err))
-}
-
-fn timeout_duration(timeout: Option<f64>) -> PyResult<Option<Duration>> {
-    crate::sandbox::optional_duration(timeout)
 }

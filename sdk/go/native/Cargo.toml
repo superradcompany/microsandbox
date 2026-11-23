@@ -11,9 +11,17 @@ edition.workspace = true
 name = "microsandbox_go_ffi"
 crate-type = ["staticlib", "cdylib"]
 
+[features]
+# Full remains the default distribution. Lean builds select exactly one provider
+# and deliberately exclude both runtime download and embedded binary features.
+default = ["full"]
+full = ["local", "remote", "microsandbox/download-binaries", "microsandbox/keyring"]
+local = ["microsandbox/local", "microsandbox/net"]
+remote = ["microsandbox/cloud", "microsandbox/net"]
+
 [dependencies]
-microsandbox = { workspace = true, default-features = true, features = ["net", "ssh"] }
-microsandbox-network.workspace = true
+microsandbox = { workspace = true, default-features = false, features = ["ssh"] }
+microsandbox-network = { workspace = true, default-features = false }
 ipnetwork.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -27,3 +35,6 @@ chrono.workspace = true
 
 [build-dependencies]
 cbindgen = "0.29"
+
+[dev-dependencies]
+tempfile.workspace = true

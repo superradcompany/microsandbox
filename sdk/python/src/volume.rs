@@ -14,15 +14,8 @@ use crate::helpers::{extract_str_enum, str_enum_member};
 /// A named persistent volume.
 #[pyclass(name = "Volume")]
 pub struct PyVolume {
-    name: String,
-    /// Local volumes expose a host path; cloud volumes deliberately do not.
-    path: Option<String>,
-}
-
-/// A lightweight handle to a volume from the database.
-#[pyclass(name = "VolumeHandle")]
-pub struct PyVolumeHandle {
-    inner: microsandbox::volume::VolumeHandle,
+    // The native resource retains destination and identity for create, get and list alike.
+    inner: microsandbox::volume::Volume,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -31,6 +24,36 @@ pub struct PyVolumeHandle {
 
 #[pymethods]
 impl PyVolume {
+    /// Capture a local destination without consulting remote selection variables.
+    #[staticmethod]
+    fn local() -> crate::context::PyVolumes {
+        crate::context::PyVolumes {
+            inner: microsandbox::context::default_local_context(),
+        }
+    }
+
+    /// Capture remote environment settings before any deferred operation.
+    #[staticmethod]
+    fn remote() -> PyResult<crate::context::PyVolumes> {
+        Ok(crate::context::PyVolumes {
+            inner: microsandbox::context::remote_from_env().map_err(to_py_err)?,
+        })
+    }
+
+    #[staticmethod]
+    fn ctx(context: PyRef<'_, crate::context::PyContext>) -> crate::context::PyVolumes {
+        crate::context::PyVolumes {
+            inner: context.inner.clone(),
+        }
+    }
+
+    #[getter]
+    fn context(&self) -> PyResult<crate::context::PyContext> {
+        Ok(crate::context::PyContext {
+            inner: self.inner.context().clone_shared(),
+        })
+    }
+
     /// Create a new named volume.
     #[staticmethod]
     #[pyo3(signature = (name, *, kind=None, size_mib=None, quota_mib=None, labels=None))]
@@ -42,89 +65,44 @@ impl PyVolume {
         quota_mib: Option<u32>,
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let kind = kind
-            .as_ref()
-            .map(|value| extract_str_enum(value.bind(py), "VolumeKind"))
-            .transpose()?
-            .unwrap_or_else(|| "dir".to_string());
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut builder = microsandbox::Volume::builder(&name);
-            match kind.as_str() {
-                "dir" => {
-                    builder = builder.directory();
-                    if size_mib.is_some() {
-                        return Err(to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
-                            "size_mib is only supported with kind='disk' until directory quotas are enforced".into(),
-                        )));
-                    }
-                }
-                "disk" => {
-                    builder = builder.disk();
-                    let size_mib = size_mib.ok_or_else(|| {
-                        to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
-                            "size_mib is required with kind='disk'".into(),
-                        ))
-                    })?;
-                    builder = builder.size(size_mib);
-                }
-                other => {
-                    return Err(to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
-                        format!("unknown volume kind: {other}"),
-                    )));
-                }
-            }
-            if let Some(quota) = quota_mib {
-                builder = builder.quota(quota);
-            }
-            if let Some(labels) = labels {
-                for (k, v) in labels {
-                    builder = builder.label(k, v);
-                }
-            }
-            let vol = builder.create().await.map_err(to_py_err)?;
-            // A cloud create is still a successful volume create even though
-            // its bytes have no path on the SDK caller's machine.
-            let path = match vol.path() {
-                Ok(path) => Some(path.display().to_string()),
-                Err(microsandbox::MicrosandboxError::Unsupported { .. }) => None,
-                Err(error) => return Err(to_py_err(error)),
-            };
-            Ok(PyVolume {
-                name: vol.name().to_string(),
-                path,
-            })
-        })
+        create_in(
+            microsandbox::context::configured_context(),
+            py,
+            name,
+            kind,
+            size_mib,
+            quota_mib,
+            labels,
+        )
     }
 
     /// Get a lightweight handle to an existing volume.
     #[staticmethod]
     fn get<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let handle = microsandbox::Volume::get(&name).await.map_err(to_py_err)?;
-            Ok(PyVolumeHandle { inner: handle })
+            Ok(PyVolume { inner: handle })
         })
     }
 
     /// Get the cloud account's always-present default volume.
     #[staticmethod]
     fn get_default<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let handle = microsandbox::Volume::get_default()
                 .await
                 .map_err(to_py_err)?;
-            Ok(PyVolumeHandle { inner: handle })
+            Ok(PyVolume { inner: handle })
         })
     }
 
     /// List all volumes.
     #[staticmethod]
     fn list<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let handles = microsandbox::Volume::list().await.map_err(to_py_err)?;
-            let py_handles: Vec<PyVolumeHandle> = handles
-                .into_iter()
-                .map(|h| PyVolumeHandle { inner: h })
-                .collect();
+            let py_handles: Vec<PyVolume> =
+                handles.into_iter().map(|h| PyVolume { inner: h }).collect();
             Ok(py_handles)
         })
     }
@@ -132,7 +110,7 @@ impl PyVolume {
     /// Remove a volume.
     #[staticmethod]
     fn remove<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             microsandbox::Volume::remove(&name)
                 .await
                 .map_err(to_py_err)?;
@@ -140,18 +118,19 @@ impl PyVolume {
         })
     }
 
-    /// Volume name.
+    /// Stable identity within the retained destination; no I/O.
     #[getter]
-    fn name(&self) -> &str {
-        &self.name
+    fn id(&self) -> String {
+        self.inner.id().to_string()
     }
 
-    /// Host path of the volume.
+    /// Host path of a local volume. Remote storage has no client-host path.
     #[getter]
-    fn path(&self) -> PyResult<&str> {
-        self.path
-            .as_deref()
-            .ok_or_else(|| crate::error::local_only("volume.path"))
+    fn path(&self) -> PyResult<String> {
+        self.inner
+            .path()
+            .map(|p| p.display().to_string())
+            .map_err(to_py_err)
     }
 
     //----------------------------------------------------------------------------------------------
@@ -331,14 +310,7 @@ impl PyVolume {
             Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
         })
     }
-}
 
-//--------------------------------------------------------------------------------------------------
-// Methods: VolumeHandle
-//--------------------------------------------------------------------------------------------------
-
-#[pymethods]
-impl PyVolumeHandle {
     #[getter]
     fn name(&self) -> &str {
         self.inner.name()
@@ -350,23 +322,8 @@ impl PyVolumeHandle {
     }
 
     #[getter]
-    fn quota_mib(&self) -> Option<u32> {
-        self.inner.quota_mib()
-    }
-
-    #[getter]
     fn kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "VolumeKind", self.inner.kind().as_str())
-    }
-
-    #[getter]
-    fn used_bytes(&self) -> u64 {
-        self.inner.used_bytes()
-    }
-
-    #[getter]
-    fn capacity_bytes(&self) -> Option<u64> {
-        self.inner.capacity_bytes()
     }
 
     #[getter]
@@ -383,26 +340,37 @@ impl PyVolumeHandle {
     }
 
     #[getter]
-    fn labels(&self) -> HashMap<String, String> {
-        self.inner
-            .labels()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
-    }
-
-    #[getter]
     fn created_at(&self) -> Option<f64> {
         self.inner
             .created_at()
             .map(|dt| dt.timestamp_millis() as f64)
     }
 
+    /// One fresh backend observation; no captured metadata fallback on failure.
+    fn info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let volume = self.inner.clone();
+        crate::runtime::future_into_py(py, async move {
+            let info = volume.info().await.map_err(to_py_err)?;
+            let mut value = serde_json::to_value(&info).map_err(|error| to_py_err(error.into()))?;
+            value["labels"] =
+                serde_json::to_value(info.labels.into_iter().collect::<HashMap<_, _>>())
+                    .map_err(|error| to_py_err(error.into()))?;
+            Python::attach(|py| {
+                let result = crate::conversion::json_value_to_py(py, value)?;
+                result.bind(py).cast::<PyDict>()?.set_item(
+                    "kind",
+                    str_enum_member(py, "VolumeKind", info.kind.as_str())?,
+                )?;
+                Ok::<_, PyErr>(result)
+            })
+        })
+    }
+
     /// Remove this volume.
-    fn remove<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn destroy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            handle.remove().await.map_err(to_py_err)?;
+        crate::runtime::future_into_py(py, async move {
+            handle.destroy().await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -424,14 +392,14 @@ impl PyVolumeHandle {
 /// Holds a volume handle; constructs a [`VolumeFs`] per op.
 #[pyclass(name = "VolumeFs")]
 pub struct PyVolumeFs {
-    inner: microsandbox::volume::VolumeHandle,
+    inner: microsandbox::volume::Volume,
 }
 
 #[pymethods]
 impl PyVolumeFs {
     fn read<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             let data = fs.read(&path).await.map_err(to_py_err)?;
             Ok(data.to_vec())
@@ -440,7 +408,7 @@ impl PyVolumeFs {
 
     fn read_text<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             let text = fs.read_to_string(&path).await.map_err(to_py_err)?;
             Ok(text)
@@ -454,7 +422,7 @@ impl PyVolumeFs {
         data: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             fs.write(&path, &data).await.map_err(to_py_err)?;
             Ok(())
@@ -463,7 +431,7 @@ impl PyVolumeFs {
 
     fn list<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             let entries = fs.list(&path).await.map_err(to_py_err)?;
             let py_entries: Vec<crate::fs::PyFsEntry> = entries
@@ -476,7 +444,7 @@ impl PyVolumeFs {
 
     fn mkdir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             fs.mkdir(&path).await.map_err(to_py_err)?;
             Ok(())
@@ -485,7 +453,7 @@ impl PyVolumeFs {
 
     fn remove_file<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             fs.remove(&path).await.map_err(to_py_err)?;
             Ok(())
@@ -494,7 +462,7 @@ impl PyVolumeFs {
 
     fn remove_dir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             handle.fs().remove_dir(&path).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -502,7 +470,7 @@ impl PyVolumeFs {
 
     fn copy<'py>(&self, py: Python<'py>, from_: String, to: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             handle.fs().copy(&from_, &to).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -515,7 +483,7 @@ impl PyVolumeFs {
         to: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             handle.fs().rename(&from_, &to).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -523,7 +491,7 @@ impl PyVolumeFs {
 
     fn stat<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let metadata = handle.fs().stat(&path).await.map_err(to_py_err)?;
             Ok(crate::fs::convert_fs_metadata(&metadata))
         })
@@ -531,7 +499,7 @@ impl PyVolumeFs {
 
     fn exists<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let fs = handle.fs();
             let exists = fs.exists(&path).await.map_err(to_py_err)?;
             Ok(exists)
@@ -544,12 +512,12 @@ impl PyVolumeFs {
 //--------------------------------------------------------------------------------------------------
 
 fn mount_config_class<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-    let types = PyModule::import(py, "microsandbox.types")?;
+    let types = PyModule::import(py, crate::provider::public_module("types").as_str())?;
     types.getattr("MountConfig")
 }
 
 fn mount_kind<'py>(py: Python<'py>, variant: &str) -> PyResult<Bound<'py, PyAny>> {
-    let types = PyModule::import(py, "microsandbox.types")?;
+    let types = PyModule::import(py, crate::provider::public_module("types").as_str())?;
     types.getattr("MountKind")?.getattr(variant)
 }
 
@@ -581,4 +549,114 @@ fn set_mount_metadata_options(
         kwargs.set_item("override_gid", gid)?;
     }
     Ok(())
+}
+
+pub(crate) fn create_in<'py>(
+    context: std::sync::Arc<dyn microsandbox::Context>,
+    py: Python<'py>,
+    name: String,
+    kind: Option<Py<PyAny>>,
+    size_mib: Option<u32>,
+    quota_mib: Option<u32>,
+    labels: Option<HashMap<String, String>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let kind = kind
+        .as_ref()
+        .map(|value| extract_str_enum(value.bind(py), "VolumeKind"))
+        .transpose()?
+        .unwrap_or_else(|| "dir".to_string());
+    crate::runtime::future_into_py(py, async move {
+        let mut builder = microsandbox::Volume::ctx(context.as_ref()).builder(&name);
+        match kind.as_str() {
+            "dir" => {
+                builder = builder.directory();
+                if size_mib.is_some() {
+                    return Err(to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                            "size_mib is only supported with kind='disk' until directory quotas are enforced".into(),
+                        )));
+                }
+            }
+            "disk" => {
+                builder = builder.disk();
+                let size_mib = size_mib.ok_or_else(|| {
+                    to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                        "size_mib is required with kind='disk'".into(),
+                    ))
+                })?;
+                builder = builder.size(size_mib);
+            }
+            other => {
+                return Err(to_py_err(microsandbox::MicrosandboxError::InvalidConfig(
+                    format!("unknown volume kind: {other}"),
+                )));
+            }
+        }
+        if let Some(quota) = quota_mib {
+            builder = builder.quota(quota);
+        }
+        if let Some(labels) = labels {
+            for (k, v) in labels {
+                builder = builder.label(k, v);
+            }
+        }
+        let vol = builder.create().await.map_err(to_py_err)?;
+        Ok(PyVolume { inner: vol })
+    })
+}
+
+impl PyVolume {
+    pub(crate) fn from_rust(inner: microsandbox::Volume) -> Self {
+        Self { inner }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use microsandbox::{Context, LocalContext};
+
+    #[tokio::test]
+    async fn unified_volume_keeps_identity_and_filesystem_after_context_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let context = LocalContext::builder().home(root.path()).build().unwrap();
+        let created = context.volumes().builder("cache").create().await.unwrap();
+        let fetched = context.volumes().get("cache").await.unwrap();
+        let listed = context.volumes().list().await.unwrap().remove(0);
+        drop(context);
+
+        Python::initialize();
+        let filesystem = Python::attach(|py| {
+            for resource in [created.clone(), fetched, listed] {
+                let wrapped = Py::new(py, PyVolume { inner: resource }).unwrap();
+                let bound = wrapped.bind(py);
+                assert_eq!(
+                    bound.getattr("id").unwrap().extract::<String>().unwrap(),
+                    created.id().as_str()
+                );
+                assert_eq!(
+                    bound.getattr("name").unwrap().extract::<String>().unwrap(),
+                    "cache"
+                );
+                assert!(bound.getattr("destroy").unwrap().is_callable());
+                assert!(bound.getattr("remove").unwrap().is_callable());
+                assert!(bound.getattr("fs").unwrap().is_instance_of::<PyVolumeFs>());
+            }
+            PyVolume {
+                inner: created.clone(),
+            }
+            .fs()
+        });
+        filesystem
+            .inner
+            .fs()
+            .write("marker", b"original".to_vec())
+            .await
+            .unwrap();
+        created.destroy().await.unwrap();
+        assert!(filesystem.inner.fs().read("marker").await.is_err());
+    }
 }
