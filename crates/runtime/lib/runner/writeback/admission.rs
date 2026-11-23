@@ -18,7 +18,7 @@ use msb_krun::WritebackLimit;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 #[cfg(target_os = "linux")]
-use crate::writeback_recovery::{DeviceId, current_boot_id, device_id};
+use crate::writeback_recovery::{current_boot_id, device_id};
 use crate::writeback_recovery::{is_valid_lease_name, recover_stale_allocation};
 use crate::{RuntimeError, RuntimeResult};
 
