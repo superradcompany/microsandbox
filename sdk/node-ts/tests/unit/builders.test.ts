@@ -425,6 +425,24 @@ describe("SandboxBuilder.build", () => {
     expect(() => builder.name("retry")).toThrow("RestoreBuilder already consumed");
   });
 
+  it("rejects invalid restored disk capacities without consuming the builder", () => {
+    const builder = Sandbox.restore("saved");
+    expect(() => builder.rootDisk(-1)).toThrow(/non-negative safe integer/);
+    expect(() => builder.rootDisk(1.5)).toThrow(/non-negative safe integer/);
+    expect(builder.rootDisk(512)).toBe(builder);
+  });
+
+  it("validates restored secret policy without consuming the destination", () => {
+    const builder = Sandbox.restore("saved");
+    expect(() => builder.secretViolationAction("allow")).toThrow(/violation action/);
+    expect(() => builder.secret(secret => secret.env("API_KEY").value("host-only")))
+      .toThrow();
+    expect(builder.secret(secret => secret.env("API_KEY").value("host-only").allow("api.example.com")))
+      .toBe(builder);
+    expect(builder.secretViolationAction("block-and-log")).toBe(builder);
+    expect(builder.tlsInterceptCa("source-ca.pem", "source-key.pem")).toBe(builder);
+  });
+
   it("requires .image()", async () => {
     await expect(Sandbox.builder("x").build()).rejects.toThrow(
       InvalidConfigError,

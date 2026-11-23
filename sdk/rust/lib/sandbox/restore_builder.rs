@@ -104,6 +104,11 @@ impl super::SandboxConfigPatch {
         if let Some(boot) = self.restore_boot_overrides {
             boot.validate_scope(scope, mode)?;
         }
+        if self.snapshot_root_growth_mib.is_some() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "changing a full snapshot root capacity requires disk-only mode".into(),
+            ));
+        }
         if self.spec.security_profile.is_some() {
             return Err(MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
@@ -220,6 +225,21 @@ impl RestoreBuilder {
     /// Set guest memory for disk boot. Full restore accepts only the captured memory size.
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
         self.inner = self.inner.memory(size);
+        self
+    }
+
+    /// Grow the destination's private ext4 root disk before its first boot.
+    ///
+    /// Local contexts only. The capacity is in MiB. Shrinking and replacing the captured layout are unsupported.
+    /// Full snapshots require disk-only mode; the source snapshot is never modified.
+    pub fn root_disk(mut self, size: impl Into<Mebibytes>) -> Self {
+        if self.inner.context().kind() != crate::ContextKind::Local {
+            self.inner = self
+                .inner
+                .config_error("snapshot root disk growth requires a local context");
+            return self;
+        }
+        self.inner.config.snapshot_root_growth_mib = Some(size.into().as_u32());
         self
     }
 
@@ -581,6 +601,58 @@ mod tests {
 
     fn config(builder: &RestoreBuilder) -> crate::SandboxConfig {
         builder.inner.config.clone().into_config()
+    }
+
+    #[test]
+    fn root_capacity_requires_a_fresh_disk_boot() {
+        use crate::snapshot::SnapshotScope;
+
+        let builder = Sandbox::restore("saved").root_disk(512_u32);
+        assert_eq!(config(&builder).snapshot_root_growth_mib, Some(512));
+        assert!(
+            builder
+                .inner
+                .config
+                .validate_for_restore(SnapshotScope::Disk, SnapshotRestoreMode::Full,)
+                .is_ok()
+        );
+        assert!(
+            builder
+                .inner
+                .config
+                .validate_for_restore(SnapshotScope::Full, SnapshotRestoreMode::DiskOnly,)
+                .is_ok()
+        );
+        let error = builder
+            .inner
+            .config
+            .validate_for_restore(SnapshotScope::Full, SnapshotRestoreMode::Full)
+            .unwrap_err();
+        assert!(error.to_string().contains("disk-only"));
+    }
+
+    #[cfg(feature = "cloud")]
+    #[tokio::test]
+    async fn root_capacity_rejects_remote_before_resolving_the_source() {
+        let context = crate::RemoteContext::builder()
+            .url("http://127.0.0.1:1")
+            .api_key("test-key")
+            .build()
+            .unwrap();
+        let builder = RestoreBuilder::for_context(
+            std::sync::Arc::new(context),
+            SnapshotReference::auto("saved"),
+        );
+        let result = builder
+            .name("destination")
+            .root_disk(512_u32)
+            .restore()
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("remote root capacity must be rejected"),
+        };
+        assert!(error.to_string().contains("requires a local context"));
     }
 
     #[test]

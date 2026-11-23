@@ -1511,6 +1511,14 @@ memory(mib: number): this
 
 Memory in MiB. Full restore must match capture.
 
+#### <span className="msb-recv">restore.</span><span className="msb-hn">rootDisk()</span>
+
+```typescript
+rootDisk(mib: number): this
+```
+
+Grow a local destination's private ext4 root disk before its first boot. Capacity is in MiB and cannot shrink. The captured layout and source snapshot stay unchanged. Full snapshots require `diskOnly()`; this method does not resume captured execution with a different disk capacity. Remote contexts reject this option before dispatch.
+
 #### <span className="msb-recv">restore.</span><span className="msb-hn">maxCpus()</span>
 
 ```typescript
@@ -1556,6 +1564,49 @@ networkPolicy(policy: NetworkPolicy | NetworkPolicyBuilder): this
 ```
 
 Replace host traffic filtering; guest DNS and TLS settings stay unchanged.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">secret()</span>
+
+```typescript
+secret(configure: (secret: SecretBuilder) => SecretBuilder): this
+```
+
+Bind a destination secret before disk boot or full resume, enabling TLS interception as at creation. The guest receives a placeholder, while the supplied value stays outside the guest. Full resume must rebind the names and placeholders already held by the captured guest. The example reads `API_KEY` from the caller's environment before restoring.
+
+<Accordion title="Example">
+
+```typescript
+import { GiB, Sandbox } from "microsandbox";
+
+const apiKey = process.env.API_KEY;
+if (!apiKey) throw new Error("API_KEY is required");
+
+const child = await Sandbox.restore("prepared")
+  .name("worker")
+  .rootDisk(GiB(8))
+  .secret(secret => secret.env("API_KEY")
+    .value(apiKey)
+    .allow("api.example.com"))
+  .restore();
+```
+
+</Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">secretViolationAction()</span>
+
+```typescript
+secretViolationAction(action: string): this
+```
+
+Set the default action for blocked placeholders: `block`, `block-and-log`, or `block-and-terminate`. Per-secret policies use the existing `SecretBuilder` rules.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">tlsInterceptCa()</span>
+
+```typescript
+tlsInterceptCa(cert: string, key: string): this
+```
+
+Select the destination interception CA certificate and private key as host PEM paths. Full resume must use the CA already trusted by the captured guest; it does not rerun guest trust setup. Disk boots install the selected CA before workloads start.
 
 #### <span className="msb-recv">restore.</span><span className="msb-hn">pullPolicy()</span>
 

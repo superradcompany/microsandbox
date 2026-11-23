@@ -1517,6 +1517,14 @@ fn memory(mut self, size: impl Into<Mebibytes>) -> Self
 CPU count and memory in MiB. Full restore must match capture.
 
 
+#### <span className="msb-recv">restore.</span><span className="msb-hn">root_disk()</span>
+
+```rust
+fn root_disk(self, size: impl Into<Mebibytes>) -> Self
+```
+
+Grow a local destination's private ext4 root disk before its first boot. Capacity is in MiB and cannot shrink. This preserves the captured disk layout and leaves the source snapshot unchanged. Full snapshots require `disk_only()`; resumed execution cannot change disk capacity. Remote contexts reject this option before dispatch.
+
 #### <span className="msb-recv">restore.</span><span className="msb-hn">max_cpus()</span>
 
 ```rust
