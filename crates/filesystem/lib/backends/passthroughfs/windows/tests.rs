@@ -1034,6 +1034,62 @@ fn host_rename_leaves_entries_of_the_new_occupant_in_place() {
     assert_eq!(x_again.inode, x.inode);
 }
 
+/// The Host replaces the mount root and moves the old root inside the new
+/// one. The old root is an ordinary directory there, never inode 1, and the
+/// root keeps serving the new directory.
+#[test]
+fn the_old_root_moved_under_its_replacement_is_not_the_root() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("before"), b"old").unwrap();
+    let fs = fs_for(&temp.path);
+    let root_path = fs.inode(ROOT_INODE).unwrap().path();
+    let moved = TempDir {
+        path: temp.path.with_extension("moved"),
+    };
+
+    std::fs::rename(&temp.path, &moved.path).unwrap();
+    std::fs::create_dir(&temp.path).unwrap();
+    std::fs::write(temp.path.join("after"), b"new").unwrap();
+    std::fs::rename(&moved.path, temp.path.join("old")).unwrap();
+
+    for pass in 0..2 {
+        let (handle, _) = fs
+            .opendir(context(), ROOT_INODE, LINUX_O_DIRECTORY as u32)
+            .unwrap();
+        let handle = handle.unwrap();
+        let entries = fs.readdir(context(), ROOT_INODE, handle, 4096, 0).unwrap();
+        fs.releasedir(context(), ROOT_INODE, 0, handle).unwrap();
+
+        let mut names: Vec<_> = entries.iter().map(|entry| entry.name).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [b".".as_slice(), b"..", b"after", b"old"],
+            "listing {pass}"
+        );
+        let old = entries.iter().find(|entry| entry.name == b"old").unwrap();
+        assert_ne!(old.ino, ROOT_INODE, "listing {pass}");
+    }
+
+    let old = fs.lookup(context(), ROOT_INODE, c"old").unwrap();
+    assert_ne!(old.inode, ROOT_INODE);
+    assert_eq!(
+        fs.lookup(context(), old.inode, c"before")
+            .unwrap()
+            .attr
+            .st_size,
+        3
+    );
+    assert_eq!(
+        fs.lookup(context(), ROOT_INODE, c"after")
+            .unwrap()
+            .attr
+            .st_size,
+        3
+    );
+    assert_eq!(fs.inode(ROOT_INODE).unwrap().path(), root_path);
+}
+
 #[test]
 fn heartbeat_style_rename_keeps_source_inode_usable() {
     let temp = TempDir::new();

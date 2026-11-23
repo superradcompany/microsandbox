@@ -196,8 +196,11 @@ impl PassthroughFs {
             }
             return Ok(data);
         }
+        // The root never takes another name: after the Host replaced it, its
+        // old directory may come back under the mount as an ordinary one.
         if let Some(identity) = identity
             && let Some(data) = inodes.by_identity.get(&identity).cloned()
+            && data.inode != ROOT_INODE
         {
             // FUSE aliases must share one logical inode, not just equal st_ino values:
             // otherwise the guest can cache conflicting file contents and attributes.
