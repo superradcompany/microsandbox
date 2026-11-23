@@ -1434,7 +1434,13 @@ pub(super) async fn remove_local_persisted_sandbox(
     let _storage = CreationStorage::acquire(local_backend, name)?;
     local_backend.remove_socket_artifacts(name)?;
     #[cfg(target_os = "linux")]
-    if local_backend.config().runtime.private_writeback_leases {
+    if local_backend.config().runtime.private_writeback_leases
+        || local_backend
+            .sandboxes_dir()
+            .join(name)
+            .join("runtime-leases/writeback")
+            .exists()
+    {
         lease_recovery::recover(
             local_backend,
             pools.read(),
@@ -1445,9 +1451,7 @@ pub(super) async fn remove_local_persisted_sandbox(
         .await?;
     }
     #[cfg(target_os = "linux")]
-    if local_backend.config().runtime.private_metrics {
-        crate::runtime::private_metrics::remove(&local_backend.config().run_dir(), name)?;
-    }
+    crate::runtime::private_metrics::remove(&local_backend.config().run_dir(), name)?;
     microsandbox_runtime::checkpoint::remove_sandbox_identity(
         &local_backend.config().home(),
         expected_id,

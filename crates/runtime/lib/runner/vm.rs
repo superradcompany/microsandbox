@@ -3378,20 +3378,19 @@ fn open_metrics_registry(
     run_dir: &Path,
     sandbox_name: &str,
 ) -> microsandbox_metrics::MetricsResult<MetricsRegistry> {
-    match MetricsRegistry::open(&handoff.shm_name) {
-        Ok(reg) => Ok(reg),
-        #[cfg(target_os = "linux")]
-        Err(microsandbox_metrics::MetricsError::Io(err))
-            if err.kind() == std::io::ErrorKind::NotFound =>
-        {
-            MetricsRegistry::open_file(&run_dir.join("runtime-metrics").join(sandbox_name))
-        }
-        Err(err) => {
-            #[cfg(not(target_os = "linux"))]
-            let _ = (run_dir, sandbox_name);
-            Err(err)
+    #[cfg(target_os = "linux")]
+    if handoff.slot == 0 {
+        let private_path = run_dir.join("runtime-metrics").join(sandbox_name);
+        match MetricsRegistry::open_file(&private_path) {
+            Ok(reg) => return Ok(reg),
+            Err(microsandbox_metrics::MetricsError::Io(err))
+                if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
         }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (run_dir, sandbox_name);
+    MetricsRegistry::open(&handoff.shm_name)
 }
 
 /// Open the shared-memory registry and promote the host-reserved slot to

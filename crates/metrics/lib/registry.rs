@@ -406,6 +406,11 @@ impl MetricsRegistry {
         if !metadata.is_file() || metadata.len() != map_len as u64 {
             return Err(MetricsError::Custom("invalid file registry size".into()));
         }
+        if std::os::unix::fs::MetadataExt::uid(&metadata) != unsafe { libc::geteuid() } {
+            return Err(MetricsError::Custom(
+                "private metrics registry file is not owned by the current user".into(),
+            ));
+        }
 
         let ptr = unsafe {
             libc::mmap(
