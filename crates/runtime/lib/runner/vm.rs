@@ -5351,6 +5351,30 @@ mod tests {
             sandbox_name
         ));
 
+        let write_sample = |writer: &microsandbox_metrics::MetricsSlotWriter, memory_bytes: u64| {
+            writer
+                .write_sample(microsandbox_metrics::SampleWrite {
+                    sampled_at: chrono::Utc::now(),
+                    cpu_percent: Some(1.0),
+                    vcpu_time_ns: Some(0),
+                    memory_bytes: Some(memory_bytes),
+                    memory_available_bytes: None,
+                    memory_host_resident_bytes: None,
+                    memory_limit_bytes: None,
+                    disk_read_bytes: 0,
+                    disk_write_bytes: 0,
+                    net_rx_bytes: 0,
+                    net_tx_bytes: 0,
+                    net_inbound_tcp_rejected: None,
+                    net_outbound_tcp_rejected: None,
+                    net_outbound_udp_evicted: None,
+                    upper_used_bytes: None,
+                    upper_free_bytes: None,
+                    upper_host_allocated_bytes: None,
+                })
+                .unwrap();
+        };
+
         // Private handoff updates the private file directly (never touching /dev/shm).
         let opened_priv = open_metrics_registry(&private_handoff, run_dir, sandbox_name).unwrap();
         let priv_writer = opened_priv
@@ -5362,12 +5386,14 @@ mod tests {
                 started_at: chrono::Utc::now(),
             })
             .unwrap();
+        write_sample(&priv_writer, 512);
         let snap =
             MetricsRegistry::read_file_snapshot(&std::fs::File::open(&private_file).unwrap())
                 .unwrap()
                 .identified_snapshot(false);
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].metric.run_id, 101);
+        assert_eq!(snap[0].metric.memory_bytes, 512);
         drop(priv_writer);
 
         // Shared handoff on slot 0 still opens the shared registry even though the
@@ -5382,9 +5408,11 @@ mod tests {
                 started_at: chrono::Utc::now(),
             })
             .unwrap();
+        write_sample(&shared_writer, 1024);
         let shared_snap = shared.identified_snapshot(false);
         assert_eq!(shared_snap.len(), 1);
         assert_eq!(shared_snap[0].metric.run_id, 202);
+        assert_eq!(shared_snap[0].metric.memory_bytes, 1024);
         drop(shared_writer);
 
         drop(shared);
