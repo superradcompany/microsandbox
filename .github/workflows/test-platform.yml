@@ -54,6 +54,8 @@ jobs:
           df -h /
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
 
       - name: Install build deps (Linux)
         if: inputs.os == 'linux'
@@ -101,6 +103,7 @@ jobs:
         if: inputs.os == 'linux'
         run: |
           rustup target add --toolchain stable ${{ inputs.agentd_target }}
+          cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }} --all-targets -- -D warnings
           cargo +stable test --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }}
 
       - name: Test privileged agentd resource limits (Linux)
@@ -119,11 +122,24 @@ jobs:
         env:
           TEST_PLATFORM_OS: ${{ inputs.os }}
         run: |
+          exclude_args=(--exclude microsandbox-agentd)
           # Concurrent fresh shell fixtures can exceed the runtime's two-second
           # probe deadline on macOS. Bound harness workers, not production timeouts;
           # tests still exercise their own explicit concurrency unchanged.
           if [[ "$TEST_PLATFORM_OS" == "darwin" ]]; then
             workers="$(sysctl -n hw.logicalcpu)"
             export RUST_TEST_THREADS="$(( workers < 4 ? workers : 4 ))"
+            # Linux CI compiles all examples/rust/* workspace members; excluding
+            # them on macOS avoids linking 21 example binaries on 3-vCPU runners.
+            while IFS= read -r pkg; do
+              exclude_args+=(--exclude "$pkg")
+            done < <(python3 -c '
+          import glob, re
+          for path in sorted(glob.glob("examples/rust/*/Cargo.toml")):
+              with open(path, encoding="utf-8") as handle:
+                  match = re.search(r"^name\s*=\s*\"([^\"]+)\"", handle.read(), re.M)
+              if match:
+                  print(match.group(1))
+          ')
           fi
-          cargo +stable test --workspace --exclude microsandbox-agentd
+          cargo +stable test --workspace "${exclude_args[@]}"
