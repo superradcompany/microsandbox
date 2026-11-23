@@ -95,6 +95,40 @@ impl LocalContext {
         }
         let mut found = HashMap::new();
         let mut output: Vec<LiveMetric> = Vec::new();
+        let mut sources: Vec<(String, Vec<IdentifiedMetric>)> = Vec::new();
+        #[cfg(target_os = "linux")]
+        if self.config().runtime.private_metrics {
+            let target_names: Vec<&str> = if let Some(id) = requested_run {
+                runs.get(&id)
+                    .and_then(|run| models.get(&run.sandbox_id))
+                    .map(|model| vec![model.name.as_str()])
+                    .unwrap_or_default()
+            } else {
+                models.values().map(|model| model.name.as_str()).collect()
+            };
+            let home = self.config().home();
+            let run_dir = self.config().run_dir();
+            for sandbox_name in target_names {
+                let Some(samples) = crate::runtime::private_metrics::read(
+                    &home,
+                    &run_dir,
+                    sandbox_name,
+                    include_exited,
+                )
+                .map_err(metrics_error)?
+                else {
+                    continue;
+                };
+                sources.push((
+                    crate::runtime::private_metrics::shm_name(sandbox_name),
+                    samples,
+                ));
+            }
+        }
+
+        // Always inspect the shared registries as well so sandboxes started
+        // before `runtime.private_metrics` was enabled remain observable until
+        // they restart.
         for name in &self.inner.metrics_registry_names {
             // Reopen by name even for a cached match: retaining a mapping alone
             // would keep reading an unlinked/replaced registry indefinitely.
@@ -122,6 +156,10 @@ impl LocalContext {
                 // identity no longer verifies. A hint cannot suppress fallback.
                 samples.swap(0, index);
             }
+            sources.push((name.clone(), samples));
+        }
+
+        for (name, samples) in sources {
             for sample in samples {
                 let live = &sample.metric;
                 if requested_run.is_some_and(|id| live.run_id != id)
@@ -141,7 +179,7 @@ impl LocalContext {
                         .matches
                         .get(&live.run_id)
                         .filter(|entry| {
-                            entry.registry == *name
+                            entry.registry == name
                                 && entry.slot == sample.slot
                                 && entry.generation == sample.generation
                                 && entry.created_at_ms == sample.registry_created_at_ms

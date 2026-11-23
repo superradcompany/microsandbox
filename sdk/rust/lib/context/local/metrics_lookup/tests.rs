@@ -314,3 +314,113 @@ async fn replacing_registry_never_returns_a_cached_mapping() {
     );
     cleanup(&local.inner.metrics_registry_names);
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn private_metrics_reads_private_files_and_shared_registries_during_transition() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let mut local = LocalContext::builder()
+        .home(home.path())
+        .private_metrics(true)
+        .build()
+        .unwrap();
+    let tag = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+    Arc::get_mut(&mut local.inner)
+        .unwrap()
+        .metrics_registry_names = vec![format!("/msb-tr-{tag:x}")];
+
+    // Existing sandbox started before private_metrics was enabled writes to shared /dev/shm.
+    let shared =
+        MetricsRegistry::open_or_create(&local.inner.metrics_registry_names[0], 4).unwrap();
+    let (shared_id, shared_run) = catalog_run(&local, "legacy-shared").await;
+    let _shared_writer = write(&shared, "legacy-shared", shared_id, shared_run, 111);
+
+    // New sandbox installs a private single-slot file and updates it via open_file.
+    let (priv_id, priv_run) = catalog_run(&local, "new-private").await;
+    let run_dir = local.config().run_dir();
+    let (shm_name, slot, generation) =
+        crate::runtime::private_metrics::install(&run_dir, priv_id, "new-private", 4096).unwrap();
+    assert_eq!(
+        shm_name,
+        crate::runtime::private_metrics::shm_name("new-private")
+    );
+    assert_eq!(slot, 0);
+
+    let file_path = crate::runtime::private_metrics::metrics_path(&run_dir, "new-private");
+    assert_eq!(
+        std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(file_path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    let priv_reg = MetricsRegistry::open_file(&file_path).unwrap();
+    let priv_writer = priv_reg
+        .activate_writer(ActivateSlot {
+            slot,
+            generation,
+            run_id: priv_run,
+            pid: std::process::id() as i32,
+            started_at: Utc::now(),
+        })
+        .unwrap();
+    priv_writer
+        .write_sample(SampleWrite {
+            sampled_at: Utc::now(),
+            cpu_percent: None,
+            vcpu_time_ns: None,
+            memory_bytes: Some(222),
+            memory_available_bytes: None,
+            memory_host_resident_bytes: None,
+            memory_limit_bytes: None,
+            disk_read_bytes: 0,
+            disk_write_bytes: 0,
+            net_rx_bytes: 0,
+            net_tx_bytes: 0,
+            net_inbound_tcp_rejected: None,
+            net_outbound_tcp_rejected: None,
+            net_outbound_udp_evicted: None,
+            upper_used_bytes: None,
+            upper_free_bytes: None,
+            upper_host_allocated_bytes: None,
+        })
+        .unwrap();
+
+    // Both sandboxes are observable together and individually.
+    let all = local.verified_metrics(None, false).await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(
+        local
+            .verified_metrics(Some(shared_run), false)
+            .await
+            .unwrap()[0]
+            .memory_bytes,
+        111
+    );
+    assert_eq!(
+        local.verified_metrics(Some(priv_run), false).await.unwrap()[0].memory_bytes,
+        222
+    );
+
+    // Replacing the private file with a symlink must fail closed.
+    drop(priv_writer);
+    drop(priv_reg);
+    let outside = home.path().join("outside-metrics");
+    std::fs::rename(&file_path, &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, &file_path).unwrap();
+    assert!(local.verified_metrics(Some(priv_run), false).await.is_err());
+
+    // Cleanup removes the entry and ignores subsequent calls.
+    crate::runtime::private_metrics::remove(&run_dir, "new-private").unwrap();
+    crate::runtime::private_metrics::remove(&run_dir, "new-private").unwrap();
+    assert!(!file_path.exists());
+    cleanup(&local.inner.metrics_registry_names);
+}

@@ -139,7 +139,7 @@ struct MetricsReservation {
     shm_name: String,
     slot: u32,
     generation: u64,
-    registry: MetricsRegistry,
+    registry: Option<MetricsRegistry>,
 }
 
 #[cfg(unix)]
@@ -849,13 +849,15 @@ impl LocalContext {
             parent_watchdog.map(|pipe| pipe.write_fd),
             #[cfg(windows)]
             child_job,
-            metrics_reservation.as_ref().map(|reservation| {
-                MetricsReservationCleanup::new(
-                    reservation.shm_name.clone(),
-                    reservation.slot,
-                    reservation.generation,
-                    Some(reservation.registry.clone()),
-                )
+            metrics_reservation.as_ref().and_then(|reservation| {
+                reservation.registry.as_ref().map(|registry| {
+                    MetricsReservationCleanup::new(
+                        reservation.shm_name.clone(),
+                        reservation.slot,
+                        reservation.generation,
+                        Some(registry.clone()),
+                    )
+                })
             }),
         ));
 
@@ -1354,6 +1356,27 @@ fn reserve_metrics_slot(
     config: &SandboxConfig,
     sandbox_id: i32,
 ) -> Option<MetricsReservation> {
+    let memory_limit_bytes = u64::from(config.spec.resources.memory_mib) * 1024 * 1024;
+    #[cfg(target_os = "linux")]
+    if local.config().runtime.private_metrics {
+        return match super::private_metrics::install(
+            &local.config().run_dir(),
+            sandbox_id,
+            &config.spec.name,
+            memory_limit_bytes,
+        ) {
+            Ok((shm_name, slot, generation)) => Some(MetricsReservation {
+                shm_name,
+                slot,
+                generation,
+                registry: None,
+            }),
+            Err(err) => {
+                tracing::warn!(error = %err, sandbox = %config.spec.name, "failed to install private metrics file");
+                None
+            }
+        };
+    }
     let shm_name = local.config().metrics_registry_shm_name();
     let capacity = local.config().metrics_registry_capacity();
     let registry = match MetricsRegistry::open_or_create(&shm_name, capacity) {
@@ -1363,7 +1386,6 @@ fn reserve_metrics_slot(
             return None;
         }
     };
-    let memory_limit_bytes = u64::from(config.spec.resources.memory_mib) * 1024 * 1024;
     match registry.reserve(ReserveSlot {
         sandbox_id,
         name: &config.spec.name,
@@ -1373,7 +1395,7 @@ fn reserve_metrics_slot(
             shm_name,
             slot,
             generation,
-            registry,
+            registry: Some(registry),
         }),
         Err(err) => {
             tracing::warn!(error = %err, sandbox = %config.spec.name, "failed to reserve metrics slot");
@@ -1665,10 +1687,10 @@ fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&Metr
     let Some(reservation) = reservation else {
         return;
     };
-    if let Err(err) = reservation
-        .registry
-        .release_reserved(reservation.slot, reservation.generation)
-    {
+    let Some(registry) = &reservation.registry else {
+        return;
+    };
+    if let Err(err) = registry.release_reserved(reservation.slot, reservation.generation) {
         tracing::debug!(error = %err, sandbox = %config.spec.name, "release: metrics slot release failed");
     }
 }
@@ -2349,7 +2371,17 @@ fn machine_cli_args(
         sandboxes_dir: local.sandboxes_dir(),
         run_dir: local.config().run_dir(),
         cpu_lease_dir: local.config().run_dir().join("cpu-leases"),
-        writeback_lease_dir: local.config().run_dir().join("writeback-leases"),
+        writeback_lease_dir: {
+            #[cfg(target_os = "linux")]
+            let dir = if local.config().runtime.private_writeback_leases {
+                local.private_writeback_lease_dir(&config.spec.name)
+            } else {
+                local.config().run_dir().join("writeback-leases")
+            };
+            #[cfg(not(target_os = "linux"))]
+            let dir = local.config().run_dir().join("writeback-leases");
+            dir
+        },
         cpu_placement: config.spec.resources.cpu_placement,
         placement_profile_name: config.spec.resources.placement_profile.clone(),
         placement_profile: config

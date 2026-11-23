@@ -251,6 +251,14 @@ impl LocalContext {
         self.config().sandboxes_dir()
     }
 
+    /// Per-sandbox private writeback lease directory (`sandboxes/<name>/runtime-leases/writeback`).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn private_writeback_lease_dir(&self, name: &str) -> PathBuf {
+        self.sandboxes_dir()
+            .join(name)
+            .join("runtime-leases/writeback")
+    }
+
     /// Resolved volumes directory.
     pub fn volumes_dir(&self) -> PathBuf {
         self.config().volumes_dir()
@@ -484,6 +492,32 @@ impl LocalContextBuilder {
     /// sandbox builder and is applied on both create and restart.
     pub fn deployment_profile(mut self, profile: DeploymentProfile) -> Self {
         self.config.deployment_profile_mut(profile);
+        self
+    }
+
+    /// Keep bulk agent payloads on the byte stream instead of negotiating
+    /// shared-memory arenas.
+    #[doc(hidden)]
+    pub fn in_band_agent_transport(mut self, enabled: bool) -> Self {
+        self.config.runtime.in_band_agent_transport_mut(enabled);
+        self
+    }
+
+    /// Store each sandbox's live metrics in a private single-slot file under
+    /// `run/runtime-metrics/<name>` instead of the shared host `/dev/shm` registry.
+    /// Linux only.
+    #[doc(hidden)]
+    pub fn private_metrics(mut self, enabled: bool) -> Self {
+        self.config.runtime.private_metrics_mut(enabled);
+        self
+    }
+
+    /// Recover per-sandbox writeback lease files under
+    /// `sandboxes/<name>/runtime-leases/writeback` before removing a stopped
+    /// sandbox. Linux only.
+    #[doc(hidden)]
+    pub fn private_writeback_leases(mut self, enabled: bool) -> Self {
+        self.config.runtime.private_writeback_leases_mut(enabled);
         self
     }
 

@@ -681,13 +681,15 @@ pub fn enter(config: Config) -> ! {
     // Capture log_dir before moving config into run() — we need it after
     // a failure to write boot-error.json, regardless of how far run() got.
     let log_dir = config.log_dir.clone();
+    let run_dir = config.run_dir.clone();
+    let sandbox_name = config.sandbox_name.clone();
     let metrics_slot = config.metrics_slot.clone();
     let failure_channel = super::progress::StartupFailureChannel::default();
     let result = run(config, &failure_channel);
     match result {
         Ok(infallible) => match infallible {},
         Err(e) => {
-            release_reserved_metrics_slot(metrics_slot.as_ref());
+            release_reserved_metrics_slot(metrics_slot.as_ref(), &run_dir, &sandbox_name);
             // Write the structured boot-error record so the parent CLI
             // can surface a real cause inline. Best-effort: any failure
             // to write falls back to the existing eprintln path, which
@@ -974,6 +976,8 @@ fn run(
     // so a missing handoff means sampling is disabled for this sandbox.
     let metrics_writer = activate_metrics_writer(
         config.metrics_slot.as_ref(),
+        &config.run_dir,
+        &config.sandbox_name,
         config.metrics_sample_interval_ms,
         run_db_id,
         pid,
@@ -987,7 +991,11 @@ fn run(
         && config.metrics_slot.is_some()
         && config.metrics_sample_interval_ms.is_some()
     {
-        release_reserved_metrics_slot(config.metrics_slot.as_ref());
+        release_reserved_metrics_slot(
+            config.metrics_slot.as_ref(),
+            &config.run_dir,
+            &config.sandbox_name,
+        );
     }
 
     // Build the VM with an exit observer for DB cleanup and socket removal.
@@ -1242,7 +1250,11 @@ fn run(
             if let Some(writer) = metrics_writer.clone() {
                 let _ = writer.release(ReleaseMode::Free);
             } else {
-                release_reserved_metrics_slot(config.metrics_slot.as_ref());
+                release_reserved_metrics_slot(
+                    config.metrics_slot.as_ref(),
+                    &config.run_dir,
+                    &config.sandbox_name,
+                );
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
             let _ = socket_paths.remove_artifacts();
@@ -1376,7 +1388,11 @@ fn run(
             if let Some(writer) = metrics_writer.clone() {
                 let _ = writer.release(ReleaseMode::Free);
             } else {
-                release_reserved_metrics_slot(config.metrics_slot.as_ref());
+                release_reserved_metrics_slot(
+                    config.metrics_slot.as_ref(),
+                    &config.run_dir,
+                    &config.sandbox_name,
+                );
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
             let _ = socket_paths.remove_artifacts();
@@ -3361,17 +3377,50 @@ fn canonicalize_owned_mount_root(path: &Path) -> RuntimeResult<PathBuf> {
     })
 }
 
+#[cfg(target_os = "linux")]
+fn is_private_metrics_handoff(handoff: &MetricsSlotHandoff, sandbox_name: &str) -> bool {
+    use sha2::{Digest, Sha256};
+
+    if handoff.slot != 0 {
+        return false;
+    }
+    let digest = hex::encode(Sha256::digest(sandbox_name.as_bytes()));
+    handoff.shm_name == format!("/msb-met-{}", &digest[..20])
+}
+
+fn open_metrics_registry(
+    handoff: &MetricsSlotHandoff,
+    run_dir: &Path,
+    sandbox_name: &str,
+) -> microsandbox_metrics::MetricsResult<MetricsRegistry> {
+    #[cfg(target_os = "linux")]
+    if is_private_metrics_handoff(handoff, sandbox_name) {
+        let private_path = run_dir.join("runtime-metrics").join(sandbox_name);
+        match MetricsRegistry::open_file(&private_path) {
+            Ok(reg) => return Ok(reg),
+            Err(microsandbox_metrics::MetricsError::Io(err))
+                if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (run_dir, sandbox_name);
+    MetricsRegistry::open(&handoff.shm_name)
+}
+
 /// Open the shared-memory registry and promote the host-reserved slot to
 /// `Active`, returning a writer handle for the sampler.
 fn activate_metrics_writer(
     handoff: Option<&MetricsSlotHandoff>,
+    run_dir: &Path,
+    sandbox_name: &str,
     interval: Option<NonZero<u64>>,
     run_id: i32,
     pid: u32,
 ) -> Option<microsandbox_metrics::MetricsSlotWriter> {
     interval?;
     let handoff = handoff?;
-    let registry = match MetricsRegistry::open(&handoff.shm_name) {
+    let registry = match open_metrics_registry(handoff, run_dir, sandbox_name) {
         Ok(reg) => reg,
         Err(err) => {
             tracing::warn!(error = %err, shm = %handoff.shm_name, "failed to open metrics registry");
@@ -3395,9 +3444,13 @@ fn activate_metrics_writer(
 }
 
 /// Best-effort release of a metrics slot that has not been activated yet.
-fn release_reserved_metrics_slot(handoff: Option<&MetricsSlotHandoff>) {
+fn release_reserved_metrics_slot(
+    handoff: Option<&MetricsSlotHandoff>,
+    run_dir: &Path,
+    sandbox_name: &str,
+) {
     let Some(handoff) = handoff else { return };
-    if let Ok(reg) = MetricsRegistry::open(&handoff.shm_name) {
+    if let Ok(reg) = open_metrics_registry(handoff, run_dir, sandbox_name) {
         let _ = reg.release_reserved(handoff.slot, handoff.generation);
     }
 }
@@ -5222,5 +5275,148 @@ mod tests {
         let mut env = vec!["PATH=/.msb/scripts:/usr/bin".to_string()];
         prepend_scripts_path(&mut env);
         assert_eq!(env, vec!["PATH=/.msb/scripts:/usr/bin".to_string()]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_metrics_registry_prefers_private_file_only_for_private_handoffs() {
+        use microsandbox_metrics::MetricsRegistry;
+        use sha2::{Digest, Sha256};
+
+        use super::{MetricsSlotHandoff, is_private_metrics_handoff, open_metrics_registry};
+
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path();
+        let sandbox_name = "metrics-route-test";
+        let digest = hex::encode(Sha256::digest(sandbox_name.as_bytes()));
+        let private_shm = format!("/msb-met-{}", &digest[..20]);
+        let shared_shm = format!(
+            "/msb-metrics-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+
+        // Seed a private single-slot file at run/runtime-metrics/<name>.
+        let seed_shm = format!(
+            "/msb-pmet-seed-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let seed = MetricsRegistry::open_or_create(&seed_shm, 1).unwrap();
+        let priv_res = seed
+            .reserve(microsandbox_metrics::ReserveSlot {
+                sandbox_id: 10,
+                name: sandbox_name,
+                memory_limit_bytes: 1024,
+            })
+            .unwrap();
+        let bytes =
+            std::fs::read(std::path::Path::new("/dev/shm").join(seed_shm.trim_start_matches('/')))
+                .unwrap();
+        drop(seed);
+        let c_seed = std::ffi::CString::new(seed_shm.as_bytes()).unwrap();
+        unsafe { libc::shm_unlink(c_seed.as_ptr()) };
+
+        let metrics_dir = run_dir.join("runtime-metrics");
+        std::fs::create_dir_all(&metrics_dir).unwrap();
+        let private_file = metrics_dir.join(sandbox_name);
+        std::fs::write(&private_file, &bytes).unwrap();
+
+        // Seed a shared registry with slot 0 reserved for the same sandbox.
+        let shared = MetricsRegistry::open_or_create(&shared_shm, 4).unwrap();
+        let shared_res = shared
+            .reserve(microsandbox_metrics::ReserveSlot {
+                sandbox_id: 10,
+                name: sandbox_name,
+                memory_limit_bytes: 2048,
+            })
+            .unwrap();
+        assert_eq!(shared_res.slot, 0);
+
+        let private_handoff = MetricsSlotHandoff {
+            shm_name: private_shm.clone(),
+            slot: priv_res.slot,
+            generation: priv_res.generation,
+        };
+        let shared_handoff = MetricsSlotHandoff {
+            shm_name: shared_shm.clone(),
+            slot: shared_res.slot,
+            generation: shared_res.generation,
+        };
+        assert!(is_private_metrics_handoff(&private_handoff, sandbox_name));
+        assert!(!is_private_metrics_handoff(&shared_handoff, sandbox_name));
+        assert!(!is_private_metrics_handoff(
+            &MetricsSlotHandoff {
+                slot: 1,
+                ..private_handoff.clone()
+            },
+            sandbox_name
+        ));
+
+        let write_sample = |writer: &microsandbox_metrics::MetricsSlotWriter, memory_bytes: u64| {
+            writer
+                .write_sample(microsandbox_metrics::SampleWrite {
+                    sampled_at: chrono::Utc::now(),
+                    cpu_percent: Some(1.0),
+                    vcpu_time_ns: Some(0),
+                    memory_bytes: Some(memory_bytes),
+                    memory_available_bytes: None,
+                    memory_host_resident_bytes: None,
+                    memory_limit_bytes: None,
+                    disk_read_bytes: 0,
+                    disk_write_bytes: 0,
+                    net_rx_bytes: 0,
+                    net_tx_bytes: 0,
+                    net_inbound_tcp_rejected: None,
+                    net_outbound_tcp_rejected: None,
+                    net_outbound_udp_evicted: None,
+                    upper_used_bytes: None,
+                    upper_free_bytes: None,
+                    upper_host_allocated_bytes: None,
+                })
+                .unwrap();
+        };
+
+        // Private handoff updates the private file directly (never touching /dev/shm).
+        let opened_priv = open_metrics_registry(&private_handoff, run_dir, sandbox_name).unwrap();
+        let priv_writer = opened_priv
+            .activate_writer(microsandbox_metrics::ActivateSlot {
+                slot: priv_res.slot,
+                generation: priv_res.generation,
+                run_id: 101,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        write_sample(&priv_writer, 512);
+        let snap =
+            MetricsRegistry::read_file_snapshot(&std::fs::File::open(&private_file).unwrap())
+                .unwrap()
+                .identified_snapshot(false);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].metric.run_id, 101);
+        assert_eq!(snap[0].metric.memory_bytes, 512);
+        drop(priv_writer);
+
+        // Shared handoff on slot 0 still opens the shared registry even though the
+        // leftover private file exists on disk.
+        let opened_shared = open_metrics_registry(&shared_handoff, run_dir, sandbox_name).unwrap();
+        let shared_writer = opened_shared
+            .activate_writer(microsandbox_metrics::ActivateSlot {
+                slot: shared_res.slot,
+                generation: shared_res.generation,
+                run_id: 202,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        write_sample(&shared_writer, 1024);
+        let shared_snap = shared.identified_snapshot(false);
+        assert_eq!(shared_snap.len(), 1);
+        assert_eq!(shared_snap[0].metric.run_id, 202);
+        assert_eq!(shared_snap[0].metric.memory_bytes, 1024);
+        drop(shared_writer);
+
+        drop(shared);
+        let c_shared = std::ffi::CString::new(shared_shm.as_bytes()).unwrap();
+        unsafe { libc::shm_unlink(c_shared.as_ptr()) };
     }
 }

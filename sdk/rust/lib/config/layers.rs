@@ -68,6 +68,18 @@ impl GlobalConfig {
             ));
         }
 
+        if cfg!(not(target_os = "linux")) && self.runtime.private_metrics {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.private_metrics is supported only on Linux hosts".into(),
+            ));
+        }
+
+        if cfg!(not(target_os = "linux")) && self.runtime.private_writeback_leases {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.private_writeback_leases is supported only on Linux hosts".into(),
+            ));
+        }
+
         if let Some(limit) = self.runtime.patches.max_concurrent_batches
             && limit.get() > Semaphore::MAX_PERMITS
         {
@@ -105,6 +117,12 @@ impl GlobalConfig {
             config.stage = true;
         }
         config
+    }
+
+    /// Whether agent connections keep bulk payloads on the byte stream instead of
+    /// negotiating shared-memory arenas.
+    pub(crate) fn in_band_agent_transport(&self) -> bool {
+        self.runtime.in_band_agent_transport
     }
 }
 
@@ -715,6 +733,91 @@ mod tests {
                     .resolved_config()
                     .strict_host_files()
             );
+        }
+    }
+
+    #[test]
+    fn local_preparation_enables_in_band_agent_transport_only_when_explicitly_set() {
+        for (user, managed) in [
+            (r#"{"runtime":{"in_band_agent_transport":true}}"#, "{}"),
+            ("{}", r#"{"runtime":{"in_band_agent_transport":true}}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            assert!(
+                layers
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap()
+                    .resolved_config()
+                    .in_band_agent_transport()
+            );
+        }
+
+        for (user, managed) in [
+            ("{}", "{}"),
+            (r#"{"deployment_profile":"multi-tenant"}"#, "{}"),
+            ("{}", r#"{"deployment_profile":"multi-tenant"}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            assert!(
+                !layers
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap()
+                    .resolved_config()
+                    .in_band_agent_transport()
+            );
+        }
+
+        #[cfg(feature = "local")]
+        {
+            let home = tempfile::tempdir().unwrap();
+            let via_builder = crate::context::LocalContext::builder()
+                .home(home.path())
+                .in_band_agent_transport(true)
+                .build()
+                .unwrap();
+            assert!(via_builder.config().in_band_agent_transport());
+        }
+    }
+
+    #[test]
+    fn local_preparation_accepts_private_metrics_and_writeback_leases_only_on_linux() {
+        for (field, expected_error) in [
+            (
+                "private_metrics",
+                "runtime.private_metrics is supported only on Linux",
+            ),
+            (
+                "private_writeback_leases",
+                "runtime.private_writeback_leases is supported only on Linux",
+            ),
+        ] {
+            let json = format!(r#"{{"runtime":{{"{field}":true}}}}"#);
+            for (user, managed) in [(json.as_str(), "{}"), ("{}", json.as_str())] {
+                let layers = BackendConfig::new(
+                    serde_json::from_str(user).unwrap(),
+                    serde_json::from_str(managed).unwrap(),
+                );
+                let result = layers.prepare_for_local_backend(Default::default());
+
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = expected_error;
+                    let resolved = result.unwrap();
+                    if field == "private_metrics" {
+                        assert!(resolved.resolved_config().runtime.private_metrics);
+                    } else {
+                        assert!(resolved.resolved_config().runtime.private_writeback_leases);
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                assert!(result.err().unwrap().to_string().contains(expected_error));
+            }
         }
     }
 
