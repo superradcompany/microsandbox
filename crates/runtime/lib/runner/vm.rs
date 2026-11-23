@@ -5362,13 +5362,13 @@ mod tests {
                 started_at: chrono::Utc::now(),
             })
             .unwrap();
-        drop(priv_writer);
         let snap =
             MetricsRegistry::read_file_snapshot(&std::fs::File::open(&private_file).unwrap())
                 .unwrap()
                 .identified_snapshot(false);
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].metric.run_id, 101);
+        drop(priv_writer);
 
         // Shared handoff on slot 0 still opens the shared registry even though the
         // leftover private file exists on disk.
@@ -5382,10 +5382,10 @@ mod tests {
                 started_at: chrono::Utc::now(),
             })
             .unwrap();
-        drop(shared_writer);
         let shared_snap = shared.identified_snapshot(false);
         assert_eq!(shared_snap.len(), 1);
         assert_eq!(shared_snap[0].metric.run_id, 202);
+        drop(shared_writer);
 
         drop(shared);
         let c_shared = std::ffi::CString::new(shared_shm.as_bytes()).unwrap();
