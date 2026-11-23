@@ -143,20 +143,25 @@ mod tests {
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
     use super::recover;
-    use crate::SandboxConfig;
     use crate::context::LocalContext;
     use crate::sandbox::remove_local_persisted_sandbox;
 
     async fn insert_stopped_sandbox_run(local: &LocalContext, name: &str) -> (i32, i32) {
         let pools = local.db().await.unwrap();
-        let mut config = SandboxConfig::default();
-        config.spec.name = name.into();
-        let sandbox_id = LocalContext::insert_sandbox_record(pools.write(), &config)
-            .await
-            .unwrap();
+        let sandbox_id = sandbox_entity::ActiveModel {
+            name: Set(name.to_string()),
+            config: Set("{}".to_string()),
+            status: Set(sandbox_entity::SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap()
+        .id;
         let run_id = run::Entity::insert(run::ActiveModel {
             sandbox_id: Set(sandbox_id),
-            status: Set(run::RunStatus::Stopped),
+            status: Set(run::RunStatus::Terminated),
             started_at: Set(Some(Utc::now().naive_utc())),
             terminated_at: Set(Some(Utc::now().naive_utc())),
             ..Default::default()
