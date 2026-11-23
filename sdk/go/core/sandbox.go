@@ -1,0 +1,1290 @@
+package microsandbox
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/superradcompany/microsandbox/sdk/go/core/internal/ffi"
+)
+
+const (
+	// Restart and Destroy retain their explicit convergence deadline; Stop has none.
+	defaultStopTimeout = 10 * time.Second
+	defaultKillTimeout = 5 * time.Second
+)
+
+// Sandbox represents a live microsandbox VM. It holds a Rust-side handle
+// that must be released with Close.
+//
+// Sandbox is safe for concurrent use from multiple goroutines.
+type Sandbox struct {
+	inner *ffi.Sandbox
+}
+
+// GuestFlush controls optional guest filesystem writeback during capture or pause.
+type GuestFlush string
+
+const (
+	// GuestFlushAuto flushes live disk-only captures, but not full captures or forks.
+	GuestFlushAuto GuestFlush = "auto"
+	// GuestFlushRequired requires successful writeback of captured persistent filesystems.
+	GuestFlushRequired GuestFlush = "required"
+	// GuestFlushSkip skips optional writeback, never mandatory storage barriers.
+	GuestFlushSkip GuestFlush = "skip"
+)
+
+// forkOptions holds the private configuration for a local fork.
+type forkOptions struct {
+	recordIntegrity bool
+	guestFlush      GuestFlush
+	volumes         map[string]MountConfig
+}
+
+// ForkOutcome contains either a running child or its startup error.
+type ForkOutcome struct {
+	Name    string
+	Sandbox *Sandbox
+	Error   error
+}
+
+// ForkOption configures a local fork.
+type ForkOption func(*forkOptions)
+
+// BranchOption configures a live fork.
+//
+// Deprecated: use ForkOption.
+type BranchOption = ForkOption
+
+// BranchOutcome is a live fork result.
+//
+// Deprecated: use ForkOutcome.
+type BranchOutcome = ForkOutcome
+
+// WithBranchIntegrity enables disk integrity recording.
+//
+// Deprecated: use WithForkIntegrity.
+func WithBranchIntegrity() ForkOption { return WithForkIntegrity() }
+
+// WithBranchGuestFlush selects guest writeback for live forking.
+//
+// Deprecated: use WithForkGuestFlush.
+func WithBranchGuestFlush(policy GuestFlush) ForkOption { return WithForkGuestFlush(policy) }
+
+// WithForkIntegrity records disk content hashes; RAM backing remains unhashed.
+func WithForkIntegrity() ForkOption {
+	return func(options *forkOptions) { options.recordIntegrity = true }
+}
+
+// WithForkVolumes rebinds captured disks to host images consistent with the
+// captured state. A fork cannot add a new block device. Each child attaches
+// the supplied image directly, without a private copy, so batch forks should
+// not share a writable image.
+func WithForkVolumes(volumes map[string]MountConfig) ForkOption {
+	return func(options *forkOptions) { options.volumes = volumes }
+}
+
+// WithForkGuestFlush selects guest writeback before capturing a live fork.
+func WithForkGuestFlush(policy GuestFlush) ForkOption {
+	return func(options *forkOptions) { options.guestFlush = policy }
+}
+
+// ContextKind identifies the retained destination without I/O.
+func (s *Sandbox) ContextKind() ContextKind {
+	if s.inner.BackendKind() == "cloud" {
+		return ContextRemote
+	}
+	return ContextKind(s.inner.BackendKind())
+}
+
+// CreateSandbox creates and boots a new sandbox. The returned Sandbox owns the
+// VM process — call Close (or Stop + Close) when done.
+//
+// Sandbox names are limited to 128 UTF-8 bytes.
+//
+// ctx controls the boot operation only; cancelling ctx after this function
+// returns has no effect on the running sandbox.
+func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
+	return createSandboxWithMode(ctx, name, false, opts...)
+}
+
+// ConnectOrCreateSandbox connects to and runs the persisted sandbox with this
+// name, or creates it if absent. opts apply only when creation is necessary; an
+// existing sandbox retains its persisted configuration. Concurrent callers
+// converge on the winning identity.
+func ConnectOrCreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
+	return createSandboxWithMode(ctx, name, true, opts...)
+}
+
+func createSandboxWithMode(ctx context.Context, name string, connectOrCreate bool, opts ...SandboxOption) (*Sandbox, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	config := SandboxConfig{}
+	for _, apply := range opts {
+		apply(&config)
+	}
+	if err := prepareSandboxCreateConfig(&config); err != nil {
+		return nil, err
+	}
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	inner, err := selected.nativeContext().CreateSandbox(ctx, name, buildFFICreateOptions(config), connectOrCreate)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+
+}
+
+// prepareSandboxCreateConfig resolves host inputs and validates options before native creation.
+func prepareSandboxCreateConfig(config *SandboxConfig) error {
+	if err := validateLifecycleLimits(&config.MaxDuration, &config.IdleTimeout); err != nil {
+		return err
+	}
+	if err := resolveRegistryCACertPaths(config); err != nil {
+		return err
+	}
+	if err := validateOwnedMounts(config.Volumes); err != nil {
+		return err
+	}
+	return validateHTTPConfig(config.Network)
+}
+
+// resolveRegistryCACertPaths reads every PEM file named by
+// RegistryCACertPaths and appends its contents to RegistryCACerts. The option
+// functions only record paths, since they cannot report a read failure.
+func resolveRegistryCACertPaths(o *SandboxConfig) error {
+	for _, path := range o.RegistryCACertPaths {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return &Error{Kind: ErrInvalidConfig, Message: fmt.Sprintf("microsandbox: reading registry CA certs %q", path), Cause: err}
+		}
+		o.RegistryCACerts = append(o.RegistryCACerts, pem)
+	}
+	return nil
+}
+
+// buildFFICreateOptions translates SandboxConfig into the FFI wire shape.
+// Extracted so tests can assert the JSON envelope without booting the runtime.
+func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
+	ffiOpts := ffi.CreateOptions{
+		Image:             o.Image,
+		ImageFstype:       o.ImageFstype,
+		ImageBind:         o.ImageBind,
+		MemoryMiB:         o.MemoryMiB,
+		CPUs:              o.CPUs,
+		MaxMemoryMiB:      o.MaxMemoryMiB,
+		MaxCPUs:           o.MaxCPUs,
+		CPUPlacement:      string(o.CPUPlacement),
+		PlacementProfile:  o.PlacementProfile,
+		THP:               string(o.THP),
+		NestedVirt:        o.NestedVirt,
+		Workdir:           o.Workdir,
+		Shell:             o.Shell,
+		SecurityProfile:   string(o.SecurityProfile),
+		DeploymentProfile: string(o.DeploymentProfile),
+		Hostname:          o.Hostname,
+		User:              o.User,
+		Replace:           o.Replace,
+		Env:               o.Env,
+		Labels:            o.Labels,
+		Detached:          o.Detached,
+		Ephemeral:         o.Ephemeral,
+		LogLevel:          string(o.LogLevel),
+		QuietLogs:         o.QuietLogs,
+		Scripts:           o.Scripts,
+		PullPolicy:        string(o.PullPolicy),
+		MaxDurationSecs:   uint64(o.MaxDuration / time.Second),
+		IdleTimeoutSecs:   uint64(o.IdleTimeout / time.Second),
+		Ports:             o.Ports,
+		PortsUDP:          o.PortsUDP,
+		PortBindings:      buildFFIPortBindings(o.PortBindings),
+		Vsock:             buildFFIVsockRoutes(o.Vsock),
+		RegistryInsecure:  o.RegistryInsecure,
+	}
+	if o.Entrypoint != nil {
+		entrypoint := append([]string{}, o.Entrypoint...)
+		ffiOpts.Entrypoint = &entrypoint
+	}
+	if o.Cmd != nil {
+		cmd := append([]string{}, o.Cmd...)
+		ffiOpts.Cmd = &cmd
+	}
+	if o.RootDisk != nil {
+		ffiOpts.RootDisk = buildFFIRootDisk(*o.RootDisk)
+	} else if o.ociUpperSizeSet || o.OCIUpperSizeMiB != 0 {
+		// Deprecated flat field, honored as a managed root disk.
+		size := o.OCIUpperSizeMiB
+		ffiOpts.RootDisk = &ffi.RootDiskSpec{Kind: "managed", SizeMiB: &size}
+	}
+	if o.ReplaceWithTimeout != nil {
+		var ms uint64
+		if d := *o.ReplaceWithTimeout; d > 0 {
+			ms = uint64((d + time.Millisecond - 1) / time.Millisecond)
+		}
+		ffiOpts.ReplaceWithTimeoutMs = &ms
+	}
+	if o.Init != nil {
+		init := &ffi.InitOptions{Cmd: o.Init.Cmd, Args: append([]string(nil), o.Init.Args...)}
+		if len(o.Init.Env) > 0 {
+			init.Env = make([][2]string, 0, len(o.Init.Env))
+			for k, v := range o.Init.Env {
+				init.Env = append(init.Env, [2]string{k, v})
+			}
+		}
+		ffiOpts.Init = init
+	}
+	if o.registryAnonymous {
+		ffiOpts.RegistryAnonymous = true
+	} else if o.RegistryAuth != nil {
+		ffiOpts.RegistryAuth = &ffi.RegistryAuthOptions{
+			Username: o.RegistryAuth.Username,
+			Password: o.RegistryAuth.Password,
+		}
+	}
+	if len(o.RegistryCACerts) > 0 {
+		ffiOpts.RegistryCACerts = make([]string, 0, len(o.RegistryCACerts))
+		for _, pem := range o.RegistryCACerts {
+			ffiOpts.RegistryCACerts = append(ffiOpts.RegistryCACerts, string(pem))
+		}
+	}
+
+	if len(o.Volumes) > 0 {
+		ffiOpts.Volumes = make(map[string]ffi.MountSpec, len(o.Volumes))
+		for guestPath, m := range o.Volumes {
+			spec := ffi.MountSpec{
+				Bind:               m.Bind,
+				Named:              m.Named,
+				NamedMode:          string(m.NamedMode),
+				NamedKind:          string(m.NamedKind),
+				Owned:              m.Owned,
+				Tmpfs:              m.Tmpfs,
+				Disk:               m.Disk,
+				Format:             m.Format,
+				Fstype:             m.Fstype,
+				Readonly:           m.Readonly,
+				Noexec:             m.Noexec,
+				Nosuid:             m.Nosuid,
+				Nodev:              m.Nodev,
+				SizeMiB:            m.SizeMiB,
+				QuotaMiB:           m.QuotaMiB,
+				StatVirtualization: string(m.StatVirtualization),
+				HostPermissions:    string(m.HostPermissions),
+			}
+			if m.Owner != nil {
+				uid, gid := m.Owner.UID, m.Owner.GID
+				spec.OverrideUid, spec.OverrideGid = &uid, &gid
+			}
+			ffiOpts.Volumes[guestPath] = spec
+		}
+	}
+
+	if o.Network != nil {
+		ffiOpts.Network = buildFFINetwork(o.Network)
+	}
+	ffiOpts.Proxy = buildFFIOutboundProxy(o.Proxy)
+
+	for _, s := range o.Secrets {
+		ffiOpts.Secrets = append(ffiOpts.Secrets, ffi.SecretOptions{
+			EnvVar:             s.EnvVar,
+			Value:              s.Value,
+			Allow:              s.Allow,
+			Passthrough:        s.Passthrough,
+			Placeholder:        s.Placeholder,
+			RequireTLSIdentity: s.RequireTLSIdentity,
+			Substitution: ffi.SecretSubstitutionOptions{
+				Headers:      s.Substitution.Headers,
+				HeaderFields: s.Substitution.HeaderFields,
+				Query:        s.Substitution.Query,
+				Body:         s.Substitution.Body,
+			},
+			ViolationAction: string(s.ViolationAction),
+		})
+	}
+
+	for _, p := range o.Patches {
+		ffiOpts.Patches = append(ffiOpts.Patches, ffi.PatchOptions{
+			Kind:    string(p.Kind),
+			Path:    p.Path,
+			Content: p.Content,
+			Mode:    p.Mode,
+			Replace: p.Replace,
+			Src:     p.Src,
+			Dst:     p.Dst,
+			Target:  p.Target,
+			Link:    p.Link,
+		})
+	}
+
+	return ffiOpts
+}
+
+// buildFFIRootDisk translates a RootDiskConfig into the FFI wire shape.
+func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
+	spec := &ffi.RootDiskSpec{}
+	switch rd.Kind() {
+	case RootDiskKindTmpfs:
+		spec.Kind = "tmpfs"
+	case RootDiskKindDiskImage:
+		spec.Kind = "disk-image"
+		spec.Path = rd.Path
+		spec.Format = rd.Format
+		spec.Fstype = rd.Fstype
+	case RootDiskKindFlat:
+		spec.Kind = "flat"
+		spec.Fstype = rd.Fstype
+		spec.Clone = string(rd.Clone)
+	default:
+		// Managed, including zero-valued configs built without the factory.
+		spec.Kind = "managed"
+	}
+	if rd.sizeSet || rd.SizeMiB != 0 {
+		size := rd.SizeMiB
+		spec.SizeMiB = &size
+	}
+	return spec
+}
+
+// The create and restore wire formats persist lifecycle limits in whole seconds.
+func validateLifecycleLimits(maxDuration, idleTimeout *time.Duration) error {
+	for _, limit := range []struct {
+		name  string
+		value *time.Duration
+	}{
+		{"max duration", maxDuration},
+		{"idle timeout", idleTimeout},
+	} {
+		if limit.value != nil && (*limit.value < 0 || *limit.value%time.Second != 0) {
+			return &Error{Kind: ErrInvalidConfig, Message: limit.name + " must be a non-negative whole number of seconds"}
+		}
+	}
+	return nil
+}
+
+// durationSecsCeil rounds a Duration up to whole seconds. Sub-second values
+// round up to 1 so that "any positive timeout" remains positive on the wire.
+func durationSecsCeil(d time.Duration) uint64 {
+	if d <= 0 {
+		return 0
+	}
+	return uint64((d + time.Second - 1) / time.Second)
+}
+
+func durationMillisCeil(d time.Duration) uint64 {
+	if d <= 0 {
+		return 0
+	}
+	// Divide before rounding so a large valid Duration cannot overflow.
+	millis := uint64(d / time.Millisecond)
+	if d%time.Millisecond != 0 {
+		millis++
+	}
+	return millis
+}
+
+func stopTimeoutMillis(opts []StopOption) *uint64 {
+	o := lifecycleOptions{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if !o.timeoutSet {
+		return nil
+	}
+	timeout := durationMillisCeil(o.timeout)
+	return &timeout
+}
+
+func killTimeoutMillis(opts []KillOption) uint64 {
+	o := lifecycleOptions{timeout: defaultKillTimeout}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return durationMillisCeil(o.timeout)
+}
+
+func sandboxStopResultFromFFI(result *ffi.SandboxStopResult) *SandboxStopResult {
+	if result == nil {
+		return nil
+	}
+	return &SandboxStopResult{
+		Name:       result.Name,
+		Status:     SandboxStatus(result.Status),
+		ExitCode:   result.ExitCode,
+		Signal:     result.Signal,
+		ObservedAt: time.Unix(result.ObservedAtUnix, 0),
+		Source:     result.Source,
+	}
+}
+
+func sandboxPingResultFromFFI(result *ffi.SandboxPingResult) *SandboxPingResult {
+	if result == nil {
+		return nil
+	}
+	return &SandboxPingResult{
+		Name:    result.Name,
+		Latency: time.Duration(result.LatencyMs * float64(time.Millisecond)),
+	}
+}
+
+func sandboxTouchResultFromFFI(result *ffi.SandboxTouchResult) *SandboxTouchResult {
+	if result == nil {
+		return nil
+	}
+	return &SandboxTouchResult{
+		Name:        result.Name,
+		ActivitySeq: result.ActivitySeq,
+	}
+}
+
+func validateHTTPConfig(network *NetworkConfig) error {
+	if network == nil || network.HTTP == nil {
+		return nil
+	}
+	switch network.HTTP.DenyResponseFormat {
+	case "", HTTPDenyResponseText, HTTPDenyResponseJSON:
+		return nil
+	default:
+		return &Error{Kind: ErrInvalidConfig, Message: "deny_response_format must be text or json"}
+	}
+}
+
+// buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
+func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
+	out := &ffi.NetworkOptions{
+		DNSRebindProtection:      n.DNSRebindProtection,
+		DenyDomains:              n.DenyDomains,
+		DenyDomainSuffixes:       n.DenyDomainSuffixes,
+		Ports:                    n.Ports,
+		PortBindings:             buildFFIPortBindings(n.PortBindings),
+		TCPAcceptQueueSize:       n.TCPAcceptQueueSize,
+		MaxInboundTCPConnections: n.MaxInboundTCPConnections,
+		IPv4Pool:                 n.IPv4Pool,
+		IPv6Pool:                 n.IPv6Pool,
+		NAT64Prefixes:            n.NAT64Prefixes,
+		MaxConnections:           n.MaxConnections,
+		MaxTCPConnections:        n.MaxTCPConnections,
+		MaxUDPConnections:        n.MaxUDPConnections,
+		RateLimiter:              buildFFINetworkRateLimiter(n.RateLimiter),
+		SecretViolationAction:    string(n.SecretViolationAction),
+		TrustHostCAs:             n.TrustHostCAs,
+	}
+
+	if n.HTTP != nil {
+		format := n.HTTP.DenyResponseFormat
+		if format == "" {
+			format = HTTPDenyResponseJSON
+		}
+		out.HTTP = &ffi.HTTPConfig{DenyResponseFormat: string(format), DenyMessage: n.HTTP.DenyMessage, DenyResponse: n.HTTP.DenyResponse, NetworkDenyMessage: n.HTTP.NetworkDenyMessage, SecretDenyMessage: n.HTTP.SecretDenyMessage}
+	}
+
+	strict := !n.DisableStrict
+	out.Strict = &strict
+
+	if len(n.Rules) > 0 || n.DefaultEgress != "" || n.DefaultIngress != "" {
+		cp := &ffi.CustomNetworkPolicy{
+			DefaultEgress:  string(n.DefaultEgress),
+			DefaultIngress: string(n.DefaultIngress),
+		}
+		for _, r := range n.Rules {
+			rule := ffi.NetworkRule{
+				Action:      string(r.Action),
+				Direction:   string(r.Direction),
+				Destination: r.Destination,
+				Protocol:    string(r.Protocol),
+				Port:        r.Port,
+				Ports:       append([]string(nil), r.Ports...),
+			}
+			for _, p := range r.Protocols {
+				rule.Protocols = append(rule.Protocols, string(p))
+			}
+			cp.Rules = append(cp.Rules, rule)
+		}
+		out.CustomPolicy = cp
+	}
+
+	if n.DNS != nil {
+		out.DNS = &ffi.DNSOptions{
+			RebindProtection: n.DNS.RebindProtection,
+			Nameservers:      append([]string(nil), n.DNS.Nameservers...),
+			QueryTimeoutMs:   n.DNS.QueryTimeoutMs,
+		}
+	}
+
+	if n.TLS != nil {
+		scopedUpstreamCACerts := make([]ffi.ScopedUpstreamCACert, 0, len(n.TLS.ScopedUpstreamCACerts))
+		for _, scoped := range n.TLS.ScopedUpstreamCACerts {
+			scopedUpstreamCACerts = append(scopedUpstreamCACerts, ffi.ScopedUpstreamCACert{
+				Pattern: scoped.Pattern,
+				Path:    scoped.Path,
+			})
+		}
+		scopedVerifyUpstream := make([]ffi.ScopedVerifyUpstream, 0, len(n.TLS.ScopedVerifyUpstream))
+		for _, scoped := range n.TLS.ScopedVerifyUpstream {
+			scopedVerifyUpstream = append(scopedVerifyUpstream, ffi.ScopedVerifyUpstream{
+				Pattern: scoped.Pattern,
+				Verify:  scoped.Verify,
+			})
+		}
+		out.TLS = &ffi.TLSOptions{
+			Bypass:                n.TLS.Bypass,
+			VerifyUpstream:        n.TLS.VerifyUpstream,
+			InterceptedPorts:      n.TLS.InterceptedPorts,
+			BlockQUIC:             n.TLS.BlockQUIC,
+			CACert:                n.TLS.CACert,
+			CAKey:                 n.TLS.CAKey,
+			UpstreamCACerts:       append([]string(nil), n.TLS.UpstreamCACerts...),
+			ScopedUpstreamCACerts: scopedUpstreamCACerts,
+			ScopedVerifyUpstream:  scopedVerifyUpstream,
+		}
+	}
+
+	return out
+}
+
+func buildFFIOutboundProxy(proxy *OutboundProxy) *ffi.OutboundProxyOptions {
+	if proxy == nil {
+		return nil
+	}
+	result := &ffi.OutboundProxyOptions{
+		Protocol: proxy.protocol,
+		Address:  proxy.address,
+		UserID:   proxy.userID,
+	}
+	if proxy.hasCredentials {
+		result.Username = &proxy.username
+		result.PasswordSource = &ffi.SecretSourceOptions{
+			Kind: proxy.password.kind,
+			Var:  proxy.password.varName,
+		}
+	}
+	return result
+}
+
+func buildFFINetworkRateLimiter(l *NetworkRateLimiterConfig) *ffi.NetworkRateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.NetworkRateLimiterOptions{
+		Egress:  buildFFIRateLimiter(l.Egress),
+		Ingress: buildFFIRateLimiter(l.Ingress),
+	}
+}
+
+func buildFFIRateLimiter(l *RateLimiterConfig) *ffi.RateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.RateLimiterOptions{
+		Bandwidth: buildFFITokenBucket(l.Bandwidth),
+		Ops:       buildFFITokenBucket(l.Ops),
+	}
+}
+
+func buildFFITokenBucket(b *TokenBucketConfig) *ffi.TokenBucketOptions {
+	if b == nil {
+		return nil
+	}
+	// Keep invalid durations invalid on the wire so the Rust builder returns
+	// a configuration error. Casting a negative Milliseconds result directly
+	// to uint64 would otherwise turn it into an enormous valid interval.
+	var refillTimeMs uint64
+	if b.RefillTime >= time.Millisecond && b.RefillTime%time.Millisecond == 0 {
+		refillTimeMs = uint64(b.RefillTime / time.Millisecond)
+	}
+	return &ffi.TokenBucketOptions{
+		Size:         b.Size,
+		RefillTimeMs: refillTimeMs,
+		OneTimeBurst: b.OneTimeBurst,
+	}
+}
+
+func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
+	out := make([]ffi.PortBindingOptions, 0, len(bindings))
+	for _, b := range bindings {
+		out = append(out, ffi.PortBindingOptions{
+			Bind:      b.Bind,
+			HostPort:  b.HostPort,
+			GuestPort: b.GuestPort,
+			Protocol:  string(b.Protocol),
+		})
+	}
+	return out
+}
+
+func buildFFIVsockRoutes(routes []VsockRoute) []ffi.VsockRouteOptions {
+	out := make([]ffi.VsockRouteOptions, 0, len(routes))
+	for _, route := range routes {
+		out = append(out, ffi.VsockRouteOptions{
+			HostSocket: route.HostSocket,
+			Port:       route.Port,
+			SocketType: string(route.SocketType),
+		})
+	}
+	return out
+}
+
+// GetSandbox looks up a resource without starting it or connecting to its guest.
+// Guest operations prepare the retained receiver automatically when needed.
+func GetSandbox(ctx context.Context, name string) (*Sandbox, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	return selected.Sandboxes().Get(ctx, name)
+}
+
+// GetRunningSandbox looks up an existing sandbox and connects or starts it.
+// Missing resources are errors. A newly started local run belongs to the returned
+// Sandbox; connecting to an existing run does not acquire shutdown ownership.
+func GetRunningSandbox(ctx context.Context, name string) (*Sandbox, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	return selected.Sandboxes().GetRunning(ctx, name)
+}
+
+// StartSandbox boots a stopped sandbox by name and returns a live Sandbox.
+// Sandbox names are limited to 128 UTF-8 bytes.
+func StartSandbox(ctx context.Context, name string) (*Sandbox, error) {
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	return selected.Sandboxes().Start(ctx, name)
+}
+
+// StartSandboxDetached boots a stopped sandbox in detached mode. The VM keeps
+// running after the returned handle is released. Sandbox names are limited to
+// 128 UTF-8 bytes.
+func StartSandboxDetached(ctx context.Context, name string) (*Sandbox, error) {
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	return selected.Sandboxes().StartDetached(ctx, name)
+}
+
+// AllSandboxMetrics returns a point-in-time metrics snapshot for every running
+// sandbox, keyed by sandbox name. Only running and draining sandboxes appear.
+func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
+	raw, err := ffi.AllSandboxMetrics(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	out := make(map[string]*Metrics, len(raw))
+	for name, m := range raw {
+		out[name] = &Metrics{
+			CPUPercent:              m.CPUPercent,
+			VCPUTimeNs:              m.VCPUTimeNs,
+			MemoryBytes:             m.MemoryBytes,
+			MemoryAvailableBytes:    m.MemoryAvailableBytes,
+			MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+			MemoryLimitBytes:        m.MemoryLimitBytes,
+			DiskReadBytes:           m.DiskReadBytes,
+			DiskWriteBytes:          m.DiskWriteBytes,
+			NetRxBytes:              m.NetRxBytes,
+			NetTxBytes:              m.NetTxBytes,
+			UpperUsedBytes:          m.UpperUsedBytes,
+			UpperFreeBytes:          m.UpperFreeBytes,
+			UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
+			Uptime:                  m.Uptime,
+		}
+	}
+	return out, nil
+}
+
+// SandboxPage is one page returned by ListSandboxes or ListSandboxesWith.
+type SandboxPage struct {
+	Sandboxes  []*Sandbox
+	NextCursor *string
+}
+
+type sandboxListOptions struct {
+	cursor *string
+	limit  *uint32
+	labels map[string]string
+}
+
+// SandboxListOption configures one paginated sandbox list request.
+type SandboxListOption func(*sandboxListOptions)
+
+type lifecycleOptions struct {
+	timeout    time.Duration
+	timeoutSet bool
+}
+
+type restartOptions struct {
+	force    bool
+	timeout  time.Duration
+	detached bool
+}
+
+type destroyOptions struct {
+	force   bool
+	timeout time.Duration
+}
+
+// StopOption configures Sandbox.Stop.
+type StopOption func(*lifecycleOptions)
+
+// KillOption configures Sandbox.Kill.
+type KillOption func(*lifecycleOptions)
+
+// RestartOption configures identity-safe sandbox restart.
+type RestartOption func(*restartOptions)
+
+// DestroyOption configures identity-safe stop-and-remove convergence.
+type DestroyOption func(*destroyOptions)
+
+// SandboxStopResult describes a terminal sandbox state observed by WaitUntilStopped.
+type SandboxStopResult struct {
+	Name       string
+	Status     SandboxStatus
+	ExitCode   *int
+	Signal     *int
+	ObservedAt time.Time
+	Source     *string
+}
+
+// SandboxPingResult describes a successful agent reachability check.
+type SandboxPingResult struct {
+	Name    string
+	Latency time.Duration
+}
+
+// SandboxTouchResult describes a successful explicit idle-activity refresh.
+type SandboxTouchResult struct {
+	Name        string
+	ActivitySeq uint64
+}
+
+// WithStopTimeout bounds Stop's wait for graceful shutdown. Expiry returns an
+// error without force-killing; zero expires before sending a shutdown request.
+func WithStopTimeout(timeout time.Duration) StopOption {
+	return func(o *lifecycleOptions) {
+		o.timeout = timeout
+		o.timeoutSet = true
+	}
+}
+
+// WithKillTimeout sets how long Kill waits for stopped-state observation.
+func WithKillTimeout(timeout time.Duration) KillOption {
+	return func(o *lifecycleOptions) { o.timeout = timeout }
+}
+
+// WithRestartForce force-terminates instead of requesting graceful shutdown.
+func WithRestartForce() RestartOption {
+	return func(options *restartOptions) { options.force = true }
+}
+
+// WithRestartTimeout sets the graceful-shutdown convergence timeout. Reaching
+// the timeout escalates the restart to forceful termination.
+func WithRestartTimeout(timeout time.Duration) RestartOption {
+	return func(options *restartOptions) { options.timeout = timeout }
+}
+
+// WithRestartDetached starts the restarted runtime in detached mode.
+func WithRestartDetached() RestartOption {
+	return func(options *restartOptions) { options.detached = true }
+}
+
+// WithDestroyForce force-terminates instead of requesting graceful shutdown.
+func WithDestroyForce() DestroyOption {
+	return func(options *destroyOptions) { options.force = true }
+}
+
+// WithDestroyTimeout sets the graceful-shutdown convergence timeout. Reaching
+// the timeout escalates destruction to forceful termination.
+func WithDestroyTimeout(timeout time.Duration) DestroyOption {
+	return func(options *destroyOptions) { options.timeout = timeout }
+}
+
+// WithListCursor continues after a cursor returned by a previous page.
+func WithListCursor(cursor string) SandboxListOption {
+	return func(options *sandboxListOptions) { options.cursor = &cursor }
+}
+
+// WithListLimit sets the maximum number of sandboxes returned in one page.
+func WithListLimit(limit uint32) SandboxListOption {
+	return func(options *sandboxListOptions) { options.limit = &limit }
+}
+
+// WithListLabels requires every returned sandbox to carry all labels.
+func WithListLabels(labels map[string]string) SandboxListOption {
+	return func(options *sandboxListOptions) {
+		if options.labels == nil {
+			options.labels = make(map[string]string, len(labels))
+		}
+		for key, value := range labels {
+			options.labels[key] = value
+		}
+	}
+}
+
+// ListSandboxes returns the first page of known sandboxes.
+func ListSandboxes(ctx context.Context) (*SandboxPage, error) {
+	return listSandboxes(ctx)
+}
+
+// ListSandboxesWith returns a configured page of known sandboxes.
+func ListSandboxesWith(ctx context.Context, configure ...SandboxListOption) (*SandboxPage, error) {
+	return listSandboxes(ctx, configure...)
+}
+
+func listSandboxes(ctx context.Context, configure ...SandboxListOption) (*SandboxPage, error) {
+	selected, err := configuredContext()
+	if err != nil {
+		return nil, err
+	}
+	return selected.Sandboxes().List(ctx, configure...)
+}
+
+// RemoveSandbox removes a stopped sandbox's persisted state by name.
+// Sandbox names are limited to 128 UTF-8 bytes.
+func RemoveSandbox(ctx context.Context, name string) error {
+	selected, err := configuredContext()
+	if err != nil {
+		return err
+	}
+	return selected.Sandboxes().Remove(ctx, name)
+}
+
+// ---------------------------------------------------------------------------
+// Live sandbox methods
+// ---------------------------------------------------------------------------
+
+// Name returns the sandbox's name. Names are limited to 128 UTF-8 bytes.
+func (s *Sandbox) Name() string { return s.inner.Name() }
+
+// ID returns the stable identity of this persisted sandbox.
+func (s *Sandbox) ID() string { return s.inner.ID() }
+
+// ExternalMountWarning describes an unmapped filesystem or an accepted restore mismatch.
+type ExternalMountWarning struct {
+	GuestPath   string   `json:"guest_path"`
+	Reason      string   `json:"reason"`
+	StaleInodes []uint64 `json:"stale_inodes"`
+}
+
+// RestoreWarnings reports unmapped external filesystems and accepted restore mismatches.
+func (s *Sandbox) RestoreWarnings(ctx context.Context) ([]ExternalMountWarning, error) {
+	data, err := s.inner.RestoreWarnings(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	var warnings []ExternalMountWarning
+	if err := json.Unmarshal([]byte(data), &warnings); err != nil {
+		return nil, err
+	}
+	return warnings, nil
+}
+
+// Stop requests graceful shutdown and waits for this exact sandbox run to finish.
+// There is no built-in timeout. Context cancellation or WithStopTimeout ends only
+// the wait and never force-kills the sandbox.
+func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
+	return wrapFFI(s.inner.Stop(ctx, stopTimeoutMillis(opts)))
+}
+
+// StopWithTimeout bounds graceful shutdown observation without force-killing.
+func (s *Sandbox) StopWithTimeout(ctx context.Context, timeout time.Duration) error {
+	return s.Stop(ctx, WithStopTimeout(timeout))
+}
+
+// RequestStop requests graceful shutdown and returns once the request is sent.
+func (s *Sandbox) RequestStop(ctx context.Context) error {
+	return wrapFFI(s.inner.RequestStop(ctx))
+}
+
+// Pause controls resident execution without creating a snapshot.
+func (s *Sandbox) Pause(ctx context.Context) error {
+	return wrapFFI(s.inner.Pause(ctx))
+}
+
+// PauseWithGuestFlush optionally prepares flushed disks for capture while paused.
+func (s *Sandbox) PauseWithGuestFlush(ctx context.Context, policy GuestFlush) error {
+	return wrapFFI(s.inner.PauseWithGuestFlush(ctx, string(policy)))
+}
+
+// Branch creates a live fork.
+//
+// Deprecated: use Fork.
+func (s *Sandbox) Branch(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	return s.Fork(ctx, name, opts...)
+}
+
+// BranchMany creates live forks from one capture.
+//
+// Deprecated: use ForkMany.
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	return s.ForkMany(ctx, names, opts...)
+}
+
+// Fork creates an independent local CoW child without publishing a durable full snapshot.
+func (s *Sandbox) Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	options := forkOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := s.inner.Branch(ctx, name, options.recordIntegrity, volumes, string(options.guestFlush))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
+// Resume controls resident execution without creating a snapshot.
+func (s *Sandbox) Resume(ctx context.Context) error {
+	return wrapFFI(s.inner.Resume(ctx))
+}
+
+// ForkMany captures once and returns each child's outcome in input order.
+// Validation/capture errors fail the call; individual startup failures are returned in Error.
+func (s *Sandbox) ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	options := forkOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.inner.BranchMany(ctx, names, options.recordIntegrity, volumes, string(options.guestFlush))
+	return wrapBranchOutcomes(rows, err)
+}
+
+// ffiForkVolumes validates and encodes fork volumes like restore volumes.
+func ffiForkVolumes(volumes map[string]MountConfig) (map[string]ffi.MountSpec, error) {
+	if len(volumes) == 0 {
+		return nil, nil
+	}
+	if err := validateOwnedMounts(volumes); err != nil {
+		return nil, err
+	}
+	specs := buildFFICreateOptions(SandboxConfig{Volumes: volumes}).Volumes
+	// Fork is always local. Resolve host paths now so a later chdir cannot change
+	// which file the native fork opens.
+	var cwd string
+	for guestPath, spec := range specs {
+		for _, hostPath := range []*string{&spec.Bind, &spec.Disk} {
+			if *hostPath == "" || filepath.IsAbs(*hostPath) {
+				continue
+			}
+			var abs string
+			var err error
+			if filepath.Separator == '\\' {
+				abs, err = filepath.Abs(*hostPath)
+			} else {
+				if cwd == "" {
+					cwd, err = os.Getwd()
+				}
+				if err == nil {
+					// Keep ".." components uncleaned so symlinked parents resolve as the native call resolves them.
+					abs = strings.TrimSuffix(cwd, "/") + "/" + *hostPath
+				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("microsandbox: resolve host path %q for fork volume %q: %w", *hostPath, guestPath, err)
+			}
+			*hostPath = abs
+		}
+		specs[guestPath] = spec
+	}
+	return specs, nil
+}
+
+func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]ForkOutcome, error) {
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	results := make([]ForkOutcome, 0, len(rows))
+	for _, row := range rows {
+		item := ForkOutcome{Name: row.Name, Error: wrapFFI(row.Error)}
+		if row.Sandbox != nil {
+			item.Sandbox = &Sandbox{inner: row.Sandbox}
+		}
+		results = append(results, item)
+	}
+	return results, nil
+}
+
+// Kill force-kills the sandbox and waits until stopped state is observed.
+func (s *Sandbox) Kill(ctx context.Context, opts ...KillOption) error {
+	return wrapFFI(s.inner.Kill(ctx, killTimeoutMillis(opts)))
+}
+
+// RequestKill requests force termination and returns once the request is sent.
+func (s *Sandbox) RequestKill(ctx context.Context) error {
+	return wrapFFI(s.inner.RequestKill(ctx))
+}
+
+// Close releases this native handle. An attached final owner triggers fallback
+// shutdown; completion is not awaited. Detached and remote runs keep running.
+// Use Stop(ctx) first when shutdown completion must be observed.
+func (s *Sandbox) Close() error {
+	return wrapFFI(s.inner.Close())
+}
+
+// Detach disarms automatic shutdown for the shared local ownership group.
+// It is repeatable and leaves this Sandbox usable, including explicit Stop.
+// Call Close when finished to release the native handle.
+func (s *Sandbox) Detach(ctx context.Context) error {
+	return wrapFFI(s.inner.Detach(ctx))
+}
+
+// RequestDrain requests graceful drain and returns once the request is sent.
+func (s *Sandbox) RequestDrain(ctx context.Context) error {
+	return wrapFFI(s.inner.RequestDrain(ctx))
+}
+
+// WaitUntilStopped waits until this sandbox is observed in terminal state.
+func (s *Sandbox) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error) {
+	result, err := s.inner.WaitUntilStopped(ctx)
+	return sandboxStopResultFromFFI(result), wrapFFI(err)
+}
+
+// WaitForStatus waits without a built-in timeout until this exact sandbox
+// reaches status. Use ctx for deadlines or cancellation. A same-name
+// replacement is rejected.
+func (s *Sandbox) WaitForStatus(ctx context.Context, status SandboxStatus) error {
+	return wrapFFI(s.inner.WaitForStatus(ctx, string(status)))
+}
+
+// Restart stops and starts this exact sandbox. It defaults to graceful shutdown
+// with a ten-second convergence timeout; created, stopped, and crashed
+// sandboxes start directly.
+func (s *Sandbox) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error) {
+	options := restartOptions{timeout: defaultStopTimeout}
+	for _, apply := range opts {
+		apply(&options)
+	}
+	inner, err := s.inner.Lifecycle(ctx, "restart", ffi.SandboxHandleLifecycleOptions{
+		Detached:  options.detached,
+		Force:     options.force,
+		TimeoutMs: durationMillisCeil(options.timeout),
+	})
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
+// Destroy stops and removes this exact sandbox. It defaults to graceful
+// shutdown with a ten-second convergence timeout and refuses to remove a
+// same-name replacement.
+func (s *Sandbox) Destroy(ctx context.Context, opts ...DestroyOption) error {
+	options := destroyOptions{timeout: defaultStopTimeout}
+	for _, apply := range opts {
+		apply(&options)
+	}
+	_, err := s.inner.Lifecycle(ctx, "destroy", ffi.SandboxHandleLifecycleOptions{
+		Force:     options.force,
+		TimeoutMs: durationMillisCeil(options.timeout),
+	})
+	return wrapFFI(err)
+}
+
+// OwnsLifecycle reports whether this handle owns the VM process. When true,
+// closing or stopping the handle terminates the sandbox.
+//
+// The error return covers stale handles and FFI-layer failures; callers that
+// don't care can use OwnsLifecycleOrFalse.
+func (s *Sandbox) OwnsLifecycle() (bool, error) {
+	owns, err := s.inner.OwnsLifecycle()
+	return owns, wrapFFI(err)
+}
+
+// OwnsLifecycleOrFalse is a convenience that swallows the error and returns
+// false on any failure. Suitable for log lines and best-effort branching.
+func (s *Sandbox) OwnsLifecycleOrFalse() bool {
+	owns, err := s.inner.OwnsLifecycle()
+	return err == nil && owns
+}
+
+// Attach starts an interactive PTY session running cmd with optional args.
+// It blocks until the process exits and returns the exit code.
+// The caller's terminal must be a real TTY; this is primarily useful for
+// CLI tools, not library code.
+func (s *Sandbox) Attach(ctx context.Context, cmd string, args ...string) (int, error) {
+	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{Args: args})
+	return code, wrapFFI(err)
+}
+
+// AttachDefault starts an interactive PTY session for the effective OCI entrypoint and CMD.
+func (s *Sandbox) AttachDefault(ctx context.Context, opts ...AttachOption) (int, error) {
+	o := AttachConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	code, err := s.inner.AttachDefault(ctx, ffi.AttachOptions{
+		Cwd:        o.Cwd,
+		User:       o.User,
+		Env:        o.Env,
+		DetachKeys: o.DetachKeys,
+	})
+	return code, wrapFFI(err)
+}
+
+// AttachWith starts an interactive PTY session running cmd with args, applying
+// the given options. Otherwise identical to Attach.
+func (s *Sandbox) AttachWith(ctx context.Context, cmd string, args []string, opts ...AttachOption) (int, error) {
+	o := AttachConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{
+		Args:       args,
+		Cwd:        o.Cwd,
+		User:       o.User,
+		Env:        o.Env,
+		DetachKeys: o.DetachKeys,
+	})
+	return code, wrapFFI(err)
+}
+
+// AttachShell starts an interactive PTY session in the sandbox's default shell.
+// It blocks until the shell exits and returns the exit code.
+func (s *Sandbox) AttachShell(ctx context.Context) (int, error) {
+	code, err := s.inner.AttachShell(ctx)
+	return code, wrapFFI(err)
+}
+
+// FS returns a filesystem accessor for this sandbox.
+func (s *Sandbox) FS() *SandboxFSOps {
+	return &SandboxFSOps{sandbox: s}
+}
+
+// Metrics returns the current resource usage for this sandbox.
+func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error) {
+	m, err := s.inner.Metrics(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Metrics{
+		CPUPercent:              m.CPUPercent,
+		VCPUTimeNs:              m.VCPUTimeNs,
+		MemoryBytes:             m.MemoryBytes,
+		MemoryAvailableBytes:    m.MemoryAvailableBytes,
+		MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+		MemoryLimitBytes:        m.MemoryLimitBytes,
+		DiskReadBytes:           m.DiskReadBytes,
+		DiskWriteBytes:          m.DiskWriteBytes,
+		NetRxBytes:              m.NetRxBytes,
+		NetTxBytes:              m.NetTxBytes,
+		UpperUsedBytes:          m.UpperUsedBytes,
+		UpperFreeBytes:          m.UpperFreeBytes,
+		UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
+		Uptime:                  m.Uptime,
+	}, nil
+}
+
+// Ping checks whether agentd is reachable without refreshing idle activity.
+func (s *Sandbox) Ping(ctx context.Context) (*SandboxPingResult, error) {
+	result, err := s.inner.Ping(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return sandboxPingResultFromFFI(result), nil
+}
+
+// Touch explicitly refreshes this sandbox's idle activity timer.
+func (s *Sandbox) Touch(ctx context.Context) (*SandboxTouchResult, error) {
+	result, err := s.inner.Touch(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return sandboxTouchResultFromFFI(result), nil
+}
+
+// MetricsStreamHandle is a live metrics subscription. Obtain via
+// Sandbox.MetricsStream. Call Close to release Rust-side resources.
+type MetricsStreamHandle struct {
+	inner *ffi.MetricsStreamHandle
+}
+
+// Recv blocks until the next metrics snapshot arrives or ctx is cancelled.
+// Returns nil, nil when the stream has ended (sandbox exited).
+func (h *MetricsStreamHandle) Recv(ctx context.Context) (*Metrics, error) {
+	m, err := h.inner.Recv(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	if m == nil {
+		return nil, nil
+	}
+	return &Metrics{
+		CPUPercent:              m.CPUPercent,
+		VCPUTimeNs:              m.VCPUTimeNs,
+		MemoryBytes:             m.MemoryBytes,
+		MemoryAvailableBytes:    m.MemoryAvailableBytes,
+		MemoryHostResidentBytes: m.MemoryHostResidentBytes,
+		MemoryLimitBytes:        m.MemoryLimitBytes,
+		DiskReadBytes:           m.DiskReadBytes,
+		DiskWriteBytes:          m.DiskWriteBytes,
+		NetRxBytes:              m.NetRxBytes,
+		NetTxBytes:              m.NetTxBytes,
+		UpperUsedBytes:          m.UpperUsedBytes,
+		UpperFreeBytes:          m.UpperFreeBytes,
+		UpperHostAllocatedBytes: m.UpperHostAllocatedBytes,
+		Uptime:                  m.Uptime,
+	}, nil
+}
+
+// Close stops the metrics stream and releases Rust-side resources.
+func (h *MetricsStreamHandle) Close() error {
+	return wrapFFI(h.inner.Close())
+}
+
+// MetricsStream starts a streaming metrics subscription that delivers a
+// snapshot every interval. Close the returned handle when done.
+//
+// interval is rounded up to milliseconds; a zero or negative value uses the
+// runtime minimum (~1 ms).
+func (s *Sandbox) MetricsStream(ctx context.Context, interval time.Duration) (*MetricsStreamHandle, error) {
+	var ms uint64
+	if interval > 0 {
+		ms = uint64((interval + time.Millisecond - 1) / time.Millisecond)
+	}
+	h, err := s.inner.MetricsStream(ctx, ms)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &MetricsStreamHandle{inner: h}, nil
+}
+
+// Metrics is a snapshot of sandbox resource usage.
+type Metrics struct {
+	CPUPercent              float64
+	VCPUTimeNs              uint64
+	MemoryBytes             uint64
+	MemoryAvailableBytes    *uint64
+	MemoryHostResidentBytes *uint64
+	MemoryLimitBytes        uint64
+	DiskReadBytes           uint64
+	DiskWriteBytes          uint64
+	NetRxBytes              uint64
+	NetTxBytes              uint64
+	UpperUsedBytes          *uint64
+	UpperFreeBytes          *uint64
+	UpperHostAllocatedBytes *uint64
+	Uptime                  time.Duration
+}

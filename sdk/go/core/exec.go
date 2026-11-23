@@ -1,0 +1,325 @@
+package microsandbox
+
+import (
+	"context"
+	"time"
+
+	"github.com/superradcompany/microsandbox/sdk/go/core/internal/ffi"
+)
+
+// timeoutSecsCeil rounds a Duration up to whole seconds. The FFI boundary
+// carries timeouts as uint64 seconds, so any positive sub-second Duration
+// must round to at least 1 — truncation would drop it to 0, which the Rust
+// side interprets as "no timeout" (the opposite of the caller's intent).
+func timeoutSecsCeil(d time.Duration) uint64 {
+	if d <= 0 {
+		return 0
+	}
+	return uint64((d-1)/time.Second) + 1
+}
+
+// ExecOutput is the collected result of a command execution.
+//
+// A non-zero ExitCode is NOT treated as a Go error — callers inspect
+// Success or ExitCode explicitly, matching how os/exec.Cmd.Output works
+// against a script that exits non-zero.
+type ExecOutput struct {
+	stdout   []byte
+	stderr   []byte
+	exitCode int
+}
+
+// Stdout returns captured standard output as a string.
+func (e *ExecOutput) Stdout() string { return string(e.stdout) }
+
+// StdoutBytes returns captured standard output as bytes.
+func (e *ExecOutput) StdoutBytes() []byte { return e.stdout }
+
+// Stderr returns captured standard error as a string.
+func (e *ExecOutput) Stderr() string { return string(e.stderr) }
+
+// StderrBytes returns captured standard error as bytes.
+func (e *ExecOutput) StderrBytes() []byte { return e.stderr }
+
+// ExitCode returns the process's exit code, or -1 if the guest did not
+// report one (e.g. the process was killed by a signal).
+func (e *ExecOutput) ExitCode() int { return e.exitCode }
+
+// Success reports whether the command exited with code 0.
+func (e *ExecOutput) Success() bool { return e.exitCode == 0 }
+
+// Validate collected options before shell lookup or guest execution. Only
+// streaming sessions expose a handle from which the caller can take stdin.
+func collectedExecOptions(opts []ExecOption) (ffi.ExecOptions, error) {
+	var config ExecConfig
+	for _, opt := range opts {
+		opt(&config)
+	}
+	if config.StdinPipe {
+		return ffi.ExecOptions{}, &Error{Kind: ErrInvalidConfig, Message: "collected execution cannot expose a stdin pipe; use a streaming execution method"}
+	}
+	return ffi.ExecOptions{Cwd: config.Cwd, TTY: config.TTY, User: config.User, Env: config.Env, TimeoutSecs: timeoutSecsCeil(config.Timeout)}, nil
+}
+
+// ExecDefault runs the sandbox's effective OCI entrypoint and CMD.
+// A missing executable default is returned as ErrNoDefaultCommand.
+func (s *Sandbox) ExecDefault(ctx context.Context, opts ...ExecOption) (*ExecOutput, error) {
+	ffiOpts, err := collectedExecOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.inner.ExecDefault(ctx, ffiOpts)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecOutput{
+		stdout:   []byte(res.Stdout),
+		stderr:   []byte(res.Stderr),
+		exitCode: res.ExitCode,
+	}, nil
+}
+
+// Exec runs a command in the sandbox and returns its collected output.
+// Invalid options and transport/runtime failures return an error. A non-zero
+// command exit is reported through ExecOutput.ExitCode.
+// This call blocks until the command exits.
+func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecOutput, error) {
+	ffiOpts, err := collectedExecOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	return s.execCollected(ctx, cmd, args, ffiOpts)
+}
+
+func (s *Sandbox) execCollected(ctx context.Context, cmd string, args []string, ffiOpts ffi.ExecOptions) (*ExecOutput, error) {
+	ffiOpts.Args = args
+	res, err := s.inner.Exec(ctx, cmd, ffiOpts)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecOutput{
+		stdout:   []byte(res.Stdout),
+		stderr:   []byte(res.Stderr),
+		exitCode: res.ExitCode,
+	}, nil
+}
+
+// Shell runs command with the configured shell (default /bin/sh) and waits for exit.
+func (s *Sandbox) Shell(ctx context.Context, command string, opts ...ExecOption) (*ExecOutput, error) {
+	ffiOpts, err := collectedExecOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	shell, err := s.inner.ShellPath(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return s.execCollected(ctx, shell, []string{"-c", command}, ffiOpts)
+}
+
+// ExecEventKind identifies what an ExecEvent carries.
+type ExecEventKind = ffi.ExecEventKind
+
+const (
+	// ExecEventStarted is sent once when the guest process starts.
+	ExecEventStarted ExecEventKind = ffi.ExecEventStarted
+	// ExecEventStdout carries a chunk of standard output.
+	ExecEventStdout ExecEventKind = ffi.ExecEventStdout
+	// ExecEventStderr carries a chunk of standard error.
+	ExecEventStderr ExecEventKind = ffi.ExecEventStderr
+	// ExecEventExited is sent when the process exits. ExitCode is valid.
+	ExecEventExited ExecEventKind = ffi.ExecEventExited
+	// ExecEventFailed is sent when the user program never started (binary
+	// missing, permission denied, etc.). Distinct from Exited — Failure is
+	// populated and ExitCode is not meaningful.
+	ExecEventFailed ExecEventKind = ffi.ExecEventFailed
+	// ExecEventStdinError is sent when writing to stdin failed. Failure is
+	// populated. The event is non-terminal; the process may still exit normally.
+	ExecEventStdinError ExecEventKind = ffi.ExecEventStdinError
+	// ExecEventDone signals that all events have been consumed.
+	ExecEventDone ExecEventKind = ffi.ExecEventDone
+)
+
+// ExecFailure carries structured detail about a failed-to-start exec.
+type ExecFailure = ffi.ExecFailure
+
+// ExecEvent is one event from a streaming exec session.
+type ExecEvent struct {
+	// Kind identifies which fields are populated.
+	Kind ExecEventKind
+
+	// PID is the guest process ID. Populated on ExecEventStarted.
+	PID uint32
+
+	// Data is a chunk of stdout or stderr bytes. Populated on ExecEventStdout
+	// and ExecEventStderr.
+	Data []byte
+
+	// ExitCode is the process exit code. Populated on ExecEventExited.
+	ExitCode int
+
+	// Failure carries the failure detail. Populated on ExecEventFailed and
+	// ExecEventStdinError.
+	Failure *ExecFailure
+}
+
+// ExecSink is a write-only pipe to a running process's stdin. Obtain via
+// ExecHandle.TakeStdin. Implements io.WriteCloser.
+//
+// Both Write and Close use context.Background() under the hood — there is no
+// way to cancel a stuck stdin write through the io.Writer interface alone.
+// For caller-controlled cancellation, use WriteCtx (see the FFI layer) or
+// tear the session down via ExecHandle.Kill / Close.
+type ExecSink = ffi.ExecSink
+
+// ExecHandle is a live streaming exec session. Obtain via Sandbox.ExecStream.
+// Call Close when done to release Rust-side resources.
+//
+// Signal, Kill, and Resize may be called concurrently with Recv. Other method
+// combinations, including concurrent Recv calls, are not supported.
+type ExecHandle struct {
+	inner *ffi.ExecStreamHandle
+}
+
+// ID returns the unique identifier for this exec session, assigned by the
+// guest agent. Useful for correlating log entries or referencing the session
+// from external tooling.
+func (h *ExecHandle) ID() (string, error) {
+	id, err := h.inner.ID()
+	return id, wrapFFI(err)
+}
+
+// TakeStdin returns the stdin sink for this exec session.
+//
+// Returns nil when:
+//   - the session was not started with WithExecStdinPipe, or
+//   - TakeStdin has already been called on this handle (single-take, matching
+//     the Node and Python SDK semantics).
+//
+// The caller is responsible for closing the sink when done writing. Closing
+// the sink without closing the exec handle is fine — they own different
+// Rust-side resources.
+func (h *ExecHandle) TakeStdin() *ExecSink {
+	return h.inner.TakeStdin()
+}
+
+// Recv blocks until the next event arrives or the stream ends. Returns an
+// event with Kind==ExecEventDone when all events have been consumed.
+//
+// ctx controls the wait. Cancellation signals the native call and returns
+// ctx.Err() after that call releases its borrowed FFI buffers. This is not
+// necessarily immediate and does not establish that the guest process exited.
+func (h *ExecHandle) Recv(ctx context.Context) (*ExecEvent, error) {
+	ev, err := h.inner.Recv(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecEvent{
+		Kind:     ev.Kind,
+		PID:      ev.PID,
+		Data:     ev.Data,
+		ExitCode: ev.ExitCode,
+		Failure:  ev.Failure,
+	}, nil
+}
+
+// Collect drains the stream, accumulates all output, and returns it as
+// ExecOutput. Equivalent to calling Recv in a loop and assembling the result.
+// Completion remains available to Wait afterward; output is not replayed.
+// Close the handle when finished using it.
+func (h *ExecHandle) Collect(ctx context.Context) (*ExecOutput, error) {
+	res, err := h.inner.Collect(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecOutput{
+		stdout:   []byte(res.Stdout),
+		stderr:   []byte(res.Stderr),
+		exitCode: res.ExitCode,
+	}, nil
+}
+
+// Wait blocks until the process exits and returns its exit code. Unlike
+// Collect, stdout and stderr are discarded. A terminal outcome observed by
+// Wait, Collect, or Recv is retained for subsequent waits while the handle is open.
+// Cancelling a wait does not establish that the command finished.
+// Close the handle when finished using it.
+func (h *ExecHandle) Wait(ctx context.Context) (int, error) {
+	code, err := h.inner.Wait(ctx)
+	return code, wrapFFI(err)
+}
+
+// Kill sends SIGKILL to the running process.
+func (h *ExecHandle) Kill(ctx context.Context) error {
+	return wrapFFI(h.inner.Kill(ctx))
+}
+
+// Signal sends a Unix signal to the running process (e.g. syscall.SIGTERM).
+func (h *ExecHandle) Signal(ctx context.Context, signal int) error {
+	return wrapFFI(h.inner.Signal(ctx, signal))
+}
+
+// Resize changes the pseudo-terminal size for this exec session.
+func (h *ExecHandle) Resize(ctx context.Context, rows, cols uint16) error {
+	return wrapFFI(h.inner.Resize(ctx, rows, cols))
+}
+
+// Close releases the Rust-side exec handle. Does not kill the running process;
+// call Signal(ctx, 9) first if you need to terminate it. Safe to call after
+// ExecEventDone has been received.
+func (h *ExecHandle) Close() error {
+	return wrapFFI(h.inner.Close())
+}
+
+// ExecStream starts a streaming exec session and returns an ExecHandle.
+// The handle MUST be closed with Close when the stream is no longer needed.
+//
+// ctx controls only the start handshake; individual Recv calls take their
+// own ctx. Non-zero exit codes are NOT errors — inspect ExecEventExited.
+//
+// This call is nonblocking, the handle returns immediately and the stream starts
+// in the background.
+func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecHandle, error) {
+	o := ExecConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, StdinPipe: o.StdinPipe, TTY: o.TTY, User: o.User, Env: o.Env}
+	if o.Timeout > 0 {
+		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
+	}
+	h, err := s.inner.ExecStream(ctx, cmd, ffiOpts)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecHandle{inner: h}, nil
+}
+
+// ExecDefaultStream starts a streaming exec of the effective OCI entrypoint and CMD.
+func (s *Sandbox) ExecDefaultStream(ctx context.Context, opts ...ExecOption) (*ExecHandle, error) {
+	o := ExecConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	ffiOpts := ffi.ExecOptions{Cwd: o.Cwd, StdinPipe: o.StdinPipe, TTY: o.TTY, User: o.User, Env: o.Env}
+	if o.Timeout > 0 {
+		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
+	}
+	handle, err := s.inner.ExecDefaultStream(ctx, ffiOpts)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecHandle{inner: handle}, nil
+}
+
+// ShellStream runs command with the configured shell (default /bin/sh) and streams output.
+//
+// This call is nonblocking, the handle returns immediately and the stream starts
+// in the background.
+func (s *Sandbox) ShellStream(ctx context.Context, command string, opts ...ExecOption) (*ExecHandle, error) {
+	shell, err := s.inner.ShellPath(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return s.ExecStream(ctx, shell, []string{"-c", command}, opts...)
+}
