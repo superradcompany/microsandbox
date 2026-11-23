@@ -52,10 +52,11 @@ pub(super) async fn recover(
         return Ok(());
     }
 
-    let directory = local
+    let private_dir = local
         .sandboxes_dir()
         .join(name)
         .join("runtime-leases/writeback");
+    let shared_dir = local.config().run_dir().join("writeback-leases");
     let policy = HostFilePolicy::strict_beneath(local.config().home());
 
     let leases = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
@@ -70,12 +71,21 @@ pub(super) async fn recover(
                     "invalid private writeback lease identity",
                 ));
             }
-            let lease = host_file::open(
-                &directory.join(&allocation.lease_name),
+            let lease = match host_file::open(
+                &private_dir.join(&allocation.lease_name),
                 HostFileKind::Regular,
                 HostFileAccess::ReadWrite,
                 &policy,
-            )?;
+            ) {
+                Ok(file) => file,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => host_file::open(
+                    &shared_dir.join(&allocation.lease_name),
+                    HostFileKind::Regular,
+                    HostFileAccess::ReadWrite,
+                    &policy,
+                )?,
+                Err(err) => return Err(err),
+            };
             if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
                 return Err(std::io::Error::last_os_error());
             }

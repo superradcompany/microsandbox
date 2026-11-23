@@ -681,13 +681,15 @@ pub fn enter(config: Config) -> ! {
     // Capture log_dir before moving config into run() — we need it after
     // a failure to write boot-error.json, regardless of how far run() got.
     let log_dir = config.log_dir.clone();
+    let run_dir = config.run_dir.clone();
+    let sandbox_name = config.name.clone();
     let metrics_slot = config.metrics_slot.clone();
     let failure_channel = super::progress::StartupFailureChannel::default();
     let result = run(config, &failure_channel);
     match result {
         Ok(infallible) => match infallible {},
         Err(e) => {
-            release_reserved_metrics_slot(metrics_slot.as_ref());
+            release_reserved_metrics_slot(metrics_slot.as_ref(), &run_dir, &sandbox_name);
             // Write the structured boot-error record so the parent CLI
             // can surface a real cause inline. Best-effort: any failure
             // to write falls back to the existing eprintln path, which
@@ -974,6 +976,8 @@ fn run(
     // so a missing handoff means sampling is disabled for this sandbox.
     let metrics_writer = activate_metrics_writer(
         config.metrics_slot.as_ref(),
+        &config.run_dir,
+        &config.name,
         config.metrics_sample_interval_ms,
         run_db_id,
         pid,
@@ -987,7 +991,7 @@ fn run(
         && config.metrics_slot.is_some()
         && config.metrics_sample_interval_ms.is_some()
     {
-        release_reserved_metrics_slot(config.metrics_slot.as_ref());
+        release_reserved_metrics_slot(config.metrics_slot.as_ref(), &config.run_dir, &config.name);
     }
 
     // Build the VM with an exit observer for DB cleanup and socket removal.
@@ -1242,7 +1246,11 @@ fn run(
             if let Some(writer) = metrics_writer.clone() {
                 let _ = writer.release(ReleaseMode::Free);
             } else {
-                release_reserved_metrics_slot(config.metrics_slot.as_ref());
+                release_reserved_metrics_slot(
+                    config.metrics_slot.as_ref(),
+                    &config.run_dir,
+                    &config.name,
+                );
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
             let _ = socket_paths.remove_artifacts();
@@ -1376,7 +1384,11 @@ fn run(
             if let Some(writer) = metrics_writer.clone() {
                 let _ = writer.release(ReleaseMode::Free);
             } else {
-                release_reserved_metrics_slot(config.metrics_slot.as_ref());
+                release_reserved_metrics_slot(
+                    config.metrics_slot.as_ref(),
+                    &config.run_dir,
+                    &config.name,
+                );
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
             let _ = socket_paths.remove_artifacts();
@@ -3361,17 +3373,40 @@ fn canonicalize_owned_mount_root(path: &Path) -> RuntimeResult<PathBuf> {
     })
 }
 
+fn open_metrics_registry(
+    handoff: &MetricsSlotHandoff,
+    run_dir: &Path,
+    sandbox_name: &str,
+) -> microsandbox_metrics::MetricsResult<MetricsRegistry> {
+    match MetricsRegistry::open(&handoff.shm_name) {
+        Ok(reg) => Ok(reg),
+        #[cfg(target_os = "linux")]
+        Err(microsandbox_metrics::MetricsError::Io(err))
+            if err.kind() == std::io::ErrorKind::NotFound =>
+        {
+            MetricsRegistry::open_file(&run_dir.join("runtime-metrics").join(sandbox_name))
+        }
+        Err(err) => {
+            #[cfg(not(target_os = "linux"))]
+            let _ = (run_dir, sandbox_name);
+            Err(err)
+        }
+    }
+}
+
 /// Open the shared-memory registry and promote the host-reserved slot to
 /// `Active`, returning a writer handle for the sampler.
 fn activate_metrics_writer(
     handoff: Option<&MetricsSlotHandoff>,
+    run_dir: &Path,
+    sandbox_name: &str,
     interval: Option<NonZero<u64>>,
     run_id: i32,
     pid: u32,
 ) -> Option<microsandbox_metrics::MetricsSlotWriter> {
     interval?;
     let handoff = handoff?;
-    let registry = match MetricsRegistry::open(&handoff.shm_name) {
+    let registry = match open_metrics_registry(handoff, run_dir, sandbox_name) {
         Ok(reg) => reg,
         Err(err) => {
             tracing::warn!(error = %err, shm = %handoff.shm_name, "failed to open metrics registry");
@@ -3395,9 +3430,13 @@ fn activate_metrics_writer(
 }
 
 /// Best-effort release of a metrics slot that has not been activated yet.
-fn release_reserved_metrics_slot(handoff: Option<&MetricsSlotHandoff>) {
+fn release_reserved_metrics_slot(
+    handoff: Option<&MetricsSlotHandoff>,
+    run_dir: &Path,
+    sandbox_name: &str,
+) {
     let Some(handoff) = handoff else { return };
-    if let Ok(reg) = MetricsRegistry::open(&handoff.shm_name) {
+    if let Ok(reg) = open_metrics_registry(handoff, run_dir, sandbox_name) {
         let _ = reg.release_reserved(handoff.slot, handoff.generation);
     }
 }

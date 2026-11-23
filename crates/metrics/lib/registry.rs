@@ -387,6 +387,71 @@ impl MetricsRegistry {
         Ok(reg)
     }
 
+    /// Open an existing single-slot registry file for in-place shared-memory updates.
+    ///
+    /// Rejects symlinks, non-regular files, and files whose length does not match
+    /// a single-slot registry.
+    #[cfg(target_os = "linux")]
+    pub fn open_file(path: &std::path::Path) -> MetricsResult<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let map_len = registry_size(1);
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() != map_len as u64 {
+            return Err(MetricsError::Custom("invalid file registry size".into()));
+        }
+
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                map_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        drop(file);
+        if ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        let mapping = MappedRegion {
+            ptr: NonNull::new(ptr as *mut u8).expect("mmap returned non-null"),
+            len: map_len,
+        };
+        let header = unsafe { &*(mapping.ptr.as_ptr() as *const Header) };
+        match wait_for_ready(header) {
+            Ok(()) => validate_header(header, Some(1))?,
+            Err(WaitForReadyError::Stuck) => {
+                return Err(MetricsError::Custom(
+                    "metrics registry is still initializing".into(),
+                ));
+            }
+            Err(WaitForReadyError::Invalid(state)) => {
+                return Err(MetricsError::Custom(format!(
+                    "invalid registry header state: {state}"
+                )));
+            }
+        }
+
+        let cname = CString::new(path.to_string_lossy().as_bytes())
+            .unwrap_or_else(|_| CString::new("/private-metrics").expect("static cstring"));
+        Ok(Self {
+            inner: Arc::new(RegistryInner {
+                name: cname,
+                mapping,
+                capacity: 1,
+            }),
+        })
+    }
+
     /// Read a one-slot registry file into an independent in-memory snapshot.
     ///
     /// The source file is never memory-mapped. Truncating or replacing it after

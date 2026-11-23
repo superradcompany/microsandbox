@@ -796,6 +796,7 @@ mod tests {
 
                 #[cfg(target_os = "linux")]
                 {
+                    let _ = expected_error;
                     let resolved = result.unwrap();
                     if field == "private_metrics" {
                         assert!(resolved.resolved_config().runtime.private_metrics);
