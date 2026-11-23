@@ -1435,11 +1435,7 @@ pub(super) async fn remove_local_persisted_sandbox(
     local_backend.remove_socket_artifacts(name)?;
     #[cfg(target_os = "linux")]
     if local_backend.config().runtime.private_writeback_leases
-        || local_backend
-            .sandboxes_dir()
-            .join(name)
-            .join("runtime-leases/writeback")
-            .exists()
+        || local_backend.private_writeback_lease_dir(name).exists()
     {
         lease_recovery::recover(
             local_backend,

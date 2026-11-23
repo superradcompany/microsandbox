@@ -251,6 +251,14 @@ impl LocalContext {
         self.config().sandboxes_dir()
     }
 
+    /// Per-sandbox private writeback lease directory (`sandboxes/<name>/runtime-leases/writeback`).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn private_writeback_lease_dir(&self, name: &str) -> PathBuf {
+        self.sandboxes_dir()
+            .join(name)
+            .join("runtime-leases/writeback")
+    }
+
     /// Resolved volumes directory.
     pub fn volumes_dir(&self) -> PathBuf {
         self.config().volumes_dir()

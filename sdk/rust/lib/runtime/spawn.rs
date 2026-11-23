@@ -2371,15 +2371,16 @@ fn machine_cli_args(
         sandboxes_dir: local.sandboxes_dir(),
         run_dir: local.config().run_dir(),
         cpu_lease_dir: local.config().run_dir().join("cpu-leases"),
-        writeback_lease_dir: if cfg!(target_os = "linux")
-            && local.config().runtime.private_writeback_leases
-        {
-            local
-                .sandboxes_dir()
-                .join(&config.spec.name)
-                .join("runtime-leases/writeback")
-        } else {
-            local.config().run_dir().join("writeback-leases")
+        writeback_lease_dir: {
+            #[cfg(target_os = "linux")]
+            let dir = if local.config().runtime.private_writeback_leases {
+                local.private_writeback_lease_dir(&config.spec.name)
+            } else {
+                local.config().run_dir().join("writeback-leases")
+            };
+            #[cfg(not(target_os = "linux"))]
+            let dir = local.config().run_dir().join("writeback-leases");
+            dir
         },
         cpu_placement: config.spec.resources.cpu_placement,
         placement_profile_name: config.spec.resources.placement_profile.clone(),

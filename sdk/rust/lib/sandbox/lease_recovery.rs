@@ -1,15 +1,15 @@
 //! Recover per-sandbox private writeback leases before removing a stopped sandbox.
 
 use std::fs::File;
-use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::io;
+use std::path::Path;
 
 use microsandbox_db::{
     DbReadConnection, DbWriteConnection,
     entity::{run, writeback_allocation},
 };
+use microsandbox_runtime::writeback_recovery::{is_valid_lease_name, recover_stale_allocation};
+use microsandbox_utils::process_lock;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::{
@@ -33,13 +33,13 @@ pub(super) async fn recover(
 ) -> MicrosandboxResult<()> {
     // The caller holds transition and lifecycle ownership. No new runtime for
     // this sandbox can start until removal or recovery completes.
-    let runs = run::Entity::find()
+    let runs: Vec<i32> = run::Entity::find()
         .filter(run::Column::SandboxId.eq(sandbox_id))
         .all(read)
         .await?
         .into_iter()
         .map(|run| run.id)
-        .collect::<Vec<_>>();
+        .collect();
     if runs.is_empty() {
         return Ok(());
     }
@@ -52,56 +52,27 @@ pub(super) async fn recover(
         return Ok(());
     }
 
-    let private_dir = local
-        .sandboxes_dir()
-        .join(name)
-        .join("runtime-leases/writeback");
+    let private_dir = local.private_writeback_lease_dir(name);
     let shared_dir = local.config().run_dir().join("writeback-leases");
     let policy = HostFilePolicy::strict_beneath(local.config().home());
 
-    let leases = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
-        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let leases = tokio::task::spawn_blocking(move || -> MicrosandboxResult<_> {
         let mut leases = Vec::with_capacity(allocations.len());
         for allocation in allocations {
-            if allocation.id.len() != 32
-                || !allocation.id.bytes().all(|byte| byte.is_ascii_hexdigit())
-                || allocation.lease_name != format!("{}.lock", allocation.id)
-            {
-                return Err(std::io::Error::other(
-                    "invalid private writeback lease identity",
+            if !is_valid_lease_name(&allocation.id, &allocation.lease_name) {
+                return Err(MicrosandboxError::Runtime(
+                    "invalid private writeback lease identity".into(),
                 ));
             }
-            let lease = match host_file::open(
-                &private_dir.join(&allocation.lease_name),
-                HostFileKind::Regular,
-                HostFileAccess::ReadWrite,
-                &policy,
-            ) {
-                Ok(file) => file,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => host_file::open(
-                    &shared_dir.join(&allocation.lease_name),
-                    HostFileKind::Regular,
-                    HostFileAccess::ReadWrite,
-                    &policy,
-                )?,
-                Err(err) => return Err(err),
-            };
-            if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                return Err(std::io::Error::last_os_error());
+            let lease = open_lease(&private_dir, &shared_dir, &allocation.lease_name, &policy)?;
+            if !process_lock::try_lock_exclusive(&lease)? {
+                return Err(MicrosandboxError::Runtime(format!(
+                    "writeback lease {} is still held by a live runtime",
+                    allocation.lease_name
+                )));
             }
-            if allocation.boot_id.trim() == boot.trim() {
-                sync_devices(&allocation.backing_devices)?;
-            } else if allocation.boot_id.len() != 36
-                || !allocation.boot_id.bytes().enumerate().all(|(index, byte)| {
-                    if matches!(index, 8 | 13 | 18 | 23) {
-                        byte == b'-'
-                    } else {
-                        byte.is_ascii_hexdigit()
-                    }
-                })
-            {
-                return Err(std::io::Error::other("invalid writeback boot identity"));
-            }
+            recover_stale_allocation(&allocation)
+                .map_err(|error| MicrosandboxError::Runtime(error.to_string()))?;
             leases.push((allocation, lease));
         }
         Ok(leases)
@@ -130,68 +101,28 @@ pub(super) async fn recover(
     Ok(())
 }
 
-fn sync_devices(encoded: &str) -> std::io::Result<()> {
-    if encoded.is_empty() || encoded.len() > 32768 {
-        return Err(std::io::Error::other("invalid writeback device identity"));
+/// Open a writeback lease file strictly (no symlinks), preferring the sandbox's
+/// private lease directory and falling back to the shared directory for rows
+/// created before `private_writeback_leases` was enabled.
+fn open_lease(
+    private_dir: &Path,
+    shared_dir: &Path,
+    lease_name: &str,
+    policy: &HostFilePolicy,
+) -> io::Result<File> {
+    match host_file::open(
+        &private_dir.join(lease_name),
+        HostFileKind::Regular,
+        HostFileAccess::ReadWrite,
+        policy,
+    ) {
+        Ok(file) => Ok(file),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => host_file::open(
+            &shared_dir.join(lease_name),
+            HostFileKind::Regular,
+            HostFileAccess::ReadWrite,
+            policy,
+        ),
+        Err(err) => Err(err),
     }
-    let mounts = std::fs::read_to_string("/proc/self/mountinfo")?;
-    for device in encoded.split(',') {
-        let mut synced = false;
-        for line in mounts.lines() {
-            let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 5 || fields[2] != device {
-                continue;
-            }
-            let path = mount_path(fields[4])?;
-            let file = match File::options()
-                .read(true)
-                .custom_flags(
-                    libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_CLOEXEC,
-                )
-                .open(path)
-            {
-                Ok(file) => file,
-                Err(_) => continue,
-            };
-            let dev = file.metadata()?.dev();
-            if format!("{}:{}", libc::major(dev), libc::minor(dev)) != device {
-                continue;
-            }
-            if unsafe { libc::syncfs(file.as_raw_fd()) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            synced = true;
-            break;
-        }
-        if !synced {
-            return Err(std::io::Error::other(
-                "writeback backing filesystem is unavailable; retaining recovery state",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn mount_path(encoded: &str) -> std::io::Result<PathBuf> {
-    let mut bytes = Vec::new();
-    let mut input = encoded.bytes();
-    while let Some(byte) = input.next() {
-        if byte != b'\\' {
-            bytes.push(byte);
-            continue;
-        }
-        let digits = input.by_ref().take(3).collect::<Vec<_>>();
-        if digits.len() != 3 || !digits.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
-            return Err(std::io::Error::other("invalid mount path escape"));
-        }
-        let value = digits
-            .iter()
-            .fold(0u16, |value, byte| value * 8 + u16::from(byte - b'0'));
-        bytes.push(u8::try_from(value).map_err(std::io::Error::other)?);
-    }
-    let path = PathBuf::from(std::ffi::OsString::from_vec(bytes));
-    if !path.is_absolute() {
-        return Err(std::io::Error::other("relative mount path"));
-    }
-    Ok(path)
 }
