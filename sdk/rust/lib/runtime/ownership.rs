@@ -49,6 +49,17 @@ pub(crate) struct RecordedOwner {
     /// that counts as alive, so the run is left alone rather than reported as an error
     /// or reconciled as exited.
     pub inaccessible: bool,
+    pid: i32,
+    birth: u64,
+}
+
+/// An I/O error from reading a runtime ownership record or capturing the PID it holds.
+/// The original error stays the source, so callers keep its OS error code.
+#[derive(Debug, thiserror::Error)]
+#[error("{subject}: {source}")]
+struct RecordIoError {
+    subject: String,
+    source: io::Error,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -170,10 +181,22 @@ impl RuntimeProcess {
 
 impl RecordedOwner {
     /// Whether the recorded runtime still holds its run. An exited or recycled process
-    /// is not alive; one this token may not open is (see [`Self::inaccessible`]).
+    /// is not alive; one this token may not open is (see [`Self::inaccessible`]). There is
+    /// no handle to an inaccessible PID, so it is captured again on every call and stops
+    /// counting once it exits.
     pub(crate) fn alive(&self) -> io::Result<bool> {
         if self.inaccessible {
-            return Ok(true);
+            let current = owner_from_capture(
+                RuntimeProcess::capture(self.pid),
+                self.pid,
+                self.birth,
+                self.lifecycle_lock,
+            )?;
+            if current.inaccessible {
+                return Ok(true);
+            }
+
+            return current.alive();
         }
 
         Ok(self
@@ -208,6 +231,7 @@ pub(crate) fn recorded_owner(
 
     let owner = owner_from_capture(
         RuntimeProcess::capture(record.pid),
+        record.pid,
         record.birth,
         record.lifecycle_lock,
     )
@@ -228,6 +252,7 @@ fn changed() -> MicrosandboxError {
 /// PID is live but not openable by this token; like `pid_is_alive`, that is alive.
 fn owner_from_capture(
     captured: io::Result<Option<RuntimeProcess>>,
+    pid: i32,
     birth: u64,
     lifecycle_lock: bool,
 ) -> io::Result<RecordedOwner> {
@@ -241,18 +266,27 @@ fn owner_from_capture(
         lifecycle_lock,
         process,
         inaccessible,
+        pid,
+        birth,
     })
 }
 
 /// Names the record (and the PID it holds) an I/O error came from; a bare OS error
-/// from `msb list` gives no clue which sandbox or process failed.
+/// from `msb list` gives no clue which sandbox or process failed. The original error
+/// stays reachable as the source.
 fn record_error(path: &Path, pid: Option<i32>, error: io::Error) -> io::Error {
     let subject = match pid {
         Some(pid) => format!("runtime pid {pid} recorded in {}", path.display()),
         None => path.display().to_string(),
     };
 
-    io::Error::new(error.kind(), format!("{subject}: {error}"))
+    io::Error::new(
+        error.kind(),
+        RecordIoError {
+            subject,
+            source: error,
+        },
+    )
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -374,23 +408,39 @@ mod tests {
 
     /// A recorded PID this token may not open (another account's or a protected process)
     /// counts as alive, as `pid_is_alive` does, instead of failing `msb list` with a bare
-    /// "Access is denied (os error 5)".
+    /// "Access is denied (os error 5)". Each check captures it again, so a stop waiting
+    /// on it finishes once it exits.
     #[test]
-    fn an_inaccessible_recorded_pid_is_alive_not_an_error() {
+    fn an_inaccessible_recorded_pid_is_alive_until_it_exits() {
+        let mut child = ChildFixture::start();
+        let process = RuntimeProcess::capture(child.0.id() as i32)
+            .unwrap()
+            .unwrap();
+        let (pid, birth) = (process.pid, process.birth);
+        drop(process);
         let denied = io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32);
 
-        let owner = owner_from_capture(Err(denied), 1, false).unwrap();
+        let owner = owner_from_capture(Err(denied), pid, birth, false).unwrap();
         assert!(owner.inaccessible);
         assert!(owner.process.is_none());
         assert!(owner.alive().unwrap());
 
-        let exited = owner_from_capture(Ok(None), 1, false).unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+
+        assert!(!owner.alive().unwrap());
+    }
+
+    /// An exited PID is not alive, and other capture errors are still returned.
+    #[test]
+    fn only_access_denied_makes_an_inaccessible_owner() {
+        let exited = owner_from_capture(Ok(None), 1, 1, false).unwrap();
         assert!(!exited.inaccessible);
         assert!(!exited.alive().unwrap());
 
         let other = io::Error::from_raw_os_error(ERROR_INVALID_HANDLE as i32);
 
-        let error = owner_from_capture(Err(other), 1, false).err().unwrap();
+        let error = owner_from_capture(Err(other), 1, 1, false).err().unwrap();
         assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_HANDLE as i32));
     }
 
@@ -406,8 +456,16 @@ mod tests {
             io::Error::from_raw_os_error(ERROR_INVALID_HANDLE as i32),
         );
         let message = error.to_string();
+        let source = error
+            .get_ref()
+            .and_then(|inner| inner.source())
+            .and_then(|source| source.downcast_ref::<io::Error>());
         assert!(message.contains("runtime pid 4321"), "{message}");
         assert!(message.contains(&path.display().to_string()), "{message}");
+        assert_eq!(
+            source.and_then(io::Error::raw_os_error),
+            Some(ERROR_INVALID_HANDLE as i32)
+        );
 
         // An unreadable record (here a directory in its place) names its path.
         std::fs::create_dir(&path).unwrap();
@@ -417,8 +475,16 @@ mod tests {
         else {
             panic!("an unreadable record is no longer an I/O error");
         };
+        let source = error
+            .get_ref()
+            .and_then(|inner| inner.source())
+            .and_then(|source| source.downcast_ref::<io::Error>());
         assert!(
             error.to_string().contains(&path.display().to_string()),
+            "{error}"
+        );
+        assert!(
+            source.and_then(io::Error::raw_os_error).is_some(),
             "{error}"
         );
     }
