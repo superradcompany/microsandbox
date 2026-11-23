@@ -497,6 +497,7 @@ impl LocalContextBuilder {
 
     /// Keep bulk agent payloads on the byte stream instead of negotiating
     /// shared-memory arenas.
+    #[doc(hidden)]
     pub fn in_band_agent_transport(mut self, enabled: bool) -> Self {
         self.config.runtime.in_band_agent_transport_mut(enabled);
         self
@@ -505,6 +506,7 @@ impl LocalContextBuilder {
     /// Store each sandbox's live metrics in a private single-slot file under
     /// `run/runtime-metrics/<name>` instead of the shared host `/dev/shm` registry.
     /// Linux only.
+    #[doc(hidden)]
     pub fn private_metrics(mut self, enabled: bool) -> Self {
         self.config.runtime.private_metrics_mut(enabled);
         self
@@ -513,6 +515,7 @@ impl LocalContextBuilder {
     /// Recover per-sandbox writeback lease files under
     /// `sandboxes/<name>/runtime-leases/writeback` before removing a stopped
     /// sandbox. Linux only.
+    #[doc(hidden)]
     pub fn private_writeback_leases(mut self, enabled: bool) -> Self {
         self.config.runtime.private_writeback_leases_mut(enabled);
         self

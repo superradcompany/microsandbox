@@ -121,12 +121,8 @@ impl GlobalConfig {
 
     /// Whether agent connections keep bulk payloads on the byte stream instead of
     /// negotiating shared-memory arenas.
-    ///
-    /// Enabled explicitly via `runtime.in_band_agent_transport` or automatically
-    /// when `deployment_profile` is `multi-tenant`.
     pub(crate) fn in_band_agent_transport(&self) -> bool {
         self.runtime.in_band_agent_transport
-            || self.deployment_profile == Some(DeploymentProfile::MultiTenant)
     }
 }
 
@@ -741,12 +737,10 @@ mod tests {
     }
 
     #[test]
-    fn local_preparation_enables_in_band_agent_transport_explicitly_or_for_multi_tenant() {
+    fn local_preparation_enables_in_band_agent_transport_only_when_explicitly_set() {
         for (user, managed) in [
             (r#"{"runtime":{"in_band_agent_transport":true}}"#, "{}"),
             ("{}", r#"{"runtime":{"in_band_agent_transport":true}}"#),
-            (r#"{"deployment_profile":"multi-tenant"}"#, "{}"),
-            ("{}", r#"{"deployment_profile":"multi-tenant"}"#),
         ] {
             let layers = BackendConfig::new(
                 serde_json::from_str(user).unwrap(),
@@ -761,17 +755,23 @@ mod tests {
             );
         }
 
-        let default_layers = BackendConfig::new(
-            serde_json::from_str("{}").unwrap(),
-            serde_json::from_str("{}").unwrap(),
-        );
-        assert!(
-            !default_layers
-                .prepare_for_local_backend(Default::default())
-                .unwrap()
-                .resolved_config()
-                .in_band_agent_transport()
-        );
+        for (user, managed) in [
+            ("{}", "{}"),
+            (r#"{"deployment_profile":"multi-tenant"}"#, "{}"),
+            ("{}", r#"{"deployment_profile":"multi-tenant"}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            assert!(
+                !layers
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap()
+                    .resolved_config()
+                    .in_band_agent_transport()
+            );
+        }
 
         #[cfg(feature = "local")]
         {
