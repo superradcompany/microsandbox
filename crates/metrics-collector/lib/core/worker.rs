@@ -53,9 +53,8 @@ pub(crate) struct ExporterWorker {
 
 /// Cap on the exponential backoff multiplier. With base = `flush_interval`,
 /// the worst-case delay between retries is `flush_interval × 2^MAX`. At
-/// the default 10s flush interval that's ~5 minutes, which is long enough
-/// to ride out a typical backend outage without hammering and short
-/// enough that recovery is visible to operators.
+/// the default 1s flush interval that's 32s, which backs off during a
+/// backend outage while keeping recovery responsive once it returns.
 const MAX_BACKOFF_EXP: u32 = 5;
 
 //--------------------------------------------------------------------------------------------------

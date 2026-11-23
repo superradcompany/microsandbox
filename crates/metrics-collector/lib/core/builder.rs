@@ -16,8 +16,10 @@ use super::types::MetricsExporter;
 /// Default interval between shared-memory metrics reads.
 pub const DEFAULT_COLLECT_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Default per-exporter interval between scheduled exports.
-pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
+/// Default per-exporter interval between scheduled exports. Kept at `1s` so
+/// buffered collections flush well within the 3-second guest-memory freshness
+/// floor and do not accumulate multi-collection OTLP export queues.
+pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Default per-exporter collection buffer limit.
 pub const DEFAULT_MAX_BUFFERED_COLLECTIONS: usize = 60;
@@ -347,6 +349,15 @@ mod tests {
         assert_eq!(
             builder.default_collector_config.max_buffered_collections,
             60
+        );
+    }
+
+    #[test]
+    fn default_flush_interval_is_one_second() {
+        let builder = MetricsCollector::builder("test");
+        assert_eq!(
+            builder.default_collector_config.flush_interval,
+            Duration::from_secs(1)
         );
     }
 
