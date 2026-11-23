@@ -814,10 +814,7 @@ pub(crate) async fn select_http_deny_response(
     if !config.spec.network.enabled || !config.spec.network.http.deny_response {
         return Ok(http);
     }
-    let capabilities = bounded_probe(path, "__launch-protocol")
-        .await
-        .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok());
+    let capabilities = capabilities(path).await.ok();
     let supported =
         capabilities
             .as_ref()
@@ -931,10 +928,9 @@ pub(crate) async fn validate_guest_clock(
     {
         return Ok(());
     }
-    let supported = bounded_probe(path, "__launch-protocol")
+    let supported = capabilities(path)
         .await
         .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
         .is_some_and(|capabilities| capabilities.guest_clock);
     if !supported {
         return Err(MicrosandboxError::unsupported(
@@ -967,13 +963,9 @@ pub(crate) async fn validate_multi_tenant_config(
         ));
     }
 
-    let supported = bounded_probe(path, "__launch-protocol")
-        .await
-        .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(|capabilities| {
-            capabilities.protocols.contains(&2) && capabilities.multi_tenant
-        });
+    let supported = capabilities(path).await.ok().is_some_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.multi_tenant
+    });
     if !supported {
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
@@ -992,13 +984,9 @@ pub(crate) async fn validate_fs_state_limit(
     if global.fs_state_limit_override().is_none() {
         return Ok(());
     }
-    let supported = bounded_probe(path, "__launch-protocol")
-        .await
-        .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(|capabilities| {
-            capabilities.protocols.contains(&2) && capabilities.fs_state_limit
-        });
+    let supported = capabilities(path).await.ok().is_some_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.fs_state_limit
+    });
     if !supported {
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
@@ -1013,13 +1001,9 @@ pub(crate) async fn validate_fs_state_limit(
 /// Optional evidence support never gates an otherwise-supported operation on an older runtime.
 /// Read the existing side-effect-free probe before dispatch; a failed/old probe means no handoff.
 pub(crate) async fn supports_configuration_retention(path: &Path) -> bool {
-    bounded_probe(path, "__launch-protocol")
-        .await
-        .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(|capabilities| {
-            capabilities.protocols.contains(&2) && capabilities.configuration_retention
-        })
+    capabilities(path).await.ok().is_some_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.configuration_retention
+    })
 }
 
 /// Probe only the new combination. Ordinary starts/restores keep their cached,
@@ -1048,11 +1032,9 @@ async fn require_tcp_accept_queue_size(path: &Path) -> MicrosandboxResult<()> {
 /// This is a security prerequisite for every start, rather than an optional feature.
 /// Probe failures are refusals too: older executables may not recognize the probe command.
 pub(crate) async fn require_protected_guest_state(path: &Path) -> MicrosandboxResult<()> {
-    let result = bounded_probe(path, "__launch-protocol").await;
-    let supported = result.as_ref().ok().is_some_and(|output| {
-        serde_json::from_slice::<LaunchCapabilities>(output).is_ok_and(|capabilities| {
-            capabilities.protocols.contains(&2) && capabilities.protected_guest_state
-        })
+    let result = capabilities(path).await;
+    let supported = result.as_ref().ok().is_some_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.protected_guest_state
     });
     if supported {
         return Ok(());

@@ -252,12 +252,23 @@ mod tests {
         drop(live_file);
 
         // 2. Also add a prior-boot row in the shared fallback dir; both recover cleanly.
+        let fallback_run_id = run::Entity::insert(run::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            status: Set(run::RunStatus::Terminated),
+            started_at: Set(Some(Utc::now().naive_utc())),
+            terminated_at: Set(Some(Utc::now().naive_utc())),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap()
+        .last_insert_id;
         let fallback_id = "fedcba9876543210fedcba9876543210";
         let fallback_name = format!("{fallback_id}.lock");
         File::create(shared_dir.join(&fallback_name)).unwrap();
         insert_allocation(
             &local,
-            run_id,
+            fallback_run_id,
             fallback_id,
             &fallback_name,
             "00000000-0000-0000-0000-000000000000",
