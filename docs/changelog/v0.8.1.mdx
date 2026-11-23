@@ -1,0 +1,60 @@
+---
+title: "v0.8.1"
+sidebarTitle: "v0.8.1"
+description: "Cap snapshot import size, keep long Cloud log follows and downloads open, and restore Cloud and mixed-version runtime compatibility."
+icon: "bolt"
+---
+
+November 23, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.8.1) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.8.0...v0.8.1)
+
+v0.8.1 is the first published release of the v0.8 line. See [v0.8.0](/changelog/v0.8.0) for SDK contexts, unified resources, snapshot histories and the smaller SDK packages.
+
+## New features
+
+**Limit how much a snapshot import can write.** Snapshot imports accept an optional maximum disk size. The limit counts logical file bytes, including metadata, dependencies and sparse holes, and each declared file disk must also fit. Imports over the limit fail before anything is written or published. Omit the limit to keep imports unlimited.
+
+```bash
+msb snap import received --file ready.msb --maximum-disk-bytes 10737418240
+```
+
+The SDKs expose the same option through their existing import options: `maximum_disk_bytes` in Rust, Python and Ruby, `maximumDiskBytes()` in TypeScript and `MaximumDiskBytes` in Go. [Snapshot commands](/cli/snapshot-commands)
+
+## Fixes
+
+- Cloud sandbox creation works against the deployed Cloud API again. Explicit compute tier selection still requires the newer API.
+- Cloud log follows and volume downloads no longer fail just because they outlast the request timeout. Uploads keep their total timeout.
+- After looking up a Cloud sandbox, commands use its own working directory, shell and default command. Cloud creation resolves secrets whose values come from environment variables.
+- Rust returns `MicrosandboxError::InvalidWorkdir` when the guest rejects the configured working directory.
+- The current SDK can launch compatible, separately installed runtimes without an exact version match. Self-update and downgrade accept release candidate versions.
+- Python processes shut down native workers cleanly at exit, which fixes intermittent crashes during interpreter shutdown.
+
+## Before upgrading
+
+- **Rust snapshot import options.** `SnapshotImportOptions` and `LoadOpts` gain a public `maximum_disk_bytes` field. Struct literals that list every field must add it or use `..Default::default()`.
+- **Multi-tenant DNS.** Multi-tenant sandboxes now use the operator's [`dns.nameservers`](/configuration#dns) list, or `1.1.1.1` and `1.0.0.1` when it is omitted, instead of host DNS. Set the list if your sandboxes need different resolvers, then restart multi-tenant sandboxes.
+- **Coming from v0.7?** Follow the [v0.7 to v0.8 migration guide](/migrations/v0.8).
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/appcypher">
+      <img src="https://avatars.githubusercontent.com/u/20358651?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@appcypher</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/TheRealSibasishBehera">
+      <img src="https://avatars.githubusercontent.com/u/95071627?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@TheRealSibasishBehera</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/toksdotdev">
+      <img src="https://avatars.githubusercontent.com/u/11903253?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@toksdotdev</span>
+    </a>
+  </li>
+</ul>
