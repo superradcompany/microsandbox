@@ -3373,13 +3373,24 @@ fn canonicalize_owned_mount_root(path: &Path) -> RuntimeResult<PathBuf> {
     })
 }
 
+#[cfg(target_os = "linux")]
+fn is_private_metrics_handoff(handoff: &MetricsSlotHandoff, sandbox_name: &str) -> bool {
+    use sha2::{Digest, Sha256};
+
+    if handoff.slot != 0 {
+        return false;
+    }
+    let digest = hex::encode(Sha256::digest(sandbox_name.as_bytes()));
+    handoff.shm_name == format!("/msb-met-{}", &digest[..20])
+}
+
 fn open_metrics_registry(
     handoff: &MetricsSlotHandoff,
     run_dir: &Path,
     sandbox_name: &str,
 ) -> microsandbox_metrics::MetricsResult<MetricsRegistry> {
     #[cfg(target_os = "linux")]
-    if handoff.slot == 0 {
+    if is_private_metrics_handoff(handoff, sandbox_name) {
         let private_path = run_dir.join("runtime-metrics").join(sandbox_name);
         match MetricsRegistry::open_file(&private_path) {
             Ok(reg) => return Ok(reg),
