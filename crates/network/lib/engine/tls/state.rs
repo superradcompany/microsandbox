@@ -307,15 +307,16 @@ impl ServerCertVerifier for NoVerify {
 
 /// Build the upstream TLS connector based on configuration.
 ///
-/// Verified Windows connections use native chain validation; other platforms load native roots.
-/// When false, uses a permissive verifier that accepts all server certificates.
+/// Verified Windows and macOS connections use native platform certificate
+/// validation; other platforms load native roots. When false, uses a
+/// permissive verifier that accepts all server certificates.
 fn build_upstream_connector(
     config: &TlsConfig,
     verify_upstream: bool,
     scoped_ca_cert: &[PathBuf],
 ) -> Result<TlsConnector, TlsStateError> {
     let client_config = if verify_upstream {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         let verified = {
             let mut extra_roots = Vec::new();
             let mut parsed_roots = rustls::RootCertStore::empty();
@@ -331,8 +332,10 @@ fn build_upstream_connector(
             load_upstream_ca_certificates(scoped_ca_cert, &mut add_root);
             let builder = rustls::ClientConfig::builder();
             let provider = Arc::clone(builder.crypto_provider());
-            // Native verification can retrieve a Windows-approved root on first use. Extra
-            // CAs belong only to this connector, never to the machine-wide trusted store.
+            // Native verification follows host trust policy (including Keychain
+            // intermediates, AIA fetching, and explicit distrust overrides on
+            // macOS, and automatic trusted-root retrieval on Windows). Extra CAs
+            // belong only to this connector, never to the host trust store.
             let verifier = if extra_roots.is_empty() {
                 rustls_platform_verifier::Verifier::new(provider)?
             } else {
@@ -343,7 +346,7 @@ fn build_upstream_connector(
                 .with_custom_certificate_verifier(Arc::new(verifier))
                 .with_no_client_auth()
         };
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         let verified = {
             let mut root_store = rustls::RootCertStore::empty();
             let certs = rustls_native_certs::load_native_certs();
@@ -574,9 +577,12 @@ fn write_key_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use microsandbox_types::{ScopedUpstreamCaCert, ScopedVerifyUpstream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use microsandbox_types::{ScopedUpstreamCaCert, ScopedVerifyUpstream};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    use super::*;
     use crate::secrets::config::SecretsConfig;
     use crate::secrets::handle::SecretsHandle;
 
@@ -853,5 +859,297 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         assert_eq!(root_store.len(), 1);
+    }
+
+    fn write_temp_pem(label: &str, pem: &[u8]) -> PathBuf {
+        static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("msb-{label}-{}-{id}.pem", std::process::id()));
+        std::fs::write(&path, pem).expect("write temporary PEM");
+        path
+    }
+
+    fn verify_chain_fixture(
+        connector: &TlsConnector,
+        chain: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+        server_name: ServerName<'static>,
+    ) -> Result<(), rustls::Error> {
+        let server_config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(chain, key)
+                .unwrap(),
+        );
+        let mut client =
+            rustls::ClientConnection::new(Arc::clone(connector.config()), server_name)?;
+        let mut server = rustls::ServerConnection::new(server_config)?;
+
+        for _ in 0..8 {
+            let mut wire = Vec::new();
+            client.write_tls(&mut wire).unwrap();
+            server.read_tls(&mut std::io::Cursor::new(wire)).unwrap();
+            server.process_new_packets()?;
+
+            let mut wire = Vec::new();
+            server.write_tls(&mut wire).unwrap();
+            client.read_tls(&mut std::io::Cursor::new(wire)).unwrap();
+            client.process_new_packets()?;
+
+            if !client.is_handshaking() {
+                return Ok(());
+            }
+        }
+
+        panic!("fixture TLS handshake did not complete");
+    }
+
+    fn generate_three_tier_chain(
+        san: &str,
+    ) -> (
+        CertAuthority,
+        CertificateDer<'static>,
+        String,
+        CertificateDer<'static>,
+        PrivateKeyDer<'static>,
+    ) {
+        let root = CertAuthority::generate();
+        let now = OffsetDateTime::now_utc();
+
+        let mut intermediate_params = rcgen::CertificateParams::default();
+        let mut dn = rcgen::DistinguishedName::new();
+        dn.push(rcgen::DnType::CommonName, "microsandbox test intermediate");
+        intermediate_params.distinguished_name = dn;
+        intermediate_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        intermediate_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        intermediate_params.not_before = now - Duration::seconds(2);
+        intermediate_params.not_after = now + Duration::hours(48);
+        let intermediate_key = rcgen::KeyPair::generate().unwrap();
+        let intermediate_cert = intermediate_params
+            .signed_by(&intermediate_key, &root.issuer)
+            .unwrap();
+        let intermediate_issuer = rcgen::Issuer::new(intermediate_params, intermediate_key);
+
+        let mut leaf_params = rcgen::CertificateParams::new(vec![san.to_owned()]).unwrap();
+        let mut leaf_dn = rcgen::DistinguishedName::new();
+        leaf_dn.push(rcgen::DnType::CommonName, san);
+        leaf_params.distinguished_name = leaf_dn;
+        leaf_params.is_ca = rcgen::IsCa::ExplicitNoCa;
+        leaf_params.use_authority_key_identifier_extension = true;
+        leaf_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::KeyEncipherment,
+        ];
+        leaf_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        leaf_params.not_before = now - Duration::seconds(2);
+        leaf_params.not_after = now + Duration::hours(24);
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &intermediate_issuer)
+            .unwrap();
+
+        (
+            root,
+            CertificateDer::from(intermediate_cert.der().to_vec()),
+            intermediate_cert.pem(),
+            CertificateDer::from(leaf_cert.der().to_vec()),
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+        )
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn upstream_verification_uses_platform_verifier_on_macos_and_windows() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let connector = build_upstream_connector(&TlsConfig::default(), true, &[]).unwrap();
+        let debug = format!("{:?}", connector.config());
+
+        assert!(
+            !debug.contains("WebPkiServerVerifier"),
+            "expected platform verifier on macOS/Windows, got: {debug}"
+        );
+    }
+
+    #[test]
+    fn upstream_verification_validates_intermediate_chain_ip_sans_and_scope() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (root, intermediate_der, intermediate_pem, api_leaf_der, api_leaf_key) =
+            generate_three_tier_chain("api.internal");
+        let other_leaf = certgen::generate_domain_cert("other.internal", &root, 24).unwrap();
+        let unrelated_root = CertAuthority::generate();
+
+        let root_path = write_temp_pem("upstream-chain-root", &root.cert_pem());
+        let unrelated_path = write_temp_pem("upstream-chain-unrelated", &unrelated_root.cert_pem());
+
+        let mut bundle_with_intermediate = intermediate_pem.into_bytes();
+        bundle_with_intermediate.extend_from_slice(&root.cert_pem());
+        let bundle_path = write_temp_pem("upstream-chain-bundle", &bundle_with_intermediate);
+
+        // Also test malformed DER mixed with a valid CA cert in one file.
+        let mut mixed_pem =
+            b"-----BEGIN CERTIFICATE-----\nAAECAw==\n-----END CERTIFICATE-----\n".to_vec();
+        mixed_pem.extend_from_slice(&root.cert_pem());
+        let mixed_path = write_temp_pem("upstream-chain-mixed", &mixed_pem);
+
+        let full_chain = vec![api_leaf_der.clone(), intermediate_der];
+        let api_name = ServerName::try_from("api.internal".to_owned()).unwrap();
+        let wrong_name = ServerName::try_from("wrong.internal".to_owned()).unwrap();
+
+        // Default verifier rejects unknown test root.
+        let default_connector = build_upstream_connector(&TlsConfig::default(), true, &[]).unwrap();
+        assert!(
+            verify_chain_fixture(
+                &default_connector,
+                full_chain.clone(),
+                api_leaf_key.clone_key(),
+                api_name.clone(),
+            )
+            .is_err()
+        );
+
+        // Unrelated extra CA must not trust the chain.
+        let mut unrelated_config = TlsConfig::default();
+        unrelated_config
+            .upstream_ca_cert
+            .push(unrelated_path.clone());
+        let unrelated_connector = build_upstream_connector(&unrelated_config, true, &[]).unwrap();
+        assert!(
+            verify_chain_fixture(
+                &unrelated_connector,
+                full_chain.clone(),
+                api_leaf_key.clone_key(),
+                api_name.clone(),
+            )
+            .is_err()
+        );
+
+        // Trusted extra root verifies leaf -> intermediate -> root and still checks SAN.
+        let mut trusted_config = TlsConfig::default();
+        trusted_config.upstream_ca_cert.push(root_path.clone());
+        let trusted_connector = build_upstream_connector(&trusted_config, true, &[]).unwrap();
+        verify_chain_fixture(
+            &trusted_connector,
+            full_chain.clone(),
+            api_leaf_key.clone_key(),
+            api_name.clone(),
+        )
+        .expect("3-tier chain with trusted extra root must verify");
+        assert!(
+            verify_chain_fixture(
+                &trusted_connector,
+                full_chain.clone(),
+                api_leaf_key.clone_key(),
+                wrong_name,
+            )
+            .is_err()
+        );
+
+        // Leaf-only server succeeds when user supplies [intermediate, root] in
+        // the extra CA bundle on macOS (`SecTrustSetAnchorCertificates`) and
+        // Linux (`RootCertStore`). Windows CryptoAPI `hExclusiveRoot` only
+        // matches self-signed root anchors.
+        #[cfg(not(windows))]
+        {
+            let mut bundle_config = TlsConfig::default();
+            bundle_config.upstream_ca_cert.push(bundle_path.clone());
+            let bundle_connector = build_upstream_connector(&bundle_config, true, &[]).unwrap();
+            verify_chain_fixture(
+                &bundle_connector,
+                vec![api_leaf_der.clone()],
+                api_leaf_key.clone_key(),
+                api_name.clone(),
+            )
+            .expect("leaf-only server with intermediate+root extra bundle must verify");
+        }
+        #[cfg(windows)]
+        let _ = (&bundle_path, &api_leaf_der);
+
+        // Malformed DER entry in the bundle is skipped without failing connector setup.
+        let mut mixed_config = TlsConfig::default();
+        mixed_config.upstream_ca_cert.push(mixed_path.clone());
+        let mixed_connector = build_upstream_connector(&mixed_config, true, &[]).unwrap();
+        verify_chain_fixture(
+            &mixed_connector,
+            full_chain.clone(),
+            api_leaf_key.clone_key(),
+            api_name.clone(),
+        )
+        .expect("valid CA alongside malformed DER entry must still verify");
+
+        // Host-scoped extra root must apply only to matching SNIs and never leak.
+        let mut scoped_config = TlsConfig::default();
+        scoped_config
+            .scoped_upstream_ca_cert
+            .push(ScopedUpstreamCaCert {
+                pattern: "api.internal".to_owned(),
+                path: root_path.clone(),
+            });
+        let scoped_state =
+            TlsState::new(scoped_config, SecretsHandle::new(SecretsConfig::default())).unwrap();
+        verify_chain_fixture(
+            scoped_state.upstream_connector_for("api.internal"),
+            full_chain,
+            api_leaf_key,
+            api_name,
+        )
+        .expect("scoped connector must validate matching host chain");
+        assert!(
+            verify_fixture(
+                scoped_state.upstream_connector_for("other.internal"),
+                &other_leaf,
+                "other.internal",
+            )
+            .is_err(),
+            "scoped extra root must not leak to unrelated SNI"
+        );
+
+        // IPv4 and IPv6 SAN certificates (matching sdk/rust/tests/tls_intercept.rs).
+        let now = OffsetDateTime::now_utc();
+        for (ip_str, wrong_ip_str) in [("172.30.255.1", "192.0.2.1"), ("fd00::1", "2001:db8::1")] {
+            let ip_key = rcgen::KeyPair::generate().unwrap();
+            let mut ip_params = rcgen::CertificateParams::new(vec![ip_str.to_owned()]).unwrap();
+            ip_params.is_ca = rcgen::IsCa::ExplicitNoCa;
+            ip_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+            ip_params.not_before = now - Duration::seconds(2);
+            ip_params.not_after = now + Duration::hours(24);
+            let ip_cert = ip_params.signed_by(&ip_key, &root.issuer).unwrap();
+            let ip_chain = vec![
+                CertificateDer::from(ip_cert.der().to_vec()),
+                root.cert_der.clone(),
+            ];
+            let ip_priv = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ip_key.serialize_der()));
+            let good_ip = ServerName::try_from(ip_str.to_owned()).unwrap();
+            let bad_ip = ServerName::try_from(wrong_ip_str.to_owned()).unwrap();
+
+            verify_chain_fixture(
+                &trusted_connector,
+                ip_chain.clone(),
+                ip_priv.clone_key(),
+                good_ip.clone(),
+            )
+            .unwrap_or_else(|e| panic!("IP SAN {ip_str} must verify with extra root: {e}"));
+            assert!(
+                verify_chain_fixture(
+                    &trusted_connector,
+                    ip_chain.clone(),
+                    ip_priv.clone_key(),
+                    bad_ip,
+                )
+                .is_err(),
+                "mismatched IP SAN {wrong_ip_str} must be rejected"
+            );
+            assert!(
+                verify_chain_fixture(&default_connector, ip_chain, ip_priv, good_ip).is_err(),
+                "IP SAN {ip_str} must be rejected without extra root"
+            );
+        }
+
+        for path in [root_path, unrelated_path, bundle_path, mixed_path] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }

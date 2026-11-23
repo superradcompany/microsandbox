@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rustls::pki_types::ServerName;
+use rustls::{AlertDescription, ContentType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -35,6 +36,9 @@ const CLIENT_HELLO_BUF_SIZE: usize = 16384;
 
 /// Buffer size for bidirectional relay.
 const RELAY_BUF_SIZE: usize = 16384;
+
+/// TLS fatal alert level (RFC 5246 section 7.2 / RFC 8446 section 6).
+const TLS_ALERT_LEVEL_FATAL: u8 = 2;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -496,6 +500,42 @@ pub(crate) async fn intercept_relay(
     }
     .with_guest_dst(guest_dst);
 
+    let connect_dst = connect_target.primary();
+    let server_name = ServerName::try_from(sni_name.to_string())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+    // Establish and verify the upstream TLS session before completing the
+    // guest handshake so upstream certificate or handshake errors surface as
+    // a fatal TLS alert rather than an abrupt EOF after the guest sends data.
+    let server_stream = match upstream_stream {
+        Some(s) => s,
+        None => {
+            connect_target
+                .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
+                .await?
+        }
+    };
+    let mut server_tls = match tls_state
+        .upstream_connector_for(sni_name)
+        .connect(server_name, server_stream)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            let alert = upstream_handshake_alert(&error);
+            tracing::warn!(
+                sni = %sni_name,
+                dst = %connect_dst,
+                %guest_dst,
+                ?alert,
+                %error,
+                "upstream TLS handshake failed",
+            );
+            send_tls_fatal_alert(&to_smoltcp, &shared, alert).await;
+            return Err(error);
+        }
+    };
+
     // Get or generate per-domain certificate (includes cached ServerConfig).
     let domain_cert = tls_state
         .get_or_generate_cert(sni_name)
@@ -519,23 +559,6 @@ pub(crate) async fn intercept_relay(
         &mut tls_buf,
     )
     .await?;
-
-    // Connect to real server with TLS.
-    let server_stream = match upstream_stream {
-        Some(s) => s,
-        None => {
-            connect_target
-                .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
-                .await?
-        }
-    };
-    let server_name = ServerName::try_from(sni_name.to_string())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let mut server_tls = tls_state
-        .upstream_connector_for(sni_name)
-        .connect(server_name, server_stream)
-        .await
-        .map_err(io::Error::other)?;
 
     // Phase 2: Bidirectional plaintext relay.
     let mut server_buf = vec![0u8; RELAY_BUF_SIZE];
@@ -773,6 +796,73 @@ async fn flush_to_guest(
     Ok(())
 }
 
+/// Map an upstream TLS handshake error to a fatal TLS alert for the guest.
+///
+/// Certificate failures preserve rustls's RFC 5246/8446 alert mapping; other
+/// handshake and transport errors fall back to `handshake_failure`.
+fn upstream_handshake_alert(error: &io::Error) -> AlertDescription {
+    let Some(tls_error) = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<rustls::Error>())
+    else {
+        return AlertDescription::HandshakeFailure;
+    };
+
+    match tls_error {
+        rustls::Error::InvalidCertificate(cert_error) => AlertDescription::from(cert_error.clone()),
+        rustls::Error::NoCertificatesPresented => AlertDescription::BadCertificate,
+        rustls::Error::AlertReceived(alert)
+            if matches!(
+                alert,
+                AlertDescription::HandshakeFailure
+                    | AlertDescription::ProtocolVersion
+                    | AlertDescription::InsufficientSecurity
+                    | AlertDescription::UnrecognisedName
+                    | AlertDescription::CertificateRequired
+                    | AlertDescription::BadCertificate
+                    | AlertDescription::UnsupportedCertificate
+                    | AlertDescription::CertificateRevoked
+                    | AlertDescription::CertificateExpired
+                    | AlertDescription::CertificateUnknown
+                    | AlertDescription::UnknownCA
+                    | AlertDescription::InternalError
+            ) =>
+        {
+            *alert
+        }
+        _ => AlertDescription::HandshakeFailure,
+    }
+}
+
+/// Encode an unencrypted TLS 1.2 fatal alert record for a pre-ServerHello failure.
+fn tls_fatal_alert_record(description: AlertDescription) -> [u8; 7] {
+    [
+        u8::from(ContentType::Alert),
+        0x03,
+        0x03,
+        0x00,
+        0x02,
+        TLS_ALERT_LEVEL_FATAL,
+        u8::from(description),
+    ]
+}
+
+/// Send a plaintext fatal TLS alert to the guest before ServerHello.
+async fn send_tls_fatal_alert(
+    to_smoltcp: &mpsc::Sender<Bytes>,
+    shared: &SharedState,
+    description: AlertDescription,
+) {
+    let record = tls_fatal_alert_record(description);
+    if to_smoltcp
+        .send(Bytes::copy_from_slice(&record))
+        .await
+        .is_ok()
+    {
+        shared.proxy_wake.wake();
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -783,13 +873,18 @@ mod tests {
     use std::time::Duration;
 
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{CertificateError, Error as TlsError, OtherError};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio_rustls::TlsAcceptor;
+    use tracing::instrument::WithSubscriber;
 
     use super::*;
+    use crate::engine::tls::ca::CertAuthority;
+    use crate::engine::tls::certgen::generate_domain_cert;
     use crate::secrets::config::{HostPattern, SecretEntry, SecretSubstitution};
     use crate::secrets::{config::SecretsConfig, handle::SecretsHandle};
+    use crate::tcp::connection::ProxyConnectStatus;
     use microsandbox_types::TlsConfig;
 
     fn isolated_tls_state(mut config: TlsConfig, secrets: SecretsHandle) -> TlsState {
@@ -1697,5 +1792,485 @@ mod tests {
             "a rejected header flight must forward nothing upstream, got {received:02x?}"
         );
         server.await.unwrap().unwrap();
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordedEvent {
+        level: tracing::Level,
+        fields: Vec<(String, String)>,
+    }
+
+    #[derive(Clone, Default)]
+    struct EventRecorder {
+        events: Arc<std::sync::Mutex<Vec<RecordedEvent>>>,
+    }
+
+    struct FieldCollector(Vec<(String, String)>);
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push((field.name().to_owned(), format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_owned(), value.to_owned()));
+        }
+    }
+
+    impl tracing::Subscriber for EventRecorder {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut collector = FieldCollector(Vec::new());
+            event.record(&mut collector);
+            self.events.lock().unwrap().push(RecordedEvent {
+                level: *event.metadata().level(),
+                fields: collector.0,
+            });
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    impl EventRecorder {
+        fn warnings(&self) -> Vec<RecordedEvent> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.level == tracing::Level::WARN)
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn signed_server_config(san: &str, ca: &CertAuthority) -> Arc<rustls::ServerConfig> {
+        let cert = generate_domain_cert(san, ca, 24).unwrap();
+        cert.server_config
+    }
+
+    #[tokio::test]
+    async fn intercept_relay_warns_and_alerts_guest_on_upstream_cert_failure() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let untrusted_ca = CertAuthority::generate();
+        let upstream_config = signed_server_config("example.com", &untrusted_ca);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let stream = accept_with_deadline(listener).await.unwrap();
+            let _ = TlsAcceptor::from(upstream_config).accept(stream).await;
+        });
+
+        let tls_state = Arc::new(isolated_tls_state(
+            TlsConfig::default(),
+            SecretsHandle::new(SecretsConfig::default()),
+        ));
+        let (from_tx, from_rx) = mpsc::channel(8);
+        let (to_tx, mut to_rx) = mpsc::channel(8);
+        let mut client = guest_client(&tls_state);
+        send_client_tls_output(&mut client, &from_tx).await;
+
+        let proxy_connect = Arc::new(ProxyConnectState::new());
+        let recorder = EventRecorder::default();
+        let proxy = TlsProxy::new(
+            None,
+            upstream,
+            UpstreamTcpTarget::direct(upstream),
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(8)),
+            tls_state,
+            Arc::new(NetworkPolicy::allow_all()),
+            false,
+            proxy_connect.clone(),
+            None,
+            tokio::sync::watch::channel(None).1,
+        );
+        let relay = tokio::spawn(proxy.try_run().with_subscriber(recorder.clone()));
+
+        let alert = tokio::time::timeout(Duration::from_secs(5), async {
+            let first = to_rx
+                .recv()
+                .await
+                .expect("proxy must send a TLS alert before closing");
+            let mut input = first.as_ref();
+            client.read_tls(&mut input).unwrap();
+            client.process_new_packets()
+        })
+        .await
+        .expect("timed out waiting for guest TLS alert");
+
+        assert!(
+            client.is_handshaking(),
+            "guest handshake must fail before completing when upstream cert is untrusted"
+        );
+        assert!(
+            matches!(
+                alert,
+                Err(TlsError::AlertReceived(
+                    AlertDescription::UnknownCA
+                        | AlertDescription::CertificateUnknown
+                        | AlertDescription::BadCertificate
+                ))
+            ),
+            "expected fatal certificate TLS alert, got: {alert:?}"
+        );
+
+        let relay_result = tokio::time::timeout(Duration::from_secs(5), relay)
+            .await
+            .expect("relay did not finish")
+            .unwrap();
+        assert!(relay_result.is_err());
+        // Upstream TCP connected before the TLS handshake failed, so smoltcp
+        // must flush the queued TLS alert and close with FIN rather than RST.
+        assert_eq!(proxy_connect.status(), ProxyConnectStatus::Connected);
+        server.await.unwrap();
+
+        let warnings = recorder.warnings();
+        assert!(
+            warnings.iter().any(|event| {
+                event
+                    .fields
+                    .iter()
+                    .any(|(k, v)| k == "sni" && v == "example.com")
+                    && event
+                        .fields
+                        .iter()
+                        .any(|(k, v)| k == "error" && !v.is_empty())
+            }),
+            "expected WARN log with sni and error on upstream TLS failure, got: {warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn intercept_relay_warns_and_alerts_guest_on_upstream_hostname_mismatch() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let trusted_ca = CertAuthority::generate();
+        let ca_path =
+            std::env::temp_dir().join(format!("msb-proxy-mismatch-ca-{}.pem", std::process::id()));
+        std::fs::write(&ca_path, trusted_ca.cert_pem()).unwrap();
+
+        // Upstream presents a valid certificate signed by the trusted CA,
+        // but for a different hostname (`other.example` instead of `example.com`).
+        let upstream_config = signed_server_config("other.example", &trusted_ca);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let stream = accept_with_deadline(listener).await.unwrap();
+            let _ = TlsAcceptor::from(upstream_config).accept(stream).await;
+        });
+
+        let mut config = TlsConfig::default();
+        config.upstream_ca_cert.push(ca_path.clone());
+        let tls_state = Arc::new(isolated_tls_state(
+            config,
+            SecretsHandle::new(SecretsConfig::default()),
+        ));
+        let _ = std::fs::remove_file(&ca_path);
+
+        let (from_tx, from_rx) = mpsc::channel(8);
+        let (to_tx, mut to_rx) = mpsc::channel(8);
+        let mut client = guest_client(&tls_state);
+        send_client_tls_output(&mut client, &from_tx).await;
+
+        let recorder = EventRecorder::default();
+        let relay = tokio::spawn(
+            intercept_relay(
+                "203.0.113.10:443".parse().unwrap(),
+                UpstreamTcpTarget::direct(upstream),
+                "example.com",
+                true,
+                Vec::new(),
+                from_rx,
+                to_tx,
+                Arc::new(SharedState::new(8)),
+                tls_state,
+                Arc::new(ProxyConnectState::new()),
+                None,
+                None,
+            )
+            .with_subscriber(recorder.clone()),
+        );
+
+        let alert = tokio::time::timeout(Duration::from_secs(5), async {
+            let first = to_rx
+                .recv()
+                .await
+                .expect("proxy must send a TLS alert before closing");
+            let mut input = first.as_ref();
+            client.read_tls(&mut input).unwrap();
+            client.process_new_packets()
+        })
+        .await
+        .expect("timed out waiting for guest TLS alert");
+
+        assert!(
+            matches!(
+                alert,
+                Err(TlsError::AlertReceived(AlertDescription::BadCertificate))
+            ),
+            "expected BadCertificate alert on hostname mismatch, got: {alert:?}"
+        );
+        assert!(relay.await.unwrap().is_err());
+        server.await.unwrap();
+
+        let warnings = recorder.warnings();
+        assert!(
+            warnings.iter().any(|event| {
+                event
+                    .fields
+                    .iter()
+                    .any(|(k, v)| k == "sni" && v == "example.com")
+                    && event
+                        .fields
+                        .iter()
+                        .any(|(k, v)| k == "error" && !v.is_empty())
+            }),
+            "expected WARN log on hostname mismatch, got: {warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn intercept_relay_warns_and_alerts_guest_on_upstream_non_tls_failure() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut stream = accept_with_deadline(listener).await.unwrap();
+            let _ = stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            let _ = stream.shutdown().await;
+        });
+
+        let tls_state = Arc::new(isolated_tls_state(
+            TlsConfig::default(),
+            SecretsHandle::new(SecretsConfig::default()),
+        ));
+        let (from_tx, from_rx) = mpsc::channel(8);
+        let (to_tx, mut to_rx) = mpsc::channel(8);
+        let mut client = guest_client(&tls_state);
+        send_client_tls_output(&mut client, &from_tx).await;
+
+        let recorder = EventRecorder::default();
+        let relay = tokio::spawn(
+            intercept_relay(
+                "203.0.113.10:443".parse().unwrap(),
+                UpstreamTcpTarget::direct(upstream),
+                "example.com",
+                true,
+                Vec::new(),
+                from_rx,
+                to_tx,
+                Arc::new(SharedState::new(8)),
+                tls_state,
+                Arc::new(ProxyConnectState::new()),
+                None,
+                None,
+            )
+            .with_subscriber(recorder.clone()),
+        );
+
+        let alert = tokio::time::timeout(Duration::from_secs(5), async {
+            let first = to_rx
+                .recv()
+                .await
+                .expect("proxy must send a TLS alert before closing");
+            let mut input = first.as_ref();
+            client.read_tls(&mut input).unwrap();
+            client.process_new_packets()
+        })
+        .await
+        .expect("timed out waiting for guest TLS alert");
+
+        assert!(
+            matches!(
+                alert,
+                Err(TlsError::AlertReceived(AlertDescription::HandshakeFailure))
+            ),
+            "expected HandshakeFailure alert on non-TLS upstream, got: {alert:?}"
+        );
+        assert!(relay.await.unwrap().is_err());
+        server.await.unwrap();
+
+        let warnings = recorder.warnings();
+        assert!(
+            warnings.iter().any(|event| {
+                event
+                    .fields
+                    .iter()
+                    .any(|(k, v)| k == "sni" && v == "example.com")
+                    && event
+                        .fields
+                        .iter()
+                        .any(|(k, v)| k == "error" && !v.is_empty())
+            }),
+            "expected WARN log on non-TLS upstream failure, got: {warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn intercept_relay_succeeds_with_trusted_upstream_without_warnings() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let trusted_ca = CertAuthority::generate();
+        let ca_path =
+            std::env::temp_dir().join(format!("msb-proxy-trusted-ca-{}.pem", std::process::id()));
+        std::fs::write(&ca_path, trusted_ca.cert_pem()).unwrap();
+
+        let upstream_config = signed_server_config("example.com", &trusted_ca);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let stream = accept_with_deadline(listener).await.unwrap();
+            let mut stream = TlsAcceptor::from(upstream_config)
+                .accept(stream)
+                .await
+                .unwrap();
+            let mut req = [0u8; 256];
+            let n = stream.read(&mut req).await.unwrap();
+            assert!(req[..n].starts_with(b"GET / HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+        });
+
+        let mut config = TlsConfig::default();
+        config.upstream_ca_cert.push(ca_path.clone());
+        let tls_state = Arc::new(isolated_tls_state(
+            config,
+            SecretsHandle::new(SecretsConfig::default()),
+        ));
+        let _ = std::fs::remove_file(&ca_path);
+
+        let (from_tx, from_rx) = mpsc::channel(8);
+        let (to_tx, mut to_rx) = mpsc::channel(8);
+        let mut client = guest_client(&tls_state);
+        send_client_tls_output(&mut client, &from_tx).await;
+
+        let recorder = EventRecorder::default();
+        let relay = tokio::spawn(
+            intercept_relay(
+                "203.0.113.10:443".parse().unwrap(),
+                UpstreamTcpTarget::direct(upstream),
+                "example.com",
+                true,
+                Vec::new(),
+                from_rx,
+                to_tx,
+                Arc::new(SharedState::new(8)),
+                tls_state,
+                Arc::new(ProxyConnectState::new()),
+                None,
+                None,
+            )
+            .with_subscriber(recorder.clone()),
+        );
+
+        complete_relay_handshake(&mut client, &from_tx, &mut to_rx).await;
+        client
+            .writer()
+            .write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .unwrap();
+        send_client_tls_output(&mut client, &from_tx).await;
+        drop(from_tx);
+
+        let mut response = Vec::new();
+        while let Some(bytes) = to_rx.recv().await {
+            let mut input = bytes.as_ref();
+            while !input.is_empty() {
+                client.read_tls(&mut input).unwrap();
+                client.process_new_packets().unwrap();
+            }
+            let mut plain = [0u8; 1024];
+            loop {
+                match client.reader().read(&mut plain) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&plain[..n]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("unexpected TLS read error: {error}"),
+                }
+            }
+        }
+
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        relay.await.unwrap().unwrap();
+        server.await.unwrap();
+        assert!(
+            recorder.warnings().is_empty(),
+            "valid upstream TLS must not emit WARN logs, got: {:?}",
+            recorder.warnings()
+        );
+    }
+
+    #[test]
+    fn upstream_handshake_alert_maps_certificate_and_transport_errors() {
+        let wrap = |err: TlsError| io::Error::new(io::ErrorKind::InvalidData, err);
+
+        assert_eq!(
+            upstream_handshake_alert(&wrap(TlsError::InvalidCertificate(
+                CertificateError::UnknownIssuer
+            ))),
+            AlertDescription::UnknownCA
+        );
+        assert_eq!(
+            upstream_handshake_alert(&wrap(TlsError::InvalidCertificate(
+                CertificateError::NotValidForName
+            ))),
+            AlertDescription::BadCertificate
+        );
+        assert_eq!(
+            upstream_handshake_alert(&wrap(TlsError::InvalidCertificate(
+                CertificateError::Expired
+            ))),
+            AlertDescription::CertificateExpired
+        );
+        assert_eq!(
+            upstream_handshake_alert(&wrap(TlsError::InvalidCertificate(
+                CertificateError::Revoked
+            ))),
+            AlertDescription::CertificateRevoked
+        );
+        assert_eq!(
+            upstream_handshake_alert(&wrap(TlsError::InvalidCertificate(
+                CertificateError::Other(OtherError(Arc::new(io::Error::other("platform error"))))
+            ))),
+            AlertDescription::CertificateUnknown
+        );
+        assert_eq!(
+            upstream_handshake_alert(&wrap(TlsError::NoCertificatesPresented)),
+            AlertDescription::BadCertificate
+        );
+        assert_eq!(
+            upstream_handshake_alert(&wrap(TlsError::AlertReceived(
+                AlertDescription::UnrecognisedName
+            ))),
+            AlertDescription::UnrecognisedName
+        );
+        assert_eq!(
+            upstream_handshake_alert(&wrap(TlsError::AlertReceived(
+                AlertDescription::CloseNotify
+            ))),
+            AlertDescription::HandshakeFailure
+        );
+        assert_eq!(
+            upstream_handshake_alert(&io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
+            AlertDescription::HandshakeFailure
+        );
     }
 }

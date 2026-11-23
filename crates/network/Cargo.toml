@@ -114,8 +114,10 @@ zeroize = { workspace = true }
 core-foundation = { version = "0.9", optional = true }
 system-configuration = { version = "0.7", optional = true }
 
-[target.'cfg(target_os = "windows")'.dependencies]
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 rustls-platform-verifier = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns", "Win32_System_LibraryLoader"], optional = true }
 
 [dev-dependencies]
