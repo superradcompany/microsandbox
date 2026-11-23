@@ -59,6 +59,7 @@ use windows_sys::Win32::System::Threading::{
 const INIT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const INIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const QUIESCE_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+const SEQLOCK_READ_ATTEMPTS: usize = 4096;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -289,30 +290,41 @@ impl Drop for MappedRegion {
 impl GuestMemoryValidity {
     /// Whether this allocation still holds a valid report from the same lifecycle.
     /// New reports in that lifecycle do not invalidate an unexpired older sample.
-    /// Busy, stopped, reused or unsupported slots fail closed without waiting.
+    /// Retries briefly across concurrent seqlock writes, then fails closed if the
+    /// slot remains busy, stopped, reused, or unsupported.
     pub fn is_current(&self) -> bool {
         let slot = self.registry.slot(self.slot);
-        let before = slot.seq.load(Ordering::Acquire);
-        if before & 1 != 0 {
-            return false;
-        }
-        let generation = slot.generation.load(Ordering::Relaxed);
-        let state = slot.state.load(Ordering::Relaxed);
-        let flags = slot.sample_flags.load(Ordering::Relaxed);
-        let epoch = slot.memory_epoch.load(Ordering::Relaxed);
-        let pid = slot.pid.load(Ordering::Relaxed);
-        let after = slot.seq.load(Ordering::Acquire);
         let required = SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE
             | SAMPLE_FLAG_GUEST_MEMORY_OBSERVATION
             | SAMPLE_FLAG_GUEST_MEMORY_VALID;
-        before == after
-            && generation == self.generation
-            && slot.generation.load(Ordering::Acquire) == self.generation
-            && state == SLOT_ACTIVE
-            && slot.state.load(Ordering::Acquire) == SLOT_ACTIVE
-            && flags & required == required
-            && epoch == self.epoch
-            && pid_is_alive(pid)
+
+        for _ in 0..SEQLOCK_READ_ATTEMPTS {
+            let before = slot.seq.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let generation = slot.generation.load(Ordering::Relaxed);
+            let state = slot.state.load(Ordering::Relaxed);
+            let flags = slot.sample_flags.load(Ordering::Relaxed);
+            let epoch = slot.memory_epoch.load(Ordering::Relaxed);
+            let pid = slot.pid.load(Ordering::Relaxed);
+            let after = slot.seq.load(Ordering::Acquire);
+            if before != after || after & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+
+            return generation == self.generation
+                && slot.generation.load(Ordering::Acquire) == self.generation
+                && state == SLOT_ACTIVE
+                && slot.state.load(Ordering::Acquire) == SLOT_ACTIVE
+                && flags & required == required
+                && epoch == self.epoch
+                && pid_is_alive(pid);
+        }
+
+        false
     }
 }
 
@@ -879,7 +891,7 @@ impl MetricsRegistry {
         // can complete a full cycle in <100 ns, so we need a generous budget
         // before giving up. 4096 attempts is still cheap (<1 ms in the worst
         // case) and effectively unbounded in practice.
-        for _ in 0..4096 {
+        for _ in 0..SEQLOCK_READ_ATTEMPTS {
             let state = slot.state.load(Ordering::Acquire);
             if !slot_visible(state, include_stale) {
                 return None;

@@ -126,7 +126,7 @@ struct CollectorOpts {
     collect_interval: Duration,
 
     /// Per-exporter scheduled flush interval.
-    #[arg(long, value_parser = humantime::parse_duration, default_value = "10s")]
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "1s")]
     flush_interval: Duration,
 
     /// Per-exporter buffer cap (number of collections held before the
