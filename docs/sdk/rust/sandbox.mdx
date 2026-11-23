@@ -2984,23 +2984,15 @@ Result of an explicit idle-timer refresh.
 
 ### CreationProgressHandle
 
-<p className="msb-backref">Returned by <a href="#sandboxcreate_with_progress">Sandbox::create_with_progress()</a> · <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
-
-Bounded receiver for best-effort creation telemetry. Dropping this handle never cancels or blocks creation; await the accompanying `JoinHandle` for the final creation outcome.
-
 #### <span className="msb-recv">progress.</span><span className="msb-hn">recv()</span>
 
 ```rust
 async fn recv(&mut self) -> Option<CreationProgress>
 ```
 
-Receive the next [`CreationProgress`](#creationprogress) event, or `None` when the progress channel closes. Slow consumers may observe coalesced or omitted events.
+Receive the next [`CreationProgress`](#creationprogress) event, or `None` when the progress channel closes. Delivery is best-effort and slow consumers may observe coalesced or omitted events; dropping this handle never cancels or blocks creation, so await the accompanying `JoinHandle` for the final creation outcome.
 
 ### CreationProgress
-
-<p className="msb-backref">Yielded by <a href="#creationprogresshandle">CreationProgressHandle</a></p>
-
-Progress update emitted from image preparation through local VM activation.
 
 <div className="msb-params">
   <div className="msb-param">
@@ -3015,10 +3007,6 @@ Progress update emitted from image preparation through local VM activation.
 
 ### StartupProgress
 
-<p className="msb-backref">Wrapped by <a href="#creationprogress">CreationProgress::Startup</a></p>
-
-Cumulative local startup progress update.
-
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>phase</code><a className="msb-type" href="#startupphase">StartupPhase</a></div>
@@ -3026,7 +3014,7 @@ Cumulative local startup progress update.
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>completed_bytes</code><span className="msb-type">u64</span></div>
-    <div className="msb-param-desc">RAM bytes verified and written in this phase.</div>
+    <div className="msb-param-desc">Cumulative RAM bytes verified and written in this phase.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>total_bytes</code><span className="msb-type">Option&lt;u64&gt;</span></div>
@@ -3035,10 +3023,6 @@ Cumulative local startup progress update.
 </div>
 
 ### StartupPhase
-
-<p className="msb-backref">Field of <a href="#startupprogress">StartupProgress</a></p>
-
-Startup phase reported during local sandbox preparation and activation.
 
 <div className="msb-params">
   <div className="msb-param">
@@ -3069,9 +3053,7 @@ Startup phase reported during local sandbox preparation and activation.
 
 ### PullProgress
 
-<p className="msb-backref">Wrapped by <a href="#creationprogress">CreationProgress::Pull</a></p>
-
-Image pull and EROFS materialization progress event exported from `microsandbox::sandbox::PullProgress`.
+Import path: `microsandbox::sandbox::PullProgress`.
 
 <div className="msb-params">
   <div className="msb-param">
