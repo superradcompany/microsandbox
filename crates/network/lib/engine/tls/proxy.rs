@@ -8,6 +8,7 @@
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use rustls::pki_types::ServerName;
@@ -36,6 +37,9 @@ const CLIENT_HELLO_BUF_SIZE: usize = 16384;
 
 /// Buffer size for bidirectional relay.
 const RELAY_BUF_SIZE: usize = 16384;
+
+/// Timeout for guest-facing and upstream TLS handshakes.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// TLS fatal alert level (RFC 5246 section 7.2 / RFC 8446 section 6).
 const TLS_ALERT_LEVEL_FATAL: u8 = 2;
@@ -165,7 +169,7 @@ impl TlsProxy {
         // Buffer a complete ClientHello. Timeout prevents a
         // slow/malicious guest from holding a proxy slot indefinitely.
         let sni_name = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            TLS_HANDSHAKE_TIMEOUT,
             read_client_hello(&mut from_smoltcp, initial_buf),
         )
         .await
@@ -395,7 +399,7 @@ async fn complete_guest_handshake(
     // Send ServerHello etc. back to guest.
     flush_to_guest(guest_tls, to_smoltcp, shared, tls_buf).await?;
 
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, async {
         while guest_tls.is_handshaking() {
             let data = from_smoltcp
                 .recv()
@@ -483,6 +487,39 @@ pub(crate) async fn intercept_relay(
     sni_name: &str,
     via_connect: bool,
     initial_buf: Vec<u8>,
+    from_smoltcp: mpsc::Receiver<Bytes>,
+    to_smoltcp: mpsc::Sender<Bytes>,
+    shared: Arc<SharedState>,
+    tls_state: Arc<TlsState>,
+    proxy_connect: Arc<ProxyConnectState>,
+    upstream_stream: Option<TcpStream>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+) -> io::Result<()> {
+    intercept_relay_with_timeout(
+        guest_dst,
+        connect_target,
+        sni_name,
+        via_connect,
+        initial_buf,
+        from_smoltcp,
+        to_smoltcp,
+        shared,
+        tls_state,
+        proxy_connect,
+        upstream_stream,
+        outbound_proxy,
+        TLS_HANDSHAKE_TIMEOUT,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn intercept_relay_with_timeout(
+    guest_dst: SocketAddr,
+    connect_target: UpstreamTcpTarget,
+    sni_name: &str,
+    via_connect: bool,
+    initial_buf: Vec<u8>,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
@@ -490,6 +527,7 @@ pub(crate) async fn intercept_relay(
     proxy_connect: Arc<ProxyConnectState>,
     upstream_stream: Option<TcpStream>,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+    upstream_handshake_timeout: Duration,
 ) -> io::Result<()> {
     // Per-connection snapshot: live secret updates apply to later connections.
     let secrets = tls_state.secrets.load();
@@ -515,23 +553,27 @@ pub(crate) async fn intercept_relay(
                 .await?
         }
     };
-    let mut server_tls = match tls_state
-        .upstream_connector_for(sni_name)
-        .connect(server_name, server_stream)
-        .await
+    let mut server_tls = match complete_upstream_handshake(
+        &tls_state,
+        sni_name,
+        server_name,
+        server_stream,
+        connect_dst,
+        guest_dst,
+        &to_smoltcp,
+        &shared,
+        upstream_handshake_timeout,
+    )
+    .await
     {
         Ok(stream) => stream,
         Err(error) => {
-            let alert = upstream_handshake_alert(&error);
-            tracing::warn!(
-                sni = %sni_name,
-                dst = %connect_dst,
-                %guest_dst,
-                ?alert,
-                %error,
-                "upstream TLS handshake failed",
-            );
-            send_tls_fatal_alert(&to_smoltcp, &shared, alert).await;
+            // Drop both relay channel ends before waking smoltcp so the poll
+            // loop observes proxy exit immediately and flushes the queued alert
+            // followed by FIN via DeferredClose.
+            drop(from_smoltcp);
+            drop(to_smoltcp);
+            shared.proxy_wake.wake();
             return Err(error);
         }
     };
@@ -796,6 +838,64 @@ async fn flush_to_guest(
     Ok(())
 }
 
+/// Complete the upstream TLS handshake within `timeout`.
+///
+/// On verification, protocol, transport, or deadline failure, emits a
+/// structured warning and sends an RFC 5246/8446 plaintext fatal TLS alert to
+/// the guest before returning the error.
+#[allow(clippy::too_many_arguments)]
+async fn complete_upstream_handshake(
+    tls_state: &TlsState,
+    sni_name: &str,
+    server_name: ServerName<'static>,
+    server_stream: TcpStream,
+    connect_dst: SocketAddr,
+    guest_dst: SocketAddr,
+    to_smoltcp: &mpsc::Sender<Bytes>,
+    shared: &SharedState,
+    timeout: Duration,
+) -> io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    match tokio::time::timeout(
+        timeout,
+        tls_state
+            .upstream_connector_for(sni_name)
+            .connect(server_name, server_stream),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => {
+            let alert = upstream_handshake_alert(&error);
+            tracing::warn!(
+                sni = %sni_name,
+                dst = %connect_dst,
+                %guest_dst,
+                ?alert,
+                %error,
+                "upstream TLS handshake failed",
+            );
+            send_tls_fatal_alert(to_smoltcp, shared, alert).await;
+            Err(error)
+        }
+        Err(_) => {
+            let alert = AlertDescription::HandshakeFailure;
+            tracing::warn!(
+                sni = %sni_name,
+                dst = %connect_dst,
+                %guest_dst,
+                ?alert,
+                ?timeout,
+                "upstream TLS handshake timed out",
+            );
+            send_tls_fatal_alert(to_smoltcp, shared, alert).await;
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "upstream TLS handshake timed out",
+            ))
+        }
+    }
+}
+
 /// Map an upstream TLS handshake error to a fatal TLS alert for the guest.
 ///
 /// Certificate failures preserve rustls's RFC 5246/8446 alert mapping; other
@@ -870,7 +970,6 @@ async fn send_tls_fatal_alert(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::{CertificateError, Error as TlsError, OtherError};
@@ -2119,6 +2218,162 @@ mod tests {
                         .any(|(k, v)| k == "error" && !v.is_empty())
             }),
             "expected WARN log on non-TLS upstream failure, got: {warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn intercept_relay_warns_and_alerts_guest_on_silent_upstream_timeout() {
+        assert_eq!(TLS_HANDSHAKE_TIMEOUT, Duration::from_secs(10));
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let (release_tx, mut release_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let mut stream = accept_with_deadline(listener).await.unwrap();
+            let _ = accepted_tx.send(());
+            let mut buf = [0u8; 512];
+            loop {
+                tokio::select! {
+                    _ = &mut release_rx => break,
+                    read = stream.read(&mut buf) => {
+                        if !matches!(read, Ok(n) if n > 0) {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let tls_state = Arc::new(isolated_tls_state(
+            TlsConfig::default(),
+            SecretsHandle::new(host_bound_secret_config()),
+        ));
+        let (from_tx, from_rx) = mpsc::channel(8);
+        let (to_tx, mut to_rx) = mpsc::channel(8);
+        let mut client = guest_client(&tls_state);
+        send_client_tls_output(&mut client, &from_tx).await;
+
+        let handshake_timeout = Duration::from_millis(100);
+        let guest_dst: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        let proxy_connect = Arc::new(ProxyConnectState::new());
+        let recorder = EventRecorder::default();
+        let relay = tokio::spawn(
+            intercept_relay_with_timeout(
+                guest_dst,
+                UpstreamTcpTarget::direct(upstream),
+                "example.com",
+                true,
+                Vec::new(),
+                from_rx,
+                to_tx,
+                Arc::new(SharedState::new(8)),
+                tls_state,
+                proxy_connect.clone(),
+                None,
+                None,
+                handshake_timeout,
+            )
+            .with_subscriber(recorder.clone()),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), accepted_rx)
+            .await
+            .expect("timed out waiting for upstream TCP accept")
+            .expect("silent upstream task exited before accepting");
+
+        let (raw_alert, alert) = tokio::time::timeout(Duration::from_secs(2), async {
+            let first = to_rx
+                .recv()
+                .await
+                .expect("proxy must send a TLS alert before closing");
+            let mut input = first.as_ref();
+            client.read_tls(&mut input).unwrap();
+            let result = client.process_new_packets();
+            (first, result)
+        })
+        .await
+        .expect("timed out waiting for guest TLS alert on silent upstream");
+
+        assert_eq!(
+            raw_alert.as_ref(),
+            &tls_fatal_alert_record(AlertDescription::HandshakeFailure)
+        );
+        assert!(
+            client.is_handshaking(),
+            "guest handshake must not complete when upstream is silent"
+        );
+        assert!(
+            matches!(
+                alert,
+                Err(TlsError::AlertReceived(AlertDescription::HandshakeFailure))
+            ),
+            "expected HandshakeFailure alert on silent upstream timeout, got: {alert:?}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), to_rx.recv())
+                .await
+                .expect("timed out waiting for proxy channel close")
+                .is_none(),
+            "proxy must close the guest channel cleanly after sending the fatal alert"
+        );
+
+        let relay_result = tokio::time::timeout(Duration::from_secs(2), relay)
+            .await
+            .expect("relay did not finish")
+            .unwrap();
+        let err = relay_result.expect_err("silent upstream must fail with timeout");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        // Upstream TCP connected before the TLS handshake timed out, so smoltcp
+        // must flush the queued TLS alert and close with FIN via DeferredClose.
+        assert_eq!(proxy_connect.status(), ProxyConnectStatus::Connected);
+
+        // Dropping the timed-out upstream handshake must close the upstream TCP
+        // socket so the silent server observes EOF without holding the handle.
+        let server_outcome = tokio::time::timeout(Duration::from_secs(2), server).await;
+        let _ = release_tx.send(());
+        server_outcome
+            .expect("proxy did not close upstream socket on handshake timeout")
+            .unwrap();
+
+        let expected_dst = upstream.to_string();
+        let expected_guest_dst = guest_dst.to_string();
+        let expected_timeout = format!("{handshake_timeout:?}");
+        let warnings = recorder.warnings();
+        assert!(
+            warnings.iter().any(|event| {
+                event
+                    .fields
+                    .iter()
+                    .any(|(k, v)| k == "sni" && v == "example.com")
+                    && event
+                        .fields
+                        .iter()
+                        .any(|(k, v)| k == "dst" && v == &expected_dst)
+                    && event
+                        .fields
+                        .iter()
+                        .any(|(k, v)| k == "guest_dst" && v == &expected_guest_dst)
+                    && event
+                        .fields
+                        .iter()
+                        .any(|(k, v)| k == "alert" && v == "HandshakeFailure")
+                    && event
+                        .fields
+                        .iter()
+                        .any(|(k, v)| k == "timeout" && v == &expected_timeout)
+            }),
+            "expected structured WARN log with sni/dst/guest_dst/alert/timeout, got: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().all(|event| {
+                event
+                    .fields
+                    .iter()
+                    .all(|(_, v)| !v.contains("real-secret-value") && !v.contains("$MSB_KEY"))
+            }),
+            "WARN log must not contain secret values, got: {warnings:?}"
         );
     }
 
