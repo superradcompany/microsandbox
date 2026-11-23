@@ -682,7 +682,7 @@ pub fn enter(config: Config) -> ! {
     // a failure to write boot-error.json, regardless of how far run() got.
     let log_dir = config.log_dir.clone();
     let run_dir = config.run_dir.clone();
-    let sandbox_name = config.name.clone();
+    let sandbox_name = config.sandbox_name.clone();
     let metrics_slot = config.metrics_slot.clone();
     let failure_channel = super::progress::StartupFailureChannel::default();
     let result = run(config, &failure_channel);
@@ -977,7 +977,7 @@ fn run(
     let metrics_writer = activate_metrics_writer(
         config.metrics_slot.as_ref(),
         &config.run_dir,
-        &config.name,
+        &config.sandbox_name,
         config.metrics_sample_interval_ms,
         run_db_id,
         pid,
@@ -991,7 +991,11 @@ fn run(
         && config.metrics_slot.is_some()
         && config.metrics_sample_interval_ms.is_some()
     {
-        release_reserved_metrics_slot(config.metrics_slot.as_ref(), &config.run_dir, &config.name);
+        release_reserved_metrics_slot(
+            config.metrics_slot.as_ref(),
+            &config.run_dir,
+            &config.sandbox_name,
+        );
     }
 
     // Build the VM with an exit observer for DB cleanup and socket removal.
@@ -1249,7 +1253,7 @@ fn run(
                 release_reserved_metrics_slot(
                     config.metrics_slot.as_ref(),
                     &config.run_dir,
-                    &config.name,
+                    &config.sandbox_name,
                 );
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
@@ -1387,7 +1391,7 @@ fn run(
                 release_reserved_metrics_slot(
                     config.metrics_slot.as_ref(),
                     &config.run_dir,
-                    &config.name,
+                    &config.sandbox_name,
                 );
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
