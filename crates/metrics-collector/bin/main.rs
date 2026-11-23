@@ -255,8 +255,9 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
             flush_interval = ?args.collector.flush_interval,
             "otel --flush-interval is >= 3s; buffered guest memory metrics \
              (microsandbox.memory.usage, microsandbox.memory.total, \
-             microsandbox.memory.available) expire after 3s on export and may \
-             be omitted; recommend --flush-interval=1s"
+             microsandbox.memory.available) can expire after as little as 3s on \
+             export (depending on the guest reporting interval) and may be \
+             omitted; recommend --flush-interval=1s"
         );
     }
 
