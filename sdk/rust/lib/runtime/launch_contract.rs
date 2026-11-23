@@ -10,7 +10,7 @@ use std::{
     io::Read as _,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, OnceLock},
     time::{Duration, SystemTime},
 };
 
@@ -43,6 +43,7 @@ static CONTRACTS: LazyLock<Mutex<HashMap<PathBuf, CachedContract>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static CAPABILITIES: LazyLock<Mutex<HashMap<PathBuf, CachedCapabilities>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static OWN_RUNTIME: OnceLock<OwnRuntime> = OnceLock::new();
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_VERSION_OUTPUT: u64 = 4096;
 
@@ -80,6 +81,15 @@ struct CachedContract {
 struct CachedCapabilities {
     identity: FileIdentity,
     capabilities: Arc<LaunchCapabilities>,
+    _file: File,
+}
+
+/// The running executable, captured at registration: launch checks of a
+/// runtime that is this very file read its advertisement in-process.
+struct OwnRuntime {
+    path: PathBuf,
+    identity: FileIdentity,
+    advertise: fn() -> LaunchCapabilities,
     _file: File,
 }
 
@@ -655,6 +665,31 @@ impl FileIdentity {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Register the running executable's launch advertisement. A launch check of
+/// a runtime that is this same file (same canonical path and identity as now)
+/// is then answered without spawning `msb __launch-protocol`. The identity is
+/// captured here, so call it as early as possible; a file replaced afterwards
+/// is probed as usual. Only the first registration counts. For the msb CLI:
+/// the advertisement must be what this executable prints to that probe.
+#[doc(hidden)]
+pub fn register_own_runtime(advertise: fn() -> LaunchCapabilities) -> std::io::Result<()> {
+    register_runtime_at(&std::env::current_exe()?, advertise)
+}
+
+// Process-wide and first-wins, so at most one test may register a runtime.
+fn register_runtime_at(path: &Path, advertise: fn() -> LaunchCapabilities) -> std::io::Result<()> {
+    let path = std::fs::canonicalize(path)?;
+    let file = File::open(&path)?;
+    let identity = FileIdentity::capture(&file)?;
+    let _ = OWN_RUNTIME.set(OwnRuntime {
+        path,
+        identity,
+        advertise,
+        _file: file,
+    });
+    Ok(())
+}
+
 /// Check launch intent before create can replace an existing sandbox.
 /// Host paths, named volumes and network slots are checked again in the final encoder.
 pub(crate) async fn validate_runtime_config(
@@ -695,20 +730,12 @@ pub(crate) async fn validate_runtime_config(
     };
     require_protected_guest_state(&runtime.msb_path).await?;
     if needs_guard {
-        let advertisement: serde_json::Value =
-            serde_json::from_slice(&bounded_probe(&runtime.msb_path, "__launch-protocol").await?)?;
-        if config.retained_exec_limits().is_some()
-            && advertisement["restored_exec_limits"].as_bool() != Some(true)
-        {
-            return Err(MicrosandboxError::Runtime(upgrade_required(
-                "retained execution limits",
-            )));
-        }
-        if needs_bindings && advertisement["deferred_command_bindings"].as_bool() != Some(true) {
-            return Err(MicrosandboxError::Runtime(upgrade_required(
-                "deferred command bindings",
-            )));
-        }
+        let advertisement = capabilities(&runtime.msb_path).await?;
+        require_restore_guard(
+            &advertisement,
+            config.retained_exec_limits().is_some(),
+            needs_bindings,
+        )?;
     }
     let contract = resolve(&runtime.msb_path).await?;
     validate_nested_virt(&runtime.msb_path, config, contract).await?;
@@ -814,10 +841,7 @@ pub(crate) async fn select_http_deny_response(
     if !config.spec.network.enabled || !config.spec.network.http.deny_response {
         return Ok(http);
     }
-    let capabilities = bounded_probe(path, "__launch-protocol")
-        .await
-        .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok());
+    let capabilities = capabilities(path).await.ok();
     let supported =
         capabilities
             .as_ref()
@@ -931,10 +955,9 @@ pub(crate) async fn validate_guest_clock(
     {
         return Ok(());
     }
-    let supported = bounded_probe(path, "__launch-protocol")
+    let supported = capabilities(path)
         .await
         .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
         .is_some_and(|capabilities| capabilities.guest_clock);
     if !supported {
         return Err(MicrosandboxError::unsupported(
@@ -967,13 +990,9 @@ pub(crate) async fn validate_multi_tenant_config(
         ));
     }
 
-    let supported = bounded_probe(path, "__launch-protocol")
-        .await
-        .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(|capabilities| {
-            capabilities.protocols.contains(&2) && capabilities.multi_tenant
-        });
+    let supported = capabilities(path).await.ok().is_some_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.multi_tenant
+    });
     if !supported {
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
@@ -992,13 +1011,9 @@ pub(crate) async fn validate_fs_state_limit(
     if global.fs_state_limit_override().is_none() {
         return Ok(());
     }
-    let supported = bounded_probe(path, "__launch-protocol")
-        .await
-        .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(|capabilities| {
-            capabilities.protocols.contains(&2) && capabilities.fs_state_limit
-        });
+    let supported = capabilities(path).await.ok().is_some_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.fs_state_limit
+    });
     if !supported {
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
@@ -1013,13 +1028,9 @@ pub(crate) async fn validate_fs_state_limit(
 /// Optional evidence support never gates an otherwise-supported operation on an older runtime.
 /// Read the existing side-effect-free probe before dispatch; a failed/old probe means no handoff.
 pub(crate) async fn supports_configuration_retention(path: &Path) -> bool {
-    bounded_probe(path, "__launch-protocol")
-        .await
-        .ok()
-        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(|capabilities| {
-            capabilities.protocols.contains(&2) && capabilities.configuration_retention
-        })
+    capabilities(path).await.ok().is_some_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.configuration_retention
+    })
 }
 
 /// Probe only the new combination. Ordinary starts/restores keep their cached,
@@ -1048,11 +1059,9 @@ async fn require_tcp_accept_queue_size(path: &Path) -> MicrosandboxResult<()> {
 /// This is a security prerequisite for every start, rather than an optional feature.
 /// Probe failures are refusals too: older executables may not recognize the probe command.
 pub(crate) async fn require_protected_guest_state(path: &Path) -> MicrosandboxResult<()> {
-    let result = bounded_probe(path, "__launch-protocol").await;
-    let supported = result.as_ref().ok().is_some_and(|output| {
-        serde_json::from_slice::<LaunchCapabilities>(output).is_ok_and(|capabilities| {
-            capabilities.protocols.contains(&2) && capabilities.protected_guest_state
-        })
+    let result = capabilities(path).await;
+    let supported = result.as_ref().is_ok_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.protected_guest_state
     });
     if supported {
         return Ok(());
@@ -1110,16 +1119,30 @@ async fn capabilities(path: &Path) -> MicrosandboxResult<Arc<LaunchCapabilities>
             return Ok(entry.capabilities.clone());
         }
     }
-    let capabilities = Arc::new(serde_json::from_slice::<LaunchCapabilities>(
-        &bounded_probe(&path, "__launch-protocol").await?,
-    )?);
-    if FileIdentity::capture(&File::open(&path)?)? != identity
-        || FileIdentity::capture(&file)? != identity
+    let capabilities = if let Some(own) = OWN_RUNTIME
+        .get()
+        .filter(|own| own.path == path && own.identity == identity)
     {
-        return Err(MicrosandboxError::Runtime(
-            "runtime executable changed during capability discovery".into(),
-        ));
-    }
+        // Bounded like a probe: the advertisement asks the host hypervisor.
+        let advertisement =
+            tokio::time::timeout(PROBE_TIMEOUT, tokio::task::spawn_blocking(own.advertise))
+                .await
+                .map_err(|_| MicrosandboxError::Runtime("runtime version probe timed out".into()))?
+                .map_err(|_| MicrosandboxError::Runtime("runtime version probe failed".into()))?;
+        Arc::new(advertisement)
+    } else {
+        let capabilities = Arc::new(serde_json::from_slice::<LaunchCapabilities>(
+            &bounded_probe(&path, "__launch-protocol").await?,
+        )?);
+        if FileIdentity::capture(&File::open(&path)?)? != identity
+            || FileIdentity::capture(&file)? != identity
+        {
+            return Err(MicrosandboxError::Runtime(
+                "runtime executable changed during capability discovery".into(),
+            ));
+        }
+        capabilities
+    };
     let mut cached = CAPABILITIES.lock().await;
     if cached.len() >= 64 {
         cached.clear();
@@ -1191,6 +1214,26 @@ fn parse_version(bytes: &[u8]) -> MicrosandboxResult<Version> {
         .and_then(|text| text.trim().strip_prefix("msb "))
         .and_then(|value| Version::parse(value).ok());
     parsed.ok_or_else(|| MicrosandboxError::Runtime("unrecognized runtime version response".into()))
+}
+
+/// Restored execution limits and deferred command bindings are honored only by
+/// runtimes that advertise them; older ones would drop them silently.
+fn require_restore_guard(
+    advertisement: &LaunchCapabilities,
+    needs_limits: bool,
+    needs_bindings: bool,
+) -> MicrosandboxResult<()> {
+    if needs_limits && !advertisement.restored_exec_limits {
+        return Err(MicrosandboxError::Runtime(upgrade_required(
+            "retained execution limits",
+        )));
+    }
+    if needs_bindings && !advertisement.deferred_command_bindings {
+        return Err(MicrosandboxError::Runtime(upgrade_required(
+            "deferred command bindings",
+        )));
+    }
+    Ok(())
 }
 
 /// A consistent, actionable refusal for features that cannot be downgraded.
@@ -2116,6 +2159,328 @@ mod tests {
         // Existing strict readers receive no additional property on the unsupported path.
         let value = serde_json::to_value(LaunchConfig::default()).unwrap();
         assert!(value.get("retention_source").is_none());
+    }
+
+    /// Removes a runtime's cached advertisement (and its open handle) on drop,
+    /// so a failed assertion does not leave the global entry behind.
+    struct EvictCapabilities(PathBuf);
+
+    impl Drop for EvictCapabilities {
+        fn drop(&mut self) {
+            if let Ok(mut cached) = CAPABILITIES.try_lock() {
+                cached.remove(&self.0);
+            }
+        }
+    }
+
+    /// An advertisement with every capability the launch checks read.
+    fn all_capabilities() -> LaunchCapabilities {
+        serde_json::from_value(serde_json::json!({
+            "protocols": [2, 1],
+            "protected_guest_state": true,
+            "storage_reader": true,
+            "required_restore_backing": true,
+            "tcp_accept_queue_size": true,
+            "http_deny_message": true,
+            "http_deny_json": true,
+            "guest_clock": true,
+            "fs_state_limit": true,
+            "configuration_retention": true,
+            "multi_tenant": true,
+            "deferred_command_bindings": true,
+            "restored_exec_limits": true,
+        }))
+        .unwrap()
+    }
+
+    /// Every launch check reads one cached advertisement per unchanged native runtime.
+    /// The seeded executable cannot run, so any check that spawns its own probe fails.
+    #[tokio::test]
+    async fn launch_checks_reuse_the_cached_advertisement_of_an_unchanged_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(if cfg!(windows) { "msb.exe" } else { "msb" });
+        std::fs::write(&path, b"not an executable").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        assert!(bounded_probe(&path, "__launch-protocol").await.is_err());
+
+        let canonical = std::fs::canonicalize(&path).unwrap();
+        let _evict = EvictCapabilities(canonical.clone());
+        let file = File::open(&canonical).unwrap();
+        CAPABILITIES.lock().await.insert(
+            canonical.clone(),
+            CachedCapabilities {
+                identity: FileIdentity::capture(&file).unwrap(),
+                capabilities: Arc::new(all_capabilities()),
+                _file: file,
+            },
+        );
+
+        // Collect every check that spawned its own probe, so a regression names each one.
+        let mut probed = Vec::new();
+        let mut check = |name: &'static str, ok: bool| {
+            if !ok {
+                probed.push(name);
+            }
+        };
+        check(
+            "require_protected_guest_state",
+            require_protected_guest_state(&path).await.is_ok(),
+        );
+        check(
+            "require_restore_backing",
+            require_restore_backing(&path).await.is_ok(),
+        );
+        check(
+            "supports_configuration_retention",
+            supports_configuration_retention(&path).await,
+        );
+
+        let mut config = SandboxConfig::default();
+        config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off);
+        check(
+            "validate_guest_clock",
+            validate_guest_clock(&path, &config).await.is_ok(),
+        );
+
+        let mut global = GlobalConfig::default();
+        global.snapshots.max_filesystem_state_mib = 64;
+        check(
+            "validate_fs_state_limit",
+            validate_fs_state_limit(&path, &global).await.is_ok(),
+        );
+        #[cfg(feature = "net")]
+        {
+            check(
+                "require_tcp_accept_queue_size",
+                require_tcp_accept_queue_size(&path).await.is_ok(),
+            );
+
+            config.spec.network.enabled = true;
+            config.spec.network.http.deny_response = true;
+            config.spec.network.http.deny_response_format = HttpDenyResponseFormat::Json;
+            check(
+                "select_http_deny_response",
+                select_http_deny_response(&path, &config)
+                    .await
+                    .is_ok_and(|http| http.deny_response_format == HttpDenyResponseFormat::Json),
+            );
+
+            config.spec.deployment_profile = microsandbox_types::DeploymentProfile::MultiTenant;
+            global.dns.nameservers = Some(vec!["9.9.9.9".parse().unwrap()]);
+            check(
+                "validate_multi_tenant_config",
+                validate_multi_tenant_config(&path, &config, &global)
+                    .await
+                    .is_ok(),
+            );
+        }
+        assert!(probed.is_empty(), "checks that probed again: {probed:?}");
+
+        require_restore_guard(&capabilities(&path).await.unwrap(), true, true).unwrap();
+
+        // A changed executable is never answered from the old advertisement.
+        std::fs::write(&path, b"still not an executable, but longer").unwrap();
+        let error = require_protected_guest_state(&path).await.unwrap_err();
+        assert!(error.to_string().contains("Probe failed"), "{error}");
+    }
+
+    /// A registered file is answered in-process; the same path after a
+    /// replacement, another name of the same file and a copy are probed. The
+    /// file is not executable, so every probe of it fails the check that made it.
+    #[tokio::test]
+    async fn launch_checks_of_the_registered_running_executable_never_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir
+            .path()
+            .join(if cfg!(windows) { "msb.exe" } else { "msb" });
+        std::fs::write(&own, b"not an executable").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        assert!(bounded_probe(&own, "__launch-protocol").await.is_err());
+
+        // Linked before registration, so the link cannot change the identity
+        // registered below (a Unix identity includes the inode's ctime).
+        let link = dir.path().join("linked");
+        std::fs::hard_link(&own, &link).unwrap();
+
+        register_runtime_at(&own, all_capabilities).unwrap();
+        let _evict = EvictCapabilities(std::fs::canonicalize(&own).unwrap());
+
+        let mut probed = Vec::new();
+        let mut check = |name: &'static str, ok: bool| {
+            if !ok {
+                probed.push(name);
+            }
+        };
+        check(
+            "require_protected_guest_state",
+            require_protected_guest_state(&own).await.is_ok(),
+        );
+        check(
+            "require_storage_reader",
+            require_storage_reader(&own).await.is_ok(),
+        );
+        check(
+            "require_restore_backing",
+            require_restore_backing(&own).await.is_ok(),
+        );
+        check(
+            "supports_configuration_retention",
+            supports_configuration_retention(&own).await,
+        );
+
+        let mut config = SandboxConfig::default();
+        config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off);
+        check(
+            "validate_guest_clock",
+            validate_guest_clock(&own, &config).await.is_ok(),
+        );
+
+        let mut global = GlobalConfig::default();
+        global.snapshots.max_filesystem_state_mib = 64;
+        check(
+            "validate_fs_state_limit",
+            validate_fs_state_limit(&own, &global).await.is_ok(),
+        );
+        check(
+            "require_restore_guard",
+            capabilities(&own)
+                .await
+                .is_ok_and(|caps| require_restore_guard(&caps, true, true).is_ok()),
+        );
+        assert!(probed.is_empty(), "checks that probed: {probed:?}");
+
+        // Another name of the same file is another runtime path: probed.
+        assert!(require_protected_guest_state(&link).await.is_err());
+
+        // So is a byte-identical copy.
+        let copy = dir.path().join("copy");
+        std::fs::copy(&own, &copy).unwrap();
+        assert!(require_protected_guest_state(&copy).await.is_err());
+
+        // A replacement at the registered path is not the registered file.
+        std::fs::remove_file(&link).unwrap();
+        let staged = dir.path().join("staged");
+        std::fs::write(&staged, b"not an executable").unwrap();
+        std::fs::rename(&staged, &own).unwrap();
+        let error = require_protected_guest_state(&own).await.unwrap_err();
+        assert!(error.to_string().contains("Probe failed"), "{error}");
+    }
+
+    /// Create and restart admission refuse a restore guard the selected runtime
+    /// does not advertise, before any later launch check runs.
+    #[tokio::test]
+    async fn runtime_admission_refuses_an_unadvertised_restore_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let msb = dir
+            .path()
+            .join(if cfg!(windows) { "msb.exe" } else { "msb" });
+        let library = dir.path().join("libkrunfw");
+        std::fs::write(&msb, b"not an executable").unwrap();
+        std::fs::write(&library, b"not a library").unwrap();
+
+        let canonical = std::fs::canonicalize(&msb).unwrap();
+        let _evict = EvictCapabilities(canonical.clone());
+        let mut global = GlobalConfig::default();
+        global.paths.msb = Some(msb.clone());
+        global.paths.libkrunfw = Some(library);
+
+        let limited = SandboxConfig {
+            restored_exec_limits: Some(microsandbox_types::ExecLimits {
+                max_executions: 2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut bound = SandboxConfig::default();
+        bound.deferred_command_bindings.cmd.insert("ARGS".into());
+
+        for (field, config, refusal) in [
+            (
+                "restored_exec_limits",
+                &limited,
+                "retained execution limits",
+            ),
+            (
+                "deferred_command_bindings",
+                &bound,
+                "deferred command bindings",
+            ),
+        ] {
+            for advertised in [false, true] {
+                let mut advertisement = serde_json::to_value(all_capabilities()).unwrap();
+                advertisement[field] = advertised.into();
+                let file = File::open(&canonical).unwrap();
+                CAPABILITIES.lock().await.insert(
+                    canonical.clone(),
+                    CachedCapabilities {
+                        identity: FileIdentity::capture(&file).unwrap(),
+                        capabilities: Arc::new(serde_json::from_value(advertisement).unwrap()),
+                        _file: file,
+                    },
+                );
+
+                let result = validate_runtime_config(config, &global).await;
+
+                let refused = result
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains(refusal));
+                assert_eq!(
+                    refused, !advertised,
+                    "{field} advertised {advertised}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn restore_guard_requires_each_advertised_field() {
+        for limits in [None, Some(false), Some(true)] {
+            for bindings in [None, Some(false), Some(true)] {
+                let mut advertised = serde_json::json!({"protocols": [2, 1]});
+                if let Some(limits) = limits {
+                    advertised["restored_exec_limits"] = limits.into();
+                }
+                if let Some(bindings) = bindings {
+                    advertised["deferred_command_bindings"] = bindings.into();
+                }
+                let advertised: LaunchCapabilities = serde_json::from_value(advertised).unwrap();
+                for (needs_limits, needs_bindings) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    let cell = format!(
+                        "advertised limits {limits:?} bindings {bindings:?}, \
+                         needs limits {needs_limits} bindings {needs_bindings}"
+                    );
+                    let result = require_restore_guard(&advertised, needs_limits, needs_bindings);
+                    let refused_limits = needs_limits && limits != Some(true);
+                    let refused_bindings = needs_bindings && bindings != Some(true);
+                    match result {
+                        Ok(()) => assert!(!refused_limits && !refused_bindings, "{cell}"),
+                        Err(error) => {
+                            let error = error.to_string();
+                            if refused_limits {
+                                assert!(error.contains("retained execution limits"), "{cell}");
+                            } else {
+                                assert!(refused_bindings, "{cell}: {error}");
+                                assert!(error.contains("deferred command bindings"), "{cell}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(unix)]

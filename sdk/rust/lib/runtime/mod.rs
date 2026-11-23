@@ -31,6 +31,7 @@ pub(crate) mod storage_aliases;
 //--------------------------------------------------------------------------------------------------
 
 pub use handle::ProcessHandle;
+pub use launch_contract::register_own_runtime;
 pub(crate) use lifecycle::acquire_sandbox_lifecycle_guard;
 pub(crate) use sockets::{
     default_agent_socket_paths, remove_socket_artifacts_at, resolve_agent_socket_path,

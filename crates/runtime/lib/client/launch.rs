@@ -127,6 +127,16 @@ pub struct LaunchCapabilities {
     /// Older runtimes omit this capability.
     #[serde(default)]
     pub multi_tenant: bool,
+
+    /// Deferred command bindings are resolved by the runtime.
+    /// Older runtimes omit this capability.
+    #[serde(default)]
+    pub deferred_command_bindings: bool,
+
+    /// Captured execution limits are restored by the runtime.
+    /// Older runtimes omit this capability.
+    #[serde(default)]
+    pub restored_exec_limits: bool,
 }
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this sandbox.
@@ -575,6 +585,26 @@ impl LaunchConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_guard_capabilities_default_off_and_are_always_advertised() {
+        let legacy: LaunchCapabilities =
+            serde_json::from_value(serde_json::json!({"protocols": [2, 1]})).unwrap();
+        assert!(!legacy.deferred_command_bindings && !legacy.restored_exec_limits);
+
+        let current: LaunchCapabilities = serde_json::from_value(serde_json::json!({
+            "protocols": [2, 1],
+            "deferred_command_bindings": true,
+            "restored_exec_limits": true,
+        }))
+        .unwrap();
+        assert!(current.deferred_command_bindings && current.restored_exec_limits);
+
+        // Older SDKs read these keys from the raw JSON, so they are always written.
+        let written = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(written["deferred_command_bindings"], false);
+        assert_eq!(written["restored_exec_limits"], false);
+    }
 
     #[test]
     fn required_backing_is_explicit_and_absent_from_legacy_mount_bindings() {
