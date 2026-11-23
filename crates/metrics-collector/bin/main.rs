@@ -20,8 +20,15 @@ use microsandbox_metrics_collector::exporters::{
     OtelExporter, OtlpCompression, OtlpProtocol, StdoutExporter,
 };
 use microsandbox_metrics_collector::{CatalogLabelSource, MetricsCollector};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Minimum guest-memory freshness floor enforced on export (`max(3 * reporting_interval, 3s)`).
+const GUEST_MEMORY_FRESHNESS_FLOOR: Duration = Duration::from_secs(3);
 
 //--------------------------------------------------------------------------------------------------
 // CLI definition
@@ -243,6 +250,15 @@ async fn main() -> anyhow::Result<()> {
 async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
     let registries = resolve_registry_names(args.collector.msb_home.as_deref())?;
     info!(registry_count = registries.len(), endpoint = %args.endpoint, "starting msb-metrics otel");
+    if args.collector.flush_interval >= GUEST_MEMORY_FRESHNESS_FLOOR {
+        warn!(
+            flush_interval = ?args.collector.flush_interval,
+            "otel --flush-interval is >= 3s; buffered guest memory metrics \
+             (microsandbox.memory.usage, microsandbox.memory.total, \
+             microsandbox.memory.available) expire after 3s on export and may \
+             be omitted; recommend --flush-interval=1s"
+        );
+    }
 
     let mut exporter_builder = OtelExporter::builder()
         .endpoint(&args.endpoint)
