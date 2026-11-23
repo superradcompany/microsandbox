@@ -179,7 +179,8 @@ fn missing_ancestors(path: &Path) -> Vec<PathBuf> {
 }
 
 /// Appends the CA PEM to the first found CA bundle, or creates a fallback.
-/// A bundle that already holds the PEM is left unchanged.
+/// Only the PEM blocks the bundle does not already hold are appended, so a
+/// bundle that holds them all is left unchanged.
 ///
 /// Returns the path to the bundle that was modified.
 fn append_to_bundle(ca_pem: &str) -> AgentdResult<String> {
@@ -194,14 +195,17 @@ fn append_to_bundle_at(
     for &path in bundle_paths {
         if Path::new(path).exists() {
             let mut contents = fs::read_to_string(path)?;
-            if contents.contains(ca_pem) {
+            let missing = missing_pem_blocks(&contents, ca_pem);
+            if missing.is_empty() {
                 return Ok(path.to_string());
             }
-            // Ensure a newline before appending.
-            if !contents.ends_with('\n') {
-                contents.push('\n');
+            for block in missing {
+                // Ensure a newline before each appended block.
+                if !contents.ends_with('\n') {
+                    contents.push('\n');
+                }
+                contents.push_str(block);
             }
-            contents.push_str(ca_pem);
             // Replace the symlink target, so a symlinked bundle stays a symlink.
             replace_file(&fs::canonicalize(path)?, &contents)?;
             return Ok(path.to_string());
@@ -211,6 +215,54 @@ fn append_to_bundle_at(
     // No existing bundle found — create the fallback.
     replace_file(Path::new(fallback_path), ca_pem)?;
     Ok(fallback_path.to_string())
+}
+
+/// The PEM blocks of `pem` that `bundle` does not already contain, in order
+/// and without repeats.
+///
+/// Matching is per block, not on the whole PEM: the host CA set is shipped
+/// in a different order on each boot, so the whole PEM never matches the
+/// copy appended on an earlier boot even though every certificate in it does.
+/// A `pem` with no PEM blocks is treated as one opaque block.
+fn missing_pem_blocks<'a>(bundle: &str, pem: &'a str) -> Vec<&'a str> {
+    let blocks = pem_blocks(pem);
+    if blocks.is_empty() {
+        return if bundle.contains(pem) {
+            Vec::new()
+        } else {
+            vec![pem]
+        };
+    }
+
+    let mut missing: Vec<&str> = Vec::new();
+    for block in blocks {
+        let cert = block.trim_end();
+        if !bundle.contains(cert) && !missing.iter().any(|m| m.trim_end() == cert) {
+            missing.push(block);
+        }
+    }
+    missing
+}
+
+/// Splits `pem` into its `-----BEGIN ...-----` / `-----END ...-----` blocks,
+/// each including the newline that ends its END line when there is one.
+fn pem_blocks(pem: &str) -> Vec<&str> {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "-----END ";
+
+    let mut blocks = Vec::new();
+    let mut rest = pem;
+    while let Some(start) = rest.find(BEGIN) {
+        let Some(end_marker) = rest[start..].find(END).map(|i| start + i) else {
+            break;
+        };
+        let end = rest[end_marker..]
+            .find('\n')
+            .map_or(rest.len(), |i| end_marker + i + 1);
+        blocks.push(&rest[start..end]);
+        rest = &rest[end..];
+    }
+    blocks
 }
 
 /// Replaces `path` with `contents` through a synced temporary file and a
@@ -345,6 +397,66 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&bundle).unwrap(), "OLD CERTS\nNEW CA\n");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn cert(body: &str) -> String {
+        format!("-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----\n")
+    }
+
+    #[test]
+    fn append_to_bundle_skips_host_cas_shipped_in_a_different_order() {
+        // The host CA set arrives in a different order on each boot (#2113),
+        // so matching the whole PEM never hit and every boot appended it again.
+        let root = bundle_test_root("reordered");
+        let bundle = root.join("ca-certificates.crt");
+        fs::write(&bundle, cert("MOZILLA")).unwrap();
+
+        let path = bundle.to_str().unwrap();
+        let fallback = root.join("fallback.crt");
+        let (a, b) = (cert("HOST-A"), cert("HOST-B"));
+        append_to_bundle_at(&format!("{a}{b}"), &[path], fallback.to_str().unwrap()).unwrap();
+        append_to_bundle_at(&format!("{b}{a}"), &[path], fallback.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&bundle).unwrap(),
+            format!("{}{a}{b}", cert("MOZILLA"))
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn append_to_bundle_adds_only_the_host_cas_the_bundle_lacks() {
+        let root = bundle_test_root("partial");
+        let bundle = root.join("ca-certificates.crt");
+        let (shared, extra) = (cert("IN-BOTH"), cert("HOST-ONLY"));
+        fs::write(&bundle, &shared).unwrap();
+
+        let fallback = root.join("fallback.crt");
+        append_to_bundle_at(
+            &format!("{extra}{shared}"),
+            &[bundle.to_str().unwrap()],
+            fallback.to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&bundle).unwrap(),
+            format!("{shared}{extra}")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_pem_blocks_drops_repeats_and_keeps_an_unterminated_last_block() {
+        let a = cert("A");
+        let b_unterminated = cert("B").trim_end().to_string();
+        let pem = format!("{a}{a}{b_unterminated}");
+
+        assert_eq!(
+            missing_pem_blocks("", &pem),
+            vec![a.as_str(), b_unterminated.as_str()]
+        );
+        assert!(missing_pem_blocks(&format!("{a}{}", cert("B")), &pem).is_empty());
     }
 
     #[test]
