@@ -5280,7 +5280,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn open_metrics_registry_prefers_private_file_only_for_private_handoffs() {
-        use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReserveSlot};
+        use microsandbox_metrics::MetricsRegistry;
         use sha2::{Digest, Sha256};
 
         use super::{MetricsSlotHandoff, is_private_metrics_handoff, open_metrics_registry};
