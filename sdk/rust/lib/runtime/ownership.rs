@@ -8,7 +8,7 @@ use std::time::Duration;
 use microsandbox_db::entity::run;
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::Foundation::{
-    ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows_sys::Win32::System::Threading::{
@@ -43,6 +43,12 @@ struct Record {
 pub(crate) struct RecordedOwner {
     pub lifecycle_lock: bool,
     pub process: Option<RuntimeProcess>,
+    /// The recorded PID is live but this token may not open it (ERROR_ACCESS_DENIED):
+    /// a process of another account or a protected process now holds the PID, or the
+    /// runtime itself belongs to one. Like [`microsandbox_utils::process::pid_is_alive`],
+    /// that counts as alive, so the run is left alone rather than reported as an error
+    /// or reconciled as exited.
+    pub inaccessible: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -162,6 +168,23 @@ impl RuntimeProcess {
     }
 }
 
+impl RecordedOwner {
+    /// Whether the recorded runtime still holds its run. An exited or recycled process
+    /// is not alive; one this token may not open is (see [`Self::inaccessible`]).
+    pub(crate) fn alive(&self) -> io::Result<bool> {
+        if self.inaccessible {
+            return Ok(true);
+        }
+
+        Ok(self
+            .process
+            .as_ref()
+            .map(RuntimeProcess::alive)
+            .transpose()?
+            .unwrap_or(false))
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -170,10 +193,11 @@ pub(crate) fn recorded_owner(
     directory: &Path,
     run: &run::Model,
 ) -> MicrosandboxResult<Option<RecordedOwner>> {
-    let bytes = match std::fs::read(directory.join("sdk-process.json")) {
+    let path = directory.join("sdk-process.json");
+    let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(record_error(&path, None, error).into()),
     };
     let record: Record = serde_json::from_slice(&bytes)?;
     // An old file must never bind an unrelated run, including after removal/recreation.
@@ -181,16 +205,54 @@ pub(crate) fn recorded_owner(
     {
         return Ok(None);
     }
-    let process =
-        RuntimeProcess::capture(record.pid)?.filter(|process| process.birth == record.birth);
-    Ok(Some(RecordedOwner {
-        lifecycle_lock: record.lifecycle_lock,
-        process,
-    }))
+
+    let owner = owner_from_capture(
+        RuntimeProcess::capture(record.pid),
+        record.birth,
+        record.lifecycle_lock,
+    )
+    .map_err(|error| record_error(&path, Some(record.pid), error))?;
+
+    Ok(Some(owner))
 }
 
 fn changed() -> MicrosandboxError {
     MicrosandboxError::Runtime("runtime process identity changed during lifecycle operation".into())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
+/// Turns the capture of a recorded PID into its owner. ERROR_ACCESS_DENIED means the
+/// PID is live but not openable by this token; like `pid_is_alive`, that is alive.
+fn owner_from_capture(
+    captured: io::Result<Option<RuntimeProcess>>,
+    birth: u64,
+    lifecycle_lock: bool,
+) -> io::Result<RecordedOwner> {
+    let (process, inaccessible) = match captured {
+        Ok(process) => (process.filter(|process| process.birth == birth), false),
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => (None, true),
+        Err(error) => return Err(error),
+    };
+
+    Ok(RecordedOwner {
+        lifecycle_lock,
+        process,
+        inaccessible,
+    })
+}
+
+/// Names the record (and the PID it holds) an I/O error came from; a bare OS error
+/// from `msb list` gives no clue which sandbox or process failed.
+fn record_error(path: &Path, pid: Option<i32>, error: io::Error) -> io::Error {
+    let subject = match pid {
+        Some(pid) => format!("runtime pid {pid} recorded in {}", path.display()),
+        None => path.display().to_string(),
+    };
+
+    io::Error::new(error.kind(), format!("{subject}: {error}"))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -201,6 +263,8 @@ fn changed() -> MicrosandboxError {
 mod tests {
     use super::*;
     use std::process::{Child, Command, Stdio};
+
+    use windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE;
 
     struct ChildFixture(Child);
 
@@ -307,6 +371,58 @@ mod tests {
         );
         assert!(process.alive().unwrap());
     }
+
+    /// A recorded PID this token may not open (another account's or a protected process)
+    /// counts as alive, as `pid_is_alive` does, instead of failing `msb list` with a bare
+    /// "Access is denied (os error 5)".
+    #[test]
+    fn an_inaccessible_recorded_pid_is_alive_not_an_error() {
+        let denied = io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32);
+
+        let owner = owner_from_capture(Err(denied), 1, false).unwrap();
+        assert!(owner.inaccessible);
+        assert!(owner.process.is_none());
+        assert!(owner.alive().unwrap());
+
+        let exited = owner_from_capture(Ok(None), 1, false).unwrap();
+        assert!(!exited.inaccessible);
+        assert!(!exited.alive().unwrap());
+
+        let other = io::Error::from_raw_os_error(ERROR_INVALID_HANDLE as i32);
+
+        let error = owner_from_capture(Err(other), 1, false).err().unwrap();
+        assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_HANDLE as i32));
+    }
+
+    /// Other I/O errors name the record and the PID it holds.
+    #[test]
+    fn record_errors_name_the_record_and_pid() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sdk-process.json");
+
+        let error = record_error(
+            &path,
+            Some(4321),
+            io::Error::from_raw_os_error(ERROR_INVALID_HANDLE as i32),
+        );
+        let message = error.to_string();
+        assert!(message.contains("runtime pid 4321"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+
+        // An unreadable record (here a directory in its place) names its path.
+        std::fs::create_dir(&path).unwrap();
+
+        let MicrosandboxError::Io(error) =
+            recorded_owner(directory.path(), &run(4321)).err().unwrap()
+        else {
+            panic!("an unreadable record is no longer an I/O error");
+        };
+        assert!(
+            error.to_string().contains(&path.display().to_string()),
+            "{error}"
+        );
+    }
+
     #[test]
     #[ignore = "subprocess fixture controlled by the ownership tests"]
     fn ownership_child() {

@@ -178,12 +178,7 @@ impl LocalContext {
         let lock_owned = try_acquire_lifecycle_guard(&run_dir, name)?.is_none();
         #[cfg(windows)]
         let legacy_alive = match &owner {
-            Some(owner) if !owner.lifecycle_lock => owner
-                .process
-                .as_ref()
-                .map(|process| process.alive())
-                .transpose()?
-                .unwrap_or(false),
+            Some(owner) if !owner.lifecycle_lock => owner.alive()?,
             None if !lock_owned
                 && run
                     .as_ref()
@@ -230,8 +225,7 @@ impl LocalContext {
             let legacy_alive = owner
                 .as_ref()
                 .filter(|owner| !owner.lifecycle_lock)
-                .and_then(|owner| owner.process.as_ref())
-                .map(|process| process.alive())
+                .map(|owner| owner.alive())
                 .transpose()?
                 .unwrap_or(false);
             if try_acquire_lifecycle_guard(&run_dir, name)?.is_none() || legacy_alive {
@@ -297,8 +291,7 @@ impl LocalContext {
             let process_released = !owner
                 .as_ref()
                 .filter(|owner| !owner.lifecycle_lock)
-                .and_then(|owner| owner.process.as_ref())
-                .map(|process| process.alive())
+                .map(|owner| owner.alive())
                 .transpose()?
                 .unwrap_or(false);
             #[cfg(not(windows))]

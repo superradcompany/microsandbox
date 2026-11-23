@@ -179,12 +179,7 @@ impl LocalContext {
             let alive = || -> MicrosandboxResult<bool> {
                 #[cfg(windows)]
                 if let Some(owner) = &previous_owner {
-                    return Ok(owner
-                        .process
-                        .as_ref()
-                        .map(|process| process.alive())
-                        .transpose()?
-                        .unwrap_or(false));
+                    return Ok(owner.alive()?);
                 }
                 Ok(!Self::pid_has_exited(pid))
             };
@@ -640,7 +635,13 @@ impl LocalContext {
         #[cfg(windows)]
         let client = if let Some(owner) = &owner {
             let process = owner.process.as_ref().ok_or_else(|| {
-                crate::MicrosandboxError::Runtime("runtime exited before shutdown dispatch".into())
+                crate::MicrosandboxError::Runtime(if owner.inaccessible {
+                    "runtime process is not accessible to this user; stop it from the account \
+                     that started it"
+                        .into()
+                } else {
+                    "runtime exited before shutdown dispatch".into()
+                })
             })?;
             let path = self.agent_socket_paths(name).remove(0);
             process
@@ -810,12 +811,7 @@ impl LocalContext {
                 run,
             )?
         {
-            alive = owner
-                .process
-                .as_ref()
-                .map(|process| process.alive())
-                .transpose()?
-                .unwrap_or(false);
+            alive = owner.alive()?;
         }
         if alive {
             return Ok(sandbox);
@@ -919,12 +915,7 @@ impl LocalContext {
                 &run,
             )?
         {
-            alive = owner
-                .process
-                .as_ref()
-                .map(|process| process.alive())
-                .transpose()?
-                .unwrap_or(false);
+            alive = owner.alive()?;
         }
         if alive {
             return Ok(sandbox);
