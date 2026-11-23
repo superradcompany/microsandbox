@@ -5276,4 +5276,116 @@ mod tests {
         prepend_scripts_path(&mut env);
         assert_eq!(env, vec!["PATH=/.msb/scripts:/usr/bin".to_string()]);
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_metrics_registry_prefers_private_file_only_for_private_handoffs() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path();
+        let sandbox_name = "metrics-route-test";
+        let digest = hex::encode(Sha256::digest(sandbox_name.as_bytes()));
+        let private_shm = format!("/msb-met-{}", &digest[..20]);
+        let shared_shm = format!(
+            "/msb-metrics-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+
+        // Seed a private single-slot file at run/runtime-metrics/<name>.
+        let seed_shm = format!(
+            "/msb-pmet-seed-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let seed = MetricsRegistry::open_or_create(&seed_shm, 1).unwrap();
+        let priv_res = seed
+            .reserve(microsandbox_metrics::ReserveSlot {
+                sandbox_id: 10,
+                name: sandbox_name,
+                memory_limit_bytes: 1024,
+            })
+            .unwrap();
+        let bytes =
+            std::fs::read(std::path::Path::new("/dev/shm").join(seed_shm.trim_start_matches('/')))
+                .unwrap();
+        drop(seed);
+        let c_seed = std::ffi::CString::new(seed_shm.as_bytes()).unwrap();
+        unsafe { libc::shm_unlink(c_seed.as_ptr()) };
+
+        let metrics_dir = run_dir.join("runtime-metrics");
+        std::fs::create_dir_all(&metrics_dir).unwrap();
+        let private_file = metrics_dir.join(sandbox_name);
+        std::fs::write(&private_file, &bytes).unwrap();
+
+        // Seed a shared registry with slot 0 reserved for the same sandbox.
+        let shared = MetricsRegistry::open_or_create(&shared_shm, 4).unwrap();
+        let shared_res = shared
+            .reserve(microsandbox_metrics::ReserveSlot {
+                sandbox_id: 10,
+                name: sandbox_name,
+                memory_limit_bytes: 2048,
+            })
+            .unwrap();
+        assert_eq!(shared_res.slot, 0);
+
+        let private_handoff = MetricsSlotHandoff {
+            shm_name: private_shm.clone(),
+            slot: priv_res.slot,
+            generation: priv_res.generation,
+        };
+        let shared_handoff = MetricsSlotHandoff {
+            shm_name: shared_shm.clone(),
+            slot: shared_res.slot,
+            generation: shared_res.generation,
+        };
+        assert!(is_private_metrics_handoff(&private_handoff, sandbox_name));
+        assert!(!is_private_metrics_handoff(&shared_handoff, sandbox_name));
+        assert!(!is_private_metrics_handoff(
+            &MetricsSlotHandoff {
+                slot: 1,
+                ..private_handoff.clone()
+            },
+            sandbox_name
+        ));
+
+        // Private handoff updates the private file directly (never touching /dev/shm).
+        let opened_priv = open_metrics_registry(&private_handoff, run_dir, sandbox_name).unwrap();
+        let priv_writer = opened_priv
+            .activate_writer(microsandbox_metrics::ActivateSlot {
+                slot: priv_res.slot,
+                generation: priv_res.generation,
+                run_id: 101,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(priv_writer);
+        let snap =
+            MetricsRegistry::read_file_snapshot(&std::fs::File::open(&private_file).unwrap())
+                .unwrap()
+                .identified_snapshot(false);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].metric.run_id, 101);
+
+        // Shared handoff on slot 0 still opens the shared registry even though the
+        // leftover private file exists on disk.
+        let opened_shared = open_metrics_registry(&shared_handoff, run_dir, sandbox_name).unwrap();
+        let shared_writer = opened_shared
+            .activate_writer(microsandbox_metrics::ActivateSlot {
+                slot: shared_res.slot,
+                generation: shared_res.generation,
+                run_id: 202,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(shared_writer);
+        let shared_snap = shared.identified_snapshot(false);
+        assert_eq!(shared_snap.len(), 1);
+        assert_eq!(shared_snap[0].metric.run_id, 202);
+
+        drop(shared);
+        let c_shared = std::ffi::CString::new(shared_shm.as_bytes()).unwrap();
+        unsafe { libc::shm_unlink(c_shared.as_ptr()) };
+    }
 }

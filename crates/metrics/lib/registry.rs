@@ -4000,4 +4000,56 @@ mod tests {
         assert!(reg.active_snapshot().unwrap().is_empty());
         cleanup(&name);
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_file_updates_in_place_and_rejects_symlinks_and_bad_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp_shm = unique_name("open-file-src");
+        let seed = MetricsRegistry::open_or_create(&tmp_shm, 1).unwrap();
+        let res = seed
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "priv",
+                memory_limit_bytes: 2048,
+            })
+            .unwrap();
+        let bytes =
+            std::fs::read(std::path::Path::new("/dev/shm").join(tmp_shm.trim_start_matches('/')))
+                .unwrap();
+        drop(seed);
+        cleanup(&tmp_shm);
+
+        let file_path = dir.path().join("priv");
+        std::fs::write(&file_path, &bytes).unwrap();
+
+        let reg = MetricsRegistry::open_file(&file_path).unwrap();
+        let writer = reg
+            .activate_writer(ActivateSlot {
+                slot: res.slot,
+                generation: res.generation,
+                run_id: 77,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 4096);
+        drop(writer);
+        drop(reg);
+
+        let snapshot = MetricsRegistry::read_file_snapshot(&File::open(&file_path).unwrap())
+            .unwrap()
+            .identified_snapshot(false);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].metric.run_id, 77);
+        assert_eq!(snapshot[0].metric.memory_bytes, 4096);
+
+        let link_path = dir.path().join("priv-link");
+        std::os::unix::fs::symlink(&file_path, &link_path).unwrap();
+        assert!(MetricsRegistry::open_file(&link_path).is_err());
+
+        let short_path = dir.path().join("short");
+        std::fs::write(&short_path, b"too short").unwrap();
+        assert!(MetricsRegistry::open_file(&short_path).is_err());
+    }
 }

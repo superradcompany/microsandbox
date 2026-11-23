@@ -772,6 +772,14 @@ mod tests {
                 .resolved_config()
                 .in_band_agent_transport()
         );
+
+        let home = tempfile::tempdir().unwrap();
+        let via_builder = crate::context::LocalContext::builder()
+            .home(home.path())
+            .in_band_agent_transport(true)
+            .build()
+            .unwrap();
+        assert!(via_builder.config().in_band_agent_transport());
     }
 
     #[test]
