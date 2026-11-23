@@ -1501,6 +1501,7 @@ impl LocalContext {
                 startup_process.handle_mut(),
                 &config.spec.name,
                 startup_deadline.saturating_duration_since(tokio::time::Instant::now()),
+                self.config().in_band_agent_transport(),
             ),
         )
         .await
@@ -1593,6 +1594,7 @@ impl LocalContext {
         handle: &mut ProcessHandle,
         sandbox_name: &str,
         timeout: std::time::Duration,
+        in_band_transport: bool,
     ) -> MicrosandboxResult<AgentClient> {
         tracing::debug!(
             sock = %sock_path.display(),
@@ -1606,9 +1608,16 @@ impl LocalContext {
 
         loop {
             attempts += 1;
+            let connect = async {
+                if in_band_transport {
+                    AgentClient::connect_in_band_with_deadline(sock_path, deadline).await
+                } else {
+                    AgentClient::connect(sock_path).await
+                }
+            };
             match tokio::time::timeout(
                 deadline.saturating_duration_since(tokio::time::Instant::now()),
-                AgentClient::connect(sock_path),
+                connect,
             )
             .await
             {
@@ -3354,6 +3363,7 @@ esac
             owner.handle_mut(),
             "slow-restore",
             std::time::Duration::from_millis(50),
+            false,
         )
         .await;
         let still_alive = owner.handle_mut().try_wait().unwrap().is_none();

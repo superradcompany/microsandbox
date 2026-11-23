@@ -95,33 +95,76 @@ impl LocalContext {
         }
         let mut found = HashMap::new();
         let mut output: Vec<LiveMetric> = Vec::new();
-        for name in &self.inner.metrics_registry_names {
-            // Reopen by name even for a cached match: retaining a mapping alone
-            // would keep reading an unlinked/replaced registry indefinitely.
-            let registry = match MetricsRegistry::open(name) {
-                Ok(registry) => registry,
-                Err(microsandbox_metrics::MetricsError::Io(error))
-                    if crate::sandbox::metrics::is_missing_registry_io_error(&error) =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(metrics_error(error)),
-            };
-            let cached = requested_run
-                .and_then(|id| state.matches.get(&id))
-                .filter(|entry| entry.registry == *name)
-                .and_then(|entry| registry.identified_at(entry.slot, include_exited))
-                .filter(|sample| Some(sample.metric.run_id) == requested_run);
-            // A cache hit is a slot hint, never an authority. A changed slot still
-            // falls back to searching the registry and is validated below.
-            let mut samples = registry.identified_snapshot(include_exited);
-            if let Some(cached) = cached
-                && let Some(index) = samples.iter().position(|sample| sample.slot == cached.slot)
+        let mut sources: Vec<(String, Vec<IdentifiedMetric>)> = Vec::new();
+        #[cfg(target_os = "linux")]
+        let use_private_metrics = self.config().runtime.private_metrics;
+        #[cfg(not(target_os = "linux"))]
+        let use_private_metrics = false;
+
+        if use_private_metrics {
+            #[cfg(target_os = "linux")]
             {
-                // Prefer the successful slot, but keep searching if its process
-                // identity no longer verifies. A hint cannot suppress fallback.
-                samples.swap(0, index);
+                let target_names: Vec<&str> = if let Some(id) = requested_run {
+                    runs.get(&id)
+                        .and_then(|run| models.get(&run.sandbox_id))
+                        .map(|model| vec![model.name.as_str()])
+                        .unwrap_or_default()
+                } else {
+                    models.values().map(|model| model.name.as_str()).collect()
+                };
+                let home = self.config().home();
+                let run_dir = self.config().run_dir();
+                for sandbox_name in target_names {
+                    let Some(samples) = crate::runtime::private_metrics::read(
+                        &home,
+                        &run_dir,
+                        sandbox_name,
+                        include_exited,
+                    )
+                    .map_err(metrics_error)?
+                    else {
+                        continue;
+                    };
+                    sources.push((
+                        crate::runtime::private_metrics::shm_name(sandbox_name),
+                        samples,
+                    ));
+                }
             }
+        } else {
+            for name in &self.inner.metrics_registry_names {
+                // Reopen by name even for a cached match: retaining a mapping alone
+                // would keep reading an unlinked/replaced registry indefinitely.
+                let registry = match MetricsRegistry::open(name) {
+                    Ok(registry) => registry,
+                    Err(microsandbox_metrics::MetricsError::Io(error))
+                        if crate::sandbox::metrics::is_missing_registry_io_error(&error) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(metrics_error(error)),
+                };
+                let cached = requested_run
+                    .and_then(|id| state.matches.get(&id))
+                    .filter(|entry| entry.registry == *name)
+                    .and_then(|entry| registry.identified_at(entry.slot, include_exited))
+                    .filter(|sample| Some(sample.metric.run_id) == requested_run);
+                // A cache hit is a slot hint, never an authority. A changed slot still
+                // falls back to searching the registry and is validated below.
+                let mut samples = registry.identified_snapshot(include_exited);
+                if let Some(cached) = cached
+                    && let Some(index) =
+                        samples.iter().position(|sample| sample.slot == cached.slot)
+                {
+                    // Prefer the successful slot, but keep searching if its process
+                    // identity no longer verifies. A hint cannot suppress fallback.
+                    samples.swap(0, index);
+                }
+                sources.push((name.clone(), samples));
+            }
+        }
+
+        for (name, samples) in sources {
             for sample in samples {
                 let live = &sample.metric;
                 if requested_run.is_some_and(|id| live.run_id != id)
@@ -141,7 +184,7 @@ impl LocalContext {
                         .matches
                         .get(&live.run_id)
                         .filter(|entry| {
-                            entry.registry == *name
+                            entry.registry == name
                                 && entry.slot == sample.slot
                                 && entry.generation == sample.generation
                                 && entry.created_at_ms == sample.registry_created_at_ms

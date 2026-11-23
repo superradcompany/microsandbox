@@ -42,6 +42,8 @@ pub(crate) mod identity;
 pub mod init;
 pub(crate) mod init_provenance;
 pub mod jobs;
+#[cfg(all(feature = "local", target_os = "linux"))]
+mod lease_recovery;
 pub(crate) mod metrics;
 #[cfg(any(feature = "local", feature = "cloud"))]
 mod modify;
@@ -1431,6 +1433,21 @@ pub(super) async fn remove_local_persisted_sandbox(
 
     let _storage = CreationStorage::acquire(local_backend, name)?;
     local_backend.remove_socket_artifacts(name)?;
+    #[cfg(target_os = "linux")]
+    if local_backend.config().runtime.private_writeback_leases {
+        lease_recovery::recover(
+            local_backend,
+            pools.read(),
+            pools.write(),
+            name,
+            expected_id,
+        )
+        .await?;
+    }
+    #[cfg(target_os = "linux")]
+    if local_backend.config().runtime.private_metrics {
+        crate::runtime::private_metrics::remove(&local_backend.config().run_dir(), name)?;
+    }
     microsandbox_runtime::checkpoint::remove_sandbox_identity(
         &local_backend.config().home(),
         expected_id,

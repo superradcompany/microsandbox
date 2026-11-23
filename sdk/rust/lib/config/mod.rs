@@ -419,6 +419,21 @@ pub struct RuntimeConfig {
     /// strict paths must not contain parent (`..`) components.
     pub strict_host_files: bool,
 
+    /// Keep bulk agent payloads on the byte stream instead of negotiating
+    /// shared-memory arenas. Off by default, and enabled automatically when
+    /// `deployment_profile` is `multi-tenant`.
+    pub in_band_agent_transport: bool,
+
+    /// Store each sandbox's live metrics in a private single-slot file under
+    /// `run/runtime-metrics/<name>` instead of the shared host `/dev/shm` registry.
+    /// Off by default. Linux only.
+    pub private_metrics: bool,
+
+    /// Recover per-sandbox writeback lease files under
+    /// `sandboxes/<name>/runtime-leases/writeback` before removing a stopped
+    /// sandbox. Off by default. Linux only.
+    pub private_writeback_leases: bool,
+
     /// Host-copy patch staging and resource-limit policy.
     #[config_patch(nested)]
     pub patches: PatchesConfig,
@@ -967,6 +982,9 @@ mod tests {
             },
             "runtime": {
                 "strict_host_files": true,
+                "in_band_agent_transport": true,
+                "private_metrics": true,
+                "private_writeback_leases": true,
                 "patches": {
                     "stage": true,
                     "max_bytes": 134217728,
