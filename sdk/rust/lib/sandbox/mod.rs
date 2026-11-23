@@ -414,13 +414,43 @@ impl Sandbox {
             .await
     }
 
-    /// Create a sandbox with pull progress reporting.
+    /// Create a sandbox from a config with image-pull, snapshot-preparation, and activation
+    /// progress.
     ///
-    /// Returns a progress handle for per-layer pull events and a task handle
-    /// for the sandbox creation result. The caller should consume progress
-    /// events until the channel closes, then await the task. This entry point uses
-    /// the configured context.
+    /// Events are best-effort and never block creation. Await the task for the authoritative
+    /// result; dropping the progress receiver does not cancel it. Abort the task to cancel.
+    /// Uses the configured context.
+    pub fn create_with_progress(
+        config: SandboxConfig,
+    ) -> MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<MicrosandboxResult<Self>>,
+    )> {
+        crate::Sandboxes {
+            context: crate::context::configured_context(),
+        }
+        .create_with_progress(config)
+    }
+
+    /// Create a detached sandbox from a config with the same creation-progress stream.
+    ///
+    /// Like [`Self::create_with_progress`] but spawns the sandbox process in detached mode so the
+    /// sandbox survives after the creating process exits. Uses the configured context.
+    pub fn create_detached_with_progress(
+        config: SandboxConfig,
+    ) -> MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<MicrosandboxResult<Self>>,
+    )> {
+        crate::Sandboxes {
+            context: crate::context::configured_context(),
+        }
+        .create_detached_with_progress(config)
+    }
+
+    /// Deprecated spelling for [`Self::create_with_progress`].
     #[cfg(feature = "local")]
+    #[deprecated(note = "use create_with_progress instead")]
     pub fn create_with_pull_progress(
         config: SandboxConfig,
     ) -> (
@@ -430,11 +460,9 @@ impl Sandbox {
         Self::create_with_pull_progress_and_mode(config, SpawnMode::Attached)
     }
 
-    /// Create a detached sandbox with pull progress reporting.
-    ///
-    /// Like `create_with_pull_progress` but spawns the sandbox process in detached
-    /// mode so the sandbox survives after the creating process exits.
+    /// Deprecated spelling for [`Self::create_detached_with_progress`].
     #[cfg(feature = "local")]
+    #[deprecated(note = "use create_detached_with_progress instead")]
     pub fn create_detached_with_pull_progress(
         config: SandboxConfig,
     ) -> (
@@ -1906,5 +1934,48 @@ mod tests {
         config.spec.runtime.workdir = Some("/app".into());
         assert_eq!(request(&config, None).as_deref(), Some("/app"));
         assert_eq!(request(&config, Some("/tmp")).as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn sandbox_create_with_progress_uses_creation_progress_tuple_signature() {
+        let _guard = crate::test_support::lock_env();
+        let home = tempdir().unwrap();
+        let previous = ["MSB_HOME", "MSB_CONFIG_PATH", "MSB_BACKEND"]
+            .map(|name| (name, std::env::var_os(name)));
+        unsafe {
+            std::env::set_var("MSB_HOME", home.path());
+            std::env::set_var(
+                "MSB_CONFIG_PATH",
+                home.path().join("missing-dir/config.json"),
+            );
+            std::env::set_var("MSB_BACKEND", "invalid");
+        }
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut config = super::SandboxConfig::default();
+                config.spec.name = "progress-signature".into();
+                let (mut attached_progress, attached_task) =
+                    super::Sandbox::create_with_progress(config.clone()).unwrap();
+                assert!(attached_progress.recv().await.is_none());
+                assert!(attached_task.await.unwrap().is_err());
+
+                let (mut detached_progress, detached_task) =
+                    super::Sandbox::create_detached_with_progress(config).unwrap();
+                assert!(detached_progress.recv().await.is_none());
+                assert!(detached_task.await.unwrap().is_err());
+            });
+
+        for (name, value) in previous {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
     }
 }

@@ -76,6 +76,44 @@ impl Sandboxes {
             .await
     }
 
+    /// Create from a complete configuration with image-pull, snapshot-preparation, and
+    /// activation progress.
+    pub fn create_with_progress(
+        &self,
+        config: crate::SandboxConfig,
+    ) -> MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+    )> {
+        let detached = {
+            #[cfg(feature = "local")]
+            {
+                crate::sandbox::create_spawn_mode(&config, crate::runtime::SpawnMode::Attached)
+                    == crate::runtime::SpawnMode::Detached
+            }
+            #[cfg(not(feature = "local"))]
+            {
+                false
+            }
+        };
+        SandboxBuilder::from_config_for_context(self.context.clone(), config)
+            .detached(detached)
+            .create_with_progress()
+    }
+
+    /// Create a detached sandbox from a complete configuration with the shared creation-progress
+    /// stream.
+    pub fn create_detached_with_progress(
+        &self,
+        config: crate::SandboxConfig,
+    ) -> MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+    )> {
+        SandboxBuilder::from_config_for_context(self.context.clone(), config)
+            .create_detached_with_progress()
+    }
+
     /// Borrow the retained destination. This performs no backend I/O.
     pub fn context(&self) -> &dyn Context {
         self.context.as_ref()
@@ -755,5 +793,28 @@ mod tests {
         let (progress, task) = builder.create_with_progress().unwrap();
         drop(progress);
         assert_destination(task.await.unwrap(), "retained-progress");
+    }
+
+    #[tokio::test]
+    async fn sandboxes_create_with_progress_retains_the_collection_destination() {
+        use crate::sandbox::IntoImage;
+
+        let context = destination("retained-config-progress");
+        let sandboxes = context.sandboxes();
+        drop(context);
+
+        let mut attached = crate::SandboxConfig::default();
+        attached.spec.name = "same-name".into();
+        attached.spec.image = "python".into_rootfs_source().unwrap();
+        let (progress, task) = sandboxes.create_with_progress(attached).unwrap();
+        drop(progress);
+        assert_destination(task.await.unwrap(), "retained-config-progress");
+
+        let mut detached = crate::SandboxConfig::default();
+        detached.spec.name = "same-name-detached".into();
+        detached.spec.image = "python".into_rootfs_source().unwrap();
+        let (progress, task) = sandboxes.create_detached_with_progress(detached).unwrap();
+        drop(progress);
+        assert_destination(task.await.unwrap(), "retained-config-progress");
     }
 }

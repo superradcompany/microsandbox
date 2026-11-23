@@ -232,4 +232,16 @@ fn provider_binding_lifecycle_surface_stays_available() {
     let _ = SandboxRecord::wait_until_resized_with_timeout;
     let _ = Checkpoint::spawn_sandbox_with_progress;
     let _ = Snapshot::spawn_sandbox_with_progress;
+    let _ = Sandbox::create_with_progress;
+    let _ = Sandbox::create_detached_with_progress;
+    let _ = microsandbox::Sandboxes::create_with_progress;
+    let _ = microsandbox::Sandboxes::create_detached_with_progress;
+    let _ = microsandbox::sandbox::SandboxBuilder::create_with_progress;
+    let _ = microsandbox::sandbox::SandboxBuilder::create_detached_with_progress;
+    let _: Option<(
+        microsandbox::CreationProgress,
+        microsandbox::CreationProgressHandle,
+        microsandbox::StartupPhase,
+        microsandbox::StartupProgress,
+    )> = None;
 }

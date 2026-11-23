@@ -125,7 +125,6 @@ impl RegistryConfigBuilder {
 
 impl SandboxBuilder {
     /// Rebuild a captured configuration on an explicit destination without re-resolving selection.
-    #[cfg(test)]
     pub(crate) fn from_config_for_context(
         context: std::sync::Arc<dyn crate::Context>,
         config: SandboxConfig,
@@ -1940,6 +1939,9 @@ impl SandboxBuilder {
             }
             let captured = self.config.local_restore_paths_resolved == Some(true);
             crate::context::local::host_paths::resolve_patch_paths(&mut self.config)?;
+            if let ConfigSource::ExistingConfig(prepared) = &mut self.config_source {
+                crate::context::local::host_paths::resolve_patch_paths(prepared)?;
+            }
             if !captured && let ConfigSource::Snapshot(reference) = &mut self.config_source {
                 crate::context::local::host_paths::resolve_snapshot_reference(reference)?;
             }
@@ -2335,14 +2337,14 @@ impl SandboxBuilder {
         self.detached(true).create_with_progress()
     }
 
-    /// Create the sandbox with pull progress reporting.
+    /// Deprecated spelling for [`Self::create_with_progress`].
     ///
     /// Returns a progress handle for per-layer pull events and a task handle
-    /// for the sandbox creation result. Useful for CLI commands that want to
-    /// display per-layer download/materialization progress during sandbox creation.
+    /// for the sandbox creation result.
     ///
     /// Snapshot restoration has its own `RestoreBuilder::restore_with_progress`
     /// terminal; both operations spawn work without blocking the caller.
+    #[deprecated(note = "use create_with_progress instead")]
     pub fn create_with_pull_progress(
         mut self,
     ) -> MicrosandboxResult<(
@@ -2367,8 +2369,8 @@ impl SandboxBuilder {
         Ok((handle, task))
     }
 
-    /// Like `create_with_pull_progress` but spawns the sandbox process in detached
-    /// mode so the sandbox survives after the creating process exits.
+    /// Deprecated spelling for [`Self::create_detached_with_progress`].
+    #[deprecated(note = "use create_detached_with_progress instead")]
     pub fn create_detached_with_pull_progress(
         mut self,
     ) -> MicrosandboxResult<(
