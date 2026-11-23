@@ -130,7 +130,7 @@ test('workflow pins every active source checkout and keeps maintenance destinati
 
 test('all publishers retain the complete platform and production validation gate', () => {
   const { jobs } = workflow('release.yml');
-  const publishers = ['assemble', 'npm-publish', 'crates-publish', 'pypi-publish', 'docker-build',
+  const publishers = ['assemble', 'npm-publish', 'crates-publish', 'pypi-core-publish', 'pypi-publish', 'docker-build',
     'docker-manifest', 'go-sdk-tag', 'mcp-publish', 'sync-mintlify', 'update-homebrew', 'update-winget', 'refresh-lockfile'];
   function dependsOn(job, target) {
     const needs = Array.isArray(job.needs) ? job.needs : [job.needs];
@@ -243,4 +243,39 @@ test('stable maintenance and Docker aliases exclude every prerelease', () => {
   const assemble = jobs.assemble.steps.find(step => step.name === 'Create GitHub Release').run;
   assert.ok(assemble.includes('needs.release-context.outputs.prerelease'));
   assert.ok(assemble.includes('--prerelease --latest=false'));
+});
+
+test('Python publishers use distinct identities and the same validated wheel artifact', () => {
+  const { jobs } = workflow('release.yml');
+  const core = jobs['pypi-core-publish'];
+  const sdk = jobs['pypi-publish'];
+  assert.equal(core.environment.name, 'pypi-core');
+  assert.deepEqual(sdk.strategy.matrix.include, [
+    { package: 'microsandbox', environment: 'pypi' },
+    { package: 'microsandbox-local', environment: 'pypi-local' },
+    { package: 'microsandbox-remote', environment: 'pypi-remote' },
+  ]);
+  assert.equal(sdk.environment.name, '${{ matrix.environment }}');
+  assert.equal(sdk.strategy['fail-fast'], 'false');
+  assert.ok(sdk.needs.includes('pypi-core-publish'));
+  for (const job of [core, sdk]) {
+    assert.equal(job.permissions['id-token'], 'write');
+    const downloads = job.steps.filter(step => step.uses?.startsWith('actions/download-artifact@'));
+    assert.equal(downloads.length, 1);
+    assert.equal(downloads[0].with.name, 'python-release-wheels');
+    assert.equal(downloads[0].with.pattern, undefined);
+    assert.equal(downloads[0].with['merge-multiple'], undefined);
+  }
+  assert.ok(core.steps.some(step => step.run?.includes('--package microsandbox-core')));
+  assert.ok(sdk.steps.some(step => step.env?.PYPI_PACKAGE === '${{ matrix.package }}' &&
+    step.run?.includes('--package "$PYPI_PACKAGE"')));
+  const ready = jobs['release-ready'];
+  const download = ready.steps.find(step => step.with?.pattern === 'python-sdk-*');
+  assert.equal(download.with['merge-multiple'], undefined);
+  assert.equal(download.with.path, 'python-downloads');
+  const collectIndex = ready.steps.findIndex(step => step.run?.includes('python_release.py collect'));
+  const installIndex = ready.steps.findIndex(step => step.name === 'Validate installed Python provider wheels');
+  const uploadIndex = ready.steps.findIndex(step => step.with?.name === 'python-release-wheels');
+  assert.ok(collectIndex >= 0 && installIndex > collectIndex && uploadIndex > installIndex);
+  assert.equal(ready.steps[uploadIndex].with.path, 'python-artifacts/*.whl');
 });

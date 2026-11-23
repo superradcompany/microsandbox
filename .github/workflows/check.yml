@@ -121,6 +121,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
+      - name: Test Python release collection and publication
+        run: python3 -m unittest scripts.ci.test_python_release
       - name: Check release note contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/release-note-checks"
