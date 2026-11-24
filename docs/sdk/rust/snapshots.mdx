@@ -478,7 +478,7 @@ println!("{} from {}", h.digest(), h.image_ref());
 
 </Accordion>
 
-Look up a lightweight [`Checkpoint`](#snapshot) by group head, `group:member`, stable snapshot ID, descriptor digest, or artifact path. Global IDs and digests must resolve unambiguously.
+Look up a lightweight [`Checkpoint`](#checkpoint) by group head, `group:member`, stable snapshot ID, descriptor digest, or artifact path. Global IDs and digests must resolve unambiguously.
 
 <p className="msb-label">Parameters</p>
 
@@ -493,7 +493,7 @@ Look up a lightweight [`Checkpoint`](#snapshot) by group head, `group:member`, s
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Checkpoint</a></div>
     <div className="msb-param-desc">Handle backed by the matching index row.</div>
   </div>
 </div>
@@ -522,7 +522,7 @@ included automatically.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Vec&lt;Checkpoint&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Vec&lt;Checkpoint&gt;</a></div>
     <div className="msb-param-desc">Indexed snapshot resources, ordered by creation time descending.</div>
   </div>
 </div>
@@ -637,7 +637,7 @@ async fn reindex_default() -> MicrosandboxResult<usize>
 ```
 
 Rebuild the local snapshot index from the configured default snapshot
-directory. This is equivalent to [`reindex()`](#snapshotreindex) with the
+directory. This is equivalent to [`reindex()`](#checkpointreindex) with the
 local backend's configured store and returns `MicrosandboxError::Unsupported`
 on backends without a rebuildable artifact index.
 
@@ -725,7 +725,7 @@ Unpack a snapshot archive (`.msb` or `.tar`, detected from magic bytes) into the
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Checkpoint</a></div>
     <div className="msb-param-desc">Handle for the archive-declared head snapshot, which may differ from the receiving group's selected head.</div>
   </div>
 </div>
@@ -1313,7 +1313,7 @@ Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapsho
 async fn create(self) -> MicrosandboxResult<Checkpoint>
 ```
 
-Build and execute the snapshot in one step. Equivalent to [`Checkpoint::create(self.build()?)`](#snapshotcreate).
+Build and execute the snapshot in one step. Equivalent to [`Checkpoint::create(self.build()?)`](#checkpointcreate).
 
 <p className="msb-label">Returns</p>
 
