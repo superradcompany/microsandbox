@@ -808,6 +808,30 @@
     {
       "source": "/migrations/sandbox-storage",
       "destination": "/migrations/v0.7#sandbox-storage-migration"
+    },
+    {
+      "source": "/sandboxes/customize",
+      "destination": "/sandboxes/bootstrap"
+    },
+    {
+      "source": "/examples/systemd-services",
+      "destination": "/how-to/guest/systemd-services"
+    },
+    {
+      "source": "/guides/getting-started",
+      "destination": "/getting-started/quickstart"
+    },
+    {
+      "source": "/quickstart",
+      "destination": "/getting-started/quickstart"
+    },
+    {
+      "source": "/security/tls-interception",
+      "destination": "/networking/tls"
+    },
+    {
+      "source": "/sandboxes/networking/overview",
+      "destination": "/networking/overview"
     }
   ],
   "integrations": {
