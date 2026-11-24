@@ -943,7 +943,7 @@ fn host_has_ipv6_route() -> bool {
 
 #[cfg(test)]
 #[path = "network/test_support.rs"]
-mod test_support;
+pub(super) mod test_support;
 
 #[cfg(test)]
 #[path = "network/tcp_connect_tests.rs"]

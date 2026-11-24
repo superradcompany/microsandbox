@@ -276,12 +276,22 @@ pub enum EgressEvaluation {
     DeferUntilHostname,
 }
 
+/// Egress action and the basis of an allow, determined by the same rule walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "engine")]
+pub(crate) struct EgressDecision {
+    /// The first matching rule's action, or the egress default.
+    pub(crate) action: Action,
+    /// Whether a matching hostname rule granted the allow.
+    pub(crate) allowed_by_hostname: bool,
+}
+
 /// Raw result of the egress rule walk, before the default is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(feature = "engine")]
 enum EgressWalk {
     /// A rule matched and decided.
-    Matched(Action),
+    Matched(EgressDecision),
     /// A domain rule needs the hostname before it can decide.
     Defer,
     /// No rule matched; `default_egress` applies.
@@ -367,14 +377,32 @@ impl NetworkPolicy {
         protocol: Protocol,
         shared: &SharedState,
     ) -> Action {
-        self.egress_walk(
+        self.evaluate_cached_egress(dst, protocol, shared).action
+    }
+
+    /// Evaluate an outbound packet using cached DNS and record whether the
+    /// winning rule allowed it by hostname.
+    #[cfg(feature = "engine")]
+    pub(crate) fn evaluate_cached_egress(
+        &self,
+        dst: SocketAddr,
+        protocol: Protocol,
+        shared: &SharedState,
+    ) -> EgressDecision {
+        match self.egress_walk_outcome(
             dst.ip(),
             Some(dst.port()),
             protocol,
             shared,
             HostnameSource::CacheOnly,
-        )
-        .into()
+        ) {
+            EgressWalk::Matched(decision) => decision,
+            EgressWalk::Default => EgressDecision {
+                action: self.default_egress,
+                allowed_by_hostname: false,
+            },
+            EgressWalk::Defer => unreachable!("cache-only egress evaluation cannot defer"),
+        }
     }
 
     /// Evaluate an outbound ICMP packet against the rule list. Like
@@ -506,7 +534,7 @@ impl NetworkPolicy {
         source: HostnameSource<'_>,
     ) -> EgressEvaluation {
         match self.egress_walk_outcome(addr, port, protocol, shared, source) {
-            EgressWalk::Matched(action) => action.into(),
+            EgressWalk::Matched(decision) => decision.action.into(),
             EgressWalk::Defer => EgressEvaluation::DeferUntilHostname,
             EgressWalk::Default => self.default_egress.into(),
         }
@@ -545,7 +573,13 @@ impl NetworkPolicy {
                 shared,
                 source,
             ) {
-                DestinationMatch::Match => return EgressWalk::Matched(rule.action),
+                DestinationMatch::Match => {
+                    return EgressWalk::Matched(EgressDecision {
+                        action: rule.action,
+                        allowed_by_hostname: rule.action.is_allow()
+                            && is_hostname_destination(&rule.destination),
+                    });
+                }
                 DestinationMatch::Defer => {
                     if rule.action.is_allow()
                         && !matches!(
@@ -573,7 +607,10 @@ impl NetworkPolicy {
                     if rule.action.is_deny()
                         && !self.deferred_tail_can_allow(idx + 1, addr, port, protocol, shared)
                     {
-                        return EgressWalk::Matched(Action::Deny);
+                        return EgressWalk::Matched(EgressDecision {
+                            action: Action::Deny,
+                            allowed_by_hostname: false,
+                        });
                     }
                     return EgressWalk::Defer;
                 }
@@ -1575,26 +1612,85 @@ mod tests {
         assert!(egress_tcp(&policy, PYPI_V4, &shared).is_allow());
     }
 
-    /// UDP traffic (e.g., QUIC over port 443) must match Domain rules
-    /// the same way TCP does, since both go through `evaluate_egress`.
     #[test]
-    fn udp_egress_consults_domain_cache() {
-        let shared = shared_with_host("pypi.org", PYPI_V4);
-        let policy = NetworkPolicy {
-            default_egress: Action::Deny,
-            default_ingress: Action::Allow,
-            rules: vec![Rule {
-                direction: Direction::Egress,
-                destination: Destination::Domain("pypi.org".parse().unwrap()),
-                protocols: vec![Protocol::Udp],
-                ports: vec![PortRange::single(443)],
-                action: Action::Allow,
-            }],
+    fn cached_egress_reports_the_winning_udp_rule() {
+        let shared = shared_with_host("files.pypi.org", PYPI_V4);
+        let dst = sock(PYPI_V4, 443);
+        let domain = Rule {
+            protocols: vec![Protocol::Udp],
+            ports: vec![PortRange::single(443)],
+            ..Rule::allow_egress(Destination::Domain(name("files.pypi.org")))
         };
-        assert!(
-            policy
-                .evaluate_egress(sock(PYPI_V4, 443), Protocol::Udp, &shared)
-                .is_allow()
+        let suffix = Rule::allow_egress(Destination::DomainSuffix(name("pypi.org")));
+        let public = Rule::allow_egress(Destination::Group(DestinationGroup::Public));
+        let cidr = Rule::allow_egress(Destination::Cidr("151.101.0.0/16".parse().unwrap()));
+        let deny = Rule::deny_egress(Destination::Domain(name("files.pypi.org")));
+        let unrelated = Rule::allow_egress(Destination::Domain(name("other.example")));
+        let hostname_allow = EgressDecision {
+            action: Action::Allow,
+            allowed_by_hostname: true,
+        };
+        let address_or_default_allow = EgressDecision {
+            action: Action::Allow,
+            allowed_by_hostname: false,
+        };
+        let denied = EgressDecision {
+            action: Action::Deny,
+            allowed_by_hostname: false,
+        };
+
+        for (case, rules, expected) in [
+            ("domain then default", vec![domain.clone()], hostname_allow),
+            ("suffix", vec![suffix], hostname_allow),
+            (
+                "domain before Public",
+                vec![domain.clone(), public.clone()],
+                hostname_allow,
+            ),
+            (
+                "Public before domain",
+                vec![public.clone(), domain.clone()],
+                address_or_default_allow,
+            ),
+            (
+                "CIDR before domain",
+                vec![cidr, domain],
+                address_or_default_allow,
+            ),
+            ("default allow", vec![unrelated], address_or_default_allow),
+            ("explicit deny before Public", vec![deny, public], denied),
+        ] {
+            let policy = NetworkPolicy {
+                rules,
+                ..NetworkPolicy::allow_all()
+            };
+
+            assert_eq!(
+                policy.evaluate_cached_egress(dst, Protocol::Udp, &shared),
+                expected,
+                "{case}",
+            );
+        }
+    }
+
+    #[test]
+    fn expired_dns_binding_does_not_grant_udp_egress() {
+        let shared = SharedState::new(4);
+        let dst = sock(PYPI_V4, 443);
+        assert!(shared.cache_resolved_hostname(
+            "pypi.org",
+            ResolvedHostnameFamily::Ipv4,
+            [dst.ip()],
+            Duration::ZERO,
+        ));
+        let policy = allow_rule(Destination::Domain(name("pypi.org")));
+
+        assert_eq!(
+            policy.evaluate_cached_egress(dst, Protocol::Udp, &shared),
+            EgressDecision {
+                action: Action::Deny,
+                allowed_by_hostname: false
+            },
         );
     }
 
