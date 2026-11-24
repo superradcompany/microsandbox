@@ -432,6 +432,7 @@
             "group": "Releases",
             "icon": "tag",
             "pages": [
+              "changelog/v0.8.2",
               "changelog/v0.8.1",
               "changelog/v0.8.0",
               {
