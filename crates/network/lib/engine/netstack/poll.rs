@@ -470,6 +470,7 @@ pub fn smoltcp_poll_loop(
                         &shared,
                         &mut port_publisher,
                         tls_state.as_deref(),
+                        strict,
                         &mut udp_relay,
                     );
                     device.drop_staged_frame();
@@ -489,6 +490,7 @@ pub fn smoltcp_poll_loop(
                             &shared,
                             &mut port_publisher,
                             tls_state.as_deref(),
+                            strict,
                             &mut udp_relay,
                         );
                     } else {
@@ -510,6 +512,7 @@ pub fn smoltcp_poll_loop(
                             &shared,
                             &mut port_publisher,
                             tls_state.as_deref(),
+                            strict,
                             &mut udp_relay,
                         );
                     } else {
@@ -829,6 +832,7 @@ fn relay_udp_frame(
     shared: &Arc<SharedState>,
     port_publisher: &mut PortPublisher,
     tls_state: Option<&TlsState>,
+    strict: bool,
     udp_relay: &mut UdpRelay,
 ) {
     if port_publisher.relay_udp_outbound(frame, src, dst) {
@@ -859,10 +863,16 @@ fn relay_udp_frame(
     // Policy is applied after reassembly, when the UDP destination port is known.
     if platform_policy
         .is_some_and(|policy| policy.evaluate_egress(dst, Protocol::Udp, shared).is_deny())
-        || network_policy
-            .evaluate_egress(dst, Protocol::Udp, shared)
-            .is_deny()
     {
+        return;
+    }
+
+    let decision = network_policy.evaluate_cached_egress(dst, Protocol::Udp, shared);
+    if decision.action.is_deny() {
+        return;
+    }
+    if strict && decision.allowed_by_hostname {
+        tracing::debug!(%dst, "UDP egress denied by strict hostname policy");
         return;
     }
 
@@ -886,6 +896,7 @@ fn handle_reassembled_udp_datagram(
     shared: &Arc<SharedState>,
     port_publisher: &mut PortPublisher,
     tls_state: Option<&TlsState>,
+    strict: bool,
     udp_relay: &mut UdpRelay,
 ) {
     if DnsPortType::from_udp(datagram.dst.port()) == DnsPortType::Dns {
@@ -904,6 +915,7 @@ fn handle_reassembled_udp_datagram(
         shared,
         port_publisher,
         tls_state,
+        strict,
         udp_relay,
     );
     device.drop_staged_frame();
@@ -1222,16 +1234,398 @@ fn classify_transport(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use microsandbox_types::{InterceptCaConfig, TlsConfig};
     use smoltcp::phy::ChecksumCapabilities;
     use smoltcp::wire::{
         ArpOperation, ArpPacket, ArpRepr, EthernetRepr, Icmpv4Packet, Icmpv4Repr, Ipv4Repr,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, UdpSocket};
+    use tokio::runtime::Handle;
+    use tokio::time::timeout;
 
-    use super::super::{device::SmoltcpDevice, shared::SharedState};
+    use crate::engine::tls::ca::CertAuthority;
+    use crate::netstack::shared::ResolvedHostnameFamily;
+    use crate::policy::{Destination, DestinationGroup, NetworkProfile, Rule};
+    use crate::secrets::config::SecretsConfig;
     use crate::tcp::connection::NewConnection;
+    use crate::udp::relay::construct_udp_response;
+
+    use super::*;
+
+    const UDP_HOSTNAME: &str = "quic.example";
+
+    struct UdpEgressFixture {
+        config: PollLoopConfig,
+        shared: Arc<SharedState>,
+        publisher: PortPublisher,
+        relay: UdpRelay,
+        src: SocketAddr,
+        dst: SocketAddr,
+    }
+
+    impl UdpEgressFixture {
+        fn new(dst: SocketAddr, proxy: Option<ResolvedOutboundProxy>) -> Self {
+            let config = PollLoopConfig {
+                gateway_mac: [0x02, 0, 0, 0, 0, 1],
+                guest_mac: [0x02, 0, 0, 0, 0, 2],
+                gateway: GatewayIps {
+                    ipv4: Some(Ipv4Addr::new(100, 96, 0, 1)),
+                    ipv6: Some("fd42:6d73:62::1".parse().unwrap()),
+                },
+                guest_ipv4: Some(Ipv4Addr::new(100, 96, 0, 2)),
+                guest_ipv6: Some("fd42:6d73:62::2".parse().unwrap()),
+                mtu: 1500,
+            };
+            let (src_ip, family) = if dst.is_ipv4() {
+                (
+                    config.guest_ipv4.unwrap().into(),
+                    ResolvedHostnameFamily::Ipv4,
+                )
+            } else {
+                (
+                    config.guest_ipv6.unwrap().into(),
+                    ResolvedHostnameFamily::Ipv6,
+                )
+            };
+            let shared = Arc::new(SharedState::new(4));
+            shared.set_gateway_ips(config.gateway.ipv4, config.gateway.ipv6);
+            assert!(shared.cache_resolved_hostname(
+                UDP_HOSTNAME,
+                family,
+                [dst.ip()],
+                Duration::from_secs(60),
+            ));
+
+            let handle = Handle::current();
+            let publisher = PortPublisher::new(
+                BoundPublishedPorts::default(),
+                None,
+                config.guest_ipv4,
+                config.guest_ipv6,
+                config.gateway_mac,
+                config.guest_mac,
+                Arc::new(NetworkPolicy::none()),
+                shared.clone(),
+                &handle,
+            );
+            let relay = UdpRelay::new(
+                shared.clone(),
+                config.gateway_mac,
+                config.guest_mac,
+                config.mtu,
+                handle,
+                proxy.map(Arc::new),
+            );
+
+            Self {
+                config,
+                shared,
+                publisher,
+                relay,
+                src: SocketAddr::new(src_ip, 12345),
+                dst,
+            }
+        }
+
+        fn frame(&self, payload: &[u8]) -> Vec<u8> {
+            construct_udp_response(
+                self.src,
+                self.dst,
+                payload,
+                EthernetAddress(self.config.guest_mac),
+                EthernetAddress(self.config.gateway_mac),
+            )
+            .unwrap()
+        }
+
+        fn send(
+            &mut self,
+            payload: &[u8],
+            policy: &NetworkPolicy,
+            platform: Option<&NetworkPolicy>,
+            tls: Option<&TlsState>,
+            strict: bool,
+        ) {
+            relay_udp_frame(
+                &self.frame(payload),
+                self.src,
+                self.dst,
+                &self.config,
+                policy,
+                platform,
+                &self.shared,
+                &mut self.publisher,
+                tls,
+                strict,
+                &mut self.relay,
+            );
+        }
+    }
+
+    fn udp_policy(rules: Vec<Rule>) -> NetworkPolicy {
+        NetworkPolicy {
+            rules,
+            ..NetworkPolicy::none()
+        }
+    }
+
+    async fn receive_udp(receiver: &UdpSocket) -> Vec<u8> {
+        let mut buf = [0; 128];
+        let len = timeout(Duration::from_secs(5), receiver.recv(&mut buf))
+            .await
+            .expect("expected forwarded UDP payload")
+            .unwrap();
+        buf[..len].to_vec()
+    }
+
+    #[tokio::test]
+    async fn strict_udp_preserves_address_allows_and_platform_denies() {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut fixture = UdpEgressFixture::new(receiver.local_addr().unwrap(), None);
+        let domain = Rule::allow_egress(Destination::Domain(UDP_HOSTNAME.parse().unwrap()));
+        let host_policy = udp_policy(vec![domain.clone()]);
+        let tls = tls_state_without_quic_blocking();
+        let address_rules = [
+            (
+                b"ip".as_slice(),
+                Destination::Cidr("127.0.0.1/32".parse().unwrap()),
+            ),
+            (b"cidr", Destination::Cidr("127.0.0.0/8".parse().unwrap())),
+            (b"group", Destination::Group(DestinationGroup::Loopback)),
+            (b"any", Destination::Any),
+        ];
+
+        // Send through one flow so any incorrectly forwarded datagram arrives
+        // before the following allowed datagram on the same relay session.
+        fixture.send(b"strict hostname", &host_policy, None, None, true);
+        fixture.send(
+            b"strict hostname with interception",
+            &host_policy,
+            None,
+            Some(&tls),
+            true,
+        );
+        fixture.send(
+            b"platform denied",
+            &NetworkPolicy::allow_all(),
+            Some(&NetworkPolicy::none()),
+            None,
+            true,
+        );
+        for (payload, destination) in &address_rules {
+            let policy = udp_policy(vec![
+                Rule::allow_egress(destination.clone()),
+                domain.clone(),
+            ]);
+            fixture.send(payload, &policy, None, None, true);
+        }
+        fixture.send(b"default", &NetworkPolicy::allow_all(), None, None, true);
+        fixture.send(b"non-strict hostname", &host_policy, None, None, false);
+
+        for (payload, _) in address_rules {
+            assert_eq!(receive_udp(&receiver).await, payload);
+        }
+        assert_eq!(receive_udp(&receiver).await, b"default");
+        assert_eq!(receive_udp(&receiver).await, b"non-strict hostname");
+    }
+
+    #[tokio::test]
+    async fn strict_udp_blocks_quic_before_socks5_with_or_without_tls_interception() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let proxy = ResolvedOutboundProxy::Socks5 {
+            address: listener.local_addr().unwrap(),
+            credentials: None,
+        };
+        let mut fixture = UdpEgressFixture::new("203.0.113.9:443".parse().unwrap(), Some(proxy));
+        let platform = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        let domain = Rule::allow_egress(Destination::Domain(UDP_HOSTNAME.parse().unwrap()));
+        let public = Rule::allow_egress(Destination::Group(DestinationGroup::Public));
+        let policy = udp_policy(vec![domain, public]);
+        let tls = tls_state_without_quic_blocking();
+
+        fixture.send(
+            b"strict without interception",
+            &policy,
+            Some(&platform),
+            None,
+            true,
+        );
+        fixture.send(
+            b"strict with interception",
+            &policy,
+            Some(&platform),
+            Some(&tls),
+            true,
+        );
+        fixture.send(
+            b"tenant denied",
+            &NetworkPolicy::none(),
+            Some(&platform),
+            Some(&tls),
+            false,
+        );
+        fixture.send(b"non-strict", &policy, Some(&platform), Some(&tls), false);
+
+        // Complete a real UDP ASSOCIATE against the loopback proxy. The requested
+        // external address is only a field in the datagram sent to this socket.
+        let SocketAddr::V4(relay_addr) = receiver.local_addr().unwrap() else {
+            unreachable!("receiver is IPv4");
+        };
+        let _control = timeout(Duration::from_secs(5), async {
+            let (mut control, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 3];
+            control.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            control.write_all(&[5, 0]).await.unwrap();
+
+            let mut request = [0; 10];
+            control.read_exact(&mut request).await.unwrap();
+            assert_eq!(request[1], 3, "expected UDP ASSOCIATE");
+            let mut reply = vec![5, 0, 0, 1];
+            reply.extend_from_slice(&relay_addr.ip().octets());
+            reply.extend_from_slice(&relay_addr.port().to_be_bytes());
+            control.write_all(&reply).await.unwrap();
+            control
+        })
+        .await
+        .expect("expected SOCKS5 UDP association");
+
+        let datagram = receive_udp(&receiver).await;
+        assert_eq!(&datagram[..10], &[0, 0, 0, 1, 203, 0, 113, 9, 1, 187]);
+        assert_eq!(&datagram[10..], b"non-strict");
+    }
+
+    #[tokio::test]
+    async fn strict_udp_blocks_hostname_allowed_ipv4_and_ipv6_fragments() {
+        let policy = udp_policy(vec![Rule::allow_egress(Destination::DomainSuffix(
+            "example".parse().unwrap(),
+        ))]);
+
+        for loopback in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            let receiver = UdpSocket::bind(SocketAddr::new(loopback, 0)).await.unwrap();
+            let mut fixture = UdpEgressFixture::new(receiver.local_addr().unwrap(), None);
+            let mut device = SmoltcpDevice::new(fixture.shared.clone(), fixture.config.mtu);
+            let mut iface = create_interface(&mut device, &fixture.config);
+            let mut sockets = SocketSet::new(vec![]);
+
+            // Include ordinary IPv6 UDP in the same check as its fragment path.
+            if loopback.is_ipv6() {
+                fixture.send(b"strict IPv6", &policy, None, None, true);
+            }
+            for (strict, payload) in [(true, b"dropped!"), (false, b"allowed!")] {
+                let datagram =
+                    reassemble_udp_test_frame(&fixture.frame(payload), loopback.is_ipv4());
+                handle_reassembled_udp_datagram(
+                    datagram,
+                    &mut device,
+                    &mut iface,
+                    smoltcp_now(),
+                    &mut sockets,
+                    &fixture.config,
+                    &policy,
+                    None,
+                    &fixture.shared,
+                    &mut fixture.publisher,
+                    None,
+                    strict,
+                    &mut fixture.relay,
+                );
+            }
+
+            assert_eq!(receive_udp(&receiver).await, b"allowed!", "{loopback}");
+        }
+    }
+
+    /// Split this fixture's UDP header and eight-byte payload into two IP fragments.
+    fn reassemble_udp_test_frame(frame: &[u8], ipv4: bool) -> ReassembledUdpDatagram {
+        const ETHERNET_LEN: usize = 14;
+        const UDP_HEADER_LEN: usize = 8;
+
+        if ipv4 {
+            let (headers, udp) = frame.split_at(ETHERNET_LEN + 20);
+            let make_fragment = |offset, more, data: &[u8]| {
+                let mut fragment = [headers, data].concat();
+                let mut ip = Ipv4Packet::new_unchecked(&mut fragment[ETHERNET_LEN..]);
+                ip.set_total_len((20 + data.len()) as u16);
+                ip.clear_flags();
+                ip.set_more_frags(more);
+                ip.set_frag_offset(offset);
+                ip.fill_checksum();
+                fragment
+            };
+            let mut reassembler = Ipv4UdpFragmentReassembler::new();
+            assert!(
+                reassembler
+                    .push(&make_fragment(0, true, &udp[..UDP_HEADER_LEN]))
+                    .is_none()
+            );
+            reassembler
+                .push(&make_fragment(8, false, &udp[UDP_HEADER_LEN..]))
+                .unwrap()
+        } else {
+            let (headers, udp) = frame.split_at(ETHERNET_LEN + 40);
+            let make_fragment = |offset_and_more, data: &[u8]| {
+                let fragment_header = [IpProtocol::Udp.into(), 0, 0, offset_and_more, 0, 0, 0, 1];
+                let mut fragment = [headers, &fragment_header, data].concat();
+                let mut ip = Ipv6Packet::new_unchecked(&mut fragment[ETHERNET_LEN..]);
+                ip.set_next_header(IpProtocol::Ipv6Frag);
+                ip.set_payload_len((fragment_header.len() + data.len()) as u16);
+                fragment
+            };
+            let mut reassembler = Ipv6UdpFragmentReassembler::new();
+            assert!(
+                reassembler
+                    .push(&make_fragment(1, &udp[..UDP_HEADER_LEN]))
+                    .is_none()
+            );
+            reassembler
+                .push(&make_fragment(8, &udp[UDP_HEADER_LEN..]))
+                .unwrap()
+        }
+    }
+
+    fn tls_state_without_quic_blocking() -> TlsState {
+        static NEXT_DIR_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir_id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "msb-udp-ca-{}-{timestamp}-{dir_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let cert_path = directory.join("ca.crt");
+        let key_path = directory.join("ca.key");
+        let ca = CertAuthority::generate();
+        std::fs::write(&cert_path, ca.cert_pem()).unwrap();
+        std::fs::write(&key_path, ca.key_pem()).unwrap();
+        let config = TlsConfig {
+            enabled: true,
+            verify_upstream: false,
+            block_quic_on_intercept: false,
+            intercept_ca: InterceptCaConfig {
+                cert_path: Some(cert_path),
+                key_path: Some(key_path),
+            },
+            ..TlsConfig::default()
+        };
+
+        let state = TlsState::new(config, SecretsHandle::new(SecretsConfig::default()));
+        std::fs::remove_dir_all(directory).unwrap();
+        state.unwrap()
+    }
 
     /// Build a minimal Ethernet + IPv4 + TCP SYN frame.
     fn build_tcp_syn_frame(
