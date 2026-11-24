@@ -244,7 +244,9 @@ pub(super) async fn index_upsert(
             "snapshot changed before indexing".into(),
         ));
     }
-    let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?;
+    let image_cache_dir = super::cache_binding::read_managed(local, artifact_path, digest)?;
+    let cache_dir = local.resolve_image_cache_dir(image_cache_dir.as_deref())?;
+    let cache = microsandbox_image::GlobalCache::new_async(&cache_dir).await?;
     let digest_id: microsandbox_image::Digest = manifest.image.manifest_digest.parse()?;
     let _image_lease = cache
         .lease_paths_async(vec![cache.fsmeta_erofs_path(&digest_id)])
@@ -256,6 +258,7 @@ pub(super) async fn index_upsert(
         manifest,
         "ready",
         None,
+        image_cache_dir.is_some(),
     )
     .await
 }
@@ -269,6 +272,7 @@ pub(super) async fn index_write(
     manifest: &Manifest,
     availability: &str,
     name: Option<String>,
+    has_bound_cache: bool,
 ) -> MicrosandboxResult<()> {
     write_index_rows(
         db,
@@ -278,6 +282,7 @@ pub(super) async fn index_write(
             manifest,
             availability,
             name,
+            has_bound_cache,
         )?],
         Vec::new(),
     )
@@ -291,7 +296,10 @@ pub(super) async fn index_write_batch(
 ) -> MicrosandboxResult<()> {
     let rows = snapshots
         .iter()
-        .map(|(path, digest, manifest)| index_row(path, digest, manifest, "ready", None))
+        .map(|(path, digest, manifest)| {
+            let has_bound_cache = super::cache_binding::read(path, digest)?.is_some();
+            index_row(path, digest, manifest, "ready", None, has_bound_cache)
+        })
         .collect::<MicrosandboxResult<Vec<_>>>()?;
     write_index_rows(db, rows, Vec::new()).await
 }
@@ -305,7 +313,10 @@ pub(super) async fn index_recover_batch(
 ) -> MicrosandboxResult<()> {
     let rows = snapshots
         .iter()
-        .map(|(path, digest, manifest)| index_row(path, digest, manifest, "ready", None))
+        .map(|(path, digest, manifest)| {
+            let has_bound_cache = super::cache_binding::read(path, digest)?.is_some();
+            index_row(path, digest, manifest, "ready", None, has_bound_cache)
+        })
         .collect::<MicrosandboxResult<Vec<_>>>()?;
     write_index_rows(db, rows, absent).await
 }
@@ -347,6 +358,7 @@ fn index_row(
     manifest: &Manifest,
     availability: &str,
     name: Option<String>,
+    has_bound_cache: bool,
 ) -> MicrosandboxResult<(snapshot_entity::ActiveModel, sea_orm::Condition)> {
     let created_at = chrono::DateTime::parse_from_rfc3339(&manifest.capture.created_at)
         .map(|d| d.naive_utc())
@@ -437,7 +449,9 @@ fn index_row(
         artifact_path: Set(artifact_path_str),
         size_bytes: Set(size_bytes),
         locality: Set("embedded".into()),
-        storage_binding_id: Set(None),
+        storage_binding_id: Set(
+            has_bound_cache.then(|| super::cache_binding::INDEX_BINDING.to_owned())
+        ),
         availability: Set(availability.into()),
         migration_state: Set("canonical".into()),
         migration_error_code: Set(None),
@@ -1514,6 +1528,7 @@ mod tests {
                     &path,
                     &data.digest().unwrap(),
                     &data,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1565,9 +1580,15 @@ mod tests {
         for data in [&base, &child] {
             let path = group.join(data.snapshot_id.as_str());
             publishers.push(StorageLease::shared(&path).unwrap());
-            super::super::publication::prepare(db.write(), &path, &data.digest().unwrap(), data)
-                .await
-                .unwrap();
+            super::super::publication::prepare(
+                db.write(),
+                &path,
+                &data.digest().unwrap(),
+                data,
+                None,
+            )
+            .await
+            .unwrap();
             let incoming = staged.path().join(data.snapshot_id.as_str());
             std::fs::create_dir(&incoming).unwrap();
             std::fs::write(
@@ -1677,9 +1698,15 @@ mod tests {
         for number in 0..3 {
             let data = manifest(950 + number, None);
             let path = group.join(data.snapshot_id.as_str());
-            super::super::publication::prepare(db.write(), &path, &data.digest().unwrap(), &data)
-                .await
-                .unwrap();
+            super::super::publication::prepare(
+                db.write(),
+                &path,
+                &data.digest().unwrap(),
+                &data,
+                None,
+            )
+            .await
+            .unwrap();
             if number < 2 {
                 std::fs::create_dir(&path).unwrap();
                 std::fs::write(

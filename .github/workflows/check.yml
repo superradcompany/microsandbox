@@ -669,13 +669,15 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
-      - name: Test Windows DNS resolver
+      - name: Test Windows DNS resolver and strict UDP egress
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test -p microsandbox-network --lib --target ${{ matrix.rust_target }} dns::windows_resolver::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +stable test -p microsandbox-network --lib --target ${{ matrix.rust_target }} strict_udp
 
       - name: Test Windows filesystem DAX mappings
         shell: pwsh
@@ -1353,8 +1355,8 @@ jobs:
       - name: Check the standalone Ruby SDK pin
         run: scripts/ci/check-ruby-standalone-pin.sh
 
-  ruby-platform-extension:
-    name: Build Ruby extension / ${{ matrix.platform }} / Ruby ${{ matrix.ruby }}
+  ruby-platform:
+    name: Ruby platform gem / ${{ matrix.platform }}
     needs: [build-agentd-aarch64, build-agentd-x86_64, changes]
     if: needs.changes.outputs.ruby_platform == 'true'
     runs-on: ${{ matrix.runner }}
@@ -1365,8 +1367,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin, x64-mingw-ucrt]
-        ruby: ["3.3", "3.4", "4.0"]
         include:
           # The platform label carries no glibc version, so the build host is
           # the compatibility floor. Keep the audit below in sync with these
@@ -1387,8 +1387,9 @@ jobs:
             agentd: x86_64
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}-${{ matrix.ruby }}
-      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}-${{ matrix.ruby }}
+      RB_SYS_CARGO_PROFILE: ci
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}
+      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1396,8 +1397,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
-          workspaces: . -> target/ruby-platform-${{ matrix.platform }}-${{ matrix.ruby }}
-          key: ruby-platform-${{ matrix.platform }}-${{ matrix.ruby }}
+          workspaces: . -> target/ruby-platform-${{ matrix.platform }}
+          key: ruby-platform-${{ matrix.platform }}-ci
           cache-bin: false
           cache-targets: true
 
@@ -1415,18 +1416,20 @@ jobs:
           name: agentd-${{ matrix.agentd }}-linux-musl
           path: build/
 
+      # Build all supported Ruby ABIs in one job so shared Rust dependencies
+      # compile once and macOS/Windows do not burn 7 separate runner slots.
       - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
-          ruby-version: ${{ matrix.ruby }}
+          ruby-version: "3.3"
 
       - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
         if: contains(matrix.platform, 'mingw')
         with:
-          ruby-version: ${{ matrix.ruby }}
+          ruby-version: "3.3"
           cargo-cache: false
 
-      - name: Build and stage the extension
+      - name: Build and stage Ruby 3.3 extension
         working-directory: sdk/ruby
         run: |
           gem install rake rake-compiler rb_sys --no-document
@@ -1435,6 +1438,47 @@ jobs:
       - name: Assert the extension uses the checkout Rust SDK
         working-directory: sdk/ruby
         run: cargo tree --manifest-path ext/microsandbox/Cargo.toml --depth 1 | grep "sdk.rust)"
+
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        if: "!contains(matrix.platform, 'mingw')"
+        with:
+          ruby-version: "3.4"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.4"
+          cargo-cache: false
+
+      - name: Build and stage Ruby 3.4 extension
+        working-directory: sdk/ruby
+        run: |
+          rm -f lib/microsandbox/microsandbox.*
+          gem install rake rake-compiler rb_sys --no-document
+          rake version_check gem:stage
+
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        if: "!contains(matrix.platform, 'mingw')"
+        with:
+          ruby-version: "4.0"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "4.0"
+          cargo-cache: false
+
+      - name: Build and stage Ruby 4.0 extension
+        working-directory: sdk/ruby
+        run: |
+          rm -f lib/microsandbox/microsandbox.*
+          gem install rake rake-compiler rb_sys --no-document
+          rake version_check gem:stage
+
+      - name: Restore standalone Ruby lockfile
+        if: always()
+        working-directory: sdk/ruby
+        run: rake cargo:unpatch_workspace
 
       - name: Audit the glibc symbol floor
         if: contains(matrix.platform, 'linux')
@@ -1448,57 +1492,6 @@ jobs:
               exit 1
             fi
           done
-
-      - name: Upload the staged extension
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ruby-extension-${{ matrix.platform }}-${{ matrix.ruby }}
-          # Preserve the Ruby version directory when merging the artifacts.
-          path: sdk/ruby/lib/microsandbox/*/microsandbox.*
-          if-no-files-found: error
-
-      - name: Restore standalone Ruby lockfile
-        if: always()
-        working-directory: sdk/ruby
-        run: rake cargo:unpatch_workspace
-
-  ruby-platform-gem:
-    name: Package Ruby platform gem / ${{ matrix.platform }}
-    needs: [ruby-platform-extension, changes]
-    if: needs.changes.outputs.ruby_platform == 'true'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: x86_64-linux-gnu
-            runner: ubuntu-22.04
-          - platform: aarch64-linux-gnu
-            runner: ubuntu-22.04-arm
-          - platform: arm64-darwin
-            runner: macos-15
-          - platform: x64-mingw-ucrt
-            runner: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
-        with:
-          ruby-version: "4.0"
-
-      - name: Install Ruby packaging dependencies
-        run: gem install rake rake-compiler --no-document
-
-      - name: Download the staged extensions
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: ruby-extension-${{ matrix.platform }}-*
-          path: sdk/ruby/lib/microsandbox/
-          merge-multiple: true
 
       - name: Package the platform gem
         working-directory: sdk/ruby
@@ -1535,43 +1528,35 @@ jobs:
           name: ruby-sdk-${{ matrix.platform }}
           path: sdk/ruby/pkg/*.gem
 
-  ruby-platform-smoke:
-    name: Smoke Ruby platform gem / ${{ matrix.platform }} / Ruby ${{ matrix.ruby }}
-    needs: [changes, ruby-platform-gem]
-    if: needs.changes.outputs.ruby_platform == 'true'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin, x64-mingw-ucrt]
-        ruby: ["3.3", "3.4", "4.0"]
-        include:
-          - platform: x86_64-linux-gnu
-            runner: ubuntu-22.04
-          - platform: aarch64-linux-gnu
-            runner: ubuntu-22.04-arm
-          - platform: arm64-darwin
-            runner: macos-15
-          - platform: x64-mingw-ucrt
-            runner: windows-latest
-    steps:
+      - name: Smoke test platform gem (Ruby 4.0)
+        run: |
+          gem install --local sdk/ruby/pkg/microsandbox-*.gem --no-document
+          # shellcheck disable=SC2016
+          ruby -e 'require "microsandbox"
+            loaded = $LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)$})
+            abort "precompiled ABI binary not used: #{$LOADED_FEATURES.grep(/microsandbox/).inspect}" if loaded.empty?
+            abort "native/ruby version mismatch" unless Microsandbox.version == Microsandbox::VERSION'
+
       - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
         with:
-          ruby-version: ${{ matrix.ruby }}
+          ruby-version: "3.4"
 
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ruby-sdk-${{ matrix.platform }}
-
-      - name: Install the platform gem
-        run: gem install --local ./microsandbox-*.gem --no-document
-
-      - name: Assert the precompiled binary is what loads
+      - name: Smoke test platform gem (Ruby 3.4)
         run: |
+          gem install --local sdk/ruby/pkg/microsandbox-*.gem --no-document
+          # shellcheck disable=SC2016
+          ruby -e 'require "microsandbox"
+            loaded = $LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)$})
+            abort "precompiled ABI binary not used: #{$LOADED_FEATURES.grep(/microsandbox/).inspect}" if loaded.empty?
+            abort "native/ruby version mismatch" unless Microsandbox.version == Microsandbox::VERSION'
+
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Smoke test platform gem (Ruby 3.3)
+        run: |
+          gem install --local sdk/ruby/pkg/microsandbox-*.gem --no-document
           # shellcheck disable=SC2016
           ruby -e 'require "microsandbox"
             loaded = $LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)$})
@@ -1580,7 +1565,7 @@ jobs:
 
   ruby-platform-smoke-clean:
     name: Smoke Ruby platform gem / x86_64-linux-gnu / clean container
-    needs: [changes, ruby-platform-gem]
+    needs: [changes, ruby-platform]
     if: needs.changes.outputs.ruby_platform == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -2471,9 +2456,7 @@ jobs:
       - ruby-sdk
       - ruby-source-gem
       - ruby-standalone-pin
-      - ruby-platform-extension
-      - ruby-platform-gem
-      - ruby-platform-smoke
+      - ruby-platform
       - ruby-platform-smoke-clean
       - go-quality
       - previous-release-upgrade-smoke

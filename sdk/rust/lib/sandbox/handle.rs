@@ -2,6 +2,7 @@
 //! Application code uses `Sandbox`; records do not represent independent resource ownership.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(feature = "cloud")]
 use crate::context::{CloudCreateSandboxResponse, SandboxRemoteState};
@@ -28,14 +29,14 @@ use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult}
 
 /// Default timeout for the eager local agent connection made by
 /// [`SandboxRecord::connect`].
-pub const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default graceful budget for explicit restart/destroy convergence options.
 /// [`SandboxRecord::stop`] itself has no built-in deadline.
-pub const DEFAULT_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default timeout for observing stopped state after force termination.
-pub const DEFAULT_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const DEFAULT_KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -47,7 +48,9 @@ pub struct RestartOptions {
     /// Force termination instead of requesting graceful shutdown.
     pub force: bool,
     /// Graceful-shutdown completion budget; expiry does not force termination.
-    pub timeout: std::time::Duration,
+    /// Running Cloud restarts round positive budgets up to whole seconds and
+    /// reject budgets above 60 seconds before dispatching the restart request.
+    pub timeout: Duration,
     /// Start the replacement runtime in detached mode.
     pub detached: bool,
 }
@@ -58,7 +61,7 @@ pub struct DestroyOptions {
     /// Force termination instead of requesting graceful shutdown.
     pub force: bool,
     /// Graceful-shutdown completion budget; expiry does not force termination.
-    pub timeout: std::time::Duration,
+    pub timeout: Duration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -431,15 +434,7 @@ impl SandboxRecord {
     }
 
     fn ensure_same_identity(&self, current: &SandboxRecord) -> MicrosandboxResult<()> {
-        if self.identity() == current.identity() {
-            return Ok(());
-        }
-
-        Err(MicrosandboxError::SandboxReplaced {
-            name: self.name.clone(),
-            expected: self.id().to_string(),
-            actual: current.id().to_string(),
-        })
+        ensure_identity(&self.name, &self.identity(), current)
     }
 
     /// When this sandbox was first created, if recorded.
@@ -622,7 +617,7 @@ impl SandboxRecord {
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -640,10 +635,7 @@ impl SandboxRecord {
     ///
     /// Cloud reconnect is lazy and does not open an agent WebSocket here, so
     /// this timeout applies only to local handles.
-    pub async fn connect_with_timeout(
-        &self,
-        timeout: std::time::Duration,
-    ) -> MicrosandboxResult<Sandbox> {
+    pub async fn connect_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<Sandbox> {
         match &self.inner {
             // Cloud agent routes are already keyed by the captured UUID, so
             // reconnecting cannot follow a reused name and needs no lookup.
@@ -657,7 +649,7 @@ impl SandboxRecord {
 
     pub(super) async fn connect_current_with_timeout(
         &self,
-        timeout: std::time::Duration,
+        timeout: Duration,
     ) -> MicrosandboxResult<Sandbox> {
         #[cfg(not(feature = "local"))]
         let _ = timeout;
@@ -825,7 +817,7 @@ impl SandboxRecord {
 
     /// Graceful completion under one budget, without implicit force termination.
     /// Zero returns a timeout before dispatch; a delivered request may finish later.
-    pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+    pub async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()> {
         super::stop::stop(
             self.backend.clone(),
             &self.name,
@@ -870,7 +862,7 @@ impl SandboxRecord {
     }
 
     /// Force-kill the sandbox and wait up to `timeout` for stopped-state observation.
-    pub async fn kill_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+    pub async fn kill_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()> {
         let current = self.refresh().await?;
         if sandbox_status_is_terminal(current.status_snapshot()) {
             return Ok(());
@@ -916,42 +908,21 @@ impl SandboxRecord {
             if current.status_snapshot() == status {
                 return Ok(current);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
-    /// Stop and start this exact sandbox using default graceful options.
+    /// Restart this exact sandbox using default graceful options.
     pub async fn restart(&self) -> MicrosandboxResult<Sandbox> {
         self.restart_with(RestartOptions::default()).await
     }
 
-    /// Stop and start this exact sandbox with explicit lifecycle options.
+    /// Restart this exact sandbox with explicit lifecycle options.
     pub async fn restart_with(&self, options: RestartOptions) -> MicrosandboxResult<Sandbox> {
-        let current = loop {
-            let current = self.refresh().await?;
-            match restart_action(current.status_snapshot()) {
-                RestartAction::Start => break current,
-                RestartAction::Wait => {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                RestartAction::StopThenStart => {
-                    stop_for_convergence(&current, options.force, options.timeout).await?;
-                    break current;
-                }
-                RestartAction::RejectPaused => {
-                    return Err(MicrosandboxError::SandboxNotRunning(format!(
-                        "cannot restart paused sandbox '{}': resume support is not available",
-                        current.name
-                    )));
-                }
-            }
-        };
-
-        if options.detached {
-            current.start_detached().await
-        } else {
-            current.start().await
-        }
+        self.backend
+            .sandbox_ops()
+            .restart_identified(self.backend.clone(), &self.name, self.identity(), options)
+            .await
     }
 
     /// Stop and remove this exact sandbox using default graceful options.
@@ -1004,7 +975,7 @@ impl SandboxRecord {
                 });
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -1082,6 +1053,69 @@ impl Default for DestroyOptions {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+pub(crate) async fn get_identified_handle(
+    backend: &Arc<dyn Context>,
+    name: &str,
+    identity: &SandboxIdentity,
+) -> MicrosandboxResult<SandboxRecord> {
+    let current = backend.sandbox_ops().get(backend.clone(), name).await?;
+    ensure_identity(name, identity, &current)?;
+    Ok(current)
+}
+
+pub(crate) async fn restart_by_stop_and_start(
+    backend: Arc<dyn Context>,
+    name: &str,
+    identity: SandboxIdentity,
+    options: RestartOptions,
+) -> MicrosandboxResult<Sandbox> {
+    let current = loop {
+        let current = get_identified_handle(&backend, name, &identity).await?;
+        match restart_action(current.status_snapshot()) {
+            RestartAction::Start => break current,
+            RestartAction::Wait => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            RestartAction::StopThenStart => {
+                stop_for_convergence(&current, options.force, options.timeout).await?;
+                break current;
+            }
+            RestartAction::RejectPaused => {
+                return Err(MicrosandboxError::SandboxNotRunning(format!(
+                    "cannot restart paused sandbox '{}': resume support is not available",
+                    current.name
+                )));
+            }
+        }
+    };
+
+    if options.detached {
+        current.start_detached().await
+    } else {
+        current.start().await
+    }
+}
+
+fn ensure_identity(
+    name: &str,
+    identity: &SandboxIdentity,
+    current: &SandboxRecord,
+) -> MicrosandboxResult<()> {
+    if *identity == current.identity() {
+        return Ok(());
+    }
+
+    let expected = match identity {
+        SandboxIdentity::Local(id) => SandboxId::local(*id),
+        SandboxIdentity::Cloud(id) => SandboxId::cloud(id),
+    };
+    Err(MicrosandboxError::SandboxReplaced {
+        name: name.to_string(),
+        expected: expected.to_string(),
+        actual: current.id().to_string(),
+    })
+}
+
 fn is_local_ephemeral_handle(inner: &SandboxRecordInner) -> bool {
     let SandboxRecordInner::Local(state) = inner else {
         return false;
@@ -1129,7 +1163,7 @@ fn destroy_requires_stop(status: SandboxStatus) -> bool {
 async fn stop_for_convergence(
     handle: &SandboxRecord,
     force: bool,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> MicrosandboxResult<()> {
     if force {
         handle.kill_with_timeout(timeout).await

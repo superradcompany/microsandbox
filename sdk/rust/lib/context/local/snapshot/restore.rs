@@ -16,6 +16,7 @@ use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConf
 use crate::context::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
+use super::copy::copy_private_payload;
 use super::create::{copy_checkpoint_file, stage_checkpoint_closure};
 
 //--------------------------------------------------------------------------------------------------
@@ -70,7 +71,11 @@ pub(crate) async fn materialize_checkpoint_for_child(
 
             let _lease = pin;
             std::fs::create_dir_all(destination_for_copy.parent().expect("child staging"))?;
-            stage_checkpoint_closure(&source_path, &destination_for_copy)
+            stage_checkpoint_closure(
+                &source_path,
+                &destination_for_copy,
+                _storage.copy_snapshot_files,
+            )
         })
     }
     .await
@@ -134,6 +139,8 @@ pub(crate) async fn materialize_checkpoint_child_state(
             .await?;
     validate_checkpoint_identity(&child_closure, checkpoint_id)?;
     validate_root_disk_closure(&child_closure, root_disk, false)?;
+    // The runtime admits this closure's layers by inode. Linking keeps their roots reusable.
+    let child_stage = &child_stage.for_child_private_sources();
     let upper_layers =
         materialize_checkpoint_disk_layers(&child_closure, child_stage, root_disk).await?;
     let disk_mounts =
@@ -188,7 +195,12 @@ pub(crate) async fn materialize_file_snapshot_for_child(
 
                 let _lease = pin;
                 std::fs::create_dir_all(target_for_copy.parent().expect("child staging"))?;
-                copy_child_disk_layer(&source_path, &target_for_copy, predecessor.as_deref())
+                copy_child_disk_layer(
+                    &source_path,
+                    &target_for_copy,
+                    predecessor.as_deref(),
+                    _storage.copy_snapshot_files,
+                )
             })
         }
         .await
@@ -208,7 +220,10 @@ pub(crate) async fn materialize_file_snapshot_for_child(
     })
 }
 
-/// Adopt a local handoff using independent directory entries, without duplicating disk bytes.
+/// Adopt a local handoff into the child's lasting layers.
+///
+/// Layers are linked unless their header needs relocation. When snapshot files are copied,
+/// every lasting layer gets its own inode; the transient closure stays linked to the source.
 pub(crate) async fn adopt_local_branch_for_child(
     sources: &[RootfsUpperLayerConfig],
     virtual_size: u64,
@@ -275,12 +290,17 @@ pub(crate) async fn adopt_local_branch_for_child(
         let target_path = target.clone();
         let worker_storage = child_stage.clone();
         tokio::task::spawn_blocking(move || {
-            let _storage = worker_storage;
-            if unchanged_header {
+            let storage = worker_storage;
+            if unchanged_header && !storage.copy_snapshot_files {
                 std::fs::hard_link(&source_path, &target_path)
             } else {
                 // Relocate conflicting names without mutating a shared captured inode.
-                copy_child_disk_layer(&source_path, &target_path, previous.as_deref())
+                copy_child_disk_layer(
+                    &source_path,
+                    &target_path,
+                    previous.as_deref(),
+                    storage.copy_snapshot_files,
+                )
             }
         })
         .await
@@ -442,7 +462,12 @@ async fn materialize_checkpoint_disk_layers(
 
                 let _pin = pin;
                 std::fs::create_dir_all(target_for_copy.parent().expect("child staging"))?;
-                copy_child_disk_layer(&source_for_copy, &target_for_copy, predecessor.as_deref())
+                copy_child_disk_layer(
+                    &source_for_copy,
+                    &target_for_copy,
+                    predecessor.as_deref(),
+                    _storage.copy_snapshot_files,
+                )
             })
         }
         .await
@@ -520,14 +545,15 @@ fn copy_child_disk_layer(
     source: &Path,
     target: &Path,
     predecessor: Option<&Path>,
+    copy_files: bool,
 ) -> std::io::Result<()> {
     if let Some(predecessor) = predecessor {
         // Only qcow2 layers may have a predecessor. Their relocated header must not write into
         // an inode shared with the source artifact or another restored child.
-        microsandbox_utils::copy::fast_copy(source, target)?;
+        copy_private_payload(source, target)?;
         microsandbox_image::checkpoint::relocate_qcow2_backing(target, predecessor)
     } else {
-        copy_checkpoint_file(source, target)
+        copy_checkpoint_file(source, target, copy_files)
     }
 }
 
@@ -578,89 +604,146 @@ mod tests {
             (SnapshotRootDisk::Flat, "rootfs.raw"),
         ] {
             for overlay_count in [0, 1, 3] {
-                let dir = tempfile::tempdir().unwrap();
-                let child = dir.path().join("child");
-                let layers = child.join(".branch-restore/layers");
-                std::fs::create_dir_all(&layers).unwrap();
-                let base = layers.join("layer_base.raw");
-                std::fs::write(&base, vec![29; 131072]).unwrap();
-                let mut sources = vec![RootfsUpperLayerConfig {
-                    path: base.clone(),
-                    format: "raw".into(),
-                }];
-                for index in 0..overlay_count {
-                    let alias = layers.join(if index == 0 {
-                        base_name.into()
-                    } else {
-                        format!("native-{}.qcow2", index - 1)
-                    });
-                    let previous = sources.last().unwrap();
-                    std::fs::hard_link(&previous.path, &alias).unwrap();
-                    let overlay = layers.join(format!("layer_overlay_{index}.qcow2"));
-                    microsandbox_image::checkpoint::create_qcow2_overlay(
-                        &overlay,
+                for copy_files in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let child = dir.path().join("child");
+                    let layers = child.join(".branch-restore/layers");
+                    std::fs::create_dir_all(&layers).unwrap();
+                    let base = layers.join("layer_base.raw");
+                    std::fs::write(&base, vec![29; 131072]).unwrap();
+                    let mut sources = vec![RootfsUpperLayerConfig {
+                        path: base.clone(),
+                        format: "raw".into(),
+                    }];
+                    for index in 0..overlay_count {
+                        let alias = layers.join(if index == 0 {
+                            base_name.into()
+                        } else {
+                            format!("native-{}.qcow2", index - 1)
+                        });
+                        let previous = sources.last().unwrap();
+                        std::fs::hard_link(&previous.path, &alias).unwrap();
+                        let overlay = layers.join(format!("layer_overlay_{index}.qcow2"));
+                        microsandbox_image::checkpoint::create_qcow2_overlay(
+                            &overlay,
+                            131072,
+                            &alias,
+                            &previous.format,
+                        )
+                        .await
+                        .unwrap();
+                        sources.push(RootfsUpperLayerConfig {
+                            path: overlay,
+                            format: "qcow2".into(),
+                        });
+                    }
+                    let original = sources
+                        .iter()
+                        .map(|layer| std::fs::read(&layer.path).unwrap())
+                        .collect::<Vec<_>>();
+                    let mut storage = CreationStorage::for_test(&child);
+                    storage.copy_snapshot_files = copy_files;
+                    let result =
+                        adopt_local_branch_for_child(&sources, 131072, &storage, &root_disk)
+                            .await
+                            .unwrap();
+                    assert_eq!(result.len(), sources.len() + 1);
+                    assert_eq!(result[0].path, child.join(base_name));
+                    assert_eq!(std::fs::read(&result[0].path).unwrap(), original[0]);
+                    for ((source, bytes), _owned) in sources.iter().zip(original).zip(&result) {
+                        assert_eq!(std::fs::read(&source.path).unwrap(), bytes);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                            let owned = std::fs::metadata(&_owned.path).unwrap();
+                            assert_eq!(
+                                std::fs::metadata(&source.path).unwrap().ino() == owned.ino(),
+                                !copy_files
+                            );
+                            if copy_files {
+                                assert_eq!(owned.permissions().mode() & 0o777, 0o600);
+                            }
+                        }
+                    }
+                    let head = &result.last().unwrap().path;
+                    assert_eq!(head.parent(), Some(child.as_path()));
+                    // Ordinary completion removes the entire transient closure. Exactly the listed
+                    // owned chain remains, with no alias names left to defeat later reclamation.
+                    std::fs::remove_dir_all(child.join(".branch-restore")).unwrap();
+                    for pair in result.windows(2) {
+                        let predecessor =
+                            microsandbox_image::checkpoint::qcow2_backing_basename(&pair[1].path)
+                                .unwrap();
+                        assert_eq!(child.join(predecessor), pair[0].path);
+                    }
+                    let restored = dir.path().join("durable-child");
+                    materialize_file_snapshot_for_child(
+                        &result[..result.len() - 1],
                         131072,
-                        &alias,
-                        &previous.format,
+                        &CreationStorage::for_test(&restored),
+                        &root_disk,
                     )
                     .await
                     .unwrap();
-                    sources.push(RootfsUpperLayerConfig {
-                        path: overlay,
-                        format: "qcow2".into(),
-                    });
+                    assert_eq!(
+                        std::fs::read(child.join(base_name)).unwrap(),
+                        vec![29; 131072]
+                    );
                 }
-                let original = sources
-                    .iter()
-                    .map(|layer| std::fs::read(&layer.path).unwrap())
-                    .collect::<Vec<_>>();
-                let result = adopt_local_branch_for_child(
-                    &sources,
-                    131072,
-                    &CreationStorage::for_test(&child),
-                    &root_disk,
-                )
-                .await
-                .unwrap();
-                assert_eq!(result.len(), sources.len() + 1);
-                assert_eq!(result[0].path, child.join(base_name));
-                assert_eq!(std::fs::read(&result[0].path).unwrap(), original[0]);
-                for ((source, bytes), _owned) in sources.iter().zip(original).zip(&result) {
-                    assert_eq!(std::fs::read(&source.path).unwrap(), bytes);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        assert_eq!(
-                            std::fs::metadata(&source.path).unwrap().ino(),
-                            std::fs::metadata(&_owned.path).unwrap().ino()
-                        );
-                    }
-                }
-                let head = &result.last().unwrap().path;
-                assert_eq!(head.parent(), Some(child.as_path()));
-                // Ordinary completion removes the entire transient closure. Exactly the listed
-                // owned chain remains, with no alias names left to defeat later reclamation.
-                std::fs::remove_dir_all(child.join(".branch-restore")).unwrap();
-                for pair in result.windows(2) {
-                    let predecessor =
-                        microsandbox_image::checkpoint::qcow2_backing_basename(&pair[1].path)
-                            .unwrap();
-                    assert_eq!(child.join(predecessor), pair[0].path);
-                }
-                let restored = dir.path().join("durable-child");
-                materialize_file_snapshot_for_child(
-                    &result[..result.len() - 1],
-                    131072,
-                    &CreationStorage::for_test(&restored),
-                    &root_disk,
-                )
-                .await
-                .unwrap();
-                assert_eq!(
-                    std::fs::read(child.join(base_name)).unwrap(),
-                    vec![29; 131072]
-                );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn copied_batch_branch_keeps_receipted_handoff_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let handoff = dir.path().join("handoff");
+        let layer = Path::new("layers/layer_base.raw");
+        std::fs::create_dir_all(handoff.join("layers")).unwrap();
+        std::fs::write(handoff.join(layer), vec![31; 131072]).unwrap();
+        std::fs::write(handoff.join("local-disk-admission.json"), b"[]").unwrap();
+        std::fs::write(handoff.join("branch.json"), b"{}").unwrap();
+        let batch = dir.path().join("batch");
+        let child = dir.path().join("child");
+        let closure = child.join(".branch-restore");
+        let mut storage = CreationStorage::for_test(&child);
+        storage.copy_snapshot_files = true;
+
+        // A batch sibling receives its closure through batch staging, as branch capture does.
+        crate::snapshot::stage_local_branch_closure(&handoff, &batch).unwrap();
+        crate::snapshot::stage_local_branch_closure(&batch, &closure).unwrap();
+        let staged = closure.join(layer);
+        let layers = adopt_local_branch_for_child(
+            &[RootfsUpperLayerConfig {
+                path: staged.clone(),
+                format: "raw".into(),
+            }],
+            131072,
+            &storage,
+            &SnapshotRootDisk::Flat,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&layers[0].path).unwrap(), vec![31; 131072]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // Runtime receipts bind device, inode, length, and mtime. The staged handoff must
+            // keep all of them, while the child's lasting layer gets its own private inode.
+            let stamp = |path: &Path| {
+                let metadata = std::fs::metadata(path).unwrap();
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.len(),
+                    metadata.modified().unwrap(),
+                )
+            };
+            assert_eq!(stamp(&staged), stamp(&handoff.join(layer)));
+            let lasting = std::fs::metadata(&layers[0].path).unwrap();
+            assert_ne!(lasting.ino(), stamp(&staged).1);
+            assert_eq!(lasting.permissions().mode() & 0o777, 0o600);
         }
     }
 
@@ -729,7 +812,7 @@ mod tests {
                 format: "raw".into(),
                 virtual_size: 4 * 1024 * 1024,
                 predecessor: None,
-                integrity_root: Some(layer_integrity.root),
+                integrity_root: Some(layer_integrity.root.clone()),
             }],
             head: "layer_base".into(),
             pause_generation: 7,
@@ -804,6 +887,60 @@ mod tests {
         );
         assert!(!disk_child.join(CHILD_CHECKPOINT_DIRECTORY).exists());
 
+        // Copy mode copies once, where the installed artifact meets the child.
+        let mut copied_disk_storage = CreationStorage::for_test(temp.path().join("copied-disk"));
+        copied_disk_storage.copy_snapshot_files = true;
+        let copied_disk = materialize_checkpoint_disk_for_child(
+            &restore.closure,
+            &restore.checkpoint_root,
+            &restore.checkpoint_id,
+            &copied_disk_storage,
+            &SnapshotRootDisk::Flat,
+            &Default::default(),
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .await
+        .unwrap();
+        let mut copied_storage = CreationStorage::for_test(temp.path().join("copied-child"));
+        copied_storage.copy_snapshot_files = true;
+        let copied = materialize_checkpoint_for_child(
+            &restore,
+            &copied_storage,
+            &SnapshotRootDisk::Flat,
+            &Default::default(),
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .await
+        .unwrap();
+
+        // The child's base links to its own copied closure, so the runtime reuses the root.
+        let copied_closure = CheckpointClosure::open(
+            &copied.restore.closure,
+            Some(&checkpoint_root),
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(
+            copied_closure
+                .reused_disk_integrity(&copied.upper_layers[0].path)
+                .unwrap(),
+            Some(layer_integrity.root.clone())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let source = std::fs::metadata(&source_layer).unwrap();
+            let disk_base = std::fs::metadata(&copied_disk.upper_layers[0].path).unwrap();
+            let staged =
+                std::fs::metadata(copied.restore.closure.join("layers/layer_base.raw")).unwrap();
+            let base = std::fs::metadata(&copied.upper_layers[0].path).unwrap();
+            assert_ne!(disk_base.ino(), source.ino());
+            assert_eq!(disk_base.permissions().mode() & 0o777, 0o600);
+            assert_ne!(staged.ino(), source.ino());
+            assert_eq!(staged.permissions().mode() & 0o777, 0o600);
+            assert_eq!(base.ino(), staged.ino());
+        }
+
         let materialized = materialize_checkpoint_for_child(
             &restore,
             &CreationStorage::for_test(&child),
@@ -815,17 +952,29 @@ mod tests {
         .unwrap();
         std::fs::remove_dir_all(source).unwrap();
 
-        assert_eq!(materialized.upper_layers.len(), 2);
-        assert_eq!(materialized.upper_layers[0].format, "raw");
-        assert_eq!(materialized.upper_layers[1].format, "qcow2");
-        assert!(materialized.upper_layers[0].path.exists());
-        assert!(materialized.upper_layers[1].path.exists());
-        let reopened = CheckpointClosure::open(
-            &materialized.restore.closure,
-            Some(&checkpoint_root),
-            crate::test_support::DEFAULT_FS_STATE_LIMIT,
-        )
-        .unwrap();
-        assert_eq!(reopened.checkpoint().checkpoint_id, "checkpoint_test");
+        // Both materialization policies must still open and validate the child's disk once the
+        // original checkpoint is gone, including when the child owns an independent copy.
+        for materialized in [copied, materialized] {
+            assert_eq!(materialized.upper_layers.len(), 2);
+            assert_eq!(materialized.upper_layers[0].format, "raw");
+            assert_eq!(materialized.upper_layers[1].format, "qcow2");
+            assert!(materialized.upper_layers[0].path.exists());
+            assert!(materialized.upper_layers[1].path.exists());
+            let reopened = CheckpointClosure::open(
+                &materialized.restore.closure,
+                Some(&checkpoint_root),
+                crate::test_support::DEFAULT_FS_STATE_LIMIT,
+            )
+            .unwrap();
+            assert_eq!(reopened.checkpoint().checkpoint_id, "checkpoint_test");
+            assert_eq!(
+                reopened
+                    .reused_disk_integrity(&materialized.upper_layers[0].path)
+                    .unwrap(),
+                Some(layer_integrity.root.clone())
+            );
+            let integrity = sparse_file_integrity(&materialized.upper_layers[0].path).unwrap();
+            assert_eq!(integrity.root, layer_integrity.root);
+        }
     }
 }

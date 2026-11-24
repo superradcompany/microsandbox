@@ -104,6 +104,22 @@ pub struct GlobalCache {
     tmp_dir: PathBuf,
 }
 
+/// Authentication provenance recorded when an OCI cache entry was populated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheAuthProvenance {
+    /// Entry predates provenance tracking or came from an archive import that
+    /// does not establish anonymous upstream registry access.
+    #[default]
+    Unknown,
+    /// Entry was fetched from the upstream registry without credentials.
+    Anonymous,
+    /// Entry was fetched from the upstream registry using non-anonymous credentials.
+    Authenticated,
+    /// Entry was explicitly imported from a local image archive (`msb image load`).
+    LocalArchive,
+}
+
 /// Cached metadata for a pulled image reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedImageMetadata {
@@ -119,6 +135,23 @@ pub struct CachedImageMetadata {
     pub config: ImageConfig,
     /// Layer metadata in bottom-to-top order.
     pub layers: Vec<CachedLayerMetadata>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct CachedImageEntry {
+    #[serde(flatten)]
+    pub(crate) metadata: CachedImageMetadata,
+    #[serde(default, skip_serializing_if = "CacheAuthProvenance::is_unknown")]
+    pub(crate) pull_auth: CacheAuthProvenance,
+}
+
+/// A validated archive metadata publication with the reference gate held.
+pub struct ImageMetadataInstall {
+    cache: GlobalCache,
+    path: PathBuf,
+    new_bytes: Option<Vec<u8>>,
+    _leases: Vec<StorageLease>,
+    _gate: StorageLease,
 }
 
 /// Cached metadata for a single layer descriptor.
@@ -160,6 +193,35 @@ pub struct FlatRootfsRef {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl ImageMetadataInstall {
+    /// Publish after all backing artifacts have been installed.
+    pub async fn commit(self) -> ImageResult<()> {
+        tokio::task::spawn_blocking(move || {
+            let installation = self;
+            if let Some(bytes) = &installation.new_bytes {
+                installation
+                    .cache
+                    .install_image_metadata_file(&installation.path, bytes)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+}
+
+impl CacheAuthProvenance {
+    /// Whether provenance is unknown (omitted on disk for backward compatibility).
+    pub const fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    /// Whether an unauthenticated cache lookup may serve this entry directly.
+    pub const fn allows_unauthenticated_cache_hit(self) -> bool {
+        matches!(self, Self::Anonymous | Self::LocalArchive)
+    }
+}
 
 impl GlobalCache {
     /// Create a new GlobalCache using the provided cache directory.
@@ -327,6 +389,85 @@ impl GlobalCache {
     pub fn is_vmdk_materialized(&self, manifest_digest: &Digest) -> bool {
         self.vmdk_path(manifest_digest).exists()
     }
+    /// Verify a pinned descriptor and all its referenced EROFS extents.
+    pub fn is_vmdk_complete(&self, manifest_digest: &Digest) -> bool {
+        let fsmeta = self.fsmeta_erofs_path(manifest_digest);
+        let Ok(fsmeta) = fsmeta.canonicalize() else {
+            return false;
+        };
+        let Ok(layers_dir) = self.layers_dir.canonicalize() else {
+            return false;
+        };
+        let Ok(descriptor) = std::fs::File::open(self.vmdk_path(manifest_digest)) else {
+            return false;
+        };
+        let mut text = String::new();
+        // Cache descriptors contain only extent and geometry lines.
+        const MAX_DESCRIPTOR_BYTES: usize = 16 * 1024 * 1024;
+        if descriptor
+            .take(MAX_DESCRIPTOR_BYTES as u64 + 1)
+            .read_to_string(&mut text)
+            .is_err()
+            || text.len() > MAX_DESCRIPTOR_BYTES
+        {
+            return false;
+        }
+        let mut extents = Vec::new();
+        for line in text.lines().filter(|line| line.starts_with("RW ")) {
+            let Some((_, extent)) = line.split_once(" FLAT \"") else {
+                return false;
+            };
+            let Some((path, offset)) = extent.rsplit_once("\" ") else {
+                return false;
+            };
+            if offset == "0" {
+                let path = Path::new(path);
+                let expected = if extents.is_empty() {
+                    path == fsmeta
+                } else {
+                    path.parent() == Some(layers_dir.as_path())
+                        && path.extension().is_some_and(|ext| ext == "erofs")
+                };
+                if !expected || !is_valid_erofs_artifact(path) {
+                    return false;
+                }
+                extents.push(path);
+            }
+        }
+        if extents.is_empty() {
+            return false;
+        }
+        let mut expected = Vec::new();
+        crate::stitch::vmdk::format_vmdk_descriptor(&mut expected, &extents).is_ok()
+            && text.as_bytes() == expected
+    }
+
+    /// Check the pinned descriptor against the ordered layer IDs in admitted metadata.
+    pub fn is_vmdk_complete_for_layers(
+        &self,
+        manifest_digest: &Digest,
+        diff_ids: &[Digest],
+    ) -> bool {
+        if !self.is_fsmeta_materialized(manifest_digest) || !self.all_layers_materialized(diff_ids)
+        {
+            return false;
+        }
+        let mut paths = vec![self.fsmeta_erofs_path(manifest_digest)];
+        paths.extend(diff_ids.iter().map(|id| self.layer_erofs_path(id)));
+        let extents = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        if crate::stitch::vmdk::format_vmdk_descriptor(&mut expected, &extents).is_err() {
+            return false;
+        }
+        let Ok(file) = std::fs::File::open(self.vmdk_path(manifest_digest)) else {
+            return false;
+        };
+        let mut actual = Vec::with_capacity(expected.len());
+        file.take(expected.len() as u64 + 1)
+            .read_to_end(&mut actual)
+            .is_ok()
+            && actual == expected
+    }
 
     /// Rewrite the VMDK descriptor for a manifest digest so its extents are
     /// this cache's fsmeta and layer EROFS files.
@@ -359,6 +500,21 @@ impl GlobalCache {
             manifest_digest,
             layer_diff_ids,
             VmdkWriteMode::ReplaceExisting,
+            None,
+        )
+        .await
+    }
+
+    /// Install a descriptor only if missing, preserving any existing file.
+    pub async fn install_vmdk_if_missing_async(
+        &self,
+        manifest_digest: &Digest,
+        layer_diff_ids: &[Digest],
+    ) -> ImageResult<()> {
+        self.write_vmdk_async(
+            manifest_digest,
+            layer_diff_ids,
+            VmdkWriteMode::KeepExisting,
             None,
         )
         .await
@@ -638,25 +794,18 @@ impl GlobalCache {
         &self,
         reference: &Reference,
     ) -> ImageResult<Option<CachedImageMetadata>> {
-        self.read_image_metadata_path(&self.image_metadata_path(reference))
+        Ok(self
+            .read_image_entry(reference)?
+            .map(|entry| entry.metadata))
     }
 
-    /// Resolve one mutable metadata entry and admit its exact dependencies under the
-    /// publication gate. Operation scopes retain those pins after this method returns.
-    pub(crate) fn read_image_metadata_path(
+    /// Resolve metadata and provenance together under the reference publication gate.
+    pub(crate) fn read_image_entry(
         &self,
-        path: &Path,
-    ) -> ImageResult<Option<CachedImageMetadata>> {
-        self.read_image_metadata_matching(path, None)
-    }
-
-    fn read_image_metadata_matching(
-        &self,
-        path: &Path,
-        manifest_digest: Option<&str>,
-    ) -> ImageResult<Option<CachedImageMetadata>> {
-        // Scanning by digest must release each nonmatching entry immediately. Retaining
-        // every scanned image in the caller's operation can exhaust its descriptor limit.
+        reference: &Reference,
+    ) -> ImageResult<Option<CachedImageEntry>> {
+        let path = self.image_metadata_path(reference);
+        let path = path.as_path();
         let key = StorageLease::key(path)?;
         let entry = match self.retained_lease(&key)? {
             Some(lease) => lease,
@@ -675,10 +824,7 @@ impl GlobalCache {
         };
         let metadata = parse_cached_image_metadata(path, &data)?;
         if let Some(metadata) = &metadata {
-            if manifest_digest.is_some_and(|digest| digest != metadata.manifest_digest) {
-                return Ok(None);
-            }
-            let Ok(paths) = self.metadata_paths(metadata) else {
+            let Ok(paths) = self.metadata_paths(&metadata.metadata) else {
                 return Ok(None);
             };
             self.retain_lease(key, entry.clone())?;
@@ -694,15 +840,17 @@ impl GlobalCache {
         &self,
         reference: &Reference,
     ) -> ImageResult<Option<CachedImageMetadata>> {
-        self.read_image_metadata_path_async(self.image_metadata_path(reference))
-            .await
+        Ok(self
+            .read_image_entry_async(reference)
+            .await?
+            .map(|entry| entry.metadata))
     }
 
-    pub(crate) async fn read_image_metadata_path_async(
+    pub(crate) async fn read_image_entry_async(
         &self,
-        path: PathBuf,
-    ) -> ImageResult<Option<CachedImageMetadata>> {
-        self.read_image_metadata_matching_async_inner(path, None)
+        reference: &Reference,
+    ) -> ImageResult<Option<CachedImageEntry>> {
+        self.read_image_metadata_matching_async_inner(self.image_metadata_path(reference), None)
             .await
     }
 
@@ -710,7 +858,7 @@ impl GlobalCache {
         &self,
         path: PathBuf,
         manifest_digest: String,
-    ) -> ImageResult<Option<CachedImageMetadata>> {
+    ) -> ImageResult<Option<CachedImageEntry>> {
         self.read_image_metadata_matching_async_inner(path, Some(manifest_digest))
             .await
     }
@@ -719,7 +867,7 @@ impl GlobalCache {
         &self,
         path: PathBuf,
         manifest_digest: Option<String>,
-    ) -> ImageResult<Option<CachedImageMetadata>> {
+    ) -> ImageResult<Option<CachedImageEntry>> {
         // Scans release nonmatching entries immediately instead of retaining every candidate
         // in the operation scope. That keeps descriptor use bounded on large caches.
         let key_path = path.clone();
@@ -750,11 +898,11 @@ impl GlobalCache {
         if let Some(metadata) = &metadata {
             if manifest_digest
                 .as_deref()
-                .is_some_and(|digest| digest != metadata.manifest_digest)
+                .is_some_and(|digest| digest != metadata.metadata.manifest_digest)
             {
                 return Ok(None);
             }
-            let Ok(paths) = self.metadata_paths(metadata) else {
+            let Ok(paths) = self.metadata_paths(&metadata.metadata) else {
                 return Ok(None);
             };
             self.retain_lease(key, entry.clone())?;
@@ -778,7 +926,7 @@ impl GlobalCache {
         paths.push(path.clone());
         let _leases = self.lease_paths(paths)?;
         let _gate = StorageLease::exclusive(&path.with_extension("publication"))?;
-        self.write_image_metadata_file(&path, metadata)
+        self.write_image_metadata_file(&path, metadata.clone(), CacheAuthProvenance::Anonymous)
     }
 
     /// Publish metadata from an owned worker so cancellation cannot release its gate
@@ -787,6 +935,21 @@ impl GlobalCache {
         &self,
         reference: &Reference,
         metadata: &CachedImageMetadata,
+    ) -> ImageResult<()> {
+        self.write_image_metadata_with_provenance_async(
+            reference,
+            metadata,
+            CacheAuthProvenance::Unknown,
+        )
+        .await
+    }
+
+    /// Publish image metadata with provenance established by a trusted local operation.
+    pub async fn write_image_metadata_with_provenance_async(
+        &self,
+        reference: &Reference,
+        metadata: &CachedImageMetadata,
+        pull_auth: CacheAuthProvenance,
     ) -> ImageResult<()> {
         let cache = self.clone();
         let path = self.image_metadata_path(reference);
@@ -797,7 +960,7 @@ impl GlobalCache {
         let gate = StorageLease::exclusive_async(path.with_extension("publication")).await?;
         tokio::task::spawn_blocking(move || {
             let _protection = (leases, gate);
-            cache.write_image_metadata_file(&path, &metadata)
+            cache.write_image_metadata_file(&path, metadata, pull_auth)
         })
         .await
         .map_err(std::io::Error::other)?
@@ -805,17 +968,35 @@ impl GlobalCache {
 
     /// Install archived metadata without replacing an equivalent local entry. Recheck under
     /// the same publication gate used by image pulls, so a concurrent retag cannot be lost.
+    ///
+    /// Archived metadata cannot establish anonymous upstream registry access, so any
+    /// serialized provenance marker is stripped before writing a new entry.
     pub async fn install_image_metadata_if_compatible_async(
         &self,
         reference: &Reference,
         archived_bytes: Vec<u8>,
     ) -> ImageResult<()> {
+        self.prepare_image_metadata_install(reference, archived_bytes)
+            .await?
+            .commit()
+            .await
+    }
+
+    /// Check archived metadata before installing any artifacts and reserve its publication.
+    ///
+    /// Drops provenance asserted by the archive. Equivalent existing metadata is kept intact.
+    pub async fn prepare_image_metadata_install(
+        &self,
+        reference: &Reference,
+        archived_bytes: Vec<u8>,
+    ) -> ImageResult<ImageMetadataInstall> {
         let (metadata, archived_bytes) = tokio::task::spawn_blocking(move || {
             crate::snapshot::manifest::reject_duplicate_json_keys(&archived_bytes)
                 .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
             let metadata: CachedImageMetadata = serde_json::from_slice(&archived_bytes)
                 .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
-            Ok::<_, ImageError>((metadata, archived_bytes))
+            let normalized_bytes = strip_provenance_from_metadata_json(&archived_bytes)?;
+            Ok::<_, ImageError>((metadata, normalized_bytes))
         })
         .await
         .map_err(std::io::Error::other)??;
@@ -826,8 +1007,18 @@ impl GlobalCache {
         let gate = StorageLease::exclusive_async(path.with_extension("publication")).await?;
         let cache = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _protection = (leases, gate);
-            cache.install_image_metadata_file(&path, &archived_bytes)
+            let new_bytes = if cache.check_image_metadata_target(&path, &archived_bytes)? {
+                None
+            } else {
+                Some(archived_bytes)
+            };
+            Ok(ImageMetadataInstall {
+                cache,
+                path,
+                new_bytes,
+                _leases: leases,
+                _gate: gate,
+            })
         })
         .await
         .map_err(std::io::Error::other)?
@@ -871,11 +1062,16 @@ impl GlobalCache {
     fn write_image_metadata_file(
         &self,
         path: &Path,
-        metadata: &CachedImageMetadata,
+        metadata: CachedImageMetadata,
+        pull_auth: CacheAuthProvenance,
     ) -> ImageResult<()> {
         let temporary_path = path.with_extension("json.part");
         let mut temporary = std::fs::File::create(&temporary_path)?;
-        serde_json::to_writer(&mut temporary, metadata)
+        let entry = CachedImageEntry {
+            metadata,
+            pull_auth,
+        };
+        serde_json::to_writer(&mut temporary, &entry)
             .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
         temporary.flush()?;
         temporary.sync_all()?;
@@ -883,13 +1079,13 @@ impl GlobalCache {
         sync_directory(&self.manifests_dir)
     }
 
-    /// Install compatible archived metadata under the caller's publication protection.
-    fn install_image_metadata_file(&self, path: &Path, archived_bytes: &[u8]) -> ImageResult<()> {
+    /// Check for a compatible existing entry under publication protection.
+    fn check_image_metadata_target(&self, path: &Path, archived_bytes: &[u8]) -> ImageResult<bool> {
         match std::fs::symlink_metadata(path) {
             Ok(existing) if existing.file_type().is_file() => {
                 let existing_bytes = std::fs::read(path)?;
                 if image_metadata_json_equivalent(archived_bytes, &existing_bytes) {
-                    return Ok(());
+                    return Ok(true);
                 }
                 return Err(ImageError::Cache {
                     path: path.to_path_buf(),
@@ -917,6 +1113,10 @@ impl GlobalCache {
             }
         }
 
+        Ok(false)
+    }
+
+    fn install_image_metadata_file(&self, path: &Path, archived_bytes: &[u8]) -> ImageResult<()> {
         // The gate covers the shared .json.part path until the complete file is durable.
         let temporary_path = path.with_extension("json.part");
         let mut temporary = std::fs::File::create(&temporary_path)?;
@@ -937,19 +1137,45 @@ fn image_cache_key(reference: &Reference) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn image_metadata_json_equivalent(left: &[u8], right: &[u8]) -> bool {
+fn strip_provenance_from_value(value: &mut serde_json::Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.remove("pull_auth");
+        object.remove("authenticated");
+    }
+}
+
+fn strip_provenance_from_metadata_json(bytes: &[u8]) -> ImageResult<Vec<u8>> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
+    let had_provenance = value.as_object().is_some_and(|object| {
+        object.contains_key("pull_auth") || object.contains_key("authenticated")
+    });
+    if !had_provenance {
+        return Ok(bytes.to_vec());
+    }
+    strip_provenance_from_value(&mut value);
+    serde_json::to_vec(&value).map_err(|error| ImageError::ConfigParse(error.to_string()))
+}
+
+/// Compare two cached image metadata JSON documents for immutable content equivalence,
+/// ignoring object key order and local auth-provenance markers.
+pub fn image_metadata_json_equivalent(left: &[u8], right: &[u8]) -> bool {
     if crate::snapshot::manifest::reject_duplicate_json_keys(left).is_err()
         || crate::snapshot::manifest::reject_duplicate_json_keys(right).is_err()
     {
         return false;
     }
-    matches!(
-        (
-            serde_json::from_slice::<serde_json::Value>(left),
-            serde_json::from_slice::<serde_json::Value>(right),
-        ),
-        (Ok(left), Ok(right)) if left == right
-    )
+    match (
+        serde_json::from_slice::<serde_json::Value>(left),
+        serde_json::from_slice::<serde_json::Value>(right),
+    ) {
+        (Ok(mut left), Ok(mut right)) => {
+            strip_provenance_from_value(&mut left);
+            strip_provenance_from_value(&mut right);
+            left == right
+        }
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -969,11 +1195,8 @@ fn sync_directory(_path: &Path) -> ImageResult<()> {
     Ok(())
 }
 
-pub(crate) fn parse_cached_image_metadata(
-    path: &Path,
-    data: &str,
-) -> ImageResult<Option<CachedImageMetadata>> {
-    match serde_json::from_str::<CachedImageMetadata>(data) {
+fn parse_cached_image_metadata(path: &Path, data: &str) -> ImageResult<Option<CachedImageEntry>> {
+    match serde_json::from_str::<CachedImageEntry>(data) {
         Ok(metadata) => Ok(Some(metadata)),
         Err(e) => {
             tracing::warn!(
@@ -1046,6 +1269,27 @@ mod tests {
         format!("sha256:{}", byte.to_string().repeat(64))
             .parse()
             .unwrap()
+    }
+
+    #[test]
+    fn pinned_vmdk_readiness_checks_the_full_extent_set() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap();
+        let manifest = digest('a');
+        let layer = digest('b');
+        let tree = crate::tree::FileTree::new();
+        crate::erofs::write_erofs(&tree, &cache.fsmeta_erofs_path(&manifest)).unwrap();
+        crate::erofs::write_erofs(&tree, &cache.layer_erofs_path(&layer)).unwrap();
+        cache
+            .rewrite_vmdk(&manifest, std::slice::from_ref(&layer))
+            .unwrap();
+        assert!(cache.is_vmdk_complete(&manifest));
+        assert!(cache.is_vmdk_complete_for_layers(&manifest, std::slice::from_ref(&layer)));
+
+        std::fs::remove_file(cache.layer_erofs_path(&layer)).unwrap();
+        assert!(cache.is_vmdk_materialized(&manifest));
+        assert!(!cache.is_vmdk_complete(&manifest));
+        assert!(!cache.is_vmdk_complete_for_layers(&manifest, std::slice::from_ref(&layer)));
     }
 
     #[tokio::test]
@@ -1315,5 +1559,59 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read(destination).unwrap(), expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn archived_metadata_equivalence_ignores_provenance_and_strips_archived_claims() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap().operation();
+        let reference: Reference = "example.com/private:v1".parse().unwrap();
+
+        // 1. Existing authenticated entry matches an archive lacking provenance,
+        //    and keeps its stricter Authenticated provenance on disk.
+        let auth_meta = CachedImageMetadata {
+            manifest_digest: digest('a').to_string(),
+            config_digest: digest('a').to_string(),
+            raw_manifest_json: "{}".into(),
+            raw_config_json: "{}".into(),
+            config: ImageConfig::default(),
+            layers: Vec::new(),
+        };
+        cache
+            .write_image_metadata_with_provenance_async(
+                &reference,
+                &auth_meta,
+                CacheAuthProvenance::Authenticated,
+            )
+            .await
+            .unwrap();
+
+        let archived_claiming_anon = CachedImageEntry {
+            metadata: auth_meta.clone(),
+            pull_auth: CacheAuthProvenance::Anonymous,
+        };
+        let archived_bytes = serde_json::to_vec(&archived_claiming_anon).unwrap();
+
+        cache
+            .install_image_metadata_if_compatible_async(&reference, archived_bytes.clone())
+            .await
+            .unwrap();
+        let preserved = cache.read_image_entry(&reference).unwrap().unwrap();
+        assert_eq!(preserved.pull_auth, CacheAuthProvenance::Authenticated);
+
+        // 2. Installing into a fresh reference strips any archived pull_auth claim
+        //    so an archive cannot establish anonymous upstream registry access.
+        let fresh_ref: Reference = "example.com/imported:v1".parse().unwrap();
+        cache
+            .install_image_metadata_if_compatible_async(&fresh_ref, archived_bytes)
+            .await
+            .unwrap();
+        let installed = cache.read_image_entry(&fresh_ref).unwrap().unwrap();
+        assert_eq!(installed.pull_auth, CacheAuthProvenance::Unknown);
+
+        // 3. Equivalence also ignores Unknown vs Anonymous/Authenticated.
+        let unknown_bytes = serde_json::to_vec(&auth_meta).unwrap();
+        let auth_bytes = std::fs::read(cache.image_metadata_path(&reference)).unwrap();
+        assert!(image_metadata_json_equivalent(&unknown_bytes, &auth_bytes));
     }
 }

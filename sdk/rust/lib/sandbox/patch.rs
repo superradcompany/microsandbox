@@ -27,6 +27,7 @@ use microsandbox_image::tree::{
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
+use super::patch_sources::{PatchStaging, Prepared};
 use super::types::{Patch, RootfsSource};
 use crate::MicrosandboxResult;
 use crate::context::local::creation::CreationStorage;
@@ -429,6 +430,7 @@ impl RootedPatchFs {
         dst: &Path,
         guest_path: &str,
         replace: bool,
+        sources: &Prepared,
     ) -> MicrosandboxResult<()> {
         let source = Dir::open_ambient_dir(src, ambient_authority()).map_err(|err| {
             crate::MicrosandboxError::PatchFailed(format!(
@@ -437,7 +439,7 @@ impl RootedPatchFs {
             ))
         })?;
         self.validate_copy_dir_source(&source)?;
-        self.copy_dir_from(&source, dst, guest_path, replace)
+        self.copy_dir_from(&source, src, dst, guest_path, replace, sources)
     }
 
     /// Validate the complete source tree before creating a destination.
@@ -475,12 +477,16 @@ impl RootedPatchFs {
     fn copy_dir_from(
         &self,
         source: &Dir,
+        source_path: &Path,
         dst: &Path,
         guest_path: &str,
         replace: bool,
+        sources: &Prepared,
     ) -> MicrosandboxResult<()> {
         #[cfg(unix)]
-        let source_mode = source_cap_permissions_mode(&source.dir_metadata()?.permissions());
+        let source_mode = sources.mode(source_path).or(source_cap_permissions_mode(
+            &source.dir_metadata()?.permissions(),
+        ));
         self.ensure_parent(dst)?;
         #[cfg(unix)]
         {
@@ -488,7 +494,11 @@ impl RootedPatchFs {
                 self.root.create_dir_all(dst)?;
             } else {
                 let mut builder = DirBuilder::new();
-                builder.mode(source_mode.unwrap_or(0o755));
+                builder.mode(if sources.mode(source_path).is_some() {
+                    0o700
+                } else {
+                    source_mode.unwrap_or(0o755)
+                });
                 self.root.create_dir_with(dst, &builder).map_err(|err| {
                     if err.kind() == std::io::ErrorKind::AlreadyExists {
                         path_exists_error(guest_path)
@@ -498,7 +508,12 @@ impl RootedPatchFs {
                 })?;
             }
             if let Some(mode) = source_mode {
-                set_dir_mode(&self.root.open_dir(dst)?, mode)?;
+                let construction_mode = if sources.mode(source_path).is_some() {
+                    0o700
+                } else {
+                    mode
+                };
+                set_dir_mode(&self.root.open_dir(dst)?, construction_mode)?;
             }
         }
         #[cfg(windows)]
@@ -551,9 +566,11 @@ impl RootedPatchFs {
                 )?;
                 self.copy_dir_from(
                     &Dir::from_std_file(child),
+                    &source_path.join(entry.file_name()),
                     &resolved_dst,
                     &child_guest_path,
                     replace,
+                    sources,
                 )?;
                 continue;
             }
@@ -578,7 +595,9 @@ impl RootedPatchFs {
                 )));
             }
             let source_permissions = source_file.metadata()?.permissions();
-            let source_mode = source_cap_permissions_mode(&source_permissions);
+            let source_mode = sources
+                .mode(&source_path.join(entry.file_name()))
+                .or(source_cap_permissions_mode(&source_permissions));
             let mut destination =
                 self.open_file_for_write(&resolved_dst, &child_guest_path, replace, source_mode)?;
             self.copy_stream(&mut source_file, &mut destination)?;
@@ -587,6 +606,10 @@ impl RootedPatchFs {
             }
             #[cfg(windows)]
             destination.set_permissions(source_permissions)?;
+        }
+        #[cfg(unix)]
+        if let Some(mode) = sources.mode(source_path) {
+            set_dir_mode(&self.root.open_dir(dst)?, mode)?;
         }
         Ok(())
     }
@@ -709,6 +732,7 @@ impl RootedPatchFs {
 pub(crate) async fn apply_patches(
     image: &RootfsSource,
     patches: &[Patch],
+    patch_staging: &PatchStaging,
 ) -> MicrosandboxResult<()> {
     if patches.is_empty() {
         return Ok(());
@@ -735,6 +759,8 @@ pub(crate) async fn apply_patches(
     // Windows, where POSIX modes and symlink patches are predictably
     // unsupported and must not fail after earlier patches have been applied.
     validate_bind_patches(patches)?;
+    let prepared = Arc::new(patch_staging.prepare(patches).await?);
+    let patches = prepared.patches(patches);
 
     let root =
         tokio::task::spawn_blocking(move || RootedPatchFs::open(&target_dir, follow_root_symlinks))
@@ -750,11 +776,15 @@ pub(crate) async fn apply_patches(
     for patch in patches {
         let root = Arc::clone(&root);
         let patch = patch.clone();
-        tokio::task::spawn_blocking(move || apply_one_to_bind(&root, &patch))
-            .await
-            .map_err(|err| {
-                crate::MicrosandboxError::PatchFailed(format!("bind-root patch task failed: {err}"))
-            })??;
+        let source_owner = prepared.clone();
+        tokio::task::spawn_blocking(move || {
+            let _source_owner = source_owner;
+            apply_one_to_bind(&root, &patch, &_source_owner)
+        })
+        .await
+        .map_err(|err| {
+            crate::MicrosandboxError::PatchFailed(format!("bind-root patch task failed: {err}"))
+        })??;
     }
     Ok(())
 }
@@ -762,13 +792,16 @@ pub(crate) async fn apply_patches(
 pub(crate) async fn build_upper_tree(
     patches: &[Patch],
     lower_erofs: &[PathBuf],
+    patch_staging: &PatchStaging,
 ) -> MicrosandboxResult<FileTree> {
+    let prepared = patch_staging.prepare(patches).await?;
+    let patches = prepared.patches(patches);
     // Pre-open all EROFS readers once — avoids repeated open/parse/close
     // per path lookup (hundreds of file opens for multi-patch scenarios).
     let mut lowers = LowerLayers::open(lower_erofs)?;
     let mut tree = FileTree::new();
     for patch in patches {
-        apply_one_to_tree(&mut tree, &mut lowers, patch).await?;
+        apply_one_to_tree(&mut tree, &mut lowers, patch, &prepared).await?;
     }
     Ok(tree)
 }
@@ -778,7 +811,10 @@ pub(crate) async fn build_flat_tree(
     patches: &[Patch],
     lower_erofs: &[PathBuf],
     spool_path: &CreationStorage,
+    patch_staging: &PatchStaging,
 ) -> MicrosandboxResult<FileTree> {
+    let prepared = patch_staging.prepare(patches).await?;
+    let patches = prepared.patches(patches);
     let lower_erofs = lower_erofs.to_vec();
     let spool_path = spool_path.clone();
     let mut tree = tokio::task::spawn_blocking(move || {
@@ -793,7 +829,7 @@ pub(crate) async fn build_flat_tree(
         removed: Vec::new(),
     };
     for patch in patches {
-        apply_one_to_tree(&mut tree, &mut no_lowers, patch).await?;
+        apply_one_to_tree(&mut tree, &mut no_lowers, patch, &prepared).await?;
     }
     Ok(tree)
 }
@@ -802,6 +838,7 @@ async fn apply_one_to_tree(
     tree: &mut FileTree,
     lowers: &mut LowerLayers,
     patch: &Patch,
+    sources: &Prepared,
 ) -> MicrosandboxResult<()> {
     match patch {
         Patch::Text {
@@ -865,7 +902,10 @@ async fn apply_one_to_tree(
                 tree.remove(&rel);
             }
             let (data, source_mode) = read_regular_source(src).await?;
-            let file_mode = mode.map_or(source_mode, |mode| mode as u16);
+            let file_mode = mode
+                .map(|mode| mode as u16)
+                .or(sources.mode(src).map(|mode| staged_image_mode(mode, false)))
+                .unwrap_or(source_mode);
             insert_tree_node(
                 tree,
                 &rel,
@@ -881,7 +921,7 @@ async fn apply_one_to_tree(
         Patch::CopyDir { src, dst, replace } => {
             let rel = normalize_guest_path_bytes(dst)?;
             check_replace_tree(tree, lowers, dst, *replace)?;
-            copy_dir_into_tree(tree, lowers, src, &rel).await?;
+            copy_dir_into_tree(tree, lowers, src, &rel, sources).await?;
         }
         Patch::Symlink {
             target,
@@ -1011,7 +1051,11 @@ async fn apply_one_to_tree(
 }
 
 /// Apply one patch through a capability-scoped bind-root handle.
-fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<()> {
+fn apply_one_to_bind(
+    root: &RootedPatchFs,
+    patch: &Patch,
+    sources: &Prepared,
+) -> MicrosandboxResult<()> {
     match patch {
         Patch::Text {
             path,
@@ -1038,11 +1082,11 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             replace,
         } => {
             let dest = root.resolve(dst, *replace)?;
-            root.copy_file(src, &dest, dst, *replace, *mode)?;
+            root.copy_file(src, &dest, dst, *replace, mode.or(sources.mode(src)))?;
         }
         Patch::CopyDir { src, dst, replace } => {
             let dest = root.resolve(dst, *replace)?;
-            root.copy_dir(src, &dest, dst, *replace)?;
+            root.copy_dir(src, &dest, dst, *replace, sources)?;
         }
         Patch::Symlink {
             target,
@@ -1232,15 +1276,20 @@ async fn copy_dir_into_tree(
     lowers: &mut LowerLayers,
     src: &Path,
     dst_relative: &[u8],
+    sources: &Prepared,
 ) -> MicrosandboxResult<()> {
     ensure_tree_parents(tree, lowers, dst_relative)?;
+    let mode = match sources.mode(src) {
+        Some(mode) => staged_image_mode(mode, true),
+        None => source_mode(src, true).await?,
+    };
     insert_tree_node(
         tree,
         dst_relative,
         TreeNode::Directory(new_upper_directory(
             lowers,
             dst_relative,
-            metadata_with_mode(source_mode(src, true).await?),
+            metadata_with_mode(mode),
         )),
     )?;
 
@@ -1258,6 +1307,7 @@ async fn copy_dir_into_tree(
                 lowers,
                 &child_path,
                 &child_relative,
+                sources,
             ))
             .await?;
             continue;
@@ -1276,6 +1326,9 @@ async fn copy_dir_into_tree(
             )?;
         } else if file_type.is_file() {
             let (data, mode) = read_regular_source(&child_path).await?;
+            let mode = sources
+                .mode(&child_path)
+                .map_or(mode, |mode| staged_image_mode(mode, false));
             insert_tree_node(
                 tree,
                 &child_relative,
@@ -1313,6 +1366,15 @@ async fn source_mode(_path: &Path, is_dir: bool) -> MicrosandboxResult<u16> {
     #[cfg(not(unix))]
     {
         Ok(if is_dir { 0o755 } else { 0o644 })
+    }
+}
+
+/// Image mode for a staged source mode, defaulting zero like `source_mode`.
+fn staged_image_mode(mode: u32, is_dir: bool) -> u16 {
+    match mode as u16 {
+        0 if is_dir => 0o755,
+        0 => 0o644,
+        mode => mode,
     }
 }
 
@@ -2231,6 +2293,39 @@ mod tests {
 
     use microsandbox_image::erofs::write_erofs;
 
+    fn patch_staging(bounded: bool) -> PatchStaging {
+        if bounded {
+            PatchStaging::enabled_default()
+        } else {
+            PatchStaging::disabled()
+        }
+    }
+
+    async fn apply_patches(
+        image: &RootfsSource,
+        patches: &[Patch],
+        bounded: bool,
+    ) -> MicrosandboxResult<()> {
+        super::apply_patches(image, patches, &patch_staging(bounded)).await
+    }
+
+    async fn build_upper_tree(
+        patches: &[Patch],
+        lower_erofs: &[PathBuf],
+        bounded: bool,
+    ) -> MicrosandboxResult<FileTree> {
+        super::build_upper_tree(patches, lower_erofs, &patch_staging(bounded)).await
+    }
+
+    async fn build_flat_tree(
+        patches: &[Patch],
+        lower_erofs: &[PathBuf],
+        spool_path: &CreationStorage,
+        bounded: bool,
+    ) -> MicrosandboxResult<FileTree> {
+        super::build_flat_tree(patches, lower_erofs, spool_path, &patch_staging(bounded)).await
+    }
+
     fn bind_root(path: PathBuf, follow_root_symlinks: bool) -> RootfsSource {
         RootfsSource::Bind {
             path,
@@ -2285,6 +2380,88 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn bounded_sources_refuse_unsafe_batches_before_applying_any_patch() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().canonicalize().unwrap();
+        let source = fixture.join("source");
+        let root = fixture.join("root");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        let file = source.join("data");
+        std::fs::write(&file, b"payload").unwrap();
+        symlink(&file, source.join("alias")).unwrap();
+        let patches = vec![
+            Patch::Text {
+                path: "/first".into(),
+                content: "first".into(),
+                mode: None,
+                replace: false,
+            },
+            Patch::CopyDir {
+                src: source.clone(),
+                dst: "/copied".into(),
+                replace: false,
+            },
+        ];
+        let image = bind_root(root.clone(), false);
+        assert!(apply_patches(&image, &patches, true).await.is_err());
+        assert!(
+            !root.join("first").exists(),
+            "source admission must precede destination writes"
+        );
+        apply_patches(&image, &patches, false).await.unwrap();
+        assert_eq!(
+            std::fs::read(root.join("copied/alias")).unwrap(),
+            b"payload"
+        );
+        std::fs::remove_dir_all(root.join("copied")).unwrap();
+        std::fs::remove_file(root.join("first")).unwrap();
+        std::fs::remove_file(source.join("alias")).unwrap();
+        apply_patches(&image, &patches, true).await.unwrap();
+        assert_eq!(std::fs::read(root.join("copied/data")).unwrap(), b"payload");
+        std::fs::remove_dir_all(root.join("copied")).unwrap();
+        std::fs::remove_file(root.join("first")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_len(65 * 1024 * 1024)
+            .unwrap();
+        let error = apply_patches(&image, &patches, true).await.unwrap_err();
+        assert!(error.to_string().contains("byte budget"), "{error}");
+        assert!(!root.join("first").exists());
+        std::fs::write(&file, b"payload").unwrap();
+        symlink(&source, fixture.join("alias-dir")).unwrap();
+        for patch in [
+            Patch::CopyFile {
+                src: fixture.join("alias-dir/data"),
+                dst: "/file".into(),
+                mode: None,
+                replace: false,
+            },
+            Patch::CopyDir {
+                src: fixture.join("alias-dir"),
+                dst: "/dir".into(),
+                replace: false,
+            },
+        ] {
+            assert!(apply_patches(&image, &[patch], true).await.is_err());
+        }
+        assert!(!root.join("file").exists());
+        assert!(!root.join("dir").exists());
+    }
+
+    #[test]
+    fn staged_zero_modes_use_image_defaults() {
+        assert_eq!(staged_image_mode(0, false), 0o644);
+        assert_eq!(staged_image_mode(0, true), 0o755);
+        assert_eq!(staged_image_mode(0o4750, false), 0o4750);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn bind_patch_confines_host_absolute_symlink() {
         use std::os::unix::fs::symlink;
 
@@ -2299,6 +2476,7 @@ mod tests {
         apply_patches(
             &bind_root(root.clone(), false),
             &[text_patch("/escape/pwned.txt", "contained")],
+            false,
         )
         .await
         .unwrap();
@@ -2326,6 +2504,7 @@ mod tests {
         apply_patches(
             &bind_root(root.clone(), false),
             &[text_patch("/escape/pwned.txt", "contained")],
+            false,
         )
         .await
         .unwrap();
@@ -2350,6 +2529,7 @@ mod tests {
         apply_patches(
             &bind_root(root.clone(), false),
             &[text_patch("/bin/tool", "hello")],
+            false,
         )
         .await
         .unwrap();
@@ -2376,13 +2556,14 @@ mod tests {
         let error = apply_patches(
             &bind_root(linked_root.clone(), false),
             std::slice::from_ref(&patch),
+            false,
         )
         .await
         .unwrap_err();
         assert!(error.to_string().contains("follow_root_symlinks"));
         assert!(!actual_root.join("allowed.txt").exists());
 
-        apply_patches(&bind_root(linked_root, true), &[patch])
+        apply_patches(&bind_root(linked_root, true), &[patch], false)
             .await
             .unwrap();
         assert_eq!(
@@ -2406,6 +2587,7 @@ mod tests {
             &[Patch::Remove {
                 path: "/link.txt".into(),
             }],
+            false,
         )
         .await
         .unwrap();
@@ -2441,6 +2623,7 @@ mod tests {
                 dst: "/dest".into(),
                 replace: true,
             }],
+            false,
         )
         .await
         .unwrap();
@@ -2477,6 +2660,7 @@ mod tests {
                 dst: "/copied".into(),
                 replace: false,
             }],
+            false,
         )
         .await
         .unwrap();
@@ -2512,6 +2696,7 @@ mod tests {
                 dst: "/copied".into(),
                 replace: true,
             }],
+            false,
         )
         .await
         .unwrap();
@@ -2546,6 +2731,7 @@ mod tests {
                 dst: "/copied".into(),
                 replace: false,
             }],
+            false,
         )
         .await
         .unwrap_err();
@@ -2574,6 +2760,7 @@ mod tests {
                 mode: None,
                 replace: false,
             }],
+            false,
         )
         .await
         .unwrap_err();
@@ -2588,8 +2775,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
-        let source = temp.path().join("source");
+        let fixture = temp.path().canonicalize().unwrap();
+        let root = fixture.join("root");
+        let source = fixture.join("source");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(source.join("private")).unwrap();
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o710)).unwrap();
@@ -2602,13 +2790,42 @@ mod tests {
         apply_patches(
             &bind_root(root.clone(), true),
             &[Patch::CopyDir {
-                src: source,
+                src: source.clone(),
                 dst: "/copied".into(),
                 replace: false,
             }],
+            false,
         )
         .await
         .unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::CopyDir {
+                src: source,
+                dst: "/staged".into(),
+                replace: false,
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(root.join("staged"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o710
+        );
+        assert_eq!(
+            std::fs::metadata(root.join("staged/private"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
 
         assert_eq!(
             std::fs::metadata(root.join("copied"))
@@ -2646,6 +2863,7 @@ mod tests {
                 mode: None,
                 replace: true,
             }],
+            false,
         )
         .await
         .unwrap_err();
@@ -2670,6 +2888,7 @@ mod tests {
         let error = apply_patches(
             &bind_root(root.clone(), false),
             &[text_patch("/link.txt", "overwrite")],
+            false,
         )
         .await
         .unwrap_err();
@@ -2699,6 +2918,7 @@ mod tests {
         let error = apply_patches(
             &bind_root(root.clone(), false),
             &[text_patch("/link.txt", "must-not-write")],
+            false,
         )
         .await
         .unwrap_err();
@@ -2844,6 +3064,7 @@ mod tests {
                 path: "/existing".into(),
                 mode: Some(0o700),
             }],
+            false,
         )
         .await;
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2896,6 +3117,7 @@ mod tests {
                     mode: Some(0o700),
                 },
             ],
+            false,
         )
         .await
         .unwrap();
@@ -2926,6 +3148,7 @@ mod tests {
                 text_patch("/first.txt", "must-not-write"),
                 text_patch("relative.txt", "invalid"),
             ],
+            false,
         )
         .await
         .unwrap_err();
@@ -2945,6 +3168,7 @@ mod tests {
                 text_patch("/first.txt", "must-not-write"),
                 text_patch("/../escaped.txt", "invalid"),
             ],
+            false,
         )
         .await
         .unwrap_err();
@@ -2966,6 +3190,7 @@ mod tests {
                     text_patch("/first.txt", "must-not-write"),
                     text_patch(invalid, "invalid"),
                 ],
+                false,
             )
             .await
             .unwrap_err();
@@ -2990,6 +3215,7 @@ mod tests {
                     replace: false,
                 },
             ],
+            false,
         )
         .await
         .unwrap_err();
@@ -3011,6 +3237,7 @@ mod tests {
                 dst: "/copied".into(),
                 replace: false,
             }],
+            false,
         )
         .await
         .unwrap_err();
@@ -3034,6 +3261,7 @@ mod tests {
                     text_patch("/first.txt", "must-not-write"),
                     text_patch(destination, "invalid"),
                 ],
+                false,
             )
             .await
             .unwrap_err();
@@ -3060,6 +3288,7 @@ mod tests {
                 dst: "/destination".into(),
                 replace: false,
             }],
+            false,
         )
         .await
         .unwrap_err();
@@ -3086,6 +3315,7 @@ mod tests {
                 link: "/link".into(),
                 replace: false,
             }],
+            false,
         )
         .await
         .unwrap_err();
@@ -3111,6 +3341,7 @@ mod tests {
                     replace: true,
                 },
             ],
+            false,
         )
         .await
         .unwrap_err();
@@ -3162,7 +3393,7 @@ mod tests {
         ];
 
         for patch in patches {
-            let error = apply_patches(&bind_root(root.clone(), true), &[patch])
+            let error = apply_patches(&bind_root(root.clone(), true), &[patch], false)
                 .await
                 .unwrap_err();
             assert!(
@@ -3188,6 +3419,7 @@ mod tests {
         let error = apply_patches(
             &bind_root(root.clone(), true),
             &[text_patch("/safe\\..\\escaped.txt", "must-not-write")],
+            false,
         )
         .await
         .unwrap_err();
@@ -3209,6 +3441,7 @@ mod tests {
                 text_patch("/first.txt", "must-not-write"),
                 text_patch("/NUL.txt", "invalid"),
             ],
+            false,
         )
         .await
         .unwrap_err();
@@ -3264,6 +3497,7 @@ mod tests {
                     path: "/remove.txt".into(),
                 },
             ],
+            false,
         )
         .await
         .unwrap();
@@ -3303,6 +3537,7 @@ mod tests {
         let error = apply_patches(
             &bind_root(root.clone(), true),
             &[text_patch("/escape/pwned.txt", "must-not-write")],
+            false,
         )
         .await
         .unwrap_err();
@@ -3325,13 +3560,17 @@ mod tests {
         create_windows_junction(&linked_root, &actual_root);
         let patch = text_patch("/allowed.txt", "hello");
 
-        let error = apply_patches(&bind_root(linked_root.clone(), false), &[patch.clone()])
-            .await
-            .unwrap_err();
+        let error = apply_patches(
+            &bind_root(linked_root.clone(), false),
+            &[patch.clone()],
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("follow_root_symlinks"));
         assert!(!actual_root.join("allowed.txt").exists());
 
-        apply_patches(&bind_root(linked_root, true), &[patch])
+        apply_patches(&bind_root(linked_root, true), &[patch], false)
             .await
             .unwrap();
         assert_eq!(
@@ -3357,6 +3596,7 @@ mod tests {
             &[Patch::Remove {
                 path: "/remove".into(),
             }],
+            false,
         )
         .await
         .unwrap();
@@ -3377,7 +3617,7 @@ mod tests {
             replace: false,
         }];
 
-        let tree = build_upper_tree(&patches, &[]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[], false).await.unwrap();
         assert!(matches!(tree.get(b"etc"), Some(TreeNode::Directory(_))));
         match tree.get(b"etc/app.conf").unwrap() {
             TreeNode::RegularFile(file) => assert_eq!(file.data.read_all().unwrap(), b"hello"),
@@ -3428,7 +3668,9 @@ mod tests {
             text_patch("/home/node/new/deeper.txt", "new"),
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert_eq!(
             directory_metadata(&tree, b"home"),
             (0, 0, 0o755, 1_700_000_000)
@@ -3464,7 +3706,7 @@ mod tests {
 
         let patches = vec![text_patch("/srv/app.conf", "hello")];
 
-        let tree = build_upper_tree(&patches, &[base_path, top_path])
+        let tree = build_upper_tree(&patches, &[base_path, top_path], false)
             .await
             .unwrap();
         assert_eq!(directory_metadata(&tree, b"srv"), (2000, 3000, 0o750, 2));
@@ -3495,7 +3737,9 @@ mod tests {
 
         let patches = vec![text_patch("/srv/app.conf", "hello")];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         let Some(TreeNode::Directory(srv)) = tree.get(b"srv") else {
             panic!("expected directory at srv");
         };
@@ -3516,7 +3760,9 @@ mod tests {
 
         let patches = vec![text_patch("/locked/app.conf", "hello")];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert_eq!(directory_metadata(&tree, b"locked"), (1000, 1000, 0, 1));
     }
 
@@ -3540,7 +3786,9 @@ mod tests {
             text_patch("/data/sub/new.txt", "new"),
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert_eq!(directory_metadata(&tree, b"data"), (0, 0, 0o755, 0));
         assert_eq!(directory_metadata(&tree, b"data/sub"), (0, 0, 0o755, 0));
     }
@@ -3596,7 +3844,9 @@ mod tests {
             text_patch("/data/sub/second.txt", "second"),
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert_eq!(directory_metadata(&tree, b"data"), (0, 0, 0o755, 0));
         assert!(is_opaque(&tree, b"data"));
         assert_default_directory(&tree, b"data/sub");
@@ -3628,7 +3878,9 @@ mod tests {
             },
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert!(is_opaque(&tree, b"data"));
     }
 
@@ -3648,7 +3900,9 @@ mod tests {
             },
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert!(is_opaque(&tree, b"data"));
         assert_eq!(directory_metadata(&tree, b"data"), (0, 0, 0o750, 0));
         assert!(matches!(
@@ -3676,7 +3930,9 @@ mod tests {
             },
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert!(is_opaque(&tree, b"data"));
         assert!(matches!(
             tree.get(b"data/from-host.txt"),
@@ -3699,7 +3955,9 @@ mod tests {
             },
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert!(matches!(tree.get(b"data"), Some(node) if is_whiteout(node)));
     }
 
@@ -3726,7 +3984,7 @@ mod tests {
             content: "more".into(),
         });
         assert!(
-            build_upper_tree(&patches, std::slice::from_ref(&lower_path))
+            build_upper_tree(&patches, std::slice::from_ref(&lower_path), false)
                 .await
                 .is_err()
         );
@@ -3736,7 +3994,9 @@ mod tests {
         patches.push(Patch::Remove {
             path: "/data/sub".into(),
         });
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert!(tree.get(b"data/sub").is_none());
     }
 
@@ -3752,7 +4012,9 @@ mod tests {
             text_patch("/data/sub/new.txt", "new"),
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert!(!is_opaque(&tree, b"data"));
         assert_eq!(directory_metadata(&tree, b"data"), (1000, 1000, 0o700, 1));
         assert!(is_opaque(&tree, b"data/sub"));
@@ -3774,7 +4036,9 @@ mod tests {
             text_patch("/data/sub/new.txt", "new"),
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert_default_directory(&tree, b"data/sub");
     }
 
@@ -3791,7 +4055,7 @@ mod tests {
             },
             text_patch("/data/sub/new.txt", "new"),
         ];
-        let tree = build_upper_tree(&patches, std::slice::from_ref(&lower_path))
+        let tree = build_upper_tree(&patches, std::slice::from_ref(&lower_path), false)
             .await
             .unwrap();
         assert_eq!(
@@ -3805,7 +4069,9 @@ mod tests {
             },
             text_patch("/database/app.conf", "app"),
         ];
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert_eq!(
             directory_metadata(&tree, b"database"),
             (2000, 2000, 0o750, 2)
@@ -3832,7 +4098,9 @@ mod tests {
             text_patch("/data/new.txt", "new"),
         ];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert_eq!(directory_metadata(&tree, b"data"), (0, 0, 0o755, 0));
     }
 
@@ -3868,6 +4136,7 @@ mod tests {
                     replace: false,
                 },
             ],
+            false,
         )
         .await
         .unwrap();
@@ -3900,7 +4169,9 @@ mod tests {
             path: "/etc/secret.txt".into(),
         }];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         assert!(matches!(tree.get(b"etc"), Some(TreeNode::Directory(_))));
         assert!(matches!(tree.get(b"etc/secret.txt"), Some(node) if is_whiteout(node)));
     }
@@ -3920,7 +4191,9 @@ mod tests {
             content: "-beta".into(),
         }];
 
-        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[lower_path], false)
+            .await
+            .unwrap();
         match tree.get(b"etc/config.txt").unwrap() {
             TreeNode::RegularFile(file) => assert_eq!(file.data.read_all().unwrap(), b"alpha-beta"),
             _ => panic!("expected regular file"),
@@ -3960,6 +4233,7 @@ mod tests {
             ],
             &[base_path, top_path],
             &crate::context::local::creation::CreationStorage::for_test(&spool_path),
+            false,
         )
         .await
         .unwrap();
@@ -3998,7 +4272,7 @@ mod tests {
             content: "-patched".into(),
         }];
 
-        let tree = build_upper_tree(&patches, &[base_path, top_path])
+        let tree = build_upper_tree(&patches, &[base_path, top_path], false)
             .await
             .unwrap();
         match tree.get(b"etc/config.txt").unwrap() {
@@ -4031,7 +4305,7 @@ mod tests {
             replace: false,
         }];
 
-        let tree = build_upper_tree(&patches, &[base_path, top_path])
+        let tree = build_upper_tree(&patches, &[base_path, top_path], false)
             .await
             .unwrap();
         match tree.get(b"etc/hidden.txt").unwrap() {
@@ -4064,7 +4338,7 @@ mod tests {
             replace: false,
         }];
 
-        let tree = build_upper_tree(&patches, &[base_path, top_path])
+        let tree = build_upper_tree(&patches, &[base_path, top_path], false)
             .await
             .unwrap();
         match tree.get(b"etc/from-base.txt").unwrap() {
@@ -4090,7 +4364,7 @@ mod tests {
             replace: false,
         }];
 
-        let err = match build_upper_tree(&patches, &[lower_path]).await {
+        let err = match build_upper_tree(&patches, &[lower_path], false).await {
             Ok(_) => panic!("expected non-directory parent to fail"),
             Err(err) => err,
         };
@@ -4112,7 +4386,7 @@ mod tests {
             },
         ];
 
-        let tree = build_upper_tree(&patches, &[]).await.unwrap();
+        let tree = build_upper_tree(&patches, &[], false).await.unwrap();
         assert!(tree.get(b"tmp/demo.txt").is_none());
     }
 
@@ -4134,6 +4408,7 @@ mod tests {
                 replace: false,
             }],
             &[],
+            false,
         )
         .await
         {
@@ -4162,6 +4437,7 @@ mod tests {
                 replace: false,
             }],
             &[],
+            false,
         )
         .await
         {

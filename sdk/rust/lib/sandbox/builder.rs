@@ -97,6 +97,7 @@ pub struct RegistryConfigBuilder {
     pub(crate) auth: Option<RegistryAuth>,
     pub(crate) insecure: bool,
     pub(crate) ca_certs: Vec<Vec<u8>>,
+    pub(crate) cache_dir: Option<PathBuf>,
 }
 
 impl RegistryConfigBuilder {
@@ -115,6 +116,16 @@ impl RegistryConfigBuilder {
     /// Add PEM-encoded CA root certificates to trust.
     pub fn ca_certs(mut self, pem_data: Vec<u8>) -> Self {
         self.ca_certs.push(pem_data);
+        self
+    }
+
+    /// Override the OCI image cache directory used for this sandbox's image pull.
+    ///
+    /// On multi-tenant hosts, set this to a per-tenant directory (for example,
+    /// `$MSB_HOME/cache/orgs/<org_id>`) for authenticated pulls while leaving
+    /// anonymous pulls on the shared global cache.
+    pub fn cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.cache_dir = Some(path.into());
         self
     }
 }
@@ -797,8 +808,22 @@ impl SandboxBuilder {
         if let Some(auth) = builder.auth {
             self.config.registry_auth = Some(Some(auth));
         }
+        if let Some(cache_dir) = builder.cache_dir {
+            self.config.image_cache_dir = Some(Some(cache_dir));
+        }
         self.config.insecure = Some(builder.insecure);
         self.config.ca_certs = Some(builder.ca_certs);
+        self
+    }
+
+    /// Override the OCI image cache directory for this sandbox.
+    ///
+    /// When set, the sandbox pulls, materializes, and boots its OCI image from
+    /// this directory instead of the backend's shared global cache. Local
+    /// backends persist the resolved path so subsequent restarts find the
+    /// sandbox's VMDK in the same isolated cache.
+    pub fn image_cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.image_cache_dir = Some(Some(path.into()));
         self
     }
 
@@ -2447,6 +2472,15 @@ impl SandboxBuilder {
         if sandbox.spec.name.is_empty() {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "sandbox name is required".into(),
+            ));
+        }
+        if sandbox
+            .image_cache_dir
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "image cache directory must not be empty".into(),
             ));
         }
         super::validate_sandbox_name(&sandbox.spec.name)?;

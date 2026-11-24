@@ -5,11 +5,15 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use microsandbox_types::DeploymentProfile;
+use tokio::sync::Semaphore;
+
 use super::{
-    GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PathsConfigPatch,
+    GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PatchesConfig, PathsConfigPatch,
     persistence::ManagedConfig, registry::RegistrySettingsPatch,
 };
 use crate::context::{ContextKind, ContextSelectionSource};
+use crate::host_file::HostFilePolicy;
 use crate::sandbox::restore_resources::RestoreResources;
 #[cfg(feature = "ssh")]
 use crate::sandbox::ssh::SshTimeoutPatch;
@@ -48,6 +52,79 @@ pub(crate) struct ConfigLayers<P> {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl GlobalConfig {
+    /// Validate host runtime settings this platform cannot honor.
+    pub(crate) fn validate_runtime(&self) -> MicrosandboxResult<()> {
+        if cfg!(not(unix)) && self.runtime.strict_host_files {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.strict_host_files is supported only on Unix hosts".into(),
+            ));
+        }
+
+        if cfg!(not(unix)) && self.runtime.patches.stage {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.patches.stage is supported only on Unix hosts".into(),
+            ));
+        }
+
+        if cfg!(not(target_os = "linux")) && self.runtime.private_metrics {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.private_metrics is supported only on Linux hosts".into(),
+            ));
+        }
+
+        if cfg!(not(target_os = "linux")) && self.runtime.private_writeback_leases {
+            return Err(MicrosandboxError::InvalidConfig(
+                "runtime.private_writeback_leases is supported only on Linux hosts".into(),
+            ));
+        }
+
+        if let Some(limit) = self.runtime.patches.max_concurrent_batches
+            && limit.get() > Semaphore::MAX_PERMITS
+        {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "runtime.patches.max_concurrent_batches must be at most {}",
+                Semaphore::MAX_PERMITS
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Whether SDK host file opens enforce symlink-free traversal.
+    ///
+    /// Enabled explicitly via `runtime.strict_host_files` or automatically on Unix
+    /// when `deployment_profile` is `multi-tenant`.
+    pub(crate) fn strict_host_files(&self) -> bool {
+        self.runtime.strict_host_files
+            || (cfg!(unix) && self.deployment_profile == Some(DeploymentProfile::MultiTenant))
+    }
+
+    /// Host file open policy anchored at `self.home()` when strict mode is active.
+    pub(crate) fn host_file_policy(&self) -> HostFilePolicy {
+        if self.strict_host_files() {
+            HostFilePolicy::strict_beneath(self.home())
+        } else {
+            HostFilePolicy::Standard
+        }
+    }
+
+    /// Effective patch staging policy, applying the `multi-tenant` floor on Unix.
+    pub(crate) fn effective_patches(&self) -> PatchesConfig {
+        let mut config = self.runtime.patches.clone();
+        if cfg!(unix) && self.deployment_profile == Some(DeploymentProfile::MultiTenant) {
+            config.stage = true;
+        }
+        config
+    }
+
+    /// Whether agent connections keep bulk payloads on the byte stream instead of
+    /// negotiating shared-memory arenas.
+    pub(crate) fn in_band_agent_transport(&self) -> bool {
+        self.runtime.in_band_agent_transport
+    }
+}
 
 impl BackendConfig {
     /// Borrow the settings captured by the sandbox's backend, independent of ambient routing.
@@ -151,6 +228,7 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
+        resolved.validate_runtime()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         self.validate_backend_policy()?;
 
@@ -178,6 +256,7 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
+        resolved.validate_runtime()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         self.validate_backend_policy()?;
         Ok(self)
@@ -615,6 +694,245 @@ mod tests {
             layers.resolved_config().sandbox_defaults.oci.root_disk,
             Some(RootDisk::Tmpfs { .. }),
         ));
+    }
+
+    #[test]
+    fn local_preparation_accepts_strict_host_files_only_on_unix() {
+        for (user, managed) in [
+            (r#"{"runtime":{"strict_host_files":true}}"#, "{}"),
+            ("{}", r#"{"runtime":{"strict_host_files":true}}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            let result = layers.prepare_for_local_backend(Default::default());
+
+            #[cfg(unix)]
+            assert!(result.unwrap().resolved_config().strict_host_files());
+            #[cfg(not(unix))]
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("runtime.strict_host_files is supported only on Unix")
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let multi_tenant = BackendConfig::new(
+                serde_json::from_str(r#"{"deployment_profile":"multi-tenant"}"#).unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            );
+            assert!(
+                multi_tenant
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap()
+                    .resolved_config()
+                    .strict_host_files()
+            );
+        }
+    }
+
+    #[test]
+    fn local_preparation_enables_in_band_agent_transport_only_when_explicitly_set() {
+        for (user, managed) in [
+            (r#"{"runtime":{"in_band_agent_transport":true}}"#, "{}"),
+            ("{}", r#"{"runtime":{"in_band_agent_transport":true}}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            assert!(
+                layers
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap()
+                    .resolved_config()
+                    .in_band_agent_transport()
+            );
+        }
+
+        for (user, managed) in [
+            ("{}", "{}"),
+            (r#"{"deployment_profile":"multi-tenant"}"#, "{}"),
+            ("{}", r#"{"deployment_profile":"multi-tenant"}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            assert!(
+                !layers
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap()
+                    .resolved_config()
+                    .in_band_agent_transport()
+            );
+        }
+
+        #[cfg(feature = "local")]
+        {
+            let home = tempfile::tempdir().unwrap();
+            let via_builder = crate::context::LocalContext::builder()
+                .home(home.path())
+                .in_band_agent_transport(true)
+                .build()
+                .unwrap();
+            assert!(via_builder.config().in_band_agent_transport());
+        }
+    }
+
+    #[test]
+    fn local_preparation_accepts_private_metrics_and_writeback_leases_only_on_linux() {
+        for (field, expected_error) in [
+            (
+                "private_metrics",
+                "runtime.private_metrics is supported only on Linux",
+            ),
+            (
+                "private_writeback_leases",
+                "runtime.private_writeback_leases is supported only on Linux",
+            ),
+        ] {
+            let json = format!(r#"{{"runtime":{{"{field}":true}}}}"#);
+            for (user, managed) in [(json.as_str(), "{}"), ("{}", json.as_str())] {
+                let layers = BackendConfig::new(
+                    serde_json::from_str(user).unwrap(),
+                    serde_json::from_str(managed).unwrap(),
+                );
+                let result = layers.prepare_for_local_backend(Default::default());
+
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = expected_error;
+                    let resolved = result.unwrap();
+                    if field == "private_metrics" {
+                        assert!(resolved.resolved_config().runtime.private_metrics);
+                    } else {
+                        assert!(resolved.resolved_config().runtime.private_writeback_leases);
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                assert!(result.err().unwrap().to_string().contains(expected_error));
+            }
+        }
+    }
+
+    #[test]
+    fn local_preparation_accepts_patch_staging_only_on_unix() {
+        #[cfg(unix)]
+        use std::num::NonZero;
+
+        #[cfg(unix)]
+        use crate::config::{
+            DEFAULT_PATCH_MAX_BYTES, DEFAULT_PATCH_MAX_CONCURRENT_BATCHES, DEFAULT_PATCH_MAX_DEPTH,
+            DEFAULT_PATCH_MAX_ENTRIES,
+        };
+
+        for (user, managed) in [
+            (r#"{"runtime":{"patches":{"stage":true}}}"#, "{}"),
+            ("{}", r#"{"runtime":{"patches":{"stage":true}}}"#),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            let result = layers.prepare_for_local_backend(Default::default());
+
+            #[cfg(unix)]
+            {
+                let prepared = result.unwrap();
+                let patches = &prepared.resolved_config().runtime.patches;
+                assert!(patches.stage);
+                assert_eq!(
+                    patches.max_bytes.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_BYTES)
+                );
+                assert_eq!(
+                    patches.max_entries.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_ENTRIES)
+                );
+                assert_eq!(
+                    patches.max_depth.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_DEPTH)
+                );
+                assert_eq!(
+                    patches.max_concurrent_batches.map(NonZero::get),
+                    Some(DEFAULT_PATCH_MAX_CONCURRENT_BATCHES)
+                );
+            }
+            #[cfg(not(unix))]
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("runtime.patches.stage is supported only on Unix")
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let layers = BackendConfig::new(
+                serde_json::from_str(
+                    r#"{"runtime":{"patches":{"stage":true,"max_bytes":null,"max_entries":1024,"max_concurrent_batches":null}}}"#,
+                )
+                .unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            );
+            let prepared = layers
+                .prepare_for_local_backend(Default::default())
+                .unwrap();
+            let patches = &prepared.resolved_config().runtime.patches;
+            assert!(patches.stage);
+            assert_eq!(patches.max_bytes, None);
+            assert_eq!(patches.max_entries.map(NonZero::get), Some(1024));
+            assert_eq!(
+                patches.max_depth.map(NonZero::get),
+                Some(DEFAULT_PATCH_MAX_DEPTH)
+            );
+            assert_eq!(patches.max_concurrent_batches, None);
+
+            // `deployment_profile: "multi-tenant"` enables patch staging automatically
+            // on Unix while preserving custom/null limit overrides.
+            let multi_tenant = BackendConfig::new(
+                serde_json::from_str(
+                    r#"{"deployment_profile":"multi-tenant","runtime":{"patches":{"max_bytes":null,"max_concurrent_batches":8}}}"#,
+                )
+                .unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            );
+            let effective = multi_tenant
+                .prepare_for_local_backend(Default::default())
+                .unwrap()
+                .resolved_config()
+                .effective_patches();
+            assert!(effective.stage);
+            assert_eq!(effective.max_bytes, None);
+            assert_eq!(effective.max_concurrent_batches.map(NonZero::get), Some(8));
+        }
+
+        // Concurrency limits exceeding tokio's Semaphore::MAX_PERMITS are rejected cleanly.
+        let too_many_permits = BackendConfig::new(
+            serde_json::from_str(&format!(
+                r#"{{"runtime":{{"patches":{{"max_concurrent_batches":{}}}}}}}"#,
+                usize::MAX
+            ))
+            .unwrap(),
+            serde_json::from_str("{}").unwrap(),
+        );
+        let err = too_many_permits
+            .prepare_for_local_backend(Default::default())
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("runtime.patches.max_concurrent_batches must be at most"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -20,3 +20,4 @@ pub mod memory_handoff;
 pub mod restored_exec_limits;
 pub mod retention;
 pub mod startup_progress;
+pub mod writeback_recovery;

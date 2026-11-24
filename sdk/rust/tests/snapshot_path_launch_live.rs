@@ -256,3 +256,89 @@ async fn archive_sets_launch_after_source_and_group_deletion() {
     }
     .await;
 }
+
+#[tokio::test]
+#[ignore = "requires an installed VM runtime with local fork support"]
+async fn isolated_image_can_fork_and_restore_from_imported_bundle_offline() {
+    use microsandbox::sandbox::PullPolicy;
+
+    let root = tempfile::Builder::new()
+        .prefix("msb-image-")
+        .tempdir_in(if cfg!(unix) {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        })
+        .unwrap();
+    let home = root.path().join("home");
+    let cache = root.path().join("private");
+    let provider = LocalContext::builder()
+        .home(&home)
+        .config_path(home.join("config.json"))
+        .build()
+        .unwrap();
+    let backend: &dyn Context = &provider;
+
+    let outcome = AssertUnwindSafe(async {
+        let source = backend
+            .sandboxes()
+            .builder("source")
+            .image("alpine:3.20")
+            .image_cache_dir(&cache)
+            .cpus(1)
+            .memory(256)
+            .create_detached()
+            .boxed()
+            .await
+            .unwrap();
+        check(&source, "printf private > /root/cache-marker && sync").await;
+        let child = source.fork("fork").fork().boxed().await.unwrap();
+        assert_eq!(check(&child, "cat /root/cache-marker").await, "private");
+        let private = microsandbox_image::GlobalCache::new(&cache).unwrap();
+        let shared = microsandbox_image::GlobalCache::new(&provider.cache_dir()).unwrap();
+        let reference = "alpine:3.20".parse().unwrap();
+        let digest = private
+            .read_image_metadata(&reference)
+            .unwrap()
+            .unwrap()
+            .manifest_digest
+            .parse()
+            .unwrap();
+        assert!(!shared.vmdk_path(&digest).exists());
+        drop(child);
+
+        let captured = source
+            .snapshot_with("cache-history", |capture| {
+                capture.initial_checkpoint("base")
+            })
+            .await
+            .unwrap();
+        let archive = root.path().join("offline.msb");
+        captured
+            .checkpoint
+            .save_with(&archive, |save| save.with_image())
+            .await
+            .unwrap();
+        captured.snapshot.remove().await.unwrap();
+        let imported = backend.checkpoints().load(&archive, None).await.unwrap();
+        let restored = backend
+            .sandboxes()
+            .restore_ref(imported.reference())
+            .name("restored")
+            .pull_policy(PullPolicy::Never)
+            .restore()
+            .boxed()
+            .await
+            .unwrap();
+        assert_eq!(check(&restored, "cat /root/cache-marker").await, "private");
+    })
+    .catch_unwind()
+    .await;
+
+    for name in ["restored", "fork", "source"] {
+        remove(backend, name).await;
+    }
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+}

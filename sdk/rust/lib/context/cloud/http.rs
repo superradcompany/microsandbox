@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderName, HeaderValue, USER_AGENT};
-use reqwest::{Body, Method, RequestBuilder, Response};
+use reqwest::{Body, Method, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -37,6 +37,9 @@ const CLOUD_READY_WAIT_TIMEOUT_SECS: u64 = 90;
 /// Network headroom beyond the server wait so the JSON response can arrive
 /// before reqwest's ordinary 30-second client timeout applies.
 const CLOUD_READY_HTTP_TIMEOUT: Duration = Duration::from_secs(95);
+
+/// Extra time a restart request waits beyond its shutdown timeout.
+const CLOUD_RESTART_HTTP_ALLOWANCE: Duration = Duration::from_secs(4 * 60);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -81,6 +84,12 @@ struct CloudSandboxListQuery<'a> {
     limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     labels: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CloudSandboxRestartQuery {
+    force: bool,
+    timeout: u64,
 }
 
 #[derive(Serialize)]
@@ -252,6 +261,56 @@ impl RemoteContext {
             .await
             .map_err(|e| cloud_io_error(&op, e))?;
         decode_json(resp, &op).await
+    }
+
+    /// `POST /v1/sandboxes/:id/restart`.
+    pub(in crate::context) async fn restart_sandbox_by_id(
+        &self,
+        id: &str,
+        force: bool,
+        timeout_secs: u64,
+    ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
+        let url = format!(
+            "{}/v1/sandboxes/{}/restart",
+            self.inner.url,
+            urlencoding(id)
+        );
+        let query = CloudSandboxRestartQuery {
+            force,
+            timeout: timeout_secs,
+        };
+        let http_timeout =
+            Duration::from_secs(timeout_secs).saturating_add(CLOUD_RESTART_HTTP_ALLOWANCE);
+        let resp = self
+            .request(Method::POST, &url)
+            .json(&serde_json::json!({}))
+            .query(&query)
+            .timeout(http_timeout)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/restart", e))?;
+        if resp.status() != StatusCode::NOT_FOUND {
+            return decode_json(resp, "POST /v1/sandboxes/:id/restart").await;
+        }
+
+        // A missing sandbox carries an error code; a bare 404 is an API
+        // without this route.
+        let body_text = resp.text().await.unwrap_or_default();
+        let typed: Option<CloudErrorBody> = serde_json::from_str(&body_text).ok();
+        if cloud_error_code(typed.as_ref()).is_none() {
+            return Err(MicrosandboxError::unsupported(
+                Operation::SandboxRestart,
+                UnsupportedReason::NotAvailable(
+                    "this Microsandbox Cloud API does not support restart yet".into(),
+                ),
+            ));
+        }
+        Err(cloud_http_error(
+            404,
+            typed.as_ref(),
+            &body_text,
+            "POST /v1/sandboxes/:id/restart",
+        ))
     }
 
     /// `POST /v1/sandboxes/:id/plan`, a dry run whose body carries no secret value.

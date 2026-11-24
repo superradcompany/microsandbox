@@ -50,6 +50,7 @@ impl Context for LocalContext {
         timeout: std::time::Duration,
     ) -> futures::future::BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
         Box::pin(async move {
+            let in_band = self.config().in_band_agent_transport();
             let mut last_error = None;
 
             for sock_path in self.agent_socket_paths(name) {
@@ -57,7 +58,15 @@ impl Context for LocalContext {
                     continue;
                 }
 
-                match crate::agent::AgentClient::connect_with_timeout(&sock_path, timeout).await {
+                let attempt = if in_band {
+                    let deadline = tokio::time::Instant::now() + timeout;
+                    crate::agent::AgentClient::connect_in_band_with_deadline(&sock_path, deadline)
+                        .await
+                } else {
+                    crate::agent::AgentClient::connect_with_timeout(&sock_path, timeout).await
+                };
+
+                match attempt {
                     Ok(client) => return Ok(client),
                     Err(error) => last_error = Some(error),
                 }

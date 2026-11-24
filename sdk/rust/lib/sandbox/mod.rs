@@ -42,6 +42,8 @@ pub(crate) mod identity;
 pub mod init;
 pub(crate) mod init_provenance;
 pub mod jobs;
+#[cfg(all(feature = "local", target_os = "linux"))]
+mod lease_recovery;
 pub(crate) mod metrics;
 #[cfg(any(feature = "local", feature = "cloud"))]
 mod modify;
@@ -54,6 +56,8 @@ pub(crate) mod network_presence;
 mod network_presence_tests;
 #[cfg(feature = "local")]
 mod patch;
+#[cfg(feature = "local")]
+pub(crate) mod patch_sources;
 #[cfg(feature = "local")]
 pub(crate) mod storage_preview;
 mod storage_recovery;
@@ -185,6 +189,9 @@ pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
     FsWriteSink, SandboxFsOps,
 };
+#[cfg(feature = "cloud")]
+pub(crate) use handle::get_identified_handle;
+pub(crate) use handle::restart_by_stop_and_start;
 pub use handle::{
     DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, DestroyOptions, RestartOptions, SandboxRecord,
 };
@@ -881,8 +888,7 @@ impl Sandbox {
             .backend
             .as_local()
             .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxLogger))?;
-        let log_dir = crate::logs::log_dir_for_local(local, &self.name);
-        Ok(crate::logs::SandboxLogger::new(self.name.clone(), log_dir))
+        Ok(crate::logs::SandboxLogger::for_local(local, &self.name))
     }
 
     /// Check whether agentd is reachable without refreshing the sandbox idle timer.
@@ -1427,6 +1433,21 @@ pub(super) async fn remove_local_persisted_sandbox(
 
     let _storage = CreationStorage::acquire(local_backend, name)?;
     local_backend.remove_socket_artifacts(name)?;
+    #[cfg(target_os = "linux")]
+    if local_backend.config().runtime.private_writeback_leases
+        || local_backend.private_writeback_lease_dir(name).exists()
+    {
+        lease_recovery::recover(
+            local_backend,
+            pools.read(),
+            pools.write(),
+            name,
+            expected_id,
+        )
+        .await?;
+    }
+    #[cfg(target_os = "linux")]
+    crate::runtime::private_metrics::remove(&local_backend.config().run_dir(), name)?;
     microsandbox_runtime::checkpoint::remove_sandbox_identity(
         &local_backend.config().home(),
         expected_id,
