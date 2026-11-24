@@ -11,7 +11,7 @@ v0.8.1 is the first published release of the v0.8 line. See [v0.8.0](/changelog/
 
 ## New features
 
-**Limit how much a snapshot import can write.** Snapshot imports accept an optional maximum disk size. The limit counts logical file bytes, including metadata, dependencies and sparse holes, and each declared file disk must also fit. Imports over the limit fail before anything is written or published. Omit the limit to keep imports unlimited.
+**Limit how much a snapshot import can write.** Snapshot imports accept an optional maximum disk size. The limit counts logical file bytes, including metadata, dependencies and sparse holes, and each declared file disk must also fit. Imports over the limit fail before publication, but can write temporary files before failing. Omit the limit to keep imports unlimited.
 
 ```bash
 msb snap import received --file ready.msb --maximum-disk-bytes 10737418240
