@@ -71,15 +71,21 @@ pub(super) fn read_managed(
     artifact: &Path,
     digest: &str,
 ) -> MicrosandboxResult<Option<PathBuf>> {
-    if !is_managed_snapshot_path(&local.snapshots_dir(), artifact) {
-        return Ok(None);
-    }
     let Some(cache_dir) = read(artifact, digest)? else {
         return Ok(None);
     };
-    let resolved_cache = local.resolve_image_cache_dir(Some(&cache_dir))?;
+    let managed = is_managed_snapshot_path(&local.snapshots_dir(), artifact);
+    let resolved_cache = match local.resolve_image_cache_dir(Some(&cache_dir)) {
+        Ok(resolved) => resolved,
+        Err(_) if !managed => return Ok(None),
+        Err(error) => return Err(error),
+    };
     if !has_binding(&resolved_cache, digest)? {
-        return Err(invalid_binding(&artifact.join(FILENAME)));
+        return if managed {
+            Err(invalid_binding(&artifact.join(FILENAME)))
+        } else {
+            Ok(None)
+        };
     }
     Ok(Some(resolved_cache))
 }

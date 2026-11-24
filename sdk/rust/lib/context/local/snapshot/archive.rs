@@ -6381,6 +6381,30 @@ mod tests {
                 .contains("invalid local image cache binding"),
             "unexpected managed path-set error: {err}"
         );
+
+        // 3. A host-created custom `dest_dir` snapshot (outside `snapshots_dir`) with a valid
+        //    host-written binding receipt in its cache still exports `--with-image` cleanly.
+        let mut custom_manifest = manifest.clone();
+        custom_manifest.snapshot_id =
+            SnapshotId::new("snap_00000000000000000000000000000034").unwrap();
+        let custom_digest = custom_manifest.digest().unwrap();
+        let custom_dest = directory.path().join("custom-dest-snapshot");
+        write_grouped_archive_fixture(&custom_dest, &custom_manifest);
+        super::super::cache_binding::write(&custom_dest, &custom_digest, &victim_cache_dir)
+            .unwrap();
+        let custom_exported = directory.path().join("custom-dest.msb");
+        save_snapshot(
+            &local,
+            custom_dest.to_str().unwrap(),
+            &custom_exported,
+            SaveOpts {
+                with_image: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(custom_exported.is_file());
     }
 
     #[tokio::test]
