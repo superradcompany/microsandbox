@@ -233,3 +233,22 @@ fn provider_binding_lifecycle_surface_stays_available() {
     let _ = Checkpoint::spawn_sandbox_with_progress;
     let _ = Snapshot::spawn_sandbox_with_progress;
 }
+
+#[test]
+#[cfg(feature = "local")]
+fn registry_and_image_metadata_keep_released_struct_literals() {
+    let _ = microsandbox::config::RegistryOptions {
+        auth: None,
+        insecure: false,
+        ca_certs: Vec::new(),
+        ca_cert_files: Vec::new(),
+    };
+    let _ = microsandbox_image::CachedImageMetadata {
+        manifest_digest: String::new(),
+        config_digest: String::new(),
+        raw_manifest_json: String::new(),
+        raw_config_json: String::new(),
+        config: microsandbox_image::ImageConfig::default(),
+        layers: Vec::new(),
+    };
+}

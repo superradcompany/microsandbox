@@ -14,6 +14,7 @@ use futures::Stream;
 use futures::stream;
 use notify::Watcher;
 
+use crate::host_file::HostFilePolicy;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::cursor::{FilePosition, LogCursor};
@@ -68,6 +69,7 @@ pub(crate) struct LogFileConfig {
 /// Per-reader rotation policy. `max_index == 0` denotes a
 /// non-rotating file. `max_index > 0` enables the chain walker.
 struct RotationConfig {
+    host_file_policy: HostFilePolicy,
     log_dir: PathBuf,
     filename: String,
     max_index: usize,
@@ -110,7 +112,7 @@ impl RotationConfig {
         backfill: &mut VecDeque<FileHandle>,
     ) -> MicrosandboxResult<()> {
         for index in (1..=self.max_index).rev() {
-            if let Some(src) = FileHandle::open(&self.path(index)).await? {
+            if let Some(src) = FileHandle::open(&self.path(index), &self.host_file_policy).await? {
                 backfill.push_back(src);
             }
         }
@@ -225,13 +227,23 @@ impl LogEngine {
         start: &LogStreamStart,
         until: Option<DateTime<Utc>>,
         follow: bool,
+        host_file_policy: HostFilePolicy,
     ) -> MicrosandboxResult<Self> {
         let mode = if follow {
             FollowMode::standalone(&log_dir)?
         } else {
             FollowMode::Off
         };
-        Self::assemble(log_dir, log_files, sources, start, until, mode).await
+        Self::assemble(
+            log_dir,
+            log_files,
+            sources,
+            start,
+            until,
+            mode,
+            host_file_policy,
+        )
+        .await
     }
 
     /// Like [`new`](Self::new) with `follow = true`, but wake from a
@@ -244,6 +256,7 @@ impl LogEngine {
         start: &LogStreamStart,
         until: Option<DateTime<Utc>>,
         subscription: LogSubscription,
+        host_file_policy: HostFilePolicy,
     ) -> MicrosandboxResult<Self> {
         Self::assemble(
             log_dir,
@@ -252,6 +265,7 @@ impl LogEngine {
             start,
             until,
             FollowMode::Registry(subscription),
+            host_file_policy,
         )
         .await
     }
@@ -265,6 +279,7 @@ impl LogEngine {
         start: &LogStreamStart,
         until: Option<DateTime<Utc>>,
         follow: FollowMode,
+        host_file_policy: HostFilePolicy,
     ) -> MicrosandboxResult<Self> {
         let since = match start {
             LogStreamStart::Since(t) => Some(*t),
@@ -283,7 +298,15 @@ impl LogEngine {
                 LogStreamStart::From(c) => c.positions.get(idx).copied().unwrap_or_default(),
                 _ => FilePosition::default(),
             };
-            let reader = Reader::open(config, &log_dir, &sources, start, initial_position).await?;
+            let reader = Reader::open(
+                config,
+                &log_dir,
+                &sources,
+                start,
+                initial_position,
+                host_file_policy.clone(),
+            )
+            .await?;
             initial_positions.push(initial_position);
             readers.push(ReaderState {
                 reader,
@@ -517,8 +540,10 @@ impl Reader {
         sources: &[LogSource],
         start: &LogStreamStart,
         initial_position: FilePosition,
+        host_file_policy: HostFilePolicy,
     ) -> MicrosandboxResult<Self> {
         let rotation = RotationConfig {
+            host_file_policy,
             log_dir: log_dir.to_path_buf(),
             filename: config.filename.to_string(),
             max_index: config.max_rotation_index,
@@ -547,12 +572,16 @@ impl Reader {
                 if index == 0 {
                     initial_live_offset = initial_position.offset;
                 } else {
-                    if let Some(mut src) = FileHandle::open(&rotation.path(index)).await? {
+                    if let Some(mut src) =
+                        FileHandle::open(&rotation.path(index), &rotation.host_file_policy).await?
+                    {
                         src.offset = initial_position.offset;
                         backfill.push_back(src);
                     }
                     for i in (1..index).rev() {
-                        if let Some(src) = FileHandle::open(&rotation.path(i)).await? {
+                        if let Some(src) =
+                            FileHandle::open(&rotation.path(i), &rotation.host_file_policy).await?
+                        {
                             backfill.push_back(src);
                         }
                     }
@@ -594,7 +623,9 @@ impl Reader {
         }
 
         if self.live.is_none() {
-            let Some(mut src) = FileHandle::open(&self.primary_path).await? else {
+            let Some(mut src) =
+                FileHandle::open(&self.primary_path, &self.rotation.host_file_policy).await?
+            else {
                 return Ok(ParsedChunk {
                     entries: Vec::new(),
                     position: None,
@@ -655,14 +686,18 @@ impl Reader {
         };
         let mut newly_queued: Vec<FileHandle> = Vec::new();
         for i in (1..rotation_index).rev() {
-            if let Some(src) = FileHandle::open(&self.rotation.path(i)).await? {
+            if let Some(src) =
+                FileHandle::open(&self.rotation.path(i), &self.rotation.host_file_policy).await?
+            {
                 newly_queued.push(src);
             }
         }
         for src in newly_queued {
             self.backfill.push_back(src);
         }
-        if let Some(new_live) = FileHandle::open(&self.primary_path).await? {
+        if let Some(new_live) =
+            FileHandle::open(&self.primary_path, &self.rotation.host_file_policy).await?
+        {
             self.live = Some(new_live);
         }
         Ok(ParsedChunk {
@@ -676,7 +711,9 @@ impl Reader {
     /// previous inode that wasn't read is lost by design — this
     /// case is reserved for files that don't promise retention.
     async fn replace_live(&mut self) -> MicrosandboxResult<ParsedChunk> {
-        if let Some(src) = FileHandle::open(&self.primary_path).await? {
+        if let Some(src) =
+            FileHandle::open(&self.primary_path, &self.rotation.host_file_policy).await?
+        {
             self.live = Some(src);
         }
         Ok(ParsedChunk {
@@ -756,6 +793,7 @@ mod tests {
             &opts.start,
             opts.until,
             opts.follow,
+            HostFilePolicy::Standard,
         )
         .await
     }

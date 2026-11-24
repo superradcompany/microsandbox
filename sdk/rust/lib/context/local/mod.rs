@@ -61,6 +61,7 @@ use crate::config::{
     RegistryOptions, RegistrySettingsPatch, layers::BackendConfig,
 };
 use crate::context::SnapshotOps;
+use crate::sandbox::patch_sources::PatchStaging;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -86,6 +87,7 @@ struct LocalContextInner {
     control_sessions: control::ControlSessions,
     metrics_lookup: metrics_lookup::MetricsLookup,
     pub(crate) metrics_registry_names: Vec<String>,
+    patch_staging: PatchStaging,
 }
 
 /// Fluent builder for [`LocalContext`]. Construct via [`LocalContext::builder`].
@@ -142,6 +144,8 @@ impl LocalContext {
         {
             metrics_registry_names.push(legacy.clone());
         }
+        let patch_staging =
+            PatchStaging::from_config(&config.resolved_config().effective_patches());
         Self {
             inner: Arc::new(LocalContextInner {
                 config,
@@ -151,8 +155,13 @@ impl LocalContext {
                 control_sessions: control::ControlSessions::default(),
                 metrics_lookup: metrics_lookup::MetricsLookup::default(),
                 metrics_registry_names,
+                patch_staging,
             }),
         }
+    }
+
+    pub(crate) fn patch_staging(&self) -> &PatchStaging {
+        &self.inner.patch_staging
     }
 
     /// Eagerly construct a `LocalContext` from `~/.microsandbox/config.json`,
@@ -242,6 +251,14 @@ impl LocalContext {
         self.config().sandboxes_dir()
     }
 
+    /// Per-sandbox private writeback lease directory (`sandboxes/<name>/runtime-leases/writeback`).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn private_writeback_lease_dir(&self, name: &str) -> PathBuf {
+        self.sandboxes_dir()
+            .join(name)
+            .join("runtime-leases/writeback")
+    }
+
     /// Resolved volumes directory.
     pub fn volumes_dir(&self) -> PathBuf {
         self.config().volumes_dir()
@@ -255,6 +272,53 @@ impl LocalContext {
     /// Resolved cache directory.
     pub fn cache_dir(&self) -> PathBuf {
         self.config().cache_dir()
+    }
+
+    /// Resolved OCI image cache directory, honoring a per-sandbox override when present.
+    pub(crate) fn image_cache_dir_for(&self, override_dir: Option<&Path>) -> PathBuf {
+        override_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.cache_dir())
+    }
+
+    /// Resolve and validate an OCI image cache directory override.
+    ///
+    /// When `runtime.strict_host_files` is enabled (including under
+    /// `DeploymentProfile::MultiTenant` on Unix), rejects symlinks in any existing
+    /// path component of an explicit override so an alias cannot redirect an
+    /// isolated org cache to another directory.
+    pub(crate) fn resolve_image_cache_dir(
+        &self,
+        override_dir: Option<&Path>,
+    ) -> MicrosandboxResult<PathBuf> {
+        let Some(dir) = override_dir else {
+            return Ok(self.cache_dir());
+        };
+        if dir.as_os_str().is_empty() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "image cache directory must not be empty".into(),
+            ));
+        }
+        #[cfg(unix)]
+        if self.config().strict_host_files() {
+            reject_symlinks_in_existing_components(dir)?;
+        }
+        Ok(dir.to_path_buf())
+    }
+
+    /// Whether `override_dir` refers to this backend's shared default cache directory.
+    ///
+    /// Resolves canonical existing ancestors so a symlink or lexical alias pointing
+    /// at the shared cache is not misclassified as an isolated cache.
+    pub(crate) fn is_default_image_cache_dir(&self, override_dir: Option<&Path>) -> bool {
+        let Some(dir) = override_dir else {
+            return true;
+        };
+        let default = self.cache_dir();
+        if dir == default {
+            return true;
+        }
+        canonical_with_missing_suffix(dir) == canonical_with_missing_suffix(&default)
     }
 
     /// Resolved logs directory.
@@ -475,6 +539,32 @@ impl LocalContextBuilder {
     /// sandbox builder and is applied on both create and restart.
     pub fn deployment_profile(mut self, profile: DeploymentProfile) -> Self {
         self.config.deployment_profile_mut(profile);
+        self
+    }
+
+    /// Keep bulk agent payloads on the byte stream instead of negotiating
+    /// shared-memory arenas.
+    #[doc(hidden)]
+    pub fn in_band_agent_transport(mut self, enabled: bool) -> Self {
+        self.config.runtime.in_band_agent_transport_mut(enabled);
+        self
+    }
+
+    /// Store each sandbox's live metrics in a private single-slot file under
+    /// `run/runtime-metrics/<name>` instead of the shared host `/dev/shm` registry.
+    /// Linux only.
+    #[doc(hidden)]
+    pub fn private_metrics(mut self, enabled: bool) -> Self {
+        self.config.runtime.private_metrics_mut(enabled);
+        self
+    }
+
+    /// Recover per-sandbox writeback lease files under
+    /// `sandboxes/<name>/runtime-leases/writeback` before removing a stopped
+    /// sandbox. Linux only.
+    #[doc(hidden)]
+    pub fn private_writeback_leases(mut self, enabled: bool) -> Self {
+        self.config.runtime.private_writeback_leases_mut(enabled);
         self
     }
 
@@ -707,6 +797,54 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
 fn is_missing_migrations_table(err: &DbErr) -> bool {
     let message = err.to_string();
     message.contains("no such table") && message.contains("seaql_migrations")
+}
+
+/// Resolve the longest existing ancestor canonically and append the remaining suffix
+/// so symlink/lexical aliases can be compared even before the leaf directory exists.
+fn canonical_with_missing_suffix(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            break;
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = existing.parent() else {
+            break;
+        };
+        existing = parent;
+    }
+    let mut resolved = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    resolved
+}
+
+#[cfg(unix)]
+fn reject_symlinks_in_existing_components(path: &Path) -> MicrosandboxResult<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "runtime.strict_host_files rejects symlink {} in image cache directory {}",
+                    current.display(),
+                    path.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "cannot inspect image cache directory {}: {error}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------

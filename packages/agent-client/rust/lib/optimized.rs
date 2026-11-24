@@ -323,6 +323,26 @@ impl AgentClient {
         }
     }
 
+    /// Connect to a local relay without negotiating shared-memory buffers.
+    ///
+    /// Bulk payloads remain on the socket or named pipe, even when the peer
+    /// advertises a shared-arena transport. Exec signals still use the advertised
+    /// control endpoint, as with [`Self::connect_with_deadline`]. The deadline
+    /// bounds the handshake. Existing connect methods keep automatic selection.
+    #[cfg(any(all(feature = "named-pipe", windows), all(feature = "uds", unix)))]
+    pub async fn connect_in_band_with_deadline(
+        sock_path: impl AsRef<Path>,
+        deadline: Instant,
+    ) -> AgentClientResult<Self> {
+        let stream = connect_local_stream(sock_path.as_ref(), deadline).await?;
+        #[cfg(all(feature = "uds", unix))]
+        let mut client = Self::connect_uds_stream_with_deadline(stream, deadline, false).await?;
+        #[cfg(all(feature = "named-pipe", windows))]
+        let mut client = Self::connect_stream_with_deadline(stream, deadline).await?;
+        client.exec_controller = crate::ExecController::from_ready_body(&client.ready_body)?;
+        Ok(client)
+    }
+
     /// Connect over an arbitrary byte-stream transport using the default 10s
     /// handshake timeout.
     ///
@@ -1629,6 +1649,133 @@ mod tests {
             .await
             .unwrap();
         server.await.unwrap();
+    }
+
+    #[cfg(all(feature = "uds", unix))]
+    #[tokio::test]
+    async fn in_band_connection_ignores_shared_arena_offer() {
+        use microsandbox_protocol::control::{ControlHello, ControlWelcome};
+        use microsandbox_protocol::exec::ExecSignal;
+        use microsandbox_protocol::exec_control::{
+            EXEC_CONTROL_REQUEST, EXEC_CONTROL_RESPONSE, ExecControlAdvertisement,
+            ExecControlReady, ExecControlRequest, ExecControlResponse,
+        };
+        use microsandbox_protocol::transport::LocalTransportReady;
+        use microsandbox_protocol::wire::Envelope;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sock_path = temp.path().join("agent.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let control_path = temp.path().join("control.sock");
+        let control_listener = UnixListener::bind(&control_path).unwrap();
+
+        let ready = Ready {
+            local_transport: Some(LocalTransportReady::shared_arena_v1()),
+            ..Default::default()
+        };
+        let capability = ExecControlReady {
+            version: 1,
+            endpoint: control_path.to_string_lossy().into_owned(),
+            connection: [17; 16],
+        };
+        let advertisement = ExecControlAdvertisement {
+            ready: &ready,
+            exec_control: &capability,
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &advertisement).unwrap();
+
+        let expected = Bytes::from_static(b"socket payload");
+        let expected_server = expected.clone();
+
+        let control_server = tokio::spawn(async move {
+            let (mut socket, _) = control_listener.accept().await.unwrap();
+
+            let hello_frame = codec::read_raw_frame(&mut socket).await.unwrap();
+            let hello = Envelope::decode(&hello_frame.body)
+                .unwrap()
+                .payload::<ControlHello>()
+                .unwrap();
+            let welcome = ControlWelcome::negotiate(&hello, 8).unwrap();
+            let frame = Envelope::new(1, "control.welcome", &welcome)
+                .unwrap()
+                .frame(0, 1)
+                .unwrap();
+            codec::write_raw_frame(&mut socket, &frame).await.unwrap();
+
+            let request_frame = codec::read_raw_frame(&mut socket).await.unwrap();
+            let request = Envelope::decode(&request_frame.body).unwrap();
+            assert_eq!(request.t, EXEC_CONTROL_REQUEST);
+
+            let request = request.payload::<ExecControlRequest>().unwrap();
+            assert_eq!((request.id, request.signal), (91, 15));
+            assert_eq!(request.connection, [17; 16]);
+
+            let response = Envelope::new(
+                welcome.generation,
+                EXEC_CONTROL_RESPONSE,
+                &ExecControlResponse::delivered(),
+            )
+            .unwrap()
+            .frame(request_frame.id, 1)
+            .unwrap();
+            codec::write_raw_frame(&mut socket, &response)
+                .await
+                .unwrap();
+        });
+
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&1u32.to_be_bytes()).await.unwrap();
+            socket.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut socket, &ready_msg).await.unwrap();
+
+            // An upgrade request here would violate the caller's transport choice.
+            let frame = codec::read_raw_frame(&mut socket).await.unwrap();
+            assert_eq!(frame.id, 1);
+            assert_eq!(frame.flags, FLAG_BULK);
+            assert_eq!(&frame.body[12..], expected_server.as_ref());
+
+            let _ = stop_rx.await;
+        });
+
+        let client = AgentClient::connect_in_band_with_deadline(
+            &sock_path,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        client
+            .send_bulk(BulkRecord {
+                id: 1,
+                kind: BulkKind::Filesystem,
+                flow: BulkFlow::HostToGuest,
+                offset: 0,
+                payload: expected,
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            client.send(91, MessageType::ExecSignal, &ExecSignal { signal: 15 }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), control_server)
+            .await
+            .unwrap()
+            .unwrap();
+
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[cfg(all(feature = "named-pipe", windows))]

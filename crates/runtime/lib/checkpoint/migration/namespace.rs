@@ -453,6 +453,59 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_home_below_a_shared_directory_checks_each_selected_folder() {
+        use std::process::Command;
+
+        let (temporary, _, _) = fixture();
+        let dev = temporary.path().canonicalize().unwrap().join(".dev");
+        let tools = dev.join("tools");
+        let home = tools.join("msb");
+        fs::create_dir_all(&home).unwrap();
+        let grant = |path: &Path, rights: &str| {
+            let output = Command::new("icacls.exe")
+                .arg(path)
+                .arg("/grant:r")
+                .arg(format!("*S-1-5-11:{rights}"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        // Other accounts may create siblings of our existing tools directory.
+        grant(&dev, "(WD,AD)");
+        for execution in [false, true] {
+            acquire_parents(vec![home.clone()], execution, true).unwrap();
+        }
+
+        // Inherit-only writes on the publication parent can affect newly created files.
+        grant(&home, "(OI)(CI)(IO)(M)");
+        let error = acquire_parents(vec![home.clone()], true, true)
+            .err()
+            .unwrap();
+        assert!(
+            error.contains(&format!("namespace {} ", home.display())),
+            "{error}"
+        );
+        grant(&home, "(RX)");
+
+        // A private home cannot protect an intermediate directory that others can rename.
+        grant(&tools, "(M)");
+        for execution in [false, true] {
+            let error = acquire_parents(vec![home.clone()], execution, true)
+                .err()
+                .unwrap();
+            assert!(
+                error.contains(&format!("namespace {} ", tools.display())),
+                "{error}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn private_ancestor_does_not_hide_writable_windows_publication_parent() {
         use std::process::Command;
         let (_temporary, runtime, bindings) = fixture();

@@ -851,6 +851,8 @@ async fn restart_with(&self, options: RestartOptions) -> MicrosandboxResult<Sand
 
 Restart with explicit lifecycle controls. `RestartOptions` defaults to graceful shutdown, a ten-second timeout, and attached local start. Set `force` to kill instead of draining, `timeout` to control how long shutdown can take, and `detached` to start a local background sandbox.
 
+For a running Cloud sandbox, positive restart timeouts are rounded up to whole seconds and cannot exceed 60 seconds. Larger values fail before the restart request is sent.
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">destroy()</span>
 
 ```rust

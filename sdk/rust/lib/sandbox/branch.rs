@@ -396,10 +396,7 @@ pub(super) async fn prepare_branch(
             "branch requires a running or user-paused source".into(),
         ));
     }
-    let mut config = handle
-        .active_config()?
-        .unwrap_or(handle.config()?)
-        .clone_for_persistence();
+    let mut config = fork_source_config(handle.active_config()?, handle.config()?);
     if !options.restore_resources.inherit
         && (config.spec.network.outbound_proxy.is_some()
             || config.spec.network.secrets.is_some()
@@ -468,6 +465,19 @@ pub(super) async fn prepare_branch(
     });
     config.suppress_launch_for_full_restore();
     Ok(config)
+}
+
+/// A released runtime can write an active config without the host cache binding.
+#[cfg(feature = "local")]
+fn fork_source_config(active: Option<SandboxConfig>, desired: SandboxConfig) -> SandboxConfig {
+    let Some(active) = active else {
+        return desired.clone_for_persistence();
+    };
+    let mut child = active.clone_for_persistence();
+    if child.image_cache_dir.is_none() {
+        child.image_cache_dir = desired.image_cache_dir;
+    }
+    child
 }
 
 /// Called only after the ordinary create path reserves the child name and directory.
@@ -812,6 +822,27 @@ mod tests {
                 if host == Path::new("/images/seed.img") && guest == "/data"
         ));
         assert!(config.restore_resources.mapped.contains("/data"));
+    }
+
+    #[test]
+    fn fork_uses_saved_cache_binding_when_active_config_predates_it() {
+        let mut desired = SandboxConfig::default();
+        let cache = std::env::temp_dir().join("private-image-cache");
+        desired.image_cache_dir = Some(cache.clone());
+        desired.manifest_digest = Some(format!("sha256:{}", "a".repeat(64)));
+        let mut active = desired.clone();
+        active.image_cache_dir = None;
+
+        let mut child = fork_source_config(Some(active), desired);
+        child.spec.name = "child".into();
+        child.spec.image = microsandbox_types::RootfsSource::oci("alpine");
+        let rebuilt = SandboxBuilder::from(child).finish(None, None).unwrap();
+
+        assert_eq!(rebuilt.image_cache_dir, Some(cache));
+        assert_eq!(
+            rebuilt.manifest_digest(),
+            Some(format!("sha256:{}", "a".repeat(64)).as_str())
+        );
     }
 
     #[test]

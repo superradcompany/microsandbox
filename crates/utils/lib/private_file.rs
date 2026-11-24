@@ -267,22 +267,24 @@ pub fn verify(file: &File) -> io::Result<()> {
         macos::verify(file)?;
     }
     #[cfg(windows)]
-    windows::verify(file)?;
+    windows::verify_policy(file, windows::Policy::Private)?;
     Ok(())
 }
 
 /// Verify a Windows namespace ancestor without rejecting harmless read/traverse grants.
 /// Unlike `verify`, this checks path substitution rather than confidentiality of its contents.
 /// Every selected child must already exist and be checked separately: creating an unrelated
-/// sibling directory does not authorize replacing that existing protected child.
+/// sibling file or directory does not authorize replacing that existing protected child.
 #[cfg(windows)]
 pub fn verify_ancestor(file: &File) -> io::Result<()> {
-    if !file.metadata()?.is_dir() {
+    use std::os::windows::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
         return Err(io::Error::other(
             "namespace ancestor must be an existing directory",
         ));
     }
-    windows::verify_policy(file, false, false)
+    windows::verify_policy(file, windows::Policy::Ancestor)
 }
 
 /// Verify a Windows directory before publishing new host-managed children beneath it.
@@ -297,14 +299,14 @@ pub fn verify_publication_parent(file: &File) -> io::Result<()> {
             "publication parent must be a real directory",
         ));
     }
-    windows::verify_policy(file, false, true)
+    windows::verify_policy(file, windows::Policy::Publication)
 }
 
 /// Readable shared cache artifacts may grant read access, while their owner and all
 /// mutation rights have to remain under trusted host control.
 #[cfg(windows)]
 pub fn verify_read_source(file: &File) -> io::Result<()> {
-    windows::verify_policy(file, false, false)
+    windows::verify_policy(file, windows::Policy::ReadSource)
 }
 
 #[cfg(target_os = "macos")]
@@ -407,7 +409,9 @@ mod windows {
     use std::os::windows::io::AsRawHandle;
     use std::ptr::{null, null_mut};
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_ALL, GENERIC_WRITE, HANDLE, LocalFree,
+    };
     use windows_sys::Win32::Security::Authorization::{
         GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
     };
@@ -420,11 +424,23 @@ mod windows {
         TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid,
         WinCreatorOwnerSid, WinLocalSystemSid,
     };
-    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_DELETE_CHILD,
+        FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GetFinalPathNameByHandleW,
+        GetVolumeInformationByHandleW, VOLUME_NAME_GUID, WRITE_DAC, WRITE_OWNER,
+    };
     use windows_sys::Win32::System::SystemServices::{
         ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Policy {
+        Private,
+        Ancestor,
+        Publication,
+        ReadSource,
+    }
 
     struct Token {
         handle: HANDLE,
@@ -522,11 +538,63 @@ mod windows {
                 |(index, expected)| unsafe { *GetSidSubAuthority(sid, index as u32) } == *expected,
             )
     }
-    pub(super) fn verify(file: &File) -> io::Result<()> {
-        verify_policy(file, true, false)
+    // A drive letter may name a substituted directory or a share. Only use volume-root
+    // semantics when the opened handle resolves to a local NTFS volume GUID root.
+    fn is_ntfs_volume_root(file: &File) -> bool {
+        let handle = file.as_raw_handle() as HANDLE;
+        const ROOT_LEN: usize = r"\\?\Volume{00000000-0000-0000-0000-000000000000}\".len();
+        let mut path = [0u16; ROOT_LEN + 1];
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                handle,
+                path.as_mut_ptr(),
+                path.len() as u32,
+                VOLUME_NAME_GUID,
+            )
+        };
+        if length as usize != ROOT_LEN || path[ROOT_LEN - 1] != u16::from(b'\\') {
+            return false;
+        }
+        let mut name = [0u16; 16];
+        let success = unsafe {
+            GetVolumeInformationByHandleW(
+                handle,
+                null_mut(),
+                0,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                name.as_mut_ptr(),
+                name.len() as u32,
+            )
+        };
+        success != 0 && name[..5].iter().copied().eq("NTFS\0".encode_utf16())
     }
 
-    pub(super) fn verify_policy(file: &File, private: bool, publication: bool) -> io::Result<()> {
+    impl Policy {
+        fn rejects_grant(self, file: &File, mask: u32) -> bool {
+            let namespace =
+                FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL;
+            let object = DELETE | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
+            match self {
+                Self::Private => mask != 0,
+                Self::Ancestor => {
+                    // Modify includes DELETE on this object, not DELETE_CHILD. The NTFS
+                    // root has no parent entry to rename and contains the selected child.
+                    // Each existing child is checked for inherited rights in its own turn.
+                    mask & namespace != 0 || (mask & object != 0 && !is_ntfs_volume_root(file))
+                }
+                Self::Publication => {
+                    mask & (namespace | object | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY) != 0
+                }
+                Self::ReadSource => mask & (namespace | object | FILE_WRITE_DATA) != 0,
+            }
+        }
+    }
+
+    pub(super) fn verify_policy(file: &File, policy: Policy) -> io::Result<()> {
+        let private = policy == Policy::Private;
+        let publication = policy == Policy::Publication;
         let token = Token::current()?;
         let (_descriptor, owner, acl) = security(file)?;
         if !(trusted(owner, token.sid) || (!private && trusted_installer(owner))) || acl.is_null() {
@@ -550,19 +618,7 @@ mod windows {
             }
             let entry = ace as *const ACCESS_ALLOWED_ACE;
             let sid = unsafe { std::ptr::addr_of!((*entry).SidStart) as PSID };
-            // Existing ancestors may grant ADD_SUBDIRECTORY (the normal drive-root ACL):
-            // that only creates unrelated sibling directories. Keep rejecting ADD_FILE,
-            // DELETE_CHILD, DELETE, metadata/ACL ownership writes and generic write/all.
-            // The selected child and current catalog still undergo their stricter checks.
-            let dangerous = if private {
-                u32::MAX
-            } else if publication {
-                // ADD_SUBDIRECTORY on the parent is unsafe here, and the same bit is
-                // APPEND_DATA when inherited by a subsequently published regular file.
-                0x500d_0156
-            } else {
-                0x500d_0152
-            };
+            let mask = unsafe { (*entry).Mask };
             let flags = unsafe { (*ace.cast::<ACE_HEADER>()).AceFlags };
             let inherited_only = flags & 0x08 != 0;
             // A creator-only inherited grant resolves to us on our new children. It does
@@ -571,8 +627,7 @@ mod windows {
                 && inherited_only
                 && flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8 != 0
                 && unsafe { IsWellKnownSid(sid, WinCreatorOwnerSid) } != 0;
-            if unsafe { (*entry).Mask } & dangerous != 0
-                && (private || publication || !inherited_only)
+            if (private || publication || !inherited_only)
                 && !(trusted(sid, token.sid)
                     || safe_creator
                     // OWNER RIGHTS denotes this object's already validated owner. It is
@@ -581,6 +636,7 @@ mod windows {
                     || (!private
                         && trusted_installer(owner)
                         && unsafe { EqualSid(sid, owner) } != 0))
+                && policy.rejects_grant(file, mask)
             {
                 return Err(io::Error::other(
                     "private storage grants access to another account",
@@ -630,6 +686,40 @@ mod windows {
             return Err(io::Error::from_raw_os_error(error as i32));
         }
         Ok(())
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::path::Path;
+
+        #[test]
+        fn modify_grant_on_ntfs_volume_root_is_limited_to_existing_ancestry() {
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+                READ_CONTROL,
+            };
+            let open_dir = |path: &Path| {
+                File::options()
+                    .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                    .open(path)
+                    .unwrap()
+            };
+            let system = std::fs::canonicalize(std::env::var_os("SystemRoot").unwrap()).unwrap();
+            let root = open_dir(system.ancestors().last().unwrap());
+            let windows = open_dir(&system);
+
+            // The mask displayed by icacls as (M), including SYNCHRONIZE. Evaluate
+            // it using read-only handles; the real system drive's ACL is never edited.
+            let modify = 0x0013_01bf;
+            assert!(!Policy::Ancestor.rejects_grant(&root, modify));
+            assert!(Policy::Ancestor.rejects_grant(&windows, modify));
+            assert!(Policy::Publication.rejects_grant(&root, modify));
+            for right in [FILE_DELETE_CHILD, WRITE_DAC, WRITE_OWNER] {
+                assert!(Policy::Ancestor.rejects_grant(&root, modify | right));
+            }
+        }
     }
 }
 
@@ -721,10 +811,13 @@ mod windows_tests {
                     .success()
             );
         };
-        grant("AD");
-        super::verify_ancestor(&file).unwrap();
-        assert!(super::verify(&file).is_err());
-        for rights in ["DC", "WD", "WDAC", "WO", "W"] {
+        for rights in ["WD", "AD", "WD,AD"] {
+            grant(rights);
+            super::verify_ancestor(&file).unwrap();
+            assert!(super::verify_publication_parent(&file).is_err());
+            assert!(super::verify(&file).is_err());
+        }
+        for rights in ["DC", "DE", "WDAC", "WO", "W", "M"] {
             grant(rights);
             assert!(super::verify_ancestor(&file).is_err(), "allowed {rights}");
         }
@@ -744,6 +837,18 @@ mod windows_tests {
         );
         assert!(super::verify_ancestor(&plain).is_err());
         assert!(super::verify(&plain).is_err());
+        assert!(
+            Command::new("icacls.exe")
+                .arg(&path)
+                .arg("/grant:r")
+                .arg("*S-1-5-11:(WD)")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        // The same bit that creates a sibling directory entry writes data on a file.
+        assert!(super::verify_read_source(&plain).is_err());
     }
 
     #[test]

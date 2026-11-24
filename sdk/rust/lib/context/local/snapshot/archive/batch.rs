@@ -1,12 +1,15 @@
 //! Local backend: One-pass archive staging and dependency resolution for a local group import.
 
+use std::collections::btree_map::Entry;
 use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
 };
 
 use microsandbox_image::snapshot::{Manifest, SnapshotId};
+use microsandbox_image::storage_lease::StorageLease;
 
+use super::super::cache_binding;
 use super::*;
 use crate::{SnapshotImportError, SnapshotImportOutcome};
 
@@ -303,20 +306,73 @@ async fn load_inner(
     let publication = tempfile::Builder::new()
         .prefix(".msb-snapshot-batch-")
         .tempdir_in(&snapshots_dir)?;
-    let mut image_operations = Vec::new();
+    let cache = microsandbox_image::GlobalCache::new_async(&cache_dir)
+        .await?
+        .operation();
+    let mut staged_installs = Vec::new();
+    let mut metadata = BTreeMap::<_, (_, Vec<u8>)>::new();
+    let mut bundled_snapshots = BTreeSet::new();
     for ((item, snapshots), candidate) in staged.iter().zip(&imported).zip(&candidates) {
         let head = snapshots
             .iter()
             .find(|snapshot| snapshot.id() == candidate)
             .expect("validated archive head");
-        image_operations.push(
-            Box::pin(install_staged_cache(
-                item.cache.path(),
-                &cache_dir,
-                head.manifest(),
-            ))
-            .await?,
+        let Some(mut install) = Box::pin(prepare_staged_cache_install(
+            item.cache.path(),
+            &cache_dir,
+            &cache,
+            head.manifest(),
+        ))
+        .await?
+        else {
+            continue;
+        };
+        let path = cache.image_metadata_path(&install.reference);
+        match metadata.entry(path) {
+            Entry::Vacant(entry) => {
+                entry.insert((
+                    install.reference.clone(),
+                    std::mem::take(&mut install.metadata),
+                ));
+            }
+            Entry::Occupied(entry) => {
+                if !microsandbox_image::image_metadata_json_equivalent(
+                    &entry.get().1,
+                    &install.metadata,
+                ) {
+                    return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                        "conflicting image cache metadata in this batch: {}",
+                        entry.key().display()
+                    )));
+                }
+            }
+        }
+        staged_installs.push(install);
+        for snapshot in snapshots {
+            if snapshot.manifest().image == head.manifest().image {
+                bundled_snapshots.insert(snapshot.digest().to_owned());
+            }
+        }
+    }
+
+    // Acquire one metadata publication gate per key in path order, so a conflict
+    // cannot publish a metadata prefix and concurrent batches agree on lock order.
+    let mut metadata_installs = Vec::with_capacity(metadata.len());
+    for (_, (reference, bytes)) in metadata {
+        metadata_installs.push(
+            cache
+                .prepare_image_metadata_install(&reference, bytes)
+                .await?,
         );
+    }
+    let mut vmdk_repairs = Vec::new();
+    for install in staged_installs {
+        if let Some(repair) = Box::pin(install.install_backing(&cache_dir)).await? {
+            vmdk_repairs.push(repair);
+        }
+    }
+    for install in metadata_installs {
+        install.commit().await?;
     }
     // Resolve all cross-archive reads before moving any source directory. Same-ID/same-descriptor
     // duplicates were independently validated above and are published only once.
@@ -353,12 +409,7 @@ async fn load_inner(
     super::super::publication::complete_batch(&db, &destination).await?;
     let mut publication_leases = Vec::new();
     for id in identities.keys() {
-        publication_leases.push(
-            microsandbox_image::storage_lease::StorageLease::shared_async(
-                destination.join(id.as_str()),
-            )
-            .await?,
-        );
+        publication_leases.push(StorageLease::shared_async(destination.join(id.as_str())).await?);
     }
     let publish_candidates = candidates.clone();
     let set_head = opts.set_head;
@@ -367,33 +418,74 @@ async fn load_inner(
     let (mut publication, _writer) = tokio::spawn(async move {
         // Cancellation must not drop staging, image pins, or namespace pins while the
         // blocking group publisher is still moving members into their final names.
-        let _protection = (image_operations, publication_leases, destination_group);
+        let _protection = (cache, publication_leases, destination_group);
         for snapshot in imported.iter().flatten() {
             let path = destination.join(snapshot.id().as_str());
-            super::super::publication::prepare(&db, &path, snapshot.digest(), snapshot.manifest())
-                .await?;
+            super::super::publication::prepare(
+                &db,
+                &path,
+                snapshot.digest(),
+                snapshot.manifest(),
+                Some(&publication.path().join(snapshot.id().as_str())),
+            )
+            .await?;
         }
-        let mut publication = super::super::group::publish_batch_indexed_admitted(
-            &destination,
-            publication.path(),
-            &aliases,
-            &publish_candidates,
-            set_head,
-            super::super::group::IndexedPublication {
-                operation,
-                outcome,
-                verified_signers,
-            },
-            writer.clone(),
-        )
-        .await?;
+        let mut created_receipts = Vec::new();
+        let result = {
+            // Another group may import the same descriptor. Keep receipt writers
+            // serialized until we know whether this attempt can remove its receipts.
+            let _receipt_gate = if bundled_snapshots.is_empty() {
+                None
+            } else {
+                Some(StorageLease::exclusive_async(cache_dir.join("snapshot-bundles")).await?)
+            };
+            let result = async {
+                // Flush receipts before the snapshot commit so a committed snapshot can
+                // be restored offline even if this process exits during publication.
+                for digest in bundled_snapshots {
+                    cache_binding::record_bundle(&cache_dir, &digest, &mut created_receipts)?;
+                }
+                super::super::group::publish_batch_indexed_admitted(
+                    &destination,
+                    publication.path(),
+                    &aliases,
+                    &publish_candidates,
+                    set_head,
+                    super::super::group::IndexedPublication {
+                        operation,
+                        outcome: outcome.clone(),
+                        verified_signers,
+                    },
+                    writer.clone(),
+                )
+                .await
+            }
+            .await;
+            if result.is_err()
+                && outcome.load(Ordering::Acquire) == SnapshotImportOutcome::NotCommitted as u8
+            {
+                for path in created_receipts {
+                    if let Err(error) = std::fs::remove_file(&path) {
+                        tracing::warn!(path = %path.display(), %error, "could not remove uncommitted snapshot bundle receipt");
+                    }
+                }
+            }
+            result
+        };
+        let mut publication = result?;
         if let Some(warnings) =
             super::super::publication::complete_batch_report(&db, &destination).await?
         {
             publication.warnings.extend(warnings);
         }
-        // Keep admission until the caller has projected every returned member. A
-        // concurrent remover must not turn a committed report into a missing-file race.
+        for repair in vmdk_repairs {
+            if let Err(error) = repair.finish().await {
+                publication
+                    .warnings
+                    .push(format!("could not repair imported image backing: {error}"));
+            }
+        }
+        // Keep the group writer until the caller has projected every returned member.
         Ok::<_, MicrosandboxError>((publication, writer))
     })
     .await

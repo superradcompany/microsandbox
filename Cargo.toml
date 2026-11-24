@@ -52,7 +52,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.8.1"
+version = "0.8.2"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -79,22 +79,22 @@ strip = false
 # Exact (`=`) pins: these crates share private, unstable APIs across patch
 # releases, so every published version must resolve its siblings to the same
 # version. Caret would let an older release pull newer siblings and break.
-microsandbox = { version = "=0.8.1", path = "sdk/rust", default-features = false }
-microsandbox-agent-client = { version = "=0.8.1", path = "packages/agent-client/rust" }
-microsandbox-control-client = { version = "=0.8.1", path = "packages/control-client/rust" }
-microsandbox-protocol-client = { version = "=0.8.1", path = "packages/protocol-client/rust" }
-microsandbox-db = { version = "=0.8.1", path = "crates/db" }
-microsandbox-filesystem = { version = "=0.8.1", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "=0.8.1", path = "crates/image" }
-microsandbox-metrics = { version = "=0.8.1", path = "crates/metrics" }
-microsandbox-types-macros = { version = "=0.8.1", path = "packages/microsandbox-types/macros" }
-microsandbox-types = { version = "=0.8.1", path = "packages/microsandbox-types/rust" }
-microsandbox-migration = { version = "=0.8.1", path = "crates/migration" }
-microsandbox-network = { version = "=0.8.1", path = "crates/network", default-features = false }
-microsandbox-protocol = { version = "=0.8.1", path = "crates/protocol" }
-microsandbox-runtime = { version = "=0.8.1", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "=0.8.1", path = "crates/utils" }
-microsandbox-vsock = { version = "=0.8.1", path = "crates/vsock" }
+microsandbox = { version = "=0.8.2", path = "sdk/rust", default-features = false }
+microsandbox-agent-client = { version = "=0.8.2", path = "packages/agent-client/rust" }
+microsandbox-control-client = { version = "=0.8.2", path = "packages/control-client/rust" }
+microsandbox-protocol-client = { version = "=0.8.2", path = "packages/protocol-client/rust" }
+microsandbox-db = { version = "=0.8.2", path = "crates/db" }
+microsandbox-filesystem = { version = "=0.8.2", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "=0.8.2", path = "crates/image" }
+microsandbox-metrics = { version = "=0.8.2", path = "crates/metrics" }
+microsandbox-types-macros = { version = "=0.8.2", path = "packages/microsandbox-types/macros" }
+microsandbox-types = { version = "=0.8.2", path = "packages/microsandbox-types/rust" }
+microsandbox-migration = { version = "=0.8.2", path = "crates/migration" }
+microsandbox-network = { version = "=0.8.2", path = "crates/network", default-features = false }
+microsandbox-protocol = { version = "=0.8.2", path = "crates/protocol" }
+microsandbox-runtime = { version = "=0.8.2", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "=0.8.2", path = "crates/utils" }
+microsandbox-vsock = { version = "=0.8.2", path = "crates/vsock" }
 # Keep runtime APIs and shared metrics types on the same published release.
 msb_krun = "=0.1.46"
 msb_krun_utils = "=0.1.46"
@@ -125,8 +125,8 @@ flate2 = { version = "1.0", features = ["zlib-rs"] }
 futures = "0.3"
 futures-util = "0.3"
 hex = "0.4"
-hickory-net = "0.26.1"
-hickory-proto = "0.26.1"
+hickory-net = "0.26.3"
+hickory-proto = "0.26.3"
 if-addrs = "0.15"
 httlib-hpack = "0.1.3"
 httpdate = "1.0"
@@ -202,7 +202,7 @@ sea-orm-migration = { version = "2.0.0", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
 ] }
-sqlx = { version = "0.9", default-features = false, features = [
+sqlx = { version = "0.9.1", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls",
     "sqlite",
@@ -223,7 +223,7 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 lru = "0.19.0"
 parking_lot = "0.13"
 rpassword = "7"
-russh = "0.65.0"
+russh = "0.65.4"
 russh-sftp = "2.3.0"
 
 # Temporary native APIs from libkrun PR #173, pinned for reproducible builds.

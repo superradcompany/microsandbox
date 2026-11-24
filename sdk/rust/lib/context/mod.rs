@@ -14,6 +14,8 @@ pub(crate) mod local;
 #[cfg(feature = "local")]
 pub(crate) use local::ControlSession;
 mod misconfigured;
+#[cfg(test)]
+pub(crate) use misconfigured::ConfigurationErrorBackend;
 mod profile;
 pub(crate) mod sandbox;
 mod service;

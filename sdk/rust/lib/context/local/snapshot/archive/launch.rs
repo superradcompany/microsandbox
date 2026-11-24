@@ -28,10 +28,18 @@ use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason}
 /// Drop the selected reader before private directories, including on Windows.
 pub(crate) struct PreparedLaunchSource {
     snapshot: Snapshot,
+    bundled_image: bool,
     _archives: Vec<StagedArchive>,
     _images: Vec<GlobalCache>,
     // Drop archive handles before releasing their crash-recovery lease.
     _staging: Option<LaunchStaging>,
+}
+
+impl PreparedLaunchSource {
+    /// Whether one of the supplied archives installed bundled image bytes into the destination cache.
+    pub(crate) fn bundled_image(&self) -> bool {
+        self.bundled_image
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -73,11 +81,13 @@ pub(crate) async fn prepare(
     // uses it. This worker owns staging until preparation finishes; cancellation
     // cannot advance from preparation into sandbox creation.
     let owner = backend.clone();
+    let image_cache_dir = config.image_cache_dir.clone();
     let prepared = tokio::spawn(async move {
         prepare_inner(
             owner.as_local().expect("local backend checked"),
             &paths,
             target.as_ref(),
+            image_cache_dir.as_deref(),
         )
         .await
     })
@@ -85,6 +95,17 @@ pub(crate) async fn prepare(
     .map_err(|error| {
         MicrosandboxError::Runtime(format!("snapshot source preparation: {error}"))
     })??;
+    let local = backend.as_local().expect("local backend checked");
+    if config.image_cache_dir.is_none() && !prepared.bundled_image {
+        config.image_cache_dir = super::super::cache_binding::read_managed(
+            local,
+            prepared.snapshot.path(),
+            prepared.snapshot.digest(),
+        )?;
+    }
+    let cache_dir = local.resolve_image_cache_dir(config.image_cache_dir.as_deref())?;
+    config.snapshot_has_bundled_image =
+        super::super::cache_binding::has_bundle(&cache_dir, prepared.snapshot.digest())?;
     let snapshot = dispatch::from_artifact(backend, prepared.snapshot.clone())?;
     crate::sandbox::prepare_local_snapshot_restore(config, &snapshot)?;
     config.snapshot_lease = prepared.snapshot.lease.clone();
@@ -98,9 +119,12 @@ async fn prepare_inner(
     local: &LocalContext,
     paths: &[PathBuf],
     target: Option<&SnapshotId>,
+    image_cache_dir: Option<&Path>,
 ) -> MicrosandboxResult<PreparedLaunchSource> {
     // Launch preparation does not expose an import-size option.
     let mut budget = ImportBudget::unlimited();
+    let target_cache_dir = local.resolve_image_cache_dir(image_cache_dir)?;
+    let cache_tmp = target_cache_dir.join("tmp");
     let mut staging: Option<LaunchStaging> = None;
     let mut archives = Vec::new();
     let mut directories = Vec::new();
@@ -132,7 +156,8 @@ async fn prepare_inner(
                 );
             }
             let root = staging.as_ref().expect("archive staging reserved").path();
-            archives.push(unpack(path, root, root, None, &mut budget).await?);
+            tokio::fs::create_dir_all(&cache_tmp).await?;
+            archives.push(unpack(path, root, &cache_tmp, None, &mut budget).await?);
         } else {
             return Err(MicrosandboxError::InvalidConfig(format!(
                 "snapshot input {} is not a regular archive or artifact directory",
@@ -219,6 +244,7 @@ async fn prepare_inner(
     let selected = select_target(&members, target)?;
     let snapshot = members.remove(&selected).expect("selected supplied member");
     let mut images = Vec::new();
+    let mut bundled_image = false;
     for archive in &archives {
         // An unrelated supplied archive must not install another image. Bundled image
         // bytes are used only when that archive's advertised head pins this image too.
@@ -242,18 +268,16 @@ async fn prepare_inner(
             manifest.image == snapshot.manifest().image
                 && manifest.root_disk == snapshot.manifest().root_disk
         }) {
-            images.push(
-                install_staged_cache(
-                    archive.cache.path(),
-                    &local.cache_dir(),
-                    snapshot.manifest(),
-                )
-                .await?,
-            );
+            let (cache, installed) =
+                install_staged_cache(archive.cache.path(), &target_cache_dir, snapshot.manifest())
+                    .await?;
+            bundled_image |= installed;
+            images.push(cache);
         }
     }
     Ok(PreparedLaunchSource {
         snapshot,
+        bundled_image,
         _archives: archives,
         _images: images,
         _staging: staging,
