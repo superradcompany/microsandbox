@@ -183,6 +183,11 @@ pub(crate) async fn prepare_storage(
         microsandbox_db::protected_state::admit(&database, id, &config.spec.name, &stored_config)
             .await
             .map_err(|error| MicrosandboxError::Runtime(format!("storage admission: {error}")))?;
+        // Only OCI creation stages the sandbox directory before this point. Bind and disk-image
+        // roots can arrive on a fresh home, and initialization creates only the sandbox itself.
+        if let Some(parent) = storage.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         return layout::initialize_new(&runtime).map_err(MicrosandboxError::Runtime);
     }
     if creating.is_some() {
@@ -488,6 +493,47 @@ mod tests {
             .await
             .is_err()
         );
+        layout::require_ready(&storage.join("runtime")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fresh_preparation_creates_the_sandboxes_directory_on_a_new_home() {
+        let temporary = private_test_home();
+        let backend = crate::test_support::local_backend_builder(temporary.path())
+            .build()
+            .unwrap();
+        let mut config = SandboxConfig::default();
+        config.spec.name = "first".into();
+        backend
+            .db()
+            .await
+            .unwrap()
+            .write()
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO sandbox (name,config,status,ephemeral) VALUES (?,?,'Stopped',0)",
+                [
+                    "first".into(),
+                    serde_json::to_string(&config).unwrap().into(),
+                ],
+            ))
+            .await
+            .unwrap();
+        // Bind and disk-image roots reach this point without anything creating the collection.
+        assert!(!backend.sandboxes_dir().exists());
+        let storage = CreationStorage::acquire(&backend, "first").unwrap();
+        let (id, saved) = reservation(&backend, "first").await;
+        prepare_launch(
+            &backend,
+            &config,
+            &storage,
+            StoragePreparation::New {
+                catalog_id: id,
+                expected_config: &saved,
+            },
+        )
+        .await
+        .unwrap();
         layout::require_ready(&storage.join("runtime")).unwrap();
     }
 
