@@ -119,6 +119,7 @@ fn config_with_host_inputs(base: Option<&Path>) -> SandboxConfig {
             replace: false,
         },
     ];
+    config.image_cache_dir = Some(path("org-cache"));
     config.spec.network.tls = Some(TlsConfig {
         enabled: true,
         upstream_ca_cert: vec![path("upstream.pem")],

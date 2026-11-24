@@ -14,6 +14,7 @@ use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, PaginatorTrait, Que
 
 use super::{ImagePruneReport, cleanup_journal::Journal};
 use crate::context::LocalContext;
+use crate::context::local::snapshot::cache_binding::INDEX_BINDING;
 use crate::db::{
     DbReadConnection,
     entity::{image_ref, layer, manifest, manifest_layer, snapshot},
@@ -549,6 +550,7 @@ impl CleanupOwners {
             .all(txn)
             .await?
             .into_iter()
+            .filter(|row| row.storage_binding_id.as_deref() != Some(INDEX_BINDING))
             .map(|row| row.image_manifest_digest)
             .collect::<HashSet<_>>();
         Ok(Self {
@@ -583,6 +585,7 @@ impl CleanupCatalog {
                 .all(db)
                 .await?
                 .into_iter()
+                .filter(|row| row.storage_binding_id.as_deref() != Some(INDEX_BINDING))
                 .map(|row| row.image_manifest_digest)
                 .collect(),
         })
@@ -1229,6 +1232,50 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_snapshot_does_not_retain_a_shared_manifest_with_the_same_digest() {
+        use sea_orm::Set;
+        let home = tempfile::tempdir().unwrap();
+        let local = local(home.path()).await;
+        let metadata = metadata('a', 'c');
+        let reference = "example.com/shared:latest";
+        let cache = install(&local, reference, &metadata).await;
+        let now = chrono::Utc::now().naive_utc();
+        snapshot::Entity::insert(snapshot::ActiveModel {
+            artifact_path: Set(home.path().join("isolated-snapshot").display().to_string()),
+            digest: Set("isolated-descriptor".into()),
+            scope: Set("disk".into()),
+            state_kind: Set("file".into()),
+            image_ref: Set(reference.into()),
+            image_manifest_digest: Set(metadata.manifest_digest.clone()),
+            locality: Set("embedded".into()),
+            storage_binding_id: Set(Some(INDEX_BINDING.into())),
+            availability: Set("ready".into()),
+            migration_state: Set("complete".into()),
+            created_at: Set(now),
+            indexed_at: Set(now),
+            child_count: Set(0),
+            ..Default::default()
+        })
+        .exec(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+
+        Image::remove_local(&local, reference, false).await.unwrap();
+        assert!(
+            !cache
+                .image_metadata_path(&reference.parse().unwrap())
+                .exists()
+        );
+        assert_eq!(
+            snapshot::Entity::find()
+                .count(local.db().await.unwrap().read())
+                .await
+                .unwrap(),
+            1
         );
     }
 

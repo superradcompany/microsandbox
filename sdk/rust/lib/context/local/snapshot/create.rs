@@ -63,6 +63,7 @@ enum CaptureGroupMode {
 #[derive(Debug)]
 struct StagedSnapshot {
     snapshot: Snapshot,
+    image_cache_dir: Option<PathBuf>,
     source_recovery: Option<SnapshotSourceRecoveryError>,
 }
 
@@ -313,6 +314,7 @@ async fn publish_snapshot_group(
 ) -> MicrosandboxResult<Snapshot> {
     let StagedSnapshot {
         snapshot: mut captured,
+        image_cache_dir,
         source_recovery,
     } = captured;
     let published = async {
@@ -328,6 +330,9 @@ async fn publish_snapshot_group(
         .to_canonical_bytes()
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     write_descriptor(captured.path(), &descriptor).await?;
+    if let Some(cache_dir) = image_cache_dir {
+        super::cache_binding::write(captured.path(), captured.digest(), &cache_dir)?;
+    }
     // Publication owns its staging and ancestry sequencer. Dropping an SDK future must not
     // release the source lock while a blocking group commit is still running in the background.
     let publication_db = local.db().await?.write().clone();
@@ -344,7 +349,13 @@ async fn publish_snapshot_group(
         }
         let destination = group_dir.join(captured.id().as_str());
         let _publication = microsandbox_image::storage_lease::StorageLease::shared_async(destination.clone()).await?;
-        super::publication::prepare(&publication_db, &destination, captured.digest(), captured.manifest()).await?;
+        super::publication::prepare(
+            &publication_db,
+            &destination,
+            captured.digest(),
+            captured.manifest(),
+            Some(captured.path()),
+        ).await?;
         let update = publish_with_name_retry_admitted(
             &group_dir,
             staging.path(),
@@ -465,7 +476,8 @@ async fn capture_installed(
         ));
     }
     if full {
-        return create_full_snapshot(
+        let source_config: SandboxConfig = serde_json::from_str(&model.config)?;
+        let mut captured = create_full_snapshot(
             local,
             group,
             SnapshotDestination {
@@ -479,7 +491,10 @@ async fn capture_installed(
             record_integrity,
             guest_flush,
         )
-        .await;
+        .await?;
+        captured.image_cache_dir = snapshot_cache_dir(local, &source_config)
+            .map_err(|error| capture_publication_failure(error, captured.source_recovery.take()))?;
+        return Ok(captured);
     }
 
     if model.status == SandboxStatus::Draining {
@@ -617,6 +632,7 @@ async fn capture_installed(
             return Err(e);
         }
     };
+    let image_cache_dir = snapshot_cache_dir(local, source_configuration)?;
     let artifact_build_us = artifact_started.elapsed().as_micros();
 
     let promote_started = Instant::now();
@@ -635,8 +651,20 @@ async fn capture_installed(
 
     Ok(StagedSnapshot {
         snapshot: Snapshot::from_parts(dest_dir, digest, manifest, labels),
+        image_cache_dir,
         source_recovery: None,
     })
+}
+
+fn snapshot_cache_dir(
+    local: &LocalContext,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<Option<PathBuf>> {
+    let override_dir = config.image_cache_dir.as_deref();
+    if local.is_default_image_cache_dir(override_dir) {
+        return Ok(None);
+    }
+    local.resolve_image_cache_dir(override_dir).map(Some)
 }
 
 /// Capture one running sandbox into an installed composite-checkpoint snapshot.
@@ -790,6 +818,7 @@ async fn stage_full_snapshot(
     match published {
         Ok(snapshot) => Ok(StagedSnapshot {
             snapshot,
+            image_cache_dir: None,
             source_recovery,
         }),
         Err(error) => Err(capture_publication_failure(error, source_recovery)),

@@ -247,8 +247,13 @@ async fn run_pull_inner(
         materialization: materialization.image_materialization(),
     };
 
-    if let Some((result, metadata)) =
-        microsandbox_image::Registry::pull_cached_async(&cache, &image_ref, &options).await?
+    let has_explicit_auth = explicit_auth
+        .as_ref()
+        .is_some_and(|auth| !matches!(auth, microsandbox_image::RegistryAuth::Anonymous));
+
+    if !has_explicit_auth
+        && let Some((result, metadata)) =
+            microsandbox_image::Registry::pull_cached_async(&cache, &image_ref, &options).await?
     {
         Image::persist(backend, &reference, metadata).await?;
 
@@ -305,19 +310,15 @@ async fn run_pull_inner(
         .add_insecure_registries(config.insecure_registries)
         .build()?;
 
-    let task = registry.pull_with_sender(&image_ref, &options, sender);
-
-    let result = match task.await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => {
+    let pulled = registry
+        .pull_with_metadata(&image_ref, &options, Some(sender))
+        .await;
+    let (result, metadata) = match pulled {
+        Ok(pulled) => pulled,
+        Err(error) => {
             let _ = display_thread.join();
             pull_failure_line(quiet, &reference);
-            return Err(e.into());
-        }
-        Err(e) => {
-            let _ = display_thread.join();
-            pull_failure_line(quiet, &reference);
-            return Err(anyhow::anyhow!("pull task panicked: {e}"));
+            return Err(error.into());
         }
     };
 
@@ -331,12 +332,7 @@ async fn run_pull_inner(
         }
     }
 
-    // Persist before the registry's operation scope releases the published artifacts.
-    let cache = microsandbox_image::GlobalCache::new(&backend.cache_dir())?.operation();
-    let metadata = cache
-        .read_image_metadata_async(&image_ref)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("image metadata missing after pull: {reference}"))?;
+    // Keep the image operation alive while indexing the exact admitted generation.
     Image::persist(backend, &reference, metadata).await?;
 
     if !quiet {
@@ -375,6 +371,86 @@ pub(crate) async fn pull_if_missing(
     pull_if_missing_with_auth(reference, quiet, materialization, None).await
 }
 
+/// Repair the immutable layered backing for a stopped local sandbox.
+pub(crate) async fn repair_pinned_root(
+    reference: &str,
+    digest: &str,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?.operation();
+    let original: microsandbox_image::Reference = reference.parse()?;
+    let manifest: microsandbox_image::Digest = digest.parse()?;
+    let pinned = microsandbox_image::Reference::with_digest(
+        original.registry().to_owned(),
+        original.repository().to_owned(),
+        digest.to_owned(),
+    );
+    cache
+        .lease_paths_async(vec![cache.fsmeta_erofs_path(&manifest)])
+        .await?;
+    let mut found_pinned_metadata = false;
+    for reference in [&pinned, &original] {
+        if let Some(metadata) = cache.read_image_metadata_async(reference).await?
+            && metadata.manifest_digest == digest
+        {
+            found_pinned_metadata = true;
+            let diff_ids = metadata
+                .layers
+                .iter()
+                .map(|layer| layer.diff_id.parse())
+                .collect::<Result<Vec<_>, _>>()?;
+            if cache.is_vmdk_complete_for_layers(&manifest, &diff_ids) {
+                return Ok(());
+            }
+            if cache.is_fsmeta_materialized(&manifest) && cache.all_layers_materialized(&diff_ids) {
+                cache.rewrite_vmdk_async(&manifest, &diff_ids).await?;
+                return Ok(());
+            }
+        }
+    }
+    if !found_pinned_metadata && cache.is_vmdk_complete(&manifest) {
+        return Ok(());
+    }
+
+    // Query the exact upstream manifest if any backing layer needs to be recovered.
+    run_pull_inner(
+        pinned.whole(),
+        false,
+        quiet,
+        false,
+        None,
+        microsandbox_image::PullPolicy::Always,
+        PullOverrides {
+            materialization: Some(pull::PullMaterialization::Layered),
+            explicit_auth: None,
+        },
+    )
+    .await?;
+    let metadata = cache
+        .read_image_metadata_async(&pinned)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("pinned image metadata missing after pull: {pinned}"))?;
+    anyhow::ensure!(
+        metadata.manifest_digest == digest,
+        "registry returned a different manifest for {pinned}"
+    );
+    let layers = metadata
+        .layers
+        .iter()
+        .map(|layer| layer.diff_id.parse())
+        .collect::<Result<Vec<_>, _>>()?;
+    if !cache.is_vmdk_complete_for_layers(&manifest, &layers) {
+        cache.rewrite_vmdk_async(&manifest, &layers).await?;
+    }
+    anyhow::ensure!(
+        cache.is_vmdk_complete_for_layers(&manifest, &layers),
+        "incomplete OCI backing for {pinned}"
+    );
+    Ok(())
+}
+
 /// Pull an image if missing, honoring an explicit per-sandbox registry credential.
 pub(crate) async fn pull_if_missing_with_auth(
     reference: &str,
@@ -399,8 +475,13 @@ pub(crate) async fn pull_if_missing_with_auth(
         materialization: materialization.image_materialization(),
     };
 
-    if let Some((_, metadata)) =
-        microsandbox_image::Registry::pull_cached_async(&cache, &image_ref, &options).await?
+    let has_explicit_auth = explicit_auth
+        .as_ref()
+        .is_some_and(|auth| !matches!(auth, microsandbox_image::RegistryAuth::Anonymous));
+
+    if !has_explicit_auth
+        && let Some((_, metadata)) =
+            microsandbox_image::Registry::pull_cached_async(&cache, &image_ref, &options).await?
     {
         Image::persist(local, reference, metadata).await?;
         return Ok(());

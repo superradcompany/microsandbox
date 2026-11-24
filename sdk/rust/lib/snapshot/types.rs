@@ -241,7 +241,7 @@ pub struct SaveOpts {
     /// Walk parent chain and include each ancestor in the archive.
     pub with_parents: bool,
     /// Include the OCI image artifacts (EROFS layers, VMDK descriptor)
-    /// from the global cache so the archive boots offline.
+    /// from the snapshot's local image cache so the archive boots offline.
     pub with_image: bool,
     /// Skip zstd compression and write a plain `.tar`. Default: zstd.
     pub plain_tar: bool,

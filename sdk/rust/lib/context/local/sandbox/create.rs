@@ -91,14 +91,12 @@ const AGENT_RELAY_READY_TIMEOUT: std::time::Duration = std::time::Duration::from
 
 /// OCI materialization selected for a create request.
 ///
-/// Snapshot restores carry both their digest-pinned persistence reference and,
-/// when found directly by digest, the cache metadata that may not be indexed by
-/// that immutable reference yet.
+/// Carry the admitted metadata through catalog publication even if the tag moves.
 struct ResolvedOciImage {
     cache_operation: GlobalCache,
     pull_result: PullResult,
     metadata_reference: String,
-    cached_metadata: Option<CachedImageMetadata>,
+    metadata: CachedImageMetadata,
 }
 
 /// Only the OCI architecture is needed to check historical disk launches.
@@ -236,7 +234,9 @@ impl LocalContext {
                     &oci.reference,
                     options.spec.pull_policy.unwrap_or_default(),
                     registry,
+                    options.image_cache_dir.as_ref().and_then(Option::as_deref),
                     None,
+                    false,
                     materialization,
                     progress.clone(),
                 )
@@ -288,6 +288,12 @@ impl LocalContext {
         let mut installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
         let installed_file_virtual_size = config.snapshot_root_virtual_size.take();
 
+        let branch_image = config.branch_source.is_some();
+        let mut archive_bundled_image = config.snapshot_has_bundled_image
+            || config
+                .snapshot_prepared_sources
+                .as_ref()
+                .is_some_and(|prepared| prepared.bundled_image());
         let mut archive_stage = if let Some(archive) = config.snapshot_archive_source.clone() {
             let stage = RestoreStaging::reserve(backend.clone(), self, &config).await?;
 
@@ -299,8 +305,10 @@ impl LocalContext {
                     config.snapshot_base.as_deref(),
                     &config.restore_resources,
                     config.caller_config_overrides.as_deref(),
+                    config.image_cache_dir.as_deref(),
                 ))
                 .await?;
+                archive_bundled_image |= materialized.bundled_image;
 
                 let admitted = config
                     .restore_resources
@@ -419,35 +427,22 @@ impl LocalContext {
                 ca_certs: config.ca_certs.clone(),
                 ..Default::default()
             };
-            let mut image = timing::measure(
+            let image = timing::measure(
                 &timing_name,
                 "image_resolution",
                 self.resolve_oci_image_for_create(
                     &oci.reference,
                     config.spec.pull_policy,
                     registry,
+                    config.image_cache_dir.as_deref(),
                     config.manifest_digest.as_deref(),
+                    archive_bundled_image,
                     materialization,
                     progress.clone(),
                 ),
             )
             .await?;
-            // Read the selected platform config under the image lease, before a disk
-            // editor can boot or replacement can stop the existing destination.
-            if image.cached_metadata.is_none() {
-                let reference = image
-                    .metadata_reference
-                    .parse::<Reference>()
-                    .map_err(|e| MicrosandboxError::InvalidConfig(e.to_string()))?;
-                image.cached_metadata = image
-                    .cache_operation
-                    .read_image_metadata_async(&reference)
-                    .await?;
-            }
-            let metadata = image.cached_metadata.as_ref().ok_or_else(|| {
-                MicrosandboxError::ImageNotFound(image.metadata_reference.clone())
-            })?;
-            validate_snapshot_image_architecture(&metadata.raw_config_json)?;
+            validate_snapshot_image_architecture(&image.metadata.raw_config_json)?;
             resolved_image = Some(image);
         }
 
@@ -692,7 +687,8 @@ impl LocalContext {
                 if let RootfsSource::Oci(oci) = config.spec.image.clone() {
                     let reference = oci.reference;
                     let expected_snapshot_manifest_digest =
-                        (config.snapshot_upper_source.is_some()
+                        (branch_image
+                            || config.snapshot_upper_source.is_some()
                             || config.checkpoint_restore.is_some()
                             || !config.snapshot_upper_layers.is_empty())
                         .then(|| config.manifest_digest.clone())
@@ -734,7 +730,7 @@ impl LocalContext {
                         cache_operation,
                         pull_result,
                         metadata_reference,
-                        cached_metadata,
+                        metadata,
                     } = if let Some(image) = resolved_image.take() {
                         image
                     } else {
@@ -743,9 +739,15 @@ impl LocalContext {
                             "image_resolution",
                             self.resolve_oci_image_for_create(
                                 &reference,
-                                config.spec.pull_policy,
+                                if branch_image && config.spec.pull_policy == PullPolicy::Always {
+                                    PullPolicy::IfMissing
+                                } else {
+                                    config.spec.pull_policy
+                                },
                                 overrides,
+                                config.image_cache_dir.as_deref(),
                                 expected_snapshot_manifest_digest.as_deref(),
+                                archive_bundled_image || branch_image,
                                 image_materialization,
                                 progress,
                             ),
@@ -754,7 +756,10 @@ impl LocalContext {
                     };
 
                     // Retain file ownership through insertion of the sandbox/rootfs catalog rows.
+                    let cache = cache_operation.clone();
                     image_operations.push(cache_operation);
+                    let using_default_cache =
+                        self.is_default_image_cache_dir(config.image_cache_dir.as_deref());
                     tracing::trace!(
                         target: timing::TARGET,
                         sandbox_name = %timing_name,
@@ -783,15 +788,15 @@ impl LocalContext {
                         crate::sandbox::init::validate(init)?;
                     }
 
-                    pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
-                    pinned_reference = Some(metadata_reference.clone());
+                    if using_default_cache {
+                        pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
+                        pinned_reference = Some(metadata_reference.clone());
+                    }
 
                     // Layered roots boot through the stitched VMDK descriptor. Flat
                     // roots intentionally skip both fsmeta and VMDK materialization,
                     // so requiring the descriptor here would make a cold SDK create
                     // fail after successfully publishing its flat ext4 artifact.
-                    let cache_dir = self.cache_dir();
-                    let cache = GlobalCache::new_async(&cache_dir).await?;
                     if image_materialization.includes_layered() {
                         let vmdk_path = cache.vmdk_path(&pull_result.manifest_digest);
                         if tokio::fs::metadata(&vmdk_path).await.is_err() {
@@ -1035,32 +1040,28 @@ impl LocalContext {
                     // Store manifest digest for spawn to derive paths.
                     config.manifest_digest = Some(pull_result.manifest_digest.to_string());
 
-                    // Persist snapshot restores under their immutable digest-pinned
-                    // reference, even when the cache match came from an older tag.
-                    let metadata = match cached_metadata {
-                        Some(metadata) => metadata,
-                        None => {
-                            let image_ref =
-                                metadata_reference.parse::<Reference>().map_err(|error| {
-                                    MicrosandboxError::InvalidConfig(error.to_string())
-                                })?;
-                            cache
-                                .read_image_metadata_async(&image_ref)
-                                .await?
-                                .ok_or_else(|| {
-                                    MicrosandboxError::ImageNotFound(metadata_reference.clone())
-                                })?
-                        }
-                    };
-                    // Releasing operation leases is safe only after durable ownership is recorded.
-                    // A catalog failure must not produce a live sandbox with untracked image backing.
-                    crate::image::Image::persist(self, &metadata_reference, metadata).await?;
-                    Self::persist_oci_manifest_pin(
-                        db.write(),
-                        sandbox_id,
-                        &pull_result.manifest_digest.to_string(),
-                    )
-                    .await?;
+                    if !using_default_cache {
+                        // Retain the admitted digest across later retags for offline snapshots and forks.
+                        let pinned = Self::digest_pinned_reference(&reference, &metadata.manifest_digest)?;
+                        let pinned: Reference = pinned.parse().map_err(|error| {
+                            MicrosandboxError::InvalidConfig(format!("invalid pinned reference: {error}"))
+                        })?;
+                        cache.install_image_metadata_if_compatible_async(
+                            &pinned, serde_json::to_vec(&metadata)?,
+                        ).await?;
+                    } else {
+                        // Persist snapshot restores under their immutable digest-pinned
+                        // reference, even when the cache match came from an older tag.
+                        // Releasing operation leases is safe only after durable ownership is recorded.
+                        // A catalog failure must not produce a live sandbox with untracked image backing.
+                        crate::image::Image::persist(self, &metadata_reference, metadata).await?;
+                        Self::persist_oci_manifest_pin(
+                            db.write(),
+                            sandbox_id,
+                            &pull_result.manifest_digest.to_string(),
+                        )
+                        .await?;
+                    }
                 }
 
                 // Apply rootfs patches before VM start. OCI patches were baked into their managed upper or
@@ -1735,18 +1736,22 @@ impl LocalContext {
 
     /// Resolve a fresh create by tag, but restore a snapshot by its captured
     /// manifest digest so a moved tag cannot change the snapshot's base.
+    #[allow(clippy::too_many_arguments)]
     async fn resolve_oci_image_for_create(
         &self,
         reference: &str,
         pull_policy: PullPolicy,
         registry_overrides: RegistryOptions,
+        image_cache_dir: Option<&Path>,
         expected_snapshot_manifest_digest: Option<&str>,
+        owns_cached_image: bool,
         materialization: RootfsMaterialization,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<ResolvedOciImage> {
         let Some(pinned_digest) = expected_snapshot_manifest_digest else {
-            let cache = GlobalCache::new(&self.cache_dir())?.operation();
-            let pull_result = self
+            let cache_dir = self.resolve_image_cache_dir(image_cache_dir)?;
+            let cache = GlobalCache::new_async(&cache_dir).await?.operation();
+            let (pull_result, metadata) = self
                 .pull_oci_image(
                     &cache,
                     reference,
@@ -1760,7 +1765,7 @@ impl LocalContext {
                 cache_operation: cache,
                 pull_result,
                 metadata_reference: reference.to_string(),
-                cached_metadata: None,
+                metadata,
             });
         };
 
@@ -1769,6 +1774,8 @@ impl LocalContext {
             pinned_digest,
             pull_policy,
             registry_overrides,
+            image_cache_dir,
+            owns_cached_image,
             materialization,
             progress,
         )
@@ -1776,12 +1783,15 @@ impl LocalContext {
     }
 
     /// Resolve the immutable image backing a snapshot from cache or registry.
+    #[allow(clippy::too_many_arguments)]
     async fn resolve_snapshot_oci_image(
         &self,
         reference: &str,
         pinned_digest: &str,
         pull_policy: PullPolicy,
         registry_overrides: RegistryOptions,
+        image_cache_dir: Option<&Path>,
+        owns_cached_image: bool,
         materialization: microsandbox_image::RootfsMaterialization,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<ResolvedOciImage> {
@@ -1791,7 +1801,9 @@ impl LocalContext {
             ))
         })?;
         let pinned_reference = Self::digest_pinned_reference(reference, pinned_digest)?;
-        let cache = GlobalCache::new_async(&self.cache_dir()).await?.operation();
+        let using_default_cache = self.is_default_image_cache_dir(image_cache_dir);
+        let cache_dir = self.resolve_image_cache_dir(image_cache_dir)?;
+        let cache = GlobalCache::new_async(&cache_dir).await?.operation();
         cache
             .lease_paths_async(vec![cache.fsmeta_erofs_path(&manifest_digest)])
             .await?;
@@ -1802,23 +1814,50 @@ impl LocalContext {
         let original_ref: Reference = reference.parse().map_err(|e| {
             MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
         })?;
+        let explicit_auth = registry_overrides
+            .auth
+            .as_ref()
+            .is_some_and(|auth| !matches!(auth, microsandbox_image::RegistryAuth::Anonymous));
+        let allow_restricted_cache = owns_cached_image || (!using_default_cache && !explicit_auth);
         // Explicit Always revalidates the immutable registry reference even when
-        // metadata is cached. The other policies may restore entirely offline.
+        // metadata is cached. On a shared cache, digest lookup only accepts entries
+        // whose provenance allows unauthenticated hits; restricted entries are
+        // permitted for a verified archive, an authorized branch, or an explicitly
+        // selected isolated cache without competing registry credentials.
         if pull_policy != PullPolicy::Always
-            && let Some((pull_result, metadata)) = Registry::pull_snapshot_cached(
-                &cache,
-                &[pinned_ref.clone(), original_ref],
-                &manifest_digest,
-                materialization,
-            )
-            .await?
+            && (!explicit_auth || allow_restricted_cache)
+            && let Some((pull_result, metadata)) = if allow_restricted_cache {
+                Registry::pull_snapshot_cached_allow_restricted(
+                    &cache,
+                    &[pinned_ref.clone(), original_ref],
+                    &manifest_digest,
+                    materialization,
+                )
+                .await?
+            } else {
+                Registry::pull_snapshot_cached(
+                    &cache,
+                    &[pinned_ref.clone(), original_ref],
+                    &manifest_digest,
+                    materialization,
+                )
+                .await?
+            }
         {
+            if owns_cached_image
+                && materialization == RootfsMaterialization::Layered
+                && !cache.is_vmdk_complete_for_layers(&manifest_digest, &pull_result.layer_diff_ids)
+            {
+                cache
+                    .rewrite_vmdk_async(&manifest_digest, &pull_result.layer_diff_ids)
+                    .await?;
+            }
             Self::emit_cached_pull_progress(progress.as_ref(), reference, &metadata);
             return Ok(ResolvedOciImage {
                 cache_operation: cache,
                 pull_result,
                 metadata_reference: pinned_reference,
-                cached_metadata: Some(metadata),
+                metadata,
             });
         }
 
@@ -1832,35 +1871,29 @@ impl LocalContext {
         if materialization == microsandbox_image::RootfsMaterialization::Flat {
             // The snapshot supplies the complete disk. Fetch its pinned image
             // defaults, not a second root filesystem that will never be used.
-            let global = self.config();
-            let auth = match registry_overrides.auth {
-                Some(auth) => auth,
-                None => global.resolve_registry_auth(pinned_ref.registry())?,
-            };
-            let mut ca_certs = global.resolve_ca_certs().await?;
-            ca_certs.extend(registry_overrides.ca_certs);
-            let mut insecure = global.insecure_registries();
-            if registry_overrides.insecure {
-                insecure.push(pinned_ref.registry().to_string());
-            }
+            let config = self
+                .registry_config(pinned_ref.registry(), registry_overrides)
+                .await?;
             let registry =
                 Registry::builder(microsandbox_image::Platform::host_linux(), cache.clone())
-                    .auth(auth)
-                    .extra_ca_certs(ca_certs)
-                    .add_insecure_registries(insecure)
+                    .auth(config.auth)
+                    .extra_ca_certs(config.ca_certs)
+                    .add_insecure_registries(config.insecure_registries)
                     .build()?;
-            let pull_result = registry.pull_snapshot_metadata(&pinned_ref).await?;
+            let (pull_result, metadata) = registry
+                .pull_snapshot_metadata_with_metadata(&pinned_ref)
+                .await?;
             return Ok(ResolvedOciImage {
                 cache_operation: cache,
                 pull_result,
                 metadata_reference: pinned_reference,
-                cached_metadata: None,
+                metadata,
             });
         }
 
         // Pull by digest, never by the mutable source tag, when the exact
         // snapshot base is absent from the local cache.
-        let pull_result = match self
+        let (pull_result, metadata) = match self
             .pull_oci_image(
                 &cache,
                 &pinned_reference,
@@ -1885,7 +1918,7 @@ impl LocalContext {
             cache_operation: cache,
             pull_result,
             metadata_reference: pinned_reference,
-            cached_metadata: None,
+            metadata,
         })
     }
 
@@ -1942,8 +1975,7 @@ impl LocalContext {
     /// 4. Docker credential store/config fallback
     /// 5. Anonymous fallback
     ///
-    /// When `progress` is `Some`, uses `pull_with_sender()` to emit per-layer
-    /// progress events. The caller must consume the corresponding `PullProgressHandle`.
+    /// The caller must consume the matching progress handle when a sender is supplied.
     async fn pull_oci_image(
         &self,
         cache: &GlobalCache,
@@ -1952,7 +1984,7 @@ impl LocalContext {
         registry_overrides: RegistryOptions,
         materialization: RootfsMaterialization,
         progress: Option<PullProgressSender>,
-    ) -> MicrosandboxResult<PullResult> {
+    ) -> MicrosandboxResult<(PullResult, CachedImageMetadata)> {
         let platform = microsandbox_image::Platform::host_linux();
         let image_ref: Reference = reference.parse().map_err(|e| {
             MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
@@ -1963,14 +1995,21 @@ impl LocalContext {
             ..Default::default()
         };
 
-        // Warm runs spend most of their time outside the guest, so avoid
-        // constructing the registry client when the image is already complete
-        // in the local cache.
-        if let Some((result, metadata)) =
-            Registry::pull_cached_async(cache, &image_ref, &options).await?
+        // Warm public/anonymous runs spend most of their time outside the guest,
+        // so avoid constructing the registry client when an unauthenticated image
+        // is already complete in the selected cache. Skip this fast path whenever
+        // explicit credentials are supplied; `pull_cached_async` also refuses any
+        // cached entry that was pulled with authentication.
+        let explicit_auth = registry_overrides
+            .auth
+            .as_ref()
+            .is_some_and(|auth| !matches!(auth, microsandbox_image::RegistryAuth::Anonymous));
+        if !explicit_auth
+            && let Some((result, metadata)) =
+                Registry::pull_cached_async(cache, &image_ref, &options).await?
         {
             Self::emit_cached_pull_progress(progress.as_ref(), reference, &metadata);
-            return Ok(result);
+            return Ok((result, metadata));
         }
 
         let config = self
@@ -1982,16 +2021,9 @@ impl LocalContext {
             .add_insecure_registries(config.insecure_registries)
             .build()?;
 
-        if let Some(sender) = progress {
-            let task = registry.pull_with_sender(&image_ref, &options, sender);
-            let result = task
-                .await
-                .map_err(|e| MicrosandboxError::Custom(format!("pull task panicked: {e}")))??;
-            Ok(result)
-        } else {
-            let result = registry.pull(&image_ref, &options).await?;
-            Ok(result)
-        }
+        Ok(registry
+            .pull_with_metadata(&image_ref, &options, progress)
+            .await?)
     }
 
     /// Map the SDK pull policy onto the image crate's pull policy.
@@ -2406,7 +2438,9 @@ impl LocalContext {
                     .await?;
                 }
 
-                if let Some(digest) = &config.manifest_digest {
+                if self.is_default_image_cache_dir(config.image_cache_dir.as_deref())
+                    && let Some(digest) = &config.manifest_digest
+                {
                     Self::replace_oci_manifest_pin(&txn, id, digest).await?;
                 }
                 txn.execute_raw(Statement::from_sql_and_values(
@@ -2539,6 +2573,7 @@ impl LocalContext {
                 // Starting already owns backing: cancellation or a crash during VM launch
                 // must not release operation leases before a durable root protects it.
                 if status == SandboxStatus::Starting
+                    && config.image_cache_dir.is_none()
                     && matches!(config.spec.image, RootfsSource::Oci(_))
                     && let Some(digest) = &config.manifest_digest
                 {
@@ -2829,6 +2864,7 @@ mod tests {
 
     use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
     use microsandbox_db::pool::DbPools;
+    use microsandbox_image::{GlobalCache, RegistryAuth, RootfsMaterialization};
     use microsandbox_migration::{Migrator, MigratorTrait};
     #[cfg(unix)]
     use microsandbox_runtime::ipc::RuntimeSocketPaths;
@@ -2837,6 +2873,7 @@ mod tests {
 
     use super::{check_workdir, sandbox_entity, sandbox_label_entity};
     use crate::AgentClientError;
+    use crate::config::RegistryOptions;
     use crate::context::local::creation::{self, CreationStorage};
     use crate::context::{Context, LocalContext};
     use crate::db::entity::{sandbox, volume};
@@ -5401,5 +5438,562 @@ esac
                 .await
                 .is_ok()
         );
+    }
+
+    async fn start_mock_oci_registry(
+        required_auth_header: Option<&'static str>,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use sha2::{Digest as Sha2Digest, Sha256};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let data = b"sdk test layer\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "etc/test.txt", &data[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+
+        let layer_digest = format!("sha256:{}", hex::encode(Sha256::digest(&tar_bytes)));
+        let config_bytes = serde_json::to_vec(&serde_json::json!({
+            "architecture": microsandbox_image::Platform::host_linux().arch.to_string(),
+            "os": "linux",
+            "config": { "Env": ["PATH=/usr/bin"] },
+            "rootfs": { "type": "layers", "diff_ids": [layer_digest] }
+        }))
+        .unwrap();
+        let config_digest = format!("sha256:{}", hex::encode(Sha256::digest(&config_bytes)));
+        let manifest_bytes = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": config_bytes.len()
+            },
+            "layers": [{
+                "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                "digest": layer_digest,
+                "size": tar_bytes.len()
+            }]
+        }))
+        .unwrap();
+        let manifest_digest = format!("sha256:{}", hex::encode(Sha256::digest(&manifest_bytes)));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&requests);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < 32 * 1024 {
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let req_text = String::from_utf8_lossy(&request);
+                let mut lines = req_text.lines();
+                let path = lines
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default();
+                let auth_header = lines.find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_owned())
+                });
+
+                if let Some(expected) = required_auth_header
+                    && auth_header.as_deref() != Some(expected)
+                {
+                    let body = br#"{"errors":[{"code":"UNAUTHORIZED","message":"auth required"}]}"#;
+                    let header = format!(
+                        "HTTP/1.1 401 Unauthorized\r\n\
+                         WWW-Authenticate: Basic realm=\"sdk-test\"\r\n\
+                         Content-Type: application/json\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    let _ = stream.write_all(body).await;
+                    continue;
+                }
+
+                if path == "/v2/" {
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\n\
+                              Docker-Distribution-Api-Version: registry/2.0\r\n\
+                              Content-Length: 2\r\n\
+                              Connection: close\r\n\r\n{}",
+                        )
+                        .await;
+                } else if path.contains("/manifests/") {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/vnd.oci.image.manifest.v1+json\r\n\
+                         Docker-Content-Digest: {manifest_digest}\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        manifest_bytes.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    let _ = stream.write_all(&manifest_bytes).await;
+                } else if path.ends_with(&format!("/blobs/{config_digest}")) {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/vnd.oci.image.config.v1+json\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        config_bytes.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    let _ = stream.write_all(&config_bytes).await;
+                } else if path.ends_with(&format!("/blobs/{layer_digest}")) {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/vnd.oci.image.layer.v1.tar\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        tar_bytes.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    let _ = stream.write_all(&tar_bytes).await;
+                } else {
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                }
+            }
+        });
+
+        (addr, requests, handle)
+    }
+
+    #[tokio::test]
+    async fn pull_oci_image_blocks_anonymous_reuse_and_isolates_org_caches() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(temp.path())
+            .build()
+            .unwrap();
+
+        // Private registry requiring Basic "tenant-a:secret-a".
+        let (private_addr, _private_requests, private_server) =
+            start_mock_oci_registry(Some("Basic dGVuYW50LWE6c2VjcmV0LWE=")).await;
+        let private_ref = format!("{private_addr}/acme/secret:v1");
+
+        // 1. Even on the shared cache, Tenant A's authenticated pull cannot be served to an
+        //    anonymous Tenant B pull under PullPolicy::IfMissing.
+        let tenant_a_shared = local
+            .resolve_oci_image_for_create(
+                &private_ref,
+                PullPolicy::IfMissing,
+                RegistryOptions {
+                    auth: Some(microsandbox_image::RegistryAuth::Basic {
+                        username: "tenant-a".into(),
+                        password: "secret-a".into(),
+                    }),
+                    insecure: true,
+                    ..Default::default()
+                },
+                None,
+                None,
+                false,
+                RootfsMaterialization::Layered,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!tenant_a_shared.pull_result.cached);
+
+        let tenant_b_anon = local
+            .resolve_oci_image_for_create(
+                &private_ref,
+                PullPolicy::IfMissing,
+                RegistryOptions {
+                    auth: Some(microsandbox_image::RegistryAuth::Anonymous),
+                    insecure: true,
+                    ..Default::default()
+                },
+                None,
+                None,
+                false,
+                RootfsMaterialization::Layered,
+                None,
+            )
+            .await;
+        assert!(
+            tenant_b_anon.is_err(),
+            "anonymous pull must not receive cached authenticated image from shared cache"
+        );
+
+        // 2. Per-org cache_dir isolates artifacts under cache/orgs/<org_id>.
+        let org_a_dir = local.cache_dir().join("orgs/org-a");
+        let org_b_dir = local.cache_dir().join("orgs/org-b");
+        let org_a_image = local
+            .resolve_oci_image_for_create(
+                &private_ref,
+                PullPolicy::IfMissing,
+                RegistryOptions {
+                    auth: Some(microsandbox_image::RegistryAuth::Basic {
+                        username: "tenant-a".into(),
+                        password: "secret-a".into(),
+                    }),
+                    insecure: true,
+                    ..Default::default()
+                },
+                Some(&org_a_dir),
+                None,
+                false,
+                RootfsMaterialization::Layered,
+                None,
+            )
+            .await
+            .unwrap();
+        let org_a_cache = GlobalCache::new(&org_a_dir).unwrap();
+        let org_b_cache = GlobalCache::new(&org_b_dir).unwrap();
+        assert!(
+            org_a_cache
+                .vmdk_path(&org_a_image.pull_result.manifest_digest)
+                .exists()
+        );
+        assert!(
+            !org_b_cache
+                .vmdk_path(&org_a_image.pull_result.manifest_digest)
+                .exists()
+        );
+
+        // Org B querying its own isolated cache cannot see org A's artifacts.
+        let org_b_err = local
+            .resolve_oci_image_for_create(
+                &private_ref,
+                PullPolicy::Never,
+                RegistryOptions {
+                    auth: Some(microsandbox_image::RegistryAuth::Anonymous),
+                    insecure: true,
+                    ..Default::default()
+                },
+                Some(&org_b_dir),
+                None,
+                false,
+                RootfsMaterialization::Layered,
+                None,
+            )
+            .await;
+        assert!(org_b_err.is_err());
+        private_server.abort();
+
+        // 3. Anonymous/public warm cache hits stay fast and never construct a Registry client.
+        let (public_addr, public_requests, public_server) = start_mock_oci_registry(None).await;
+        let public_ref = format!("{public_addr}/library/public:v1");
+
+        let cold_public = local
+            .resolve_oci_image_for_create(
+                &public_ref,
+                PullPolicy::IfMissing,
+                RegistryOptions {
+                    auth: Some(microsandbox_image::RegistryAuth::Anonymous),
+                    insecure: true,
+                    ..Default::default()
+                },
+                None,
+                None,
+                false,
+                RootfsMaterialization::Layered,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!cold_public.pull_result.cached);
+        let requests_after_cold = public_requests.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(requests_after_cold > 0);
+        public_server.abort();
+
+        // Pass an invalid CA PEM: if pull_oci_image constructed a Registry client,
+        // RegistryBuilder::build() would fail with InvalidCertificate.
+        let warm_public = local
+            .resolve_oci_image_for_create(
+                &public_ref,
+                PullPolicy::IfMissing,
+                RegistryOptions {
+                    insecure: true,
+                    ca_certs: vec![b"not a valid pem".to_vec()],
+                    ..Default::default()
+                },
+                None,
+                None,
+                false,
+                RootfsMaterialization::Layered,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(warm_public.pull_result.cached);
+        assert_eq!(
+            warm_public.pull_result.manifest_digest,
+            cold_public.pull_result.manifest_digest
+        );
+        assert_eq!(
+            public_requests.load(std::sync::atomic::Ordering::SeqCst),
+            requests_after_cold
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_builder_image_cache_dir_persists_and_resolves_for_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = Arc::new(
+            crate::test_support::local_backend_builder(temp.path())
+                .build()
+                .unwrap(),
+        );
+        let org_cache_dir = local.cache_dir().join("orgs/org-42");
+
+        // 1. RegistryConfigBuilder::cache_dir populates image_cache_dir.
+        let config = SandboxBuilder::for_context(local.clone(), "org-sandbox")
+            .image("ghcr.io/acme/app:v1")
+            .registry(|r| {
+                r.auth(RegistryAuth::Basic {
+                    username: "org".into(),
+                    password: "secret".into(),
+                })
+                .cache_dir(&org_cache_dir)
+            })
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            config.image_cache_dir.as_deref(),
+            Some(org_cache_dir.as_path())
+        );
+
+        // Persisted JSON retains image_cache_dir while redacting registry_auth.
+        let persisted = config.clone_for_persistence();
+        let json = serde_json::to_string(&persisted).unwrap();
+        assert!(json.contains("image_cache_dir"));
+        assert!(!json.contains("registry_auth"));
+        let mut decoded: SandboxConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.image_cache_dir.as_deref(),
+            Some(org_cache_dir.as_path())
+        );
+
+        // 2. Restart state validation looks up the VMDK in the isolated image_cache_dir,
+        //    not the shared global cache.
+        let digest = format!("sha256:{}", "c".repeat(64));
+        decoded.manifest_digest = Some(digest.clone());
+        let sandbox_dir = local.sandboxes_dir().join("org-sandbox");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+        assert!(
+            local.validate_start_state(&decoded, &sandbox_dir).is_err(),
+            "missing VMDK in isolated cache must fail start validation"
+        );
+        let org_cache = GlobalCache::new(&org_cache_dir).unwrap();
+        let vmdk_path = org_cache.vmdk_path(&digest.parse().unwrap());
+        std::fs::write(&vmdk_path, b"vmdk").unwrap();
+        local.validate_start_state(&decoded, &sandbox_dir).unwrap();
+
+        // 3. Direct SandboxBuilder::image_cache_dir works and preserves through .registry().
+        let direct = SandboxBuilder::for_context(local.clone(), "direct-cache")
+            .image("ghcr.io/acme/app:v1")
+            .image_cache_dir(&org_cache_dir)
+            .registry(|r| r.insecure())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            direct.image_cache_dir.as_deref(),
+            Some(org_cache_dir.as_path())
+        );
+
+        // 4. Default sandboxes omit image_cache_dir from serialized JSON.
+        let default_cfg = SandboxBuilder::for_context(local.clone(), "public-sandbox")
+            .image("alpine:latest")
+            .build()
+            .await
+            .unwrap();
+        let default_json = serde_json::to_string(&default_cfg.clone_for_persistence()).unwrap();
+        assert!(!default_json.contains("image_cache_dir"));
+
+        // 5. Empty image_cache_dir is rejected.
+        let empty_err = SandboxBuilder::for_context(local.clone(), "bad-cache")
+            .image("alpine:latest")
+            .image_cache_dir("")
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            empty_err.to_string().contains("image cache directory"),
+            "unexpected error: {empty_err}"
+        );
+
+        // 6. Unavailable image_cache_dir (regular file blocking cache init) returns an error
+        //    from validate_start_state instead of silently succeeding or panicking.
+        let blocking_file = temp.path().join("not-a-dir");
+        std::fs::write(&blocking_file, b"file").unwrap();
+        let mut broken = decoded.clone();
+        broken.image_cache_dir = Some(blocking_file);
+        let cache_err = local
+            .validate_start_state(&broken, &sandbox_dir)
+            .unwrap_err();
+        assert!(
+            cache_err.to_string().contains("image cache unavailable"),
+            "unexpected error: {cache_err}"
+        );
+
+        // 7. prepare_reserved_sandbox does not attach a shared sandbox_rootfs pin for isolated caches.
+        let pools = local.db().await.unwrap();
+        let reserved_id = LocalContext::insert_sandbox_record_impl(
+            pools.write(),
+            &decoded,
+            SandboxStatus::Starting,
+            true,
+        )
+        .await
+        .unwrap();
+        local
+            .prepare_reserved_sandbox(pools.write(), reserved_id, &decoded)
+            .await
+            .unwrap();
+        let pins = sandbox_rootfs_entity::Entity::find()
+            .filter(sandbox_rootfs_entity::Column::SandboxId.eq(reserved_id))
+            .all(pools.read())
+            .await
+            .unwrap();
+        assert!(
+            pins.is_empty(),
+            "isolated image_cache_dir must not pin shared sandbox_rootfs rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_restore_rejects_authenticated_shared_cache_and_strict_host_files_blocks_symlink_alias()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(temp.path())
+            .build()
+            .unwrap();
+        let (private_addr, _requests, private_server) =
+            start_mock_oci_registry(Some("Basic dGVuYW50LWE6c2VjcmV0LWE=")).await;
+        let private_ref = format!("{private_addr}/acme/secret:v1");
+
+        // Pull authenticated image into shared cache.
+        let pulled = local
+            .resolve_oci_image_for_create(
+                &private_ref,
+                PullPolicy::IfMissing,
+                RegistryOptions {
+                    auth: Some(RegistryAuth::Basic {
+                        username: "tenant-a".into(),
+                        password: "secret-a".into(),
+                    }),
+                    insecure: true,
+                    ..Default::default()
+                },
+                None,
+                None,
+                false,
+                RootfsMaterialization::Layered,
+                None,
+            )
+            .await
+            .unwrap();
+        let digest = pulled.pull_result.manifest_digest.to_string();
+
+        // Unauthenticated snapshot restore by digest on shared cache must NOT reuse the
+        // authenticated entry under either Never or IfMissing.
+        for policy in [PullPolicy::Never, PullPolicy::IfMissing] {
+            let err = local
+                .resolve_snapshot_oci_image(
+                    &private_ref,
+                    &digest,
+                    policy,
+                    RegistryOptions {
+                        auth: Some(RegistryAuth::Anonymous),
+                        insecure: true,
+                        ..Default::default()
+                    },
+                    None,
+                    false,
+                    RootfsMaterialization::Layered,
+                    None,
+                )
+                .await;
+            assert!(
+                err.is_err(),
+                "unauthenticated snapshot restore ({policy:?}) must not read authenticated shared cache"
+            );
+        }
+
+        // When the caller's own `--with-image` archive supplied the image, offline restore succeeds.
+        let from_archive = local
+            .resolve_snapshot_oci_image(
+                &private_ref,
+                &digest,
+                PullPolicy::Never,
+                RegistryOptions {
+                    auth: Some(RegistryAuth::Anonymous),
+                    insecure: true,
+                    ..Default::default()
+                },
+                None,
+                true,
+                RootfsMaterialization::Layered,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(from_archive.pull_result.manifest_digest.to_string(), digest);
+        private_server.abort();
+
+        // Symlink alias to the shared cache is recognized as the default cache, and rejected
+        // under runtime.strict_host_files (multi-tenant profile on Unix).
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(local.cache_dir()).unwrap();
+            let alias = temp.path().join("org-alias");
+            std::os::unix::fs::symlink(local.cache_dir(), &alias).unwrap();
+            assert!(local.is_default_image_cache_dir(Some(&alias)));
+
+            let strict_cfg = temp.path().join("strict-config.json");
+            std::fs::write(&strict_cfg, r#"{"runtime":{"strict_host_files":true}}"#).unwrap();
+            let strict_local = crate::test_support::local_backend_builder(temp.path())
+                .config_path(&strict_cfg)
+                .build()
+                .unwrap();
+            let err = strict_local
+                .resolve_image_cache_dir(Some(&alias))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("strict_host_files"),
+                "expected strict_host_files rejection, got: {err}"
+            );
+        }
     }
 }

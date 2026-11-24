@@ -18,6 +18,13 @@ const MAX_EXTENT_SECTORS: u64 = 4_194_304;
 /// Each extent file must be 512-byte aligned. Files larger than 2 GiB are split
 /// into multiple extent lines with increasing offsets.
 pub fn write_vmdk_descriptor(output: &Path, extents: &[&Path]) -> io::Result<()> {
+    let mut descriptor = Vec::new();
+    format_vmdk_descriptor(&mut descriptor, extents)?;
+    std::fs::write(output, descriptor)
+}
+
+/// Serialize the same descriptor for publication or validation.
+pub(crate) fn format_vmdk_descriptor(mut file: impl Write, extents: &[&Path]) -> io::Result<()> {
     let mut total_sectors: u64 = 0;
     let mut extent_lines = Vec::new();
 
@@ -60,8 +67,6 @@ pub fn write_vmdk_descriptor(output: &Path, extents: &[&Path]) -> io::Result<()>
     let heads: u64 = 16;
     let sectors_per_track: u64 = 63;
     let cylinders = total_sectors.div_ceil(heads * sectors_per_track);
-
-    let mut file = std::fs::File::create(output)?;
 
     writeln!(file, "# Disk DescriptorFile")?;
     writeln!(file, "version=1")?;

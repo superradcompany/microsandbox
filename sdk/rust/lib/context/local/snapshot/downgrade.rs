@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
@@ -24,6 +24,7 @@ use microsandbox_types::snapshot::{
     DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, Manifest, SnapshotState, UpperIntegrity,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
+use semver::Version;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 #[cfg(windows)]
@@ -32,6 +33,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::{MicrosandboxError, MicrosandboxResult};
+
+use super::{cache_binding, group};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -205,6 +208,54 @@ impl Drop for ArtifactLock {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Refuse targets that would ignore an isolated OCI cache binding on a retained snapshot.
+pub async fn preflight_isolated_image_cache(
+    db: &DatabaseConnection,
+    snapshots_dir: &Path,
+    target: &Version,
+) -> MicrosandboxResult<()> {
+    if *target >= Version::new(0, 8, 2) {
+        return Ok(());
+    }
+
+    let columns = db
+        .query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "PRAGMA table_info(snapshot_index)",
+        ))
+        .await?;
+    let mut bound = None;
+    if columns.iter().any(|row| {
+        row.try_get::<String>("", "name")
+            .is_ok_and(|name| name == "storage_binding_id")
+    }) {
+        bound = db
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT artifact_path FROM snapshot_index WHERE storage_binding_id = ? LIMIT 1",
+                [cache_binding::INDEX_BINDING.into()],
+            ))
+            .await?
+            .map(|row| row.try_get_by_index::<String>(0).map(PathBuf::from))
+            .transpose()?;
+    }
+
+    // The index can lag publication or be rebuilt. Check visible standalone
+    // artifacts and group members without opening descriptors or recovering groups.
+    if bound.is_none() {
+        bound = find_cache_sidecar(snapshots_dir, true)?;
+    }
+    if let Some(path) = bound {
+        return Err(MicrosandboxError::SnapshotMigration {
+            code: "snapshot_downgrade_unrepresentable".into(),
+            phase: "preflight".into(),
+            artifact: path.display().to_string(),
+            detail: "snapshot uses an isolated image cache; use v0.8.2 or later, or export and remove the snapshot before downgrading".into(),
+        });
+    }
+    Ok(())
+}
 
 /// Reverse every retained managed artifact into the v0.6.6 descriptor and
 /// index shape before the CLI rolls the database schema back.
@@ -518,6 +569,33 @@ async fn discover_paths(
         }
     }
     Ok(paths)
+}
+
+fn find_cache_sidecar(root: &Path, scan_groups: bool) -> MicrosandboxResult<Option<PathBuf>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::symlink_metadata(path.join(cache_binding::FILENAME)) {
+            Ok(_) => return Ok(Some(path)),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if scan_groups
+            && group::is_group(&path)
+            && let Some(member) = find_cache_sidecar(&path, false)?
+        {
+            return Ok(Some(member));
+        }
+    }
+    Ok(None)
 }
 
 async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxResult<Candidate> {
@@ -1816,6 +1894,69 @@ mod tests {
     use super::*;
 
     const LEGACY: &[u8] = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/alpine:3.20","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-07-01T10:00:00Z","labels":{"stage":"legacy"},"upper":{"file":"upper.ext4","size_bytes":5,"integrity":null},"source_sandbox":"box"}"#;
+
+    #[tokio::test]
+    async fn downgrade_refuses_retained_isolated_snapshots_without_sandboxes() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let snapshots = temp.path().join("snapshots");
+        let group = snapshots.join("retained");
+        let artifact = group.join("snap_00000000000000000000000000000001");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(
+            group.join(group::GROUP_FILENAME),
+            br#"{"schema":"microsandbox.snapshot-group/1","head":null}"#,
+        )
+        .unwrap();
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let supported = Version::new(0, 8, 2);
+        let older = [Version::new(0, 8, 1), Version::new(0, 7, 9)];
+
+        // The sidecar alone is enough while the index is absent or being rebuilt.
+        cache_binding::write(&artifact, &digest, &temp.path().join("isolated")).unwrap();
+        for target in &older {
+            let error = preflight_isolated_image_cache(&db, &snapshots, target)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("snapshot uses an isolated image cache")
+            );
+        }
+        preflight_isolated_image_cache(&db, &snapshots, &supported)
+            .await
+            .unwrap();
+
+        // Check the catalog independently, including copies outside the managed tree.
+        std::fs::remove_file(artifact.join(cache_binding::FILENAME)).unwrap();
+        db.execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO snapshot_index (artifact_path, digest, storage_binding_id, scope, state_kind, image_ref, image_manifest_digest, created_at, indexed_at) VALUES (?, ?, ?, 'disk', 'file', 'alpine:3.20', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [
+                temp.path().join("external").display().to_string().into(),
+                digest.clone().into(),
+                cache_binding::INDEX_BINDING.into(),
+                digest.into(),
+            ],
+        ))
+        .await
+        .unwrap();
+        for target in &older {
+            let error = preflight_isolated_image_cache(&db, &snapshots, target)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("snapshot uses an isolated image cache")
+            );
+        }
+        preflight_isolated_image_cache(&db, &snapshots, &supported)
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn final_single_raw_layer_downgrades_to_released_flat_descriptor() {

@@ -106,7 +106,7 @@ impl crate::Sandboxes {
                 parent,
                 layered,
                 manifest: config.manifest_digest.clone(),
-                cache: local.config().cache_dir(),
+                cache: local.image_cache_dir_for(config.image_cache_dir.as_deref()),
                 sources: local.config_sources().clone(),
                 runtime,
             };

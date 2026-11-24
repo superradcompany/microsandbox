@@ -23,6 +23,7 @@ pub(super) async fn prepare(
     path: &Path,
     digest: &str,
     manifest: &Manifest,
+    staging: Option<&Path>,
 ) -> MicrosandboxResult<()> {
     let key = super::store::canonical_path(path).display().to_string();
     let retained = db
@@ -64,6 +65,10 @@ pub(super) async fn prepare(
     }
     // Reserve only the immutable ID, never a user alias whose collision is still to be
     // checked by group publication. A failed batch cannot supersede an existing alias.
+    let has_bound_cache = match staging {
+        Some(staging) => super::cache_binding::read(staging, digest)?.is_some(),
+        None => false,
+    };
     super::store::index_write(
         db,
         path,
@@ -71,6 +76,7 @@ pub(super) async fn prepare(
         manifest,
         "publishing",
         Some(manifest.snapshot_id.to_string()),
+        has_bound_cache,
     )
     .await
 }
@@ -81,7 +87,8 @@ pub(super) async fn complete(
     digest: &str,
     manifest: &Manifest,
 ) -> MicrosandboxResult<()> {
-    super::store::index_write(db, path, digest, manifest, "ready", None).await
+    let has_bound_cache = super::cache_binding::read(path, digest)?.is_some();
+    super::store::index_write(db, path, digest, manifest, "ready", None, has_bound_cache).await
 }
 
 /// Complete the whole durable batch while retaining group ownership. Readers can help a
