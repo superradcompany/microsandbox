@@ -581,7 +581,7 @@ impl LocalContext {
             None,
             #[cfg(windows)]
             startup_pipe_name,
-        );
+        )?;
         tracing::debug!(
             per_disk_limit_bytes = ?writeback_limit_bytes,
             pool_bytes = ?writeback_pool_bytes,
@@ -2307,7 +2307,7 @@ fn machine_cli_args(
     parent_watch_fd: Option<i32>,
     startup_fd: Option<i32>,
     startup_pipe: Option<&OsStr>,
-) -> (Vec<OsString>, LaunchConfig) {
+) -> MicrosandboxResult<(Vec<OsString>, LaunchConfig)> {
     // `visible` stays on the process argv: a small set of operator-readable
     // labels (name, id, sizing, fds) so the sandbox is identifiable in `ps`
     // and logs. Everything bulky, structured, or secret-bearing goes into the
@@ -2466,9 +2466,18 @@ fn machine_cli_args(
                 });
             // Derive VMDK + upper paths from the stored manifest digest.
             } else if let Some(ref digest_str) = config.manifest_digest {
-                let cache_dir = local.cache_dir();
-                let cache = GlobalCache::new(&cache_dir).expect("cache init");
-                let digest: Digest = digest_str.parse().expect("invalid manifest digest");
+                let cache_dir = local.resolve_image_cache_dir(config.image_cache_dir.as_deref())?;
+                let cache = GlobalCache::new(&cache_dir).map_err(|error| {
+                    MicrosandboxError::Custom(format!(
+                        "image cache unavailable at {}: {error}",
+                        cache_dir.display()
+                    ))
+                })?;
+                let digest: Digest = digest_str.parse().map_err(|error| {
+                    MicrosandboxError::InvalidConfig(format!(
+                        "invalid manifest digest '{digest_str}': {error}"
+                    ))
+                })?;
                 let vmdk_path = cache.vmdk_path(&digest);
 
                 // VMDK (fsmeta + layers) read-only.
@@ -2761,7 +2770,7 @@ fn machine_cli_args(
         launch.sandbox_slot = network_slot.get();
     }
 
-    (visible, launch)
+    Ok((visible, launch))
 }
 
 /// Build guest settings shared by launch preflight and the final payload.
@@ -3645,7 +3654,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         launch
     }
 
@@ -3895,7 +3905,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         visible
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3961,7 +3972,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         visible
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3993,7 +4005,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         visible
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -4079,7 +4092,8 @@ mod tests {
             None,
             Some(microsandbox_runtime::vm::STARTUP_FD),
             None,
-        );
+        )
+        .unwrap();
 
         // The startup fd is an operator-visible label, so it stays on argv.
         assert!(visible.windows(2).any(|pair| pair
@@ -4160,7 +4174,8 @@ mod tests {
             None,
             None,
             Some(OsStr::new(r"\\.\pipe\msb-startup-test")),
-        );
+        )
+        .unwrap();
 
         assert!(visible.windows(2).any(|pair| pair
             == [

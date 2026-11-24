@@ -103,6 +103,13 @@ impl LocalContext {
                     "snapshot was replaced since this handle was opened".into(),
                 ));
             }
+            if config.image_cache_dir.is_none() {
+                config.image_cache_dir =
+                    super::cache_binding::read(artifact.path(), artifact.digest())?;
+            }
+            let cache_dir = self.resolve_image_cache_dir(config.image_cache_dir.as_deref())?;
+            config.snapshot_has_bundled_image =
+                super::cache_binding::has_bundle(&cache_dir, artifact.digest())?;
             config.snapshot_lease = artifact.lease.clone();
             let snapshot = from_artifact(backend, artifact)?;
             crate::sandbox::prepare_local_snapshot_restore(config, &snapshot)?;

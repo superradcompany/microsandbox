@@ -692,6 +692,12 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
                 UnsupportedReason::ConfigField("ca_certs"),
             ));
         }
+        if config.image_cache_dir.is_some() {
+            return Err(MicrosandboxError::unsupported(
+                Operation::SandboxCreate,
+                UnsupportedReason::ConfigField("image_cache_dir"),
+            ));
+        }
         reject_dropped_cloud_create_fields(&config)?;
         #[cfg(feature = "net")]
         {
@@ -2549,6 +2555,14 @@ mod tests {
         config
             .ca_certs
             .push(b"-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----".to_vec());
+        let err = CloudCreateBody::try_from(config).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_image_cache_dir() {
+        let mut config = base_cloud_config();
+        config.image_cache_dir = Some(std::path::PathBuf::from("/tmp/org-cache"));
         let err = CloudCreateBody::try_from(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
     }

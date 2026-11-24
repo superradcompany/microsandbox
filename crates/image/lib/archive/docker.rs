@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 
 use crate::{
-    CachedImageMetadata, CachedLayerMetadata, Digest, GlobalCache, ImageConfig, ImageError,
-    ImageResult, Platform, Reference, Registry,
+    CacheAuthProvenance, CachedImageMetadata, CachedLayerMetadata, Digest, GlobalCache,
+    ImageConfig, ImageError, ImageResult, Platform, Reference, Registry,
     erofs::{ErofsEntryKind, ErofsReader},
     path_bytes::{os_str_bytes, os_string_from_vec, path_bytes},
     tar::Compression,
@@ -115,6 +115,7 @@ pub struct ImageSaveLayer {
 
 #[derive(Debug)]
 struct PreparedLoadedImage {
+    warm: bool,
     reference: String,
     metadata: CachedImageMetadata,
 }
@@ -384,6 +385,7 @@ where
         let operation = cache.operation_or_new();
         if let Some(metadata) = refreshed.remove(&image.reference) {
             image.metadata = metadata;
+            image.warm = false;
         }
         let reference: Reference = image.reference.parse().map_err(|error| {
             ImageError::ManifestParse(format!("invalid image reference: {error}"))
@@ -415,6 +417,7 @@ where
                 .into_iter()
                 .map(|image| (image.reference, image.metadata))
                 .collect();
+            image.warm = false;
             image.metadata = refreshed
                 .remove(&image.reference)
                 .ok_or_else(|| ImageError::ManifestParse("archive changed during import".into()))?;
@@ -432,9 +435,15 @@ where
                 progress.clone(),
             )
             .await?;
-        operation
-            .write_image_metadata_async(&reference, &image.metadata)
-            .await?;
+        if !image.warm {
+            operation
+                .write_image_metadata_with_provenance_async(
+                    &reference,
+                    &image.metadata,
+                    CacheAuthProvenance::LocalArchive,
+                )
+                .await?;
+        }
         let image = LoadedImage {
             reference: image.reference,
             metadata: image.metadata,
@@ -779,29 +788,37 @@ fn prepare_docker_archive(
                 break 'early_gate;
             }
 
-            // Cached metadata under any of this image's refs whose recorded content (diff_ids) still equals the archive's.
-            let mut cached = None;
+            // Every target must already be reusable and describe the same image.
+            let mut cached = Vec::<PreparedLoadedImage>::new();
             for reference in &refs {
                 let Ok(parsed) = reference.parse::<Reference>() else {
                     break 'early_gate;
                 };
-                if let Some(metadata) = cache.read_image_metadata(&parsed)? {
-                    let cached_diff_ids = metadata
+                let Some(metadata) = cache.read_image_entry(&parsed)? else {
+                    break 'early_gate;
+                };
+                if !metadata.pull_auth.allows_unauthenticated_cache_hit()
+                    || metadata.metadata.config_digest != config_digest
+                    || !metadata
+                        .metadata
                         .layers
                         .iter()
-                        .map(|layer| layer.diff_id.clone())
-                        .collect::<Vec<_>>();
-                    if metadata.config_digest == config_digest && cached_diff_ids == diff_ids {
-                        cached = Some(metadata);
-                        break;
-                    }
+                        .map(|layer| &layer.diff_id)
+                        .eq(&diff_ids)
+                    || cached.first().is_some_and(|first| {
+                        first.metadata.manifest_digest != metadata.metadata.manifest_digest
+                    })
+                {
+                    break 'early_gate;
                 }
+                cached.push(PreparedLoadedImage {
+                    reference: reference.clone(),
+                    metadata: metadata.metadata,
+                    warm: true,
+                });
             }
-            let Some(metadata) = cached else {
-                break 'early_gate;
-            };
-
-            let Ok(manifest_digest) = metadata.manifest_digest.parse::<crate::Digest>() else {
+            let Ok(manifest_digest) = cached[0].metadata.manifest_digest.parse::<crate::Digest>()
+            else {
                 break 'early_gate;
             };
             if !crate::cache::is_valid_erofs_artifact(&cache.fsmeta_erofs_path(&manifest_digest))
@@ -824,12 +841,7 @@ fn prepare_docker_archive(
                 break 'early_gate;
             }
 
-            for reference in refs {
-                early_images.push(PreparedLoadedImage {
-                    reference,
-                    metadata: metadata.clone(),
-                });
-            }
+            early_images.extend(cached);
         }
         if !archive_contains_entries(input, &required_layers)? {
             break 'early_gate;
@@ -959,6 +971,7 @@ fn prepare_docker_archive(
             loaded.push(PreparedLoadedImage {
                 reference,
                 metadata: metadata.clone(),
+                warm: false,
             });
         }
     }
@@ -1029,13 +1042,9 @@ fn prepare_oci_archive(
 
     // Fast path: skip re-importing an image that is already fully materialized.
     //
-    // A `CachedImageMetadata` is fully determined by the small manifest and config blobs — `manifest_digest` is `sha256(manifest_bytes)`; each layer's digest, media type, and
-    // size come from the manifest descriptors; the diff_ids come from the config. So the whole record can be built without opening a single layer blob. When the fsmeta, VMDK,
-    // and every layer EROFS are already cached, return here and never stage (and re-SHA-256) the layer blobs — the work that otherwise dominates a warm-cache load. Any miss
-    // breaks out to the full staging path below.
-    //
-    // Only the small config/manifest blobs are read, seekably (`read_archive_entries` uses `entries_with_seek`), so a hit skips both the ~16 s of layer hashing and the
-    // streaming of layer bytes -- it is truly sub-second.
+    // A warm load only reuses already accessible references. Check the small
+    // manifest and config blobs and leave existing metadata and provenance intact.
+    // A new reference or any cache miss requires the full archive payload.
     'early_gate: {
         if !use_cache {
             break 'early_gate;
@@ -1048,7 +1057,7 @@ fn prepare_oci_archive(
                 break 'early_gate;
             };
             verify_descriptor_blob(manifest.config(), config_bytes)?;
-            let (config, diff_ids) = ImageConfig::parse(config_bytes)?;
+            let (_, diff_ids) = ImageConfig::parse(config_bytes)?;
             if diff_ids.len() != manifest.layers().len() {
                 break 'early_gate;
             }
@@ -1062,31 +1071,14 @@ fn prepare_oci_archive(
                 break 'early_gate;
             }
 
-            let mut layer_metadata = Vec::with_capacity(manifest.layers().len());
-            for (position, layer_descriptor) in manifest.layers().iter().enumerate() {
-                let diff_id_str = diff_ids[position].clone();
-                let Ok(diff_id) = diff_id_str.parse::<crate::Digest>() else {
+            for diff_id in diff_ids {
+                let Ok(diff_id) = diff_id.parse::<Digest>() else {
                     break 'early_gate;
                 };
-                if !crate::cache::is_valid_erofs_artifact(&cache.layer_erofs_path(&diff_id)) {
+                if !cache.is_layer_materialized(&diff_id) {
                     break 'early_gate;
                 }
-                layer_metadata.push(CachedLayerMetadata {
-                    digest: layer_descriptor.digest().to_string(),
-                    media_type: Some(layer_descriptor.media_type().to_string()),
-                    size_bytes: Some(layer_descriptor.size()),
-                    diff_id: diff_id_str,
-                });
             }
-
-            let metadata = CachedImageMetadata {
-                manifest_digest: manifest_digest_str,
-                config_digest: manifest.config().digest().to_string(),
-                raw_manifest_json: json_bytes_to_string(manifest_bytes, "OCI manifest")?,
-                raw_config_json: json_bytes_to_string(config_bytes, "OCI config")?,
-                config,
-                layers: layer_metadata,
-            };
 
             let mut refs = candidate.reference.clone().into_iter().collect::<Vec<_>>();
             if image_index == 0 {
@@ -1098,12 +1090,21 @@ fn prepare_oci_archive(
                 break 'early_gate;
             }
             for reference in refs {
-                if reference.parse::<Reference>().is_err() {
+                let Ok(parsed_ref) = reference.parse::<Reference>() else {
+                    break 'early_gate;
+                };
+                let Some(metadata) = cache.read_image_entry(&parsed_ref)? else {
+                    break 'early_gate;
+                };
+                if metadata.metadata.manifest_digest != manifest_digest_str
+                    || !metadata.pull_auth.allows_unauthenticated_cache_hit()
+                {
                     break 'early_gate;
                 }
                 early_images.push(PreparedLoadedImage {
                     reference,
-                    metadata: metadata.clone(),
+                    metadata: metadata.metadata,
+                    warm: true,
                 });
             }
         }
@@ -1213,6 +1214,7 @@ fn prepare_oci_archive(
             loaded.push(PreparedLoadedImage {
                 reference,
                 metadata: metadata.clone(),
+                warm: false,
             });
         }
     }
@@ -2543,6 +2545,93 @@ mod tests {
         assert_eq!(saved_config["history"][0]["comment"], "keep me");
     }
 
+    #[tokio::test]
+    async fn warm_archives_must_verify_payloads_for_new_or_unknown_tags() {
+        let temp = tempdir().unwrap();
+        let cache_dir = temp.path().join("cache");
+        let cache = GlobalCache::new(&cache_dir).unwrap();
+        let original = temp.path().join("valid.tar");
+        let invalid = temp.path().join("invalid.tar");
+        let layer = simple_layer_tar();
+        let corrupted = vec![0x7a; layer.len()];
+
+        for (reference, oci) in [("warm-oci:latest", true), ("warm-docker:latest", false)] {
+            if oci {
+                write_test_oci_archive_from_layer(&original, reference, layer.clone());
+            } else {
+                write_test_docker_archive_from_layer(&original, reference, layer.clone());
+            }
+            let loaded = load_archive(&cache_dir, &original, ImageLoadOptions::default())
+                .await
+                .unwrap();
+            let mut reader = tar::Archive::new(File::open(&original).unwrap());
+            let mut writer = tar::Builder::new(File::create(&invalid).unwrap());
+            for entry in reader.entries().unwrap() {
+                let mut entry = entry.unwrap();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                if bytes == layer {
+                    bytes.clone_from(&corrupted);
+                }
+                append_bytes(&mut writer, entry.path().unwrap().to_str().unwrap(), &bytes).unwrap();
+            }
+            writer.into_inner().unwrap();
+
+            let existing: Reference = reference.parse().unwrap();
+            let new_tag = format!("{reference}-new");
+            let result = load_archive(
+                &cache_dir,
+                &invalid,
+                ImageLoadOptions {
+                    tags: vec![new_tag.clone()],
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(result.is_err(), "unverified new tag {new_tag}");
+            assert!(
+                cache
+                    .read_image_metadata(&new_tag.parse().unwrap())
+                    .unwrap()
+                    .is_none()
+            );
+
+            cache
+                .write_image_metadata_async(&existing, &loaded[0].metadata)
+                .await
+                .unwrap();
+            let result = load_archive(&cache_dir, &invalid, ImageLoadOptions::default()).await;
+            assert!(result.is_err(), "unverified legacy tag {reference}");
+            let entry = cache.read_image_entry(&existing).unwrap().unwrap();
+            assert_eq!(entry.pull_auth, CacheAuthProvenance::Unknown);
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_archive_verifies_diff_id_before_reusing_an_erofs_layer() {
+        let temp = tempdir().unwrap();
+        let cache_dir = temp.path().join("cache");
+        let valid = temp.path().join("valid.tar");
+        let invalid = temp.path().join("invalid.tar");
+        let layer = simple_layer_tar();
+        let diff_id = format!("sha256:{}", sha256_hex(&layer));
+        write_test_oci_archive_from_layer(&valid, "cached:latest", layer);
+        load_archive(&cache_dir, &valid, ImageLoadOptions::default())
+            .await
+            .unwrap();
+
+        // This blob matches the OCI manifest's compressed digest and size. Its
+        // decompressed bytes do not match the diff ID recorded in the config.
+        let different_tar = vec![0; 1024];
+        write_test_oci_archive_with_diff_id(&invalid, "different:latest", different_tar, &diff_id);
+        let error = load_archive(&cache_dir, &invalid, ImageLoadOptions::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ImageError::DigestMismatch { expected, .. } if expected == diff_id)
+        );
+    }
+
     #[test]
     fn oci_load_hits_early_cache_gate_when_materialized() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3039,7 +3128,16 @@ mod tests {
 
     fn write_test_oci_archive_from_layer(path: &Path, reference: &str, layer_bytes: Vec<u8>) {
         let diff_id = format!("sha256:{}", sha256_hex(&layer_bytes));
-        let config_bytes = test_config_bytes(&diff_id);
+        write_test_oci_archive_with_diff_id(path, reference, layer_bytes, &diff_id);
+    }
+
+    fn write_test_oci_archive_with_diff_id(
+        path: &Path,
+        reference: &str,
+        layer_bytes: Vec<u8>,
+        diff_id: &str,
+    ) {
+        let config_bytes = test_config_bytes(diff_id);
         let config_hex = sha256_hex(&config_bytes);
         let layer_hex = sha256_hex(&layer_bytes);
         let manifest_bytes = serde_json::to_vec(&serde_json::json!({

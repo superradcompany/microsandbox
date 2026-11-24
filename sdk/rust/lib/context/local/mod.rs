@@ -274,6 +274,53 @@ impl LocalContext {
         self.config().cache_dir()
     }
 
+    /// Resolved OCI image cache directory, honoring a per-sandbox override when present.
+    pub(crate) fn image_cache_dir_for(&self, override_dir: Option<&Path>) -> PathBuf {
+        override_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.cache_dir())
+    }
+
+    /// Resolve and validate an OCI image cache directory override.
+    ///
+    /// When `runtime.strict_host_files` is enabled (including under
+    /// `DeploymentProfile::MultiTenant` on Unix), rejects symlinks in any existing
+    /// path component of an explicit override so an alias cannot redirect an
+    /// isolated org cache to another directory.
+    pub(crate) fn resolve_image_cache_dir(
+        &self,
+        override_dir: Option<&Path>,
+    ) -> MicrosandboxResult<PathBuf> {
+        let Some(dir) = override_dir else {
+            return Ok(self.cache_dir());
+        };
+        if dir.as_os_str().is_empty() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "image cache directory must not be empty".into(),
+            ));
+        }
+        #[cfg(unix)]
+        if self.config().strict_host_files() {
+            reject_symlinks_in_existing_components(dir)?;
+        }
+        Ok(dir.to_path_buf())
+    }
+
+    /// Whether `override_dir` refers to this backend's shared default cache directory.
+    ///
+    /// Resolves canonical existing ancestors so a symlink or lexical alias pointing
+    /// at the shared cache is not misclassified as an isolated cache.
+    pub(crate) fn is_default_image_cache_dir(&self, override_dir: Option<&Path>) -> bool {
+        let Some(dir) = override_dir else {
+            return true;
+        };
+        let default = self.cache_dir();
+        if dir == default {
+            return true;
+        }
+        canonical_with_missing_suffix(dir) == canonical_with_missing_suffix(&default)
+    }
+
     /// Resolved logs directory.
     pub fn logs_dir(&self) -> PathBuf {
         self.config().logs_dir()
@@ -750,6 +797,54 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
 fn is_missing_migrations_table(err: &DbErr) -> bool {
     let message = err.to_string();
     message.contains("no such table") && message.contains("seaql_migrations")
+}
+
+/// Resolve the longest existing ancestor canonically and append the remaining suffix
+/// so symlink/lexical aliases can be compared even before the leaf directory exists.
+fn canonical_with_missing_suffix(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            break;
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = existing.parent() else {
+            break;
+        };
+        existing = parent;
+    }
+    let mut resolved = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    resolved
+}
+
+#[cfg(unix)]
+fn reject_symlinks_in_existing_components(path: &Path) -> MicrosandboxResult<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "runtime.strict_host_files rejects symlink {} in image cache directory {}",
+                    current.display(),
+                    path.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "cannot inspect image cache directory {}: {error}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------

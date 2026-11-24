@@ -2,6 +2,7 @@
 
 pub(super) mod archive;
 mod artifact;
+pub(crate) mod cache_binding;
 pub(crate) mod configuration_capture;
 mod copy;
 mod create;

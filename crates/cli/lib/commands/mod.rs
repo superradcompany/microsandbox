@@ -79,11 +79,12 @@ pub(crate) async fn finish_stopped_memory_cleanup() {
 /// If the sandbox is already running, connects to the existing sandbox process
 /// via the agent relay socket. If stopped or crashed, starts it with a spinner.
 ///
-/// For OCI-backed sandboxes that are being (re)started, runs a pull-if-missing
+/// For local OCI-backed sandboxes that are being (re)started, runs a pull-if-missing
 /// pass first so any cache artifacts deleted since the last run (layer EROFS,
 /// fsmeta, VMDK) are regenerated before the VM tries to use them.
 pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbox> {
-    let handle = crate::commands::common::sandbox_record(name).await?;
+    let context = crate::commands::common::selected_context()?;
+    let handle = context.sandbox_ops().get(context.clone(), name).await?;
 
     match handle.status_snapshot() {
         SandboxStatus::Running | SandboxStatus::Draining => {
@@ -103,18 +104,28 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
             Ok(sandbox)
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
-            if let Ok(config) = handle.config()
+            if context.as_local().is_some()
+                && let Ok(config) = handle.config()
                 && let RootfsSource::Oci(ref oci) = config.spec.image
-            {
-                let materialization = if matches!(
+                && config.image_cache_dir.is_none()
+                && !matches!(
                     &oci.root_disk,
                     Some(microsandbox::sandbox::RootDisk::Flat { .. })
-                ) {
-                    pull::PullMaterialization::Flat
-                } else {
-                    pull::PullMaterialization::Layered
-                };
-                image::pull_if_missing(&oci.reference, quiet, materialization).await?;
+                )
+            {
+                match config.manifest_digest() {
+                    Some(digest) => {
+                        image::repair_pinned_root(&oci.reference, digest, quiet).await?
+                    }
+                    None => {
+                        image::pull_if_missing(
+                            &oci.reference,
+                            quiet,
+                            pull::PullMaterialization::Layered,
+                        )
+                        .await?;
+                    }
+                }
             }
 
             let spinner = if quiet {

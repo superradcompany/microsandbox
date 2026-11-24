@@ -699,18 +699,27 @@ impl LocalContext {
             )
             && let Some(ref digest_str) = config.manifest_digest
         {
-            let cache_dir = self.cache_dir();
-            if let Ok(cache) = GlobalCache::new(&cache_dir)
-                && let Ok(digest) = digest_str.parse::<Digest>()
-            {
-                let vmdk_path = cache.vmdk_path(&digest);
-                if !vmdk_path.exists() {
-                    return Err(crate::MicrosandboxError::Custom(format!(
-                        "sandbox '{}' cannot start: VMDK missing: {}",
-                        config.spec.name,
-                        vmdk_path.display()
-                    )));
-                }
+            let cache_dir = self.resolve_image_cache_dir(config.image_cache_dir.as_deref())?;
+            let cache = GlobalCache::new(&cache_dir).map_err(|error| {
+                crate::MicrosandboxError::Custom(format!(
+                    "sandbox '{}' cannot start: image cache unavailable at {}: {error}",
+                    config.spec.name,
+                    cache_dir.display()
+                ))
+            })?;
+            let digest = digest_str.parse::<Digest>().map_err(|error| {
+                crate::MicrosandboxError::Custom(format!(
+                    "sandbox '{}' cannot start: invalid manifest digest '{digest_str}': {error}",
+                    config.spec.name
+                ))
+            })?;
+            let vmdk_path = cache.vmdk_path(&digest);
+            if !vmdk_path.exists() {
+                return Err(crate::MicrosandboxError::Custom(format!(
+                    "sandbox '{}' cannot start: VMDK missing: {}",
+                    config.spec.name,
+                    vmdk_path.display()
+                )));
             }
         }
 

@@ -293,6 +293,13 @@ impl RestoreBuilder {
         self
     }
 
+    /// Override the OCI image cache directory used when resolving or unpacking
+    /// the restored sandbox's base image (local backends only).
+    pub fn image_cache_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.inner = self.inner.image_cache_dir(path);
+        self
+    }
+
     /// Select the destination proxy before disk boot or full-memory resume.
     /// This does not replace the captured guest interface or inject guest trust material.
     /// Proxy credentials use the existing destination secret-source resolution.
