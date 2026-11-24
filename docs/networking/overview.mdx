@@ -406,6 +406,8 @@ For plaintext HTTP, microsandbox can inspect the `Host` header and require it to
 
 Strict hostname policy mode is enabled by default: hostname allowlists fail closed unless microsandbox can inspect the request authority. In strict mode, hostname-based allow rules still work for plaintext HTTP and TLS-intercepted HTTPS. Non-intercepted HTTPS is denied when it would otherwise be allowed only by a hostname rule. Outside DNS forwarding, UDP traffic, including QUIC and HTTP/3, is also denied when the first matching rule allows it by hostname. IP, CIDR, group, and default allow rules are not treated as hostname-based allows. Set `--net-strict=false` or `network.strict: false` in sandbox configuration to opt out.
 
+The `msb` runtime enforces strict UDP policy. If you upgrade only the SDK, an older runtime keeps its previous UDP behavior. Upgrade `msb` and restart running sandboxes to apply the new enforcement.
+
 </Accordion>
 
 ## Port mapping

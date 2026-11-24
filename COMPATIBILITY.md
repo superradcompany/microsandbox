@@ -469,6 +469,8 @@ Gateway DNS rebinding protection also gates local-network discovery. `.local` re
 
 Strict hostname policy is enabled by default. The v0.6.0–v0.6.17 launch gate rejects strict policies containing outbound hostname allow rules, including domain suffixes and rules applying in both directions. Policies without those rules retain their existing behavior on older runtimes because strict enforcement is unused. Explicit `strict: false` remains supported.
 
+Strict UDP hostname enforcement runs in `msb` and requires no wire protocol, SDK API, or configuration schema changes. An SDK upgrade alone leaves the previous UDP behavior in place. Upgrade the runtime and restart running sandboxes to apply enforcement.
+
 Observable network behavior is an effective compatibility contract. It includes default MTU, sandbox-slot address derivation, IPv4 subnet sizing, guest and gateway offsets, IPv6 prefixes, deterministic MAC addresses, interface name `eth0`, `host.microsandbox.internal`, DNS UDP and TCP behavior, DNS-over-TLS, TLS interception and trust paths, published-port binding, TCP half-close, UDP peer lifetime, destination policy, and host-side secret placeholder substitution.
 
 TLS reconnects may use SNI to revalidate an expired DNS binding. A fresh policy-filtered answer must contain the chosen IP before connection policy is rechecked; no prior guest lookup is required. Deferring SYN admission never dials upstream. Non-SNI connections, UDP, ICMP, and ingress still require live bindings. No launch fields, persisted formats, protocols, SDK contracts, or agent/kernel requirements change. Older runtimes retain their previous TTL-expiry behavior.

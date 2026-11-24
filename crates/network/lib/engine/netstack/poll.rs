@@ -1237,6 +1237,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+    use hickory_proto::rr::rdata::A;
+    use hickory_proto::rr::{Name, RData, RecordType};
+    use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
     use microsandbox_types::{InterceptCaConfig, TlsConfig};
     use smoltcp::phy::ChecksumCapabilities;
     use smoltcp::wire::{
@@ -1247,6 +1251,9 @@ mod tests {
     use tokio::runtime::Handle;
     use tokio::time::timeout;
 
+    use crate::HOST_ALIAS;
+    use crate::dns::Nameserver;
+    use crate::engine::network::test_support::ipv6_loopback_unavailable;
     use crate::engine::tls::ca::CertAuthority;
     use crate::netstack::shared::ResolvedHostnameFamily;
     use crate::policy::{Destination, DestinationGroup, NetworkProfile, Rule};
@@ -1510,7 +1517,14 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         ] {
-            let receiver = UdpSocket::bind(SocketAddr::new(loopback, 0)).await.unwrap();
+            let receiver = match UdpSocket::bind(SocketAddr::new(loopback, 0)).await {
+                Ok(socket) => socket,
+                Err(error) if loopback.is_ipv6() && ipv6_loopback_unavailable(&error) => {
+                    eprintln!("skipping strict UDP on {loopback}: host cannot bind IPv6: {error}");
+                    continue;
+                }
+                Err(error) => panic!("binding strict UDP receiver on {loopback}: {error}"),
+            };
             let mut fixture = UdpEgressFixture::new(receiver.local_addr().unwrap(), None);
             let mut device = SmoltcpDevice::new(fixture.shared.clone(), fixture.config.mtu);
             let mut iface = create_interface(&mut device, &fixture.config);
@@ -1544,8 +1558,169 @@ mod tests {
         }
     }
 
-    /// Split this fixture's UDP header and eight-byte payload into two IP fragments.
+    /// Isolate the real poll thread in a subprocess because it has no shutdown API.
+    #[test]
+    fn strict_udp_poll_loop_enforces_policy_and_intercepts_fragmented_dns() {
+        const CHILD_ENV: &str = "MSB_TEST_STRICT_UDP_POLL_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "engine::netstack::poll::tests::strict_udp_poll_loop_enforces_policy_and_intercepts_fragmented_dns",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "poll-loop child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(check_strict_udp_poll_loop());
+    }
+
+    async fn check_strict_udp_poll_loop() {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let host_dst = receiver.local_addr().unwrap();
+        let config = leak_poll_config();
+        let gateway = config.gateway.ipv4.unwrap();
+        let guest = SocketAddr::from((config.guest_ipv4.unwrap(), 12345));
+        let shared = Arc::new(SharedState::new(16));
+        assert!(shared.cache_resolved_hostname(
+            UDP_HOSTNAME,
+            ResolvedHostnameFamily::Ipv4,
+            [host_dst.ip()],
+            Duration::from_secs(60),
+        ));
+        let policy = udp_policy(vec![
+            Rule::allow_egress(Destination::Domain(UDP_HOSTNAME.parse().unwrap())),
+            Rule::allow_egress(Destination::Group(DestinationGroup::Host)),
+        ]);
+
+        let frame = |dst, payload: &[u8]| {
+            construct_udp_response(
+                guest,
+                dst,
+                payload,
+                EthernetAddress(config.guest_mac),
+                EthernetAddress(config.gateway_mac),
+            )
+            .unwrap()
+        };
+        let mut query = Message::new(42, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(
+            Name::from_ascii(format!("{HOST_ALIAS}.")).unwrap(),
+            RecordType::A,
+        ));
+
+        // Both destinations dial the same host socket. The literal loopback
+        // address matches the cached hostname, while the gateway matches Host.
+        let control = frame(SocketAddr::from((gateway, host_dst.port())), b"allowed");
+        let denied = frame(host_dst, b"hostname only");
+        let [denied_first, denied_last] = fragment_udp_test_frame(&denied, true);
+        let dns = frame(SocketAddr::from((gateway, 53)), &query.to_bytes().unwrap());
+        let [dns_first, dns_last] = fragment_udp_test_frame(&dns, true);
+
+        let loop_shared = shared.clone();
+        let handle = Handle::current();
+        std::thread::spawn(move || {
+            smoltcp_poll_loop(
+                loop_shared,
+                config,
+                policy,
+                None,
+                DnsConfig {
+                    // Initialize with a loopback upstream so the synthetic
+                    // host alias response never depends on host DNS settings.
+                    nameservers: vec![Nameserver::Addr(host_dst)],
+                    ..DnsConfig::default()
+                },
+                None,
+                BoundPublishedPorts::default(),
+                true,
+                None,
+                None,
+                None,
+                handle,
+                SecretsHandle::new(Default::default()),
+                None,
+            );
+        });
+        for frame in [
+            denied,
+            denied_first,
+            denied_last,
+            control,
+            dns_first,
+            dns_last,
+        ] {
+            shared.tx_ring.push(frame).unwrap();
+        }
+        shared.tx_wake.wake();
+
+        assert_eq!(receive_udp(&receiver).await, b"allowed");
+        let response_frame = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(frame) = shared.rx_ring.pop() {
+                    break frame;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("expected a response to fragmented DNS");
+        let eth = EthernetFrame::new_checked(&response_frame).unwrap();
+        assert_eq!(eth.ethertype(), EthernetProtocol::Ipv4);
+        let ip = Ipv4Packet::new_checked(eth.payload()).unwrap();
+        assert_eq!(ip.next_header(), IpProtocol::Udp);
+        assert_eq!(ip.src_addr(), gateway);
+        assert_eq!(ip.dst_addr(), guest.ip());
+        let udp = UdpPacket::new_checked(ip.payload()).unwrap();
+        assert_eq!(udp.src_port(), 53);
+        assert_eq!(udp.dst_port(), guest.port());
+
+        let response = Message::from_bytes(udp.payload()).unwrap();
+        assert_eq!(response.metadata.id, query.metadata.id);
+        assert_eq!(response.metadata.message_type, MessageType::Response);
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(response.queries, query.queries);
+        assert_eq!(response.answers[0].data, RData::A(A(gateway)));
+
+        // A wrongly allowed datagram can arrive after the control because the
+        // relay uses separate sessions for the literal and gateway destinations.
+        let mut unexpected = [0; 128];
+        assert!(
+            timeout(Duration::from_millis(250), receiver.recv(&mut unexpected))
+                .await
+                .is_err(),
+            "strict mode forwarded a hostname-only datagram",
+        );
+    }
+
     fn reassemble_udp_test_frame(frame: &[u8], ipv4: bool) -> ReassembledUdpDatagram {
+        let [first, last] = fragment_udp_test_frame(frame, ipv4);
+        if ipv4 {
+            let mut reassembler = Ipv4UdpFragmentReassembler::new();
+            assert!(reassembler.push(&first).is_none());
+            reassembler.push(&last).unwrap()
+        } else {
+            let mut reassembler = Ipv6UdpFragmentReassembler::new();
+            assert!(reassembler.push(&first).is_none());
+            reassembler.push(&last).unwrap()
+        }
+    }
+
+    /// Put the UDP header in the first IP fragment and the payload in the second.
+    fn fragment_udp_test_frame(frame: &[u8], ipv4: bool) -> [Vec<u8>; 2] {
         const ETHERNET_LEN: usize = 14;
         const UDP_HEADER_LEN: usize = 8;
 
@@ -1561,15 +1736,10 @@ mod tests {
                 ip.fill_checksum();
                 fragment
             };
-            let mut reassembler = Ipv4UdpFragmentReassembler::new();
-            assert!(
-                reassembler
-                    .push(&make_fragment(0, true, &udp[..UDP_HEADER_LEN]))
-                    .is_none()
-            );
-            reassembler
-                .push(&make_fragment(8, false, &udp[UDP_HEADER_LEN..]))
-                .unwrap()
+            [
+                make_fragment(0, true, &udp[..UDP_HEADER_LEN]),
+                make_fragment(8, false, &udp[UDP_HEADER_LEN..]),
+            ]
         } else {
             let (headers, udp) = frame.split_at(ETHERNET_LEN + 40);
             let make_fragment = |offset_and_more, data: &[u8]| {
@@ -1580,15 +1750,10 @@ mod tests {
                 ip.set_payload_len((fragment_header.len() + data.len()) as u16);
                 fragment
             };
-            let mut reassembler = Ipv6UdpFragmentReassembler::new();
-            assert!(
-                reassembler
-                    .push(&make_fragment(1, &udp[..UDP_HEADER_LEN]))
-                    .is_none()
-            );
-            reassembler
-                .push(&make_fragment(8, &udp[UDP_HEADER_LEN..]))
-                .unwrap()
+            [
+                make_fragment(1, &udp[..UDP_HEADER_LEN]),
+                make_fragment(8, &udp[UDP_HEADER_LEN..]),
+            ]
         }
     }
 
