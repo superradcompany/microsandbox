@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::context::local::LocalContext;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -13,6 +14,8 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 
 pub(super) const FILENAME: &str = "image-cache.json";
 pub(crate) const INDEX_BINDING: &str = "oci-image-cache:v1";
+const BINDINGS_DIR: &str = "snapshot-bindings";
+const BUNDLES_DIR: &str = "snapshot-bundles";
 const MAX_BYTES: u64 = 64 * 1024;
 
 //--------------------------------------------------------------------------------------------------
@@ -63,12 +66,31 @@ pub(super) fn read(artifact: &Path, digest: &str) -> MicrosandboxResult<Option<P
     Ok(Some(binding.cache_dir))
 }
 
+pub(super) fn read_managed(
+    local: &LocalContext,
+    artifact: &Path,
+    digest: &str,
+) -> MicrosandboxResult<Option<PathBuf>> {
+    if !is_managed_snapshot_path(&local.snapshots_dir(), artifact) {
+        return Ok(None);
+    }
+    let Some(cache_dir) = read(artifact, digest)? else {
+        return Ok(None);
+    };
+    let resolved_cache = local.resolve_image_cache_dir(Some(&cache_dir))?;
+    if !has_binding(&resolved_cache, digest)? {
+        return Err(invalid_binding(&artifact.join(FILENAME)));
+    }
+    Ok(Some(resolved_cache))
+}
+
 /// Write only inside publication-owned staging, before the directory becomes visible.
 pub(super) fn write(artifact: &Path, digest: &str, cache_dir: &Path) -> MicrosandboxResult<()> {
     let path = artifact.join(FILENAME);
     if !cache_dir.is_absolute() {
         return Err(invalid_binding(&path));
     }
+    record_binding(cache_dir, digest)?;
     if let Some(existing) = read(artifact, digest)? {
         return if existing == cache_dir {
             Ok(())
@@ -99,7 +121,28 @@ pub(super) fn record_bundle(
     digest: &str,
     created: &mut Vec<PathBuf>,
 ) -> MicrosandboxResult<()> {
-    let receipt = bundle_receipt(cache_dir, digest)?;
+    record_receipt(cache_dir, BUNDLES_DIR, digest, Some(created))
+}
+
+pub(super) fn has_bundle(cache_dir: &Path, digest: &str) -> MicrosandboxResult<bool> {
+    has_receipt(cache_dir, BUNDLES_DIR, digest)
+}
+
+fn record_binding(cache_dir: &Path, digest: &str) -> MicrosandboxResult<()> {
+    record_receipt(cache_dir, BINDINGS_DIR, digest, None)
+}
+
+fn has_binding(cache_dir: &Path, digest: &str) -> MicrosandboxResult<bool> {
+    has_receipt(cache_dir, BINDINGS_DIR, digest)
+}
+
+fn record_receipt(
+    cache_dir: &Path,
+    subdir: &str,
+    digest: &str,
+    created: Option<&mut Vec<PathBuf>>,
+) -> MicrosandboxResult<()> {
+    let receipt = receipt_path(cache_dir, subdir, digest)?;
     let directory = receipt.parent().expect("receipt directory");
     std::fs::create_dir_all(directory)?;
     match std::fs::File::options()
@@ -108,7 +151,9 @@ pub(super) fn record_bundle(
         .open(&receipt)
     {
         Ok(file) => {
-            created.push(receipt.clone());
+            if let Some(created) = created {
+                created.push(receipt.clone());
+            }
             file.sync_all()?;
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
@@ -122,8 +167,8 @@ pub(super) fn record_bundle(
     Ok(())
 }
 
-pub(super) fn has_bundle(cache_dir: &Path, digest: &str) -> MicrosandboxResult<bool> {
-    let receipt = bundle_receipt(cache_dir, digest)?;
+fn has_receipt(cache_dir: &Path, subdir: &str, digest: &str) -> MicrosandboxResult<bool> {
+    let receipt = receipt_path(cache_dir, subdir, digest)?;
     match std::fs::symlink_metadata(receipt) {
         Ok(metadata) => Ok(metadata.file_type().is_file() && metadata.len() == 0),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
@@ -131,11 +176,19 @@ pub(super) fn has_bundle(cache_dir: &Path, digest: &str) -> MicrosandboxResult<b
     }
 }
 
-fn bundle_receipt(cache_dir: &Path, digest: &str) -> MicrosandboxResult<PathBuf> {
+fn receipt_path(cache_dir: &Path, subdir: &str, digest: &str) -> MicrosandboxResult<PathBuf> {
     let digest: microsandbox_image::Digest = digest.parse()?;
-    Ok(cache_dir
-        .join("snapshot-bundles")
-        .join(digest.to_path_safe()))
+    Ok(cache_dir.join(subdir).join(digest.to_path_safe()))
+}
+
+fn is_managed_snapshot_path(snapshots_dir: &Path, artifact: &Path) -> bool {
+    let Ok(managed_root) = std::fs::canonicalize(snapshots_dir) else {
+        return false;
+    };
+    let Ok(resolved_artifact) = std::fs::canonicalize(artifact) else {
+        return false;
+    };
+    resolved_artifact != managed_root && resolved_artifact.starts_with(&managed_root)
 }
 
 fn invalid_binding(path: &Path) -> MicrosandboxError {

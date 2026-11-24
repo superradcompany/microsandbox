@@ -105,7 +105,7 @@ impl LocalContext {
             }
             if config.image_cache_dir.is_none() {
                 config.image_cache_dir =
-                    super::cache_binding::read(artifact.path(), artifact.digest())?;
+                    super::cache_binding::read_managed(self, artifact.path(), artifact.digest())?;
             }
             let cache_dir = self.resolve_image_cache_dir(config.image_cache_dir.as_deref())?;
             config.snapshot_has_bundled_image =

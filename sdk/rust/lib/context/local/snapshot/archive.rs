@@ -935,7 +935,7 @@ pub(super) async fn save_archive(
     let mut cache_files: Vec<(PathBuf, String)> = Vec::new();
     let mut admitted_metadata = None;
     let image_cache_dir = if opts.with_image {
-        super::cache_binding::read(head.path(), head.digest())?
+        super::cache_binding::read_managed(local, head.path(), head.digest())?
     } else {
         None
     };
@@ -6111,7 +6111,7 @@ mod tests {
             .is_err(),
             "a managed root must still require its complete layered base"
         );
-        let artifact = directory.path().join("flat-snapshot");
+        let artifact = local.snapshots_dir().join("flat-snapshot");
         write_grouped_archive_fixture(&artifact, &manifest);
         super::super::cache_binding::write(&artifact, &manifest.digest().unwrap(), &isolated)
             .unwrap();
@@ -6139,7 +6139,7 @@ mod tests {
         let loaded = load_snapshot(&destination, &archive, None).await.unwrap();
         let mut sibling = manifest.clone();
         sibling.snapshot_id = SnapshotId::new("snap_00000000000000000000000000000023").unwrap();
-        let sibling_path = directory.path().join("sibling-snapshot");
+        let sibling_path = local.snapshots_dir().join("sibling-snapshot");
         write_grouped_archive_fixture(&sibling_path, &sibling);
         super::super::cache_binding::write(&sibling_path, &sibling.digest().unwrap(), &isolated)
             .unwrap();
@@ -6249,6 +6249,137 @@ mod tests {
                 SnapshotRootDisk::Flat
             )
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn supplied_snapshot_sidecar_cannot_select_another_tenants_private_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let local = Arc::new(
+            crate::test_support::local_backend_builder(directory.path().join("home"))
+                .build()
+                .unwrap(),
+        );
+        let victim_cache_dir = directory.path().join("orgs/victim/cache");
+        let victim_cache = microsandbox_image::GlobalCache::new_async(&victim_cache_dir)
+            .await
+            .unwrap();
+        let mut manifest = grouped_archive_manifest(33, None);
+        manifest.root_disk = SnapshotRootDisk::Flat;
+        let image_ref: microsandbox_image::Reference = manifest.image.reference.parse().unwrap();
+        let raw_config_json = "{}".to_string();
+        let metadata = microsandbox_image::CachedImageMetadata {
+            manifest_digest: manifest.image.manifest_digest.clone(),
+            config_digest: format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(raw_config_json.as_bytes()))
+            ),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+            raw_config_json,
+            config: microsandbox_image::ImageConfig::default(),
+            layers: Vec::new(),
+        };
+        victim_cache
+            .write_image_metadata_with_provenance_async(
+                &image_ref,
+                &metadata,
+                microsandbox_image::CacheAuthProvenance::Authenticated,
+            )
+            .await
+            .unwrap();
+
+        // 1. An externally supplied snapshot directory carrying a crafted `image-cache.json`
+        //    must never nominate another tenant's cache via restore, path-set launch, or export.
+        let external = directory.path().join("attacker-supplied-snapshot");
+        write_grouped_archive_fixture(&external, &manifest);
+        let descriptor_digest = manifest.digest().unwrap();
+        let forged_sidecar = serde_json::json!({
+            "descriptor_digest": descriptor_digest,
+            "cache_dir": victim_cache_dir,
+        });
+        std::fs::write(
+            external.join(super::super::cache_binding::FILENAME),
+            serde_json::to_vec(&forged_sidecar).unwrap(),
+        )
+        .unwrap();
+
+        let mut direct_restore = crate::SandboxConfig::default();
+        local
+            .prepare_local_restore(
+                local.clone(),
+                &mut direct_restore,
+                crate::SnapshotReference::path(external.to_string_lossy()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(direct_restore.image_cache_dir, None);
+
+        let mut path_set_restore = crate::SandboxConfig::default();
+        launch::prepare(
+            local.clone(),
+            &mut path_set_restore,
+            vec![external.clone()],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(path_set_restore.image_cache_dir, None);
+
+        let exported = directory.path().join("stolen.msb");
+        let export_err = save_snapshot(
+            &local,
+            external.to_str().unwrap(),
+            &exported,
+            SaveOpts {
+                with_image: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            export_err.to_string().contains("missing from cache"),
+            "unexpected export error: {export_err}"
+        );
+
+        // 2. Even inside `snapshots_dir`, a forged sidecar without a host-written receipt in
+        //    `victim_cache/snapshot-bindings/` must be rejected.
+        let managed = local.snapshots_dir().join("forged-managed-snapshot");
+        write_grouped_archive_fixture(&managed, &manifest);
+        std::fs::write(
+            managed.join(super::super::cache_binding::FILENAME),
+            serde_json::to_vec(&forged_sidecar).unwrap(),
+        )
+        .unwrap();
+
+        let mut managed_restore = crate::SandboxConfig::default();
+        let err = local
+            .prepare_local_restore(
+                local.clone(),
+                &mut managed_restore,
+                crate::SnapshotReference::path(managed.to_string_lossy()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid local image cache binding"),
+            "unexpected managed error: {err}"
+        );
+
+        let mut managed_path_set = crate::SandboxConfig::default();
+        let err = launch::prepare(
+            local.clone(),
+            &mut managed_path_set,
+            vec![managed.clone()],
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid local image cache binding"),
+            "unexpected managed path-set error: {err}"
         );
     }
 

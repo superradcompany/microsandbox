@@ -244,7 +244,7 @@ pub(super) async fn index_upsert(
             "snapshot changed before indexing".into(),
         ));
     }
-    let image_cache_dir = super::cache_binding::read(artifact_path, digest)?;
+    let image_cache_dir = super::cache_binding::read_managed(local, artifact_path, digest)?;
     let cache_dir = local.resolve_image_cache_dir(image_cache_dir.as_deref())?;
     let cache = microsandbox_image::GlobalCache::new_async(&cache_dir).await?;
     let digest_id: microsandbox_image::Digest = manifest.image.manifest_digest.parse()?;

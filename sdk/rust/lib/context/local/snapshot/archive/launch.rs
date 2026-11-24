@@ -95,13 +95,14 @@ pub(crate) async fn prepare(
     .map_err(|error| {
         MicrosandboxError::Runtime(format!("snapshot source preparation: {error}"))
     })??;
+    let local = backend.as_local().expect("local backend checked");
     if config.image_cache_dir.is_none() && !prepared.bundled_image {
-        config.image_cache_dir = super::super::cache_binding::read(
+        config.image_cache_dir = super::super::cache_binding::read_managed(
+            local,
             prepared.snapshot.path(),
             prepared.snapshot.digest(),
         )?;
     }
-    let local = backend.as_local().expect("local backend checked");
     let cache_dir = local.resolve_image_cache_dir(config.image_cache_dir.as_deref())?;
     config.snapshot_has_bundled_image =
         super::super::cache_binding::has_bundle(&cache_dir, prepared.snapshot.digest())?;
