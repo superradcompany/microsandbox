@@ -1,7 +1,7 @@
 //! `msb image` command — manage OCI images.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
@@ -144,6 +144,11 @@ pub struct ImagePruneArgs {
     /// Do not prompt for confirmation.
     #[arg(short = 'y', long)]
     pub yes: bool,
+
+    /// Path to a file listing OCI image references to exclude from pruning (one per line).
+    /// Can be specified multiple times.
+    #[arg(long = "exclude-from", value_name = "PATH")]
+    pub exclude_from: Vec<PathBuf>,
 
     /// Output format (json).
     #[arg(long, value_name = "FORMAT", value_enum)]
@@ -746,6 +751,7 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
 
 /// Execute `msb image prune`.
 pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
+    let excluded_refs = load_exclude_from_files(&args.exclude_from)?;
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
 
@@ -767,7 +773,7 @@ pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
         }
     }
 
-    let report = Image::prune_local(local).await?;
+    let report = Image::prune_local_with_keep(local, &excluded_refs).await?;
 
     if args.format == Some(OutputFormat::Json) {
         let json = serde_json::json!({
@@ -876,6 +882,43 @@ fn resolve_pull_materialization(
     }))
 }
 
+/// Load and validate OCI image references from one or more `--exclude-from` files.
+fn load_exclude_from_files(paths: &[PathBuf]) -> anyhow::Result<Vec<String>> {
+    let mut excluded_refs = Vec::new();
+    for path in paths {
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to read --exclude-from file '{}': {error}",
+                path.display()
+            )
+        })?;
+        excluded_refs.extend(parse_exclude_from_file(&content, path)?);
+    }
+    Ok(excluded_refs)
+}
+
+/// Parse a line-oriented `--exclude-from` file, ignoring blank lines and `#`
+/// comments, and normalizing each entry with the OCI reference parser.
+fn parse_exclude_from_file(content: &str, path: &Path) -> anyhow::Result<Vec<String>> {
+    let mut refs = Vec::new();
+    for (index, raw_line) in content.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parsed: microsandbox_image::Reference = line.parse().map_err(|error| {
+            anyhow::anyhow!(
+                "invalid image reference in --exclude-from file '{}' at line {}: '{}': {error}",
+                path.display(),
+                index + 1,
+                line
+            )
+        })?;
+        refs.push(parsed.to_string());
+    }
+    Ok(refs)
+}
+
 /// Truncate a digest to a short form (first 12 hex chars after algorithm prefix).
 fn truncate_digest(digest: &str) -> String {
     if let Some(hex) = digest.strip_prefix("sha256:") {
@@ -912,6 +955,77 @@ mod tests {
             resolve_pull_materialization(Some(pull::PullMaterialization::Layered), &defaults)
                 .unwrap(),
             pull::PullMaterialization::Layered
+        );
+    }
+
+    #[test]
+    fn parse_exclude_from_file_ignores_blank_lines_comments_and_whitespace() {
+        let content = "\
+            # Pre-warmed images\n\
+            \n\
+               \t  \n\
+              alpine:3.20  \n\
+              # Indented comment\n\
+            \tpython:3.12-slim\r\n\
+            ghcr.io/microsandbox/node:22\n\
+        ";
+
+        let parsed = parse_exclude_from_file(content, Path::new("exclude.txt")).unwrap();
+
+        assert_eq!(
+            parsed,
+            vec![
+                "docker.io/library/alpine:3.20",
+                "docker.io/library/python:3.12-slim",
+                "ghcr.io/microsandbox/node:22",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_exclude_from_file_rejects_invalid_reference_with_line_number() {
+        let content = "alpine:3.20\n\nINVALID:::REF!!!\n";
+        let err = parse_exclude_from_file(content, Path::new("exclude.txt")).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("exclude.txt"), "{message}");
+        assert!(message.contains("line 3"), "{message}");
+    }
+
+    #[test]
+    fn load_exclude_from_files_fails_on_missing_or_unreadable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.txt");
+
+        let err = load_exclude_from_files(std::slice::from_ref(&missing)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to read --exclude-from file")
+        );
+
+        let dir_err = load_exclude_from_files(&[dir.path().to_path_buf()]).unwrap_err();
+        assert!(
+            dir_err
+                .to_string()
+                .contains("failed to read --exclude-from file")
+        );
+    }
+
+    #[test]
+    fn load_exclude_from_files_combines_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        std::fs::write(&first, "alpine:3.20\n").unwrap();
+        std::fs::write(&second, "python:3.12-slim\n").unwrap();
+
+        let loaded = load_exclude_from_files(&[first, second]).unwrap();
+        assert_eq!(
+            loaded,
+            vec![
+                "docker.io/library/alpine:3.20",
+                "docker.io/library/python:3.12-slim",
+            ]
         );
     }
 }
