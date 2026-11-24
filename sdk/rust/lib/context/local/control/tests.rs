@@ -48,8 +48,9 @@ async fn database_identity_detects_replacement_but_not_ordinary_writes() {
 mod unix {
     use futures::FutureExt;
     use microsandbox_runtime::ipc::RuntimeSocketPaths;
+    use std::io;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use std::time::Duration;
@@ -68,7 +69,7 @@ mod unix {
     use tokio_util::sync::CancellationToken;
 
     use super::super::identity::{ProcessIdentity, ProcessStart};
-    use super::super::registry::{ControlSessions, RuntimeKey};
+    use super::super::registry::{ControlSessions, RuntimeKey, SessionConnector};
     use crate::context::LocalContext;
 
     //--------------------------------------------------------------------------------------------------
@@ -82,6 +83,7 @@ mod unix {
         started: Notify,
         gate: Notify,
         peer_closed: Notify,
+        cause: Mutex<Option<Arc<io::Error>>>,
     }
 
     struct Fixture {
@@ -110,6 +112,7 @@ mod unix {
                 started: Notify::new(),
                 gate: Notify::new(),
                 peer_closed: Notify::new(),
+                cause: Mutex::new(None),
             })
         }
         fn release(&self) {
@@ -161,6 +164,12 @@ mod unix {
                     Err(ControlClientError::RuntimeChanged)
                 }
             })
+        }
+    }
+
+    impl SessionConnector for GatedConnector {
+        fn setup_cause(&self) -> Option<Arc<io::Error>> {
+            self.cause.lock().unwrap().clone()
         }
     }
 
@@ -520,6 +529,36 @@ mod unix {
         assert_eq!(connector.dials.load(Ordering::SeqCst), 1);
     }
 
+    /// The cause a failed setup's connector kept (the runtime owner keeps an explained pipe
+    /// denial) reaches every caller that joined the setup, not only the one that started it.
+    #[tokio::test]
+    async fn every_waiter_of_a_failed_setup_gets_its_cause() {
+        let registry = Arc::new(ControlSessions::default());
+        let connector = GatedConnector::new(true);
+        let cause = Arc::new(io::Error::from(io::ErrorKind::PermissionDenied));
+        *connector.cause.lock().unwrap() = Some(cause.clone());
+        let mut waiters = Vec::new();
+        for _ in 0..3 {
+            let registry = registry.clone();
+            let connector = connector.clone();
+            waiters.push(tokio::spawn(async move {
+                registry.get(key(1), connector).await
+            }));
+        }
+        connector.started.notified().await;
+        tokio::task::yield_now().await;
+
+        connector.valid.store(false, Ordering::SeqCst);
+        connector.release();
+
+        for waiter in waiters {
+            let error = waiter.await.unwrap().err().unwrap();
+            assert!(matches!(&*error.error, ControlClientError::RuntimeChanged));
+            assert!(error.cause.is_some_and(|kept| Arc::ptr_eq(&kept, &cause)));
+        }
+        assert_eq!(connector.dials.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn last_cancelled_waiter_cancels_setup_and_a_later_operation_starts_fresh() {
         let registry = Arc::new(ControlSessions::default());
@@ -544,7 +583,12 @@ mod unix {
         let first = GatedConnector::new(false);
         let handle = registry.get(key(1), first.clone()).await.unwrap();
         let next = GatedConnector::new(false);
-        let error = registry.get(key(2), next.clone()).await.err().unwrap();
+        let error = registry
+            .get(key(2), next.clone())
+            .await
+            .err()
+            .unwrap()
+            .error;
         assert!(
             matches!(&*error, ControlClientError::Client(error) if error.kind == ErrorKind::Capacity)
         );
@@ -577,7 +621,7 @@ mod unix {
             current.started.notified().await;
             let previous = GatedConnector::new(false);
             previous.valid.store(false, Ordering::SeqCst);
-            let error = registry.get(key(1), previous).await.err().unwrap();
+            let error = registry.get(key(1), previous).await.err().unwrap().error;
             assert!(matches!(&*error, ControlClientError::RuntimeChanged));
             assert!(!session.entry.invalidated.is_cancelled());
 
@@ -609,7 +653,12 @@ mod unix {
             // caller arrives, then prove that the original setup still wins.
             let previous = GatedConnector::new(false);
             previous.valid.store(false, Ordering::SeqCst);
-            let error = registry.get(key(1), previous.clone()).await.err().unwrap();
+            let error = registry
+                .get(key(1), previous.clone())
+                .await
+                .err()
+                .unwrap()
+                .error;
             assert!(matches!(&*error, ControlClientError::RuntimeChanged));
             assert_eq!(previous.dials.load(Ordering::SeqCst), 0);
 

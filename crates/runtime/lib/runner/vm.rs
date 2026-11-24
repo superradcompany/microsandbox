@@ -49,6 +49,8 @@ use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::Serialize;
 
 #[cfg(windows)]
+use super::elevation::share_with_non_elevated;
+#[cfg(windows)]
 use crate::bootstrap_fs::AgentBootstrapFs;
 #[cfg(windows)]
 use crate::console::AgentConsolePipeBridge;
@@ -194,6 +196,11 @@ pub struct Config {
     /// detached launchers can detach stdout/stderr from birth.
     #[cfg(windows)]
     pub startup_pipe: Option<String>,
+
+    /// Share this runtime's pipes with non-elevated runs in its sign-in session when it runs
+    /// elevated (the launch's `share_elevated_sandboxes`).
+    #[cfg(windows)]
+    pub share_elevated_sandboxes: bool,
 
     /// Read end of the attached-parent watchdog pipe.
     #[cfg(unix)]
@@ -743,6 +750,11 @@ fn run(
     setup_log_capture(&config.log_dir, config.forward_output)?;
 
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
+
+    // Before any pipe exists: an elevated runtime keeps the UAC boundary unless the launch
+    // opted in to sharing its pipes with non-elevated runs in its sign-in session.
+    #[cfg(windows)]
+    share_with_non_elevated(config.share_elevated_sandboxes)?;
 
     let shutdown_flush_timeout = guest_shutdown_flush_timeout(config.vm.init_path.is_some());
 

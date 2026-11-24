@@ -87,6 +87,8 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use self::input_stall::{INPUT_STALL_TIMEOUT, InputStall};
+#[cfg(windows)]
+use super::elevation::create_shared_pipe;
 use super::exec_control::{ExecControlConnection, ExecControlLease, ExecControlRegistry};
 use super::finished_ids::FinishedIds;
 use super::workload_control::{WORKLOAD_CONTROL_ID, WorkloadControl};
@@ -1243,7 +1245,7 @@ impl AgentListener {
                 options.first_pipe_instance(true);
             }
 
-            let server = options.create(&self.pipe_name)?;
+            let server = create_shared_pipe(&options, &self.pipe_name)?;
             if first_pipe_instance {
                 self.first_pipe_instance = false;
             }

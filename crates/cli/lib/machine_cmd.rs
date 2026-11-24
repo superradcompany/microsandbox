@@ -401,6 +401,8 @@ pub fn run(args: MachineArgs) -> ! {
         startup_fd,
         #[cfg(windows)]
         startup_pipe: args.startup_pipe,
+        #[cfg(windows)]
+        share_elevated_sandboxes: launch.share_elevated_sandboxes,
         #[cfg(unix)]
         parent_watchdog,
         forward_output: args.forward_output,

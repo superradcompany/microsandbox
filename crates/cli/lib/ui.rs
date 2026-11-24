@@ -10,6 +10,7 @@
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::{
+    error::Error,
     io::IsTerminal,
     time::{Duration, Instant},
 };
@@ -18,6 +19,8 @@ use clap::ValueEnum;
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use microsandbox_image::PullProgress;
+#[cfg(windows)]
+use microsandbox_utils::elevation_share;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -28,6 +31,11 @@ const ACTION_LABEL_WIDTH: usize = 18;
 const DETAIL_LABEL_WIDTH: usize = 20;
 
 const BRAILLE_TICKS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "⠋"];
+
+/// What `msb` adds to an error the SDK explained as a sandbox an elevated process started.
+#[cfg(windows)]
+const ELEVATED_SANDBOX_HINT: &str = "run msb from an elevated terminal, or stop the sandbox \
+    with msb stop from an elevated terminal and then start it from this one";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -374,6 +382,25 @@ pub fn error_with_lines(msg: &str, lines: &[ErrorLine<'_>]) {
         };
         eprintln!("{}", context_line(text));
     }
+}
+
+/// Print the error of a command on a sandbox. On Windows, when the SDK explained it as a
+/// sandbox that an elevated process started, add the `msb` way to act on it.
+pub fn sandbox_error(err: &(dyn Error + 'static)) {
+    #[cfg(windows)]
+    if has_elevated_sandbox_denial(err) {
+        error_with_lines(&err.to_string(), &[ErrorLine::Hint(ELEVATED_SANDBOX_HINT)]);
+        return;
+    }
+
+    error(&err.to_string());
+}
+
+/// Whether `err`'s chain holds an access-denied error the SDK explained as a sandbox that an
+/// elevated process started.
+#[cfg(windows)]
+pub fn has_elevated_sandbox_denial(err: &(dyn Error + 'static)) -> bool {
+    elevation_share::has_elevated_sandbox_denial(err)
 }
 
 /// Print a styled warning message to stderr.
@@ -863,6 +890,25 @@ impl PullProgressDisplay {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use std::io;
+    #[cfg(windows)]
+    use std::path::PathBuf;
+
+    #[cfg(windows)]
+    use microsandbox::MicrosandboxError;
+    #[cfg(windows)]
+    use microsandbox::agent::AgentClientError;
+    #[cfg(windows)]
+    use microsandbox_utils::elevation_share;
+    #[cfg(windows)]
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    #[cfg(windows)]
+    use windows_sys::Win32::Security::TokenElevationTypeLimited;
+
+    #[cfg(windows)]
+    use super::has_elevated_sandbox_denial;
+
     #[test]
     fn detail_values_align_without_touching_long_keys() {
         for (key, indented) in [
@@ -983,5 +1029,30 @@ mod tests {
             super::format_rfc3339_datetime("2026-05-31T09:09:00Z").unwrap(),
             expected
         );
+    }
+
+    /// The CLI finds an explained denial, and so adds its hint, through `anyhow` and every
+    /// SDK error that carries one: a refused control pipe or shutdown request
+    /// (`MicrosandboxError::Io`, which `stop` and the control operations report) and a
+    /// refused agent connect (`MicrosandboxError::AgentClient`). A bare denial is not.
+    #[cfg(windows)]
+    #[test]
+    fn elevated_sandbox_denials_are_found_through_anyhow_and_sdk_errors() {
+        let denied = || io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32);
+        let explained =
+            || elevation_share::explain_access_denied_as(denied(), TokenElevationTypeLimited);
+
+        let io_error = anyhow::Error::from(MicrosandboxError::Io(explained()));
+        let connect_error =
+            anyhow::Error::from(MicrosandboxError::AgentClient(AgentClientError::Connect {
+                path: PathBuf::from(r"\\.\pipe\msb-agent-test"),
+                source: explained(),
+            }));
+        let bare = anyhow::Error::from(MicrosandboxError::Io(denied()));
+
+        for error in [&io_error, &connect_error] {
+            assert!(has_elevated_sandbox_denial(error.as_ref()), "{error}");
+        }
+        assert!(!has_elevated_sandbox_denial(bare.as_ref()), "{bare}");
     }
 }

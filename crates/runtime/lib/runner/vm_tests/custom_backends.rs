@@ -201,6 +201,8 @@ fn config(directory: &Path) -> Config {
         startup_fd: None,
         #[cfg(windows)]
         startup_pipe: None,
+        #[cfg(windows)]
+        share_elevated_sandboxes: false,
         #[cfg(unix)]
         parent_watchdog: None,
         forward_output: false,

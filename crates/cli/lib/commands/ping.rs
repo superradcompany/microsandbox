@@ -47,7 +47,7 @@ pub async fn run(args: PingArgs) -> anyhow::Result<()> {
             Ok(()) => {}
             Err(e) => {
                 if !args.quiet {
-                    ui::error(&format!("{e}"));
+                    ui::sandbox_error(e.as_ref());
                 }
                 failed = true;
             }

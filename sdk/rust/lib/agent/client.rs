@@ -1,5 +1,7 @@
 //! Agent transport and sandbox endpoint resolution.
 
+#[cfg(windows)]
+use std::io;
 use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
@@ -9,12 +11,13 @@ use microsandbox_protocol::{
     exec_bindings::{BoundExecRequest, ExecBindingCapability, ExecBindingOverrides},
     message::{Message, MessageType},
 };
+#[cfg(windows)]
+use microsandbox_utils::elevation_share;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     time::Instant,
 };
 
-#[cfg(feature = "local")]
 use super::AgentClientError;
 use super::AgentClientResult;
 
@@ -76,6 +79,7 @@ impl AgentClient {
         microsandbox_agent_client::OptimizedAgentClient::connect(sock_path)
             .await
             .map(Self::from_transport)
+            .map_err(explain_connect_error)
     }
 
     /// Connect over an arbitrary byte-stream transport with an explicit
@@ -106,6 +110,7 @@ impl AgentClient {
         microsandbox_agent_client::OptimizedAgentClient::connect_with_timeout(sock_path, timeout)
             .await
             .map(Self::from_transport)
+            .map_err(explain_connect_error)
     }
 
     /// Connect to an arbitrary agent relay socket path with an explicit
@@ -117,6 +122,7 @@ impl AgentClient {
         microsandbox_agent_client::OptimizedAgentClient::connect_with_deadline(sock_path, deadline)
             .await
             .map(Self::from_transport)
+            .map_err(explain_connect_error)
     }
 
     /// Connect to a local relay with bulk payloads kept on the byte stream.
@@ -243,4 +249,87 @@ fn agent_endpoint_may_exist(path: &Path) -> bool {
 #[cfg(all(feature = "local", windows))]
 fn agent_endpoint_may_exist(_path: &Path) -> bool {
     true
+}
+
+/// On Windows, explain an access-denied connect: the sandbox was most likely started by an
+/// elevated run that did not share it with non-elevated runs.
+#[cfg(windows)]
+fn explain_connect_error(error: AgentClientError) -> AgentClientError {
+    explain_connect_error_with(error, elevation_share::explain_access_denied)
+}
+
+#[cfg(not(windows))]
+fn explain_connect_error(error: AgentClientError) -> AgentClientError {
+    error
+}
+
+/// [`explain_connect_error`] with the connect's I/O error explained by `explain`.
+#[cfg(windows)]
+fn explain_connect_error_with(
+    error: AgentClientError,
+    explain: impl FnOnce(io::Error) -> io::Error,
+) -> AgentClientError {
+    if let AgentClientError::Connect { path, source } = error {
+        return AgentClientError::Connect {
+            path,
+            source: explain(source),
+        };
+    }
+
+    error
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::io;
+    use std::path::PathBuf;
+
+    use microsandbox_utils::elevation_share;
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Security::TokenElevationTypeLimited;
+
+    use super::{AgentClientError, explain_connect_error_with};
+
+    /// A non-elevated process refused the agent pipe gets the connect error with the
+    /// explained denial as its source, and the same path. An error after the connect is not
+    /// a refused pipe and is kept as it is.
+    #[test]
+    fn a_refused_agent_connect_is_explained_as_an_elevated_sandbox() {
+        let denied = || io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32);
+        let as_non_elevated = |error: io::Error| {
+            elevation_share::explain_access_denied_as(error, TokenElevationTypeLimited)
+        };
+        let path = PathBuf::from(r"\\.\pipe\msb-agent-test");
+
+        let connect = explain_connect_error_with(
+            AgentClientError::Connect {
+                path: path.clone(),
+                source: denied(),
+            },
+            as_non_elevated,
+        );
+        let after_connect =
+            explain_connect_error_with(AgentClientError::Io(denied()), as_non_elevated);
+
+        let AgentClientError::Connect { path: kept, source } = connect else {
+            panic!("the refused connect is no longer a connect error");
+        };
+        assert_eq!(kept, path);
+        assert!(
+            elevation_share::is_elevated_sandbox_denial(&source),
+            "{source}"
+        );
+
+        let AgentClientError::Io(source) = after_connect else {
+            panic!("the error after the connect is no longer an I/O error");
+        };
+        assert!(
+            !elevation_share::is_elevated_sandbox_denial(&source),
+            "{source}"
+        );
+    }
 }

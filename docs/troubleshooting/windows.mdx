@@ -72,6 +72,12 @@ where.exe msb
 
 If an error mentions `libkrunfw.so` or `libkrunfw.dylib`, clear any old Unix/macOS override in `MSB_LIBKRUNFW_PATH` or `config.json`, or point it at `libkrunfw.dll`.
 
+## Elevated and non-elevated shells
+
+By default, a sandbox started from an elevated (administrator) shell can only be driven from an elevated shell. A non-elevated `msb` lists it and reads its metrics, but `exec`, a graceful `stop` and other commands that talk to its runtime fail with access denied and a message that the sandbox was most likely started by an elevated process. `msb stop --force` may still work, because the non-elevated token can terminate the runtime process. Run the command from an elevated shell, or stop the sandbox from an elevated shell and start it again from the shell you want to use.
+
+To let non-elevated runs in the same sign-in session reach sandboxes that elevated runs start, set [`runtime.share_elevated_sandboxes`](/configuration#runtime) to `true`, then restart the sandbox from an elevated shell. This removes the UAC boundary at those sandboxes' runtime pipes for that sign-in: the pipes grant its logon SID, so another sign-in of the same account (a second Remote Desktop session, an SSH logon, a service, or a scheduled task set to run whether the user is signed in or not) stays refused.
+
 ## Updates and reinstalls
 
 `msb self update` stages and verifies the new Windows release before scheduling the installed files for replacement. The command can exit while another `msb` or `microsandbox` process still has an executable locked. The background task keeps retrying and writes its progress to the log path printed by the command.

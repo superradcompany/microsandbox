@@ -621,6 +621,24 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features net,runner -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
 
+      - name: Test elevated object sharing
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          # The three utils access tests and the runtime's opt_in_shares_the_runtime_pipes_only_when_elevated need an elevated administrator, which the runner is; each checks that first and panics with "run it elevated (administrator)" otherwise.
+          # The utils access tests re-run themselves as an emulated elevated runtime (the security a real UAC full token gives it), with and without the sharing opt-in, and check access with a filtered (Administrators deny-only, Medium) token, and with that token's logon SID also deny-only (another sign-in of the account).
+          cargo +stable test -p microsandbox-utils --lib --target ${{ matrix.rust_target }} elevation_share:: -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The runtime applies the opt-in to its pipes only in an elevated split token and fails to start if it cannot; the SDK sends it only from one, and explains a refused agent connect, shutdown connection or control pipe, keeping the explanation through a drain.
+          cargo +stable test --no-default-features --features net,runner -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} runner::elevation:: -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} -- elevated launch_fails_when_the_launcher control::owner::tests --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # msb finds the explanation through anyhow and the SDK errors and adds its hint.
+          cargo +stable test --no-default-features --features net,ssh,keyring -p microsandbox-cli --lib --target ${{ matrix.rust_target }} ui::tests::elevated -- --nocapture
+
       - name: Test bind rootfs patches
         shell: pwsh
         run: |

@@ -31,6 +31,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 
+#[cfg(windows)]
+use super::elevation::create_shared_pipe;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -375,10 +378,9 @@ impl AgentConsolePipeBridge {
         let pipe_name = pipe_name.into();
         let server = {
             let _guard = handle.enter();
-            ServerOptions::new()
-                .first_pipe_instance(true)
-                .pipe_mode(PipeMode::Byte)
-                .create(&pipe_name)?
+            let mut options = ServerOptions::new();
+            options.first_pipe_instance(true).pipe_mode(PipeMode::Byte);
+            create_shared_pipe(&options, &pipe_name)?
         };
 
         let task = handle.spawn(async move {

@@ -91,7 +91,7 @@ use crate::runtime::launch_contract;
 use crate::sandbox::SecurityProfile;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    config::{BlockWritebackConfig, RuntimeConfig},
+    config::{BlockWritebackConfig, RuntimeConfig, launched_runtimes_can_share},
     context::LocalContext,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
@@ -551,7 +551,7 @@ impl LocalContext {
         // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
         // delivered over the config fd (keeps the network-config blob and
         // secret-bearing env off `ps` / `/proc/<pid>/cmdline` — see issue #997).
-        let (mut visible, mut launch) = machine_cli_args(
+        let rendered = machine_cli_args(
             self,
             config,
             sandbox_id,
@@ -581,7 +581,15 @@ impl LocalContext {
             None,
             #[cfg(windows)]
             startup_pipe_name,
+            launched_runtimes_can_share,
         );
+        let (mut visible, mut launch) = match rendered {
+            Ok(rendered) => rendered,
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        };
         tracing::debug!(
             per_disk_limit_bytes = ?writeback_limit_bytes,
             pool_bytes = ?writeback_pool_bytes,
@@ -2307,7 +2315,12 @@ fn machine_cli_args(
     parent_watch_fd: Option<i32>,
     startup_fd: Option<i32>,
     startup_pipe: Option<&OsStr>,
-) -> (Vec<OsString>, LaunchConfig) {
+    launcher_can_share: impl FnOnce() -> MicrosandboxResult<bool>,
+) -> MicrosandboxResult<(Vec<OsString>, LaunchConfig)> {
+    let share_elevated_sandboxes = local
+        .config()
+        .share_elevated_sandboxes_with(launcher_can_share)?;
+
     // `visible` stays on the process argv: a small set of operator-readable
     // labels (name, id, sizing, fds) so the sandbox is identifiable in `ps`
     // and logs. Everything bulky, structured, or secret-bearing goes into the
@@ -2397,6 +2410,7 @@ fn machine_cli_args(
         nested_virt: config.spec.resources.nested_virt,
         guest_clock: config.spec.runtime.guest_clock.unwrap_or_default(),
         fs_state_limit_bytes: local.config().fs_state_limit_override(),
+        share_elevated_sandboxes,
         memory_cache_dir: Some(local.cache_dir().join("memory")),
         startup: startup_command(config),
         lifecycle: Lifecycle {
@@ -2761,7 +2775,7 @@ fn machine_cli_args(
         launch.sandbox_slot = network_slot.get();
     }
 
-    (visible, launch)
+    Ok((visible, launch))
 }
 
 /// Build guest settings shared by launch preflight and the final payload.
@@ -2908,7 +2922,9 @@ mod tests {
         volume::VolumeKind,
     };
     use crate::{
-        SandboxConfigPatch, config::layers::BackendConfig, context::ContextSelectionSource,
+        MicrosandboxError, MicrosandboxResult, SandboxConfigPatch,
+        config::{GlobalConfigPatch, layers::BackendConfig},
+        context::ContextSelectionSource,
     };
 
     #[test]
@@ -3597,8 +3613,13 @@ mod tests {
     /// Use isolated configuration for pure `machine_cli_args` rendering tests.
     /// The database remains unopened.
     fn test_local_backend() -> LocalContext {
+        test_local_backend_with(Default::default())
+    }
+
+    /// [`test_local_backend`] with user settings `defaults`.
+    fn test_local_backend_with(defaults: GlobalConfigPatch) -> LocalContext {
         LocalContext::from_backend_config(
-            BackendConfig::new(Default::default(), Default::default())
+            BackendConfig::new(defaults, Default::default())
                 .prepare_for_local_backend(Default::default())
                 .unwrap(),
             ContextSelectionSource::Programmatic,
@@ -3624,9 +3645,33 @@ mod tests {
 
     /// Return the typed launch payload generated for a sandbox configuration.
     fn render_launch(config: &SandboxConfig) -> LaunchConfig {
-        let local = test_local_backend();
+        render_launch_on(&test_local_backend(), config, no_launcher_sharing)
+    }
+
+    /// A launcher whose runtimes would not share: what every non-elevated or non-Windows
+    /// process is.
+    fn no_launcher_sharing() -> MicrosandboxResult<bool> {
+        Ok(false)
+    }
+
+    /// [`render_launch`] on the backend `local` for a launcher whose runtimes would share
+    /// or not (`launcher_can_share`).
+    fn render_launch_on(
+        local: &LocalContext,
+        config: &SandboxConfig,
+        launcher_can_share: impl FnOnce() -> MicrosandboxResult<bool>,
+    ) -> LaunchConfig {
+        try_render_launch_on(local, config, launcher_can_share).unwrap()
+    }
+
+    /// [`render_launch_on`], returning the rendering error.
+    fn try_render_launch_on(
+        local: &LocalContext,
+        config: &SandboxConfig,
+        launcher_can_share: impl FnOnce() -> MicrosandboxResult<bool>,
+    ) -> MicrosandboxResult<LaunchConfig> {
         let (_, launch) = machine_cli_args(
-            &local,
+            local,
             config,
             42,
             #[cfg(feature = "net")]
@@ -3645,8 +3690,9 @@ mod tests {
             None,
             None,
             None,
-        );
-        launch
+            launcher_can_share,
+        )?;
+        Ok(launch)
     }
 
     /// Re-expand a [`LaunchConfig`] into the historical `--flag value` token
@@ -3895,7 +3941,9 @@ mod tests {
             None,
             None,
             None,
-        );
+            no_launcher_sharing,
+        )
+        .unwrap();
         visible
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3938,6 +3986,60 @@ mod tests {
         assert_eq!(render_launch(&config).sandbox_slot, 1);
     }
 
+    /// The launch carries the opt-in exactly when the setting is on and the launcher is the
+    /// elevated half of a split token, asks the launcher only when the setting is on, and
+    /// fails when the launcher cannot tell. The launcher's elevation is injected, since
+    /// GitHub's runners are not split tokens.
+    #[tokio::test]
+    async fn launch_carries_the_elevated_sandbox_sharing_opt_in() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+        let opted_in: GlobalConfigPatch =
+            serde_json::from_str(r#"{"runtime":{"share_elevated_sandboxes":true}}"#).unwrap();
+        let opted_in = test_local_backend_with(opted_in);
+        let default = test_local_backend();
+
+        for (local, opt_in) in [(&default, false), (&opted_in, true)] {
+            for elevated in [false, true] {
+                let mut asked = false;
+                let launch = render_launch_on(local, &config, || {
+                    asked = true;
+                    Ok(elevated)
+                });
+
+                assert_eq!(
+                    launch.share_elevated_sandboxes,
+                    opt_in && elevated,
+                    "opt_in={opt_in} elevated launcher={elevated}"
+                );
+                assert_eq!(asked, opt_in, "opt_in={opt_in}: launcher asked");
+            }
+        }
+    }
+
+    /// With the setting on, a launcher that cannot read its own token fails the launch
+    /// instead of silently dropping the opt-in.
+    #[tokio::test]
+    async fn launch_fails_when_the_launcher_cannot_tell_whether_it_can_share() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+        let opted_in: GlobalConfigPatch =
+            serde_json::from_str(r#"{"runtime":{"share_elevated_sandboxes":true}}"#).unwrap();
+
+        let error = try_render_launch_on(&test_local_backend_with(opted_in), &config, || {
+            Err(MicrosandboxError::Runtime("injected".into()))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected"), "{error}");
+    }
+
     /// Render only the `visible` argv (what shows up in `ps`).
     fn render_visible_args(config: &SandboxConfig) -> Vec<String> {
         let local = test_local_backend();
@@ -3961,7 +4063,9 @@ mod tests {
             None,
             None,
             None,
-        );
+            no_launcher_sharing,
+        )
+        .unwrap();
         visible
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3993,7 +4097,9 @@ mod tests {
             None,
             None,
             None,
-        );
+            no_launcher_sharing,
+        )
+        .unwrap();
         visible
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -4079,7 +4185,9 @@ mod tests {
             None,
             Some(microsandbox_runtime::vm::STARTUP_FD),
             None,
-        );
+            no_launcher_sharing,
+        )
+        .unwrap();
 
         // The startup fd is an operator-visible label, so it stays on argv.
         assert!(visible.windows(2).any(|pair| pair
@@ -4160,7 +4268,9 @@ mod tests {
             None,
             None,
             Some(OsStr::new(r"\\.\pipe\msb-startup-test")),
-        );
+            no_launcher_sharing,
+        )
+        .unwrap();
 
         assert!(visible.windows(2).any(|pair| pair
             == [

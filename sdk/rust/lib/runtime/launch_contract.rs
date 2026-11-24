@@ -33,7 +33,10 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::runtime::launch_input::{legacy_env, unsupported};
-use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig, config::GlobalConfig};
+use crate::{
+    MicrosandboxError, MicrosandboxResult, SandboxConfig,
+    config::{GlobalConfig, launched_runtimes_can_share},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -322,6 +325,9 @@ impl LaunchContract {
         }
         if launch.fs_state_limit_bytes.is_some() {
             return unsupported("filesystem state budget");
+        }
+        if launch.share_elevated_sandboxes {
+            return unsupported("sharing elevated sandboxes with non-elevated runs");
         }
         #[cfg(feature = "net")]
         if !launch.multi_tenant.is_default() {
@@ -723,6 +729,13 @@ pub(crate) async fn validate_runtime_config(
     validate_exec_limits(&runtime.msb_path, config).await?;
     validate_guest_clock(&runtime.msb_path, config).await?;
     validate_fs_state_limit(&runtime.msb_path, global).await?;
+    // Every launch is prepared through here first, so this is the one capability check for
+    // the decision the launch renderer makes from the same setting and token.
+    validate_share_elevated_sandboxes(
+        &runtime.msb_path,
+        global.share_elevated_sandboxes_with(launched_runtimes_can_share)?,
+    )
+    .await?;
     #[cfg(feature = "net")]
     validate_multi_tenant_config(&runtime.msb_path, config, global).await?;
     Ok(())
@@ -992,6 +1005,34 @@ pub(crate) async fn validate_fs_state_limit(
             crate::error::Operation::SandboxStart,
             crate::error::UnsupportedReason::NotAvailable(upgrade_required(
                 "snapshots.max_filesystem_state_mib",
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// Probe elevated-sandbox sharing support only when it is `requested`. Runtimes that predate
+/// the capability reject the launch field, so the SDK refuses before launching them.
+pub(crate) async fn validate_share_elevated_sandboxes(
+    path: &Path,
+    requested: bool,
+) -> MicrosandboxResult<()> {
+    if !requested {
+        return Ok(());
+    }
+
+    let supported = bounded_probe(path, "__launch-protocol")
+        .await
+        .ok()
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
+        .is_some_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.share_elevated_sandboxes
+        });
+    if !supported {
+        return Err(MicrosandboxError::unsupported(
+            crate::error::Operation::SandboxStart,
+            crate::error::UnsupportedReason::NotAvailable(upgrade_required(
+                "runtime.share_elevated_sandboxes",
             )),
         ));
     }
@@ -2068,6 +2109,45 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":true}'"#,
         );
         validate_fs_state_limit(&path, &global).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn share_elevated_sandboxes_requires_an_explicit_runtime_capability() {
+        let _fixture_guard = PROBE_FIXTURES.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+
+        // Off must avoid probing, including on an old runtime.
+        validate_share_elevated_sandboxes(&dir.path().join("no-probe"), false)
+            .await
+            .unwrap();
+
+        for response in [
+            "exit 1",
+            r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"share_elevated_sandboxes":false}'"#,
+            r#"printf '%s' '{"protocols":[1],"share_elevated_sandboxes":true}'"#,
+        ] {
+            let path = script(dir.path(), "unsupported-share-elevated", response);
+            let error = validate_share_elevated_sandboxes(&path, true)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
+            assert!(
+                error
+                    .to_string()
+                    .contains("runtime.share_elevated_sandboxes")
+            );
+        }
+
+        let path = script(
+            dir.path(),
+            "supports-share-elevated",
+            r#"printf '%s' '{"protocols":[2,1],"share_elevated_sandboxes":true}'"#,
+        );
+        validate_share_elevated_sandboxes(&path, true)
+            .await
+            .unwrap();
     }
 
     #[cfg(unix)]

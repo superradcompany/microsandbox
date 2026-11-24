@@ -10,6 +10,8 @@ pub(crate) mod clock;
 pub mod console;
 pub(crate) mod control;
 pub mod cpu;
+#[cfg(windows)]
+pub(crate) mod elevation;
 pub(crate) mod exec_control;
 pub mod exec_log;
 pub(crate) mod finished_ids;
