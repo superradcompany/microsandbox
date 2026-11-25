@@ -18,11 +18,45 @@ const (
 // which supplies cancellation and deadlines for a single operation.
 type Context interface {
 	Kind() ContextKind
+	Info() (ContextInfo, error)
 	Sandboxes() *Sandboxes
 	Volumes() *Volumes
 	Snapshots() *Snapshots
 	Checkpoints() *Checkpoints
 	nativeContext() *ffi.Context
+}
+
+// ContextInfo describes a captured destination without exposing credentials.
+type ContextInfo struct {
+	Kind    ContextKind `json:"kind"`
+	Source  string      `json:"source"`
+	Profile string      `json:"profile,omitempty"`
+	APIURL  string      `json:"api_url,omitempty"`
+}
+
+// Info returns the settings captured by this local context.
+func (c *LocalContext) Info() (ContextInfo, error) { return contextInfo(c) }
+
+// Info returns the settings captured by this remote context.
+func (c *RemoteContext) Info() (ContextInfo, error) { return contextInfo(c) }
+
+func contextInfo(c Context) (ContextInfo, error) {
+	native, err := nativeDestination(c)
+	if err != nil {
+		return ContextInfo{}, err
+	}
+	info, err := native.Info()
+	if err != nil {
+		return ContextInfo{}, wrapFFI(err)
+	}
+	result := ContextInfo{Kind: ContextKind(info.Kind), Source: info.Source}
+	if info.Profile != nil {
+		result.Profile = *info.Profile
+	}
+	if info.APIURL != nil {
+		result.APIURL = *info.APIURL
+	}
+	return result, nil
 }
 
 type LocalOptions struct {
@@ -183,7 +217,12 @@ func (s *Sandbox) Context() Context {
 
 // Resolve once per package operation and pass the retained native context through
 // retries, progress streams and returned resources.
-func configuredContext() (Context, error) {
+func configuredContext() (Context, error) { return ConfiguredContext() }
+
+// ConfiguredContext resolves and retains the configured destination without creating
+// a sandbox. Later configuration changes do not redirect operations on this context.
+// Invalid configuration is returned immediately.
+func ConfiguredContext() (Context, error) {
 	inner, err := ffi.ConfiguredContext()
 	if err != nil {
 		return nil, wrapFFI(err)

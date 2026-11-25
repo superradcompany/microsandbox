@@ -27,6 +27,9 @@ pub enum ContextSelectionSource {
     /// Installed directly through an SDK constructor or setter.
     #[serde(rename = "programmatic")]
     Programmatic,
+    /// Selected by managed configuration, ahead of environment and user preferences.
+    #[serde(rename = "managed")]
+    Managed,
     /// Selected explicitly by `MSB_BACKEND`.
     #[serde(rename = "MSB_BACKEND")]
     MsbBackend,
@@ -96,6 +99,7 @@ impl ContextSelectionSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Programmatic => "programmatic",
+            Self::Managed => "managed",
             Self::MsbBackend => "MSB_BACKEND",
             Self::MsbApiKey => "MSB_API_KEY",
             Self::MsbProfile => "MSB_PROFILE",

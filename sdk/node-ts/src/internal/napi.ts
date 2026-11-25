@@ -31,6 +31,7 @@ export const napi = new Proxy({} as NativeBindings, {
 // dependency on the generated d.ts.
 
 export interface NativeBindings {
+  readonly configuredContext: () => NapiContext;
   readonly configuredProviderKind: () => "local" | "remote";
   readonly providerInfo: () => string;
   readonly Context: new (optionsJson: string) => NapiContext;
@@ -1554,6 +1555,7 @@ export interface NapiSnapshotImportResult {
 }
 
 export interface NapiContext {
+  readonly infoJson: string;
   deriveRemote(optionsJson: string): NapiContext;
   sandboxRestore(snapshot: string, kind?: "auto" | "id" | "path"): NapiRestoreBuilder;
   readonly kind: "local" | "remote";
