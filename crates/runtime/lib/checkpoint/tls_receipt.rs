@@ -28,8 +28,10 @@ const LIMIT: usize = 160 * 1024;
 //--------------------------------------------------------------------------------------------------
 
 fn wrapping_key(home: &Path, create: bool) -> Result<Zeroizing<[u8; 32]>, String> {
-    let (canonical, _alias, _target) = namespace::configuration_home(home)?;
-    let store = canonical.join(STORE);
+    let entry = Path::new(STORE).join(KEY);
+    let storage = super::tls_storage::key_home(home, &entry, create)?
+        .ok_or("local snapshot wrapping key unavailable; import a recipient-encrypted backup")?;
+    let store = storage.path.join(STORE);
     if create
         && let Err(error) = io::private_directory(&store)
         && microsandbox_utils::private_file::verify(&io::directory(&store)?).is_err()
@@ -257,6 +259,93 @@ mod tests {
     use super::*;
     use microsandbox_image::checkpoint::ResourceTreatment;
     use std::collections::BTreeMap;
+
+    #[cfg(windows)]
+    #[test]
+    fn shared_windows_home_keeps_tls_private_across_restart_snapshot_and_cleanup() {
+        use std::fs;
+        use std::process::Command;
+
+        use crate::checkpoint::{remove_sandbox_identity, tls_identity};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let dev = fixture.path().join(".dev");
+        fs::create_dir(&dev).unwrap();
+        let acl = |args: &[&str]| {
+            let output = Command::new("icacls")
+                .arg(&dev)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        acl(&["/grant", "*S-1-5-11:(OI)(CI)(M)"]);
+        let before = acl(&[]);
+        let home = dev.join("tools").join("msb");
+        fs::create_dir_all(home.join(microsandbox_utils::DB_SUBDIR)).unwrap();
+        assert!(namespace::configuration_home(&home).is_err());
+
+        #[cfg(feature = "client")]
+        {
+            let stage = crate::checkpoint::launch_staging::LaunchStaging::reserve(&home).unwrap();
+            assert!(!stage.path().starts_with(&home));
+            let owned = stage.path().to_owned();
+            drop(stage);
+            assert!(!owned.exists());
+        }
+        let config = tls_identity::provision(&home, 1).unwrap();
+        let private_path = config.key_path.as_deref().unwrap();
+        let profile = fs::canonicalize(dirs::data_local_dir().unwrap()).unwrap();
+        assert!(private_path.starts_with(profile.join("microsandbox-credentials")));
+        assert!(!home.join("sandbox-tls").exists());
+        assert!(tls_identity::provision(&home, 1).is_err());
+        let scoped_home = private_path.ancestors().nth(3).unwrap().to_owned();
+        let key = Zeroizing::new(fs::read(private_path).unwrap());
+        microsandbox_utils::private_file::verify(&File::open(private_path).unwrap()).unwrap();
+        let cert = fs::read(config.cert_path.as_ref().unwrap()).unwrap();
+        let fingerprint = microsandbox_network::identity::verify_dedicated_ca(&cert, &key).unwrap();
+        let resources = [ResourceDescriptor {
+            kind: "network".into(),
+            id: "net".into(),
+            treatment: ResourceTreatment::Reconnect,
+            binding: BTreeMap::from([("intercept_ca_sha256".into(), fingerprint)]),
+        }];
+
+        let sibling = dev.join("another-home");
+        fs::create_dir_all(sibling.join(microsandbox_utils::DB_SUBDIR)).unwrap();
+        assert!(
+            capture(&sibling, 1, &config, &resources, "root")
+                .unwrap()
+                .is_none()
+        );
+        remove_sandbox_identity(&sibling, 1).unwrap();
+        let artifact = tempfile::tempdir().unwrap();
+        let sealed = capture(&home, 1, &config, &resources, "root")
+            .unwrap()
+            .unwrap();
+        write_staged(artifact.path(), &sealed).unwrap();
+        assert!(!home.join(STORE).exists());
+        assert!(open_local(&sibling, artifact.path(), "root").is_err());
+        assert_eq!(acl(&[]), before);
+
+        // A later ACL change must not orphan a signing key or select a
+        // different wrapping key for an already sealed checkpoint.
+        acl(&["/remove:g", "*S-1-5-11"]);
+        let restored = restore(&home, 2, artifact.path(), &resources, "root")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(restored.key_path.as_ref().unwrap()).unwrap(), *key);
+        remove_sandbox_identity(&home, 1).unwrap();
+        remove_sandbox_identity(&home, 2).unwrap();
+        assert!(!private_path.exists());
+        assert!(!restored.key_path.unwrap().exists());
+        fs::remove_dir_all(scoped_home).unwrap();
+    }
 
     #[test]
     fn checkpoint_receipt_requires_its_host_key_root_and_confirmed_signer() {
