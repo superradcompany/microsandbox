@@ -21,6 +21,10 @@ Already-running VMs can continue during a catalog upgrade. They keep their origi
 
 Cloud users do not perform local catalog or storage migration. Update SDK code against the capabilities supported by the service.
 
+In v0.8.2 and later, strict hostname policy also applies to UDP egress. The `msb` runtime enforces it, so upgrading only the SDK leaves an older runtime's UDP behavior in place. Upgrade `msb` and restart running sandboxes to apply it. See [strict hostname policy](/networking/overview).
+
+In v0.8.2 and later, cached images record how they were pulled, and unauthenticated pulls reuse only public or locally loaded entries. Images cached by an older release are checked against the registry once, on the first pull that would reuse them. On multi-tenant hosts, clear or rotate any private layers already in `$MSB_HOME/cache`. The `"multi-tenant"` [`deployment_profile`](/configuration) also turns on `snapshots.copy_files` and, on Unix, `runtime.strict_host_files` and `runtime.patches` staging.
+
 ## SDK API migration
 
 Resource lookups return objects you can use directly. In the snapshot API, `Snapshot` represents a history and `Checkpoint` represents one immutable capture. Existing checkpoint IDs continue to identify the same artifacts.
@@ -263,3 +267,5 @@ The protected storage layout was introduced in v0.7.12. It is not a new v0.8 mig
 Keep the original backup and runtime pair until the upgrade is verified. Older tools may refuse the catalog, saved settings, or snapshots written by a newer release. Follow the CLI's compatibility checks; replacing a binary alone does not convert stored data.
 
 Released v0.7 SDKs and CLIs refuse a v0.8.0 runtime with `no tested sandbox launch contract for runtime 0.8.0`. This affects the v0.7 release line, not only v0.7.16. Use matching versions or a launcher update that explicitly supports the selected runtime. Do not change version metadata to bypass the check.
+
+In v0.8.2 and later, a sandbox or snapshot can use an isolated image cache (`image_cache_dir`). Managed downgrade to v0.8.1 or earlier refuses while any sandbox configuration or retained snapshot uses one, even after the source sandbox is removed. Older SDKs and CLIs ignore the setting and can reuse authenticated cache entries without checking provenance, so give older tools a separate cache root.

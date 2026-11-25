@@ -406,7 +406,7 @@ A paused disk capture needs a matching prior flush; cloud rejects non-Auto polic
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Checkpoint.create()</a> · <a href="#snapshot-open">Checkpoint.open()</a> · <a href="#snapshot-list_dir">Checkpoint.list_dir()</a></p>
+<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#checkpoint-create">Checkpoint.create()</a> · <a href="#checkpoint-open">Checkpoint.open()</a> · <a href="#checkpoint-list_dir">Checkpoint.list_dir()</a></p>
 
 Create, open, and manage snapshots. See [properties](#snapshot-properties) for returned metadata.
 
@@ -471,7 +471,7 @@ Create a disk snapshot, or set `full=True` to include memory and execution state
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Checkpoint</a></div>
     <div className="msb-param-desc">The captured snapshot.</div>
   </div>
 </div>
@@ -552,7 +552,7 @@ Open an existing artifact by group head, `group:member`, or path. This validates
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Checkpoint</a></div>
     <div className="msb-param-desc">The opened snapshot.</div>
   </div>
 </div>
@@ -588,7 +588,7 @@ Look up a handle by group head, `group:member`, stable snapshot ID, descriptor d
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Checkpoint</a></div>
     <div className="msb-param-desc">Operational snapshot with metadata loaded on demand.</div>
   </div>
 </div>
@@ -617,7 +617,7 @@ reference.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">list[Checkpoint]</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">list[Checkpoint]</a></div>
     <div className="msb-param-desc">Indexed snapshot resources.</div>
   </div>
 </div>
@@ -647,7 +647,7 @@ entries that don't look like snapshot artifacts. Cloud raises
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">list[Checkpoint]</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">list[Checkpoint]</a></div>
     <div className="msb-param-desc">One snapshot per valid artifact directory.</div>
   </div>
 </div>
@@ -829,7 +829,7 @@ Unpack a snapshot archive (`.msb` or `.tar`) into the selected or generated grou
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Checkpoint</a></div>
     <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
@@ -1050,7 +1050,7 @@ Checkpoint this sandbox into its default group with the given member name. Local
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Checkpoint</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Checkpoint</a></div>
     <div className="msb-param-desc">The captured snapshot.</div>
   </div>
 </div>

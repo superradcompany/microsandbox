@@ -654,7 +654,7 @@ Open an existing snapshot artifact by group head, `group:member`, or path. Cheap
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Promise&lt;Checkpoint&gt;</a></div>
     <div className="msb-param-desc">The opened snapshot.</div>
   </div>
 </div>
@@ -675,7 +675,7 @@ console.log(h.digest, h.createdAt);
 </Accordion>
 
 Look up a snapshot through the active backend and return a lightweight
-[`Checkpoint`](#snapshot).
+[`Checkpoint`](#checkpoint).
 
 <p className="msb-label">Parameters</p>
 
@@ -690,7 +690,7 @@ Look up a snapshot through the active backend and return a lightweight
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Promise&lt;Checkpoint&gt;</a></div>
     <div className="msb-param-desc">Operational snapshot with metadata loaded on demand.</div>
   </div>
 </div>
@@ -718,7 +718,7 @@ snapshots; host-volume artifacts are opened explicitly by reference.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint[]&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Promise&lt;Checkpoint[]&gt;</a></div>
     <div className="msb-param-desc">All indexed snapshot resources.</div>
   </div>
 </div>
@@ -747,7 +747,7 @@ snapshot artifacts. Cloud returns `UnsupportedError`.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint[]&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Promise&lt;Checkpoint[]&gt;</a></div>
     <div className="msb-param-desc">Parsed snapshots found in the directory.</div>
   </div>
 </div>
@@ -884,7 +884,7 @@ Unpack a snapshot archive (`.msb` or `.tar`) into the snapshots directory. Struc
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Promise&lt;Checkpoint&gt;</a></div>
     <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
@@ -965,7 +965,7 @@ Checkpoint this sandbox into its default group with the given member name. Calle
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Promise&lt;Checkpoint&gt;</a></div>
     <div className="msb-param-desc">The created snapshot artifact.</div>
   </div>
 </div>
@@ -1324,7 +1324,7 @@ Capture the configured snapshot and return the resulting artifact.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#checkpoint">Promise&lt;Checkpoint&gt;</a></div>
     <div className="msb-param-desc">The created snapshot artifact.</div>
   </div>
 </div>
@@ -1770,7 +1770,7 @@ Results include aggregate counts and per-disk entries keyed by `guestPath`. `mat
 
 ### SaveOpts <span className="msb-tag is-type">interface</span>
 
-Bundle options for [`Checkpoint.save()`](#snapshot-save) and instance `saveTo()` methods. Boolean fields default to `false`; selective-export fields are omitted by default.
+Bundle options for [`Checkpoint.save()`](#checkpoint-save) and instance `saveTo()` methods. Boolean fields default to `false`; selective-export fields are omitted by default.
 
 <div className="msb-params">
   <div className="msb-param">

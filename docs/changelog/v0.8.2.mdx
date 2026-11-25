@@ -32,10 +32,10 @@ Rust also adds [`AgentClient::connect_in_band_with_deadline`](/sdk/rust/agent-cl
 
 ## Before upgrading
 
-- **Strict UDP needs the new runtime.** Upgrade `msb` and restart running sandboxes. An older runtime keeps its previous UDP behavior.
-- **Multi-tenant hosts.** `deployment_profile: "multi-tenant"` now turns on `snapshots.copy_files` and, on Unix, strict host files and patch staging. Clear or rotate private layers already in `$MSB_HOME/cache`.
+- **Strict UDP needs the new runtime.** Upgrade `msb` and restart running sandboxes. [Before upgrading](/migrations/v0.8#before-upgrading)
+- **Multi-tenant hosts.** The multi-tenant profile turns on the new hardening settings, and existing private layers in the shared cache need cleanup. [Before upgrading](/migrations/v0.8#before-upgrading)
 - **Rust Cloud errors.** Unrecognized HTTP 400 and 422 responses now return `MicrosandboxError::CloudHttp` instead of `MicrosandboxError::InvalidConfig`.
-- **Downgrades.** Downgrading to v0.8.1 or earlier is refused while any sandbox or snapshot uses an isolated image cache.
+- **Downgrades.** Downgrading to v0.8.1 or earlier is refused while an isolated image cache is in use. [Returning to an older release](/migrations/v0.8#returning-to-an-older-release)
 - **Coming from v0.7?** Follow the [v0.7 to v0.8 migration guide](/migrations/v0.8).
 
 ## Contributors
