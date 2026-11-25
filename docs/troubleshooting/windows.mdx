@@ -74,9 +74,9 @@ If an error mentions `libkrunfw.so` or `libkrunfw.dylib`, clear any old Unix/mac
 
 ## Storage on a shared drive
 
-A protected `MSB_HOME` can live on a local NTFS data drive whose root grants `Authenticated Users` Modify. Windows can pass that grant down to existing folders. For example, with `G:\.dev\tools\msb`, use `icacls` on the directory named in the error to see whether other users can modify the storage or rename a folder on the path to it. A drive root that allows other users to delete its children also makes the path unsafe.
+You can run a sandbox with TLS interception when your `MSB_HOME` is on a shared NTFS drive, including when `Authenticated Users` inherits Modify on a folder such as `G:\.dev`. For new credentials, microsandbox uses a private directory under `%LOCALAPPDATA%\microsandbox-credentials` when the data drive cannot protect the signing key. Each storage home and catalog has a separate key directory. Your drive and folder permissions are preserved.
 
-To use the same drive without changing permissions for unrelated files, use a protected top-level folder and place `MSB_HOME` beneath it. A new home starts with its own catalog. Keep the old home if you need its sandboxes.
+Keep the Windows profile when you need to restart these sandboxes or restore snapshots that contain a locally sealed TLS identity. Existing keys in a protected `MSB_HOME` keep their original location. If permissions change around an existing key, restore protection to that location to use the key again. Use a CLI that supports profile-backed credentials to capture or remove sandboxes created with this layout.
 
 ## Updates and reinstalls
 

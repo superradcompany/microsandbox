@@ -17,7 +17,7 @@ use super::migration::{io as private_io, namespace};
 pub struct LaunchStaging {
     path: PathBuf,
     owner: Option<File>,
-    _home_authority: (namespace::Guard, namespace::Guard),
+    _home_authority: namespace::ConfigurationHome,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -28,9 +28,24 @@ impl LaunchStaging {
     /// Reap abandoned preparations before allocating a private operation directory.
     pub fn reserve(home: &Path) -> io::Result<Self> {
         fs::create_dir_all(home)?;
-        let (home, lexical, target) =
-            namespace::configuration_home(home).map_err(io::Error::other)?;
-        let root = home.join("snapshot-launch-staging");
+        let authority = namespace::configuration_home(home);
+        #[cfg(windows)]
+        let (authority, name) = match authority {
+            Ok(guard) => (Ok(guard), "snapshot-launch-staging"),
+            Err(home_error) => {
+                // Archives can contain private guest data. Unpack under the
+                // user's profile when the configured data drive is shared.
+                let profile = dirs::data_local_dir().ok_or_else(|| io::Error::other(home_error))?;
+                (
+                    namespace::configuration_home(&profile),
+                    "microsandbox-archive-staging",
+                )
+            }
+        };
+        #[cfg(not(windows))]
+        let name = "snapshot-launch-staging";
+        let authority = authority.map_err(io::Error::other)?;
+        let root = authority.path.join(name);
         // Two first-time builders may both attempt to publish the private root.
         // In that case, authenticate the winning directory before opening any files.
         if let Err(error) = private_io::private_directory(&root) {
@@ -66,7 +81,7 @@ impl LaunchStaging {
         Ok(Self {
             path,
             owner: Some(owner),
-            _home_authority: (lexical, target),
+            _home_authority: authority,
         })
     }
 
