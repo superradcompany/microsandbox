@@ -465,7 +465,7 @@ export type { StorageSelection, StorageDiagnosticStatus, StorageCandidate, Stora
 
 export type { StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection } from "./storage-recovery.js";
 
-export { Context, LocalContext, RemoteContext, LocalContextBuilder, RemoteContextBuilder, Sandboxes, Volumes, Snapshots, Checkpoints } from "./context.js";
-export type { ComputeType, LocalContextOptions, RemoteContextOptions } from "./context.js";
+export { configuredContext, Context, LocalContext, RemoteContext, LocalContextBuilder, RemoteContextBuilder, Sandboxes, Volumes, Snapshots, Checkpoints } from "./context.js";
+export type { ContextInfo, ComputeType, LocalContextOptions, RemoteContextOptions } from "./context.js";
 
 export type { SandboxConfigInspection, SandboxRuntimeInspection, RemoteSandboxInspection, LocalSandboxInspection, RemoteMountInspection, RemoteSecretInspection } from "./config-inspection.js";

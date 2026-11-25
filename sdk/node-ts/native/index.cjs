@@ -690,6 +690,7 @@ module.exports.JsVolumeFsReadStream = nativeBinding.JsVolumeFsReadStream
 module.exports.VolumeFsWriteSink = nativeBinding.VolumeFsWriteSink
 module.exports.JsVolumeFsWriteSink = nativeBinding.JsVolumeFsWriteSink
 module.exports.allSandboxMetrics = nativeBinding.allSandboxMetrics
+module.exports.configuredContext = nativeBinding.configuredContext
 module.exports.configuredProviderKind = nativeBinding.configuredProviderKind
 module.exports.diagnoseStorage = nativeBinding.diagnoseStorage
 module.exports.ensureRuntime = nativeBinding.ensureRuntime

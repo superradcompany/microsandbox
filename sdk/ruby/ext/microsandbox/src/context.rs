@@ -72,6 +72,12 @@ impl RubyContext {
         Ok(ruby.obj_wrap_as(Self { inner }, class))
     }
 
+    fn info_json(ruby: &Ruby, this: &Self) -> Result<String, Error> {
+        let info = this.inner.info().map_err(|e| crate::core_error(ruby, e))?;
+        serde_json::to_string(&info)
+            .map_err(|e| Error::new(ruby.exception_runtime_error(), e.to_string()))
+    }
+
     fn kind(&self) -> magnus::Symbol {
         crate::symbol(match self.inner.kind() {
             microsandbox_core::ContextKind::Local => "local",
@@ -393,7 +399,18 @@ fn snapshot_ctx(context: &RubyContext) -> RubyCheckpoints {
     context.checkpoints()
 }
 
+fn configured_context(ruby: &Ruby) -> Result<typed_data::Obj<RubyContext>, Error> {
+    let inner = microsandbox_core::resolve_context().map_err(|e| crate::core_error(ruby, e))?;
+    let module: RModule = ruby.class_object().const_get("Microsandbox")?;
+    let class: magnus::RClass = module.const_get(match inner.kind() {
+        microsandbox_core::ContextKind::Local => "LocalContext",
+        microsandbox_core::ContextKind::Remote => "RemoteContext",
+    })?;
+    Ok(ruby.obj_wrap_as(RubyContext { inner }, class))
+}
+
 pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+    module.define_singleton_method("configured_context", function!(configured_context, 0))?;
     let context = module.define_class("Context", ruby.class_object())?;
     context.define_singleton_method("__from_json", method!(RubyContext::from_json, 1))?;
     context.define_singleton_method(
@@ -404,6 +421,7 @@ pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
         "inherited",
         function!(magnus::RClass::undef_default_alloc_func, 1),
     )?;
+    context.define_method("__info_json", method!(RubyContext::info_json, 0))?;
     context.define_method("kind", method!(RubyContext::kind, 0))?;
     context.define_method("sandboxes", method!(RubyContext::sandboxes, 0))?;
     context.define_method("volumes", method!(RubyContext::volumes, 0))?;

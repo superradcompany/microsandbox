@@ -61,6 +61,7 @@ from microsandbox._microsandbox import (
     Volume,
     Volumes,
     all_sandbox_metrics,
+    configured_context,
     version,
 )
 from microsandbox._microsandbox import (
@@ -170,6 +171,7 @@ from microsandbox.types import (
     ChangeState,
     ComputeType,
     ConfigPlannedChange,
+    ContextInfo,
     ContextKind,
     CpuPlacement,
     CpuResizeTarget,
@@ -285,6 +287,8 @@ if _bundled_msb.is_file():
 
 
 __all__ = [
+    "configured_context",
+    "ContextInfo",
     "SandboxConfigInspection",
     "SandboxInspectionSpec",
     "SandboxRuntimeInspection",

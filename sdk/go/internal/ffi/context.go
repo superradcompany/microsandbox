@@ -27,6 +27,7 @@ type Context struct {
 
 	handle uint64
 	kind   string
+	info   *BackendInfo
 }
 
 func NewContext(options any) (*Context, error) { return defaultLibrary().NewContext(options) }
@@ -42,6 +43,14 @@ func (c *Context) DeriveRemote(overrides any) (*Context, error) {
 }
 
 func (c *Context) Kind() string { return c.kind }
+
+// Info belongs to this registration, not the currently configured default.
+func (c *Context) Info() (*BackendInfo, error) {
+	if c.info == nil {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support retained context metadata; update the native SDK"}
+	}
+	return c.info, nil
+}
 func (c *Context) CreateSandbox(ctx context.Context, name string, options CreateOptions, connectOrCreate bool) (*Sandbox, error) {
 	options.ContextHandle = c.handle
 	sandbox, err := c.lib().createSandbox(ctx, name, options, connectOrCreate)
@@ -187,8 +196,9 @@ func (library *Library) NewContext(options any) (*Context, error) {
 		return nil, err
 	}
 	var response struct {
-		Handle uint64 `json:"handle"`
-		Kind   string `json:"kind"`
+		Handle uint64       `json:"handle"`
+		Kind   string       `json:"kind"`
+		Info   *BackendInfo `json:"info"`
 	}
 	if err := json.Unmarshal([]byte(out), &response); err != nil || response.Handle == 0 || response.Kind == "" {
 		if h := salvageHandle(out); h != 0 {
@@ -196,7 +206,7 @@ func (library *Library) NewContext(options any) (*Context, error) {
 		}
 		return nil, fmt.Errorf("invalid native context registration")
 	}
-	destination := &Context{library: library, handle: response.Handle, kind: response.Kind}
+	destination := &Context{library: library, handle: response.Handle, kind: response.Kind, info: response.Info}
 	runtime.SetFinalizer(destination, func(c *Context) { C.provider_call_msb_context_release(library.table, C.uint64_t(c.handle)) })
 	return destination, nil
 }

@@ -49,6 +49,7 @@ pub(crate) fn register_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(setup::resolved_cli_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<context::PyContext>()?;
+    m.add_function(wrap_pyfunction!(context::configured_context, m)?)?;
     m.add_class::<context::PySandboxes>()?;
     m.add_class::<context::PyVolumes>()?;
     m.add_class::<context::PySnapshots>()?;

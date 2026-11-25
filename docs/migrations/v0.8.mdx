@@ -40,6 +40,12 @@ Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSa
 
 Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. See [context selection](/operations/backends#sdk-contexts) for complete language examples. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. Use the selected context’s collections to keep related operations on the same provider.
 
+### Inspect and retain configured selection
+
+Replace removed backend-info getters with the [configured-context resolver](/sdk/overview#capture-the-configured-destination). Inspect metadata on the returned context, then use its collections to keep operations on the same destination even when the saved profile changes. This does not restore mutable global backend setters.
+
+`ContextSelectionSource` now includes `Managed` (`"managed"` in serialized metadata) when managed configuration chooses the destination. Rust applications with exhaustive matches on this enum must add that arm. Saved user profile selection continues to report `ActiveProfile` (`"active_profile"`).
+
 ### Use the returned resource directly
 
 `get` and `list` do not start a stopped sandbox. Execution, filesystem and SSH operations prepare the receiver when needed. `ensure_running` explicitly performs that same preparation and returns no new owning object. `get_running` combines lookup and preparation without creating a missing resource.
