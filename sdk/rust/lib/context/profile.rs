@@ -109,6 +109,15 @@ impl From<ProfileKind> for ContextKind {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Resolve and retain the configured destination without creating a sandbox.
+///
+/// Uses the same configuration precedence as unqualified SDK operations. The returned
+/// context retains its settings and credentials even if profiles or environment change.
+/// Invalid configuration is returned immediately; metadata is available through `info()`.
+pub fn resolve_context() -> MicrosandboxResult<Arc<dyn Context>> {
+    resolve_default_backend()
+}
+
 /// Capture the configured destination for an infallible SDK builder. Keep selection errors
 /// on the builder so its fallible operation fails without touching either destination.
 #[doc(hidden)]
@@ -346,6 +355,58 @@ mod tests {
     }
     use super::*;
     use crate::config::{GlobalConfig, GlobalConfigPatch};
+
+    #[test]
+    #[cfg(feature = "cloud")]
+    fn configured_context_retains_metadata_after_profile_change() {
+        let _env_guard = crate::test_support::lock_env();
+        let temp = tempfile::tempdir().unwrap();
+        let user = temp.path().join("config.json");
+        let managed = temp.path().join("managed.json");
+        let write = |selected| {
+            std::fs::write(&user, serde_json::json!({
+                "active_profile": selected,
+                "profiles": {
+                    "prod": {"kind": "remote", "url": "http://127.0.0.1:9", "api_key_ref": "inline:captured-secret"},
+                    "staging": {"kind": "remote", "url": "http://127.0.0.1:10", "api_key_ref": "inline:changed-secret"}
+                }
+            }).to_string()).unwrap();
+        };
+        write("prod");
+        let captured = resolve_default_backend_from(&user, Some(&managed)).unwrap();
+        let info = captured.info().unwrap();
+        assert_eq!(info.kind, ContextKind::Remote);
+        assert_eq!(info.profile.as_deref(), Some("prod"));
+        assert_eq!(info.source, ContextSelectionSource::ActiveProfile);
+        assert!(
+            !serde_json::to_string(&info)
+                .unwrap()
+                .contains("captured-secret")
+        );
+        write("staging");
+        assert_eq!(captured.info().unwrap(), info);
+        assert_eq!(
+            resolve_default_backend_from(&user, Some(&managed))
+                .unwrap()
+                .info()
+                .unwrap()
+                .profile
+                .as_deref(),
+            Some("staging")
+        );
+        std::fs::write(&managed, r#"{"overrides":{"active_profile":"prod"}}"#).unwrap();
+        let managed_context = resolve_default_backend_from(&user, Some(&managed)).unwrap();
+        let managed_info = managed_context.info().unwrap();
+        assert_eq!(managed_info.source, ContextSelectionSource::Managed);
+        assert_eq!(managed_info.profile.as_deref(), Some("prod"));
+        assert_eq!(
+            serde_json::to_value(&managed_info).unwrap()["source"],
+            "managed"
+        );
+        std::fs::remove_file(&managed).unwrap();
+        write("missing");
+        assert!(resolve_default_backend_from(&user, Some(&managed)).is_err());
+    }
 
     #[test]
     fn global_config_parses_profiles() {

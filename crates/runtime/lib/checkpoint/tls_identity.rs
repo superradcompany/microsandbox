@@ -8,7 +8,7 @@ use microsandbox_types::InterceptCaConfig;
 use zeroize::Zeroizing;
 
 use super::migration::{io, namespace};
-use super::tls_storage::{STORE, identity_path};
+use super::tls_storage::{STORE, identity_path, key_home};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -29,7 +29,9 @@ pub(super) fn install_for_sandbox(
     certificate: &[u8],
     private_key: &[u8],
 ) -> Result<InterceptCaConfig, String> {
-    let (canonical, _alias, _target) = namespace::configuration_home(home)?;
+    let entry = Path::new(STORE).join(id.to_string());
+    let storage = key_home(home, &entry, true)?.ok_or("cannot allocate private TLS storage")?;
+    let canonical = &storage.path;
     let store = canonical.join(STORE);
     // Two first-time creators can race to publish the empty store. Accept
     // the winner only after validating its owner-only permissions.
@@ -40,7 +42,7 @@ pub(super) fn install_for_sandbox(
         microsandbox_utils::private_file::verify(&io::directory(&store)?).map_err(|_| error)?;
     }
     let _store = namespace::acquire_parents(vec![store], true, true)?;
-    install(&identity_path(&canonical, id), certificate, private_key)
+    install(&identity_path(canonical, id), certificate, private_key)
 }
 
 /// Called only while the SDK owns a fresh sandbox creation reservation. An
@@ -72,14 +74,44 @@ pub(super) fn captured_identity(
     configured: &InterceptCaConfig,
     resources: &[ResourceDescriptor],
 ) -> Result<Option<ManagedIdentity>, String> {
-    let canonical = std::fs::canonicalize(home).map_err(|e| format!("resolve TLS storage: {e}"))?;
-    let source_path = identity_path(&canonical, source);
-    if configured.cert_path.as_deref() != Some(source_path.join("ca.crt").as_path())
-        || configured.key_path.as_deref() != Some(source_path.join("ca.key").as_path())
-    {
+    let Some(cert_path) = configured.cert_path.as_deref() else {
+        return Ok(None);
+    };
+    let Some(key_path) = configured.key_path.as_deref() else {
+        return Ok(None);
+    };
+    let entry = Path::new(STORE).join(source.to_string());
+    if !key_path.ends_with(entry.join("ca.key")) || !cert_path.ends_with(entry.join("ca.crt")) {
         return Ok(None);
     }
-    let _source = namespace::acquire_parents(vec![home.join(STORE)], true, true)?;
+    let canonical = std::fs::canonicalize(home).map_err(|e| format!("resolve TLS storage: {e}"))?;
+    let source_path = identity_path(&canonical, source);
+    let store = home.join(STORE);
+    #[cfg(windows)]
+    let (source_path, store) = if key_path != source_path.join("ca.key") {
+        use super::tls_storage::PROFILE_STORE;
+
+        let Some(profile) = dirs::data_local_dir() else {
+            return Ok(None);
+        };
+        let profile =
+            std::fs::canonicalize(profile).map_err(|e| format!("resolve TLS profile: {e}"))?;
+        if !key_path.starts_with(profile.join(PROFILE_STORE)) {
+            return Ok(None);
+        }
+        let expected = profile
+            .join(PROFILE_STORE)
+            .join(namespace::windows_catalog_scope(
+                &home.join(microsandbox_utils::DB_SUBDIR),
+            )?);
+        (identity_path(&expected, source), expected.join(STORE))
+    } else {
+        (source_path, store)
+    };
+    if key_path != source_path.join("ca.key") || cert_path != source_path.join("ca.crt") {
+        return Ok(None);
+    }
+    let _source = namespace::acquire_parents(vec![store], true, true)?;
     let identity = read_managed(&source_path)?;
 
     let fingerprint = microsandbox_network::identity::verify_dedicated_ca(

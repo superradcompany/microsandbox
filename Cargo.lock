@@ -4497,6 +4497,7 @@ dependencies = [
  "ciborium-ll",
  "clap",
  "crossbeam-queue",
+ "dirs",
  "hex",
  "libc",
  "microsandbox-agent-client",

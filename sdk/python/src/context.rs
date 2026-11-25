@@ -61,6 +61,22 @@ impl PyContext {
         .map_err(to_py_err)?;
         Ok(Self { inner })
     }
+    /// Secret-safe metadata from the retained destination, without re-resolution.
+    #[getter]
+    fn info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let info = self.inner.info().map_err(to_py_err)?;
+        let types = py.import(crate::provider::public_module("types"))?;
+        Ok(types
+            .getattr("ContextInfo")?
+            .call1((
+                str_enum_member(py, "ContextKind", info.kind.as_str())?,
+                info.source.as_str(),
+                info.profile,
+                info.api_url,
+            ))?
+            .unbind())
+    }
+
     #[getter]
     fn kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let kind = match self.inner.kind() {
@@ -529,4 +545,16 @@ impl PySnapshots {
             })
         })
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Capture configured settings before the first resource operation.
+#[pyfunction]
+pub(crate) fn configured_context() -> PyResult<PyContext> {
+    Ok(PyContext {
+        inner: microsandbox::resolve_context().map_err(to_py_err)?,
+    })
 }
