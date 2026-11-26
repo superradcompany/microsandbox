@@ -1,13 +1,65 @@
 //! Guest execution prepares a resource once and pins the selected runtime.
 
-use std::sync::Arc;
-
 use super::{
     AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput, Sandbox,
+    agent_lease::PreparedAgent,
     exec::{ExecHandle, ExecOptions, agent},
     state::RuntimeSession,
 };
 use crate::MicrosandboxResult;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+enum ExecCommand {
+    Explicit {
+        program: String,
+        explicit_argv: bool,
+    },
+    Default,
+    Shell,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: ExecCommand
+//--------------------------------------------------------------------------------------------------
+
+impl ExecCommand {
+    fn resolve(
+        self,
+        session: &RuntimeSession,
+        args: &mut Vec<String>,
+    ) -> MicrosandboxResult<(String, bool)> {
+        match self {
+            Self::Explicit {
+                program,
+                explicit_argv,
+            } => Ok((program, explicit_argv)),
+            Self::Default => {
+                let resolved = session.default_command()?;
+                args.splice(0..0, resolved.args);
+                Ok((resolved.program, false))
+            }
+            Self::Shell => Ok((session.shell(), true)),
+        }
+    }
+
+    fn resolve_attach(
+        self,
+        session: &RuntimeSession,
+        options: AttachOptionsBuilder,
+    ) -> MicrosandboxResult<(String, AttachOptionsBuilder)> {
+        match self {
+            Self::Explicit { program, .. } => Ok((program, options)),
+            Self::Default => {
+                let resolved = session.default_command()?;
+                Ok((resolved.program, options.prepend_args(resolved.args)))
+            }
+            Self::Shell => Ok((session.shell(), options)),
+        }
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods: Execution
@@ -27,15 +79,8 @@ impl Sandbox {
         &self,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
-        let command = microsandbox_types::resolve_default_command(
-            session.config.spec.runtime.entrypoint.as_deref(),
-            session.config.spec.runtime.cmd.as_deref(),
-            None,
-        )?;
         let opts = f(ExecOptionsBuilder::default()).build()?;
-        self.execute_stream_with_default_command(session, from_cache, command, opts)
-            .await
+        self.execute_stream(ExecCommand::Default, opts).await
     }
 
     /// Execute the sandbox's effective OCI entrypoint and CMD and wait for completion.
@@ -51,15 +96,8 @@ impl Sandbox {
         &self,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
-        let command = microsandbox_types::resolve_default_command(
-            session.config.spec.runtime.entrypoint.as_deref(),
-            session.config.spec.runtime.cmd.as_deref(),
-            None,
-        )?;
         let opts = f(ExecOptionsBuilder::default()).build()?;
-        self.execute_with_default_command(session, from_cache, command, opts)
-            .await
+        self.execute_buffered(ExecCommand::Default, opts).await
     }
 
     /// Execute a command and return a streaming handle.
@@ -72,13 +110,18 @@ impl Sandbox {
         cmd: impl Into<String>,
         args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<ExecHandle> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
         let opts = ExecOptions {
             args: args.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
-        self.execute_stream_prepared(session, from_cache, cmd.into(), opts, true)
-            .await
+        self.execute_stream(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv: true,
+            },
+            opts,
+        )
+        .await
     }
 
     /// Execute a command with full options and return a streaming handle.
@@ -94,9 +137,14 @@ impl Sandbox {
         let builder = f(ExecOptionsBuilder::default());
         let explicit_argv = builder.explicit_argv();
         let opts = builder.build()?;
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
-        self.execute_stream_prepared(session, from_cache, cmd.into(), opts, explicit_argv)
-            .await
+        self.execute_stream(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv,
+            },
+            opts,
+        )
+        .await
     }
 
     /// Execute a command and wait for completion.
@@ -109,13 +157,18 @@ impl Sandbox {
         cmd: impl Into<String>,
         args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<ExecOutput> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
         let opts = ExecOptions {
             args: args.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
-        self.execute_prepared(session, from_cache, cmd.into(), opts, true)
-            .await
+        self.execute_buffered(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv: true,
+            },
+            opts,
+        )
+        .await
     }
 
     /// Execute a command with full options and wait for completion.
@@ -131,9 +184,14 @@ impl Sandbox {
         let builder = f(ExecOptionsBuilder::default());
         let explicit_argv = builder.explicit_argv();
         let opts = builder.build()?;
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
-        self.execute_prepared(session, from_cache, cmd.into(), opts, explicit_argv)
-            .await
+        self.execute_buffered(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv,
+            },
+            opts,
+        )
+        .await
     }
 
     /// Run a shell command and wait for completion.
@@ -144,12 +202,11 @@ impl Sandbox {
     /// - `sandbox.shell("echo hello")`
     /// - `sandbox.shell("ENV=val cmd | other_cmd")`
     pub async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
         let opts = ExecOptions {
             args: vec!["-c".to_string(), script.into()],
             ..Default::default()
         };
-        self.execute_shell(session, from_cache, opts).await
+        self.execute_buffered(ExecCommand::Shell, opts).await
     }
 
     /// Run a shell command with full options and wait for completion.
@@ -158,10 +215,9 @@ impl Sandbox {
         script: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
         let mut opts = f(ExecOptionsBuilder::default()).build()?;
         opts.args.splice(0..0, ["-c".to_string(), script.into()]);
-        self.execute_shell(session, from_cache, opts).await
+        self.execute_buffered(ExecCommand::Shell, opts).await
     }
 
     /// Run a shell command with streaming I/O.
@@ -169,12 +225,11 @@ impl Sandbox {
     /// Like [`shell`](Self::shell) but returns a streaming [`ExecHandle`]
     /// instead of waiting for completion.
     pub async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
         let opts = ExecOptions {
             args: vec!["-c".to_string(), script.into()],
             ..Default::default()
         };
-        self.execute_shell_stream(session, from_cache, opts).await
+        self.execute_stream(ExecCommand::Shell, opts).await
     }
 
     /// Run a shell command with full options and streaming I/O.
@@ -183,271 +238,90 @@ impl Sandbox {
         script: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
         let mut opts = f(ExecOptionsBuilder::default()).build()?;
         opts.args.splice(0..0, ["-c".to_string(), script.into()]);
-        self.execute_shell_stream(session, from_cache, opts).await
+        self.execute_stream(ExecCommand::Shell, opts).await
     }
 }
 
 impl Sandbox {
-    async fn execute_stream_with_default_command(
+    async fn execute_stream(
         &self,
-        session: Arc<RuntimeSession>,
-        from_cache: bool,
-        mut command: microsandbox_types::ResolvedCommand,
+        command: ExecCommand,
         mut options: ExecOptions,
     ) -> MicrosandboxResult<ExecHandle> {
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some()
-            && matches!(&session.inner, crate::context::SandboxInner::Cloud(_))
-        {
-            let (fresh_session, connection) = self
-                .connect_cloud_connection(Arc::clone(&session), from_cache)
+        match self.open_agent().await? {
+            PreparedAgent::Direct(lease) => {
+                let (program, explicit_argv) =
+                    command.resolve(&lease.session, &mut options.args)?;
+                let mut execution = agent::exec_stream_on_connection(
+                    lease.connection,
+                    &self.name,
+                    &lease.session.config,
+                    program,
+                    options,
+                    (24, 80),
+                    explicit_argv,
+                )
                 .await?;
-            if !Arc::ptr_eq(&fresh_session, &session) {
-                command = microsandbox_types::resolve_default_command(
-                    fresh_session.config.spec.runtime.entrypoint.as_deref(),
-                    fresh_session.config.spec.runtime.cmd.as_deref(),
-                    None,
-                )?;
+                execution.retain_runtime(lease.session);
+                Ok(execution)
             }
-            options.args.splice(0..0, command.args);
-            let mut execution = agent::exec_stream_on_connection(
-                connection,
-                &self.name,
-                &fresh_session.config,
-                command.program,
-                options,
-                (24, 80),
-                true,
-            )
-            .await?;
-            execution.retain_runtime(fresh_session);
-            return Ok(execution);
+            PreparedAgent::Fallback(session) => {
+                let (program, _) = command.resolve(&session, &mut options.args)?;
+                let mut execution = self
+                    .backend
+                    .sandbox_ops()
+                    .exec_stream(
+                        self.backend.clone(),
+                        &self.name,
+                        &session.config,
+                        program,
+                        options,
+                    )
+                    .await?;
+                execution.retain_runtime(session);
+                Ok(execution)
+            }
         }
-
-        options.args.splice(0..0, command.args);
-        self.execute_stream_prepared(session, from_cache, command.program, options, false)
-            .await
     }
 
-    async fn execute_with_default_command(
+    async fn execute_buffered(
         &self,
-        session: Arc<RuntimeSession>,
-        from_cache: bool,
-        command: microsandbox_types::ResolvedCommand,
+        command: ExecCommand,
         mut options: ExecOptions,
     ) -> MicrosandboxResult<ExecOutput> {
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some()
-            && matches!(&session.inner, crate::context::SandboxInner::Cloud(_))
-        {
-            let timeout = options.timeout.take();
-            let execution = self
-                .execute_stream_with_default_command(session, from_cache, command, options)
+        match self.open_agent().await? {
+            PreparedAgent::Direct(lease) => {
+                let timeout = options.timeout.take();
+                let (program, explicit_argv) =
+                    command.resolve(&lease.session, &mut options.args)?;
+                let mut execution = agent::exec_stream_on_connection(
+                    lease.connection,
+                    &self.name,
+                    &lease.session.config,
+                    program,
+                    options,
+                    (24, 80),
+                    explicit_argv,
+                )
                 .await?;
-            return agent::collect_buffered(execution, timeout).await;
-        }
-
-        options.args.splice(0..0, command.args);
-        self.execute_prepared(session, from_cache, command.program, options, false)
-            .await
-    }
-
-    async fn execute_shell_stream(
-        &self,
-        session: Arc<RuntimeSession>,
-        from_cache: bool,
-        options: ExecOptions,
-    ) -> MicrosandboxResult<ExecHandle> {
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some()
-            && matches!(&session.inner, crate::context::SandboxInner::Cloud(_))
-        {
-            let (session, connection) = self.connect_cloud_connection(session, from_cache).await?;
-            let shell = configured_shell(&session);
-            let mut execution = agent::exec_stream_on_connection(
-                connection,
-                &self.name,
-                &session.config,
-                shell,
-                options,
-                (24, 80),
-                true,
-            )
-            .await?;
-            execution.retain_runtime(session);
-            return Ok(execution);
-        }
-
-        let shell = configured_shell(&session);
-        self.execute_stream_prepared(session, from_cache, shell, options, true)
-            .await
-    }
-
-    async fn execute_shell(
-        &self,
-        session: Arc<RuntimeSession>,
-        from_cache: bool,
-        mut options: ExecOptions,
-    ) -> MicrosandboxResult<ExecOutput> {
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some()
-            && matches!(&session.inner, crate::context::SandboxInner::Cloud(_))
-        {
-            let timeout = options.timeout.take();
-            let execution = self
-                .execute_shell_stream(session, from_cache, options)
-                .await?;
-            return agent::collect_buffered(execution, timeout).await;
-        }
-
-        let shell = configured_shell(&session);
-        self.execute_prepared(session, from_cache, shell, options, true)
-            .await
-    }
-
-    async fn execute_stream_prepared(
-        &self,
-        session: Arc<RuntimeSession>,
-        from_cache: bool,
-        command: String,
-        options: ExecOptions,
-        explicit_argv: bool,
-    ) -> MicrosandboxResult<ExecHandle> {
-        #[cfg(not(feature = "cloud"))]
-        let _ = from_cache;
-        #[cfg(not(feature = "local"))]
-        let _ = explicit_argv;
-
-        #[cfg(feature = "local")]
-        if let crate::context::SandboxInner::Local(local) = &session.inner {
-            let mut execution = agent::exec_stream_on_client(
-                local.client.clone(),
-                &self.name,
-                &session.config,
-                command,
-                options,
-                (24, 80),
-                explicit_argv,
-            )
-            .await?;
-            execution.retain_runtime(session);
-            return Ok(execution);
-        }
-
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some()
-            && matches!(&session.inner, crate::context::SandboxInner::Cloud(_))
-        {
-            let (session, connection) = self.connect_cloud_connection(session, from_cache).await?;
-            let mut execution = agent::exec_stream_on_connection(
-                connection,
-                &self.name,
-                &session.config,
-                command,
-                options,
-                (24, 80),
-                true,
-            )
-            .await?;
-            execution.retain_runtime(session);
-            return Ok(execution);
-        }
-
-        let mut execution = self
-            .backend
-            .sandbox_ops()
-            .exec_stream(
-                self.backend.clone(),
-                &self.name,
-                &session.config,
-                command,
-                options,
-            )
-            .await?;
-        execution.retain_runtime(session);
-        Ok(execution)
-    }
-
-    async fn execute_prepared(
-        &self,
-        session: Arc<RuntimeSession>,
-        from_cache: bool,
-        command: String,
-        mut options: ExecOptions,
-        explicit_argv: bool,
-    ) -> MicrosandboxResult<ExecOutput> {
-        #[cfg(not(feature = "cloud"))]
-        let _ = from_cache;
-
-        #[cfg(feature = "local")]
-        if matches!(&session.inner, crate::context::SandboxInner::Local(_)) {
-            // Preserve buffered execution's existing deadline/kill contract.
-            let timeout = options.timeout.take();
-            let execution = self
-                .execute_stream_prepared(session, from_cache, command, options, explicit_argv)
-                .await?;
-            return agent::collect_buffered(execution, timeout).await;
-        }
-
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some()
-            && matches!(&session.inner, crate::context::SandboxInner::Cloud(_))
-        {
-            let timeout = options.timeout.take();
-            let execution = self
-                .execute_stream_prepared(session, from_cache, command, options, explicit_argv)
-                .await?;
-            return agent::collect_buffered(execution, timeout).await;
-        }
-
-        self.backend
-            .sandbox_ops()
-            .exec(
-                self.backend.clone(),
-                &self.name,
-                &session.config,
-                command,
-                options,
-            )
-            .await
-    }
-
-    #[cfg(feature = "cloud")]
-    async fn connect_cloud_connection(
-        &self,
-        session: Arc<RuntimeSession>,
-        from_cache: bool,
-    ) -> MicrosandboxResult<(Arc<RuntimeSession>, crate::agent::AgentConnection)> {
-        match crate::agent::connect_for(self.backend.as_ref(), &self.name).await {
-            Ok(connection) => Ok((session, connection)),
-            Err(error) if from_cache && crate::context::is_cloud_sandbox_not_running(&error) => {
-                let fresh = self.recover_cloud_runtime(&session).await?;
-                let connection =
-                    crate::agent::connect_for(self.backend.as_ref(), &self.name).await?;
-                Ok((fresh, connection))
+                execution.retain_runtime(lease.session);
+                agent::collect_buffered(execution, timeout).await
             }
-            Err(error) => Err(error),
-        }
-    }
-
-    #[cfg(feature = "cloud")]
-    async fn connect_cloud_agent_client(
-        &self,
-        session: Arc<RuntimeSession>,
-        from_cache: bool,
-    ) -> MicrosandboxResult<(Arc<RuntimeSession>, Arc<crate::agent::AgentClient>)> {
-        match super::fs::agent::connect_agent(self.backend.as_ref(), &self.name).await {
-            Ok(client) => Ok((session, Arc::new(client))),
-            Err(error) if from_cache && crate::context::is_cloud_sandbox_not_running(&error) => {
-                let fresh = self.recover_cloud_runtime(&session).await?;
-                let client =
-                    super::fs::agent::connect_agent(self.backend.as_ref(), &self.name).await?;
-                Ok((fresh, Arc::new(client)))
+            PreparedAgent::Fallback(session) => {
+                let (program, _) = command.resolve(&session, &mut options.args)?;
+                self.backend
+                    .sandbox_ops()
+                    .exec(
+                        self.backend.clone(),
+                        &self.name,
+                        &session.config,
+                        program,
+                        options,
+                    )
+                    .await
             }
-            Err(error) => Err(error),
         }
     }
 }
@@ -470,41 +344,8 @@ impl Sandbox {
         &self,
         f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
-        let mut command = microsandbox_types::resolve_default_command(
-            session.config.spec.runtime.entrypoint.as_deref(),
-            session.config.spec.runtime.cmd.as_deref(),
-            None,
-        )?;
         let builder = f(AttachOptionsBuilder::default()).with_inherited_command(true);
-
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some()
-            && matches!(&session.inner, crate::context::SandboxInner::Cloud(_))
-        {
-            let (fresh_session, client) = self
-                .connect_cloud_agent_client(Arc::clone(&session), from_cache)
-                .await?;
-            if !Arc::ptr_eq(&fresh_session, &session) {
-                command = microsandbox_types::resolve_default_command(
-                    fresh_session.config.spec.runtime.entrypoint.as_deref(),
-                    fresh_session.config.spec.runtime.cmd.as_deref(),
-                    None,
-                )?;
-            }
-            let builder = builder.prepend_args(command.args);
-            return super::attach::agent::attach_on_client(
-                client,
-                &fresh_session.config,
-                command.program,
-                builder,
-            )
-            .await;
-        }
-
-        let builder = builder.prepend_args(command.args);
-        self.attach_prepared(session, from_cache, command.program, builder)
-            .await
+        self.attach_command(ExecCommand::Default, builder).await
     }
 
     /// Attach to the sandbox with an interactive terminal session.
@@ -517,13 +358,18 @@ impl Sandbox {
         cmd: impl Into<String>,
         args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<i32> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
         let mut builder = AttachOptionsBuilder::default();
         for arg in args {
             builder = builder.arg(arg);
         }
-        self.attach_prepared(session, from_cache, cmd.into(), builder)
-            .await
+        self.attach_command(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv: true,
+            },
+            builder,
+        )
+        .await
     }
 
     /// Attach to the sandbox with full options.
@@ -537,98 +383,55 @@ impl Sandbox {
         f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
         let builder = f(AttachOptionsBuilder::default());
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
-        self.attach_prepared(session, from_cache, cmd.into(), builder)
-            .await
+        self.attach_command(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv: true,
+            },
+            builder,
+        )
+        .await
     }
 
     /// Attach to the sandbox's default shell.
     ///
     /// Uses the sandbox's configured shell (default: `/bin/sh`).
     pub async fn attach_shell(&self) -> MicrosandboxResult<i32> {
-        let (session, from_cache) = self.prepare_runtime_tracked().await?;
-
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some()
-            && matches!(&session.inner, crate::context::SandboxInner::Cloud(_))
-        {
-            let (session, client) = self.connect_cloud_agent_client(session, from_cache).await?;
-            let shell = configured_shell(&session);
-            return super::attach::agent::attach_on_client(
-                client,
-                &session.config,
-                shell,
-                AttachOptionsBuilder::default(),
-            )
-            .await;
-        }
-
-        let shell = configured_shell(&session);
-        self.attach_prepared(session, from_cache, shell, AttachOptionsBuilder::default())
+        self.attach_command(ExecCommand::Shell, AttachOptionsBuilder::default())
             .await
     }
 }
 
 impl Sandbox {
-    async fn attach_prepared(
+    async fn attach_command(
         &self,
-        session: Arc<RuntimeSession>,
-        from_cache: bool,
-        command: String,
+        command: ExecCommand,
         options: AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        #[cfg(not(feature = "cloud"))]
-        let _ = from_cache;
-
-        #[cfg(feature = "local")]
-        if let crate::context::SandboxInner::Local(local) = &session.inner {
-            return super::attach::agent::attach_on_client(
-                local.client.clone(),
-                &session.config,
-                command,
-                options,
-            )
-            .await;
+        match self.open_agent().await? {
+            PreparedAgent::Direct(lease) => {
+                let (program, options) = command.resolve_attach(&lease.session, options)?;
+                super::attach::agent::attach_on_client(
+                    lease.connection.into_client(),
+                    &lease.session.config,
+                    program,
+                    options,
+                )
+                .await
+            }
+            PreparedAgent::Fallback(session) => {
+                let (program, options) = command.resolve_attach(&session, options)?;
+                self.backend
+                    .sandbox_ops()
+                    .attach(
+                        self.backend.clone(),
+                        &self.name,
+                        &session.config,
+                        program,
+                        options,
+                    )
+                    .await
+            }
         }
-
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some()
-            && matches!(&session.inner, crate::context::SandboxInner::Cloud(_))
-        {
-            let (session, client) = self.connect_cloud_agent_client(session, from_cache).await?;
-            return super::attach::agent::attach_on_client(
-                client,
-                &session.config,
-                command,
-                options,
-            )
-            .await;
-        }
-
-        self.backend
-            .sandbox_ops()
-            .attach(
-                self.backend.clone(),
-                &self.name,
-                &session.config,
-                command,
-                options,
-            )
-            .await
     }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-fn configured_shell(session: &RuntimeSession) -> String {
-    session
-        .config
-        .spec
-        .runtime
-        .shell
-        .as_deref()
-        .unwrap_or("/bin/sh")
-        .to_string()
 }

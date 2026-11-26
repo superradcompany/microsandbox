@@ -11,7 +11,8 @@
 //! No OAuth or session credentials are honored here.
 
 mod agent;
-mod agent_reuse;
+#[cfg(test)]
+mod agent_tests;
 mod constructors;
 mod http;
 mod modify;
@@ -35,12 +36,10 @@ use reqwest::header::HeaderValue;
 use rustls_platform_verifier::BuilderVerifierExt;
 use tokio_tungstenite::Connector;
 
-use self::agent_reuse::AgentPool;
 use self::http::urlencoding;
 use super::{Context, ContextSelectionSource};
 use crate::config::layers::BackendConfig;
 use crate::{ComputeType, MicrosandboxError, MicrosandboxResult};
-pub(crate) use agent::is_cloud_sandbox_not_running;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -103,8 +102,6 @@ struct RemoteContextInner {
     config: Arc<BackendConfig>,
     selection_source: ContextSelectionSource,
     profile: Option<String>,
-    /// Agent connections kept between operations, shared by every clone of this context.
-    agent_pool: Arc<AgentPool>,
 }
 
 /// Fluent builder for `RemoteContext`. Use for tuned construction.
@@ -387,8 +384,6 @@ impl RemoteContextBuilder {
                     ))
                 })?,
         };
-        let agent_pool = Arc::new(AgentPool::new());
-
         Ok(RemoteContext {
             inner: Arc::new(RemoteContextInner {
                 url,
@@ -404,7 +399,6 @@ impl RemoteContextBuilder {
                 config,
                 selection_source: ContextSelectionSource::Programmatic,
                 profile: None,
-                agent_pool,
             }),
             agent_identity: None,
         })

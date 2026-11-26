@@ -9,6 +9,17 @@ use super::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Prepared runtime session plus whether it came from a cached cloud readiness state.
+pub(super) struct PreparedRuntime {
+    pub(super) session: Arc<RuntimeSession>,
+    #[cfg(feature = "cloud")]
+    pub(super) cached: bool,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
@@ -76,29 +87,35 @@ impl Sandbox {
     pub(crate) async fn prepare_runtime(&self) -> MicrosandboxResult<Arc<RuntimeSession>> {
         self.prepare_runtime_tracked()
             .await
-            .map(|(session, _)| session)
+            .map(|prepared| prepared.session)
     }
 
-    /// Return a prepared runtime session plus whether it came from a cached
-    /// confirmed-running cloud session without performing a live lookup.
-    pub(crate) async fn prepare_runtime_tracked(
-        &self,
-    ) -> MicrosandboxResult<(Arc<RuntimeSession>, bool)> {
+    /// Return a prepared runtime session plus whether it came from a cached cloud session.
+    pub(super) async fn prepare_runtime_tracked(&self) -> MicrosandboxResult<PreparedRuntime> {
         #[cfg(feature = "cloud")]
         if let Some(session) = self.binding.confirmed_cloud_session() {
-            return Ok((session, true));
+            return Ok(PreparedRuntime {
+                session,
+                cached: true,
+            });
         }
 
         let _preparing = self.binding.preparation.lock().await;
 
         #[cfg(feature = "cloud")]
         if let Some(session) = self.binding.confirmed_cloud_session() {
-            return Ok((session, true));
+            return Ok(PreparedRuntime {
+                session,
+                cached: true,
+            });
         }
 
-        self.prepare_runtime_locked()
-            .await
-            .map(|session| (session, false))
+        let session = self.prepare_runtime_locked().await?;
+        Ok(PreparedRuntime {
+            session,
+            #[cfg(feature = "cloud")]
+            cached: false,
+        })
     }
 
     /// Verify live status with the provider and prepare or start the sandbox.
@@ -107,10 +124,9 @@ impl Sandbox {
         self.prepare_runtime_locked().await
     }
 
-    /// Re-verify and start a cloud sandbox after a cached session was rejected
-    /// by the agent gateway as not running.
+    /// Re-verify and start a cloud sandbox after a cached session was rejected as not running.
     #[cfg(feature = "cloud")]
-    pub(crate) async fn recover_cloud_runtime(
+    pub(super) async fn recover_cloud_runtime(
         &self,
         stale: &Arc<RuntimeSession>,
     ) -> MicrosandboxResult<Arc<RuntimeSession>> {
@@ -124,11 +140,6 @@ impl Sandbox {
         }
 
         stale.invalidate_cloud_running();
-        if let Some(cloud) = self.backend.as_cloud()
-            && let crate::context::sandbox::SandboxIdentity::Cloud(id) = &self.identity
-        {
-            cloud.evict_pooled_agents(id);
-        }
 
         self.prepare_runtime_locked().await
     }

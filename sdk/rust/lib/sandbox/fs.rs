@@ -22,13 +22,14 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    agent::{AgentClient, AgentConnection, connect_for},
+    agent::{AGENT_CONNECT_TIMEOUT, AgentClient, AgentConnection},
     context::Context,
     error::{Operation, UnsupportedReason},
 };
 
 use super::{
     Sandbox,
+    agent_lease::PreparedAgent,
     state::{RuntimeSession, WeakSandbox},
 };
 
@@ -62,20 +63,14 @@ pub(crate) trait FsAgentSource: Send + Sync {
     fn retained_runtime(&self) -> Option<Arc<RuntimeSession>> {
         None
     }
-    fn fs_agent<'a>(&'a self, name: &'a str)
-    -> BoxFuture<'a, MicrosandboxResult<Arc<AgentClient>>>;
 
-    fn fs_connection<'a>(
-        &'a self,
-        name: &'a str,
-    ) -> BoxFuture<'a, MicrosandboxResult<AgentConnection>>;
+    fn fs_agent<'a>(&'a self, name: &'a str) -> BoxFuture<'a, MicrosandboxResult<AgentConnection>>;
 }
 
 struct FsOperation {
     backend: Arc<dyn Context>,
     runtime: Option<Arc<RuntimeSession>>,
-    #[cfg(feature = "cloud")]
-    recovery: Option<Sandbox>,
+    connection: std::sync::Mutex<Option<AgentConnection>>,
 }
 
 /// A filesystem entry returned from listing or stat operations.
@@ -209,11 +204,17 @@ impl SandboxFsOps {
         sandbox: &Sandbox,
         path: &str,
     ) -> MicrosandboxResult<Result<FsMetadata, String>> {
-        let operation = FsOperation {
-            backend: sandbox.backend.clone(),
-            runtime: Some(sandbox.prepared_runtime()?),
-            #[cfg(feature = "cloud")]
-            recovery: None,
+        let operation = match sandbox.open_prepared_agent().await? {
+            PreparedAgent::Direct(lease) => FsOperation {
+                backend: sandbox.backend.clone(),
+                runtime: Some(lease.session),
+                connection: std::sync::Mutex::new(Some(lease.connection)),
+            },
+            PreparedAgent::Fallback(session) => FsOperation {
+                backend: sandbox.backend.clone(),
+                runtime: Some(session),
+                connection: std::sync::Mutex::new(None),
+            },
         };
         agent::stat_answer(&operation, sandbox.name(), path).await
     }
@@ -241,21 +242,23 @@ impl SandboxFsOps {
         match &self.resource {
             Some(resource) => {
                 let sandbox = resource.upgrade()?;
-                let (session, from_cache) = sandbox.prepare_runtime_tracked().await?;
-                #[cfg(not(feature = "cloud"))]
-                let _ = (sandbox, from_cache);
-                Ok(FsOperation {
-                    backend: self.backend.clone(),
-                    runtime: Some(session),
-                    #[cfg(feature = "cloud")]
-                    recovery: from_cache.then_some(sandbox),
-                })
+                match sandbox.open_agent().await? {
+                    PreparedAgent::Direct(lease) => Ok(FsOperation {
+                        backend: self.backend.clone(),
+                        runtime: Some(lease.session),
+                        connection: std::sync::Mutex::new(Some(lease.connection)),
+                    }),
+                    PreparedAgent::Fallback(session) => Ok(FsOperation {
+                        backend: self.backend.clone(),
+                        runtime: Some(session),
+                        connection: std::sync::Mutex::new(None),
+                    }),
+                }
             }
             None => Ok(FsOperation {
                 backend: self.backend.clone(),
                 runtime: None,
-                #[cfg(feature = "cloud")]
-                recovery: None,
+                connection: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -410,7 +413,7 @@ impl SandboxFsOps {
     ) -> MicrosandboxResult<FsHandle> {
         self.require_owned_handle_support(Operation::SandboxFsOpenFile)?;
         let operation = self.prepare().await?;
-        let client = operation.fs_agent(&self.name).await?;
+        let client = operation.fs_agent(&self.name).await?.into_client();
         FsHandle::open(client, path.to_owned(), Some(options), operation.runtime).await
     }
 
@@ -418,7 +421,7 @@ impl SandboxFsOps {
     pub async fn open_dir(&self, path: &str) -> MicrosandboxResult<FsHandle> {
         self.require_owned_handle_support(Operation::SandboxFsOpenDir)?;
         let operation = self.prepare().await?;
-        let client = operation.fs_agent(&self.name).await?;
+        let client = operation.fs_agent(&self.name).await?.into_client();
         FsHandle::open(client, path.to_owned(), None, operation.runtime).await
     }
 
@@ -1067,45 +1070,21 @@ impl FsWriteSink {
 //--------------------------------------------------------------------------------------------------
 
 impl<T: Context + ?Sized> FsAgentSource for T {
-    fn fs_agent<'a>(
-        &'a self,
-        name: &'a str,
-    ) -> BoxFuture<'a, MicrosandboxResult<Arc<AgentClient>>> {
+    fn fs_agent<'a>(&'a self, name: &'a str) -> BoxFuture<'a, MicrosandboxResult<AgentConnection>> {
         Box::pin(async move {
-            self.dial_agent(name, std::time::Duration::from_secs(10))
+            self.dial_agent(name, AGENT_CONNECT_TIMEOUT)
                 .await
-                .map(Arc::new)
+                .map(AgentConnection::fresh)
         })
-    }
-
-    fn fs_connection<'a>(
-        &'a self,
-        name: &'a str,
-    ) -> BoxFuture<'a, MicrosandboxResult<AgentConnection>> {
-        Box::pin(async move { connect_for(self, name).await })
     }
 }
 
 impl FsOperation {
-    fn local_client(&self) -> Option<Arc<AgentClient>> {
-        #[cfg(feature = "local")]
-        if let Some(runtime) = &self.runtime
-            && let crate::context::SandboxInner::Local(local) = &runtime.inner
-        {
-            return Some(local.client.clone());
-        }
-        None
-    }
-
     fn uses_direct_agent(&self) -> bool {
-        if self.local_client().is_some() {
-            return true;
-        }
-        #[cfg(feature = "cloud")]
-        if self.backend.as_cloud().is_some() {
-            return true;
-        }
-        false
+        self.connection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 }
 
@@ -1113,49 +1092,18 @@ impl FsAgentSource for FsOperation {
     fn retained_runtime(&self) -> Option<Arc<RuntimeSession>> {
         self.runtime.clone()
     }
-    fn fs_agent<'a>(
-        &'a self,
-        name: &'a str,
-    ) -> BoxFuture<'a, MicrosandboxResult<Arc<AgentClient>>> {
-        Box::pin(async move {
-            if let Some(client) = self.local_client() {
-                return Ok(client);
-            }
-            match self.backend.as_ref().fs_agent(name).await {
-                Ok(client) => Ok(client),
-                #[cfg(feature = "cloud")]
-                Err(error)
-                    if crate::context::is_cloud_sandbox_not_running(&error)
-                        && let (Some(sandbox), Some(stale)) = (&self.recovery, &self.runtime) =>
-                {
-                    sandbox.recover_cloud_runtime(stale).await?;
-                    self.backend.as_ref().fs_agent(name).await
-                }
-                Err(error) => Err(error),
-            }
-        })
-    }
 
-    fn fs_connection<'a>(
-        &'a self,
-        name: &'a str,
-    ) -> BoxFuture<'a, MicrosandboxResult<AgentConnection>> {
+    fn fs_agent<'a>(&'a self, name: &'a str) -> BoxFuture<'a, MicrosandboxResult<AgentConnection>> {
         Box::pin(async move {
-            if let Some(client) = self.local_client() {
-                return Ok(AgentConnection::shared(client));
+            if let Some(connection) = self
+                .connection
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                return Ok(connection);
             }
-            match self.backend.as_ref().fs_connection(name).await {
-                Ok(connection) => Ok(connection),
-                #[cfg(feature = "cloud")]
-                Err(error)
-                    if crate::context::is_cloud_sandbox_not_running(&error)
-                        && let (Some(sandbox), Some(stale)) = (&self.recovery, &self.runtime) =>
-                {
-                    sandbox.recover_cloud_runtime(stale).await?;
-                    self.backend.as_ref().fs_connection(name).await
-                }
-                Err(error) => Err(error),
-            }
+            self.backend.as_ref().fs_agent(name).await
         })
     }
 }
@@ -1453,11 +1401,15 @@ pub(crate) mod agent {
             BulkOffer, BulkReceiveState, BulkSendState,
         },
         fs::{FS_CHUNK_SIZE, FsOp, FsOpenOptions, FsRequest, FsResponseData, FsSetAttrs},
-        message::{Message, MessageType},
+        message::MessageType,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient, context::Context};
+    use crate::{
+        MicrosandboxError, MicrosandboxResult,
+        agent::{AGENT_CONNECT_TIMEOUT, AgentClient},
+        context::Context,
+    };
 
     use super::{
         AgentFsHandle, FsAgentSource, FsEntry, FsMetadata, FsReadStream, FsWriteSink,
@@ -1470,7 +1422,7 @@ pub(crate) mod agent {
         backend: &dyn Context,
         name: &str,
     ) -> MicrosandboxResult<AgentClient> {
-        connect_agent_with_timeout(backend, name, std::time::Duration::from_secs(10)).await
+        connect_agent_with_timeout(backend, name, AGENT_CONNECT_TIMEOUT).await
     }
 
     pub(crate) async fn connect_agent_with_timeout(
@@ -1479,23 +1431,6 @@ pub(crate) mod agent {
         timeout: std::time::Duration,
     ) -> MicrosandboxResult<AgentClient> {
         backend.dial_agent(name, timeout).await
-    }
-
-    /// Send one request on a connection of its own and return its single response.
-    ///
-    /// An answered request leaves nothing on the connection, so a remote context may keep it for
-    /// the next operation. A request that fails or is cancelled first leaves it unfinished, and
-    /// an exclusive connection is closed.
-    async fn request_once(
-        backend: &(impl FsAgentSource + ?Sized),
-        name: &str,
-        request: &FsRequest,
-    ) -> MicrosandboxResult<Message> {
-        let connection = backend.fs_connection(name).await?;
-        let response = connection.request(MessageType::FsRequest, request).await?;
-        connection.finish();
-
-        Ok(response)
     }
 
     pub(crate) async fn open_file(
@@ -1763,7 +1698,7 @@ pub(crate) mod agent {
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<FsReadStream> {
-        let client = backend.fs_agent(name).await?;
+        let client = backend.fs_agent(name).await?.into_client();
         let guard = super::FsHandle::open(
             client.clone(),
             path.to_owned(),
@@ -1806,7 +1741,7 @@ pub(crate) mod agent {
         len: Option<u64>,
         prefer_inline: bool,
     ) -> MicrosandboxResult<FsWriteSink> {
-        let client = backend.fs_agent(name).await?;
+        let client = backend.fs_agent(name).await?.into_client();
         let guard = super::FsHandle::open(
             client.clone(),
             path.to_owned(),
@@ -1836,7 +1771,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
@@ -1866,7 +1802,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1886,7 +1823,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1903,7 +1841,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1920,7 +1859,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1937,7 +1877,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1982,7 +1923,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
@@ -2012,7 +1954,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -2027,7 +1970,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
@@ -2058,7 +2002,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -2073,7 +2018,8 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = request_once(backend, name, &req).await?;
+        let client = backend.fs_agent(name).await?;
+        let resp_msg = client.request_once(MessageType::FsRequest, &req).await?;
         let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {

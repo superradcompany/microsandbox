@@ -140,10 +140,6 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&source.inner.config, &derived.inner.config));
         assert!(!Arc::ptr_eq(&source.inner, &derived.inner));
-        assert!(
-            !Arc::ptr_eq(&source.inner.agent_pool, &derived.inner.agent_pool),
-            "derived contexts must not share an agent pool with their parent"
-        );
         assert!(derived.agent_identity.is_none());
         assert!(derived.inner.profile.is_none());
         assert_eq!(

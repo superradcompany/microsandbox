@@ -16,9 +16,7 @@ pub use bridge::{AgentBridge, BridgeFrame, StreamHandle};
 pub use client::AgentClient;
 #[cfg(feature = "local")]
 pub use client::{connect_sandbox, connect_sandbox_with_timeout};
-#[cfg(any(test, feature = "cloud"))]
-pub(crate) use connection::Reclaim;
-pub(crate) use connection::{AgentConnection, connect_for};
+pub(crate) use connection::{AGENT_CONNECT_TIMEOUT, AgentConnection};
 pub use microsandbox_agent_client::optimized::AgentProtocol;
 pub use microsandbox_agent_client::{AgentClientError, AgentClientResult};
 pub use microsandbox_protocol::codec::RawFrame;

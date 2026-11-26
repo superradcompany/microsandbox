@@ -11,12 +11,9 @@ use microsandbox_protocol::{
     core::Ready,
     message::{Message, MessageType},
 };
-use tokio::{
-    io::{AsyncWriteExt, DuplexStream},
-    time::Instant,
-};
+use tokio::io::{AsyncWriteExt, DuplexStream};
 
-use crate::agent::{AgentClient, AgentConnection, Reclaim};
+use crate::agent::{AgentClient, AgentConnection};
 
 #[cfg(feature = "cloud")]
 pub(crate) mod fake_server;
@@ -50,14 +47,8 @@ impl ReclaimedAgents {
     pub(crate) fn count(&self) -> usize {
         self.0.lock().unwrap().len()
     }
-}
 
-//--------------------------------------------------------------------------------------------------
-// Trait Implementations
-//--------------------------------------------------------------------------------------------------
-
-impl Reclaim for ReclaimedAgents {
-    fn reclaim(self: Arc<Self>, _sandbox_id: &str, client: AgentClient, _opened: Instant) {
+    fn push(&self, client: AgentClient) {
         // Holding the client keeps the connection open, as a real pool would.
         self.0.lock().unwrap().push(client);
     }
@@ -112,8 +103,12 @@ pub(crate) async fn pooled_agent_connection()
 -> (AgentConnection, DuplexStream, Arc<ReclaimedAgents>) {
     let (client, peer) = agent_client_pair().await;
     let pool = Arc::new(ReclaimedAgents::default());
-    let home = Arc::downgrade(&pool);
-    let connection = AgentConnection::pooled(client, Instant::now(), "sandbox", home);
+    let weak = Arc::downgrade(&pool);
+    let connection = AgentConnection::pooled(client, move |client| {
+        if let Some(pool) = weak.upgrade() {
+            pool.push(client);
+        }
+    });
 
     (connection, peer, pool)
 }

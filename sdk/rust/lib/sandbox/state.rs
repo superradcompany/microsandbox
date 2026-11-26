@@ -7,6 +7,8 @@ use std::sync::{
 
 use tokio::sync::Mutex;
 
+#[cfg(feature = "cloud")]
+use super::agent_pool::AgentPool;
 use super::{Sandbox, SandboxConfig, SandboxIdentity};
 use crate::context::SandboxInner;
 use crate::{Context, MicrosandboxError, MicrosandboxResult};
@@ -42,6 +44,9 @@ pub(crate) struct RuntimeSession {
     /// has not been invalidated by a lifecycle change or stale-connection signal.
     #[cfg(feature = "cloud")]
     cloud_confirmed_running: AtomicBool,
+    /// Idle cloud agent WebSockets for this run; cleared when the run is invalidated or dropped.
+    #[cfg(feature = "cloud")]
+    pub(super) agents: Arc<AgentPool>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -55,6 +60,8 @@ impl RuntimeSession {
             config,
             #[cfg(feature = "cloud")]
             cloud_confirmed_running: AtomicBool::new(false),
+            #[cfg(feature = "cloud")]
+            agents: Arc::new(AgentPool::new()),
         }
     }
 
@@ -68,7 +75,29 @@ impl RuntimeSession {
             inner,
             config,
             cloud_confirmed_running: AtomicBool::new(confirmed_running),
+            agents: Arc::new(AgentPool::new()),
         }
+    }
+
+    pub(crate) fn shell(&self) -> String {
+        self.config
+            .spec
+            .runtime
+            .shell
+            .as_deref()
+            .unwrap_or("/bin/sh")
+            .to_string()
+    }
+
+    pub(crate) fn default_command(
+        &self,
+    ) -> MicrosandboxResult<microsandbox_types::ResolvedCommand> {
+        microsandbox_types::resolve_default_command(
+            self.config.spec.runtime.entrypoint.as_deref(),
+            self.config.spec.runtime.cmd.as_deref(),
+            None,
+        )
+        .map_err(Into::into)
     }
 
     #[cfg(feature = "cloud")]
@@ -80,6 +109,7 @@ impl RuntimeSession {
     #[cfg(feature = "cloud")]
     pub(crate) fn invalidate_cloud_running(&self) {
         self.cloud_confirmed_running.store(false, Ordering::Release);
+        self.agents.evict();
     }
 }
 

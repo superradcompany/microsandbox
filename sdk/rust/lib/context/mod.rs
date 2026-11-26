@@ -24,8 +24,6 @@ pub(crate) mod snapshot;
 pub(crate) mod volume;
 
 #[cfg(feature = "cloud")]
-pub(crate) use cloud::is_cloud_sandbox_not_running;
-#[cfg(feature = "cloud")]
 pub use cloud::{DEFAULT_CLOUD_API_URL, RemoteContext, RemoteContextBuilder};
 pub use dispatch::Context;
 #[cfg(feature = "fuzzing")]

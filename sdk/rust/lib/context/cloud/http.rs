@@ -270,7 +270,6 @@ impl RemoteContext {
         force: bool,
         timeout_secs: u64,
     ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
-        self.evict_pooled_agents(id);
         let url = format!(
             "{}/v1/sandboxes/{}/restart",
             self.inner.url,
@@ -350,7 +349,6 @@ impl RemoteContext {
 
     /// `POST /v1/sandboxes/by-name/:name/stop`.
     pub async fn stop_sandbox(&self, name: &str) -> MicrosandboxResult<CloudCreateSandboxResponse> {
-        self.evict_pooled_agents_for_name(name);
         let path = format!("/v1/sandboxes/by-name/{}/stop", urlencoding(name));
         let url = format!("{}{path}", self.inner.url);
         let op = format!("POST {path}");
@@ -360,9 +358,7 @@ impl RemoteContext {
             .send()
             .await
             .map_err(|e| cloud_io_error(&op, e))?;
-        let sandbox: CloudCreateSandboxResponse = decode_json(resp, &op).await?;
-        self.evict_pooled_agents(&sandbox.id);
-        Ok(sandbox)
+        decode_json(resp, &op).await
     }
 
     /// `POST /v1/sandboxes/:id/stop` for identity-safe receiver operations.
@@ -370,7 +366,6 @@ impl RemoteContext {
         &self,
         id: &str,
     ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
-        self.evict_pooled_agents(id);
         let path = format!("/v1/sandboxes/{}/stop", urlencoding(id));
         let url = format!("{}{path}", self.inner.url);
         let op = format!("POST {path}");
@@ -386,7 +381,6 @@ impl RemoteContext {
     /// `DELETE /v1/sandboxes/by-name/:name`. Returns the typed `MessageResponse`
     /// returned by the API.
     pub async fn destroy_sandbox(&self, name: &str) -> MicrosandboxResult<CloudMessageResponse> {
-        self.evict_pooled_agents_for_name(name);
         let path = format!("/v1/sandboxes/by-name/{}", urlencoding(name));
         let url = format!("{}{path}", self.inner.url);
         let op = format!("DELETE {path}");
@@ -403,7 +397,6 @@ impl RemoteContext {
         &self,
         id: &str,
     ) -> MicrosandboxResult<CloudMessageResponse> {
-        self.evict_pooled_agents(id);
         let path = format!("/v1/sandboxes/{}", urlencoding(id));
         let url = format!("{}{path}", self.inner.url);
         let op = format!("DELETE {path}");

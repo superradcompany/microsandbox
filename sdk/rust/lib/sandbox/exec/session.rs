@@ -681,9 +681,11 @@ pub(crate) mod agent {
         time::Instant,
     };
 
+    #[cfg(feature = "ssh")]
+    use crate::agent::AgentClient;
     use crate::{
         MicrosandboxError, MicrosandboxResult,
-        agent::{AgentClient, AgentConnection, connect_for},
+        agent::{AGENT_CONNECT_TIMEOUT, AgentConnection},
         sandbox::{SandboxConfig, build_exec_request},
     };
 
@@ -712,10 +714,20 @@ pub(crate) mod agent {
         rows: u16,
         cols: u16,
     ) -> MicrosandboxResult<ExecHandle> {
-        let connection = connect_for(backend, name).await?;
-        start_session(connection, name, config, cmd, opts, (rows, cols), true).await
+        let client = backend.dial_agent(name, AGENT_CONNECT_TIMEOUT).await?;
+        exec_stream_on_connection(
+            AgentConnection::fresh(client),
+            name,
+            config,
+            cmd,
+            opts,
+            (rows, cols),
+            true,
+        )
+        .await
     }
 
+    #[cfg(feature = "ssh")]
     pub(crate) async fn exec_stream_on_client(
         client: Arc<AgentClient>,
         name: &str,
@@ -725,7 +737,7 @@ pub(crate) mod agent {
         size: (u16, u16),
         explicit_argv: bool,
     ) -> MicrosandboxResult<ExecHandle> {
-        start_session(
+        exec_stream_on_connection(
             AgentConnection::shared(client),
             name,
             config,
@@ -737,7 +749,6 @@ pub(crate) mod agent {
         .await
     }
 
-    #[cfg(feature = "cloud")]
     pub(crate) async fn exec_stream_on_connection(
         connection: AgentConnection,
         name: &str,
@@ -1096,27 +1107,17 @@ pub(crate) mod agent {
         }
 
         if let Some(event) = ended {
-            // The guest has ended the session and holds nothing more of it, so a connection that
-            // came from a pool can serve another operation. Settle that before saying the
-            // session is over: a consumer may let go the moment it hears, and the connection
-            // only passes on if that hold is the last and it is already marked finished. A
-            // connection dialed for this session alone (or shared) needs none of this.
-            let pooled = client
-                .upgrade()
-                .is_some_and(|connection| connection.is_pooled());
-            if pooled {
-                // These tasks work for the session and hold its connection while they do.
-                // Neither has anything left to do for a process that is gone.
-                acknowledging.abort();
-                let _ = acknowledgement.await;
-                if let Some(feeder) = feeder {
-                    feeder.abort();
-                    let _ = feeder.await;
-                }
-
-                if let Some(connection) = client.upgrade() {
-                    connection.finish();
-                }
+            // Stop helper tasks and mark the connection finished before notifying the caller, so
+            // dropping the handle immediately after receiving the exit event releases a pooled
+            // connection back to its pool.
+            acknowledging.abort();
+            let _ = acknowledgement.await;
+            if let Some(feeder) = feeder {
+                feeder.abort();
+                let _ = feeder.await;
+            }
+            if let Some(connection) = client.upgrade() {
+                connection.finish();
             }
 
             let _ = tx.send(event);

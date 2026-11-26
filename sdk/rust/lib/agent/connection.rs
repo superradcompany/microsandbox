@@ -1,84 +1,51 @@
 //! An agent connection held for one operation.
 //!
-//! Remote operations own their connection outright: nothing else uses it while the operation runs,
-//! and dropping it unfinished closes it, which is how the guest learns to kill what the
-//! operation started.
-//!
-//! A remote context may keep connections open between operations. It then hands out an
-//! [`AgentConnection`] that knows where it came from, and takes it back only if the operation
-//! says it [finished](AgentConnection::finish). Anything else is closed as before.
-//!
-//! Local sandboxes and SSH sessions already share one long-lived `Arc<AgentClient>` across
-//! operations; [`AgentConnection::shared`] wraps that client so shared sessions never close or
-//! return it to a pool when an individual operation drops.
+//! Exclusive connections are owned by one operation at a time; dropping an unfinished connection
+//! closes it so the guest cleans up. A pooled connection returns to its pool when marked
+//! [finished](AgentConnection::finish). Shared connections (local runs and SSH) release only
+//! their `Arc` reference on drop.
 
 use std::{
     ops::Deref,
     sync::{
-        Arc, Weak,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
-use tokio::time::Instant;
+use microsandbox_protocol::message::{Message, MessageType};
+use serde::Serialize;
 
 use super::AgentClient;
-use crate::{MicrosandboxResult, context::Context};
+use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Budget for obtaining a connection, matching the per-operation dial timeout.
-const AGENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default budget for dialing a sandbox agent connection.
+pub(crate) const AGENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
+type ReleaseFn = Box<dyn FnOnce(AgentClient) + Send + Sync>;
+
 /// One operation's hold on an agent connection.
 ///
-/// Dereferences to the [`AgentClient`]. Share it between the parts of one operation with an
-/// `Arc`; what happens to an exclusive connection is decided when the last of them lets go.
+/// Dereferences to [`AgentClient`]. Share across tasks of one operation with an `Arc`; release
+/// happens when the last reference drops.
 pub(crate) struct AgentConnection {
-    /// Underlying transport, either exclusively owned by this operation or shared with a
-    /// long-lived local/SSH session.
     client: ConnectionClient,
-
-    /// Where a finished exclusive connection may go back to. Absent for freshly dialed or shared
-    /// connections.
-    home: Option<Home>,
-
-    /// Whether the operation ended and left nothing of itself on the connection.
+    on_release: Option<ReleaseFn>,
     finished: AtomicBool,
 }
 
 enum ConnectionClient {
-    /// Exclusively owned by this operation until drop moves it out.
     Exclusive(Option<Box<AgentClient>>),
-
-    /// Shared with an outer runtime or SSH session; drop only releases this reference.
     Shared(Arc<AgentClient>),
-}
-
-/// Takes back connections whose operations finished.
-///
-/// Only the cloud context keeps connections today, so without it nothing implements this.
-#[cfg_attr(not(any(test, feature = "cloud")), allow(dead_code))]
-pub(crate) trait Reclaim: Send + Sync {
-    /// Offer a finished connection for reuse. The implementation keeps it or drops it.
-    ///
-    /// The pool arrives as an `Arc` so that it can set a timer that refers back to itself.
-    fn reclaim(self: Arc<Self>, sandbox_id: &str, client: AgentClient, opened: Instant);
-}
-
-/// The pool a connection was taken from.
-struct Home {
-    /// Weak, so an outstanding connection never keeps its pool alive.
-    pool: Weak<dyn Reclaim>,
-    sandbox_id: String,
-    opened: Instant,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -86,60 +53,65 @@ struct Home {
 //--------------------------------------------------------------------------------------------------
 
 impl AgentConnection {
-    /// Wrap a connection dialed for this operation alone. It is always closed on drop.
+    /// Wrap a connection dialed for this operation alone; always closed on drop.
     pub(crate) fn fresh(client: AgentClient) -> Self {
         Self {
             client: ConnectionClient::Exclusive(Some(Box::new(client))),
-            home: None,
+            on_release: None,
             finished: AtomicBool::new(false),
         }
     }
 
     /// Wrap a connection shared by a local sandbox run or SSH session.
-    ///
-    /// Dropping releases this reference without closing or pooling the underlying client.
     pub(crate) fn shared(client: Arc<AgentClient>) -> Self {
         Self {
             client: ConnectionClient::Shared(client),
-            home: None,
+            on_release: None,
             finished: AtomicBool::new(false),
         }
     }
 
-    /// Wrap a connection that `pool` will take back if the operation finishes.
-    ///
-    /// `opened` is when the connection was dialed, carried along so the pool can judge its age
-    /// across uses.
-    #[cfg_attr(not(any(test, feature = "cloud")), allow(dead_code))]
+    /// Wrap a connection that calls `on_release` on drop if the operation [finished](Self::finish).
+    #[cfg(any(test, feature = "cloud"))]
     pub(crate) fn pooled(
         client: AgentClient,
-        opened: Instant,
-        sandbox_id: &str,
-        pool: Weak<dyn Reclaim>,
+        on_release: impl FnOnce(AgentClient) + Send + Sync + 'static,
     ) -> Self {
         Self {
             client: ConnectionClient::Exclusive(Some(Box::new(client))),
-            home: Some(Home {
-                pool,
-                sandbox_id: sandbox_id.to_owned(),
-                opened,
-            }),
+            on_release: Some(Box::new(on_release)),
             finished: AtomicBool::new(false),
         }
     }
 
-    /// Whether a pool is waiting to take this connection back.
-    pub(crate) fn is_pooled(&self) -> bool {
-        self.home.is_some()
-    }
-
-    /// Record that the operation has ended and left nothing of itself on the connection.
-    ///
-    /// Call this only once the guest has reported the end: an exit, a refusal, or the single
-    /// response to a single request. An exclusive connection never marked finished is closed on
-    /// drop.
+    /// Mark that the operation ended cleanly so a pooled connection can be reused.
     pub(crate) fn finish(&self) {
         self.finished.store(true, Ordering::Release);
+    }
+
+    /// Send a single request, mark the connection finished on reply, and return the response.
+    pub(crate) async fn request_once<T: Serialize>(
+        &self,
+        msg_type: MessageType,
+        payload: &T,
+    ) -> MicrosandboxResult<Message> {
+        let response = self.request(msg_type, payload).await?;
+        self.finish();
+        Ok(response)
+    }
+
+    /// Consume this hold into a shared `Arc<AgentClient>` for long-lived streams or handles.
+    ///
+    /// Exclusive connections are detached from any pool callback and close when the last `Arc`
+    /// drops.
+    pub(crate) fn into_client(mut self) -> Arc<AgentClient> {
+        self.on_release = None;
+        match &mut self.client {
+            ConnectionClient::Exclusive(slot) => {
+                Arc::new(*slot.take().expect("the connection is present until drop"))
+            }
+            ConnectionClient::Shared(client) => Arc::clone(client),
+        }
     }
 }
 
@@ -168,44 +140,17 @@ impl Drop for AgentConnection {
         let Some(client) = slot.take() else {
             return;
         };
-        let Some(home) = self.home.take() else {
+        let Some(on_release) = self.on_release.take() else {
             return;
         };
 
-        // Unfinished means abandoned or failed. Closing is what tells the guest to clean up.
+        // Unfinished means abandoned or failed; closing tells the guest to clean up.
         if !self.finished.load(Ordering::Acquire) {
             return;
         }
 
-        // A pool that is gone cannot take it; the connection closes instead.
-        if let Some(pool) = home.pool.upgrade() {
-            pool.reclaim(&home.sandbox_id, *client, home.opened);
-        }
+        on_release(*client);
     }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-/// Obtain a connection for one operation against the named sandbox.
-///
-/// Returns one the context kept open when it has one to offer, and a freshly dialed connection
-/// otherwise. Either way the caller has it to itself.
-pub(crate) async fn connect_for<C: Context + ?Sized>(
-    backend: &C,
-    name: &str,
-) -> MicrosandboxResult<AgentConnection> {
-    #[cfg(feature = "cloud")]
-    if let Some(cloud) = backend.as_cloud()
-        && let Some(connection) = cloud.pooled_agent(name, AGENT_CONNECT_TIMEOUT).await?
-    {
-        return Ok(connection);
-    }
-
-    let client = backend.dial_agent(name, AGENT_CONNECT_TIMEOUT).await?;
-
-    Ok(AgentConnection::fresh(client))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -270,7 +215,6 @@ mod tests {
         let shared = Arc::new(client);
         let connection = AgentConnection::shared(Arc::clone(&shared));
 
-        assert!(!connection.is_pooled());
         drop(connection);
 
         expect_silence(&mut peer).await;
@@ -291,5 +235,18 @@ mod tests {
         drop(second);
 
         assert_eq!(pool.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn into_client_detaches_pooled_connection_from_pool() {
+        let (connection, mut peer, pool) = pooled_agent_connection().await;
+        let client = connection.into_client();
+
+        assert_eq!(pool.count(), 0);
+        expect_silence(&mut peer).await;
+        drop(client);
+
+        assert_eq!(pool.count(), 0);
+        expect_closed(&mut peer).await;
     }
 }

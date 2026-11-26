@@ -5,6 +5,9 @@
 //! methods (stop, kill, drain, wait) and access to the [`AgentClient`]
 //! for guest communication.
 
+mod agent_lease;
+#[cfg(feature = "cloud")]
+mod agent_pool;
 pub(crate) mod attach;
 pub(crate) mod branch;
 mod branch_batch;
