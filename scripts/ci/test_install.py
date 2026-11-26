@@ -103,6 +103,14 @@ else:
                                            target_is_directory=True)
                 env["MSB_HOME"] = "alias/../custom-home"
                 target = root / "physical" / "custom-home"
+            if case == "command-symlink-directory":
+                directory_target = root / "other-bin"
+                directory_target.mkdir()
+                local_bin = home / ".local/bin"
+                local_bin.mkdir(parents=True)
+                for command in ("msb", "microsandbox"):
+                    (local_bin / command).symlink_to(directory_target, target_is_directory=True)
+
             if expected_error:
                 (target / "bin").mkdir(parents=True)
                 (target / "bin/msb").write_bytes(b"existing binary")
@@ -121,6 +129,8 @@ else:
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
             self.assertEqual(list(temp.iterdir()), [], "installer temporary directory leaked")
             self.assertEqual(INSTALLER.read_bytes(), source, "installer source changed")
+            if case == "command-symlink-directory":
+                self.assertEqual(list(directory_target.iterdir()), [])
             for path, expected in ((target / "bin/msb", binary_bytes),
                                    (target / "lib" / library, library_bytes)):
                 self.assertFalse(path.is_symlink(), str(path))
@@ -143,6 +153,9 @@ else:
 
     def test_default_home(self):
         self.run_case("default")
+
+    def test_command_symlink_to_directory(self):
+        self.run_case("command-symlink-directory")
 
     def test_absolute_home(self):
         self.run_case("absolute")
