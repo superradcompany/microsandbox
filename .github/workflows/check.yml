@@ -621,6 +621,14 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features net,runner -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
 
+      - name: Test memory snapshot cache permissions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable test --no-default-features --features net,runner -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} checkpoint::memory_cache::tests::windows_
+
       - name: Test bind rootfs patches
         shell: pwsh
         run: |
