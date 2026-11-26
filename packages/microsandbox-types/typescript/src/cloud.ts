@@ -302,6 +302,15 @@ export type CloudSandboxComputeResources = {
   memory_mib: number;
 };
 
+export type CloudCompute = {
+  /**
+   * The kind of machine the sandbox runs on.
+   */
+  type: CloudComputeType;
+};
+
+export type CloudComputeType = "standard" | "shared";
+
 export type CloudRootfsSource = {
   "type": "bind";
   /**
@@ -684,7 +693,8 @@ export type CloudSecretEntry = {
    */
   value: string;
   /**
-   * Host-side source resolved into `value` at spawn time.
+   * Host-side source, read into `value` when a local sandbox starts or a
+   * cloud sandbox is created.
    */
   source?: CloudSecretSource | null;
   /**
@@ -763,16 +773,16 @@ export type CloudCreateSandboxResponse = {
    */
   slug: string;
   /**
-   * Current lifecycle status.
+   * Current lifecycle status. A status this SDK does not recognize arrives as its own string.
    */
-  status: CloudSandboxStatus;
+  status: CloudSandboxStatus | (string & {});
   /**
    * Why the sandbox is not running yet, when known. Only present while
    * `status` is `starting`.
    */
   status_reason: CloudSandboxStatusReason | null;
   /**
-   * Curated resolved-spec projection returned by the control plane, when
+   * Curated resolved-spec projection returned by the cloud API, when
    * available. Lifecycle and agent operations intentionally do not depend
    * on reconstructing the create request from this server-owned view.
    */
@@ -804,10 +814,76 @@ export type CloudSandboxStatus =
   | "starting"
   | "running"
   | "stopping"
+  | "saving_state"
+  | "temporarily_unavailable"
+  | "recovery_decision_required"
   | "stopped"
-  | "failed";
+  | "failed"
+  | "unknown";
 
 export type CloudSandboxStatusReason = "scheduling" | "insufficient_capacity";
+
+export type CloudService = {
+  /**
+   * Globally unique Service slug.
+   */
+  slug: string;
+  /**
+   * Absolute HTTPS URL for the Service.
+   */
+  url: string;
+  /**
+   * Whether the Service routes requests, is disabled, or has no target.
+   */
+  status: CloudServiceStatus;
+  /**
+   * Current target, or no target when the Service is detached.
+   */
+  target: CloudServiceTarget | null;
+  /**
+   * Creation timestamp.
+   */
+  created_at: string;
+  /**
+   * Timestamp of the most recent state change.
+   */
+  updated_at: string;
+};
+
+export type CloudServiceStatus =
+  | "enabled"
+  | "disabled"
+  | "detached"
+  | "unknown";
+
+export type CloudServiceTarget = {
+  /**
+   * Sandbox name.
+   */
+  sandbox: string;
+  /**
+   * Sandbox port that receives requests.
+   */
+  port: number;
+};
+
+export type CloudCreateServiceRequest = {
+  /**
+   * Globally unique Service slug.
+   */
+  slug: string;
+  /**
+   * Initial Service target.
+   */
+  target: CloudServiceTarget;
+};
+
+export type CloudUpdateServiceRequest = {
+  /**
+   * New target when moving or reattaching the Service.
+   */
+  target?: CloudServiceTarget | null;
+};
 
 export type CloudCreateSnapshotRequest = {
   "kind": "disk";

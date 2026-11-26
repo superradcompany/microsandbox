@@ -50,7 +50,10 @@ use windows_sys::Win32::System::Threading::{
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 #[cfg(feature = "net")]
-use microsandbox_network::{ResolvedNetworkConfig, config::EnvNetworkSecretResolver};
+use microsandbox_network::{
+    ResolvedNetworkConfig,
+    config::{EnvNetworkSecretResolver, MultiTenantConfig},
+};
 use microsandbox_protocol::{
     bootstrap::{
         BootstrapBlockRoot, BootstrapBlockRootUpper, BootstrapDirMount, BootstrapDiskMount,
@@ -62,6 +65,8 @@ use microsandbox_protocol::{
 use microsandbox_runtime::ipc::SandboxLifecycleGuard;
 use microsandbox_runtime::launch::{FileMountConfig, LaunchConfig, Lifecycle};
 use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
+#[cfg(feature = "net")]
+use microsandbox_types::DeploymentProfile;
 use microsandbox_types::{CommandResolutionError, SandboxLogLevel, resolve_default_command};
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -72,10 +77,13 @@ use super::protected_state::{self, StoragePreparation};
 #[cfg(windows)]
 use super::sockets::ensure_agent_pipe_unclaimed;
 use super::sockets::remove_socket_artifacts_at;
-use crate::backend::local::creation::CreationStorage;
-use crate::backend::local::volume::ResolvedNamedVolume;
+use crate::context::local::creation::CreationStorage;
+use crate::context::local::volume::ResolvedNamedVolume;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
+use crate::host_file::HostFilePolicy;
+#[cfg(unix)]
+use crate::host_file::{self, HostFileAccess, HostFileKind};
 #[cfg(windows)]
 use crate::runtime::handle::WindowsJob;
 use crate::runtime::handle::{ProcessHandle, StartupProcess};
@@ -83,8 +91,8 @@ use crate::runtime::launch_contract;
 use crate::sandbox::SecurityProfile;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    backend::LocalBackend,
     config::{BlockWritebackConfig, RuntimeConfig},
+    context::LocalContext,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
         DiskImageFormat, HostPermissions, MountOptions, RootfsSource, SandboxConfig,
@@ -131,7 +139,7 @@ struct MetricsReservation {
     shm_name: String,
     slot: u32,
     generation: u64,
-    registry: MetricsRegistry,
+    registry: Option<MetricsRegistry>,
 }
 
 #[cfg(unix)]
@@ -181,7 +189,7 @@ pub enum SpawnMode {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl LocalBackend {
+impl LocalContext {
     /// Complete filesystem preparation while its storage owner is still held.
     pub(crate) async fn prepare_sandbox_launch(
         &self,
@@ -298,11 +306,6 @@ impl LocalBackend {
         // Durable configuration stores only host-side source references. Resolve
         // them into the private runtime configuration before the sandbox process
         // is spawned.
-        #[cfg(feature = "net")]
-        let resolved_network = config
-            .local_network_config()?
-            .resolve(&EnvNetworkSecretResolver)
-            .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
 
         // Resolve the already-layered runtime paths as one compatible pair before launch.
         let global = self.config();
@@ -320,15 +323,30 @@ impl LocalBackend {
         ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
         launch_contract::require_protected_guest_state(&resolved_runtime.msb_path).await?;
         let launch_contract = launch_contract::resolve(&resolved_runtime.msb_path).await?;
+        let retention_supported = launch_contract.machine
+            && launch_contract::supports_configuration_retention(&resolved_runtime.msb_path).await;
         // A stopped sandbox may have been edited without a runtime installed, or
         // the selected executable may have changed since creation. Validate its
         // effective configuration here for both initial launch and later starts.
         launch_contract.validate_launch_intent(config)?;
         #[cfg(feature = "net")]
-        launch_contract::validate_http_deny_response(&resolved_runtime.msb_path, config).await?;
+        let resolved_network = {
+            let mut network = config.local_network_config()?;
+            network.http =
+                launch_contract::select_http_deny_response(&resolved_runtime.msb_path, config)
+                    .await?;
+            network
+                .resolve(&EnvNetworkSecretResolver)
+                .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
+        };
         launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
+
+        #[cfg(feature = "net")]
+        launch_contract::validate_multi_tenant_config(&resolved_runtime.msb_path, config, global)
+            .await?;
+
         launch_contract::validate_nested_virt(&resolved_runtime.msb_path, config, launch_contract)
             .await?;
         if config.checkpoint_restore.as_ref().is_some_and(|restore| {
@@ -437,7 +455,12 @@ impl LocalBackend {
         let named_volumes = self.resolve_named_volumes(config).await?;
         let owned_root = self.sandboxes_dir().join(&config.spec.name);
         super::owned_volumes::validate(&owned_root, &config.spec.mounts)?;
-        let disk_locks = lock_disk_mounts(config, &named_volumes, &owned_root)?;
+        let disk_locks = lock_disk_mounts_with_policy(
+            config,
+            &named_volumes,
+            &owned_root,
+            &self.config().host_file_policy(),
+        )?;
         let metrics_reservation = if config.effective_metrics_interval().is_some() {
             reserve_metrics_slot(self, config, sandbox_id)
         } else {
@@ -558,7 +581,7 @@ impl LocalBackend {
             None,
             #[cfg(windows)]
             startup_pipe_name,
-        );
+        )?;
         tracing::debug!(
             per_disk_limit_bytes = ?writeback_limit_bytes,
             pool_bytes = ?writeback_pool_bytes,
@@ -593,6 +616,12 @@ impl LocalBackend {
         }
         if !launch_contract.machine {
             visible[0] = OsString::from("sandbox");
+        }
+        // Only advertise private tracking to a runtime that passed protected-state admission.
+        if retention_supported {
+            launch.retention_source = Some(microsandbox_runtime::retention::RetentionSource {
+                configuration: serde_json::to_value(config.clone_for_persistence())?,
+            });
         }
         let launch_value = match launch_contract.encode_for_runtime(&msb_path, &launch).await {
             Ok(launch) => launch,
@@ -820,13 +849,15 @@ impl LocalBackend {
             parent_watchdog.map(|pipe| pipe.write_fd),
             #[cfg(windows)]
             child_job,
-            metrics_reservation.as_ref().map(|reservation| {
-                MetricsReservationCleanup::new(
-                    reservation.shm_name.clone(),
-                    reservation.slot,
-                    reservation.generation,
-                    Some(reservation.registry.clone()),
-                )
+            metrics_reservation.as_ref().and_then(|reservation| {
+                reservation.registry.as_ref().map(|registry| {
+                    MetricsReservationCleanup::new(
+                        reservation.shm_name.clone(),
+                        reservation.slot,
+                        reservation.generation,
+                        Some(registry.clone()),
+                    )
+                })
             }),
         ));
 
@@ -990,9 +1021,9 @@ impl Drop for StdioInheritGuard {
 
 /// Spawn a sandbox through the supplied local backend.
 ///
-/// Delegates to [`LocalBackend::spawn_sandbox`].
+/// Delegates to [`LocalContext::spawn_sandbox`].
 pub async fn spawn_sandbox(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &SandboxConfig,
     sandbox_id: i32,
     mode: SpawnMode,
@@ -1321,10 +1352,31 @@ async fn prepare_oci_upper(
 }
 
 fn reserve_metrics_slot(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &SandboxConfig,
     sandbox_id: i32,
 ) -> Option<MetricsReservation> {
+    let memory_limit_bytes = u64::from(config.spec.resources.memory_mib) * 1024 * 1024;
+    #[cfg(target_os = "linux")]
+    if local.config().runtime.private_metrics {
+        return match super::private_metrics::install(
+            &local.config().run_dir(),
+            sandbox_id,
+            &config.spec.name,
+            memory_limit_bytes,
+        ) {
+            Ok((shm_name, slot, generation)) => Some(MetricsReservation {
+                shm_name,
+                slot,
+                generation,
+                registry: None,
+            }),
+            Err(err) => {
+                tracing::warn!(error = %err, sandbox = %config.spec.name, "failed to install private metrics file");
+                None
+            }
+        };
+    }
     let shm_name = local.config().metrics_registry_shm_name();
     let capacity = local.config().metrics_registry_capacity();
     let registry = match MetricsRegistry::open_or_create(&shm_name, capacity) {
@@ -1334,7 +1386,6 @@ fn reserve_metrics_slot(
             return None;
         }
     };
-    let memory_limit_bytes = u64::from(config.spec.resources.memory_mib) * 1024 * 1024;
     match registry.reserve(ReserveSlot {
         sandbox_id,
         name: &config.spec.name,
@@ -1344,7 +1395,7 @@ fn reserve_metrics_slot(
             shm_name,
             slot,
             generation,
-            registry,
+            registry: Some(registry),
         }),
         Err(err) => {
             tracing::warn!(error = %err, sandbox = %config.spec.name, "failed to reserve metrics slot");
@@ -1636,10 +1687,10 @@ fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&Metr
     let Some(reservation) = reservation else {
         return;
     };
-    if let Err(err) = reservation
-        .registry
-        .release_reserved(reservation.slot, reservation.generation)
-    {
+    let Some(registry) = &reservation.registry else {
+        return;
+    };
+    if let Err(err) = registry.release_reserved(reservation.slot, reservation.generation) {
         tracing::debug!(error = %err, sandbox = %config.spec.name, "release: metrics slot release failed");
     }
 }
@@ -1686,10 +1737,22 @@ fn patch_sigchld_handler_uses_alt_stack() {
     }
 }
 
+#[cfg(test)]
 fn lock_disk_mounts(
     config: &SandboxConfig,
     named_volumes: &HashMap<String, ResolvedNamedVolume>,
     sandbox_dir: &Path,
+    strict: bool,
+) -> MicrosandboxResult<Vec<File>> {
+    let policy = HostFilePolicy::from_strict(strict);
+    lock_disk_mounts_with_policy(config, named_volumes, sandbox_dir, &policy)
+}
+
+fn lock_disk_mounts_with_policy(
+    config: &SandboxConfig,
+    named_volumes: &HashMap<String, ResolvedNamedVolume>,
+    sandbox_dir: &Path,
+    policy: &HostFilePolicy,
 ) -> MicrosandboxResult<Vec<File>> {
     let mut locks = Vec::new();
     let mut requests = Vec::new();
@@ -1774,10 +1837,12 @@ fn lock_disk_mounts(
                 request.label
             )));
         }
+        let strict = *policy != HostFilePolicy::Standard;
         locks.push(lock_disk_image(
-            &canonical,
+            if strict { &request.path } else { &canonical },
             request.readonly,
             request.volume_name.as_deref(),
+            policy,
         )?);
     }
 
@@ -1788,33 +1853,50 @@ fn lock_disk_image(
     path: &Path,
     readonly: bool,
     volume_name: Option<&str>,
+    policy: &HostFilePolicy,
 ) -> MicrosandboxResult<File> {
     #[cfg(unix)]
     {
-        lock_disk_image_unix(path, readonly, volume_name)
+        lock_disk_image_unix_with_policy(path, readonly, volume_name, policy)
     }
 
     #[cfg(windows)]
     {
+        if *policy != HostFilePolicy::Standard {
+            return Err(MicrosandboxError::InvalidConfig(
+                "strict host file opens require Unix".into(),
+            ));
+        }
         lock_disk_image_windows(path, readonly, volume_name)
     }
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn lock_disk_image_unix(
     path: &Path,
     readonly: bool,
     volume_name: Option<&str>,
+    strict: bool,
 ) -> MicrosandboxResult<File> {
-    let file = if readonly {
-        std::fs::OpenOptions::new().read(true).open(path)
+    let policy = HostFilePolicy::from_strict(strict);
+    lock_disk_image_unix_with_policy(path, readonly, volume_name, &policy)
+}
+
+#[cfg(unix)]
+fn lock_disk_image_unix_with_policy(
+    path: &Path,
+    readonly: bool,
+    volume_name: Option<&str>,
+    policy: &HostFilePolicy,
+) -> MicrosandboxResult<File> {
+    let access = if readonly {
+        HostFileAccess::ReadOnly
     } else {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-    }
-    .map_err(|err| {
+        HostFileAccess::ReadWrite
+    };
+
+    let file = host_file::open(path, HostFileKind::Disk, access, policy).map_err(|err| {
         MicrosandboxError::InvalidConfig(format!("open disk image lock {}: {err}", path.display()))
     })?;
 
@@ -2208,7 +2290,7 @@ pub(crate) fn guest_mount_tag(guest_path: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn machine_cli_args(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &SandboxConfig,
     sandbox_id: i32,
     #[cfg(feature = "net")] network_slot: NetworkSlot,
@@ -2225,7 +2307,7 @@ fn machine_cli_args(
     parent_watch_fd: Option<i32>,
     startup_fd: Option<i32>,
     startup_pipe: Option<&OsStr>,
-) -> (Vec<OsString>, LaunchConfig) {
+) -> MicrosandboxResult<(Vec<OsString>, LaunchConfig)> {
     // `visible` stays on the process argv: a small set of operator-readable
     // labels (name, id, sizing, fds) so the sandbox is identifiable in `ps`
     // and logs. Everything bulky, structured, or secret-bearing goes into the
@@ -2289,7 +2371,17 @@ fn machine_cli_args(
         sandboxes_dir: local.sandboxes_dir(),
         run_dir: local.config().run_dir(),
         cpu_lease_dir: local.config().run_dir().join("cpu-leases"),
-        writeback_lease_dir: local.config().run_dir().join("writeback-leases"),
+        writeback_lease_dir: {
+            #[cfg(target_os = "linux")]
+            let dir = if local.config().runtime.private_writeback_leases {
+                local.private_writeback_lease_dir(&config.spec.name)
+            } else {
+                local.config().run_dir().join("writeback-leases")
+            };
+            #[cfg(not(target_os = "linux"))]
+            let dir = local.config().run_dir().join("writeback-leases");
+            dir
+        },
         cpu_placement: config.spec.resources.cpu_placement,
         placement_profile_name: config.spec.resources.placement_profile.clone(),
         placement_profile: config
@@ -2323,6 +2415,16 @@ fn machine_cli_args(
         }),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
+
+        #[cfg(feature = "net")]
+        multi_tenant: if config.spec.deployment_profile == DeploymentProfile::MultiTenant {
+            MultiTenantConfig {
+                nameservers: local.config().dns.nameservers.clone(),
+            }
+        } else {
+            MultiTenantConfig::default()
+        },
+
         bootstrap: guest_bootstrap(config),
         ..Default::default()
     };
@@ -2364,9 +2466,18 @@ fn machine_cli_args(
                 });
             // Derive VMDK + upper paths from the stored manifest digest.
             } else if let Some(ref digest_str) = config.manifest_digest {
-                let cache_dir = local.cache_dir();
-                let cache = GlobalCache::new(&cache_dir).expect("cache init");
-                let digest: Digest = digest_str.parse().expect("invalid manifest digest");
+                let cache_dir = local.resolve_image_cache_dir(config.image_cache_dir.as_deref())?;
+                let cache = GlobalCache::new(&cache_dir).map_err(|error| {
+                    MicrosandboxError::Custom(format!(
+                        "image cache unavailable at {}: {error}",
+                        cache_dir.display()
+                    ))
+                })?;
+                let digest: Digest = digest_str.parse().map_err(|error| {
+                    MicrosandboxError::InvalidConfig(format!(
+                        "invalid manifest digest '{digest_str}': {error}"
+                    ))
+                })?;
                 let vmdk_path = cache.vmdk_path(&digest);
 
                 // VMDK (fsmeta + layers) read-only.
@@ -2659,7 +2770,7 @@ fn machine_cli_args(
         launch.sandbox_slot = network_slot.get();
     }
 
-    (visible, launch)
+    Ok((visible, launch))
 }
 
 /// Build guest settings shared by launch preflight and the final payload.
@@ -2797,8 +2908,8 @@ mod tests {
     use crate::db::entity::volume as volume_entity;
     use crate::{
         LogLevel,
-        backend::LocalBackend,
         config::{BlockWritebackConfig, RuntimeConfig},
+        context::LocalContext,
         sandbox::{
             DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, RlimitResource,
             RootfsSource, SandboxBuilder, SandboxConfig, StatVirtualization, VolumeMount,
@@ -2806,7 +2917,7 @@ mod tests {
         volume::VolumeKind,
     };
     use crate::{
-        SandboxConfigPatch, backend::BackendSelectionSource, config::layers::BackendConfig,
+        SandboxConfigPatch, config::layers::BackendConfig, context::ContextSelectionSource,
     };
 
     #[test]
@@ -3196,13 +3307,13 @@ mod tests {
             drop(unrelated);
             // The selected child must retain its lock after the creator lets go, even when
             // its original descriptor was overwritten by a fixed runtime handoff mapping.
-            assert!(super::lock_disk_image_unix(&selected_path, false, None).is_err());
+            assert!(super::lock_disk_image_unix(&selected_path, false, None, false).is_err());
             // Other parallel tests can still be between fork and exec with transient copies
             // of our CLOEXEC descriptors. Keep this child alive while waiting: a real leak
             // into this execed child must time out, not be hidden by killing it first.
             let available = wait_for_unix_test_disk_release(&unrelated_path).await;
             assert!(child.try_wait().unwrap().is_none());
-            assert!(super::lock_disk_image_unix(&selected_path, false, None).is_err());
+            assert!(super::lock_disk_image_unix(&selected_path, false, None, false).is_err());
             drop(available);
             child.kill().await.unwrap();
             let released = wait_for_unix_test_disk_release(&selected_path).await;
@@ -3216,7 +3327,7 @@ mod tests {
         use std::os::fd::AsRawFd;
 
         let disk = tempfile::NamedTempFile::new().unwrap();
-        let lock = super::lock_disk_image_unix(disk.path(), false, None).unwrap();
+        let lock = super::lock_disk_image_unix(disk.path(), false, None, false).unwrap();
         let fd = lock.as_raw_fd();
         assert_ne!(
             unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
@@ -3243,7 +3354,7 @@ mod tests {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
         let disk = tempfile::NamedTempFile::new().unwrap();
-        let lock = super::lock_disk_image_unix(disk.path(), false, None).unwrap();
+        let lock = super::lock_disk_image_unix(disk.path(), false, None, false).unwrap();
         // No handoff callback: a concurrently spawned ordinary process must not keep this
         // disk busy after the creator releases it, even while the unrelated child stays alive.
         let mut child = unix_disk_lock_test_command().spawn().unwrap();
@@ -3282,7 +3393,7 @@ mod tests {
         let disks = std::array::from_fn::<_, 4, _>(|_| tempfile::NamedTempFile::new().unwrap());
         let locks = disks
             .iter()
-            .map(|disk| super::lock_disk_image_unix(disk.path(), false, None).unwrap())
+            .map(|disk| super::lock_disk_image_unix(disk.path(), false, None, false).unwrap())
             .collect::<Vec<_>>();
         let mut sources = std::array::from_fn::<_, 4, _>(|_| tempfile::tempfile().unwrap());
         for (index, source) in sources.iter_mut().enumerate() {
@@ -3381,7 +3492,7 @@ mod tests {
             None,
         );
         for disk in disks {
-            let error = super::lock_disk_image_unix(disk, false, None).unwrap_err();
+            let error = super::lock_disk_image_unix(disk, false, None, false).unwrap_err();
             assert!(error.to_string().contains("incompatible disk mode"));
         }
         writer.write_all(b"done\n").await.unwrap();
@@ -3402,7 +3513,7 @@ mod tests {
         // A genuinely leaked descriptor still fails this test within the bounded deadline.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                match super::lock_disk_image_unix(path, false, None) {
+                match super::lock_disk_image_unix(path, false, None, false) {
                     Ok(file) => return file,
                     Err(error) => {
                         assert!(
@@ -3427,7 +3538,7 @@ mod tests {
         use std::os::unix::process::CommandExt;
 
         let disk = tempfile::NamedTempFile::new().unwrap();
-        let lock = super::lock_disk_image_unix(disk.path(), false, None).unwrap();
+        let lock = super::lock_disk_image_unix(disk.path(), false, None, false).unwrap();
         let (mut parent_gate, child_gate) = UnixStream::pair().unwrap();
         for gate in [&parent_gate, &child_gate] {
             gate.set_read_timeout(Some(std::time::Duration::from_secs(5)))
@@ -3457,7 +3568,7 @@ mod tests {
         parent_gate.read_exact(&mut ready).unwrap();
         drop(child_gate);
         drop(lock);
-        assert!(super::lock_disk_image_unix(disk.path(), false, None).is_err());
+        assert!(super::lock_disk_image_unix(disk.path(), false, None, false).is_err());
         let path = disk.path().to_owned();
         let waiting = tokio::spawn(async move { wait_for_unix_test_disk_release(&path).await });
         tokio::task::yield_now().await;
@@ -3494,12 +3605,12 @@ mod tests {
 
     /// Use isolated configuration for pure `machine_cli_args` rendering tests.
     /// The database remains unopened.
-    fn test_local_backend() -> LocalBackend {
-        LocalBackend::from_backend_config(
+    fn test_local_backend() -> LocalContext {
+        LocalContext::from_backend_config(
             BackendConfig::new(Default::default(), Default::default())
                 .prepare_for_local_backend(Default::default())
                 .unwrap(),
-            BackendSelectionSource::Programmatic,
+            ContextSelectionSource::Programmatic,
             None,
         )
     }
@@ -3543,7 +3654,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         launch
     }
 
@@ -3793,7 +3905,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         visible
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3859,7 +3972,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         visible
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3891,7 +4005,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         visible
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3977,7 +4092,8 @@ mod tests {
             None,
             Some(microsandbox_runtime::vm::STARTUP_FD),
             None,
-        );
+        )
+        .unwrap();
 
         // The startup fd is an operator-visible label, so it stays on argv.
         assert!(visible.windows(2).any(|pair| pair
@@ -4058,7 +4174,8 @@ mod tests {
             None,
             None,
             Some(OsStr::new(r"\\.\pipe\msb-startup-test")),
-        );
+        )
+        .unwrap();
 
         assert!(visible.windows(2).any(|pair| pair
             == [
@@ -4458,7 +4575,7 @@ mod tests {
 
         super::prepare_oci_upper(
             &config,
-            &crate::backend::local::creation::CreationStorage::for_test(temp.path()),
+            &crate::context::local::creation::CreationStorage::for_test(temp.path()),
         )
         .await
         .unwrap();
@@ -4516,7 +4633,7 @@ mod tests {
 
         let error = super::prepare_oci_upper(
             &config,
-            &crate::backend::local::creation::CreationStorage::for_test(temp.path()),
+            &crate::context::local::creation::CreationStorage::for_test(temp.path()),
         )
         .await
         .unwrap_err();
@@ -5026,12 +5143,11 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_named_volumes_recovers_disk_metadata_from_store() {
         let temp = tempdir().unwrap();
-        let local = LocalBackend::builder()
+        let local = LocalContext::builder()
             .config_path(temp.path().join("config.json"))
             .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
-            .await
             .unwrap();
         let pools = local.db().await.unwrap();
         volume_entity::ActiveModel {
@@ -5168,8 +5284,8 @@ mod tests {
             ..Default::default()
         };
 
-        let err =
-            super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused")).unwrap_err();
+        let err = super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"), false)
+            .unwrap_err();
         assert!(err.to_string().contains("more than once per sandbox"));
     }
 
@@ -5196,7 +5312,7 @@ mod tests {
         // parallel Unix children to exec and close transient copies of the old locks.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                match super::lock_disk_mounts(config, &HashMap::new(), Path::new("unused")) {
+                match super::lock_disk_mounts(config, &HashMap::new(), Path::new("unused"), false) {
                     Ok(locks) => return locks,
                     Err(error) => {
                         assert!(
@@ -5224,8 +5340,12 @@ mod tests {
                 let gate = &gate;
                 scope.spawn(move || {
                     gate.wait();
-                    let locks =
-                        super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"));
+                    let locks = super::lock_disk_mounts(
+                        &config,
+                        &HashMap::new(),
+                        Path::new("unused"),
+                        false,
+                    );
                     // The winner must retain ownership until both contenders have tried.
                     gate.wait();
                     locks
@@ -5271,8 +5391,8 @@ mod tests {
                 ..Default::default()
             },
         });
-        let error =
-            super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused")).unwrap_err();
+        let error = super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"), false)
+            .unwrap_err();
         assert!(error.to_string().contains("more than once per sandbox"));
         // Failure after acquiring the upper must not leave it reserved for a failed launch.
         config.spec.mounts.clear();
@@ -5285,7 +5405,8 @@ mod tests {
         let disk = dir.path().join("upper.ext4");
         std::fs::write(&disk, b"disk").unwrap();
         let owner = oci_upper_lock_config("owner", disk.clone());
-        let locks = super::lock_disk_mounts(&owner, &HashMap::new(), Path::new("unused")).unwrap();
+        let locks =
+            super::lock_disk_mounts(&owner, &HashMap::new(), Path::new("unused"), false).unwrap();
 
         let mut reader = oci_upper_lock_config("reader", disk.clone());
         reader.spec.image = RootfsSource::Oci(OciRootfsSource {
@@ -5295,7 +5416,7 @@ mod tests {
         // Shared OCI image layers do not require attachment locks. The explicit upper
         // does: even a read-only mount in another VM must conflict with its writer.
         assert!(
-            super::lock_disk_mounts(&reader, &HashMap::new(), Path::new("unused"))
+            super::lock_disk_mounts(&reader, &HashMap::new(), Path::new("unused"), false)
                 .unwrap()
                 .is_empty()
         );
@@ -5309,8 +5430,8 @@ mod tests {
                 ..Default::default()
             },
         });
-        let error =
-            super::lock_disk_mounts(&reader, &HashMap::new(), Path::new("unused")).unwrap_err();
+        let error = super::lock_disk_mounts(&reader, &HashMap::new(), Path::new("unused"), false)
+            .unwrap_err();
         assert!(error.to_string().contains("incompatible disk mode"));
         drop(locks);
         assert_eq!(wait_for_test_oci_disk_mounts(&reader).await.len(), 1);
@@ -5322,10 +5443,11 @@ mod tests {
         let disk = dir.path().join("upper.ext4");
         std::fs::write(&disk, b"disk").unwrap();
         let owner = oci_upper_lock_config("owner", disk);
-        let _locks = super::lock_disk_mounts(&owner, &HashMap::new(), Path::new("unused")).unwrap();
+        let _locks =
+            super::lock_disk_mounts(&owner, &HashMap::new(), Path::new("unused"), false).unwrap();
         let alias = oci_upper_lock_config("alias", dir.path().join(".").join("upper.ext4"));
-        let error =
-            super::lock_disk_mounts(&alias, &HashMap::new(), Path::new("unused")).unwrap_err();
+        let error = super::lock_disk_mounts(&alias, &HashMap::new(), Path::new("unused"), false)
+            .unwrap_err();
         assert!(error.to_string().contains("incompatible disk mode"));
     }
 
@@ -5340,12 +5462,60 @@ mod tests {
         std::os::unix::fs::symlink(&disk, &symlink).unwrap();
         std::fs::hard_link(&disk, &hardlink).unwrap();
         let owner = oci_upper_lock_config("owner", disk);
-        let _locks = super::lock_disk_mounts(&owner, &HashMap::new(), Path::new("unused")).unwrap();
+        let _locks =
+            super::lock_disk_mounts(&owner, &HashMap::new(), Path::new("unused"), false).unwrap();
         for path in [symlink, hardlink] {
             let config = oci_upper_lock_config("alias", path);
             let error =
-                super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused")).unwrap_err();
+                super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"), false)
+                    .unwrap_err();
             assert!(error.to_string().contains("incompatible disk mode"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_disk_admission_checks_the_original_path_before_locking() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = root.join("images");
+        std::fs::create_dir(&directory).unwrap();
+        let disk = directory.join("disk.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+        symlink(&disk, root.join("alias.raw")).unwrap();
+        symlink(&directory, root.join("alias-dir")).unwrap();
+        let config = oci_upper_lock_config("direct", disk.clone());
+        drop(super::lock_disk_mounts(&config, &HashMap::new(), &root, true).unwrap());
+        for path in [root.join("alias.raw"), root.join("alias-dir/disk.raw")] {
+            let config = oci_upper_lock_config("linked", path);
+            drop(super::lock_disk_mounts(&config, &HashMap::new(), &root, false).unwrap());
+            let error = super::lock_disk_mounts(&config, &HashMap::new(), &root, true).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("open disk image lock"), "{message}");
+            assert!(message.contains("runtime.strict_host_files"), "{message}");
+        }
+
+        // A read-only mount takes a shared lock through a read-only strict open.
+        let mut reader = SandboxConfig::default();
+        reader.spec.mounts.push(VolumeMount::DiskImage {
+            host: disk,
+            guest: "/data".into(),
+            format: DiskImageFormat::Raw,
+            fstype: None,
+            options: MountOptions {
+                readonly: true,
+                ..Default::default()
+            },
+        });
+        let first = super::lock_disk_mounts(&reader, &HashMap::new(), &root, true).unwrap();
+        let second = super::lock_disk_mounts(&reader, &HashMap::new(), &root, true).unwrap();
+
+        for lock in first.iter().chain(&second) {
+            let flags = unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_GETFL) };
+            assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
         }
     }
 
@@ -5356,7 +5526,8 @@ mod tests {
 
         let disk = tempfile::NamedTempFile::new().unwrap();
         let config = oci_upper_lock_config("owner", disk.path().into());
-        let locks = super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused")).unwrap();
+        let locks =
+            super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"), false).unwrap();
         assert_eq!(locks.len(), 1);
         let fd = locks[0].as_raw_fd();
         assert_ne!(
@@ -5413,8 +5584,8 @@ mod tests {
         let mut named_volumes = HashMap::new();
         named_volumes.insert("data".to_string(), named_disk(disk));
 
-        let err =
-            super::lock_disk_mounts(&config, &named_volumes, Path::new("unused")).unwrap_err();
+        let err = super::lock_disk_mounts(&config, &named_volumes, Path::new("unused"), false)
+            .unwrap_err();
         assert!(err.to_string().contains("more than once per sandbox"));
     }
 
@@ -5465,10 +5636,10 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let base = directory.join("disk.raw");
         std::fs::write(&base, b"original base").unwrap();
-        let locks = super::lock_disk_mounts(&config, &HashMap::new(), &sandbox).unwrap();
+        let locks = super::lock_disk_mounts(&config, &HashMap::new(), &sandbox, false).unwrap();
         // Compaction must be able to collect this data file without losing the device lock.
         std::fs::remove_file(&base).unwrap();
-        assert!(super::lock_disk_mounts(&config, &HashMap::new(), &sandbox).is_err());
+        assert!(super::lock_disk_mounts(&config, &HashMap::new(), &sandbox, false).is_err());
         drop(locks);
         // A parallel fork can temporarily retain the marker even though this test dropped
         // its last copy. Verify release of that same marker without racing its next opener.
@@ -5478,7 +5649,7 @@ mod tests {
         )
         .await;
         #[cfg(windows)]
-        assert!(super::lock_disk_mounts(&config, &HashMap::new(), &sandbox).is_ok());
+        assert!(super::lock_disk_mounts(&config, &HashMap::new(), &sandbox, false).is_ok());
     }
 
     #[tokio::test]

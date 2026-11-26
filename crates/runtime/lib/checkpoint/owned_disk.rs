@@ -258,7 +258,8 @@ impl RuntimeOwnedDisk {
             .checked_add(1)
             .ok_or("owned disk generation exhausted")?;
         let directory = checkpoint_root.join("layers");
-        std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        microsandbox_utils::private_file::create_private_dir_all(&directory)
+            .map_err(|error| error.to_string())?;
         let mut captured = Vec::with_capacity(next.layers.len());
         for (index, layer) in next.layers.iter_mut().enumerate() {
             let source = sandbox.join(&layer.path);
@@ -284,12 +285,18 @@ impl RuntimeOwnedDisk {
                 // Relocating a backing filename changes physical bytes. Never rewrite a shared
                 // inode, and hash the archive-local representation rather than reusing its source.
                 let stage = tempfile::tempdir_in(&directory).map_err(|error| error.to_string())?;
+                #[cfg(unix)]
+                microsandbox_utils::private_file::harden_existing_directory(stage.path())
+                    .map_err(|error| error.to_string())?;
                 let staged = stage.path().join("layer.qcow2");
                 microsandbox_utils::copy::fast_copy(&source, &staged)
                     .map_err(|error| error.to_string())?;
                 let previous: &DiskLayerRef = &captured[index - 1];
                 let backing = directory.join(format!("{}.{}", previous.layer_id, previous.format));
                 microsandbox_image::checkpoint::relocate_qcow2_backing(&staged, &backing)
+                    .map_err(|error| error.to_string())?;
+                #[cfg(unix)]
+                microsandbox_utils::private_file::harden_existing_file(&staged)
                     .map_err(|error| error.to_string())?;
                 OpenOptions::new()
                     .write(true)
@@ -381,6 +388,9 @@ impl RuntimeOwnedDisk {
         let stage = tempfile::Builder::new()
             .prefix(".compact-")
             .tempdir_in(&storage)
+            .map_err(RootDiskRolloverError::pre_rebind)?;
+        #[cfg(unix)]
+        microsandbox_utils::private_file::harden_existing_directory(stage.path())
             .map_err(RootDiskRolloverError::pre_rebind)?;
         let prefix = &self.state.layers[plan.prefix()];
         let boundary = prefix.last().expect("nonempty compact prefix");
@@ -772,13 +782,17 @@ fn write_state_with_sync(
         .ok_or_else(|| RootDiskRolloverError::pre_rebind("owned journal root missing"))?;
     validate_journal_parents(&runtime.join("runtime"), &state.device_id)
         .map_err(RootDiskRolloverError::pre_rebind)?;
-    std::fs::create_dir_all(parent).map_err(RootDiskRolloverError::pre_rebind)?;
+    microsandbox_utils::private_file::create_private_dir_all(parent)
+        .map_err(RootDiskRolloverError::pre_rebind)?;
     // Persist newly created journal-directory bindings before publishing the journal itself.
     sync_directory(parent.parent().expect("owned journal collection"))
         .map_err(RootDiskRolloverError::pre_rebind)?;
     sync_directory(runtime).map_err(RootDiskRolloverError::pre_rebind)?;
     let mut file =
         tempfile::NamedTempFile::new_in(parent).map_err(RootDiskRolloverError::pre_rebind)?;
+    #[cfg(unix)]
+    microsandbox_utils::private_file::harden(file.as_file(), false)
+        .map_err(RootDiskRolloverError::pre_rebind)?;
     let bytes = serde_json::to_vec(state).map_err(RootDiskRolloverError::pre_rebind)?;
     file.write_all(&bytes)
         .and_then(|()| file.as_file().sync_all())

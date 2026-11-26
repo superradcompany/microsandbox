@@ -1,0 +1,271 @@
+---
+title: "Migrating from v0.7 to v0.8"
+sidebarTitle: "v0.7 to v0.8"
+description: "Prepare SDK applications, local runtime versions, and snapshot workflows for v0.8."
+---
+
+<Note>
+v0.8.0 is upcoming. These instructions describe the changes merged for that release; the latest published release is v0.7.16.
+</Note>
+
+v0.8 changes how SDK applications select a destination, access resources, and inspect their state. Start with the full SDK package you already use. Smaller local-only and remote-only packages are optional.
+
+## Before upgrading
+
+1. **Review your SDK calls.** Follow [SDK contexts and unified resources](/migrations/v0.8#sdk-api-migration) for language-specific replacements.
+2. **Update SDK applications and CLI jobs that share a local home together.** Keep a backup of important data. Stop a sandbox while copying its disks so that the backup is consistent.
+3. **Check the selected runtime.** Updating an SDK does not replace the runtime in an already-running VM. Independent or pinned runtime installations need a compatible SDK/runtime pair. See [runtime setup](/sdk/setup).
+4. **Test your normal lifecycle.** Create or start a sandbox, execute a command, stop it, restart it, and verify application data before updating the rest of your installation.
+
+Already-running VMs can continue during a catalog upgrade. They keep their original runtime and guest agent until restarted. Do not assume that a working connection to an existing VM proves that the same SDK can launch its runtime.
+
+Cloud users do not perform local catalog or storage migration. Update SDK code against the capabilities supported by the service.
+
+## SDK API migration
+
+Resource lookups return objects you can use directly. In the snapshot API, `Snapshot` represents a history and `Checkpoint` represents one immutable capture. Existing checkpoint IDs continue to identify the same artifacts.
+
+### Migrate snapshot lookups
+
+| What you have | Rust | Go |
+| --- | --- | --- |
+| Group name | `ctx.snapshots().get(name).await?` | `provider.Snapshots().Get(ctx, name)` |
+| Checkpoint ID | `ctx.checkpoints().get(id).await?` | `provider.Checkpoints().Get(ctx, id)` |
+
+In TypeScript and Python, use `await ctx.snapshots.get(name)` or `await ctx.checkpoints.get(id)`. In Ruby, use `ctx.snapshots.get(name)` or `ctx.checkpoints.get(id)`. In Go, change individual artifact declarations from `*microsandbox.Snapshot` to `*microsandbox.Checkpoint`. Local groups can spawn from their head or a selected member. Cloud supports individual disk checkpoints through the checkpoint collection.
+
+### Keep unqualified resource calls
+
+Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSandbox` for ordinary resource operations. Use the matching resource or collection for lookups and lists. These calls honor the configured backend and use local when unset. An API key alone supplies credentials.
+
+Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. See [context selection](/operations/backends#sdk-contexts) for complete language examples. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. Use the selected context’s collections to keep related operations on the same provider.
+
+### Inspect and retain configured selection
+
+Replace removed backend-info getters with the [configured-context resolver](/sdk/overview#capture-the-configured-destination). Inspect metadata on the returned context, then use its collections to keep operations on the same destination even when the saved profile changes. This does not restore mutable global backend setters.
+
+`ContextSelectionSource` now includes `Managed` (`"managed"` in serialized metadata) when managed configuration chooses the destination. Rust applications with exhaustive matches on this enum must add that arm. Saved user profile selection continues to report `ActiveProfile` (`"active_profile"`).
+
+### Use the returned resource directly
+
+`get` and `list` do not start a stopped sandbox. Execution, filesystem and SSH operations prepare the receiver when needed. `ensure_running` explicitly performs that same preparation and returns no new owning object. `get_running` combines lookup and preparation without creating a missing resource.
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const sb = await Sandbox.get("worker");
+const output = await sb.shell("echo ready");
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::get("worker").await?;
+let output = sb.shell("echo ready").await?;
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.get("worker")
+output = await sb.shell("echo ready")
+```
+
+```go Go
+sb, err := microsandbox.GetSandbox(ctx, "worker")
+if err != nil { return err }
+defer sb.Close()
+output, err := sb.Shell(ctx, "echo ready")
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.get("worker")
+output = sb.shell("echo ready")
+```
+</CodeGroup>
+
+Explicit static `start` and `start_detached` are strict: they start an existing stopped resource and fail if it is already running. They do not perform connect-or-start. There is no separate instance `start`; use `ensure_running` only when you need [explicit preparation ahead of work](/sandboxes/lifecycle#prepare-ahead-of-time). Ordinary execution needs no preparation call.
+
+When preparation starts a stopped local sandbox, the receiving resource retains the new run's ownership. Connecting to an already running sandbox acquires no new shutdown ownership. Remote resources do not gain client-scope shutdown ownership. Use explicit stop or destroy when that is the intended action. See [lifecycle](/sandboxes/lifecycle) for cleanup and detachment.
+
+### Read current state explicitly
+
+Identity (`id`, `name`, `context`) is synchronous and performs no I/O. A captured name is a lookup label; resource operations target the captured stable identity and must not act on a replacement that reused that name.
+
+Mutable inspection and configuration perform fresh backend lookups. Rust `config()` now returns `Result<SandboxConfigInspection>` asynchronously rather than borrowing a captured configuration. TypeScript uses `await sb.config()`, Python uses `await sb.config()`, Go uses `sb.Config(ctx)`, and Ruby's `config` performs the lookup. Keep the returned value yourself when you want an observation without further I/O.
+
+Use `info` to obtain related fields together. `status` and `last_failure_message` are live convenience methods. No refresh call is required, and a failed live lookup does not silently fall back to cached state. Inspection observes one moment; it does not prevent subsequent changes. Configuration means the latest persisted settings, which may require restart before they apply to a running VM.
+
+Volume quota, usage, capacity, and labels also require live inspection: `await volume.info()` in TypeScript/Python, `volume.info().await?` in Rust, `volume.Info(ctx)` in Go, and `volume.info` in Ruby. A missing provider measurement remains unknown rather than becoming zero.
+
+Local context `build()` is synchronous and validates configuration immediately; the catalog opens lazily. Profile writers use `kind: "remote"` or `kind: "local"`, while readers still accept `backend` and `cloud`. Older SDKs may reject profiles rewritten in the new format.
+
+### Update cleanup and execution code
+
+Use `destroy` on a volume or individual checkpoint to delete it through its retained provider. Removing a snapshot group deletes its history. A cloud checkpoint selected by a mutable host-volume path cannot guarantee exact deletion. Use an explicit collection operation if you intend to remove the resource currently at that path.
+
+`wait_for_status` signals completion only. Keep using the original resource and call `info` afterward if a new observation is needed. Checkpoint `manifest` and `state` load metadata lazily through fallible I/O; get/list do not eagerly read every artifact.
+
+Execution retains its terminal outcome. A later wait returns the same recorded completion after an earlier wait, collection, or terminal event read. This does not rerun the command or replay its output. Cancelling a caller's wait is not proof that the command finished.
+
+Rust `client()` is now asynchronous and returns an owned `Arc<AgentClient>` bound to the selected local run. Filesystem handles are owned run-bound objects with explicit asynchronous close. Idle filesystem/SSH accessors do not keep a run alive; active operations and open handles retain the run they selected.
+
+### Memory values in Python
+
+Memory options accept integer MiB or `Size`, including `Size.gib(1)`. A `Size` value must represent a nonnegative whole number of MiB within the option's integer range; fractional MiB and overflow raise an error before creation or modification. Existing integer inputs keep their MiB meaning.
+
+### Captured launch outcomes
+
+Rust `sandbox.launch_info()` returns optional `SandboxLaunchInfo` for the receiver's retained session. Its `init_owns_boot_workload` and `resumed_from_full_snapshot` flags describe preparation outcomes, not persisted settings or live status. An unprepared lookup returns `None`. The CLI uses these outcomes to avoid executing an init-owned workload twice and to report full-restore warnings. Continue using `config().await?` for current persisted configuration and `status().await?` for current lifecycle state.
+
+### Remote context construction
+
+Key-only constructors now honor `MSB_API_URL`. To pin an endpoint, pass its URL explicitly. In Rust, replace `new(url, key)` with `with_url(url, key)` and `with_api_key(key)` with `new(key)`. In Go, use `NewRemoteContextWithURL(url, key)` for the two-argument form.
+
+TypeScript keeps `new RemoteContext({ apiKey })` and adds `RemoteContext.withUrl(url, apiKey, options?)`. Python keeps `RemoteContext(api_key=...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Ruby keeps `RemoteContext.new(api_key: ...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Existing URL options/keywords remain supported. Builders, explicit environment loading and named profiles retain their roles. See [remote endpoints](/cloud/connect#another-endpoint).
+
+This is a public source API change. Runtime protocols, stored configuration, resource identity and the local fallback are unchanged.
+
+### Remote context derivation and authentication
+
+Use Rust `to_builder()` or TypeScript `toBuilder()` to derive through the existing fluent builder. Python uses `replace(...)`, Ruby uses `with(...)`, and Go uses `WithOptions(...)`; these SDKs do not gain context builders. Derivation preserves captured configuration and native-provider ownership. Existing resources keep their original credentials and endpoint. See [the language examples](/cloud/connect#more-options).
+
+Rust custom HTTP clients now use the context's API key for Authorization, consistently with agent connections. A different default Authorization header on a supplied `reqwest::Client` no longer overrides that key. Pass the intended credential to `RemoteContext` or its derived builder. Custom transport, timeout and user-agent settings retain their existing precedence. Runtime protocols and persisted configuration formats are unchanged.
+
+### Resource selectors and state accessors
+
+Explicit resource-type `local()` / `remote()` selectors return the existing plural collections before builder/create/get/list. Go uses `SandboxLocal()` / `SandboxRemote()` and corresponding Volume/Snapshot functions. Remote selection reads environment credentials; unqualified calls use the configured destination. See [usage and feature availability](/cloud/connect#resource-selectors).
+
+Rust's previous instance `.local()` and `.cloud()` state accessors are now `.local_state()` and `.remote_state()`. Public `SandboxCloudState` and `VolumeCloudState` become `SandboxRemoteState` and `VolumeRemoteState`. This source-breaking rename frees the resource-type selector names. State access remains synchronous and does not replace live inspection. Runtime protocols and persisted field spellings are unchanged.
+
+CLI `--local` / `--remote` override ordinary and managed active-profile selection but still enforce `allowed_backends`. Remote flags use environment credentials; omit them for named-profile credential resolution. `MSB_BACKEND=remote` is accepted alongside legacy `cloud`. Diagnostic JSON uses `remote` for the remote kind. Explicit flag-selected contexts use the existing `programmatic` source value. See [CLI precedence](/cloud/connect#precedence).
+
+### Configuration result shape
+
+`config()` returns a dedicated inspection result rather than creation input. This intentionally changes the public Rust and Go return types and the serialized shape used by TypeScript, Python and Ruby. The result always performs a fresh backend lookup; retaining it gives a snapshot, not a live object. A persisted value is not proof that it has been applied to the running VM.
+
+The serialized envelope has `kind` (`local` or `remote`), `name`, `spec`, `unavailable` and `redacted`. Local `spec` is the persisted task specification, excluding process-local creation options. Remote `spec` is the provider's allowlisted view: OCI reference (or null for an unavailable non-OCI source), resource sizes, runtime settings, environment, labels, resource limits, lifecycle, mount presentation and redacted network metadata. Remote mounts do not expose source identities, and secret descriptors do not contain values or vault paths. Omitted init, security-profile, patches and other unreported fields remain unavailable, never silently defaulted.
+
+Rust uses `inspection.runtime()` and pattern matching on `inspection.settings`, or `local_spec()`/`remote_spec()`. TypeScript reads `inspection.spec.runtime.shell`; Python and Ruby read `inspection["spec"]["runtime"]["shell"]`. Go reads `inspection.Spec.Runtime.Shell` (a pointer, nil when unset). TypeScript camel-cases object keys; the strings in `unavailable` and `redacted` remain snake_case wire paths in every SDK. Use `Kind`/`kind` before interpreting backend-specific source and resource fields.
+
+In TypeScript, Python and Go, inspected log levels and local pull policies use the same choices as creation. Replace comparisons against the persisted spelling `IfMissing` with `"if-missing"`, `PullPolicy.IF_MISSING`, or `PullPolicyIfMissing`, respectively. Go named-volume options and snapshot state kinds also use named string types.
+
+Do not feed the result back into a creation builder. Keep creation input separately if your application needs to reproduce a task; a redacted inspection response cannot supply withheld source references or credentials. Fetching an existing resource preserves its returned runtime settings for shell and default-command execution without an explicit `ensure_running` call.
+
+### Typed resource and job values
+
+Job log filters accept `stdout`, `stderr`, `output` and `stdin_error`. An unrecognized source now raises a validation error.
+
+- **Rust** — Match `snapshot.state_kind()` against `SnapshotStateKind::File` or `Checkpoint`. Use `.as_str()` when forwarding the tag, including an unknown indexed value. For job logs, replace `vec!["stderr".into()]` with `vec![JobOutputSource::Stderr]` and compare `entry.source` with the same enum. Dynamic inputs can use `name.parse::<JobOutputSource>()?`. [Job log options](/sdk/rust/execution#joblogoptions)
+- **TypeScript** — `volume.kind` and `(await volume.info()).kind` both return `"dir" | "disk"`. Narrow dynamic pull policies, log levels and job output filters before passing them to the SDK. Fluent configuration callbacks return the configured builder.
+- **Python** — `(await sb.info())["status"]` returns a `SandboxStatus`, `context.kind` a `ContextKind`, and `(await volume.info())["kind"]` a `VolumeKind`. Job event tags narrow the payload to output, a replay gap or completed job information. Use `JobState.RUNNING` to compare job state.
+- **Go** — Use `JobStateRunning` for job state and `[]JobOutputSource{JobOutputStdout, JobOutputStderr}` for log filters. Progress phases, modification dispositions and live resize outcomes also have named string types. Use `string(value)` when passing one to a function requiring a string.
+- **Ruby** — Change `sb.status == "running"` to `sb.status == :running`, including comparisons against `sb.info.fetch("status")`. Context and volume kinds, snapshot kind accessors, job/event tags and log sources return symbols. Use `job.info` for live metadata. Ruby's `job.inspect` formats the object locally.
+
+### Lifetime limits and command timeouts
+
+| SDK | Migration |
+|---|---|
+| Rust | Pass `Duration::from_secs(60)` to `max_duration` or `idle_timeout` on create and restore builders. |
+| TypeScript | Rename `maxDuration` to `maxDurationSeconds`, `idleTimeout` to `idleTimeoutSeconds`, and exec builder `timeout` to `timeoutMilliseconds`. |
+| Python | Pass numeric seconds or `datetime.timedelta`. For example, `timeout=timedelta(milliseconds=500)` and `timeout=0.5` set the same command deadline. |
+| Go | Keep using `time.Duration`. For a two-second limit, pass `2 * time.Second` to the create or restore option. Passing `1500 * time.Millisecond` now fails with error kind `ErrInvalidConfig`. |
+
+For these SDKs, maximum lifetime and idle limits must be non-negative whole seconds. Choose the intended whole-second limit explicitly when migrating fractional values. Omission and explicit zero retain their operation-specific meanings.
+
+## Update snapshot workflows
+
+`Snapshot` now represents a history; `Checkpoint` represents one immutable capture. Use snapshot collections for histories and checkpoint collections for individual captures. Existing checkpoint IDs still identify the same artifacts.
+
+On the CLI, create a history with `msb snapshot create` and append captures with `msb snapshot checkpoint`. Review scripts using the older snapshot command structure against the [snapshot command reference](/cli/snapshot-commands).
+
+Keep an untouched copy of important archives before testing imports or restores. Do not assume a newer archive or rewritten catalog can be opened by an older release. See [snapshots](/sandboxes/snapshots) for restore modes and external resource bindings.
+
+## SDK distribution migration
+
+These packages are unreleased and are not part of v0.7.15. When available, install matching SDK and native-library versions.
+
+Keep `npm install microsandbox` or `pip install microsandbox` to keep the full package. Switching to a smaller package is optional. The [API migration](/migrations/v0.8#sdk-api-migration) applies independently of package selection.
+
+### Choose what gets installed
+
+| Language | Full | Local only | Remote only |
+|---|---|---|---|
+| TypeScript | `microsandbox` | `@microsandbox/local` | `@microsandbox/remote` |
+| Python | `microsandbox` | `microsandbox-local` | `microsandbox-remote` |
+| Go | `github.com/superradcompany/microsandbox/sdk/go` | `…/sdk/go/local` | `…/sdk/go/remote` |
+
+Lean TypeScript packages and Python wheels deliver the selected native binding. They omit the host `msb` executable, `libkrunfw` firmware and runtime launcher. Lean Go modules contain wrappers only; provision their selected native library explicitly. Local execution also needs a compatible host runtime pair, following [bring your own runtime](/sdk/setup#bring-your-own-runtime). Remote execution needs no host runtime.
+
+Rust package defaults and Ruby distribution are unchanged by this packaging migration. They still participate in the context and resource API migration.
+
+### Update imports
+
+For local use, change the package you import:
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "@microsandbox/local";
+
+const sb = await Sandbox.builder("worker").image("python").create();
+```
+
+```python Python
+from microsandbox_local import Sandbox
+
+sb = await Sandbox.create("worker", image="python")
+```
+</CodeGroup>
+
+Python uses separate distributions, not `microsandbox[local]` or `microsandbox[remote]` extras. Each owns a separate import package. npm uses separately installable scoped packages, not `microsandbox/local` or `microsandbox/remote` subpath imports.
+
+Local and remote packages can be installed together. Existing objects keep their original connection. A remote-only installation requires a [RemoteContext](/cloud/connect#sdk-contexts); trying to run locally reports a missing-package error.
+
+### Provision Go FFI explicitly
+
+Add the selected module and install one exact-version native asset from trusted release metadata. Replace the placeholders with the released SDK version, artifact URL or offline path, and independently trusted SHA-256:
+
+```bash
+go get github.com/superradcompany/microsandbox/sdk/go/local@VERSION
+go run github.com/superradcompany/microsandbox/sdk/go/core/cmd/ffi-setup@VERSION \
+  --kind local --source EXACT_URL_OR_FILE --sha256 TRUSTED_SHA256
+```
+
+Setup accepts `--target` for cross-target provisioning and `--cache` for a custom cache. It verifies and copies the selected FFI only, and never installs the host runtime. Module installation, import and first use do not download native files.
+
+Load the verified local provider before using the following example with a local destination. An empty path selects the verified default cache; a nonempty path selects an explicitly trusted preinstalled library:
+
+```go
+import (
+    "context"
+
+    msb "github.com/superradcompany/microsandbox/sdk/go/core"
+    "github.com/superradcompany/microsandbox/sdk/go/local"
+)
+
+func create(ctx context.Context) (*msb.Sandbox, error) {
+    if _, err := local.Load(""); err != nil { return nil, err }
+    return msb.CreateSandbox(ctx, "worker", msb.WithImage("python"))
+}
+```
+
+For remote operations, provision `--kind remote` and use `remote.NewContextWithURL(path, url, apiKey)`. Full and smaller packages use the same object types. Objects keep using the library they were created with.
+
+### Verify the installation
+
+Use matching package and native versions. A missing provider should produce an installation error, and an incompatible provider should be rejected before resource operations. Removing one lean provider must leave the other usable. Full and lean providers may coexist without overwriting each other’s package files.
+
+A package download size differs from its installed size. Include the platform native package in npm totals, the selected wheel in Python totals, and the separately provisioned FFI in Go totals. Count the external local runtime separately. Build measurements are platform-specific and are not claims about a published registry payload.
+
+Use `remote.NewContext(path, apiKey)` with `MSB_API_URL` or the hosted default; `remote.NewContextWithURL(path, url, apiKey)` selects an explicit endpoint. The path selects the native library, not the remote service.
+
+## Existing local storage
+
+The protected storage layout was introduced in v0.7.12. It is not a new v0.8 migration. If an older sandbox cannot start because its storage needs attention, use [Sandbox storage migration](/migrations/v0.7#sandbox-storage-migration). Do not recreate the sandbox or remove migration records to bypass a refusal.
+
+## Returning to an older release
+
+Keep the original backup and runtime pair until the upgrade is verified. Older tools may refuse the catalog, saved settings, or snapshots written by a newer release. Follow the CLI's compatibility checks; replacing a binary alone does not convert stored data.
+
+Released v0.7 SDKs and CLIs refuse a v0.8.0 runtime with `no tested sandbox launch contract for runtime 0.8.0`. This affects the v0.7 release line, not only v0.7.16. Use matching versions or a launcher update that explicitly supports the selected runtime. Do not change version metadata to bypass the check.

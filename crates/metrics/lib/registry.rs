@@ -6,6 +6,17 @@
 //! torn reads without requiring a kernel mutex.
 
 use std::ffi::CString;
+use std::fmt;
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::io;
+#[cfg(unix)]
+use std::mem::{offset_of, size_of};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(unix)]
+use std::ptr;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
@@ -17,14 +28,15 @@ use chrono::{DateTime, TimeZone, Utc};
 use crate::layout::{
     DEFAULT_CAPACITY, HEADER_SIZE, HEADER_STATE_INITIALIZING, HEADER_STATE_READY,
     HEADER_STATE_UNINIT, Header, NAME_BYTES, REGISTRY_MAGIC, REGISTRY_VERSION, SAMPLE_FLAG_CPU,
-    SAMPLE_FLAG_INBOUND_TCP_REJECTED, SAMPLE_FLAG_MEMORY_AVAILABLE,
+    SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE, SAMPLE_FLAG_GUEST_MEMORY_OBSERVATION,
+    SAMPLE_FLAG_GUEST_MEMORY_VALID, SAMPLE_FLAG_INBOUND_TCP_REJECTED, SAMPLE_FLAG_MEMORY_AVAILABLE,
     SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SAMPLE_FLAG_MEMORY_LIMIT_LIVE, SAMPLE_FLAG_MEMORY_USED,
     SAMPLE_FLAG_OUTBOUND_TCP_REJECTED, SAMPLE_FLAG_OUTBOUND_UDP_EVICTED, SAMPLE_FLAG_UPPER_FREE,
     SAMPLE_FLAG_UPPER_HOST_ALLOCATED, SAMPLE_FLAG_UPPER_USED, SLOT_ACTIVE, SLOT_FREE,
     SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot, registry_size,
 };
 use crate::snapshot::{LiveMetric, LiveMetricState};
-use crate::{MetricsError, MetricsResult};
+use crate::{GuestMemoryObservation, MetricsError, MetricsResult, guest_memory_clock};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError,
@@ -47,6 +59,7 @@ use windows_sys::Win32::System::Threading::{
 const INIT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const INIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const QUIESCE_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+const SEQLOCK_READ_ATTEMPTS: usize = 4096;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -126,6 +139,14 @@ pub struct SampleWrite {
     pub upper_host_allocated_bytes: Option<u64>,
 }
 
+/// Distinguish a producer without observation support from a capable producer
+/// explicitly invalidating its current report.
+#[derive(Clone, Copy)]
+enum GuestMemoryInput {
+    Legacy,
+    Observed(Option<GuestMemoryObservation>),
+}
+
 /// Shared-memory registry.
 ///
 /// Cloneable handle (`Arc`-backed). Dropping the last clone unmaps the region
@@ -170,6 +191,18 @@ pub struct MetricsSlotWriter {
     generation: u64,
 }
 
+/// Live allocation/lifecycle identity carried by a buffered guest-memory sample.
+///
+/// Retains only the shared mapping, never the runtime or a writer lock. This
+/// token cannot be persisted or transported to another host.
+#[derive(Clone)]
+pub struct GuestMemoryValidity {
+    registry: MetricsRegistry,
+    slot: u32,
+    generation: u64,
+    epoch: u64,
+}
+
 struct RegistryInner {
     // Kept alive so a future explicit `unlink` API has the resolved name.
     // Currently only used for the open path; suppress the dead-code warning.
@@ -208,6 +241,27 @@ impl MappedRegion {
 unsafe impl Send for RegistryInner {}
 unsafe impl Sync for RegistryInner {}
 
+impl fmt::Debug for GuestMemoryValidity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GuestMemoryValidity")
+            .field("slot", &self.slot)
+            .field("generation", &self.generation)
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for GuestMemoryValidity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.registry.inner, &other.registry.inner)
+            && self.slot == other.slot
+            && self.generation == other.generation
+            && self.epoch == other.epoch
+    }
+}
+
+impl Eq for GuestMemoryValidity {}
+
 impl Drop for MappedRegion {
     fn drop(&mut self) {
         // Unmap only. The named backing object is managed separately: POSIX
@@ -232,6 +286,47 @@ impl Drop for MappedRegion {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl GuestMemoryValidity {
+    /// Whether this allocation still holds a valid report from the same lifecycle.
+    /// New reports in that lifecycle do not invalidate an unexpired older sample.
+    /// Retries briefly across concurrent seqlock writes, then fails closed if the
+    /// slot remains busy, stopped, reused, or unsupported.
+    pub fn is_current(&self) -> bool {
+        let slot = self.registry.slot(self.slot);
+        let required = SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE
+            | SAMPLE_FLAG_GUEST_MEMORY_OBSERVATION
+            | SAMPLE_FLAG_GUEST_MEMORY_VALID;
+
+        for _ in 0..SEQLOCK_READ_ATTEMPTS {
+            let before = slot.seq.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let generation = slot.generation.load(Ordering::Relaxed);
+            let state = slot.state.load(Ordering::Relaxed);
+            let flags = slot.sample_flags.load(Ordering::Relaxed);
+            let epoch = slot.memory_epoch.load(Ordering::Relaxed);
+            let pid = slot.pid.load(Ordering::Relaxed);
+            let after = slot.seq.load(Ordering::Acquire);
+            if before != after || after & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+
+            return generation == self.generation
+                && slot.generation.load(Ordering::Acquire) == self.generation
+                && state == SLOT_ACTIVE
+                && slot.state.load(Ordering::Acquire) == SLOT_ACTIVE
+                && flags & required == required
+                && epoch == self.epoch
+                && pid_is_alive(pid);
+        }
+
+        false
+    }
+}
 
 impl MetricsRegistry {
     /// Open the registry by name, creating it if it does not exist.
@@ -302,6 +397,157 @@ impl MetricsRegistry {
         let reg = try_open_existing(&cname, capacity, map_len)?
             .ok_or_else(|| MetricsError::Custom("registry disappeared during open".into()))?;
         Ok(reg)
+    }
+
+    /// Open an existing single-slot registry file for in-place shared-memory updates.
+    ///
+    /// Rejects symlinks, non-regular files, and files whose length does not match
+    /// a single-slot registry.
+    #[cfg(target_os = "linux")]
+    pub fn open_file(path: &std::path::Path) -> MetricsResult<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let map_len = registry_size(1);
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() != map_len as u64 {
+            return Err(MetricsError::Custom("invalid file registry size".into()));
+        }
+        if std::os::unix::fs::MetadataExt::uid(&metadata) != unsafe { libc::geteuid() } {
+            return Err(MetricsError::Custom(
+                "private metrics registry file is not owned by the current user".into(),
+            ));
+        }
+
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                map_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        drop(file);
+        if ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        let mapping = MappedRegion {
+            ptr: NonNull::new(ptr as *mut u8).expect("mmap returned non-null"),
+            len: map_len,
+        };
+        let header = unsafe { &*(mapping.ptr.as_ptr() as *const Header) };
+        match wait_for_ready(header) {
+            Ok(()) => validate_header(header, Some(1))?,
+            Err(WaitForReadyError::Stuck) => {
+                return Err(MetricsError::Custom(
+                    "metrics registry is still initializing".into(),
+                ));
+            }
+            Err(WaitForReadyError::Invalid(state)) => {
+                return Err(MetricsError::Custom(format!(
+                    "invalid registry header state: {state}"
+                )));
+            }
+        }
+
+        let cname = CString::new(path.to_string_lossy().as_bytes())
+            .unwrap_or_else(|_| CString::new("/private-metrics").expect("static cstring"));
+        Ok(Self {
+            inner: Arc::new(RegistryInner {
+                name: cname,
+                mapping,
+                capacity: 1,
+            }),
+        })
+    }
+
+    /// Read a one-slot registry file into an independent in-memory snapshot.
+    ///
+    /// The source file is never memory-mapped. Truncating or replacing it after
+    /// this call cannot invalidate the returned snapshot. Invalid sizes and
+    /// layouts are rejected; a busy writer is retried at most four times.
+    /// Only the current registry ABI is accepted. Existing named-registry readers
+    /// keep their compatibility behavior; this adds no writer format.
+    ///
+    /// Producer and reader must share a PID namespace: subsequent snapshot reads
+    /// use the recorded PID for the usual dead-owner checks. Mutating the returned
+    /// registry changes only this private copy, never the source file.
+    #[cfg(unix)]
+    pub fn read_file_snapshot(file: &File) -> MetricsResult<Self> {
+        const SEQ_OFFSET: usize = offset_of!(Slot, seq);
+        const PREFIX_LEN: usize = SEQ_OFFSET + size_of::<AtomicU64>();
+
+        let length = registry_size(1);
+
+        for _ in 0..4 {
+            if file.metadata()?.len() != length as u64 {
+                return Err(MetricsError::Custom("invalid file registry size".into()));
+            }
+
+            let mut before = [0u8; PREFIX_LEN];
+            file.read_exact_at(&mut before, HEADER_SIZE as u64)?;
+            let seq = u64::from_ne_bytes(before[SEQ_OFFSET..PREFIX_LEN].try_into().unwrap());
+            if seq & 1 != 0 {
+                continue;
+            }
+
+            let mut bytes = vec![0u8; length];
+            file.read_exact_at(&mut bytes, 0)?;
+
+            let mut after = [0u8; PREFIX_LEN];
+            file.read_exact_at(&mut after, HEADER_SIZE as u64)?;
+            if before != after || before != bytes[HEADER_SIZE..HEADER_SIZE + PREFIX_LEN] {
+                continue;
+            }
+
+            // The mapping is anonymous and private. Only the bounded byte copy is
+            // untrusted; subsequent reads cannot SIGBUS after a source file resize.
+            let ptr = unsafe {
+                libc::mmap(
+                    ptr::null_mut(),
+                    length,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                return Err(io::Error::last_os_error().into());
+            }
+
+            let mapping = MappedRegion {
+                ptr: NonNull::new(ptr.cast()).unwrap(),
+                len: length,
+            };
+            unsafe {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), length);
+            }
+
+            let header = unsafe { &*mapping.ptr.as_ptr().cast::<Header>() };
+            validate_header(header, Some(1))?;
+            if header.state.load(Ordering::Acquire) != HEADER_STATE_READY {
+                return Err(MetricsError::Custom("file registry is not ready".into()));
+            }
+
+            return Ok(Self {
+                inner: Arc::new(RegistryInner {
+                    name: CString::new("file-snapshot").unwrap(),
+                    mapping,
+                    capacity: 1,
+                }),
+            });
+        }
+
+        Err(MetricsError::Custom("file registry writer is busy".into()))
     }
 
     /// Reserve a slot for an upcoming sandbox spawn.
@@ -715,7 +961,7 @@ impl MetricsRegistry {
         // can complete a full cycle in <100 ns, so we need a generous budget
         // before giving up. 4096 attempts is still cheap (<1 ms in the worst
         // case) and effectively unbounded in practice.
-        for _ in 0..4096 {
+        for _ in 0..SEQLOCK_READ_ATTEMPTS {
             let state = slot.state.load(Ordering::Acquire);
             if !slot_visible(state, include_stale) {
                 return None;
@@ -741,6 +987,21 @@ impl MetricsRegistry {
             let cpu_bits = slot.cpu_percent_bits.load(Ordering::Relaxed);
             let memory = slot.memory_bytes.load(Ordering::Relaxed);
             let memory_available = slot.memory_available_bytes.load(Ordering::Relaxed);
+            // Old writers can leave dirty tail bytes on slot reuse. Flags, not
+            // apparent values, establish whether these bytes have meaning.
+            let guest_memory = flag_set(sample_flags, SAMPLE_FLAG_GUEST_MEMORY_VALID).then(|| {
+                GuestMemoryObservation {
+                    total_bytes: slot.memory_guest_total_bytes.load(Ordering::Relaxed),
+                    available_bytes: memory_available,
+                    received_at: Duration::from_nanos(
+                        slot.memory_received_ns.load(Ordering::Relaxed),
+                    ),
+                    reporting_interval: Duration::from_nanos(
+                        slot.memory_interval_ns.load(Ordering::Relaxed),
+                    ),
+                }
+            });
+            let memory_epoch = slot.memory_epoch.load(Ordering::Relaxed);
             let memory_host_resident = slot.memory_host_resident_bytes.load(Ordering::Relaxed);
             let disk_r = slot.disk_read_bytes.load(Ordering::Relaxed);
             let disk_w = slot.disk_write_bytes.load(Ordering::Relaxed);
@@ -786,6 +1047,13 @@ impl MetricsRegistry {
                 LiveMetricState::Active
             };
 
+            let capable = flag_set(sample_flags, SAMPLE_FLAG_GUEST_MEMORY_OBSERVATION);
+            let fresh = capable
+                && state == LiveMetricState::Active
+                && guest_memory
+                    .zip(guest_memory_clock())
+                    .is_some_and(|(observation, now)| observation.is_fresh_at(now));
+            let memory_valid = !capable || fresh;
             let metric = LiveMetric {
                 state,
                 sandbox_id,
@@ -796,13 +1064,27 @@ impl MetricsRegistry {
                 uptime,
                 cpu_percent: f32::from_bits(cpu_bits),
                 vcpu_time_ns,
-                memory_bytes: memory,
-                memory_bytes_reported: flag_set(sample_flags, SAMPLE_FLAG_MEMORY_USED),
+                memory_bytes: if memory_valid { memory } else { 0 },
+                guest_memory_observation: guest_memory.filter(|_| capable),
+                guest_memory_validity: (capable
+                    && flag_set(sample_flags, SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE))
+                .then(|| GuestMemoryValidity {
+                    registry: self.clone(),
+                    slot: idx,
+                    generation: gen_after,
+                    epoch: memory_epoch,
+                }),
+                memory_total_bytes: guest_memory
+                    .filter(|_| fresh)
+                    .map(|report| report.total_bytes),
+                memory_bytes_reported: memory_valid
+                    && flag_set(sample_flags, SAMPLE_FLAG_MEMORY_USED),
                 memory_available_bytes: flag_value(
                     sample_flags,
                     SAMPLE_FLAG_MEMORY_AVAILABLE,
                     memory_available,
-                ),
+                )
+                .filter(|_| memory_valid),
                 memory_host_resident_bytes: flag_value(
                     sample_flags,
                     SAMPLE_FLAG_MEMORY_HOST_RESIDENT,
@@ -850,6 +1132,75 @@ impl MetricsSlotWriter {
     /// out from under this writer. Callers (the sampler) should stop on
     /// mismatch instead of forcing the write.
     pub fn write_sample(&self, sample: SampleWrite) -> MetricsResult<()> {
+        self.write_sample_inner(sample, GuestMemoryInput::Legacy)
+    }
+
+    /// Publish a sample from a runtime supporting coherent guest memory reports.
+    ///
+    /// `None` invalidates guest memory (for example on pause). Reports must be
+    /// captured in this run; resume/restore must wait for a new report. Repeated
+    /// publications preserve the receipt time, so they cannot prolong freshness.
+    /// Usage retains the configured-limit-minus-available formula, not total
+    /// minus available. Host residency and CPU/disk samples remain independent.
+    pub fn write_sample_with_guest_memory(
+        &self,
+        sample: SampleWrite,
+        observation: Option<GuestMemoryObservation>,
+    ) -> MetricsResult<()> {
+        self.write_sample_inner(sample, GuestMemoryInput::Observed(observation))
+    }
+
+    /// Invalidate guest-dependent observations without renewing other samples.
+    ///
+    /// A capable producer uses this synchronously at lifecycle boundaries and
+    /// serializes it with publication at its observation source. The slot seqlock
+    /// alone prevents torn writes, not publication of a previously captured report.
+    /// Independent counters, the limit, host residency and sample time are preserved.
+    pub fn invalidate_guest_memory(&self) -> MetricsResult<()> {
+        let slot = self.registry.try_slot(self.slot)?;
+        let observed = slot.generation.load(Ordering::Acquire);
+        if observed != self.generation {
+            return Err(MetricsError::GenerationMismatch {
+                expected: self.generation,
+                actual: observed,
+            });
+        }
+        let begin = begin_write(slot);
+        // A release/reuse may occur while waiting for the seqlock. Never clear
+        // the replacement runtime's observations with a previous writer handle.
+        let observed = slot.generation.load(Ordering::Acquire);
+        if observed != self.generation {
+            end_write(slot, begin);
+            return Err(MetricsError::GenerationMismatch {
+                expected: self.generation,
+                actual: observed,
+            });
+        }
+        let flags = slot.sample_flags.load(Ordering::Relaxed);
+        advance_guest_memory_epoch(slot, flags);
+        slot.sample_flags.store(
+            (flags
+                & !(SAMPLE_FLAG_GUEST_MEMORY_VALID
+                    | SAMPLE_FLAG_MEMORY_USED
+                    | SAMPLE_FLAG_MEMORY_AVAILABLE))
+                | SAMPLE_FLAG_GUEST_MEMORY_OBSERVATION
+                | SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE,
+            Ordering::Relaxed,
+        );
+        slot.memory_bytes.store(0, Ordering::Relaxed);
+        slot.memory_available_bytes.store(0, Ordering::Relaxed);
+        slot.memory_guest_total_bytes.store(0, Ordering::Relaxed);
+        slot.memory_received_ns.store(0, Ordering::Relaxed);
+        slot.memory_interval_ns.store(0, Ordering::Relaxed);
+        end_write(slot, begin);
+        Ok(())
+    }
+
+    fn write_sample_inner(
+        &self,
+        mut sample: SampleWrite,
+        guest_memory: GuestMemoryInput,
+    ) -> MetricsResult<()> {
         let slot = self.registry.try_slot(self.slot)?;
         let observed = slot.generation.load(Ordering::Acquire);
         if observed != self.generation {
@@ -875,9 +1226,57 @@ impl MetricsSlotWriter {
             });
         }
 
+        let previous_flags = slot.sample_flags.load(Ordering::Relaxed);
+        // Keep the lifecycle stamp across use of the legacy sample API. Dropping
+        // and later reinitializing it could revive a buffered earlier lifecycle.
+        if !flag_set(previous_flags, SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE) {
+            slot.memory_epoch.store(0, Ordering::Relaxed);
+        } else if matches!(guest_memory, GuestMemoryInput::Legacy)
+            && flag_set(previous_flags, SAMPLE_FLAG_GUEST_MEMORY_OBSERVATION)
+        {
+            advance_guest_memory_epoch(slot, previous_flags);
+        }
+        let mut sample_flags = SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE;
+        let observation = match guest_memory {
+            GuestMemoryInput::Legacy => None,
+            GuestMemoryInput::Observed(report) => report,
+        };
+        let observation = observation.filter(|report| {
+            guest_memory_clock().is_some_and(|now| report.is_fresh_at(now))
+                && u64::try_from(report.received_at.as_nanos()).is_ok()
+                && u64::try_from(report.reporting_interval.as_nanos()).is_ok()
+        });
+        if matches!(guest_memory, GuestMemoryInput::Observed(_)) {
+            if observation.is_none() {
+                advance_guest_memory_epoch(slot, previous_flags);
+            }
+            sample_flags |=
+                SAMPLE_FLAG_GUEST_MEMORY_OBSERVATION | SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE;
+            sample.memory_available_bytes = observation.map(|report| report.available_bytes);
+            let limit = sample
+                .memory_limit_bytes
+                .unwrap_or_else(|| slot.memory_limit_bytes.load(Ordering::Relaxed));
+            sample.memory_bytes = sample
+                .memory_available_bytes
+                .and_then(|available| limit.checked_sub(available));
+        }
+        if let Some(report) = observation {
+            sample_flags |= SAMPLE_FLAG_GUEST_MEMORY_VALID;
+            slot.memory_guest_total_bytes
+                .store(report.total_bytes, Ordering::Relaxed);
+            slot.memory_received_ns
+                .store(report.received_at.as_nanos() as u64, Ordering::Relaxed);
+            slot.memory_interval_ns.store(
+                report.reporting_interval.as_nanos() as u64,
+                Ordering::Relaxed,
+            );
+        } else {
+            slot.memory_guest_total_bytes.store(0, Ordering::Relaxed);
+            slot.memory_received_ns.store(0, Ordering::Relaxed);
+            slot.memory_interval_ns.store(0, Ordering::Relaxed);
+        }
         slot.sampled_at_unix_ms
             .store(sample.sampled_at.timestamp_millis(), Ordering::Relaxed);
-        let mut sample_flags = 0;
         if sample.cpu_percent.is_some() && sample.vcpu_time_ns.is_some() {
             sample_flags |= SAMPLE_FLAG_CPU;
         }
@@ -982,6 +1381,17 @@ impl MetricsSlotWriter {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+// Called only inside the slot's writer seqlock. An invalidation is a boundary
+// even when the next publication repeats the same values and receipt (ABA).
+fn advance_guest_memory_epoch(slot: &Slot, previous_flags: u32) {
+    let next = if flag_set(previous_flags, SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE) {
+        slot.memory_epoch.load(Ordering::Relaxed).wrapping_add(1)
+    } else {
+        1
+    };
+    slot.memory_epoch.store(next, Ordering::Relaxed);
+}
 
 /// Default capacity used by the host launcher when creating a registry.
 pub const fn default_capacity() -> u32 {
@@ -1402,6 +1812,10 @@ fn write_reservation_fields(slot: &Slot, spec: &ReserveSlot<'_>, generation: u64
     slot.cpu_percent_bits.store(0, Ordering::Relaxed);
     slot.memory_bytes.store(0, Ordering::Relaxed);
     slot.memory_available_bytes.store(0, Ordering::Relaxed);
+    slot.memory_guest_total_bytes.store(0, Ordering::Relaxed);
+    slot.memory_received_ns.store(0, Ordering::Relaxed);
+    slot.memory_interval_ns.store(0, Ordering::Relaxed);
+    slot.memory_epoch.store(0, Ordering::Relaxed);
     slot.memory_host_resident_bytes.store(0, Ordering::Relaxed);
     slot.disk_read_bytes.store(0, Ordering::Relaxed);
     slot.disk_write_bytes.store(0, Ordering::Relaxed);
@@ -1427,8 +1841,8 @@ fn write_name(slot: &Slot, name: &str) {
     for (i, byte) in bytes.iter().take(len).enumerate() {
         slot.name_bytes[i].store(*byte, Ordering::Relaxed);
     }
-    for i in len..NAME_BYTES {
-        slot.name_bytes[i].store(0, Ordering::Relaxed);
+    for byte in &slot.name_bytes[len..] {
+        byte.store(0, Ordering::Relaxed);
     }
     slot.name_len.store(len as u16, Ordering::Relaxed);
 }
@@ -1579,7 +1993,7 @@ fn _assert_atomic_traits() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Barrier;
+    use std::sync::{Barrier, mpsc};
     use std::thread;
 
     use super::*;
@@ -1603,6 +2017,589 @@ mod tests {
     /// readers don't demote the slot as dead-owner.
     fn alive_pid() -> i32 {
         std::process::id() as i32
+    }
+
+    fn guest_memory_fixture(
+        tag: &str,
+    ) -> (String, MetricsRegistry, MetricsSlotWriter, SampleWrite) {
+        let name = unique_name(tag);
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reservation = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 1,
+                name: "guest",
+                memory_limit_bytes: 4096,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reservation.slot,
+                generation: reservation.generation,
+                run_id: 1,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        let sample = SampleWrite {
+            sampled_at: Utc::now(),
+            cpu_percent: Some(12.0),
+            vcpu_time_ns: Some(100),
+            memory_bytes: Some(999),
+            memory_available_bytes: Some(999),
+            memory_host_resident_bytes: Some(123),
+            memory_limit_bytes: None,
+            disk_read_bytes: 17,
+            disk_write_bytes: 0,
+            net_rx_bytes: 0,
+            net_tx_bytes: 0,
+            net_inbound_tcp_rejected: None,
+            net_outbound_tcp_rejected: None,
+            net_outbound_udp_evicted: None,
+            upper_used_bytes: None,
+            upper_free_bytes: None,
+            upper_host_allocated_bytes: None,
+        };
+        (name, registry, writer, sample)
+    }
+
+    fn guest_report() -> GuestMemoryObservation {
+        GuestMemoryObservation {
+            total_bytes: 3000,
+            available_bytes: 1000,
+            received_at: guest_memory_clock().unwrap(),
+            reporting_interval: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn buffered_guest_sample_cannot_revive_after_invalidation_or_slot_reuse() {
+        let (name, registry, writer, sample) = guest_memory_fixture("buffered");
+        let report = guest_report();
+        writer
+            .write_sample_with_guest_memory(sample, Some(report))
+            .unwrap();
+        // Read through a separately opened mapping, as a collector process does.
+        let reader = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let buffered = crate::SandboxMetricSnapshot::from(reader.snapshot().unwrap().remove(0));
+        assert!(
+            buffered
+                .metrics
+                .guest_memory_is_fresh_at(Some(report.received_at))
+        );
+        let mut later = report;
+        later.available_bytes = 500;
+        writer
+            .write_sample_with_guest_memory(sample, Some(later))
+            .unwrap();
+        assert!(
+            buffered
+                .metrics
+                .guest_memory_is_fresh_at(Some(report.received_at))
+        );
+
+        writer.invalidate_guest_memory().unwrap();
+        assert!(
+            !buffered
+                .metrics
+                .guest_memory_is_fresh_at(Some(report.received_at))
+        );
+        // Repeating identical bytes cannot make a pre-pause batch current again.
+        writer
+            .write_sample_with_guest_memory(sample, Some(report))
+            .unwrap();
+        assert!(
+            !buffered
+                .metrics
+                .guest_memory_is_fresh_at(Some(report.received_at))
+        );
+        let resumed = crate::SandboxMetricSnapshot::from(reader.snapshot().unwrap().remove(0));
+        assert!(
+            resumed
+                .metrics
+                .guest_memory_is_fresh_at(Some(report.received_at))
+        );
+        let mut retry = buffered.clone();
+        retry
+            .metrics
+            .expire_guest_memory_at(Some(report.received_at));
+        assert!(!retry.metrics.memory_bytes_reported);
+        assert_eq!(retry.metrics.memory_total_bytes, None);
+        assert_eq!(retry.metrics.memory_available_bytes, None);
+        assert_eq!(retry.metrics.cpu_percent, buffered.metrics.cpu_percent);
+        assert_eq!(
+            retry.metrics.memory_limit_bytes,
+            buffered.metrics.memory_limit_bytes
+        );
+        assert_eq!(retry.metrics.guest_memory_observation, Some(report));
+
+        writer.release(ReleaseMode::Stale).unwrap();
+        assert!(
+            !resumed
+                .metrics
+                .guest_memory_is_fresh_at(Some(report.received_at))
+        );
+        let replacement = reserve_limit_writer(&registry, "replacement");
+        replacement
+            .write_sample_with_guest_memory(sample, Some(report))
+            .unwrap();
+        assert!(
+            !resumed
+                .metrics
+                .guest_memory_is_fresh_at(Some(report.received_at))
+        );
+        cleanup(&name);
+    }
+
+    #[test]
+    fn lifecycle_stamp_is_capability_gated_and_busy_or_invalid_reports_fail_closed() {
+        let (name, registry, writer, sample) = guest_memory_fixture("stamp");
+        let slot = registry.slot(writer.slot());
+        slot.memory_epoch.store(u64::MAX, Ordering::Relaxed);
+        writer.write_sample(sample).unwrap();
+        assert!(
+            registry.snapshot().unwrap()[0]
+                .guest_memory_validity
+                .is_none()
+        );
+        writer
+            .write_sample_with_guest_memory(sample, Some(guest_report()))
+            .unwrap();
+        assert_eq!(slot.memory_epoch.load(Ordering::Relaxed), 0);
+        let cached = crate::SandboxMetricSnapshot::from(registry.snapshot().unwrap().remove(0));
+        let guard = cached.metrics.guest_memory_validity.as_ref().unwrap();
+        assert!(guard.is_current());
+        let begin = begin_write(slot);
+        assert!(!guard.is_current());
+        end_write(slot, begin);
+        assert!(guard.is_current());
+        writer.write_sample_with_guest_memory(sample, None).unwrap();
+        writer
+            .write_sample_with_guest_memory(sample, Some(guest_report()))
+            .unwrap();
+        assert!(!guard.is_current());
+        let cached = crate::SandboxMetricSnapshot::from(registry.snapshot().unwrap().remove(0));
+        writer.write_sample(sample).unwrap();
+        assert!(
+            !cached
+                .metrics
+                .guest_memory_is_fresh_at(guest_memory_clock())
+        );
+        writer
+            .write_sample_with_guest_memory(sample, Some(guest_report()))
+            .unwrap();
+        assert!(
+            !cached
+                .metrics
+                .guest_memory_is_fresh_at(guest_memory_clock())
+        );
+        // Simulate a receipt-aware older writer without the new stamp contract.
+        writer
+            .write_sample_with_guest_memory(sample, Some(guest_report()))
+            .unwrap();
+        let begin = begin_write(slot);
+        slot.sample_flags
+            .fetch_and(!SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE, Ordering::Relaxed);
+        slot.memory_epoch.store(u64::MAX, Ordering::Relaxed);
+        end_write(slot, begin);
+        let older = crate::SandboxMetricSnapshot::from(registry.snapshot().unwrap().remove(0));
+        assert!(older.metrics.guest_memory_validity.is_none());
+        assert!(older.metrics.guest_memory_is_fresh_at(guest_memory_clock()));
+        cleanup(&name);
+    }
+
+    #[test]
+    fn guest_invalidation_preserves_independent_samples_and_cannot_clear_a_reused_slot() {
+        let (name, registry, writer, sample) = guest_memory_fixture("invalidate");
+        writer
+            .write_sample_with_guest_memory(sample, Some(guest_report()))
+            .unwrap();
+        let before = registry.snapshot().unwrap().remove(0);
+        writer.invalidate_guest_memory().unwrap();
+        let after = registry.snapshot().unwrap().remove(0);
+        assert_eq!(after.memory_total_bytes, None);
+        assert_eq!(after.memory_available_bytes, None);
+        assert!(!after.memory_bytes_reported);
+        assert_eq!(after.guest_memory_observation, None);
+        assert_eq!(after.timestamp, before.timestamp);
+        assert_eq!(after.memory_limit_bytes, before.memory_limit_bytes);
+        assert_eq!(
+            after.memory_host_resident_bytes,
+            before.memory_host_resident_bytes
+        );
+        assert_eq!(after.cpu_percent, before.cpu_percent);
+        assert_eq!(after.vcpu_time_ns, before.vcpu_time_ns);
+        assert_eq!(after.disk_read_bytes, before.disk_read_bytes);
+        assert_eq!(after.run_id, before.run_id);
+        writer.clone().release(ReleaseMode::Stale).unwrap();
+        let replacement = reserve_limit_writer(&registry, "replacement");
+        replacement
+            .write_sample_with_guest_memory(sample, Some(guest_report()))
+            .unwrap();
+        assert!(matches!(
+            writer.invalidate_guest_memory(),
+            Err(MetricsError::GenerationMismatch { .. })
+        ));
+        let row = registry.snapshot().unwrap().remove(0);
+        assert_eq!(row.name, "replacement");
+        assert_eq!(row.memory_total_bytes, Some(3000));
+        assert_eq!(row.memory_available_bytes, Some(1000));
+        assert!(row.memory_bytes_reported);
+        cleanup(&name);
+    }
+
+    #[test]
+    fn coherent_guest_memory_preserves_usage_formula_and_independent_sources() {
+        let (name, registry, writer, sample) = guest_memory_fixture("gm");
+        let report = guest_report();
+        writer
+            .write_sample_with_guest_memory(sample, Some(report))
+            .unwrap();
+        let item = registry.snapshot().unwrap().remove(0);
+        assert_eq!(item.memory_total_bytes, Some(3000));
+        assert_eq!(item.memory_available_bytes, Some(1000));
+        // Legacy accounting is configured capacity minus available, NOT guest total minus available.
+        assert_eq!(item.memory_bytes, 3096);
+        assert!(item.memory_bytes_reported);
+        assert_eq!(item.memory_limit_bytes, 4096);
+        let collected = crate::SandboxMetricSnapshot::from(item);
+        assert_eq!(collected.metrics.guest_memory_observation, Some(report));
+        assert_eq!(
+            collected.clone().metrics.guest_memory_observation,
+            Some(report)
+        );
+        writer.write_sample_with_guest_memory(sample, None).unwrap();
+        let item = registry.snapshot().unwrap().remove(0);
+        assert_eq!(item.memory_total_bytes, None);
+        assert_eq!(item.memory_available_bytes, None);
+        assert!(!item.memory_bytes_reported);
+        assert_eq!(item.memory_host_resident_bytes, Some(123));
+        assert_eq!(item.cpu_percent, 12.0);
+        assert_eq!(item.disk_read_bytes, 17);
+        assert_eq!(item.memory_limit_bytes, 4096);
+        cleanup(&name);
+    }
+
+    #[test]
+    fn guest_memory_pair_remains_coherent_under_concurrent_publication() {
+        let (name, registry, writer, sample) = guest_memory_fixture("pair");
+        let report = guest_report();
+        writer
+            .write_sample_with_guest_memory(sample, Some(report))
+            .unwrap();
+        let publisher = thread::spawn(move || {
+            for available in 1..=10_000 {
+                let report = GuestMemoryObservation {
+                    total_bytes: available + 2000,
+                    available_bytes: available,
+                    received_at: guest_memory_clock().unwrap(),
+                    ..report
+                };
+                writer
+                    .write_sample_with_guest_memory(sample, Some(report))
+                    .unwrap();
+            }
+        });
+        let mut reads = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !publisher.is_finished() || reads < 100 {
+            assert!(
+                Instant::now() < deadline,
+                "guest observations did not remain readable"
+            );
+            for item in registry.snapshot().unwrap() {
+                if let Some(total) = item.memory_total_bytes {
+                    assert_eq!(total, item.memory_available_bytes.unwrap() + 2000);
+                    assert_eq!(
+                        item.memory_bytes_reported,
+                        item.memory_available_bytes.unwrap() <= 4096
+                    );
+                    if item.memory_bytes_reported {
+                        assert_eq!(
+                            item.memory_bytes + item.memory_available_bytes.unwrap(),
+                            4096
+                        );
+                    }
+                    reads += 1;
+                }
+            }
+        }
+        publisher.join().unwrap();
+        cleanup(&name);
+    }
+
+    #[test]
+    fn old_writer_dirty_tail_is_ignored_and_new_reservation_clears_it() {
+        let (name, registry, writer, sample) = guest_memory_fixture("old");
+        writer.write_sample(sample).unwrap();
+        let slot = registry.try_slot(writer.slot()).unwrap();
+        // Simulate an actual old writer: it clears unknown flags but knows nothing about the tail.
+        let report = guest_report();
+        slot.memory_guest_total_bytes
+            .store(report.total_bytes, Ordering::Relaxed);
+        slot.memory_received_ns
+            .store(report.received_at.as_nanos() as u64, Ordering::Relaxed);
+        slot.memory_interval_ns
+            .store(1_000_000_000, Ordering::Relaxed);
+        let item = registry.snapshot().unwrap().remove(0);
+        assert_eq!(item.memory_total_bytes, None);
+        assert_eq!(item.memory_bytes, 999);
+        assert_eq!(item.memory_available_bytes, Some(999));
+        writer.release(ReleaseMode::Free).unwrap();
+        let reservation = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 2,
+                name: "replacement",
+                memory_limit_bytes: 1024,
+            })
+            .unwrap();
+        let slot = registry.try_slot(reservation.slot).unwrap();
+        assert_eq!(slot.memory_guest_total_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(slot.memory_received_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(slot.memory_interval_ns.load(Ordering::Relaxed), 0);
+        cleanup(&name);
+    }
+
+    #[test]
+    fn guest_memory_expires_at_read_time_without_another_write() {
+        let (name, registry, writer, sample) = guest_memory_fixture("age");
+        let report = guest_report();
+        writer
+            .write_sample_with_guest_memory(sample, Some(report))
+            .unwrap();
+        let slot = registry.try_slot(writer.slot()).unwrap();
+        // Age the original receipt, while leaving the host publication time fresh.
+        // This avoids a timing-sensitive multi-second sleep in the regression test.
+        let old = report
+            .received_at
+            .checked_sub(Duration::from_secs(4))
+            .unwrap();
+        slot.memory_received_ns
+            .store(old.as_nanos() as u64, Ordering::Relaxed);
+        let item = registry.snapshot().unwrap().remove(0);
+        assert_eq!(item.memory_total_bytes, None);
+        assert_eq!(item.memory_available_bytes, None);
+        assert!(!item.memory_bytes_reported);
+        assert_eq!(item.memory_limit_bytes, 4096);
+        assert_eq!(item.memory_host_resident_bytes, Some(123));
+        let stale = GuestMemoryObservation {
+            received_at: old,
+            ..report
+        };
+        writer
+            .write_sample_with_guest_memory(sample, Some(stale))
+            .unwrap();
+        assert_eq!(registry.snapshot().unwrap()[0].memory_total_bytes, None);
+        cleanup(&name);
+    }
+
+    #[test]
+    fn invalid_guest_report_drops_the_whole_pair_and_stale_lifecycle_invalidates() {
+        let (name, registry, writer, sample) = guest_memory_fixture("bad");
+        let mut report = guest_report();
+        report.available_bytes = report.total_bytes + 1;
+        writer
+            .write_sample_with_guest_memory(sample, Some(report))
+            .unwrap();
+        let item = registry.snapshot().unwrap().remove(0);
+        assert_eq!(item.memory_total_bytes, None);
+        assert_eq!(item.memory_available_bytes, None);
+        writer
+            .write_sample_with_guest_memory(sample, Some(guest_report()))
+            .unwrap();
+        writer.release(ReleaseMode::Stale).unwrap();
+        let item = registry.snapshot_slots(true).unwrap().remove(0);
+        assert_eq!(item.memory_total_bytes, None);
+        assert_eq!(item.memory_available_bytes, None);
+        cleanup(&name);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_snapshot_survives_source_changes_and_rejects_invalid_input() {
+        use std::io::Write;
+        use std::slice;
+
+        let name = unique_name("file");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reservation = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "alpine",
+                memory_limit_bytes: 1024,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reservation.slot,
+                generation: reservation.generation,
+                run_id: 19,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 123);
+
+        // Save bytes emitted by the actual registry writer, not a fabricated receipt.
+        let bytes =
+            unsafe { slice::from_raw_parts(registry.inner.mapping.ptr.as_ptr(), registry_size(1)) }
+                .to_vec();
+        cleanup(&name);
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&bytes).unwrap();
+
+        let snapshot = MetricsRegistry::read_file_snapshot(&file).unwrap();
+        file.set_len(0).unwrap();
+
+        let sample = snapshot.identified_at(0, true).unwrap();
+        assert_eq!(sample.metric.sandbox_id, 7);
+        assert_eq!(sample.metric.run_id, 19);
+        assert_eq!(sample.metric.memory_bytes, 123);
+        assert!(MetricsRegistry::read_file_snapshot(&file).is_err());
+
+        file.write_all_at(&bytes, 0).unwrap();
+        file.write_all_at(
+            &1_u64.to_ne_bytes(),
+            (HEADER_SIZE + offset_of!(Slot, seq)) as u64,
+        )
+        .unwrap();
+        assert!(
+            MetricsRegistry::read_file_snapshot(&file).is_err(),
+            "busy source was accepted"
+        );
+
+        file.write_all_at(&bytes, 0).unwrap();
+        file.write_all_at(
+            &HEADER_STATE_INITIALIZING.to_ne_bytes(),
+            offset_of!(Header, state) as u64,
+        )
+        .unwrap();
+        assert!(
+            MetricsRegistry::read_file_snapshot(&file).is_err(),
+            "initializing header was accepted"
+        );
+
+        file.write_all_at(&bytes, 0).unwrap();
+        file.write_all_at(&0_u64.to_ne_bytes(), 0).unwrap();
+        assert!(
+            MetricsRegistry::read_file_snapshot(&file).is_err(),
+            "bad header was accepted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_snapshots_remain_coherent_while_a_mapped_producer_writes() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::slice;
+        use std::sync::atomic::AtomicBool;
+
+        let name = unique_name("fp");
+        let template = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let length = registry_size(1);
+        let bytes = unsafe { slice::from_raw_parts(template.inner.mapping.ptr.as_ptr(), length) };
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        cleanup(&name);
+        drop(template);
+
+        let ptr = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED);
+
+        let producer = MetricsRegistry {
+            inner: Arc::new(RegistryInner {
+                name: CString::new("mapped-file-producer").unwrap(),
+                mapping: MappedRegion {
+                    ptr: NonNull::new(ptr.cast()).unwrap(),
+                    len: length,
+                },
+                capacity: 1,
+            }),
+        };
+        let reservation = producer
+            .reserve(ReserveSlot {
+                sandbox_id: 1,
+                name: "file-pressure",
+                memory_limit_bytes: 1024,
+            })
+            .unwrap();
+        let writer = producer
+            .activate_writer(ActivateSlot {
+                slot: reservation.slot,
+                generation: reservation.generation,
+                run_id: 1,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 0);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = stop.clone();
+        let writing = thread::spawn(move || {
+            let slot = writer.registry.slot(writer.slot);
+            let mut count = 0;
+
+            while !writer_stop.load(Ordering::Acquire) {
+                count += 1;
+                // Use the published seqlock, with a deliberate long partial update
+                // so a file read must distinguish completed and incomplete samples.
+                slot.seq.fetch_add(1, Ordering::AcqRel);
+                slot.memory_bytes.store(count, Ordering::Relaxed);
+                thread::yield_now();
+                slot.disk_read_bytes.store(count, Ordering::Relaxed);
+                slot.disk_write_bytes.store(count, Ordering::Relaxed);
+                slot.net_rx_bytes.store(count, Ordering::Relaxed);
+                slot.net_tx_bytes.store(count, Ordering::Relaxed);
+                slot.seq.fetch_add(1, Ordering::Release);
+                thread::yield_now();
+            }
+        });
+
+        let mut accepted = 0;
+        let mut inconsistent = None;
+
+        for _ in 0..30_000 {
+            let Ok(snapshot) = MetricsRegistry::read_file_snapshot(&file) else {
+                continue;
+            };
+
+            let sample = snapshot.identified_at(0, false).unwrap().metric;
+            accepted += 1;
+
+            if [
+                sample.disk_read_bytes,
+                sample.disk_write_bytes,
+                sample.net_rx_bytes,
+                sample.net_tx_bytes,
+            ]
+            .iter()
+            .any(|value| *value != sample.memory_bytes)
+            {
+                inconsistent = Some(sample);
+                break;
+            }
+        }
+
+        stop.store(true, Ordering::Release);
+        writing.join().unwrap();
+
+        assert!(
+            inconsistent.is_none(),
+            "accepted a torn sample: {inconsistent:?}"
+        );
+        assert!(accepted > 0, "no complete samples were observed");
     }
 
     #[test]
@@ -1939,34 +2936,51 @@ mod tests {
         const ITERATIONS: u64 = 4_000;
         let barrier = Arc::new(Barrier::new(WRITERS + 1));
         let mut handles = Vec::new();
+        let mut stop_senders = Vec::new();
         for worker in 0..WRITERS {
             let writer = writer.clone();
             let barrier = Arc::clone(&barrier);
+            let (stop_sender, stop_receiver) = mpsc::channel::<()>();
+            stop_senders.push(stop_sender);
             handles.push(thread::spawn(move || {
-                barrier.wait();
-                for n in 0..ITERATIONS {
+                for n in 0_u64.. {
                     let counter = ((worker as u64) << 48) | n | 1;
-                    writer
-                        .write_sample(SampleWrite {
-                            sampled_at: Utc::now(),
-                            cpu_percent: Some((counter % 100) as f32),
-                            vcpu_time_ns: Some(counter),
-                            memory_bytes: Some(counter),
-                            memory_available_bytes: Some(counter),
-                            memory_host_resident_bytes: Some(counter),
-                            memory_limit_bytes: None,
-                            disk_read_bytes: counter,
-                            disk_write_bytes: counter,
-                            net_rx_bytes: counter,
-                            net_tx_bytes: counter,
-                            net_inbound_tcp_rejected: None,
-                            net_outbound_tcp_rejected: None,
-                            net_outbound_udp_evicted: None,
-                            upper_used_bytes: None,
-                            upper_free_bytes: None,
-                            upper_host_allocated_bytes: None,
-                        })
-                        .unwrap();
+                    let result = writer.write_sample(SampleWrite {
+                        sampled_at: Utc::now(),
+                        cpu_percent: Some((counter % 100) as f32),
+                        vcpu_time_ns: Some(counter),
+                        memory_bytes: Some(counter),
+                        memory_available_bytes: Some(counter),
+                        memory_host_resident_bytes: Some(counter),
+                        memory_limit_bytes: None,
+                        disk_read_bytes: counter,
+                        disk_write_bytes: counter,
+                        net_rx_bytes: counter,
+                        net_tx_bytes: counter,
+                        net_inbound_tcp_rejected: None,
+                        net_outbound_tcp_rejected: None,
+                        net_outbound_udp_evicted: None,
+                        upper_used_bytes: None,
+                        upper_free_bytes: None,
+                        upper_host_allocated_bytes: None,
+                    });
+                    if n == 0 {
+                        // Publish before releasing the reader, even on a single CPU.
+                        // Keep Result checking after the barrier so an ordinary
+                        // write error cannot strand the reader at the barrier.
+                        barrier.wait();
+                    }
+                    result.unwrap();
+                    // Writers remain active until reading finishes. Dropping
+                    // senders also releases them if a reader assertion panics.
+                    if n + 1 >= ITERATIONS
+                        && matches!(
+                            stop_receiver.try_recv(),
+                            Err(mpsc::TryRecvError::Disconnected)
+                        )
+                    {
+                        break;
+                    }
                     if n % 64 == 0 {
                         thread::yield_now();
                     }
@@ -1976,7 +2990,7 @@ mod tests {
 
         barrier.wait();
         let mut successful_reads = 0;
-        while handles.iter().any(|handle| !handle.is_finished()) {
+        for _ in 0..10_000 {
             let snap = reg.snapshot().unwrap();
             if let Some(item) = snap.first() {
                 assert_eq!(item.memory_bytes, item.disk_read_bytes);
@@ -1989,6 +3003,7 @@ mod tests {
             }
             thread::yield_now();
         }
+        drop(stop_senders);
         for handle in handles {
             handle.join().unwrap();
         }
@@ -2996,5 +4011,57 @@ mod tests {
         assert_eq!(stale.state, LiveMetricState::Stale);
         assert!(reg.active_snapshot().unwrap().is_empty());
         cleanup(&name);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_file_updates_in_place_and_rejects_symlinks_and_bad_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp_shm = unique_name("open-file-src");
+        let seed = MetricsRegistry::open_or_create(&tmp_shm, 1).unwrap();
+        let res = seed
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "priv",
+                memory_limit_bytes: 2048,
+            })
+            .unwrap();
+        let bytes =
+            std::fs::read(std::path::Path::new("/dev/shm").join(tmp_shm.trim_start_matches('/')))
+                .unwrap();
+        drop(seed);
+        cleanup(&tmp_shm);
+
+        let file_path = dir.path().join("priv");
+        std::fs::write(&file_path, &bytes).unwrap();
+
+        let reg = MetricsRegistry::open_file(&file_path).unwrap();
+        let writer = reg
+            .activate_writer(ActivateSlot {
+                slot: res.slot,
+                generation: res.generation,
+                run_id: 77,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 4096);
+        drop(writer);
+        drop(reg);
+
+        let snapshot = MetricsRegistry::read_file_snapshot(&File::open(&file_path).unwrap())
+            .unwrap()
+            .identified_snapshot(false);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].metric.run_id, 77);
+        assert_eq!(snapshot[0].metric.memory_bytes, 4096);
+
+        let link_path = dir.path().join("priv-link");
+        std::os::unix::fs::symlink(&file_path, &link_path).unwrap();
+        assert!(MetricsRegistry::open_file(&link_path).is_err());
+
+        let short_path = dir.path().join("short");
+        std::fs::write(&short_path, b"too short").unwrap();
+        assert!(MetricsRegistry::open_file(&short_path).is_err());
     }
 }

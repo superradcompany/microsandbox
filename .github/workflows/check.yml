@@ -23,6 +23,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Native SDK subprocesses must retain a stack trace when a Rust worker aborts.
+  RUST_BACKTRACE: "1"
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_TIMEOUT: "120"
   CARGO_HTTP_MULTIPLEXING: "false"
@@ -358,10 +360,12 @@ jobs:
           python3 scripts/smoke/cli/runtime-discovery.py \
             --msb build/msb --libkrunfw build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
 
-      - name: Smoke test cloud backend in msb
+      - name: Smoke test remote context and legacy cloud selector in msb
         run: |
-          MSB_BACKEND=cloud MSB_API_KEY=msb_test_ci build/msb context --format json |
-            python3 -c 'import json, sys; assert json.load(sys.stdin)["kind"] == "cloud"'
+          for backend in remote cloud; do
+            MSB_BACKEND="$backend" MSB_API_KEY=msb_test_ci build/msb context --format json |
+              python3 -c 'import json, sys; assert json.load(sys.stdin)["kind"] == "remote"'
+          done
 
       # Upload immediately. All KVM lanes can begin while independent quality
       # and cross-platform checks continue in parallel.
@@ -655,7 +659,7 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           foreach ($filter in @(
             'image::cleanup::tests',
-            'backend::local::snapshot::store::tests',
+            'context::local::snapshot::store::tests',
             'external_import_alias_has_one_row_and_preserves_distinct_copies',
             'import_requires_durable_ownership_and_recovers_failed_completion',
             'storage::usage::local_usage::tests',
@@ -665,13 +669,15 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
-      - name: Test Windows DNS resolver
+      - name: Test Windows DNS resolver and strict UDP egress
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test -p microsandbox-network --lib --target ${{ matrix.rust_target }} dns::windows_resolver::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +stable test -p microsandbox-network --lib --target ${{ matrix.rust_target }} strict_udp
 
       - name: Test Windows filesystem DAX mappings
         shell: pwsh
@@ -680,6 +686,35 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features -p microsandbox-filesystem --lib --target ${{ matrix.rust_target }} dax_
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+          python-version: "3.13"
+
+      - name: Test Python native shutdown on Windows
+        shell: pwsh
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          Push-Location sdk/python
+          uv sync --group dev --no-install-project
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # These metadata-only regressions need native workers, not a VM or
+          # release downloads. Reuse this lane's dev-profile dependency builds.
+          uv run --no-sync maturin build --profile dev --no-default-features --features local,remote --target ${{ matrix.rust_target }} --out dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheel = (Get-ChildItem dist/*.whl).FullName
+          uv pip install --reinstall $wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          uv run --project sdk/python --no-sync pytest sdk/python/tests/test_runtime_shutdown.py sdk/python/tests/test_checkpoint_removal.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --project sdk/python --no-sync cargo test -p microsandbox-py --no-default-features --features local,remote --target ${{ matrix.rust_target }} --test stdio
 
   windows-build:
     name: Build Windows ${{ matrix.component }} (${{ matrix.target }})
@@ -957,11 +992,25 @@ jobs:
 
       - name: Check Rust SDK feature surfaces
         run: |
+          cargo +stable check -p microsandbox --no-default-features --features cloud --tests
+          cargo +stable check -p microsandbox --no-default-features --features cloud,net --tests
           cargo +stable test -p microsandbox --no-default-features --features cloud,net --test api_compat
           cargo +stable check -p microsandbox --no-default-features --features local,net
           cargo +stable check -p microsandbox-runtime --no-default-features --features client,net
           cargo +stable check -p microsandbox-network --no-default-features
           cargo +stable check -p microsandbox-types --features utoipa
+
+      - name: Check native SDK provider feature surfaces
+        run: |
+          # Separate invocations prevent Cargo feature unification from hiding
+          # remote-only failures behind another SDK's local/full dependency.
+          for provider in local remote; do
+            for sdk in microsandbox-node microsandbox-py microsandbox-go; do
+              cargo +stable check --locked -p "$sdk" --no-default-features --features "$provider"
+            done
+          done
+          cargo +stable test -p microsandbox --no-default-features --features cloud,net --lib remote_resize_refuses
+          cargo +stable test -p microsandbox --no-default-features --features cloud,net --lib cloud_projection_retains_source_digest
 
       - name: Docs
         env:
@@ -1044,12 +1093,14 @@ jobs:
             sdk/node-ts/package.json
             sdk/node-ts/package-lock.json
             sdk/node-ts/scripts/prune-platform-optional-deps.mjs
+            sdk/node-ts/scripts/stage-distribution.mjs
             sdk/node-ts/tests/
             sdk/node-ts/tsconfig.json
             sdk/node-ts/vitest.config.ts
 
       # Artifact-only SDK jobs need the workspace dependency beside sdk/node-ts
-      # so npm's existing workspace link resolves to the tested build.
+      # so npm's existing workspace link resolves to the tested build, and the
+      # shared Service fixtures the SDK tests read.
       - name: Upload shared types artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -1057,6 +1108,7 @@ jobs:
           path: |
             packages/microsandbox-types/typescript/package.json
             packages/microsandbox-types/typescript/dist/
+            packages/microsandbox-types/rust/lib/cloud/fixtures/
 
   python-wheel-build:
     name: Build Python wheel (linux-x86_64)
@@ -1303,8 +1355,8 @@ jobs:
       - name: Check the standalone Ruby SDK pin
         run: scripts/ci/check-ruby-standalone-pin.sh
 
-  ruby-platform-extension:
-    name: Build Ruby extension / ${{ matrix.platform }} / Ruby ${{ matrix.ruby }}
+  ruby-platform:
+    name: Ruby platform gem / ${{ matrix.platform }}
     needs: [build-agentd-aarch64, build-agentd-x86_64, changes]
     if: needs.changes.outputs.ruby_platform == 'true'
     runs-on: ${{ matrix.runner }}
@@ -1315,8 +1367,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin, x64-mingw-ucrt]
-        ruby: ["3.3", "3.4", "4.0"]
         include:
           # The platform label carries no glibc version, so the build host is
           # the compatibility floor. Keep the audit below in sync with these
@@ -1337,8 +1387,9 @@ jobs:
             agentd: x86_64
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}-${{ matrix.ruby }}
-      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}-${{ matrix.ruby }}
+      RB_SYS_CARGO_PROFILE: ci
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}
+      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1346,8 +1397,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
-          workspaces: . -> target/ruby-platform-${{ matrix.platform }}-${{ matrix.ruby }}
-          key: ruby-platform-${{ matrix.platform }}-${{ matrix.ruby }}
+          workspaces: . -> target/ruby-platform-${{ matrix.platform }}
+          key: ruby-platform-${{ matrix.platform }}-ci
           cache-bin: false
           cache-targets: true
 
@@ -1365,18 +1416,20 @@ jobs:
           name: agentd-${{ matrix.agentd }}-linux-musl
           path: build/
 
+      # Build all supported Ruby ABIs in one job so shared Rust dependencies
+      # compile once and macOS/Windows do not burn 7 separate runner slots.
       - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
-          ruby-version: ${{ matrix.ruby }}
+          ruby-version: "3.3"
 
       - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
         if: contains(matrix.platform, 'mingw')
         with:
-          ruby-version: ${{ matrix.ruby }}
+          ruby-version: "3.3"
           cargo-cache: false
 
-      - name: Build and stage the extension
+      - name: Build and stage Ruby 3.3 extension
         working-directory: sdk/ruby
         run: |
           gem install rake rake-compiler rb_sys --no-document
@@ -1385,6 +1438,47 @@ jobs:
       - name: Assert the extension uses the checkout Rust SDK
         working-directory: sdk/ruby
         run: cargo tree --manifest-path ext/microsandbox/Cargo.toml --depth 1 | grep "sdk.rust)"
+
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        if: "!contains(matrix.platform, 'mingw')"
+        with:
+          ruby-version: "3.4"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.4"
+          cargo-cache: false
+
+      - name: Build and stage Ruby 3.4 extension
+        working-directory: sdk/ruby
+        run: |
+          rm -f lib/microsandbox/microsandbox.*
+          gem install rake rake-compiler rb_sys --no-document
+          rake version_check gem:stage
+
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        if: "!contains(matrix.platform, 'mingw')"
+        with:
+          ruby-version: "4.0"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "4.0"
+          cargo-cache: false
+
+      - name: Build and stage Ruby 4.0 extension
+        working-directory: sdk/ruby
+        run: |
+          rm -f lib/microsandbox/microsandbox.*
+          gem install rake rake-compiler rb_sys --no-document
+          rake version_check gem:stage
+
+      - name: Restore standalone Ruby lockfile
+        if: always()
+        working-directory: sdk/ruby
+        run: rake cargo:unpatch_workspace
 
       - name: Audit the glibc symbol floor
         if: contains(matrix.platform, 'linux')
@@ -1398,57 +1492,6 @@ jobs:
               exit 1
             fi
           done
-
-      - name: Upload the staged extension
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ruby-extension-${{ matrix.platform }}-${{ matrix.ruby }}
-          # Preserve the Ruby version directory when merging the artifacts.
-          path: sdk/ruby/lib/microsandbox/*/microsandbox.*
-          if-no-files-found: error
-
-      - name: Restore standalone Ruby lockfile
-        if: always()
-        working-directory: sdk/ruby
-        run: rake cargo:unpatch_workspace
-
-  ruby-platform-gem:
-    name: Package Ruby platform gem / ${{ matrix.platform }}
-    needs: [ruby-platform-extension, changes]
-    if: needs.changes.outputs.ruby_platform == 'true'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: x86_64-linux-gnu
-            runner: ubuntu-22.04
-          - platform: aarch64-linux-gnu
-            runner: ubuntu-22.04-arm
-          - platform: arm64-darwin
-            runner: macos-15
-          - platform: x64-mingw-ucrt
-            runner: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
-        with:
-          ruby-version: "4.0"
-
-      - name: Install Ruby packaging dependencies
-        run: gem install rake rake-compiler --no-document
-
-      - name: Download the staged extensions
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: ruby-extension-${{ matrix.platform }}-*
-          path: sdk/ruby/lib/microsandbox/
-          merge-multiple: true
 
       - name: Package the platform gem
         working-directory: sdk/ruby
@@ -1485,43 +1528,35 @@ jobs:
           name: ruby-sdk-${{ matrix.platform }}
           path: sdk/ruby/pkg/*.gem
 
-  ruby-platform-smoke:
-    name: Smoke Ruby platform gem / ${{ matrix.platform }} / Ruby ${{ matrix.ruby }}
-    needs: [changes, ruby-platform-gem]
-    if: needs.changes.outputs.ruby_platform == 'true'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin, x64-mingw-ucrt]
-        ruby: ["3.3", "3.4", "4.0"]
-        include:
-          - platform: x86_64-linux-gnu
-            runner: ubuntu-22.04
-          - platform: aarch64-linux-gnu
-            runner: ubuntu-22.04-arm
-          - platform: arm64-darwin
-            runner: macos-15
-          - platform: x64-mingw-ucrt
-            runner: windows-latest
-    steps:
+      - name: Smoke test platform gem (Ruby 4.0)
+        run: |
+          gem install --local sdk/ruby/pkg/microsandbox-*.gem --no-document
+          # shellcheck disable=SC2016
+          ruby -e 'require "microsandbox"
+            loaded = $LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)$})
+            abort "precompiled ABI binary not used: #{$LOADED_FEATURES.grep(/microsandbox/).inspect}" if loaded.empty?
+            abort "native/ruby version mismatch" unless Microsandbox.version == Microsandbox::VERSION'
+
       - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
         with:
-          ruby-version: ${{ matrix.ruby }}
+          ruby-version: "3.4"
 
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ruby-sdk-${{ matrix.platform }}
-
-      - name: Install the platform gem
-        run: gem install --local ./microsandbox-*.gem --no-document
-
-      - name: Assert the precompiled binary is what loads
+      - name: Smoke test platform gem (Ruby 3.4)
         run: |
+          gem install --local sdk/ruby/pkg/microsandbox-*.gem --no-document
+          # shellcheck disable=SC2016
+          ruby -e 'require "microsandbox"
+            loaded = $LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)$})
+            abort "precompiled ABI binary not used: #{$LOADED_FEATURES.grep(/microsandbox/).inspect}" if loaded.empty?
+            abort "native/ruby version mismatch" unless Microsandbox.version == Microsandbox::VERSION'
+
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Smoke test platform gem (Ruby 3.3)
+        run: |
+          gem install --local sdk/ruby/pkg/microsandbox-*.gem --no-document
           # shellcheck disable=SC2016
           ruby -e 'require "microsandbox"
             loaded = $LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)$})
@@ -1530,7 +1565,7 @@ jobs:
 
   ruby-platform-smoke-clean:
     name: Smoke Ruby platform gem / x86_64-linux-gnu / clean container
-    needs: [changes, ruby-platform-gem]
+    needs: [changes, ruby-platform]
     if: needs.changes.outputs.ruby_platform == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1579,7 +1614,8 @@ jobs:
         run: |
           go build ./...
           go vet ./...
-          go test -count=1 .
+          go test -count=1 . ./internal/ffi
+          MSB_READINESS_NATIVE_LIBRARY="$MICROSANDBOX_FFI_PATH" go test -tags readiness_native -run '^TestConfiguredContextNative$' -count=1 -timeout 2m .
           go test -tags "smoke microsandbox_ffi_path" -count=1 -timeout 2m .
 
   # ---------------------------------------------------------------------------
@@ -1659,7 +1695,12 @@ jobs:
           python3 -m unittest discover -s scripts/ci -p test_runner_storage.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_compatibility.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_checkpoint_integration.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_catalog_history.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_lifecycle_evidence.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_saved_config_integration.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_saved_evidence_cleanup.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_managed_job_integration.py
 
       - name: Snapshot and branch live smoke
@@ -1674,11 +1715,13 @@ jobs:
           status=0
           # Short isolated homes avoid Unix socket limits and cross-layout reuse.
           # Run both even if one fails so the artifact reports retain both outcomes.
+          # Allow aggregate I/O contention across the many operations on shared runners;
+          # each operation still has its independent 30-second deadline.
           for layout in managed flat; do
             python3 scripts/smoke/cli/snapshot-branch.py \
               --binary "${{ github.workspace }}/build/msb" \
               --output "/tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-$layout" \
-              --layout "$layout" || status=$?
+              --layout "$layout" --suite-timeout 240 || status=$?
           done
           exit "$status"
 
@@ -1719,12 +1762,19 @@ jobs:
   # ---------------------------------------------------------------------------
   # Integration tests (requires KVM)
   # ---------------------------------------------------------------------------
-  integration-test:
-    name: Integration Tests
+  integration-suites:
+    name: Integration Tests (${{ matrix.suite }})
     needs: [build-linux-x86_64, rust-integration-build, changes]
     if: always() && needs.changes.outputs.code == 'true' && needs.build-linux-x86_64.result == 'success' && needs.rust-integration-build.result == 'success'
     runs-on: self-hosted-ubuntu-2404-x64
-    # Bound a wedged run so it can't squat a shared runner for the 6h default.
+    # Give the main batch and serial fixture suites independent deadlines.
+    # Two runner users provide isolated workspaces/homes; cap fan-out because
+    # their microVMs still share the physical KVM host and root disk.
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        suite: [standard, fixtures]
     timeout-minutes: 45
     steps:
       - name: Clean workspace
@@ -1767,6 +1817,7 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
       - name: Prepare pre-built agentd
+        id: integration_ready
         # upload-artifact normalizes executable bits. The runtime build already
         # produced agentd; restore its mode instead of compiling it again here.
         run: chmod +x build/agentd
@@ -1778,8 +1829,13 @@ jobs:
       # this at two: stdin-heavy tests and overlapping microVM boots have lost
       # relay/session readiness when the shared KVM host is oversubscribed.
       - name: Run integration tests
+        if: matrix.suite == 'standard'
         env:
           MSB_TEST_ISOLATE_HOME: "1"
+          # Self-provisioning fixtures may select a fresh backend home. Resolve the
+          # downloaded runtime explicitly instead of looking inside that empty home.
+          MSB_PATH: ${{ github.workspace }}/build/msb
+          MSB_LIBKRUNFW_PATH: ${{ github.workspace }}/build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
           MSB_TEST_RUNTIME_DIR: ${{ github.workspace }}/build
           MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
         run: |
@@ -1797,16 +1853,55 @@ jobs:
           # historical binaries, existing VMs, and dummy secrets. The jobs binary also requires
           # MSB_JOB_TEST_SANDBOX and an idle, caller-provisioned VM, with serial execution and
           # an explicit restart opt-in. Keep these out of this self-provisioning batch; the
-          # catalog and managed-job fixtures are provisioned separately below.
-          cargo-nextest nextest run \
+          # catalog and managed-job fixtures are provisioned separately below. Snapshot unit
+          # helpers are invoked by their parent crash/cancellation tests, not standalone;
+          # historical readers get a pinned release in the dedicated fixture below. The
+          # artifact-dependent live snapshot diagnostics remain explicit qualification tests.
+          # Portable-defaults qualification requires an external archive; this
+          # self-provisioning batch cannot supply that fixture.
+          # The six saved-config assertions consume records produced by the dedicated step below.
+          saved_config_tests="$(python3 scripts/smoke/cli/saved-config-integration.py --nextest-filter)"
+          # Keep the extraction inside job-owned build output. An interrupted
+          # nextest run can leave its automatic /tmp archive behind; build/ is
+          # reclaimed at job finish and again before the next job starts.
+          mkdir -p build/nextest
+          cargo-nextest nextest list \
             --archive-file build/rust-integration-tests.tar.zst \
+            --extract-to build/nextest \
+            --workspace-remap "${{ github.workspace }}" \
+            --list-type binaries-only
+          cargo-nextest nextest run \
+            --cargo-metadata build/nextest/target/nextest/cargo-metadata.json \
+            --binaries-metadata build/nextest/target/nextest/binaries-metadata.json \
+            --target-dir-remap build/nextest/target \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
+            -E "not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or binary(=portable_defaults_live) or test(/^context::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^context::local::snapshot::/) or test(/^context::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/)) and not ($saved_config_tests)" \
             --test-threads 2
 
+      - name: Saved configuration integration fixtures
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
+        timeout-minutes: 15
+        run: |
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          python3 scripts/smoke/cli/saved-config-integration.py \
+            --binary build/msb --agent build/agentd \
+            --firmware "build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" \
+            --archive build/rust-integration-tests.tar.zst --workspace "${{ github.workspace }}" \
+            --output build/saved-config-integration-results
+
+      - name: Upload saved configuration diagnostics
+        if: ${{ always() && matrix.suite == 'fixtures' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: saved-config-integration-results
+          path: build/saved-config-integration-results/
+          if-no-files-found: warn
+
       - name: Managed-job integration fixtures
-        if: ${{ !cancelled() }}
+        # Keep independent test results after a test failure, but never launch fixtures
+        # when admission/download/install failed and their binaries are unavailable.
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 15
         run: |
           python3 scripts/smoke/cli/managed-job-integration.py \
@@ -1817,7 +1912,7 @@ jobs:
             --output build/managed-job-integration-results
 
       - name: Upload managed-job integration results
-        if: always()
+        if: ${{ always() && matrix.suite == 'fixtures' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: managed-job-integration-results
@@ -1827,7 +1922,8 @@ jobs:
       # This fixture needs a released runtime, not the candidate installed above.
       # Keep its signal even when an unrelated test in the generic batch fails.
       - name: Historical catalog compatibility (v0.6.18)
-        if: ${{ !cancelled() }}
+        # A failed test may be followed by independent fixtures; failed setup may not.
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           python3 scripts/smoke/cli/catalog-history.py \
@@ -1837,17 +1933,35 @@ jobs:
             --output build/catalog-history-results
 
       - name: Upload historical catalog results
-        if: always()
+        if: ${{ always() && matrix.suite == 'fixtures' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: catalog-history-results
           path: build/catalog-history-results/*.log
           if-no-files-found: ignore
 
+      - name: Snapshot reader compatibility (v0.7.8)
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
+        timeout-minutes: 15
+        run: |
+          python3 scripts/smoke/cli/snapshot-compatibility.py \
+            --archive build/rust-integration-tests.tar.zst \
+            --workspace "${{ github.workspace }}" \
+            --output build/snapshot-compatibility-results
+
+      - name: Upload snapshot compatibility results
+        if: ${{ always() && matrix.suite == 'fixtures' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: snapshot-compatibility-results
+          path: build/snapshot-compatibility-results/
+          if-no-files-found: warn
+
       # These tests require a captured guest and scoped fault injection; run every case
       # explicitly, including all three eager modes, even if the general batch failed.
       - name: Checkpoint lifecycle integration fixtures
-        if: ${{ !cancelled() }}
+        # A failed test may be followed by independent fixtures; failed setup may not.
+        if: ${{ !cancelled() && matrix.suite == 'fixtures' && steps.integration_ready.outcome == 'success' }}
         run: |
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           python3 scripts/smoke/cli/checkpoint-integration.py \
@@ -1858,7 +1972,7 @@ jobs:
             --output build/checkpoint-integration-results
 
       - name: Upload checkpoint lifecycle results
-        if: always()
+        if: ${{ always() && matrix.suite == 'fixtures' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: checkpoint-integration-results
@@ -1868,6 +1982,23 @@ jobs:
       - name: Disk usage
         if: always()
         run: scripts/ci/clean-runner-disk.sh --finish
+
+  # Preserve the existing required check name while requiring both suites.
+  integration-test:
+    name: Integration Tests
+    needs: [integration-suites, changes]
+    if: ${{ always() && needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both integration suites
+        env:
+          SUITES_RESULT: ${{ needs.integration-suites.result }}
+        run: |
+          if [ "$SUITES_RESULT" != success ]; then
+            echo "::error::Integration suites did not all pass: $SUITES_RESULT"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)
@@ -1897,7 +2028,7 @@ jobs:
     steps:
       - name: Clean workspace
         run: |
-          rm -rf "${{ github.workspace }}"/{sdk,build,packages/microsandbox-types/typescript}
+          rm -rf "${{ github.workspace }}"/{sdk,build,packages/microsandbox-types}
           rm -rf ~/.microsandbox
 
       # Keep SDK tests artifact-only; fetch only the shared CI maintenance scripts.
@@ -1930,7 +2061,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: node-sdk-shared-types
-          path: packages/microsandbox-types/typescript/
+          path: packages/microsandbox-types/
 
       - name: Install Node.js dependencies
         working-directory: sdk/node-ts
@@ -2060,6 +2191,7 @@ jobs:
           path: sdk/python/dist/
 
       - name: Install Python development environment
+        id: python_ready
         working-directory: sdk/python
         run: |
           uv sync --group dev --no-install-project
@@ -2077,7 +2209,8 @@ jobs:
           uv run --project sdk/python --no-sync pytest --import-mode=importlib -n 2 --dist loadscope sdk/python/integration
 
       - name: Python managed-job and null-stdin regression
-        if: ${{ !cancelled() }}
+        # Run after test failures only when artifacts and the Python environment are ready.
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         timeout-minutes: 5
         run: |
           chmod +x build/msb build/agentd
@@ -2324,9 +2457,7 @@ jobs:
       - ruby-sdk
       - ruby-source-gem
       - ruby-standalone-pin
-      - ruby-platform-extension
-      - ruby-platform-gem
-      - ruby-platform-smoke
+      - ruby-platform
       - ruby-platform-smoke-clean
       - go-quality
       - previous-release-upgrade-smoke

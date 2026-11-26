@@ -238,8 +238,8 @@ struct DowngradeOperation {
 }
 
 enum SnapshotArtifactDowngradePlan {
-    V066(microsandbox::backend::local_snapshot_downgrade::DowngradePlan),
-    ReleasedFlat(microsandbox::backend::local_snapshot_downgrade::ReleasedFlatDowngradePlan),
+    V066(microsandbox::context::local_snapshot_downgrade::DowngradePlan),
+    ReleasedFlat(microsandbox::context::local_snapshot_downgrade::ReleasedFlatDowngradePlan),
 }
 
 /// Durable Windows-only handoff from a self-management command to its retryable
@@ -452,21 +452,9 @@ impl Drop for MigrationLock {
 
 fn parse_version(input: &str) -> anyhow::Result<Version> {
     let clean = input.trim().strip_prefix('v').unwrap_or(input.trim());
-    let mut parts = clean.split('.');
-    let Some(major) = parts.next() else {
-        anyhow::bail!("invalid version {input:?}");
-    };
-    let Some(minor) = parts.next() else {
-        anyhow::bail!("invalid version {input:?}; expected MAJOR.MINOR.PATCH");
-    };
-    let Some(patch) = parts.next() else {
-        anyhow::bail!("invalid version {input:?}; expected MAJOR.MINOR.PATCH");
-    };
-    if parts.next().is_some() {
-        anyhow::bail!("invalid version {input:?}; expected MAJOR.MINOR.PATCH");
-    }
-
-    Ok(Version::new(major.parse()?, minor.parse()?, patch.parse()?))
+    // Preserve prerelease/build metadata: RCs participate in SemVer precedence
+    // and are valid installed releases on both update and downgrade paths.
+    Version::parse(clean).map_err(|error| anyhow::anyhow!("invalid version {input:?}: {error}"))
 }
 
 /// Run a `msb self` subcommand.
@@ -924,7 +912,7 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     info(&format!("Current version: v{current_version}"));
     info(&format!("Target version: v{target_version}"));
 
-    if target_version >= current_version {
+    if target_version.cmp_precedence(&current_version).is_ge() {
         return refuse_static(
             &format!("v{target_version} is not older than the current version"),
             &["use `msb self update` to move to the latest release"],
@@ -1119,6 +1107,12 @@ async fn run_downgrade_with_db(
         }
 
         if ctx.operation.phase() < DowngradePhase::DatabaseReverted {
+            microsandbox::context::local_snapshot_downgrade::preflight_isolated_image_cache(
+                ctx.db.inner(),
+                ctx.snapshots_dir,
+                ctx.target_version,
+            )
+            .await?;
             if fresh_plan
                 .rollback
                 .iter()
@@ -1140,14 +1134,14 @@ async fn run_downgrade_with_db(
             {
                 let spinner = ui::Spinner::start("Checking", "retained snapshot graph");
                 let result = if reverses_legacy_snapshots {
-                    microsandbox::backend::local_snapshot_downgrade::preflight_managed_v066(
+                    microsandbox::context::local_snapshot_downgrade::preflight_managed_v066(
                         ctx.db.inner(),
                         ctx.snapshots_dir,
                     )
                     .await
                     .map(SnapshotArtifactDowngradePlan::V066)
                 } else {
-                    microsandbox::backend::local_snapshot_downgrade::preflight_managed_released_flat(
+                    microsandbox::context::local_snapshot_downgrade::preflight_managed_released_flat(
                         ctx.db.inner(),
                         ctx.snapshots_dir,
                     )
@@ -1230,7 +1224,7 @@ async fn run_downgrade_with_db(
                     let spinner = ui::Spinner::start("Reverting", "snapshot artifacts");
                     let result = match plan {
                         SnapshotArtifactDowngradePlan::V066(plan) => {
-                            microsandbox::backend::local_snapshot_downgrade::execute_managed_v066(
+                            microsandbox::context::local_snapshot_downgrade::execute_managed_v066(
                                 ctx.db.inner(),
                                 ctx.operation.recovery_dir(),
                                 plan,
@@ -1238,7 +1232,7 @@ async fn run_downgrade_with_db(
                             .await
                         }
                         SnapshotArtifactDowngradePlan::ReleasedFlat(plan) => {
-                            microsandbox::backend::local_snapshot_downgrade::execute_managed_released_flat(
+                            microsandbox::context::local_snapshot_downgrade::execute_managed_released_flat(
                                 ctx.db.inner(),
                                 ctx.operation.recovery_dir(),
                                 plan,

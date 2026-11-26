@@ -18,17 +18,17 @@ use microsandbox_runtime::control::ControlRequest;
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
 use microsandbox_types::GuestFlush;
 
-use crate::backend::Backend;
+use crate::context::Context;
 #[cfg(feature = "local")]
-use crate::backend::local::creation::CreationStorage;
-use crate::backend::sandbox::SandboxIdentity;
+use crate::context::local::creation::CreationStorage;
+use crate::context::sandbox::SandboxIdentity;
 #[cfg(feature = "local")]
-use crate::backend::{ControlSession, LocalBackend};
+use crate::context::{ControlSession, LocalContext};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 #[cfg(feature = "local")]
 use super::SandboxStatus;
-use super::{Sandbox, SandboxBuilder, SandboxConfig, SandboxHandle};
+use super::{Sandbox, SandboxBuilder, SandboxConfig, SandboxRecord};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -56,7 +56,7 @@ pub struct ForkManyBuilder {
 /// Settings and preparation shared by single-child and batch forks.
 pub(super) struct ForkConfig {
     guest_flush: GuestFlush,
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     source: String,
     identity: SandboxIdentity,
     pub(super) inner: SandboxBuilder,
@@ -120,7 +120,7 @@ impl Sandbox {
     }
 }
 
-impl SandboxHandle {
+impl SandboxRecord {
     /// Deprecated spelling for live execution forking.
     #[deprecated(note = "use fork instead")]
     pub fn branch(&self, name: impl Into<String>) -> ForkBuilder {
@@ -154,7 +154,7 @@ impl SandboxHandle {
 
 impl ForkConfig {
     fn new(
-        backend: Arc<dyn Backend>,
+        backend: Arc<dyn Context>,
         source: &str,
         identity: SandboxIdentity,
         name: String,
@@ -254,7 +254,7 @@ impl ForkBuilder {
     }
 
     fn new(
-        backend: Arc<dyn Backend>,
+        backend: Arc<dyn Context>,
         source: &str,
         identity: SandboxIdentity,
         name: String,
@@ -318,7 +318,7 @@ impl ForkBuilder {
 
 #[cfg(not(feature = "local"))]
 async fn branch(
-    _backend: Arc<dyn Backend>,
+    _backend: Arc<dyn Context>,
     _source: &str,
     _identity: SandboxIdentity,
     _options: super::SandboxConfig,
@@ -332,7 +332,7 @@ async fn branch(
 
 #[cfg(feature = "local")]
 async fn branch(
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     source: &str,
     identity: SandboxIdentity,
     options: SandboxConfig,
@@ -349,7 +349,7 @@ async fn branch(
     )
     .await?;
     backend
-        .sandboxes()
+        .sandbox_ops()
         .create_detached(backend.clone(), config)
         .await
 }
@@ -357,7 +357,7 @@ async fn branch(
 /// Resolve source configuration once, shared by single-child and explicit batch operations.
 #[cfg(feature = "local")]
 pub(super) async fn prepare_branch(
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     source: &str,
     identity: SandboxIdentity,
     options: SandboxConfig,
@@ -376,11 +376,11 @@ pub(super) async fn prepare_branch(
     };
     let run = {
         let _transition =
-            LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), source)
+            LocalContext::acquire_sandbox_transition_guard(&local.config().run_dir(), source)
                 .await?;
         local.control_run_identity(source, expected_id).await?
     };
-    let handle = backend.sandboxes().get(backend.clone(), source).await?;
+    let handle = backend.sandbox_ops().get(backend.clone(), source).await?;
     if handle.identity() != SandboxIdentity::Local(expected_id) {
         return Err(MicrosandboxError::SandboxReplaced {
             name: source.into(),
@@ -396,10 +396,7 @@ pub(super) async fn prepare_branch(
             "branch requires a running or user-paused source".into(),
         ));
     }
-    let mut config = handle
-        .active_config()?
-        .unwrap_or(handle.config()?)
-        .clone_for_persistence();
+    let mut config = fork_source_config(handle.active_config()?, handle.config()?);
     if !options.restore_resources.inherit
         && (config.spec.network.outbound_proxy.is_some()
             || config.spec.network.secrets.is_some()
@@ -470,14 +467,28 @@ pub(super) async fn prepare_branch(
     Ok(config)
 }
 
+/// A released runtime can write an active config without the host cache binding.
+#[cfg(feature = "local")]
+fn fork_source_config(active: Option<SandboxConfig>, desired: SandboxConfig) -> SandboxConfig {
+    let Some(active) = active else {
+        return desired.clone_for_persistence();
+    };
+    let mut child = active.clone_for_persistence();
+    if child.image_cache_dir.is_none() {
+        child.image_cache_dir = desired.image_cache_dir;
+    }
+    child
+}
+
 /// Called only after the ordinary create path reserves the child name and directory.
 /// Retain this pin through spawn, until the runtime owns its independent mapping handle.
 #[cfg(feature = "local")]
 pub(crate) async fn capture_child(
-    local: &LocalBackend,
+    local: &LocalContext,
     config: &mut SandboxConfig,
     source: &super::identity::BranchSource,
     child: &CreationStorage,
+    child_id: i32,
 ) -> MicrosandboxResult<Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>> {
     crate::runtime::protected_state::require_running(local, &source.name)?;
     if let Some(capture) = source.batch.as_ref().and_then(|batch| batch.get()) {
@@ -487,14 +498,22 @@ pub(crate) async fn capture_child(
         crate::snapshot::stage_local_branch_closure(capture.staging.path(), &closure)?;
         config.snapshot_parent = capture.snapshot_parent.clone();
         capture.state.validate_files(&closure)?;
-        return adopt_capture(config, child, closure, &capture.state, capture.pin.clone()).await;
+        return adopt_capture(
+            config,
+            child,
+            (&local.config().home(), source.run.sandbox_id, child_id),
+            closure,
+            &capture.state,
+            capture.pin.clone(),
+        )
+        .await;
     }
     reclaim_abandoned_memory(&local.cache_dir().join("memory"));
     let record_integrity = source.record_integrity;
     // Child reservation precedes capture; source transition ownership now excludes restart or
     // replacement until the exact selected generation has handed off its state.
     let _transition =
-        LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), &source.name)
+        LocalContext::acquire_sandbox_transition_guard(&local.config().run_dir(), &source.name)
             .await?;
     local.validate_control_run(&source.name, source.run).await?;
     // Serialize with durable source captures so a child's ancestry describes its actual cut.
@@ -607,17 +626,42 @@ pub(crate) async fn capture_child(
         MicrosandboxError::Runtime(format!("branch reservation cleanup: {error}"))
     })??;
 
-    adopt_capture(config, child, closure, &state, pin).await
+    adopt_capture(
+        config,
+        child,
+        (&local.config().home(), source.run.sandbox_id, child_id),
+        closure,
+        &state,
+        pin,
+    )
+    .await
 }
 
 #[cfg(feature = "local")]
 async fn adopt_capture(
     config: &mut SandboxConfig,
     child: &CreationStorage,
+    identities: (&std::path::Path, i32, i32),
     closure: std::path::PathBuf,
     state: &LocalBranchState,
     pin: Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>,
 ) -> MicrosandboxResult<Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>> {
+    #[cfg(feature = "net")]
+    if config.restore_resources.inherit
+        && let Some(tls) = &mut config.spec.network.tls
+        && let Some(owned) = microsandbox_runtime::checkpoint::tls_identity::inherit_for_child(
+            identities.0,
+            identities.1,
+            identities.2,
+            &tls.intercept_ca,
+            &state.resources,
+        )
+        .map_err(MicrosandboxError::Runtime)?
+    {
+        tls.intercept_ca = owned;
+    }
+    #[cfg(not(feature = "net"))]
+    let _ = identities;
     // Every sibling must retain the captured owned inventory, not just the child
     // that established the batch. External-resource choices cannot replace it.
     crate::snapshot::validate_owned_inventory(&config.spec.mounts, &state.owned_volumes)?;
@@ -778,6 +822,27 @@ mod tests {
                 if host == Path::new("/images/seed.img") && guest == "/data"
         ));
         assert!(config.restore_resources.mapped.contains("/data"));
+    }
+
+    #[test]
+    fn fork_uses_saved_cache_binding_when_active_config_predates_it() {
+        let mut desired = SandboxConfig::default();
+        let cache = std::env::temp_dir().join("private-image-cache");
+        desired.image_cache_dir = Some(cache.clone());
+        desired.manifest_digest = Some(format!("sha256:{}", "a".repeat(64)));
+        let mut active = desired.clone();
+        active.image_cache_dir = None;
+
+        let mut child = fork_source_config(Some(active), desired);
+        child.spec.name = "child".into();
+        child.spec.image = microsandbox_types::RootfsSource::oci("alpine");
+        let rebuilt = SandboxBuilder::from(child).finish(None, None).unwrap();
+
+        assert_eq!(rebuilt.image_cache_dir, Some(cache));
+        assert_eq!(
+            rebuilt.manifest_digest(),
+            Some(format!("sha256:{}", "a".repeat(64)).as_str())
+        );
     }
 
     #[test]

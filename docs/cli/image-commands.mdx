@@ -6,7 +6,7 @@ description: Pull, inspect, and manage cached OCI images with the microsandbox C
 icon: "layer-group"
 ---
 
-<Tooltip tip="Image commands manage the local cache. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Image commands manage the local cache. On our managed cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ## msb pull
 
@@ -145,11 +145,14 @@ Remove cached images that are not used by any sandbox or indexed snapshot, then 
 ```bash Shell
 msb image prune
 msb image prune --yes
+msb image prune --yes --exclude-from /etc/microsandbox/keep-images.txt
 msb image prune --format json
 ```
 </CodeGroup>
 
-Images referenced by sandboxes or indexed snapshots are kept. `msb rmi --force` can remove a specific reference, but retains backing and cached metadata needed by those dependencies and refuses to remove a reference held by an active operation. Retained metadata files may remain after the last dependency is removed; pruning does not sweep unindexed metadata files.
+Images referenced by sandboxes or indexed snapshots are kept. Pass `--exclude-from <PATH>` (repeatable) to pin additional OCI image references from a line-oriented text file (one reference per line; surrounding whitespace is trimmed, blank lines and `#` comments are ignored). Entries are normalized using the same OCI reference rules as `msb pull`, so short names like `alpine:3.20` preserve `docker.io/library/alpine:3.20` and its layers. If an `--exclude-from` file is missing, unreadable, or contains an invalid image reference, `msb image prune` exits with an error without deleting anything.
+
+`msb rmi --force` can remove a specific reference, but retains backing and cached metadata needed by those dependencies and refuses to remove a reference held by an active operation. Retained metadata files may remain after the last dependency is removed; pruning does not sweep unindexed metadata files.
 
 Prune skips cache entries held by participating pulls, imports, exports, or sandbox creation and continues with unrelated entries. Cleanup commits bounded batches, so an error can leave earlier batches completed. Shared aliases are checked together before removing their metadata file. JSON reports include `skipped_in_use`, counting busy references, manifests, and layers. Stable lock files remain in the cache. Interrupted cleanup is recovered on a later image prune or removal, with the catalog and exact file identity checked again before deletion.
 
@@ -158,6 +161,7 @@ Concurrent cleanup requires every accessing CLI and SDK to participate in the le
 | Flag | Description |
 |------|-------------|
 | `-y`, `--yes` | Skip the confirmation prompt |
+| `--exclude-from <PATH>` | Exclude OCI image references listed in a file from pruning (one per line; repeatable) |
 | `--format` | Output format (`json`) |
 | `-q`, `--quiet` | Suppress output |
 

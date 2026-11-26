@@ -4,6 +4,10 @@
 //! process and [`spawn_sandbox`] for starting one from a
 //! [`crate::sandbox::SandboxConfig`].
 
+#[cfg(target_os = "linux")]
+mod child_exit;
+#[cfg(target_os = "linux")]
+mod child_reaper;
 pub(crate) mod handle;
 pub(crate) mod launch_contract;
 mod launch_input;
@@ -13,6 +17,8 @@ mod network_slot;
 pub(crate) mod owned_volumes;
 #[cfg(windows)]
 pub(crate) mod ownership;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) mod private_metrics;
 mod sockets;
 // The pure identity helpers stay compiled (and unit-tested) on every platform;
 // only Windows has call sites outside the tests.

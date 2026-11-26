@@ -13,7 +13,7 @@ Factory for sandbox image sources.
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">oci()</span>
 
-<Tooltip tip="OCI images work everywhere; microsandbox cloud accepts managed root disks only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="OCI images work everywhere; our managed cloud accepts managed root disks only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod
@@ -68,8 +68,6 @@ Create an OCI image rootfs source. Use `root_disk` to configure its writable lay
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">bind()</span>
 
-<Tooltip tip="Host-directory root filesystems are not available on microsandbox cloud; use an OCI image."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```python
 @staticmethod
 def bind(path: str) -> ImageSource
@@ -83,7 +81,7 @@ sb = await Sandbox.create("api", image=Image.bind("/srv/rootfs"))
 
 </Accordion>
 
-Create a rootfs source that binds a host directory as the guest root filesystem.
+Create a rootfs source that binds a host directory as the guest root filesystem. On our managed cloud, the path refers to your organization's host volume.
 
 <p className="msb-label">Parameters</p>
 
@@ -105,8 +103,6 @@ Create a rootfs source that binds a host directory as the guest root filesystem.
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="Disk-image root filesystems are not available on microsandbox cloud; use an OCI image."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```python
 @staticmethod
 def disk(path: str, *, fstype: str | None = None) -> ImageSource
@@ -123,7 +119,7 @@ sb = await Sandbox.create(
 
 </Accordion>
 
-Create a rootfs source backed by a disk image. The format is inferred from the file extension. Pass `fstype` when the filesystem type cannot be auto-detected.
+Create a rootfs source backed by a disk image. The format is inferred from the file extension. Pass `fstype` when the filesystem type cannot be auto-detected. On our managed cloud, the path refers to your organization's host volume.
 
 <p className="msb-label">Parameters</p>
 
@@ -153,7 +149,7 @@ These static methods inspect and prune images already pulled into the local OCI 
 
 ## Local image cache
 
-<Tooltip tip="These methods manage the local image cache. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="These methods manage the local image cache. On our managed cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">get()</span>
 
@@ -519,7 +515,7 @@ Microsandbox-managed sparse ext4 disk
 
 #### <span className="msb-recv">RootDisk.</span><span className="msb-hn">tmpfs()</span>
 
-<Tooltip tip="Tmpfs root disks are not available on microsandbox cloud; use a managed root disk."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Tmpfs root disks are not available on our managed cloud; use a managed root disk."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 tmpfs(size_mib=None)
@@ -533,7 +529,7 @@ Ephemeral RAM-backed upper layer
 
 #### <span className="msb-recv">RootDisk.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="Caller-supplied root disk images are not available on microsandbox cloud; use a managed root disk."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Caller-supplied root disk images are not available on our managed cloud; use a managed root disk."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 disk(path, *, format=None, fstype=None)

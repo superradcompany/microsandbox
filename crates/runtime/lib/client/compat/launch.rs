@@ -158,6 +158,7 @@ impl PreviousLaunch {
             .map(|network| network.into_current(self.deployment_profile))
             .transpose()?;
         let mut launch = LaunchConfig {
+            retention_source: None,
             protected_guest_state: false,
             execution: ExecutionIntent::Boot,
             bootstrap,
@@ -197,6 +198,9 @@ impl PreviousLaunch {
             exec_args: self.exec_args,
             #[cfg(feature = "net")]
             deployment_profile: self.deployment_profile,
+            // Previous launch formats always used the built-in resolvers.
+            #[cfg(feature = "net")]
+            multi_tenant: Default::default(),
             #[cfg(feature = "net")]
             sandbox_slot: self.sandbox_slot,
             vsock: self.vsock,

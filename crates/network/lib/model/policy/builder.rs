@@ -135,6 +135,10 @@ pub enum BuildError {
     )]
     IngressDoesNotSupportIcmp { rule_index: usize },
 
+    /// The fluent declaration is incomplete or used the unrestricted-host shorthand.
+    #[error("invalid secret declaration: {0}")]
+    InvalidSecretDeclaration(&'static str),
+
     /// A secret entry failed validation.
     #[error("{source}")]
     InvalidSecretConfig {

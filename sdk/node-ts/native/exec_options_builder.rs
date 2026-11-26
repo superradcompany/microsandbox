@@ -143,7 +143,7 @@ impl JsExecOptionsBuilder {
     }
 
     /// Kill the process if it hasn't exited within `ms` milliseconds.
-    #[napi]
+    #[napi(js_name = "timeoutMilliseconds")]
     pub fn timeout(&mut self, ms: f64) -> Result<&Self> {
         let ms = crate::numeric::safe_integer(ms, "ms")?;
         let prev = self.take_inner();

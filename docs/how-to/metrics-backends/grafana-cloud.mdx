@@ -4,7 +4,7 @@ description: Ship msb-metrics output to Grafana Cloud's OTLP gateway
 icon: "cloud-arrow-up"
 ---
 
-<Tooltip tip="This page covers msb-metrics, which reads host-local shared memory and is local-only. It does not apply to microsandbox cloud sandboxes."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This page covers msb-metrics, which reads host-local shared memory and is local-only. It does not apply to our managed cloud sandboxes."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <Note>
 This guide ships data emitted by [`msb-metrics`](/observability/msb-metrics).
@@ -76,7 +76,7 @@ to it using HTTP/Protobuf and Basic auth.
     Boot a sandbox (`msb run alpine`) and open Grafana → **Explore**.
     Query `microsandbox_cpu_utilization` (PromQL view of the OTel
     `microsandbox.cpu.utilization` gauge). You should see data within
-    the next flush interval (default 10s).
+    the next flush interval (default 1s).
   </Step>
 </Steps>
 

@@ -60,6 +60,14 @@ Verify the installation:
 msb --version
 ```
 
+## Unreleased resize-observation dependencies
+
+The resize/telemetry branch pins native Rust crates through workspace Git patches and pins the guest firmware through `vendor/libkrunfw`. No package publication or version bump is needed to build these changes. Initialize the recorded submodule revision with `git submodule update --init vendor/libkrunfw` and explicitly run `just build-libkrunfw` after changing that revision, then rebuild the CLI/SDK artifacts. The ordinary dependency check accepts an existing firmware filename and does not prove it was built from the recorded source commit.
+
+Use the newly built firmware for local qualification (set `MSB_PATH` to the newly built runtime and `MSB_LIBKRUNFW_PATH` to the firmware’s absolute path), and use the matching newly built `agentd`. An older firmware can still run supported workloads, but it lacks authoritative guest-readiness observations; resize observation/wait must report unsupported instead of claiming completion. Never replace that refusal with a target-equals-current heuristic.
+
+The workspace Git patches do not propagate to downstream crates. Before publishing dependent packages, the maintainer must publish the native release and replace those patches with the released dependencies. Until then, qualify from this checkout and retain exact source/binary identities in test reports.
+
 ## Build & Install Loop
 
 The core development cycle is:
@@ -69,6 +77,8 @@ just build && just install
 ```
 
 This rebuilds the `msb` CLI (and ensures `agentd` and `libkrunfw` are up to date) then installs the updated binaries to `~/.microsandbox/` on Unix or `%USERPROFILE%\.microsandbox\` on Windows.
+
+For Linux development or tests that need shared libraries from the checkout, set the search path for that invocation from the repository root, for example `LD_LIBRARY_PATH="$PWD/build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cargo test -p microsandbox-runtime --lib`.
 
 On Windows, `just build-msb` targets the native MSVC Rust target (`aarch64-pc-windows-msvc` on Windows ARM64 or `x86_64-pc-windows-msvc` on Windows x64). `just build-agentd` and `just build-libkrunfw` use a Linux build backend for the guest/kernel artifacts, then link/install Windows-native outputs. The backend is selected with `MSB_WINDOWS_LINUX_BUILD_BACKEND=auto|docker|wsl` and defaults to `auto`, which prefers Docker Linux containers and falls back to Ubuntu WSL. Set `MSB_WSL_DISTRO=<name>` when your WSL distro is not named `Ubuntu`. Set `MSB_WINDOWS_TARGET_ARCH=arm64` or `MSB_WINDOWS_TARGET_ARCH=amd64` before running `just build-msb` if you need to override native target detection.
 

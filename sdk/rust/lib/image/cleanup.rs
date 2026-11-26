@@ -13,7 +13,8 @@ use microsandbox_image::{
 use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, PaginatorTrait, QueryFilter};
 
 use super::{ImagePruneReport, cleanup_journal::Journal};
-use crate::backend::LocalBackend;
+use crate::context::LocalContext;
+use crate::context::local::snapshot::cache_binding::INDEX_BINDING;
 use crate::db::{
     DbReadConnection,
     entity::{image_ref, layer, manifest, manifest_layer, snapshot},
@@ -58,6 +59,7 @@ struct CleanupScope {
     selected: Option<(String, bool)>,
     selected_manifests: HashSet<i32>,
     selected_layers: HashSet<i32>,
+    keep_refs: HashSet<String>,
 }
 
 /// Prepared claims and journal remain owned until catalog commit and filesystem cleanup finish.
@@ -78,11 +80,11 @@ impl Image {
     /// sandboxes and snapshots. Active storage operations always return
     /// [`MicrosandboxError::ImageInUse`], including with `force`.
     pub async fn remove_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         reference: &str,
         force: bool,
     ) -> MicrosandboxResult<()> {
-        Self::delete_local(local, Some((reference.to_owned(), force))).await?;
+        Self::delete_local(local, Some((reference.to_owned(), force)), HashSet::new()).await?;
         Ok(())
     }
 
@@ -93,15 +95,40 @@ impl Image {
     /// are preserved.
     /// If a later cleanup batch fails, the error message includes removal counts from
     /// completed batches. The failing batch may have made additional progress.
-    pub async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport> {
-        Self::delete_local(local, None).await
+    pub async fn prune_local(local: &LocalContext) -> MicrosandboxResult<ImagePruneReport> {
+        Self::delete_local(local, None, HashSet::new()).await
+    }
+
+    /// Remove cached image data that is not used by any sandbox, indexed snapshot,
+    /// or listed in `keep_references`.
+    ///
+    /// Each entry in `keep_references` is normalized using the same OCI reference
+    /// rules as image pulls and the local cache. Matching cached image references,
+    /// their manifests, and their referenced layers are preserved.
+    ///
+    /// Returns [`MicrosandboxError::InvalidConfig`] if any reference in
+    /// `keep_references` is invalid, before removing any cached entries.
+    pub async fn prune_local_with_keep<I, S>(
+        local: &LocalContext,
+        keep_references: I,
+    ) -> MicrosandboxResult<ImagePruneReport>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut keep_refs = HashSet::new();
+        for reference in keep_references {
+            keep_refs.insert(normalize_reference(reference.as_ref())?);
+        }
+        Self::delete_local(local, None, keep_refs).await
     }
 
     async fn delete_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         selected: Option<(String, bool)>,
+        keep_refs: HashSet<String>,
     ) -> MicrosandboxResult<ImagePruneReport> {
-        crate::backend::local::snapshot::publication::recover(local).await?;
+        crate::context::local::snapshot::publication::recover(local).await?;
         Journal::recover(local).await?;
         let pools = local.db().await?;
         // Freeze the scope of an explicit removal, not the mutable catalog contents. Every
@@ -134,6 +161,7 @@ impl Image {
                 selected.clone(),
                 selected_manifests.clone(),
                 selected_layers.clone(),
+                keep_refs.clone(),
                 skipped,
             )
             .await;
@@ -178,10 +206,11 @@ impl Image {
     }
 
     async fn delete_local_batch(
-        local: &LocalBackend,
+        local: &LocalContext,
         selected: Option<(String, bool)>,
         selected_manifests: HashSet<i32>,
         selected_layers: HashSet<i32>,
+        keep_refs: HashSet<String>,
         skipped: HashSet<PathBuf>,
     ) -> MicrosandboxResult<(ImagePruneReport, bool, HashSet<PathBuf>)> {
         let cache = GlobalCache::new_async(&local.cache_dir()).await?;
@@ -194,12 +223,20 @@ impl Image {
             selected.clone(),
             selected_manifests.clone(),
             selected_layers.clone(),
+            keep_refs.clone(),
             skipped,
         )
         .await?;
 
         prepared
-            .commit(local, cache, selected, selected_manifests, selected_layers)
+            .commit(
+                local,
+                cache,
+                selected,
+                selected_manifests,
+                selected_layers,
+                keep_refs,
+            )
             .await
     }
 }
@@ -322,6 +359,9 @@ impl Cleanup {
             return Err(MicrosandboxError::ImageInUse(
                 "image reference changed during removal; retry".into(),
             ));
+        }
+        if scope.selected.is_none() && is_kept_reference(&scope.keep_refs, &reference.reference) {
+            return Ok(false);
         }
         let retained = owners.retains(&manifest);
         if retained {
@@ -510,6 +550,7 @@ impl CleanupOwners {
             .all(txn)
             .await?
             .into_iter()
+            .filter(|row| row.storage_binding_id.as_deref() != Some(INDEX_BINDING))
             .map(|row| row.image_manifest_digest)
             .collect::<HashSet<_>>();
         Ok(Self {
@@ -544,6 +585,7 @@ impl CleanupCatalog {
                 .all(db)
                 .await?
                 .into_iter()
+                .filter(|row| row.storage_binding_id.as_deref() != Some(INDEX_BINDING))
                 .map(|row| row.image_manifest_digest)
                 .collect(),
         })
@@ -555,6 +597,7 @@ impl CleanupCatalog {
 }
 
 impl PreparedCleanup {
+    #[allow(clippy::too_many_arguments)]
     async fn prepare(
         root: PathBuf,
         cache: GlobalCache,
@@ -562,6 +605,7 @@ impl PreparedCleanup {
         selected: Option<(String, bool)>,
         selected_manifests: HashSet<i32>,
         selected_layers: HashSet<i32>,
+        keep_refs: HashSet<String>,
         skipped: HashSet<PathBuf>,
     ) -> MicrosandboxResult<Self> {
         tokio::task::spawn_blocking(move || {
@@ -584,6 +628,9 @@ impl PreparedCleanup {
                     return Err(MicrosandboxError::ImageInUse(
                         "image reference changed during removal; retry".into(),
                     ));
+                }
+                if selected.is_none() && is_kept_reference(&keep_refs, &reference.reference) {
+                    continue;
                 }
                 if catalog.retains(manifest) {
                     match &selected {
@@ -678,16 +725,18 @@ impl PreparedCleanup {
     /// Recheck owners and commit only prepared entries, then finish filesystem cleanup.
     async fn commit(
         self,
-        local: &LocalBackend,
+        local: &LocalContext,
         cache: GlobalCache,
         selected: Option<(String, bool)>,
         selected_manifests: HashSet<i32>,
         selected_layers: HashSet<i32>,
+        keep_refs: HashSet<String>,
     ) -> MicrosandboxResult<(ImagePruneReport, bool, HashSet<PathBuf>)> {
         let scope = CleanupScope {
             selected,
             selected_manifests,
             selected_layers,
+            keep_refs,
         };
         let pools = local.db().await?;
         let (report, cleanup) = pools
@@ -730,6 +779,31 @@ impl PreparedCleanup {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn normalize_reference(reference: &str) -> MicrosandboxResult<String> {
+    reference
+        .parse::<Reference>()
+        .map(|parsed| parsed.to_string())
+        .map_err(|error| {
+            MicrosandboxError::InvalidConfig(format!(
+                "invalid image reference '{reference}': {error}"
+            ))
+        })
+}
+
+fn is_kept_reference(keep_refs: &HashSet<String>, reference: &str) -> bool {
+    if keep_refs.is_empty() {
+        return false;
+    }
+    reference
+        .parse::<Reference>()
+        .ok()
+        .is_some_and(|parsed| keep_refs.contains(&parsed.to_string()))
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -746,10 +820,33 @@ mod tests {
     use super::*;
     use crate::Image;
 
-    async fn local(home: &std::path::Path) -> LocalBackend {
+    #[cfg(unix)]
+    fn recovery_fixture_in_child(name: &str) -> bool {
+        if std::env::var("MSB_TEST_IMAGE_RECOVERY").as_deref() == Ok(name) {
+            return false;
+        }
+        // These fixtures assert immediate recovery after dropping the last lock.
+        // A sibling test's fork can retain that descriptor until exec, so create
+        // the locks in a child with no unrelated process-spawning test threads.
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("image::cleanup::tests::{name}"),
+                "--nocapture",
+            ])
+            .env("MSB_TEST_IMAGE_RECOVERY", name)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated recovery fixture {name} failed: {status}"
+        );
+        true
+    }
+
+    async fn local(home: &std::path::Path) -> LocalContext {
         crate::test_support::local_backend_builder(home)
             .build()
-            .await
             .unwrap()
     }
 
@@ -770,7 +867,7 @@ mod tests {
     }
 
     async fn install(
-        local: &LocalBackend,
+        local: &LocalContext,
         reference: &str,
         metadata: &CachedImageMetadata,
     ) -> GlobalCache {
@@ -1069,6 +1166,26 @@ mod tests {
 
     #[tokio::test]
     async fn pending_snapshot_publication_roots_survive_prune_until_abandoned() {
+        #[cfg(unix)]
+        if std::env::var_os("MSB_TEST_PENDING_PUBLICATION_PRUNE").is_none() {
+            // A parallel fork may retain the publisher's descriptor until exec. Keep
+            // this immediate post-drop reclamation assertion in its own process,
+            // just like the busy-image fixture; do not weaken production lock safety.
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "image::cleanup::tests::pending_snapshot_publication_roots_survive_prune_until_abandoned",
+                    "--nocapture",
+                ])
+                .env("MSB_TEST_PENDING_PUBLICATION_PRUNE", "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated publication prune test failed: {status}"
+            );
+            return;
+        }
         use sea_orm::Set;
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
@@ -1115,6 +1232,50 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_snapshot_does_not_retain_a_shared_manifest_with_the_same_digest() {
+        use sea_orm::Set;
+        let home = tempfile::tempdir().unwrap();
+        let local = local(home.path()).await;
+        let metadata = metadata('a', 'c');
+        let reference = "example.com/shared:latest";
+        let cache = install(&local, reference, &metadata).await;
+        let now = chrono::Utc::now().naive_utc();
+        snapshot::Entity::insert(snapshot::ActiveModel {
+            artifact_path: Set(home.path().join("isolated-snapshot").display().to_string()),
+            digest: Set("isolated-descriptor".into()),
+            scope: Set("disk".into()),
+            state_kind: Set("file".into()),
+            image_ref: Set(reference.into()),
+            image_manifest_digest: Set(metadata.manifest_digest.clone()),
+            locality: Set("embedded".into()),
+            storage_binding_id: Set(Some(INDEX_BINDING.into())),
+            availability: Set("ready".into()),
+            migration_state: Set("complete".into()),
+            created_at: Set(now),
+            indexed_at: Set(now),
+            child_count: Set(0),
+            ..Default::default()
+        })
+        .exec(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+
+        Image::remove_local(&local, reference, false).await.unwrap();
+        assert!(
+            !cache
+                .image_metadata_path(&reference.parse().unwrap())
+                .exists()
+        );
+        assert_eq!(
+            snapshot::Entity::find()
+                .count(local.db().await.unwrap().read())
+                .await
+                .unwrap(),
+            1
         );
     }
 
@@ -1189,6 +1350,7 @@ mod tests {
             HashSet::new(),
             HashSet::new(),
             HashSet::new(),
+            HashSet::new(),
         )
         .await
         .unwrap();
@@ -1200,7 +1362,14 @@ mod tests {
         let cleaning_local = Arc::clone(&local);
         let cleaning = tokio::spawn(async move {
             prepared
-                .commit(&cleaning_local, cache, None, HashSet::new(), HashSet::new())
+                .commit(
+                    &cleaning_local,
+                    cache,
+                    None,
+                    HashSet::new(),
+                    HashSet::new(),
+                    HashSet::new(),
+                )
                 .await
         });
 
@@ -1285,11 +1454,19 @@ mod tests {
             HashSet::new(),
             HashSet::new(),
             HashSet::new(),
+            HashSet::new(),
         )
         .await
         .unwrap();
         let (report, _, _) = prepared
-            .commit(&local, cache.clone(), None, HashSet::new(), HashSet::new())
+            .commit(
+                &local,
+                cache.clone(),
+                None,
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+            )
             .await
             .unwrap();
 
@@ -1309,6 +1486,12 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_cleanup_rechecks_catalog_and_never_unlinks_replacement() {
+        #[cfg(unix)]
+        if recovery_fixture_in_child(
+            "interrupted_cleanup_rechecks_catalog_and_never_unlinks_replacement",
+        ) {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
         let metadata = metadata('a', 'c');
@@ -1323,6 +1506,7 @@ mod tests {
             cache.clone(),
             catalog,
             None,
+            HashSet::new(),
             HashSet::new(),
             HashSet::new(),
             HashSet::new(),
@@ -1369,6 +1553,12 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_discards_abandoned_preparation_without_unlinking_sources() {
+        #[cfg(unix)]
+        if recovery_fixture_in_child(
+            "recovery_discards_abandoned_preparation_without_unlinking_sources",
+        ) {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
         let metadata = metadata('a', 'c');
@@ -1404,5 +1594,157 @@ mod tests {
         assert!(second.is_ok(), "{second:?}");
         assert!(materializer.exists());
         assert_eq!(lock.metadata().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn prune_with_keep_preserves_pinned_images_and_layers_while_pruning_unpinned() {
+        let home = tempfile::tempdir().unwrap();
+        let local = local(home.path()).await;
+
+        let shared_layer = CachedLayerMetadata {
+            digest: format!("sha256:{}", "0".repeat(64)),
+            media_type: None,
+            size_bytes: Some(7),
+            diff_id: format!("sha256:{}", "0".repeat(64)),
+        };
+        let mut pinned_meta = metadata('a', '1');
+        pinned_meta.layers.insert(0, shared_layer.clone());
+
+        let mut unpinned_meta = metadata('b', '2');
+        unpinned_meta.layers.insert(0, shared_layer.clone());
+
+        let cache = install(&local, "docker.io/library/alpine:3.20", &pinned_meta).await;
+        install(&local, "docker.io/library/ubuntu:24.04", &unpinned_meta).await;
+
+        let report = Image::prune_local_with_keep(&local, ["alpine:3.20"])
+            .await
+            .unwrap();
+
+        assert_eq!(report.image_refs_removed, 1);
+        assert_eq!(report.manifests_removed, 1);
+        assert_eq!(report.layers_removed, 1);
+
+        let remaining: Vec<String> = Image::list_local(&local)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|handle| handle.reference().to_string())
+            .collect();
+        assert_eq!(remaining, vec!["docker.io/library/alpine:3.20"]);
+
+        // Pinned image metadata, manifest artifacts, shared layer, and unique layer survive.
+        assert!(
+            cache
+                .image_metadata_path(&"docker.io/library/alpine:3.20".parse().unwrap())
+                .exists()
+        );
+        assert!(
+            cache
+                .fsmeta_erofs_path(&pinned_meta.manifest_digest.parse().unwrap())
+                .exists()
+        );
+        assert!(
+            cache
+                .vmdk_path(&pinned_meta.manifest_digest.parse().unwrap())
+                .exists()
+        );
+        assert!(
+            cache
+                .layer_erofs_path(&shared_layer.diff_id.parse().unwrap())
+                .exists()
+        );
+        assert!(
+            cache
+                .layer_erofs_path(&pinned_meta.layers[1].diff_id.parse().unwrap())
+                .exists()
+        );
+
+        // Unpinned image metadata, manifest artifacts, and unique layer are removed.
+        assert!(
+            !cache
+                .image_metadata_path(&"docker.io/library/ubuntu:24.04".parse().unwrap())
+                .exists()
+        );
+        assert!(
+            !cache
+                .fsmeta_erofs_path(&unpinned_meta.manifest_digest.parse().unwrap())
+                .exists()
+        );
+        assert!(
+            !cache
+                .vmdk_path(&unpinned_meta.manifest_digest.parse().unwrap())
+                .exists()
+        );
+        assert!(
+            !cache
+                .layer_erofs_path(&unpinned_meta.layers[1].diff_id.parse().unwrap())
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_with_keep_normalizes_short_names_in_both_directions() {
+        let home = tempfile::tempdir().unwrap();
+        let local = local(home.path()).await;
+
+        let alpine_meta = metadata('a', '1');
+        let python_meta = metadata('b', '2');
+        let busybox_meta = metadata('c', '3');
+        let unpinned_meta = metadata('d', '4');
+
+        install(&local, "docker.io/library/alpine:3.20", &alpine_meta).await;
+        install(&local, "python:3.12-slim", &python_meta).await;
+        install(&local, "docker.io/library/busybox:latest", &busybox_meta).await;
+        install(&local, "ghcr.io/example/ephemeral:v1", &unpinned_meta).await;
+
+        let report = Image::prune_local_with_keep(
+            &local,
+            [
+                "alpine:3.20",
+                "docker.io/library/python:3.12-slim",
+                "busybox",
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.image_refs_removed, 1);
+        assert_eq!(report.manifests_removed, 1);
+        assert_eq!(report.layers_removed, 1);
+
+        let remaining: HashSet<String> = Image::list_local(&local)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|handle| handle.reference().to_string())
+            .collect();
+        assert_eq!(
+            remaining,
+            HashSet::from([
+                "docker.io/library/alpine:3.20".to_string(),
+                "python:3.12-slim".to_string(),
+                "docker.io/library/busybox:latest".to_string(),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_with_keep_rejects_invalid_reference_without_deleting_anything() {
+        let home = tempfile::tempdir().unwrap();
+        let local = local(home.path()).await;
+        let data = metadata('a', '1');
+        let cache = install(&local, "docker.io/library/alpine:3.20", &data).await;
+
+        let error = Image::prune_local_with_keep(&local, ["NOT::VALID!!!"])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
+
+        assert_eq!(Image::list_local(&local).await.unwrap().len(), 1);
+        assert!(
+            cache
+                .image_metadata_path(&"docker.io/library/alpine:3.20".parse().unwrap())
+                .exists()
+        );
     }
 }

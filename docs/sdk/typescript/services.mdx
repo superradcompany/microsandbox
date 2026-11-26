@@ -1,0 +1,489 @@
+---
+title: Services
+"og:title": TypeScript SDK Services reference
+description: Manage public URLs for sandbox ports with the TypeScript SDK.
+keywords: ["TypeScript SDK", "TypeScript services", "microsandbox services", "public URL"]
+---
+
+<Tooltip tip="Available only on microsandbox cloud; the local backend throws UnsupportedError."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+See [Services](/sandboxes/services) for usage and limits.
+
+## Service
+
+Properties use the last response without making a request.
+
+<p className="msb-member-group">Static methods</p>
+
+#### <span className="msb-recv">Service.</span><span className="msb-hn">builder()</span>
+
+```typescript
+static builder(slug: string): ServiceBuilder
+```
+
+<Accordion title="Example">
+
+```typescript
+import { Service } from "microsandbox";
+
+const svc = await Service.builder("my-app").target("my-sandbox", 8080).create();
+console.log(svc.url);
+```
+
+</Accordion>
+
+Start a [`ServiceBuilder`](#servicebuilder).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Service slug, e.g. <code>"my-app"</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicebuilder">ServiceBuilder</a></div>
+    <div className="msb-param-desc">Builder for the new Service.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Service.</span><span className="msb-hn">get()</span>
+
+```typescript
+static get(slug: string): Promise<Service>
+```
+
+Get a Service by slug.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Service slug.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Promise&lt;Service&gt;</a></div>
+    <div className="msb-param-desc">The Service's current state.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Service.</span><span className="msb-hn">list()</span>
+
+```typescript
+static list(): Promise<ServicePage>
+```
+
+List the first page in slug order, including disabled and detached Services.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicepage">Promise&lt;ServicePage&gt;</a></div>
+    <div className="msb-param-desc">One page of Services.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Service.</span><span className="msb-hn">listWith()</span>
+
+```typescript
+static listWith(
+  configure: (list: ServiceListBuilder) => ServiceListBuilder,
+): Promise<ServicePage>
+```
+
+<Accordion title="Example">
+
+```typescript
+import { Service } from "microsandbox";
+
+const page = await Service.listWith((l) => l.sandbox("my-sandbox").limit(50));
+for (const svc of page.services) {
+  console.log(svc.url, svc.target);
+}
+```
+
+</Accordion>
+
+List a configured page in slug order. A limit outside 1 through 100 throws `RangeError` before any request.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>configure</code><span className="msb-type">(list: ServiceListBuilder) =&gt; ServiceListBuilder</span></div>
+    <div className="msb-param-desc">Sets the <a href="#servicelistbuilder">list options</a>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicepage">Promise&lt;ServicePage&gt;</a></div>
+    <div className="msb-param-desc">One page of Services.</div>
+  </div>
+</div>
+
+<p className="msb-member-group">Instance properties</p>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">slug</span>
+
+`string`
+
+The Service slug.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">url</span>
+
+`string`
+
+The public URL as returned by the backend.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">status</span>
+
+[`ServiceStatus`](#servicestatus)
+
+Whether the Service routes requests, is disabled, or has no target, as of the read that returned this value. `refresh()` returns a current copy.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">target</span>
+
+[`ServiceTarget`](#servicetarget) ` | null`
+
+The target, or `null` when the Service is detached.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">createdAt</span>
+
+`Date`
+
+The creation time.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">updatedAt</span>
+
+`Date`
+
+The last state-change time.
+
+<p className="msb-member-group">Instance methods</p>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">update()</span>
+
+```typescript
+update(options: ServiceUpdateOptions): Promise<Service>
+```
+
+<Accordion title="Example">
+
+```typescript
+import { Service } from "microsandbox";
+
+let svc = await Service.get("my-app");
+svc = await svc.update({
+  target: { sandbox: "new-sandbox", port: 8080 },
+});
+```
+
+</Accordion>
+
+Change the target without retrying. If <code>changed</code> is <code>"unknown"</code>, get and check the Service.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>options</code><a className="msb-type" href="#serviceupdateoptions">ServiceUpdateOptions</a></div>
+    <div className="msb-param-desc">Required target for the change.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Promise&lt;Service&gt;</a></div>
+    <div className="msb-param-desc">The Service as committed.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">enable()</span>
+
+```typescript
+enable(): Promise<Service>
+```
+
+Enable the Service without retrying. To enable a detached Service, set a running target with `update()` instead.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">disable()</span>
+
+```typescript
+disable(): Promise<Service>
+```
+
+Disable the Service without retrying while retaining its target.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">remove()</span>
+
+```typescript
+remove(): Promise<void>
+```
+
+Remove the Service and release its slug without retrying.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">refresh()</span>
+
+```typescript
+refresh(): Promise<Service>
+```
+
+Get the Service again and return its current state. This value is not changed.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Promise&lt;Service&gt;</a></div>
+    <div className="msb-param-desc">The Service's current state.</div>
+  </div>
+</div>
+
+## ServiceBuilder
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">target()</span>
+
+```typescript
+target(sandbox: string, port: number): this
+```
+
+Set the running sandbox and port that receive requests.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sandbox</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Target sandbox name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>port</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Sandbox port, 1 through 65535.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">create()</span>
+
+```typescript
+create(): Promise<Service>
+```
+
+Create the Service without retrying. A port that is not an integer from 1 through 65535 throws `RangeError`; a missing target throws `InvalidConfigError`. Both errors occur before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Promise&lt;Service&gt;</a></div>
+    <div className="msb-param-desc">The Service as committed.</div>
+  </div>
+</div>
+
+## ServiceUpdateOptions
+
+Options for one target update. The target is required. A port that is not an integer from 1 through 65535 throws `RangeError` before any request.
+
+#### <span className="msb-hn">target</span>
+
+```typescript
+target: ServiceTarget
+```
+
+Set the running target. This also enables or reattaches the Service. See [`ServiceTarget`](#servicetarget) for its fields.
+
+## ServiceListBuilder
+
+#### <span className="msb-recv">l.</span><span className="msb-hn">sandbox()</span>
+
+```typescript
+sandbox(name: string): this
+```
+
+Filter by target sandbox. An unknown name returns an empty page.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">l.</span><span className="msb-hn">limit()</span>
+
+```typescript
+limit(limit: number): this
+```
+
+Set the page size from 1 to 100; the default is 20.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limit</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Page size.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">l.</span><span className="msb-hn">cursor()</span>
+
+```typescript
+cursor(cursor: string): this
+```
+
+Continue from a previous <code>nextCursor</code>.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cursor</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Opaque cursor.</div>
+  </div>
+</div>
+
+## ServicePage
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>services</code><a className="msb-type" href="#service">Service[]</a></div>
+    <div className="msb-param-desc">Services in this page, in slug order.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nextCursor</code><span className="msb-type">string | undefined</span></div>
+    <div className="msb-param-desc">Cursor for the next page, or <code>undefined</code> on the final page.</div>
+  </div>
+</div>
+
+## ServiceStatus
+
+```typescript
+type ServiceStatus = "enabled" | "disabled" | "detached" | "unknown"
+```
+
+`"enabled"` routes requests, `"disabled"` retains the target without routing, `"detached"` has no target, and `"unknown"` represents an unrecognized backend value.
+
+## ServiceTarget
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sandbox</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Current name of the target sandbox.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>port</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Sandbox port that receives requests.</div>
+  </div>
+</div>
+
+## ServiceError
+
+A refused Service change or an unknown outcome. A missing Service throws `ServiceNotFoundError`, an unavailable slug throws `ServiceAlreadyExistsError`, and a missing target sandbox throws `SandboxNotFoundError`. Every `MicrosandboxError` from create, update, enable, disable, or remove exposes `changed`; it is `"unknown"` when the change may have been applied.
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">string</span></div>
+<div className="msb-param-desc">Service slug.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reason</code><span className="msb-type">ServiceErrorReason</span></div>
+<div className="msb-param-desc">Reason for the failure.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>retryAfterMs</code><span className="msb-type">number | null</span></div>
+    <div className="msb-param-desc">Retry delay returned with the refusal, in milliseconds, or <code>null</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>changed</code><span className="msb-type">"unchanged" | "unknown"</span></div>
+<div className="msb-param-desc"><code>"unknown"</code> means the change may have been applied; get and check the Service.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>rawCode</code><span className="msb-type">string | null</span></div>
+    <div className="msb-param-desc">Raw refusal code when <code>reason</code> is <code>"other"</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>rawStatus</code><span className="msb-type">number | null</span></div>
+    <div className="msb-param-desc">HTTP status when <code>reason</code> is <code>"other"</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>rawMessage</code><span className="msb-type">string | null</span></div>
+    <div className="msb-param-desc">Raw refusal message when <code>reason</code> is <code>"other"</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Reasons</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"serviceQuotaExceeded"</code></div>
+<div className="msb-param-desc">The organization's Service limit was reached. Remove a Service or request a higher limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"sandboxServiceLimitExceeded"</code></div>
+<div className="msb-param-desc">The target sandbox's Service limit was reached. Remove or move a Service, or request a higher limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"serviceConflict"</code></div>
+<div className="msb-param-desc">Another change to the Service committed first. Get it, then retry.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"serviceDetached"</code></div>
+    <div className="msb-param-desc">The Service is detached. Set a target.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"targetUnreachable"</code></div>
+<div className="msb-param-desc">The target sandbox cannot be reached right now. Retry later, after <code>retryAfterMs</code> when set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"sandboxNotRunning"</code></div>
+<div className="msb-param-desc">The target sandbox is not running. Start it, then retry.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"serviceChangesPaused"</code></div>
+<div className="msb-param-desc">Service changes are paused. Retry later, after <code>retryAfterMs</code> when set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"outcomeUnknown"</code></div>
+<div className="msb-param-desc">The change may have been applied. Get and check the Service before retrying.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"other"</code></div>
+<div className="msb-param-desc">A reason this SDK does not recognize; <code>rawCode</code>, <code>rawStatus</code>, and <code>rawMessage</code> preserve the refusal, and <code>changed</code> still reports the outcome.</div>
+  </div>
+</div>
+
+## ChangeState
+
+```typescript
+type ChangeState = "unchanged" | "unknown"
+```
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"unchanged"</code></div>
+    <div className="msb-param-desc">Nothing changed.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"unknown"</code></div>
+    <div className="msb-param-desc">The change may have been applied. Get and check the Service before retrying.</div>
+  </div>
+</div>

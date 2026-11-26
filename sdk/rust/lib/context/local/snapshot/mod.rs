@@ -1,0 +1,51 @@
+//! Local snapshot lifecycle and complete artifact engine.
+
+pub(super) mod archive;
+mod artifact;
+pub(crate) mod cache_binding;
+pub(crate) mod configuration_capture;
+mod copy;
+mod create;
+pub(crate) mod deletion;
+mod dispatch;
+pub mod downgrade;
+mod file_identity;
+mod group;
+#[cfg(test)]
+mod historical_recovery_tests;
+mod lease;
+pub(crate) mod lineage;
+mod metadata;
+pub(super) mod migration;
+pub(crate) mod publication;
+mod restore;
+mod source;
+mod stopped_script_backing;
+mod store;
+mod verify;
+mod writer;
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+use crate::snapshot::{
+    HeadUpdate, Manifest, SnapshotArchive, SnapshotConfig, SnapshotFormat, SnapshotId,
+    SnapshotScope, UpperIntegrity,
+};
+pub(crate) use archive::launch::{PreparedLaunchSource, prepare as prepare_snapshot_sources};
+use artifact::{Snapshot, SnapshotHandle};
+pub(crate) use create::{
+    CHECKPOINT_DIRECTORY, stage_local_branch_closure, validate_checkpoint_owned_inventory,
+    validate_owned_inventory,
+};
+pub(crate) use restore::{
+    adopt_local_branch_for_child, append_private_writable_head, apply_additional_disks,
+    materialize_additional_disks, materialize_checkpoint_child_state,
+    materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
+    materialize_file_snapshot_for_child, materialize_owned_volumes, root_device,
+};
+
+pub(crate) use archive::save_snapshot_expected;
+pub(crate) use dispatch::{anchor_archive_selector_in, load_group_admitted, load_many_admitted};
+pub(super) use store::looks_like_path;

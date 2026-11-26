@@ -113,11 +113,7 @@ pub async fn materialize_compact_prefix(
             "invalid compaction disk capacity",
         ));
     }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
+    let file = microsandbox_utils::private_file::create_new_read_write(destination)?;
     Qcow2::<ImagoFile>::create_builder(ImagoFile::try_from(file)?)
         .size(virtual_size)
         .cluster_size(65536)
@@ -185,11 +181,8 @@ pub async fn materialize_raw_prefix(
             "invalid raw disk capacity",
         ));
     }
-    let mut target = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)
-        .await?;
+    let mut target =
+        tokio::fs::File::from_std(microsandbox_utils::private_file::create_new(destination)?);
     target.set_len(virtual_size).await?;
     let mut buffer = vec![0u8; 1024 * 1024];
     let mut offset = 0;
@@ -262,6 +255,8 @@ pub async fn validate_compact_chain(layers: &[CompactLayer]) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::checkpoint::create_qcow2_overlay;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
     async fn compacted_prefix_preserves_overwrites_zeroes_and_grown_tail() {
@@ -311,6 +306,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.virtual_size, 262144);
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         let input = open_chain(&layers).await.unwrap();
         let output = open_chain(&[CompactLayer {
             path: destination.clone(),
@@ -331,6 +337,15 @@ mod tests {
             .unwrap();
         assert_eq!(raw_result.virtual_size, 262144);
         assert_eq!(std::fs::read(&raw_destination).unwrap(), before);
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&raw_destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         assert!(
             materialize_raw_prefix(&layers, &raw_destination)
                 .await

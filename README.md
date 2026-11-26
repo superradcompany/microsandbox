@@ -31,6 +31,18 @@
 
 <br />
 
+<div align="center">
+  <a href="https://microsandbox.dev">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./assets/microsandbox-cloud-banner-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="./assets/microsandbox-cloud-banner-light.png">
+      <img width="100%" src="./assets/microsandbox-cloud-banner-dark.png" alt="we are launching microsandbox cloud. learn more.">
+    </picture>
+  </a>
+</div>
+
+<br />
+
 **Microsandbox** runs **untrusted workloads** inside fast, local microVMs: AI agents, user code, plugins, CI jobs, dev environments, scrapers, and automation.
 
 ##
@@ -152,13 +164,12 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 > ```sh
 > # Snapshot now, resume later.
 > msb snap create --sandbox app --full -o snapshot.msb
-> msb snap restore snapshot.msb --name app3
+> msb create --from-snapshot ./snapshot.msb --name app3
 > ```
->
-> Forking duplicates live execution. Restoring starts from saved state; add `--cow-mem` to share unchanged memory from a full snapshot. Snapshot generations describe progression, while branches describe distinct paths through snapshot history. The old `--forked` restore flag remains a deprecated alias. See [forking and snapshots](https://docs.microsandbox.dev/sandboxes/snapshots#forking).
 >
 > ```sh
 > # Lifecycle
+> msb ls
 > msb stop app
 > msb start app
 > msb rm app
@@ -172,14 +183,12 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 > msb image rm python       # Remove an image
 > ```
 
-#### <img height="14" src="https://octicons-col.vercel.app/file-code/A770EF">&nbsp;&nbsp;Configuration File
+#### <img height="14" src="https://octicons-col.vercel.app/file-code/A770EF">&nbsp;&nbsp;Sandboxfile
 
-> ```sh
-> msb run --conf sandbox.yaml -- octocat
-> ```
+> Save the sandbox settings in a YAML file named `Sandboxfile`.
 >
 > ```yaml
-> # sandbox.yaml
+> # Sandboxfile
 > image: python:3.12
 > memory: 64M
 > network:
@@ -198,6 +207,10 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >         print(response.read().decode())
 >     PY
 > ```
+>
+> ```sh
+> msb run --file Sandboxfile -- octocat
+> ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
 
@@ -212,8 +225,8 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >
 > Run:<br />
 > · `msb --help` for quick help menu. <br />
-> · `msb --tree` for complete command hierarchy and descriptions. <br />
-> · `msb <command> --tree` for a specific command tree.
+> · `msb --tree` for the complete command hierarchy and descriptions. <br />
+> · `msb --tree -CbL 2` for a compact two-level view.
 
 <br />
 

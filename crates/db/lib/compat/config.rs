@@ -75,6 +75,9 @@ pub fn to_previous_version(raw: &str, version: &Version) -> Result<Option<String
     if !version.pre.is_empty() {
         return Err("saved-config compatibility requires a stable release version");
     }
+    if requires_downgrade(version) {
+        reject_isolated_image_cache_dir(raw)?;
+    }
     match (version.major, version.minor, version.patch) {
         (0, 6, patch) => to_v0_6(raw, patch),
         (0, 7, 0..=2) => compat::v0_7_0::secrets::to_previous_version(raw),
@@ -88,13 +91,24 @@ pub fn to_previous_version(raw: &str, version: &Version) -> Result<Option<String
 pub fn requires_downgrade(version: &Version) -> bool {
     matches!(
         (version.major, version.minor, version.patch),
-        (0, 6, _) | (0, 7, 0..=6)
+        (0, 6, _) | (0, 7, _) | (0, 8, 0..=1)
     )
 }
 
 /// Whether compatibility preparation for this destination can rewrite saved records.
 pub fn requires_rewrite(version: &Version) -> bool {
     matches!((version.major, version.minor), (0, 6))
+}
+
+fn reject_isolated_image_cache_dir(raw: &str) -> Result<(), &'static str> {
+    let value: Value = serde_json::from_str(raw).map_err(|_| "invalid configuration JSON")?;
+    if value
+        .get("image_cache_dir")
+        .is_some_and(|entry| !entry.is_null())
+    {
+        return Err("isolated image cache directories require v0.8.2 or later");
+    }
+    Ok(())
 }
 
 // Secret source references arrived in v0.6.4; the policy shape predates v0.6.
@@ -150,6 +164,14 @@ mod tests {
             }]
         }}})
         .to_string()
+    }
+
+    #[test]
+    fn current_rc_needs_no_historical_saved_config_projection() {
+        let version = Version::parse("0.8.2-rc.1").unwrap();
+        assert!(!requires_downgrade(&version));
+        assert!(!requires_rewrite(&version));
+        assert!(to_previous_version("{}", &Version::parse("0.8.0-rc.1").unwrap()).is_err());
     }
 
     #[test]
@@ -256,21 +278,42 @@ mod tests {
     }
 
     #[test]
-    fn downgrade_target_gates_include_released_v0_7_only() {
+    fn downgrade_target_gates_cover_releases_before_0_8_2() {
         for version in [
             "0.6.0", "0.6.18", "0.7.0", "0.7.1", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6",
+            "0.7.7", "0.8.0", "0.8.1",
         ] {
             assert!(requires_downgrade(&Version::parse(version).unwrap()));
         }
         for version in [
-            "0.7.0", "0.7.1", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6",
+            "0.7.0", "0.7.1", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6", "0.7.7", "0.8.0",
+            "0.8.1",
         ] {
             assert!(!requires_rewrite(&Version::parse(version).unwrap()));
         }
         assert!(requires_rewrite(&Version::parse("0.6.18").unwrap()));
-        for version in ["0.5.0", "0.7.7", "0.8.0", "1.6.0"] {
+        for version in ["0.5.0", "0.8.2", "1.6.0"] {
             assert!(!requires_downgrade(&Version::parse(version).unwrap()));
         }
+    }
+
+    #[test]
+    fn downgrade_rejects_isolated_image_cache_dir_before_0_8_2() {
+        let with_cache = serde_json::json!({
+            "name": "org-sandbox",
+            "image_cache_dir": "/var/lib/msb/cache/orgs/org-a"
+        })
+        .to_string();
+        for target in ["0.6.18", "0.7.6", "0.7.7", "0.8.0", "0.8.1"] {
+            let err = to_previous_version(&with_cache, &Version::parse(target).unwrap())
+                .expect_err("isolated image_cache_dir must block downgrade");
+            assert!(err.contains("v0.8.2"), "{target}: {err}");
+        }
+        assert!(
+            to_previous_version(&with_cache, &Version::new(0, 8, 2))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

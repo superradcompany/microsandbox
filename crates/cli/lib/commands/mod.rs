@@ -34,6 +34,7 @@ pub mod restore;
 pub mod run;
 pub mod sandbox;
 pub mod self_cmd;
+pub mod service;
 pub mod snapshot;
 #[cfg(feature = "ssh")]
 pub mod ssh;
@@ -65,7 +66,9 @@ pub async fn maybe_stop(sandbox: &Sandbox) {
 
 /// Finish local stop cleanup before a command calls `process::exit`.
 pub(crate) async fn finish_stopped_memory_cleanup() {
-    let backend = microsandbox::backend::default_backend();
+    let Ok(backend) = crate::commands::common::selected_context() else {
+        return;
+    };
     if let Some(local) = backend.as_local() {
         local.finish_stopped_memory_cleanup().await;
     }
@@ -76,18 +79,22 @@ pub(crate) async fn finish_stopped_memory_cleanup() {
 /// If the sandbox is already running, connects to the existing sandbox process
 /// via the agent relay socket. If stopped or crashed, starts it with a spinner.
 ///
-/// For OCI-backed sandboxes that are being (re)started, runs a pull-if-missing
+/// For local OCI-backed sandboxes that are being (re)started, runs a pull-if-missing
 /// pass first so any cache artifacts deleted since the last run (layer EROFS,
 /// fsmeta, VMDK) are regenerated before the VM tries to use them.
 pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbox> {
-    let handle = Sandbox::get(name).await?;
+    let context = crate::commands::common::selected_context()?;
+    let handle = context.sandbox_ops().get(context.clone(), name).await?;
 
     match handle.status_snapshot() {
         SandboxStatus::Running | SandboxStatus::Draining => {
             // Rebuild a live sandbox. Local connects to the agent relay now;
             // cloud agent operations establish their WebSocket lazily.
             let sandbox = handle.connect().await?;
-            if sandbox.local().is_some() && sandbox.client().is_legacy_protocol() && !quiet {
+            if sandbox.local_state().is_some()
+                && sandbox.client().await?.is_legacy_protocol()
+                && !quiet
+            {
                 // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
                 // compatibility for versions before 0.5 is no longer supported.
                 ui::warn(&format!(
@@ -97,18 +104,28 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
             Ok(sandbox)
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
-            if let Ok(config) = handle.config()
+            if context.as_local().is_some()
+                && let Ok(config) = handle.config()
                 && let RootfsSource::Oci(ref oci) = config.spec.image
-            {
-                let materialization = if matches!(
+                && config.image_cache_dir.is_none()
+                && !matches!(
                     &oci.root_disk,
                     Some(microsandbox::sandbox::RootDisk::Flat { .. })
-                ) {
-                    pull::PullMaterialization::Flat
-                } else {
-                    pull::PullMaterialization::Layered
-                };
-                image::pull_if_missing(&oci.reference, quiet, materialization).await?;
+                )
+            {
+                match config.manifest_digest() {
+                    Some(digest) => {
+                        image::repair_pinned_root(&oci.reference, digest, quiet).await?
+                    }
+                    None => {
+                        image::pull_if_missing(
+                            &oci.reference,
+                            quiet,
+                            pull::PullMaterialization::Layered,
+                        )
+                        .await?;
+                    }
+                }
             }
 
             let spinner = if quiet {

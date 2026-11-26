@@ -1,4 +1,4 @@
-import { napi, type NapiSandboxModifyOptions } from "./internal/napi.js";
+import { napi, type NativeBindings, type NapiSandboxModifyOptions } from "./internal/napi.js";
 import type { SecretSubstitution } from "./network-config.js";
 import type { ViolationAction } from "./violation-action.js";
 
@@ -42,7 +42,7 @@ export type ResourceConvergenceState =
   | "failed";
 
 /**
- * Options for `Sandbox.modify()` / `SandboxHandle.modify()`.
+ * Options for `Sandbox.modify()`.
  *
  * `memory` / `maxMemory` / `rootDiskSize` are in MiB. Omitted fields are left unchanged.
  */
@@ -154,11 +154,11 @@ const SECRET_SUBSTITUTION_KEYS: readonly string[] = [
 ];
 
 /** Reject options that an older native library would accept but not apply. */
-export function requireModifyCapabilities(opts?: ModifyOptions): void {
-  if ((opts?.ports?.length || opts?.portsRemove?.length) && !napi.supportsPortModification?.()) {
+export function requireModifyCapabilities(opts?: ModifyOptions, native: NativeBindings = napi): void {
+  if ((opts?.ports?.length || opts?.portsRemove?.length) && !native.supportsPortModification?.()) {
     throw new Error("published-port modification requires an updated native library");
   }
-  if (usesSecretPolicyFields(opts) && !napi.supportsSecretPolicyModification?.()) {
+  if (usesSecretPolicyFields(opts) && !native.supportsSecretPolicyModification?.()) {
     throw new Error("secret policy modification requires an updated native library");
   }
 }
@@ -244,6 +244,18 @@ export interface ResourceResizeStatus {
   actual: string;
   enforced: string;
   state: ResourceConvergenceState;
+}
+
+/** Parse the resize status JSON array emitted by the native layer. */
+export function resizeStatusFromJson(raw: string): ResourceResizeStatus[] {
+  return JSON.parse(raw) as ResourceResizeStatus[];
+}
+
+/** Reject budgets N-API cannot represent; omitted waits without a deadline, `0` checks once. */
+export function validateResizeTimeout(timeoutMs?: number): void {
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) {
+    throw new RangeError("resize wait timeout must be a non-negative finite number of milliseconds");
+  }
 }
 
 /** Dry-run or apply plan returned by `modify()`. */

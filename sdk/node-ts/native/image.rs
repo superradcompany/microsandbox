@@ -1,4 +1,6 @@
+#[cfg(feature = "local")]
 use microsandbox::image as msb_image;
+#[cfg(feature = "local")]
 use microsandbox::image::{ImageDetail, ImageHandle, ImagePruneReport};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -13,6 +15,7 @@ use crate::types::*;
 /// A lightweight handle to a cached image.
 #[napi(js_name = "ImageHandle")]
 pub struct JsImageHandle {
+    #[cfg(feature = "local")]
     inner: ImageHandle,
 }
 
@@ -84,6 +87,7 @@ pub struct ImagePruneReportJs {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "local")]
 #[napi]
 impl JsImageHandle {
     #[napi(getter)]
@@ -131,8 +135,9 @@ impl JsImageHandle {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn resolve_local() -> Result<std::sync::Arc<dyn microsandbox::Backend>> {
-    let backend = microsandbox::backend::default_backend();
+#[cfg(feature = "local")]
+fn resolve_local() -> Result<std::sync::Arc<dyn microsandbox::Context>> {
+    let backend = microsandbox::context::configured_context();
     if backend.as_local().is_none() {
         return Err(napi::Error::from_reason(
             "image ops require a local backend".to_string(),
@@ -144,56 +149,101 @@ fn resolve_local() -> Result<std::sync::Arc<dyn microsandbox::Backend>> {
 /// Look up a cached image by reference.
 #[napi(js_name = "imageGet")]
 pub async fn image_get(reference: String) -> Result<JsImageHandle> {
-    let backend = resolve_local()?;
-    let local = backend.as_local().expect("checked above");
-    let inner = msb_image::Image::get_local(local, &reference)
-        .await
-        .map_err(to_napi_error)?;
-    Ok(JsImageHandle { inner })
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::ImageGet,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let backend = resolve_local()?;
+        let local = backend.as_local().expect("checked above");
+        let inner = msb_image::Image::get_local(local, &reference)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsImageHandle { inner })
+    }
 }
 
 /// List all cached images.
 #[napi(js_name = "imageList")]
 pub async fn image_list() -> Result<Vec<ImageInfo>> {
-    let backend = resolve_local()?;
-    let local = backend.as_local().expect("checked above");
-    let handles = msb_image::Image::list_local(local)
-        .await
-        .map_err(to_napi_error)?;
-    Ok(handles.iter().map(image_handle_to_info).collect())
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::ImageList,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let backend = resolve_local()?;
+        let local = backend.as_local().expect("checked above");
+        let handles = msb_image::Image::list_local(local)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(handles.iter().map(image_handle_to_info).collect())
+    }
 }
 
 /// Full inspect (config + layers).
 #[napi(js_name = "imageInspect")]
 pub async fn image_inspect(reference: String) -> Result<ImageDetailJs> {
-    let backend = resolve_local()?;
-    let local = backend.as_local().expect("checked above");
-    let detail = msb_image::Image::inspect_local(local, &reference)
-        .await
-        .map_err(to_napi_error)?;
-    Ok(image_detail_to_js(detail))
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::ImageInspect,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let backend = resolve_local()?;
+        let local = backend.as_local().expect("checked above");
+        let detail = msb_image::Image::inspect_local(local, &reference)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(image_detail_to_js(detail))
+    }
 }
 
 /// Remove an image reference. Force permits untagging dependencies while retaining
 /// their backing; active storage operations are never bypassed.
 #[napi(js_name = "imageRemove")]
 pub async fn image_remove(reference: String, force: Option<bool>) -> Result<()> {
-    let backend = resolve_local()?;
-    let local = backend.as_local().expect("checked above");
-    msb_image::Image::remove_local(local, &reference, force.unwrap_or(false))
-        .await
-        .map_err(to_napi_error)
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::ImageRemove,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let backend = resolve_local()?;
+        let local = backend.as_local().expect("checked above");
+        msb_image::Image::remove_local(local, &reference, force.unwrap_or(false))
+            .await
+            .map_err(to_napi_error)
+    }
 }
 
 /// Remove cached image data that is not used by any sandbox or indexed snapshot.
 #[napi(js_name = "imagePrune")]
 pub async fn image_prune() -> Result<ImagePruneReportJs> {
-    let backend = resolve_local()?;
-    let local = backend.as_local().expect("checked above");
-    msb_image::Image::prune_local(local)
-        .await
-        .map(image_prune_report_to_js)
-        .map_err(to_napi_error)
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::ImagePrune,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let backend = resolve_local()?;
+        let local = backend.as_local().expect("checked above");
+        msb_image::Image::prune_local(local)
+            .await
+            .map(image_prune_report_to_js)
+            .map_err(to_napi_error)
+    }
 }
 
 /// Load images from a local archive (`docker save` tarball or OCI Image
@@ -201,13 +251,22 @@ pub async fn image_prune() -> Result<ImagePruneReportJs> {
 /// first image in the archive.
 #[napi(js_name = "imageLoad")]
 pub async fn image_load(input_path: String, tag: Option<String>) -> Result<Vec<ImageInfo>> {
-    let backend = resolve_local()?;
-    let local = backend.as_local().expect("checked above");
-    let tags: Vec<String> = tag.into_iter().collect();
-    let handles = msb_image::Image::load_local(local, std::path::Path::new(&input_path), tags)
-        .await
-        .map_err(to_napi_error)?;
-    Ok(handles.iter().map(image_handle_to_info).collect())
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::ImageLoad,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let backend = resolve_local()?;
+        let local = backend.as_local().expect("checked above");
+        let tags: Vec<String> = tag.into_iter().collect();
+        let handles = msb_image::Image::load_local(local, std::path::Path::new(&input_path), tags)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(handles.iter().map(image_handle_to_info).collect())
+    }
 }
 
 /// Save cached images to an archive file. `format` selects the layout:
@@ -218,32 +277,42 @@ pub async fn image_save(
     output_path: String,
     format: Option<String>,
 ) -> Result<()> {
-    let format = match format.as_deref().unwrap_or("docker") {
-        "docker" => microsandbox::ImageArchiveFormat::Docker,
-        "oci" => microsandbox::ImageArchiveFormat::Oci,
-        other => {
-            return Err(napi::Error::from_reason(format!(
-                "invalid archive format '{other}': expected 'docker' or 'oci'"
-            )));
-        }
-    };
-    if references.is_empty() {
-        return Err(napi::Error::from_reason(
-            "at least one image reference is required".to_string(),
-        ));
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::ImageSave,
+        )))
     }
-    let backend = resolve_local()?;
-    let local = backend.as_local().expect("checked above");
-    msb_image::Image::save_local(
-        local,
-        &references,
-        std::path::Path::new(&output_path),
-        format,
-    )
-    .await
-    .map_err(to_napi_error)
+    #[cfg(feature = "local")]
+    {
+        let format = match format.as_deref().unwrap_or("docker") {
+            "docker" => microsandbox::ImageArchiveFormat::Docker,
+            "oci" => microsandbox::ImageArchiveFormat::Oci,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid archive format '{other}': expected 'docker' or 'oci'"
+                )));
+            }
+        };
+        if references.is_empty() {
+            return Err(napi::Error::from_reason(
+                "at least one image reference is required".to_string(),
+            ));
+        }
+        let backend = resolve_local()?;
+        let local = backend.as_local().expect("checked above");
+        msb_image::Image::save_local(
+            local,
+            &references,
+            std::path::Path::new(&output_path),
+            format,
+        )
+        .await
+        .map_err(to_napi_error)
+    }
 }
 
+#[cfg(feature = "local")]
 fn image_handle_to_info(h: &ImageHandle) -> ImageInfo {
     ImageInfo {
         reference: h.reference().to_string(),
@@ -257,6 +326,7 @@ fn image_handle_to_info(h: &ImageHandle) -> ImageInfo {
     }
 }
 
+#[cfg(feature = "local")]
 fn image_detail_to_js(d: ImageDetail) -> ImageDetailJs {
     let h = &d.handle;
     let config = d.config.as_ref().map(|c| ImageConfigDetail {
@@ -295,6 +365,7 @@ fn image_detail_to_js(d: ImageDetail) -> ImageDetailJs {
     }
 }
 
+#[cfg(feature = "local")]
 fn image_prune_report_to_js(report: ImagePruneReport) -> ImagePruneReportJs {
     ImagePruneReportJs {
         image_refs_removed: report.image_refs_removed,

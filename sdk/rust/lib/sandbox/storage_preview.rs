@@ -17,14 +17,14 @@ use super::{
     RootDisk, RootfsSource, SandboxBuilder, StorageRecovery, StorageRecoveryOptions,
     StorageRecoverySelection,
 };
-use crate::backend::{Backend, BackendSelectionSource};
 use crate::config::layers::BackendConfig;
+use crate::context::{Context, ContextSelectionSource};
 use crate::runtime::{
     launch_contract,
     protected_state::{self, StoragePreparation},
 };
 use crate::sandbox::exec::ExecEvent;
-use crate::{LocalBackend, MicrosandboxError, MicrosandboxResult, Sandbox, SandboxConfig};
+use crate::{LocalContext, MicrosandboxError, MicrosandboxResult, Sandbox, SandboxConfig};
 
 #[path = "storage_preview_lower.rs"]
 mod lower;
@@ -38,7 +38,7 @@ pub use wire::StoragePreviewEntry;
 #[doc(hidden)]
 pub struct StoragePreview {
     name: String,
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Context>,
     maintenance: bool,
     candidates: Vec<CandidateSummary>,
     mounts: BTreeMap<String, String>,
@@ -69,12 +69,27 @@ impl Sandbox {
         name: &str,
         options: StorageRecoveryOptions,
     ) -> MicrosandboxResult<StoragePreview> {
+        crate::context::configured_context()
+            .sandboxes()
+            .preview_storage(name, options)
+            .await
+    }
+}
+
+impl crate::Sandboxes {
+    /// Preview storage on this captured destination without booting or adopting the target.
+    #[doc(hidden)]
+    pub async fn preview_storage(
+        &self,
+        name: &str,
+        options: StorageRecoveryOptions,
+    ) -> MicrosandboxResult<StoragePreview> {
         if !options.selections.is_empty() {
             return Err(MicrosandboxError::InvalidConfig(
                 "choose candidate IDs when confirming the captured views".into(),
             ));
         }
-        let backend = crate::backend::default_backend();
+        let backend = self.context.clone();
         with_target_locks(backend.clone(), name, async |local| {
             let runtime = crate::setup::resolve_runtime(local.config())?;
             launch_contract::require_storage_reader(&runtime.msb_path).await?;
@@ -91,7 +106,7 @@ impl Sandbox {
                 parent,
                 layered,
                 manifest: config.manifest_digest.clone(),
-                cache: local.config().cache_dir(),
+                cache: local.image_cache_dir_for(config.image_cache_dir.as_deref()),
                 sources: local.config_sources().clone(),
                 runtime,
             };
@@ -257,7 +272,7 @@ pub(crate) fn guest_mounts(config: &SandboxConfig) -> BTreeMap<String, String> {
 /// Called with exclusive target transition/lineage/lifecycle ownership. Reading through the
 /// released-schema catalog keeps cancelling a browse compatible with the original CLI.
 pub(crate) async fn capture_readonly(
-    local: &LocalBackend,
+    local: &LocalContext,
     name: &str,
     options: &StorageRecoveryOptions,
     parent: &std::path::Path,
@@ -362,9 +377,9 @@ async fn run_query(
     let root = scratch.join("root");
     seed_reader_root(&root)?;
     let private_config = files.sources.recovery_reader(&home, &files.runtime)?;
-    let local = LocalBackend::from_backend_config(
+    let local = LocalContext::from_backend_config(
         private_config,
-        BackendSelectionSource::Programmatic,
+        ContextSelectionSource::Programmatic,
         None,
     );
     // Bind-root readers never pull an image or provision a disk in this fresh home. Create
@@ -404,10 +419,13 @@ async fn run_query(
             "managed sandbox policy is incompatible with an isolated read-only reader",
         ));
     }
-    let backend: Arc<dyn Backend> = Arc::new(local);
-    let vm = crate::backend::with_backend(backend, Sandbox::create(config))
-        .await
-        .map_err(|e| unavailable(format!("starting isolated reader VM: {e}")))?;
+    let backend: Arc<dyn Context> = Arc::new(local);
+    let vm = async {
+        let destination: std::sync::Arc<dyn crate::Context> = backend;
+        destination.sandboxes().create(config).await
+    }
+    .await
+    .map_err(|e| unavailable(format!("starting isolated reader VM: {e}")))?;
     let result = async {
         let handshake = exchange(&vm, &["handshake"], 256)
             .await
@@ -609,15 +627,18 @@ mod tests {
                 .paths(PathsConfigPatch::new().msb(exe).libkrunfw(firmware)),
             Default::default(),
         );
-        let backend: Arc<dyn Backend> = Arc::new(LocalBackend::from_backend_config(
+        let backend: Arc<dyn Context> = Arc::new(LocalContext::from_backend_config(
             config,
-            BackendSelectionSource::Programmatic,
+            ContextSelectionSource::Programmatic,
             None,
         ));
-        let error = crate::backend::with_backend(
-            backend,
-            Sandbox::preview_storage("target", Default::default()),
-        )
+        let error = async {
+            let destination: std::sync::Arc<dyn crate::Context> = backend;
+            destination
+                .sandboxes()
+                .preview_storage("target", Default::default())
+                .await
+        }
         .await
         .err()
         .expect("old embedded agent accepted");

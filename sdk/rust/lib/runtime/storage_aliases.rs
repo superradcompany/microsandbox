@@ -19,9 +19,9 @@ use microsandbox_runtime::ipc::{self, SandboxLifecycleGuard};
 use microsandbox_types::VolumeMount;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
-use crate::backend::local::creation::CreationStorage;
+use crate::context::local::creation::CreationStorage;
 use crate::sandbox::{RootfsSource, SandboxConfig, SandboxStatus, validate_sandbox_name};
-use crate::{LocalBackend, MicrosandboxError, MicrosandboxResult};
+use crate::{LocalContext, MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -319,7 +319,7 @@ pub(crate) fn discover(
 /// Exclude all discovered writers, then repeat discovery under the retained guards. Every
 /// related acquisition is nonblocking: the caller already owns its own lifecycle and lineage.
 pub(crate) async fn resolve(
-    backend: &LocalBackend,
+    backend: &LocalContext,
     _config: &SandboxConfig,
     current_id: i32,
     bindings: &mut MigrationBindings,
@@ -330,7 +330,7 @@ pub(crate) async fn resolve(
 /// Explicit browsing supplies a read-only released catalog. Ownership, two-pass discovery and
 /// teardown checks stay identical to adoption; only SQL access and compatibility decoding differ.
 pub(crate) async fn resolve_with_catalog(
-    backend: &LocalBackend,
+    backend: &LocalContext,
     current_id: i32,
     bindings: &mut MigrationBindings,
     mut readonly: Option<&mut sea_orm::sqlx::SqliteConnection>,
@@ -397,7 +397,7 @@ pub(crate) async fn resolve_with_catalog(
             .flatten()
         } else {
             let pools = backend.db().await?;
-            LocalBackend::load_latest_run(pools.read(), *id)
+            LocalContext::load_latest_run(pools.read(), *id)
                 .await?
                 .and_then(|run| run.pid)
         };
@@ -468,7 +468,7 @@ pub(crate) async fn resolve_with_catalog(
 /// need only the ordinary explicit-alias checks and are not stopped or locked by this gate.
 #[cfg(target_os = "macos")]
 async fn exclude_unclassified_writers(
-    backend: &LocalBackend,
+    backend: &LocalContext,
     current_id: i32,
     sandboxes: &[CatalogSandbox],
     guards: &mut AliasGuards,
@@ -498,7 +498,7 @@ async fn exclude_unclassified_writers(
 
 #[cfg(target_os = "macos")]
 async fn unclassified_writers(
-    backend: &LocalBackend,
+    backend: &LocalContext,
     current_id: i32,
     sandboxes: &[CatalogSandbox],
     readonly: &mut Option<&mut sea_orm::sqlx::SqliteConnection>,
@@ -573,7 +573,7 @@ fn unclassified_writer(name: &str) -> String {
 }
 
 async fn catalog(
-    backend: &LocalBackend,
+    backend: &LocalContext,
     readonly: &mut Option<&mut sea_orm::sqlx::SqliteConnection>,
 ) -> MicrosandboxResult<(Vec<CatalogSandbox>, Vec<CatalogSnapshot>)> {
     if let Some(db) = readonly.as_deref_mut() {
@@ -1408,7 +1408,7 @@ mod tests {
         assert!(read_metadata(&root, Path::new("snapshot.json")).is_err());
     }
 
-    async fn save(backend: &LocalBackend, row: &CatalogSandbox) {
+    async fn save(backend: &LocalContext, row: &CatalogSandbox) {
         backend
             .db()
             .await
@@ -1444,7 +1444,6 @@ mod tests {
         let temp = private_test_home();
         let backend = crate::test_support::local_backend_builder(temp.path())
             .build()
-            .await
             .unwrap();
         let mut rows = [record(1, "child"), record(2, "peer")];
         let root = backend.sandboxes_dir();
@@ -1493,7 +1492,6 @@ mod tests {
         let temp = private_test_home();
         let backend = crate::test_support::local_backend_builder(temp.path())
             .build()
-            .await
             .unwrap();
         let rows = [record(1, "child"), record(2, "peer")];
         let root = backend.sandboxes_dir();
@@ -1531,7 +1529,6 @@ mod tests {
         let temp = private_test_home();
         let backend = crate::test_support::local_backend_builder(temp.path())
             .build()
-            .await
             .unwrap();
         let rows = [record(1, "child"), record(2, "legacy")];
         let root = backend.sandboxes_dir();
@@ -1600,7 +1597,6 @@ mod tests {
         let temp = private_test_home();
         let backend = crate::test_support::local_backend_builder(temp.path())
             .build()
-            .await
             .unwrap();
         let rows = [record(1, "child"), record(2, "protected")];
         let root = backend.sandboxes_dir();

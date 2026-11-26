@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
 
 use crate::ui;
 
@@ -63,7 +62,7 @@ pub async fn run(args: PingArgs) -> anyhow::Result<()> {
 }
 
 async fn ping_one(name: &str, touch: bool, quiet: bool) -> anyhow::Result<()> {
-    let handle = Sandbox::get(name).await?;
+    let handle = crate::commands::common::sandbox_record(name).await?;
     let spinner = if quiet {
         ui::Spinner::quiet()
     } else {
@@ -94,7 +93,7 @@ async fn ping_one(name: &str, touch: bool, quiet: bool) -> anyhow::Result<()> {
 }
 
 async fn touch_after_ping(name: &str, quiet: bool) -> anyhow::Result<()> {
-    let handle = Sandbox::get(name).await?;
+    let handle = crate::commands::common::sandbox_record(name).await?;
     let spinner = if quiet {
         ui::Spinner::quiet()
     } else {

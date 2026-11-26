@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::io::AsyncWriteExt;
@@ -17,7 +16,7 @@ use crate::error::to_py_err;
 /// SSH namespace for a sandbox.
 #[pyclass(name = "SandboxSshOps")]
 pub struct PySandboxSshOps {
-    inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+    inner: microsandbox::sandbox::SandboxSshOps,
 }
 
 pub type PySandboxSsh = PySandboxSshOps;
@@ -53,13 +52,8 @@ pub struct PySshServer {
 //--------------------------------------------------------------------------------------------------
 
 impl PySandboxSshOps {
-    pub fn new(inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>) -> Self {
+    pub fn new(inner: microsandbox::sandbox::SandboxSshOps) -> Self {
         Self { inner }
-    }
-
-    async fn clone_sandbox(&self) -> PyResult<microsandbox::sandbox::Sandbox> {
-        let guard = self.inner.lock().await;
-        guard.as_ref().cloned().ok_or_else(crate::error::consumed)
     }
 }
 
@@ -73,17 +67,15 @@ impl PySandboxSshOps {
         user: String,
         term: Option<String>,
         sftp: bool,
-        inactivity_timeout: Option<f64>,
+        inactivity_timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inactivity_timeout =
-            parse_inactivity_timeout(inactivity_timeout).map_err(PyValueError::new_err)?;
+        let inactivity_timeout = parse_inactivity_timeout(inactivity_timeout)?;
         let ssh = Self {
             inner: self.inner.clone(),
         };
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sandbox = ssh.clone_sandbox().await?;
-            let client = sandbox
-                .ssh()
+        crate::runtime::future_into_py(py, async move {
+            let client = ssh
+                .inner
                 .open_client_with(|builder| {
                     let mut builder = builder.user(user).sftp(sftp);
                     if let Some(term) = term {
@@ -116,17 +108,15 @@ impl PySandboxSshOps {
         authorized_keys_path: Option<PathBuf>,
         user: Option<String>,
         sftp: bool,
-        inactivity_timeout: Option<f64>,
+        inactivity_timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inactivity_timeout =
-            parse_inactivity_timeout(inactivity_timeout).map_err(PyValueError::new_err)?;
+        let inactivity_timeout = parse_inactivity_timeout(inactivity_timeout)?;
         let ssh = Self {
             inner: self.inner.clone(),
         };
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sandbox = ssh.clone_sandbox().await?;
-            let server = sandbox
-                .ssh()
+        crate::runtime::future_into_py(py, async move {
+            let server = ssh
+                .inner
                 .prepare_server_with(|builder| {
                     let mut builder = builder.sftp(sftp);
                     if let Some(path) = host_key_path {
@@ -228,7 +218,7 @@ impl PySshClient {
         tty: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let client = guard.as_ref().ok_or_else(crate::error::consumed)?;
             let output = client
@@ -248,7 +238,7 @@ impl PySshClient {
         detach_keys: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let client = guard.as_ref().ok_or_else(crate::error::consumed)?;
             client
@@ -270,7 +260,7 @@ impl PySshClient {
     /// Open an SFTP session over this SSH connection.
     fn sftp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let client = guard.as_ref().ok_or_else(crate::error::consumed)?;
             let sftp = client.sftp().await.map_err(to_py_err)?;
@@ -281,7 +271,7 @@ impl PySshClient {
     /// Close this SSH client session.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let client = {
                 let mut guard = inner.lock().await;
                 guard.take().ok_or_else(crate::error::consumed)?
@@ -309,7 +299,7 @@ impl PySftpClient {
     /// Read a file into memory.
     fn read<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             let data = sftp.read(path).await.map_err(sftp_py_err)?;
@@ -325,7 +315,7 @@ impl PySftpClient {
         data: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             let mut file = sftp.create(path).await.map_err(sftp_py_err)?;
@@ -338,7 +328,7 @@ impl PySftpClient {
     /// Create a directory.
     fn mkdir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.create_dir(path).await.map_err(sftp_py_err)
@@ -348,7 +338,7 @@ impl PySftpClient {
     /// Remove a file.
     fn remove_file<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.remove_file(path).await.map_err(sftp_py_err)
@@ -358,7 +348,7 @@ impl PySftpClient {
     /// Remove an empty directory.
     fn remove_dir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.remove_dir(path).await.map_err(sftp_py_err)
@@ -373,7 +363,7 @@ impl PySftpClient {
         new_path: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.rename(old_path, new_path).await.map_err(sftp_py_err)
@@ -383,7 +373,7 @@ impl PySftpClient {
     /// Resolve a path to its canonical absolute form.
     fn real_path<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.canonicalize(path).await.map_err(sftp_py_err)
@@ -393,7 +383,7 @@ impl PySftpClient {
     /// Read a symlink target.
     fn read_link<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.read_link(path).await.map_err(sftp_py_err)
@@ -408,7 +398,7 @@ impl PySftpClient {
         link_path: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let guard = inner.lock().await;
             let sftp = guard.as_ref().ok_or_else(crate::error::consumed)?;
             sftp.symlink(target, link_path).await.map_err(sftp_py_err)
@@ -418,7 +408,7 @@ impl PySftpClient {
     /// Close this SFTP session.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let sftp = {
                 let mut guard = inner.lock().await;
                 guard.take().ok_or_else(crate::error::consumed)?
@@ -445,13 +435,10 @@ impl PySshServer {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn parse_inactivity_timeout(timeout: Option<f64>) -> Result<Option<Duration>, &'static str> {
-    match timeout {
-        Some(timeout) => Duration::try_from_secs_f64(timeout)
-            .map(Some)
-            .map_err(|_| "inactivity_timeout must be a non-negative finite duration"),
-        None => Ok(None),
-    }
+fn parse_inactivity_timeout(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Duration>> {
+    value
+        .map(|value| crate::helpers::duration_input(value, "inactivity_timeout", false))
+        .transpose()
 }
 
 fn sftp_py_err(error: impl std::fmt::Display) -> PyErr {
@@ -463,15 +450,15 @@ impl PySshServer {
     /// Serve one SSH transport over this process's stdin/stdout.
     fn serve_connection<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let server = {
                 let guard = inner.lock().await;
                 guard.as_ref().ok_or_else(crate::error::consumed)?.clone()
             };
-            server
-                .serve_connection(microsandbox::sandbox::SshStdioStream::new())
-                .await
-                .map_err(to_py_err)?;
+            let stream =
+                crate::stdio::StdioStream::new().map_err(|error| to_py_err(error.into()))?;
+            let _cancel = stream.cancel_on_drop();
+            server.serve_connection(stream).await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -497,22 +484,20 @@ mod tests {
 
     #[test]
     fn inactivity_timeout_parsing_supports_inherit_set_and_disable() {
-        assert_eq!(parse_inactivity_timeout(None).unwrap(), None);
-        assert_eq!(
-            parse_inactivity_timeout(Some(30.5)).unwrap(),
-            Some(Duration::from_secs_f64(30.5))
-        );
-        assert_eq!(
-            parse_inactivity_timeout(Some(0.0)).unwrap(),
-            Some(Duration::ZERO)
-        );
-    }
-
-    #[test]
-    fn inactivity_timeout_rejects_invalid_values() {
-        assert!(parse_inactivity_timeout(Some(-1.0)).is_err());
-        assert!(parse_inactivity_timeout(Some(f64::INFINITY)).is_err());
-        assert!(parse_inactivity_timeout(Some(f64::NAN)).is_err());
-        assert!(parse_inactivity_timeout(Some(f64::MAX)).is_err());
+        Python::initialize();
+        Python::attach(|py| {
+            assert_eq!(parse_inactivity_timeout(None).unwrap(), None);
+            for secs in [0.0, 30.5] {
+                let value = pyo3::types::PyFloat::new(py, secs);
+                assert_eq!(
+                    parse_inactivity_timeout(Some(&value)).unwrap(),
+                    Some(Duration::from_secs_f64(secs))
+                );
+            }
+            for secs in [-1.0, f64::INFINITY, f64::NAN, f64::MAX] {
+                let value = pyo3::types::PyFloat::new(py, secs);
+                assert!(parse_inactivity_timeout(Some(&value)).is_err());
+            }
+        });
     }
 }

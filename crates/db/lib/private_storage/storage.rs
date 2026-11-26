@@ -196,16 +196,20 @@ pub fn verify_symbolic_link_authority(path: &Path) -> io::Result<()> {
 #[cfg(unix)]
 pub fn is_private_directory_boundary(file: &File) -> io::Result<bool> {
     let metadata = file.metadata()?;
-    if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        return Ok(false);
-    }
+    let private = metadata.is_dir()
+        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.mode() & 0o077 == 0;
     #[cfg(target_os = "macos")]
-    return super::macos_acl::is_private_directory_boundary(file);
+    {
+        if !private {
+            return Ok(false);
+        }
+        super::macos_acl::is_private_directory_boundary(file)
+    }
     #[cfg(not(target_os = "macos"))]
-    Ok(true)
+    {
+        Ok(private)
+    }
 }
 
 /// Validate a digest-keyed host cache artifact before using it as an immutable guest lower.
@@ -382,9 +386,31 @@ fn require_owner(metadata: &fs::Metadata, path: &Path) -> io::Result<()> {
 }
 
 fn harden_file(path: &Path) -> io::Result<()> {
+    // SQLite can unlink/recreate sidecars as the last connection closes. A
+    // metadata lookup can observe the departing inode with zero links. Retry
+    // the entire inspection, never treat that observation as safe storage.
+    for _ in 0..16 {
+        match harden_file_once(path) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            result => return result,
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!(
+            "catalog artifact {} kept changing during inspection",
+            path.display()
+        ),
+    ))
+}
+
+fn harden_file_once(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         let metadata = fs::symlink_metadata(path)?;
+        if metadata.is_file() && metadata.nlink() == 0 {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         if !metadata.is_file() || metadata.nlink() != 1 {
             return Err(invalid(&format!(
                 "catalog artifact {} must be a regular file with one link",
@@ -414,10 +440,14 @@ fn harden_file(path: &Path) -> io::Result<()> {
         let after = fs::symlink_metadata(path)?;
         if after.dev() != metadata.dev()
             || after.ino() != metadata.ino()
-            || after.mode() & 0o077 != 0
+            || (after.is_file() && after.nlink() == 0)
         {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        if !after.is_file() || after.nlink() != 1 || after.mode() & 0o077 != 0 {
             return Err(invalid("catalog artifact changed or is not private"));
         }
+        require_owner(&after, path)?;
     }
     #[cfg(not(unix))]
     let _ = path;

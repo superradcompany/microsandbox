@@ -1,0 +1,1158 @@
+//! Temporary storage for validating a snapshot restore before replacing its destination.
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use microsandbox_runtime::ipc::SandboxLifecycleGuard;
+
+use crate::MicrosandboxResult;
+use crate::context::local::creation::{CreationStorage, RemovalMode};
+use crate::context::local::volume::EnsuredNamedVolumes;
+use crate::context::{Context, LocalContext};
+use crate::runtime::acquire_sandbox_lifecycle_guard;
+use crate::sandbox::{SandboxConfig, SandboxStatus};
+
+use super::cleanup::CreationCleanup;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Temporary extraction storage tracked by an incomplete sandbox record.
+///
+/// The archive is unpacked and validated here before replacing the destination.
+/// The record allows cleanup after a crash; no VM is launched for this staging sandbox.
+pub(super) struct RestoreStaging {
+    /// Storage ownership passed to extraction workers so cleanup waits for their writes.
+    pub(super) storage: CreationStorage,
+    id: i32,
+    name: String,
+    /// Attempts cleanup if preparation exits without explicitly discarding the staging area.
+    cleanup: CreationCleanup,
+    _lifecycle: SandboxLifecycleGuard,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl AsRef<Path> for RestoreStaging {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
+impl RestoreStaging {
+    /// Reserve a unique staging name and persist its recovery record before extraction.
+    /// The destination sandbox is left untouched.
+    pub(super) async fn reserve(
+        backend: Arc<dyn Context>,
+        local: &LocalContext,
+        config: &SandboxConfig,
+    ) -> MicrosandboxResult<Self> {
+        let name = format!("archive-stage-{:032x}", rand::random::<u128>());
+        let transition =
+            LocalContext::acquire_sandbox_transition_guard(&local.config().run_dir(), &name)
+                .await?;
+        let lifecycle = acquire_sandbox_lifecycle_guard(
+            &local.config().run_dir(),
+            &name,
+            Duration::from_secs(5),
+        )
+        .await?;
+
+        let storage = CreationStorage::acquire(local, &name)?;
+        let mut reserved = config.clone_for_persistence();
+        reserved.spec.name = name.clone();
+        reserved.spec.labels.clear();
+        // The reservation needs an identity, never a second copy of user-provided file content.
+        reserved.spec.patches.clear();
+        reserved.replace_existing = false;
+        reserved.spec.lifecycle.ephemeral = true;
+
+        let cleanup = CreationCleanup::new(
+            backend,
+            name.clone(),
+            transition,
+            Arc::new(EnsuredNamedVolumes::default()),
+        );
+
+        let id = LocalContext::insert_sandbox_record_impl(
+            local.db().await?.write(),
+            &reserved,
+            SandboxStatus::Starting,
+            true,
+        )
+        .await?;
+
+        Ok(Self {
+            storage,
+            id,
+            name,
+            cleanup,
+            _lifecycle: lifecycle,
+        })
+    }
+
+    /// Directory used to resolve extracted paths before transfer to the destination.
+    pub(super) fn path(&self) -> &Path {
+        self.storage.path()
+    }
+
+    /// Remove remaining staging files, then retire their recovery record.
+    ///
+    /// Releases this handle's storage lock first so cleanup can acquire it. Outstanding
+    /// workers still retain their locks; failed cleanup leaves the record recoverable.
+    pub(super) async fn discard(mut self, local: &LocalContext) -> MicrosandboxResult<()> {
+        drop(self.storage);
+
+        local
+            .remove_incomplete_sandbox(self.id, &self.name, RemovalMode::PreparationFailed)
+            .await?;
+
+        self.cleanup.disarm();
+
+        Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, unix))]
+mod tests {
+    //! Admission regressions must fail before replacing any existing sandbox state.
+
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use microsandbox_image::checkpoint::{
+        CaptureIntent, CheckpointGeometry, CheckpointManifest, ContentRef, DiskGenerationManifest,
+        DiskLayerRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
+        MemoryManifest, ObjectId, ResourceDescriptor, ResourceTreatment,
+    };
+    use microsandbox_image::snapshot::{
+        CheckpointSnapshotState, DiskLayer, DiskLayerId, FileSnapshotState, ImageRef,
+        LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency,
+        SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState,
+    };
+    use microsandbox_image::{
+        CachedImageMetadata, GlobalCache, ImageConfig, RootfsMaterialization,
+    };
+    use sea_orm::{EntityTrait, Set};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::process::Command;
+    use tokio::sync::Mutex;
+
+    use crate::ContextSelectionSource;
+    use crate::config::GlobalConfig;
+    use crate::config::RegistryOptions;
+    use crate::context::local::database;
+    use crate::context::local::snapshot::archive::{
+        save_direct_checkpoint_snapshot, save_direct_file_snapshot,
+    };
+    use crate::db::entity::run as run_entity;
+    use crate::sandbox::{PullPolicy, SandboxBuilder, SandboxListBuilder};
+    use crate::snapshot::SnapshotReference;
+    use crate::test_support::{local_backend, local_backend_builder};
+
+    use super::super::{
+        LocalContext, RootfsSource, SandboxConfig, SandboxStatus, SpawnMode, sandbox_entity,
+    };
+    use super::RestoreStaging;
+
+    //--------------------------------------------------------------------------------------------------
+    // Functions
+    //--------------------------------------------------------------------------------------------------
+
+    fn private_test_root() -> tempfile::TempDir {
+        // Each root is a catalog ancestor and must remain private under a shared developer umask.
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
+    async fn archive(root: &Path, flat: bool, plain: bool) -> PathBuf {
+        let source = root.join("source.raw");
+        std::fs::write(&source, vec![0u8; 4096]).unwrap();
+        let layer_id = DiskLayerId::new("layer_00000000000000000000000000000001").unwrap();
+        let manifest = Manifest {
+            schema: SCHEMA.into(),
+            snapshot_id: SnapshotId::new("snap_00000000000000000000000000000001").unwrap(),
+            scope: SnapshotScope::Disk,
+            state: SnapshotState::File(FileSnapshotState {
+                disk_format: SnapshotFormat::Raw,
+                filesystem: "ext4".into(),
+                virtual_size: 4096,
+                head: layer_id.clone(),
+                layers: vec![DiskLayer {
+                    layer_id,
+                    format: SnapshotFormat::Raw,
+                    virtual_size: 4096,
+                    backing: None,
+                    payload: LayerPayload {
+                        file_kind: LayerFileKind::Regular,
+                        integrity: None,
+                    },
+                }],
+            }),
+            capture: SnapshotCapture {
+                created_at: "2026-09-17T00:00:00Z".into(),
+                source_lineage: None,
+                source_checkpoint: None,
+                consistency: SnapshotConsistency::CrashConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:3.21".into(),
+                manifest_digest: format!("sha256:{}", "1".repeat(64)),
+            },
+            root_disk: if flat {
+                SnapshotRootDisk::Flat
+            } else {
+                SnapshotRootDisk::Managed
+            },
+            parent: None,
+            extensions: BTreeMap::new(),
+            requires: Vec::new(),
+        };
+        let out = root.join("source.msnap");
+        save_direct_file_snapshot(
+            &manifest,
+            &BTreeMap::new(),
+            "saved",
+            &[source],
+            None,
+            &out,
+            plain,
+            false,
+        )
+        .await
+        .unwrap();
+        out
+    }
+
+    /// Write a minimal full-snapshot archive whose checkpoint is never resumed.
+    async fn checkpoint_archive(root: &Path) -> PathBuf {
+        let source = root.join("checkpoint-source");
+        let store = LocalObjectStore::open(&source).unwrap();
+        let memory_bytes = b"checkpoint-memory";
+        let memory_object = store.put_bytes(memory_bytes).unwrap();
+        let memory = MemoryManifest {
+            schema: "microsandbox.memory/1".into(),
+            architecture: std::env::consts::ARCH.into(),
+            guest_page_size: 4096,
+            topology_generation: 1,
+            generation: 1,
+            capture_mode: MemoryCaptureMode::Full,
+            pause_generation: 1,
+            extents: vec![MemoryExtent {
+                start: 0,
+                length: memory_bytes.len() as u64,
+                content: MemoryExtentContent::Object(ContentRef {
+                    object: memory_object,
+                    object_offset: 0,
+                }),
+            }],
+        };
+        let memory_id = store
+            .put_bytes(&memory.to_canonical_bytes().unwrap())
+            .unwrap();
+        let execution_id = store.put_bytes(b"execution").unwrap();
+
+        let layer_id = "layer_00000000000000000000000000000001";
+        let layers = source.join("layers");
+        std::fs::create_dir(&layers).unwrap();
+        std::fs::write(layers.join(format!("{layer_id}.qcow2")), b"QFI\xfbhead").unwrap();
+        let disk = DiskGenerationManifest {
+            schema: "microsandbox.disk-generation/1".into(),
+            volume_id: "vol_test".into(),
+            device_id: "vdb".into(),
+            generation: 1,
+            layers: vec![DiskLayerRef {
+                file_size: 8,
+                layer_id: layer_id.into(),
+                format: "qcow2".into(),
+                virtual_size: 4096,
+                predecessor: None,
+                integrity_root: None,
+            }],
+            head: layer_id.into(),
+            pause_generation: 1,
+        };
+        let disk_id = store
+            .put_bytes(&disk.to_canonical_bytes().unwrap())
+            .unwrap();
+
+        let checkpoint = CheckpointManifest {
+            schema: "microsandbox.checkpoint/1".into(),
+            checkpoint_id: "checkpoint_archive".into(),
+            capture_intent: CaptureIntent::FullSnapshot,
+            geometry: CheckpointGeometry {
+                vcpus: 1,
+                max_vcpus: 1,
+                memory_mib: 128,
+                max_memory_mib: 128,
+            },
+            architecture: std::env::consts::ARCH.into(),
+            pause_generation: 1,
+            execution_state: execution_id,
+            memory: memory_id,
+            disks: vec![disk_id],
+            devices: Vec::new(),
+            resources: vec![ResourceDescriptor {
+                id: "agent".into(),
+                kind: "agent".into(),
+                treatment: ResourceTreatment::Reconnect,
+                binding: BTreeMap::from([(
+                    "ready".into(),
+                    serde_json::to_string(&microsandbox_protocol::core::Ready {
+                        exec_limits: Some(microsandbox_types::ExecLimits {
+                            max_executions: 7,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )]),
+            }],
+            owned_volumes: Vec::new(),
+            requires: Vec::new(),
+        };
+        let checkpoint_bytes = checkpoint.to_canonical_bytes().unwrap();
+        let checkpoint_root = ObjectId::from_bytes(&checkpoint_bytes).unwrap();
+        std::fs::write(source.join("checkpoint.json"), checkpoint_bytes).unwrap();
+
+        let manifest = Manifest {
+            schema: SCHEMA.into(),
+            snapshot_id: SnapshotId::new("snap_00000000000000000000000000000002").unwrap(),
+            scope: SnapshotScope::Full,
+            state: SnapshotState::Checkpoint(CheckpointSnapshotState {
+                checkpoint_id: checkpoint.checkpoint_id,
+                checkpoint_root: checkpoint_root.to_string(),
+                restore_intents: vec!["clone".into(), "resume".into()],
+                requirements_summary: BTreeMap::from([
+                    ("vcpus".into(), 1.into()),
+                    ("max_vcpus".into(), 1.into()),
+                    ("memory_mib".into(), 128.into()),
+                    ("max_memory_mib".into(), 128.into()),
+                ]),
+            }),
+            capture: SnapshotCapture {
+                created_at: "2026-09-17T00:00:00Z".into(),
+                source_lineage: None,
+                source_checkpoint: None,
+                consistency: SnapshotConsistency::ApplicationConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:3.21".into(),
+                manifest_digest: format!("sha256:{}", "2".repeat(64)),
+            },
+            root_disk: SnapshotRootDisk::Managed,
+            parent: None,
+            extensions: BTreeMap::new(),
+            requires: Vec::new(),
+        };
+        let out = root.join("checkpoint.msnap");
+        save_direct_checkpoint_snapshot(
+            &manifest,
+            &BTreeMap::new(),
+            "checkpoint",
+            &source,
+            &out,
+            false,
+            false,
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .await
+        .unwrap();
+        out
+    }
+
+    async fn backend(root: &Path, patch: u8) -> Arc<LocalContext> {
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'msb 0.6.{patch}'; else exit 99; fi\n"
+        );
+        backend_with_probe(root, &script).await
+    }
+
+    async fn backend_with_probe(root: &Path, probe: &str) -> Arc<LocalContext> {
+        let executable = root.join("fixture-msb");
+        std::fs::write(&executable, probe).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        backend_with_executable(root, &executable).await
+    }
+
+    async fn backend_with_executable(root: &Path, executable: &Path) -> Arc<LocalContext> {
+        let firmware = root.join("firmware");
+        std::fs::write(&firmware, b"not launched").unwrap();
+        let backend = LocalContext::from_backend_config(
+            crate::config::layers::BackendConfig::new(
+                serde_json::from_value(serde_json::json!({
+                    "home": root.join("home"),
+                    "paths": {"msb": executable, "libkrunfw": firmware}
+                }))
+                .unwrap(),
+                Default::default(),
+            ),
+            ContextSelectionSource::Programmatic,
+            None,
+        );
+        backend.db().await.unwrap();
+        Arc::new(backend)
+    }
+
+    // Security capability admission now precedes all archive/runtime compatibility checks.
+    fn historical_admission_reason(_archive_reason: &str) -> &str {
+        "upgrade required"
+    }
+
+    fn backend_without_runtime(root: &Path) -> Arc<LocalContext> {
+        Arc::new(local_backend(GlobalConfig {
+            home: Some(root.join("home")),
+            ..Default::default()
+        }))
+    }
+
+    async fn assert_rejection_preserves_target(
+        backend: Arc<LocalContext>,
+        archive: &Path,
+        reason: &str,
+    ) {
+        let mut request = replaceable_config();
+        request.replace_existing = true;
+        request.snapshot_reference = Some(SnapshotReference::path(archive.to_string_lossy()));
+
+        assert_request_preserves_target(backend, request, reason).await;
+    }
+
+    /// Existing sandbox that a rejected replacement request must leave untouched.
+    fn replaceable_config() -> SandboxConfig {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "replaceable".into();
+        config.spec.image = RootfsSource::oci("alpine:3.21");
+        config.spec.resources.max_cpus = config.spec.resources.cpus;
+        config.spec.resources.max_memory_mib = config.spec.resources.memory_mib;
+        // Historical runtimes lack HTTP denials; reach the archive admission checks.
+        config.spec.network.http.deny_response = false;
+
+        config
+    }
+
+    async fn assert_request_preserves_target(
+        backend: Arc<LocalContext>,
+        request: impl Into<SandboxBuilder>,
+        reason: &str,
+    ) {
+        assert_request_preserves_target_with_owner(backend, request, reason, false).await;
+    }
+
+    async fn assert_request_preserves_target_with_owner(
+        backend: Arc<LocalContext>,
+        request: impl Into<SandboxBuilder>,
+        reason: &str,
+        running: bool,
+    ) {
+        let config = replaceable_config();
+        let pools = backend.db().await.unwrap();
+        let id = LocalContext::insert_sandbox_record_with_status(
+            pools.write(),
+            &config,
+            if running {
+                SandboxStatus::Running
+            } else {
+                SandboxStatus::Stopped
+            },
+        )
+        .await
+        .unwrap();
+        // A real child catches premature stop/kill as well as catalog/storage deletion.
+        // It does not pretend to establish guest execution or VM activation behavior.
+        let mut owner = if running {
+            let child = tokio::process::Command::new("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            run_entity::Entity::insert(run_entity::ActiveModel {
+                sandbox_id: Set(id),
+                pid: Set(Some(child.id().unwrap() as i32)),
+                status: Set(run_entity::RunStatus::Running),
+                ..Default::default()
+            })
+            .exec(pools.write())
+            .await
+            .unwrap();
+            Some(child)
+        } else {
+            None
+        };
+        let before = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let child = backend.sandboxes_dir().join(&config.spec.name);
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("sentinel"), b"keep my disk").unwrap();
+
+        let error = match backend
+            .create_sandbox(backend.clone(), request, SpawnMode::Attached, None)
+            .await
+        {
+            Ok(_) => panic!("unsupported archive must not launch"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains(reason), "{error}");
+        assert_eq!(
+            std::fs::read(child.join("sentinel")).unwrap(),
+            b"keep my disk"
+        );
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        let entries = std::fs::read_dir(backend.sandboxes_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("replaceable")],
+            "staging must be reclaimed"
+        );
+        if let Some(owner) = owner.as_mut() {
+            assert!(
+                owner.try_wait().unwrap().is_none(),
+                "prior owner was stopped"
+            );
+            let run = LocalContext::load_latest_run(pools.read(), id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.status, run_entity::RunStatus::Running);
+            assert_eq!(run.pid, Some(owner.id().unwrap() as i32));
+            owner.kill().await.unwrap();
+        }
+    }
+
+    //--------------------------------------------------------------------------------------------------
+    // Tests
+    //--------------------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn rejected_snapshot_restores_preserve_the_replacement_target() {
+        check_rejected_snapshot_replacement(None).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "set MSB_TEST_RESTORE_ADMISSION_RUNTIME to the compiled current msb executable"]
+    async fn native_runtime_reaches_image_admission_before_replacement() {
+        let runtime = std::env::var_os("MSB_TEST_RESTORE_ADMISSION_RUNTIME")
+            .or_else(|| std::env::var_os("MSB_PATH"))
+            .expect("set MSB_TEST_RESTORE_ADMISSION_RUNTIME or MSB_PATH to the compiled CLI");
+        check_rejected_snapshot_replacement(Some(Path::new(&runtime))).await;
+    }
+
+    async fn check_rejected_snapshot_replacement(runtime: Option<&Path>) {
+        for running in [false, true] {
+            let root = private_test_root();
+            let source = root.path().join("snapshot-upper.ext4");
+            std::fs::write(&source, b"snapshot disk must remain unchanged").unwrap();
+            // Pass the prerequisite capability checks so the test actually reaches image
+            // admission. A launch attempt is always a fixture error.
+            let backend = if let Some(runtime) = runtime {
+                backend_with_executable(root.path(), runtime).await
+            } else {
+                backend_with_probe(
+                    root.path(),
+                    r#"#!/bin/sh
+case "$1" in
+--version) echo 'msb 0.6.18';;
+__launch-protocol) echo '{"protocols":[2,1],"protected_guest_state":true,"nested_virt":true}';;
+*) exit 99;;
+esac
+"#,
+                )
+                .await
+            };
+            let mut request = replaceable_config();
+            request.snapshot_upper_source = Some(source.clone());
+            request.manifest_digest = Some(format!("sha256:{}", "1".repeat(64)));
+            request.spec.pull_policy = crate::sandbox::PullPolicy::Never;
+            request.replace_existing = true;
+            assert_request_preserves_target_with_owner(
+                backend,
+                request,
+                if runtime.is_none() && cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+                    "nested virtualization policy through a legacy runtime or wrapper"
+                } else {
+                    "is not cached locally and pull policy is `never`"
+                },
+                running,
+            )
+            .await;
+            assert_eq!(
+                std::fs::read(source).unwrap(),
+                b"snapshot disk must remain unchanged"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_snapshot_always_revalidates_the_recorded_digest() {
+        let root = private_test_root();
+        let backend = backend(root.path(), 18).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reference = format!("{}/fixture:mutable-tag", listener.local_addr().unwrap());
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let cache = GlobalCache::new(&backend.cache_dir()).unwrap();
+        cache.write_image_metadata_with_provenance_async(&reference.parse().unwrap(), &CachedImageMetadata {
+            manifest_digest: digest.clone(),
+            config_digest: format!("sha256:{}", "b".repeat(64)),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+            raw_config_json: r#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#.into(),
+            config: ImageConfig::default(),
+            layers: Vec::new(),
+
+        }, microsandbox_image::CacheAuthProvenance::Anonymous).await.unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") && request.len() < 16 * 1024 {
+                    let mut byte = [0];
+                    if stream.read(&mut byte).await.unwrap() == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                let line = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                observed.lock().await.push(line.clone());
+                // Permit the registry probe, then refuse the immutable manifest. A cached
+                // image must not make explicit Always succeed when its registry is unavailable.
+                let response = if line.contains(" /v2/ ") {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        for policy in [PullPolicy::Never, PullPolicy::IfMissing] {
+            let image = backend
+                .resolve_snapshot_oci_image(
+                    &reference,
+                    &digest,
+                    policy,
+                    RegistryOptions {
+                        insecure: true,
+                        ..Default::default()
+                    },
+                    None,
+                    false,
+                    RootfsMaterialization::Flat,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(image.pull_result.manifest_digest.to_string(), digest);
+        }
+        assert!(
+            requests.lock().await.is_empty(),
+            "cache-only policies contacted registry"
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            backend.resolve_snapshot_oci_image(
+                &reference,
+                &digest,
+                PullPolicy::Always,
+                RegistryOptions {
+                    insecure: true,
+                    ..Default::default()
+                },
+                None,
+                false,
+                RootfsMaterialization::Flat,
+                None,
+            ),
+        )
+        .await;
+        server.abort();
+        let _ = server.await;
+        assert!(
+            result.expect("registry request must finish").is_err(),
+            "Always incorrectly accepted a cache hit"
+        );
+        let requests = requests.lock().await;
+        assert!(
+            requests
+                .iter()
+                .any(|line| line.contains(&format!("/manifests/{digest}"))),
+            "missing digest request: {requests:?}"
+        );
+        assert!(
+            requests.iter().all(|line| !line.contains("mutable-tag")),
+            "snapshot followed its original tag"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_staging_does_not_match_destination_labels() {
+        if std::env::var_os("MSB_RESTORE_LABELS_CHILD").is_none() {
+            // Parallel fork/pre_exec tests can retain copies of this test's lock
+            // descriptors even after it drops them. Create the staging lease in
+            // an isolated process so the immediate cleanup assertion has no
+            // unrelated owners; keep the production ownership checks intact.
+            let output = tokio::time::timeout(
+                Duration::from_secs(30),
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "context::local::sandbox::create::restore::tests::restore_staging_does_not_match_destination_labels",
+                        "--nocapture",
+                    ])
+                    .env("MSB_RESTORE_LABELS_CHILD", "1")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("isolated restore-label test timed out")
+            .expect("start isolated restore-label test");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let temp = private_test_root();
+        let local = Arc::new(local_backend_builder(temp.path()).build().unwrap());
+        let mut config = replaceable_config();
+        config.spec.labels.insert("tier".into(), "web".into());
+        LocalContext::insert_sandbox_record_with_status(
+            local.db().await.unwrap().write(),
+            &config,
+            SandboxStatus::Stopped,
+        )
+        .await
+        .unwrap();
+        let stage = RestoreStaging::reserve(local.clone(), &local, &config)
+            .await
+            .unwrap();
+        let query = SandboxListBuilder::default().label("tier", "web");
+
+        let (rows, _) = local.list_sandbox_handle_state(&query).await.unwrap();
+
+        assert_eq!(
+            rows.iter()
+                .map(|(row, _)| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["replaceable"]
+        );
+        stage.discard(&local).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn archive_flat_layout_is_admitted_before_replacement() {
+        for patch in [0, 8] {
+            for plain in [false, true] {
+                let root = private_test_root();
+                let archive = archive(root.path(), true, plain).await;
+
+                assert_rejection_preserves_target(
+                    backend(root.path(), patch).await,
+                    &archive,
+                    historical_admission_reason("newer runtime launch contract"),
+                )
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_disk_chain_is_admitted_before_replacement() {
+        let root = private_test_root();
+        let archive = archive(root.path(), false, false).await;
+        assert_rejection_preserves_target(
+            backend(root.path(), 18).await,
+            &archive,
+            historical_admission_reason("disk chains require a newer runtime launch contract"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn managed_root_layout_conflict_preserves_replacement_target() {
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+
+        for flat in [false, true] {
+            let root = private_test_root();
+            let archive = archive(root.path(), flat, false).await;
+            let mut backend = backend_without_runtime(root.path());
+            let user = GlobalConfigPatch::from_present_fields(backend.config().clone());
+            let managed = serde_json::from_value(serde_json::json!({
+                "sandbox_defaults": {"oci": {"root_disk": {
+                    "kind": if flat { "managed" } else { "flat" }
+                }}}
+            }))
+            .unwrap();
+            Arc::get_mut(&mut Arc::get_mut(&mut backend).unwrap().inner)
+                .unwrap()
+                .config = BackendConfig::new(user, managed);
+            assert_rejection_preserves_target(backend, &archive, "captured root disk layout").await;
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_archive_does_not_replace_target() {
+        let root = private_test_root();
+        let archive = root.path().join("broken.msnap");
+        std::fs::write(&archive, b"not a tar archive").unwrap();
+        let backend = backend_without_runtime(root.path());
+        let stage = tempfile::tempdir_in(root.path()).unwrap();
+        let reason = match backend
+            .materialize_archive_for_child(
+                &archive,
+                &crate::context::local::creation::CreationStorage::for_test(stage.path()),
+                false,
+                None,
+                &Default::default(),
+                Default::default(),
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("corrupt archive accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert_rejection_preserves_target(backend, &archive, &reason).await;
+    }
+
+    #[tokio::test]
+    async fn copy_on_write_disk_archive_preserves_replacement_target() {
+        let root = private_test_root();
+        let archive = archive(root.path(), false, false).await;
+        // Without an installed runtime, launch-contract checks are skipped, so only
+        // the copy-on-write checks can reject this request.
+        let backend = Arc::new(local_backend(GlobalConfig {
+            home: Some(root.path().join("home")),
+            ..Default::default()
+        }));
+
+        // A disk archive has no checkpoint, so CoW memory must fail before replacement.
+        let request = SandboxBuilder::new("replaceable")
+            .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))
+            .forked()
+            .replace();
+
+        assert_request_preserves_target(
+            backend,
+            request,
+            "copy-on-write memory requires a full snapshot restore",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn historical_runtime_rejects_disk_only_restore_before_launch() {
+        let root = private_test_root();
+        let archive = checkpoint_archive(root.path()).await;
+        // Linux x86 rejects the old runtime at nesting preflight. Other hosts
+        // admit disk-only restore, then reject the materialized disk chain.
+        let backend = backend(root.path(), 18).await;
+
+        // Match the public restore builder: the reference is resolved during preparation.
+        let builder = SandboxBuilder::new("disk-only-child")
+            .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))
+            .disk_only();
+        #[cfg(feature = "net")]
+        let builder = builder.network(|network| network.http(|http| http.deny_response(false)));
+        let error = match backend
+            .create_sandbox(backend.clone(), builder, SpawnMode::Attached, None)
+            .await
+        {
+            Ok(_) => panic!("the stub runtime must not launch"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains(historical_admission_reason(
+                "disk chains require a newer runtime launch contract"
+            )),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn archive_relocation_moves_only_child_owned_paths() {
+        let stage = Path::new("/staging/unique-child");
+        let child = Path::new("/sandboxes/child");
+        let mut config = SandboxConfig {
+            checkpoint_restore: Some(
+                serde_json::from_value(serde_json::json!({
+                    "local_branch": false, "forked": false,
+                    "closure": stage.join(".checkpoint-restore"),
+                    "checkpoint_root": "unused", "checkpoint_id": "unused",
+                }))
+                .unwrap(),
+            ),
+            snapshot_upper_source: Some(stage.join("upper.ext4")),
+            ..Default::default()
+        };
+        for host in [
+            stage.join("additional-disks/data.raw"),
+            "/external/data.raw".into(),
+        ] {
+            config
+                .spec
+                .mounts
+                .push(microsandbox_types::VolumeMount::DiskImage {
+                    host,
+                    guest: "/data".into(),
+                    format: microsandbox_types::DiskImageFormat::Raw,
+                    fstype: None,
+                    options: Default::default(),
+                });
+        }
+        super::super::relocate_archive_config(&mut config, stage, child);
+        assert_eq!(
+            config.checkpoint_restore.unwrap().closure,
+            child.join(".checkpoint-restore")
+        );
+        assert_eq!(
+            config.snapshot_upper_source.unwrap(),
+            child.join("upper.ext4")
+        );
+        for (mount, expected) in config.spec.mounts.iter().zip([
+            child.join("additional-disks/data.raw"),
+            "/external/data.raw".into(),
+        ]) {
+            let microsandbox_types::VolumeMount::DiskImage { host, .. } = mount else {
+                panic!()
+            };
+            assert_eq!(host, &expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn current_catalog_persistence_is_separate_from_create_admission() {
+        let root = private_test_root();
+        let backend = backend(root.path(), 8).await;
+        let pools = backend.db().await.unwrap();
+        assert!(database::is_current(pools.read()).await.unwrap());
+        let mut config = SandboxConfig::default();
+        config.spec.image = RootfsSource::oci("alpine:3.21");
+        crate::sandbox::apply_snapshot_root_layout(&mut config, &SnapshotRootDisk::Flat).unwrap();
+        // Desired state can be saved, but cannot become a Starting sandbox through
+        // a historical executable that does not understand the requested layout.
+        let encoded = serde_json::to_string(&config).unwrap();
+        assert!(encoded.contains("flat"));
+        let error = LocalContext::insert_starting_sandbox_record(
+            pools.write(),
+            &config,
+            Some(backend.config()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(historical_admission_reason("newer runtime launch contract")),
+            "{error}"
+        );
+        assert!(
+            sandbox_entity::Entity::find()
+                .all(pools.read())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_publication_preserves_relative_disk_chain() {
+        let root = private_test_root();
+        let archive = archive(root.path(), false, false).await;
+        let backend = backend(root.path(), 18).await;
+        let stage = tempfile::tempdir_in(root.path()).unwrap();
+        let materialized = backend
+            .materialize_archive_for_child(
+                &archive,
+                &crate::context::local::creation::CreationStorage::for_test(stage.path()),
+                false,
+                None,
+                &Default::default(),
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut config = SandboxConfig {
+            snapshot_upper_layers: materialized.upper_layers,
+            ..Default::default()
+        };
+        let child = root.path().join("child");
+        super::super::relocate_archive_config(&mut config, stage.path(), &child);
+        std::fs::rename(stage.path(), &child).unwrap();
+        drop(stage);
+        assert_eq!(config.snapshot_upper_layers.len(), 2);
+        for pair in config.snapshot_upper_layers.windows(2) {
+            assert!(pair[0].path.is_file());
+            let backing =
+                microsandbox_image::checkpoint::qcow2_backing_basename(&pair[1].path).unwrap();
+            assert_eq!(pair[0].path, child.join(backing));
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_settings_resolve_without_extracting_payloads() {
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+        let root = private_test_root();
+        let source = checkpoint_archive(root.path()).await;
+        let mut local = backend(root.path(), 18).await;
+        let mut defaults = GlobalConfigPatch::from_present_fields(local.config().clone());
+        defaults.sandbox_defaults.cpus = Some(16);
+        defaults.sandbox_defaults.memory_mib = Some(8192);
+        Arc::get_mut(&mut Arc::get_mut(&mut local).unwrap().inner)
+            .unwrap()
+            .config = BackendConfig::new(defaults, Default::default());
+        {
+            let mut builder = SandboxBuilder::new("restore")
+                .with_snapshot_reference(SnapshotReference::path(source.to_string_lossy()))
+                .max_cpus(1)
+                .max_memory(128);
+            builder.prepare(local.clone()).await.unwrap();
+            let config = builder.finish_local(local.config_sources(), None).unwrap();
+            assert_eq!(config.spec.resources.cpus, 1);
+            assert_eq!(config.spec.resources.memory_mib, 128);
+            // The captured guest's advertised policy rides along with the restore.
+            assert_eq!(config.exec_limits().max_executions, 7);
+            assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/sh"));
+            assert!(config.checkpoint_restore.is_none());
+            assert!(config.snapshot_upper_layers.is_empty());
+            assert!(
+                std::fs::read_dir(local.sandboxes_dir())
+                    .map(|mut entries| entries.next().is_none())
+                    .unwrap_or(true)
+            );
+            let mut reused = SandboxBuilder::from(config);
+            reused.prepare(local.clone()).await.unwrap();
+            let reused = reused.finish_local(local.config_sources(), None).unwrap();
+            assert_eq!(reused.exec_limits().max_executions, 7);
+            assert!(reused.checkpoint_restore.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn replacing_prepared_full_archive_discards_its_checkpoint() {
+        let root = private_test_root();
+        let full = checkpoint_archive(root.path()).await;
+        let disk = archive(root.path(), false, true).await;
+        let local = backend(root.path(), 18).await;
+        let mut builder = SandboxBuilder::new("restore")
+            .with_snapshot_reference(SnapshotReference::path(full.to_string_lossy()));
+        builder.prepare(local.clone()).await.unwrap();
+        let config = builder.finish_local(local.config_sources(), None).unwrap();
+        assert!(config.resumed_from_full_snapshot);
+        assert!(config.restore_resources.geometry.is_some());
+
+        let mut replacement = SandboxBuilder::from(config)
+            .with_snapshot_reference(SnapshotReference::path(disk.to_string_lossy()));
+        replacement.prepare(local.clone()).await.unwrap();
+        let config = replacement
+            .finish_local(local.config_sources(), None)
+            .unwrap();
+        assert!(config.checkpoint_restore.is_none());
+        assert!(!config.resumed_from_full_snapshot);
+        assert!(config.snapshot_upper_layers.is_empty());
+        assert!(config.snapshot_upper_source.is_none());
+        assert!(config.restore_resources.geometry.is_none());
+        assert!(config.restore_resources.agent_ready.is_none());
+    }
+
+    #[tokio::test]
+    async fn archive_changes_after_build_preserve_replacement_target() {
+        for plain in [false, true] {
+            for missing in [false, true] {
+                let root = private_test_root();
+                let source = archive(root.path(), false, plain).await;
+                let local = backend(root.path(), 18).await;
+                let mut builder = SandboxBuilder::new("replaceable")
+                    .with_snapshot_reference(SnapshotReference::path(source.to_string_lossy()))
+                    .replace();
+                builder.prepare(local.clone()).await.unwrap();
+                let config = builder.finish_local(local.config_sources(), None).unwrap();
+
+                let reason = if missing {
+                    std::fs::remove_file(&source).unwrap();
+                    "cannot open snapshot archive"
+                } else {
+                    // Same snapshot ID, different descriptor: identity is the digest, not the ID.
+                    std::fs::remove_file(&source).unwrap();
+                    archive(root.path(), true, plain).await;
+                    "snapshot archive changed after configuration was built"
+                };
+                Box::pin(assert_request_preserves_target(local, config, reason)).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_payload_is_deferred_to_create_without_replacing_target() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let root = private_test_root();
+        let source = archive(root.path(), false, true).await;
+        let mut tar = tar::Archive::new(std::fs::File::open(&source).unwrap());
+        let payload_offset = tar
+            .entries()
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| entry.path().unwrap().starts_with("layers"))
+            .unwrap()
+            .raw_file_position();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        file.seek(SeekFrom::Start(payload_offset)).unwrap();
+        file.write_all(b"corrupt").unwrap();
+        drop(file);
+
+        // Exercise archive integrity without an unrelated runtime admission failure.
+        let local = backend_without_runtime(root.path());
+        let mut request = replaceable_config();
+        request.snapshot_reference = Some(SnapshotReference::path(source.to_string_lossy()));
+        request.replace_existing = true;
+        let mut builder = SandboxBuilder::from(request);
+        builder.prepare(local.clone()).await.unwrap();
+        let config = builder.finish_local(local.config_sources(), None).unwrap();
+        Box::pin(assert_request_preserves_target(
+            local,
+            config,
+            "archive member transport integrity mismatch",
+        ))
+        .await;
+    }
+}

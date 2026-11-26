@@ -11,7 +11,7 @@ Low-level typed and raw transport for communicating with `agentd` through a sand
 
 #### <span className="msb-recv">agent::</span><span className="msb-hn">connect_sandbox()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_sandbox(name: &str) -> AgentClientResult<AgentClient>
@@ -49,7 +49,7 @@ Resolve a sandbox name to its agent relay socket path and connect, using the def
 
 #### <span className="msb-recv">agent::</span><span className="msb-hn">connect_sandbox_with_timeout()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_sandbox_with_timeout(name: &str, timeout: Duration) -> AgentClientResult<AgentClient>
@@ -98,7 +98,7 @@ Low-level client for raw agent frames.
 
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<AgentClient>
@@ -137,7 +137,7 @@ Connect to an arbitrary agent relay socket by path, using the default ten-second
 
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect_with_timeout()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_with_timeout(sock_path: impl AsRef<Path>, timeout: Duration) -> AgentClientResult<AgentClient>
@@ -169,7 +169,7 @@ Connect to an arbitrary agent relay socket by path with an explicit handshake ti
 
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect_with_deadline()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_with_deadline(sock_path: impl AsRef<Path>, deadline: Instant) -> AgentClientResult<AgentClient>
@@ -199,9 +199,58 @@ Connect to an arbitrary agent relay socket by path with an explicit handshake de
   </div>
 </div>
 
+#### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect_in_band_with_deadline()</span>
+
+<Tooltip tip="Connects to a local agent relay socket or named pipe."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+async fn connect_in_band_with_deadline(sock_path: impl AsRef<Path>, deadline: Instant) -> AgentClientResult<AgentClient>
+```
+
+Connect to a local relay while keeping bulk payloads on the socket or named pipe. Shared-memory upgrades stay disabled even if the peer advertises them. Exec signals still use the advertised control endpoint, as they do with `connect_with_deadline`. One Tokio deadline bounds the handshake. Existing connection methods keep automatic transport selection.
+
+<Accordion title="Example">
+
+```rust
+use std::time::Duration;
+
+use microsandbox::agent::AgentClient;
+use tokio::time::Instant;
+
+let path = AgentClient::socket_path("dev")?;
+let client = AgentClient::connect_in_band_with_deadline(
+    &path,
+    Instant::now() + Duration::from_secs(2),
+).await?;
+```
+
+</Accordion>
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sock_path</code><span className="msb-type">impl AsRef&lt;Path&gt;</span></div>
+    <div className="msb-param-desc">Path to the local relay socket or named pipe.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>deadline</code><span className="msb-type">Instant</span></div>
+    <div className="msb-param-desc">Tokio instant by which the handshake must complete.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#agentclient">AgentClient</a></div>
+    <div className="msb-param-desc">Connected client using only in-band payloads.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect_sandbox()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_sandbox(name: &str) -> AgentClientResult<AgentClient>
@@ -229,7 +278,7 @@ Resolve a sandbox name to its agent socket path and connect. Equivalent to the m
 
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect_sandbox_with_timeout()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_sandbox_with_timeout(name: &str, timeout: Duration) -> AgentClientResult<AgentClient>
@@ -261,7 +310,7 @@ Resolve a sandbox name to its agent socket path and connect with an explicit han
 
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">socket_path()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn socket_path(name: &str) -> MicrosandboxResult<PathBuf>
@@ -768,7 +817,7 @@ FFI-friendly bytes-in/bytes-out wrapper around [`AgentClient`](#agentclient).
 
 #### <span className="msb-recv">AgentBridge::</span><span className="msb-hn">connect_sandbox()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_sandbox(name: &str) -> AgentClientResult<AgentBridge>
@@ -796,7 +845,7 @@ Connect to a sandbox by name, resolving the socket path from SDK config. Sandbox
 
 #### <span className="msb-recv">AgentBridge::</span><span className="msb-hn">connect_sandbox_with_timeout()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_sandbox_with_timeout(name: &str, timeout: Duration) -> AgentClientResult<AgentBridge>
@@ -828,7 +877,7 @@ Connect to a sandbox by name with an explicit handshake timeout.
 
 #### <span className="msb-recv">AgentBridge::</span><span className="msb-hn">connect_path()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_path(path: &str) -> AgentClientResult<AgentBridge>
@@ -856,7 +905,7 @@ Connect to an arbitrary agentd relay socket by path.
 
 #### <span className="msb-recv">AgentBridge::</span><span className="msb-hn">connect_path_with_timeout()</span>
 
-<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Connecting an agent client by socket path is local-only; on our managed cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn connect_path_with_timeout(path: &str, timeout: Duration) -> AgentClientResult<AgentBridge>

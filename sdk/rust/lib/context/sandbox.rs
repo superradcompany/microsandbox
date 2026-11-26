@@ -1,0 +1,630 @@
+//! Sandbox lifecycle backend trait.
+//!
+//! Per the SDK local-cloud parity plan (D6.4): `Sandbox` and `SandboxRecord`
+//! stay single types with no variants. They hold `Arc<dyn Context>` plus a
+//! backend-private `*Inner` enum that the outer types never expose directly.
+//! The trait returns the outer types — the local/cloud `Inner` variants are
+//! constructed inside each backend's trait impl and wrapped with the
+//! `Arc<dyn Context>` the caller passes in.
+
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use futures::Stream;
+use futures::future::BoxFuture;
+
+use super::Context;
+use crate::MicrosandboxResult;
+use crate::agent::AgentClient;
+use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
+#[cfg(feature = "local")]
+use crate::runtime::ProcessHandle;
+use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
+use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
+use crate::sandbox::metrics::SandboxMetrics;
+use crate::sandbox::{
+    DEFAULT_STOP_TIMEOUT, RestartOptions, Sandbox, SandboxConfig, SandboxListBuilder,
+    SandboxRecord, SandboxStatus,
+};
+
+// Keep the pre-split path `crate::context::sandbox::cloud_status_to_sandbox_status`
+// working for callers like `sandbox/handle.rs`.
+#[cfg(feature = "cloud")]
+pub(crate) use super::cloud::sandbox::{
+    cloud_status_to_sandbox_status, sandbox_config_from_cloud_spec,
+};
+
+//--------------------------------------------------------------------------------------------------
+// Type Aliases
+//--------------------------------------------------------------------------------------------------
+
+/// Boxed stream of metrics samples returned by [`SandboxOps::metrics_stream`].
+pub type MetricsStream =
+    Pin<Box<dyn Stream<Item = MicrosandboxResult<SandboxMetrics>> + Send + 'static>>;
+
+/// Boxed stream of log entries returned by [`SandboxOps::log_stream`].
+pub type LogStream = Pin<Box<dyn Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static>>;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Provider observations for one listing request, before resource construction.
+/// Unlike the public resource page, these records describe the listing's observation.
+pub struct SandboxRecordPage {
+    /// Provider records, in listing order.
+    pub sandboxes: Vec<SandboxRecord>,
+    /// Opaque continuation cursor.
+    pub next_cursor: Option<String>,
+}
+
+/// Context-private state behind [`Sandbox`].
+///
+/// Users never see this enum directly — they get the outer `Sandbox` and reach
+/// variant-specific data through the [`Sandbox::local_state`](crate::sandbox::Sandbox::local_state)
+/// / [`Sandbox::remote_state`](crate::sandbox::Sandbox::remote_state) accessors.
+pub enum SandboxInner {
+    /// Local libkrun-backed sandbox state.
+    Local(Arc<SandboxLocalState>),
+    /// Cloud msb-cloud-backed sandbox state.
+    Cloud(Arc<SandboxRemoteState>),
+}
+
+/// Local libkrun-backed sandbox state held inside [`SandboxInner::Local`].
+pub struct SandboxLocalState {
+    /// SQLite row id for this sandbox.
+    pub db_id: i32,
+    /// Catalog generation of this connection, including non-owning connections.
+    pub(crate) run_id: Option<i32>,
+    /// Owned libkrun process handle, when this `Sandbox` owns the lifecycle.
+    #[cfg(feature = "local")]
+    pub handle: Option<Arc<tokio::sync::Mutex<ProcessHandle>>>,
+    /// Shared observation of the process owner's disarm state, without locking the child.
+    #[cfg(feature = "local")]
+    pub(crate) cleanup: Option<Arc<crate::runtime::handle::CleanupControl>>,
+    /// Runtime generation owned by this group; independent connections have none.
+    #[cfg(feature = "local")]
+    pub(crate) owned_run_id: Option<i32>,
+    /// UDS connection to the in-VM agentd relay.
+    pub client: Arc<AgentClient>,
+}
+
+/// Cloud msb-cloud-backed sandbox state held inside [`SandboxInner::Cloud`].
+pub struct SandboxRemoteState {
+    /// Server-side UUID (kept as a string to match the cloud wire format).
+    pub id: String,
+    /// Owning org's UUID.
+    pub org_id: String,
+    /// Creation timestamp returned by the cloud API.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Context-private state behind [`SandboxRecord`] — the lightweight DB-row view.
+pub enum SandboxRecordInner {
+    /// Local persisted sandbox handle.
+    Local(SandboxRecordLocalState),
+    /// Cloud msb-cloud sandbox handle.
+    Cloud(SandboxRecordCloudState),
+}
+
+/// Context-private selector used to protect receiver-based lifecycle calls
+/// from acting on a different sandbox that reused the same name.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SandboxIdentity {
+    /// Local SQLite sandbox row id.
+    Local(i32),
+    /// Cloud control-plane sandbox UUID.
+    Cloud(String),
+}
+
+/// Local handle state. Snapshot of the database row + active PID, if any.
+pub struct SandboxRecordLocalState {
+    /// SQLite row id for this sandbox.
+    pub db_id: i32,
+    /// Sandbox lifecycle status at handle-creation time.
+    pub status: SandboxStatus,
+    /// Serialized `SandboxConfig` as stored in the database.
+    pub config_json: String,
+    /// JSON containing the caller's explicit settings and a fingerprint of `config_json`.
+    /// May be absent on older records or when no caller overrides were saved.
+    pub caller_config_overrides_json: Option<String>,
+    /// Serialized `SandboxConfig` used by the active VM, when known.
+    pub active_config_json: Option<String>,
+    /// When this sandbox was first created, if recorded.
+    pub created_at: Option<DateTime<Utc>>,
+    /// When this sandbox's database record was last modified.
+    pub updated_at: Option<DateTime<Utc>>,
+    /// Active sandbox process PID, if any.
+    pub pid: Option<i32>,
+}
+
+/// Cloud handle state. Captures the snapshot msb-cloud returned at fetch time.
+pub struct SandboxRecordCloudState {
+    /// Server-side UUID.
+    pub id: String,
+    /// Owning org's UUID.
+    pub org_id: String,
+    /// Lifecycle status mapped from the cloud API's
+    /// [`CloudSandboxStatus`](crate::CloudSandboxStatus).
+    pub status: SandboxStatus,
+    /// Serialized [`CloudCreateSandboxRequest`](crate::CloudCreateSandboxRequest)
+    /// returned by the cloud API.
+    pub config_json: String,
+    /// Creation timestamp returned by the cloud API.
+    pub created_at: Option<DateTime<Utc>>,
+    /// Last start timestamp, when known.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Last stop timestamp, when known.
+    pub stopped_at: Option<DateTime<Utc>>,
+    /// Human-readable message for the most recent failure, when any.
+    pub last_failure_message: Option<String>,
+}
+
+/// Resource-specific backend for sandbox lifecycle operations.
+///
+/// Trait methods take the [`Arc<dyn Context>`] that they should wrap any
+/// returned [`Sandbox`] / [`SandboxRecord`] with. Callers (e.g.
+/// `Sandbox::create`) resolve the backend via
+/// [`configured_context`](super::configured_context) and forward it through.
+pub trait SandboxOps: Send + Sync {
+    /// Suggested budget for callers choosing a bounded graceful-stop observation.
+    ///
+    /// Backends whose stop path includes durable persistence work may suggest a longer budget.
+    /// `SandboxRecord::stop` waits without a deadline; `stop_with_timeout` uses the caller's
+    /// explicit budget. Neither operation applies this hint implicitly.
+    fn default_stop_timeout(&self) -> Duration {
+        DEFAULT_STOP_TIMEOUT
+    }
+
+    /// Context preference for callers implementing an explicit timeout-escalation policy.
+    ///
+    /// The SDK's graceful-stop methods never escalate implicitly. Callers must explicitly
+    /// choose `kill` for force termination; a backend whose accepted stop continues
+    /// asynchronously can return `false` to advise against that policy.
+    #[doc(hidden)]
+    fn should_force_kill_after_stop_timeout(&self) -> bool {
+        true
+    }
+
+    /// Create a sandbox. The returned outer [`Sandbox`] carries the supplied
+    /// `backend` Arc and the variant-specific state inside `SandboxInner`.
+    ///
+    /// `start` controls whether the sandbox is booted as part of create.
+    /// **Cloud honours `start`** (forwards it as `?start=true|false` on the
+    /// create request). **Local always boots immediately** — the local impl
+    /// ignores the flag, because libkrun has no equivalent "create-without-
+    /// start" state. This asymmetry is intentional per the SDK parity plan
+    /// (D6.4); callers that need a stopped local sandbox should create then
+    /// `stop()` it explicitly.
+    fn create<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        config: SandboxConfig,
+        start: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>>;
+
+    /// Create a sandbox that must survive after the creating process exits.
+    fn create_detached<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        config: SandboxConfig,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>>;
+
+    /// Start a stopped sandbox by name.
+    fn start<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>>;
+
+    /// Start a stopped sandbox by name in detached mode.
+    fn start_detached<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>>;
+
+    /// Start the exact persisted sandbox identified by `identity`.
+    ///
+    /// Custom backends should override this method with an atomic or
+    /// ID-addressed implementation. The default delegates by name only to
+    /// preserve source compatibility for existing backend implementations.
+    fn start_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        _identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        self.start(backend, name)
+    }
+
+    /// Start the exact persisted sandbox in detached mode.
+    ///
+    /// Custom backends should override this method for identity safety.
+    fn start_detached_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        _identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        self.start_detached(backend, name)
+    }
+
+    /// Get a sandbox handle by name.
+    fn get<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxRecord>>;
+
+    /// List a filtered page of sandboxes.
+    fn list<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        query: SandboxListBuilder,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxRecordPage>>;
+
+    /// Remove/destroy a sandbox by name.
+    fn remove<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Remove the exact persisted sandbox identified by `identity`.
+    ///
+    /// Custom backends should override this method for identity safety.
+    fn remove_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        _identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        self.remove(backend, name)
+    }
+
+    /// Stop a running sandbox by name (graceful).
+    fn stop<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Stop the exact persisted sandbox identified by `identity`.
+    ///
+    /// Custom backends should override this method for identity safety.
+    fn stop_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        _identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        self.stop(backend, name)
+    }
+
+    /// Kill a running sandbox by name (SIGKILL).
+    fn kill<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Kill the exact persisted sandbox identified by `identity`.
+    ///
+    /// Custom backends should override this method for identity safety.
+    fn kill_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        _identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        self.kill(backend, name)
+    }
+
+    /// Restart the exact persisted sandbox identified by `identity`.
+    ///
+    /// The default stops the sandbox and starts it again.
+    fn restart_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        identity: SandboxIdentity,
+        options: RestartOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        Box::pin(crate::sandbox::restart_by_stop_and_start(
+            backend, name, identity, options,
+        ))
+    }
+
+    /// Trigger a graceful drain on a sandbox by name.
+    fn drain<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Drain the exact persisted sandbox identified by `identity`.
+    ///
+    /// Custom backends should override this method for identity safety.
+    fn drain_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        _identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        self.drain(backend, name)
+    }
+
+    // ============================================================
+    // Exec
+    // ============================================================
+
+    /// Execute a command inside the named sandbox and wait for it to complete.
+    fn exec<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<ExecOutput>> {
+        Box::pin(async move {
+            crate::sandbox::exec::agent::exec(backend.as_ref(), name, config, cmd, opts).await
+        })
+    }
+
+    /// Execute a command and return a streaming [`ExecHandle`].
+    fn exec_stream<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<ExecHandle>> {
+        Box::pin(async move {
+            crate::sandbox::exec::agent::exec_stream(backend.as_ref(), name, config, cmd, opts)
+                .await
+        })
+    }
+
+    /// Attach the host terminal to a PTY session in the named sandbox.
+    ///
+    /// Returns the exit code. Local routes through libkrun + agentd; cloud
+    /// routes the same session over the sandbox's agent WebSocket route.
+    fn attach<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+        cmd: String,
+        opts: crate::sandbox::AttachOptionsBuilder,
+    ) -> BoxFuture<'a, MicrosandboxResult<i32>> {
+        Box::pin(async move {
+            crate::sandbox::attach::agent::attach(backend.as_ref(), name, config, cmd, opts).await
+        })
+    }
+
+    // ============================================================
+    // Logs / metrics
+    // ============================================================
+
+    /// Return the most recent startup diagnostic for the named sandbox, when
+    /// the selected backend provides one.
+    fn boot_error<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<BootError>>>;
+
+    /// Read captured output for the named sandbox.
+    fn logs<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        opts: &'a LogOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<LogEntry>>>;
+
+    /// Stream captured output for the named sandbox.
+    fn log_stream<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        opts: &'a LogStreamOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<LogStream>>;
+
+    /// Replay a filtered snapshot, then follow new log entries.
+    ///
+    /// The backend owns the snapshot-to-stream handoff so callers do not need
+    /// backend-specific cursor or transport logic.
+    fn follow_logs<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        opts: &'a LogOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<LogStream>>;
+
+    /// Latest metrics sample for the named sandbox.
+    fn metrics<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxMetrics>>;
+
+    /// Streaming metrics samples at `interval`. Local opens a DB poll loop;
+    /// cloud returns a stream that yields a single
+    /// [`MicrosandboxError::Unsupported`](crate::MicrosandboxError::Unsupported).
+    fn metrics_stream(
+        &self,
+        backend: Arc<dyn Context>,
+        name: String,
+        config: SandboxConfig,
+        interval: Duration,
+    ) -> MetricsStream;
+
+    // ============================================================
+    // Guest FS (sandbox.fs() surface)
+    // ============================================================
+
+    /// Read an entire guest file into memory.
+    fn fs_read<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Bytes>> {
+        Box::pin(async move { crate::sandbox::fs::agent::read(backend.as_ref(), name, path).await })
+    }
+
+    /// Stream a guest file. Returns a [`FsReadStream`] yielding chunks.
+    fn fs_read_stream<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsReadStream>> {
+        Box::pin(async move {
+            crate::sandbox::fs::agent::read_stream(backend.as_ref(), name, path).await
+        })
+    }
+
+    /// Write `data` to a guest file (overwriting if it exists).
+    fn fs_write<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        path: &'a str,
+        data: Vec<u8>,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            crate::sandbox::fs::agent::write(backend.as_ref(), name, path, data).await
+        })
+    }
+
+    /// Open a streaming writer for a guest file.
+    fn fs_write_stream<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsWriteSink>> {
+        Box::pin(async move {
+            crate::sandbox::fs::agent::write_stream(backend.as_ref(), name, path).await
+        })
+    }
+
+    /// List immediate children of a guest directory.
+    fn fs_list<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<FsEntry>>> {
+        Box::pin(async move { crate::sandbox::fs::agent::list(backend.as_ref(), name, path).await })
+    }
+
+    /// Get file/directory metadata.
+    fn fs_stat<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsMetadata>> {
+        Box::pin(async move { crate::sandbox::fs::agent::stat(backend.as_ref(), name, path).await })
+    }
+
+    /// Create a directory (and parents).
+    fn fs_mkdir<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(
+            async move { crate::sandbox::fs::agent::mkdir(backend.as_ref(), name, path).await },
+        )
+    }
+
+    /// Remove a file or (when `recursive`) directory.
+    fn fs_remove<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        path: &'a str,
+        recursive: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            crate::sandbox::fs::agent::remove(backend.as_ref(), name, path, recursive).await
+        })
+    }
+
+    /// Copy a guest file from `from` to `to`.
+    fn fs_copy<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        from: &'a str,
+        to: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(
+            async move { crate::sandbox::fs::agent::copy(backend.as_ref(), name, from, to).await },
+        )
+    }
+
+    /// Rename/move a guest file or directory.
+    fn fs_rename<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        from: &'a str,
+        to: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            crate::sandbox::fs::agent::rename(backend.as_ref(), name, from, to).await
+        })
+    }
+
+    /// Check whether a guest path exists.
+    fn fs_exists<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<bool>> {
+        Box::pin(
+            async move { crate::sandbox::fs::agent::exists(backend.as_ref(), name, path).await },
+        )
+    }
+
+    /// Copy a host file into the guest sandbox.
+    fn fs_copy_from_host<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        host: &'a Path,
+        guest: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            crate::sandbox::fs::agent::copy_from_host(backend.as_ref(), name, host, guest).await
+        })
+    }
+
+    /// Copy a guest file out to the host with buffered atomic publication.
+    fn fs_copy_to_host<'a>(
+        &'a self,
+        backend: Arc<dyn Context>,
+        name: &'a str,
+        guest: &'a str,
+        host: &'a Path,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            crate::sandbox::fs::agent::copy_to_host(backend.as_ref(), name, guest, host).await
+        })
+    }
+}

@@ -54,21 +54,34 @@ jobs:
           df -h /
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
 
       - name: Install build deps (Linux)
         if: inputs.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev strace python3-dev
 
-      - name: Configure Python linking (Linux)
-        if: inputs.os == 'linux'
+      - name: Configure Python linking
         id: python
+        shell: bash
         run: |
-          # Rust tests embed Python, so select the interpreter whose headers and
-          # shared library were installed together by apt, not a toolcache Python.
-          echo 'PYO3_PYTHON=/usr/bin/python3' >> "$GITHUB_ENV"
-          # PyO3 caches its linker configuration. Include the system Python
-          # configuration so runner image upgrades cannot restore stale libpython paths.
-          python_config=$(/usr/bin/python3 -m sysconfig | sha256sum | cut -d ' ' -f 1)
+          # Rust tests embed Python. On Linux, select the interpreter whose headers and
+          # shared library were installed together by apt, not a toolcache Python. On
+          # macOS, resolve the runner's python3 to its versioned path: PyO3 reconfigures
+          # only when PYO3_PYTHON or PATH changes, and an image upgrade changes neither.
+          if [[ "${{ inputs.os }}" == linux ]]; then
+            python=/usr/bin/python3
+          else
+            python=$(python3 -c 'import os, sys; print(os.path.realpath(sys.executable))')
+          fi
+          echo "PYO3_PYTHON=$python" >> "$GITHUB_ENV"
+          # PyO3 caches its linker configuration. Include the Python configuration so
+          # runner image upgrades cannot restore stale libpython paths.
+          if command -v sha256sum >/dev/null; then
+            python_config=$("$python" -m sysconfig | sha256sum | cut -d ' ' -f 1)
+          else
+            python_config=$("$python" -m sysconfig | shasum -a 256 | cut -d ' ' -f 1)
+          fi
           echo "cache-key=system-python-${python_config}" >> "$GITHUB_OUTPUT"
 
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
@@ -90,6 +103,7 @@ jobs:
         if: inputs.os == 'linux'
         run: |
           rustup target add --toolchain stable ${{ inputs.agentd_target }}
+          cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }} --all-targets -- -D warnings
           cargo +stable test --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }}
 
       - name: Test privileged agentd resource limits (Linux)
@@ -105,4 +119,27 @@ jobs:
         uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Test workspace
-        run: cargo +stable test --workspace --exclude microsandbox-agentd
+        env:
+          TEST_PLATFORM_OS: ${{ inputs.os }}
+        run: |
+          exclude_args=(--exclude microsandbox-agentd)
+          # Concurrent fresh shell fixtures can exceed the runtime's two-second
+          # probe deadline on macOS. Bound harness workers, not production timeouts;
+          # tests still exercise their own explicit concurrency unchanged.
+          if [[ "$TEST_PLATFORM_OS" == "darwin" ]]; then
+            workers="$(sysctl -n hw.logicalcpu)"
+            export RUST_TEST_THREADS="$(( workers < 4 ? workers : 4 ))"
+            # Linux CI compiles all examples/rust/* workspace members; excluding
+            # them on macOS avoids linking 21 example binaries on 3-vCPU runners.
+            while IFS= read -r pkg; do
+              exclude_args+=(--exclude "$pkg")
+            done < <(python3 -c '
+          import glob, re
+          for path in sorted(glob.glob("examples/rust/*/Cargo.toml")):
+              with open(path, encoding="utf-8") as handle:
+                  match = re.search(r"^name\s*=\s*\"([^\"]+)\"", handle.read(), re.M)
+              if match:
+                  print(match.group(1))
+          ')
+          fi
+          cargo +stable test --workspace "${exclude_args[@]}"

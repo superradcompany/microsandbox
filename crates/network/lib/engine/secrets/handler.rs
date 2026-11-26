@@ -4607,7 +4607,7 @@ mod tests {
                 Some(false) => secret.allow_placeholder_for("placeholder.example"),
                 None => secret,
             };
-            let config = make_config(vec![secret.build()]);
+            let config = make_config(vec![secret.build().unwrap()]);
             let input = b"POST / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nContent-Length: 15\r\n\r\n{\"key\": \"$KEY\"}";
             let mut allowed = SecretsHandler::new(&config, "api.openai.com", true);
             let output =

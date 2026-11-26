@@ -1,5 +1,8 @@
 //! Tests for the cloud wire contract.
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
 use super::*;
 use crate::compat;
 use crate::domain::{
@@ -7,6 +10,16 @@ use crate::domain::{
     RootfsSource, SecretSubstitution, SecretsConfig,
 };
 use crate::snapshot::cloud_manifest::Manifest as SnapshotManifest;
+
+fn assert_fixture_round_trips<T>(fixture: &str)
+where
+    T: DeserializeOwned + Serialize,
+{
+    let expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+    let decoded: T = serde_json::from_value(expected.clone()).unwrap();
+
+    assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+}
 
 fn spec(name: &str) -> CloudSandboxSpec {
     CloudSandboxSpec {
@@ -34,6 +47,86 @@ fn restore_request(name: &str) -> CloudCreateSandboxRequest {
         resources: CloudSandboxComputeResources::default(),
         pull_policy: CloudPullPolicy::default(),
     }
+}
+
+#[test]
+fn service_wire_fixtures_round_trip() {
+    assert_fixture_round_trips::<CloudService>(include_str!("fixtures/service.json"));
+    assert_fixture_round_trips::<CloudServiceTarget>(include_str!("fixtures/service-target.json"));
+    assert_fixture_round_trips::<CloudCreateServiceRequest>(include_str!(
+        "fixtures/create-service-request.json"
+    ));
+    assert_fixture_round_trips::<CloudUpdateServiceRequest>(include_str!(
+        "fixtures/update-service-request.json"
+    ));
+}
+
+#[test]
+fn service_update_with_target_refuses_unknown_fields() {
+    let request = include_str!("fixtures/update-service-request-unknown-with-target.json");
+
+    assert!(serde_json::from_str::<CloudUpdateServiceRequest>(request).is_err());
+}
+
+#[test]
+fn service_update_refuses_only_unknown_fields() {
+    let request = include_str!("fixtures/update-service-request-unknown-only.json");
+
+    assert!(serde_json::from_str::<CloudUpdateServiceRequest>(request).is_err());
+}
+
+#[test]
+fn unknown_service_status_decodes_as_unknown() {
+    let mut service: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/service.json")).unwrap();
+    service["status"] = serde_json::json!("future_status");
+
+    let service: CloudService = serde_json::from_value(service).unwrap();
+
+    assert_eq!(service.status, CloudServiceStatus::Unknown);
+}
+
+#[test]
+fn service_response_target_ignores_unknown_fields() {
+    let mut service: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/service.json")).unwrap();
+    service["target"]["future_option"] = serde_json::json!(true);
+
+    let service: CloudService = serde_json::from_value(service).unwrap();
+
+    assert_eq!(
+        service.target,
+        Some(CloudServiceTarget {
+            sandbox: "web-1".into(),
+            port: 8080,
+        })
+    );
+}
+
+#[test]
+fn service_page_fixtures_decode_and_reencode() {
+    for fixture in [
+        include_str!("fixtures/service-page.json"),
+        include_str!("fixtures/empty-service-page.json"),
+    ] {
+        let mut expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        expected.as_object_mut().unwrap().remove("has_more");
+        let page: CloudPaginated<CloudService> = serde_json::from_str(fixture).unwrap();
+
+        assert_eq!(serde_json::to_value(page).unwrap(), expected);
+    }
+}
+
+#[test]
+fn service_error_fixture_decodes_and_reencodes() {
+    let fixture = include_str!("fixtures/service-error.json");
+    let mut expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+    expected["code"] = serde_json::Value::Null;
+    expected["message"] = serde_json::Value::Null;
+    expected["error"].as_object_mut().unwrap().remove("details");
+    let error: CloudErrorBody = serde_json::from_str(fixture).unwrap();
+
+    assert_eq!(serde_json::to_value(error).unwrap(), expected);
 }
 
 #[test]
@@ -250,6 +343,41 @@ fn cloud_secrets_config_round_trips_through_domain() {
 }
 
 #[test]
+fn cloud_create_request_debug_redacts_secret_values() {
+    const MATERIAL: &str = "distinctive-cloud-secret-material";
+
+    let mut request = image_request("agent-1");
+    let CloudCreateSandboxRequest::Oci { sandbox, .. } = &mut request else {
+        panic!("expected OCI create request");
+    };
+    let entry = CloudSecretEntry {
+        env_var: "API_KEY".into(),
+        value: MATERIAL.into(),
+        source: None,
+        placeholder: "$MSB_API_KEY".into(),
+        allowed_hosts: vec![CloudHostPattern::Exact {
+            value: "api.example.com".into(),
+        }],
+        substitution: SecretSubstitution::default(),
+        passthrough_hosts: Vec::new(),
+        violation_action: None,
+        require_tls_identity: true,
+    };
+    let serialized = serde_json::to_value(&entry).unwrap();
+    sandbox.network.secrets = Some(CloudSecretsConfig {
+        entries: vec![entry],
+        ..Default::default()
+    });
+
+    for rendered in [format!("{request:?}"), format!("{request:#?}")] {
+        assert!(!rendered.contains(MATERIAL), "value leaked: {rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        assert!(rendered.contains("API_KEY"), "{rendered}");
+    }
+    assert_eq!(serialized["value"], MATERIAL);
+}
+
+#[test]
 fn create_request_converts_disk_size_to_oci_rootfs() {
     let mut req = image_request("agent-1");
     assert!(req.set_oci_disk_size_mib(8192));
@@ -388,6 +516,48 @@ fn sandbox_response_accepts_omitted_spec() {
 
     assert!(response.spec.is_none());
     assert_eq!(response.status, CloudSandboxStatus::Running);
+}
+
+#[test]
+fn sandbox_response_decodes_new_and_unknown_statuses() {
+    let mut body = serde_json::json!({
+        "id": "00000000-0000-0000-0000-000000000002",
+        "org_id": "00000000-0000-0000-0000-000000000001",
+        "name": "agent-1",
+        "slug": "brave-otter",
+        "status": "running",
+        "status_reason": null,
+        "spec": null,
+        "ephemeral": false,
+        "created_at": "2026-05-17T12:00:00Z",
+        "started_at": "2026-05-17T12:00:01Z",
+        "stopped_at": null,
+        "last_failure_message": null
+    });
+
+    for (wire_status, expected) in [
+        ("saving_state", CloudSandboxStatus::SavingState),
+        (
+            "temporarily_unavailable",
+            CloudSandboxStatus::TemporarilyUnavailable,
+        ),
+        (
+            "recovery_decision_required",
+            CloudSandboxStatus::RecoveryDecisionRequired,
+        ),
+        ("not_a_real_status", CloudSandboxStatus::Unknown),
+    ] {
+        body["status"] = serde_json::json!(wire_status);
+
+        let response: CloudCreateSandboxResponse = serde_json::from_value(body.clone()).unwrap();
+
+        assert_eq!(response.status, expected);
+    }
+
+    assert_eq!(
+        serde_json::to_value(CloudSandboxStatus::Unknown).unwrap(),
+        serde_json::json!("unknown")
+    );
 }
 
 #[test]

@@ -58,6 +58,20 @@ if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, micro
 
 Use `IsRuntimeInstalled(RuntimeConfig{})` for a boolean availability check or `ResolveRuntime(RuntimeConfig{})` to require an existing pair and obtain its paths without installing runtime binaries. `InstallRuntime` explicitly provisions the selected source. All setup calls use the shared Rust resolver and installer; the first call may also materialize the embedded SDK FFI library.
 
+## Lean distributions
+
+The full module above retains its bundled FFI. `sdk/go/core` provides the same public resource types without a bundled native payload; `sdk/go/local` and `sdk/go/remote` select separately built providers. Each provider module depends on the exact core version. They can coexist with the full module in one process.
+
+```bash
+go get github.com/superradcompany/microsandbox/sdk/go/remote
+go run github.com/superradcompany/microsandbox/sdk/go/core/cmd/ffi-setup@VERSION \
+  --kind remote --source EXACT_ARTIFACT_URL --sha256 TRUSTED_SHA256
+```
+
+Replace the placeholders with the exact release version, native artifact URL and digest from trusted release metadata. Offline provisioning uses a local file for `--source`. Setup copies only that FFI artifact; it never installs `msb` or firmware. Import and first use never download missing libraries.
+
+Use `remote.NewContextWithURL(path, url, apiKey)` or `local.NewContext(path, core.LocalOptions{...})`. An empty path selects the verified install cache; an explicit path selects a trusted preinstalled library. Package functions such as `CreateSandbox` require the provider for the configured backend. With no selection, they use local. Resources, streams, cancellation and cleanup retain the library that created them.
+
 ## Quick Start
 
 ```go
@@ -117,11 +131,10 @@ sb, err := microsandbox.ConnectOrCreateSandbox(ctx, "worker",
 )
 
 fmt.Printf("%s: %s\n", sb.Name(), sb.ID())
-handle, err := microsandbox.GetSandbox(ctx, "worker")
-running, err := handle.ConnectOrStart(ctx)
+running, err := microsandbox.GetRunningSandbox(ctx, "worker")
 err = running.RequestStop(ctx)
-stopped, err := running.WaitForStatus(ctx, microsandbox.SandboxStatusStopped)
-restarted, err := stopped.Restart(ctx)
+err = running.WaitForStatus(ctx, microsandbox.SandboxStatusStopped)
+restarted, err := running.Restart(ctx)
 err = restarted.Destroy(ctx)
 ```
 
@@ -380,7 +393,7 @@ fmt.Println(preview.Entries)
 
 Reports contain integer byte counts; optional pointer fields are `nil` when unknown. Logical bytes are file lengths, and allocated bytes may count shared CoW blocks repeatedly. They do not measure exclusive disk ownership. `sb.StorageUsage(ctx)` observes the live sandbox's managed directory through its retained backend and stable identity; host bind mounts and shared runtime-memory caches are excluded.
 
-Go's metadata-only `SandboxHandle`, `SnapshotArtifact`, and `SnapshotHandle` do not yet expose per-object storage methods because they do not retain a native backend-bound receiver. Use the detailed `Sandboxes.Items` and `Snapshots.Items` fields in `StorageUsage(ctx)` for observations through the selected backend.
+`Sandbox`, `Volume`, and `Snapshot` retain their selected destination and stable identity. Use `sb.StorageUsage(ctx)` for a sandbox observation, or the detailed `Sandboxes.Items` and `Snapshots.Items` fields in `StorageUsage(ctx)` for local storage accounting.
 
 `PruneStorage` is an explicit cleanup operation and does not prompt. `DryRun: true` only previews; calling with `DryRun: false` rechecks ownership and removes unused runtime RAM. It retains durable snapshots, named volumes, sandbox disks, and handoff locks. Check each entry for partial errors. Logical bytes removed are reported separately from physical bytes reclaimed, which remain unknown. Remote backends and native bundles predating storage support return `ErrUnsupportedOperation`.
 
@@ -480,3 +493,5 @@ MSB_STORAGE_NATIVE_LIBRARY="$PWD/../../target/debug/libmicrosandbox_go_ffi.dylib
 ## License
 
 Apache-2.0
+
+Use `remote.NewContext(path, apiKey)` with `MSB_API_URL` or the hosted default; `remote.NewContextWithURL(path, url, apiKey)` selects an explicit endpoint. The path selects the native library, not the remote service.
