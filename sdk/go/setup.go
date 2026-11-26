@@ -7,8 +7,8 @@ import (
 	"strings"
 	"sync"
 
+	core "github.com/superradcompany/microsandbox/sdk/go/core"
 	"github.com/superradcompany/microsandbox/sdk/go/internal/bundle"
-	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 // sdkVersion is the microsandbox release that this SDK binds to. The
@@ -21,7 +21,7 @@ const sdkVersion = "0.8.3"
 // library. No explicit EnsureRuntime call is needed for FFI
 // bootstrap.
 func init() {
-	ffi.SetAutoLoader(autoLoadFFI)
+	core.RegisterFullNativeLoader(autoLoadFFI)
 }
 
 var (
@@ -48,7 +48,7 @@ func autoLoadFFI() error {
 			autoLoadErr = err
 			return
 		}
-		if err := ffi.Load(ffiPath); err != nil {
+		if err := core.LoadFullNative(ffiPath); err != nil {
 			autoLoadErr = wrapDlopenErr(err, ffiPath)
 			return
 		}
@@ -66,8 +66,8 @@ func SDKVersion() string { return sdkVersion }
 // library. Triggers FFI auto-load if needed; returns an FFI error if
 // the library couldn't be loaded.
 func RuntimeVersion() (string, error) {
-	v, err := ffi.Version()
-	return v, wrapFFI(err)
+	v, err := core.RuntimeVersion()
+	return v, err
 }
 
 // installDir returns the SDK FFI extraction root: nonempty MSB_HOME or
