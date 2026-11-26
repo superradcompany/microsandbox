@@ -38,14 +38,14 @@ Use a newer glibc-based distribution if the version is below 2.28. Do not replac
 
 ## NixOS
 
-NixOS does not provide the generic dynamic loader path (`/lib64/ld-linux-x86-64.so.2`) that the released `msb` binary and the SDK native libraries are linked against. Running them directly can fail with an error like this:
+NixOS does not provide the generic dynamic loader path (`/lib64/ld-linux-x86-64.so.2`) that the released `msb` binary is linked against. Running it directly can fail with an error like this:
 
 ```text
 Could not start dynamically linked executable: msb
 NixOS cannot run dynamically linked executables intended for generic linux environments out of the box.
 ```
 
-Enabling [nix-ld](https://github.com/nix-community/nix-ld) in your NixOS configuration has been reported to resolve this. It provides the loader location and a default set of common libraries:
+Enabling [nix-ld](https://github.com/nix-community/nix-ld) in your NixOS configuration has been reported to resolve this for `msb`. It provides the loader location and a default set of common libraries:
 
 <CodeGroup>
 ```nix Nix
@@ -54,6 +54,8 @@ programs.nix-ld.enable = true;
 </CodeGroup>
 
 Apply the change with `sudo nixos-rebuild switch`, then log out and back in so your session picks it up. If a binary still reports a missing shared library, add that library through `programs.nix-ld.libraries`.
+
+nix-ld only affects executables started by the system loader, such as `msb`. The SDK native libraries load inside your language runtime process, so if you run the SDK with a Nix-provided interpreter, a missing library such as `libcap-ng.so.0` has to be made visible to that interpreter instead (for example through the package or dev shell that provides it).
 
 ## Quick checks
 
