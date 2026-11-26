@@ -12,7 +12,7 @@ use super::{
     fs::{self, AgentFsHandle, FsEntry, FsMetadata, FsReadStream, FsSetAttrs, FsWriteSink},
     state::RuntimeSession,
 };
-use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient};
+use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentConnection};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -30,7 +30,7 @@ pub struct FsHandle {
 
 pub(super) struct FsHandleState {
     raw: AgentFsHandle,
-    client: Arc<AgentClient>,
+    client: Arc<AgentConnection>,
     runtime: Option<Arc<RuntimeSession>>,
     closed: AtomicBool,
 }
@@ -42,7 +42,7 @@ pub(super) struct FsHandleState {
 impl FsHandle {
     pub(super) fn new(
         raw: AgentFsHandle,
-        client: Arc<AgentClient>,
+        client: Arc<AgentConnection>,
         runtime: Option<Arc<RuntimeSession>>,
     ) -> Self {
         Self {
@@ -56,7 +56,7 @@ impl FsHandle {
     }
 
     pub(super) async fn open(
-        client: Arc<AgentClient>,
+        client: Arc<AgentConnection>,
         path: String,
         options: Option<super::fs::FsOpenOptions>,
         runtime: Option<Arc<RuntimeSession>>,
@@ -103,7 +103,7 @@ impl FsHandle {
     /// Read bytes from this file at the selected offset.
     pub async fn read(&self, offset: u64, len: Option<u64>) -> MicrosandboxResult<Bytes> {
         self.inner.check_open()?;
-        fs::agent::read_handle(self.inner.client.clone(), self.inner.raw, offset, len).await
+        fs::agent::read_handle_on(self.inner.client.clone(), self.inner.raw, offset, len).await
     }
 
     /// Stream bytes while retaining this open file and its original run.
@@ -113,7 +113,7 @@ impl FsHandle {
         len: Option<u64>,
     ) -> MicrosandboxResult<FsReadStream> {
         self.inner.check_open()?;
-        let mut stream = fs::agent::read_handle_stream(
+        let mut stream = fs::agent::read_handle_stream_on(
             self.inner.client.clone(),
             self.inner.raw,
             offset,
@@ -128,7 +128,7 @@ impl FsHandle {
     /// Write bytes at the selected offset without changing the handle's destination.
     pub async fn write(&self, offset: u64, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
         self.inner.check_open()?;
-        fs::agent::write_handle(
+        fs::agent::write_handle_on(
             self.inner.client.clone(),
             self.inner.raw,
             offset,
@@ -144,7 +144,7 @@ impl FsHandle {
         len: Option<u64>,
     ) -> MicrosandboxResult<FsWriteSink> {
         self.inner.check_open()?;
-        let mut sink = fs::agent::write_handle_stream(
+        let mut sink = fs::agent::write_handle_stream_on(
             self.inner.client.clone(),
             self.inner.raw,
             offset,

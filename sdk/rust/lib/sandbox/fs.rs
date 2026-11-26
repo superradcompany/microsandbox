@@ -22,7 +22,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    agent::{AGENT_CONNECT_TIMEOUT, AgentClient, AgentConnection},
+    agent::{AGENT_CONNECT_TIMEOUT, AgentConnection},
     context::Context,
     error::{Operation, UnsupportedReason},
 };
@@ -152,10 +152,10 @@ pub struct FsMetadata {
 pub struct FsReadStream {
     id: u32,
     rx: mpsc::Receiver<AgentFrame>,
-    // Holds the per-call agent client alive for the duration of the stream.
+    // Holds the per-call agent connection alive for the duration of the stream.
     // Without this the AgentClient's reader task would be dropped after
     // `fs_read_stream` returns and `rx` would receive nothing.
-    client: Option<Arc<AgentClient>>,
+    client: Option<Arc<AgentConnection>>,
     close_handle: Option<AgentFsHandle>,
     /// Set only after a terminal `FsResponse`; channel closure alone is an error.
     finished: bool,
@@ -168,7 +168,7 @@ pub struct FsReadStream {
 /// A streaming writer for file data to the sandbox.
 pub struct FsWriteSink {
     id: u32,
-    client: Arc<AgentClient>,
+    client: Arc<AgentConnection>,
     protocol: Mutex<Option<FsWriteProtocol>>,
     close_handle: Option<AgentFsHandle>,
     finished: bool,
@@ -413,7 +413,7 @@ impl SandboxFsOps {
     ) -> MicrosandboxResult<FsHandle> {
         self.require_owned_handle_support(Operation::SandboxFsOpenFile)?;
         let operation = self.prepare().await?;
-        let client = operation.fs_agent(&self.name).await?.into_client();
+        let client = Arc::new(operation.fs_agent(&self.name).await?);
         FsHandle::open(client, path.to_owned(), Some(options), operation.runtime).await
     }
 
@@ -421,7 +421,7 @@ impl SandboxFsOps {
     pub async fn open_dir(&self, path: &str) -> MicrosandboxResult<FsHandle> {
         self.require_owned_handle_support(Operation::SandboxFsOpenDir)?;
         let operation = self.prepare().await?;
-        let client = operation.fs_agent(&self.name).await?.into_client();
+        let client = Arc::new(operation.fs_agent(&self.name).await?);
         FsHandle::open(client, path.to_owned(), None, operation.runtime).await
     }
 
@@ -694,10 +694,10 @@ impl SandboxFsOps {
 
 impl FsReadStream {
     /// Construct a read stream that closes an owned handle at EOF.
-    pub(crate) fn with_client_and_close(
+    pub(crate) fn with_connection_and_close(
         id: u32,
         rx: mpsc::Receiver<AgentFrame>,
-        client: Arc<AgentClient>,
+        client: Arc<AgentConnection>,
         close_handle: Option<AgentFsHandle>,
         bulk: Option<BulkReceiveState>,
     ) -> Self {
@@ -805,6 +805,7 @@ impl FsReadStream {
                         // Terminal observation releases ownership even if the caller
                         // cancels while the close acknowledgement is pending.
                         let _retained = (self.runtime.take(), self.file.take());
+                        let owned_handle = self.close_handle.is_some();
                         let close_result = self.close_owned_handle().await;
                         let resp = response?;
                         if !resp.ok {
@@ -819,6 +820,9 @@ impl FsReadStream {
                             ));
                         }
                         close_result?;
+                        if owned_handle && let Some(client) = &self.client {
+                            client.finish();
+                        }
                         return Ok(None);
                     }
                     _ => {}
@@ -884,10 +888,10 @@ impl FsReadStream {
 //--------------------------------------------------------------------------------------------------
 
 impl FsWriteSink {
-    /// Construct a write sink from raw protocol state. **Local impl only.**
+    /// Construct a write sink from raw protocol state.
     pub(crate) fn new(
         id: u32,
-        client: Arc<AgentClient>,
+        client: Arc<AgentConnection>,
         rx: mpsc::Receiver<AgentFrame>,
         close_handle: Option<AgentFsHandle>,
         bulk: Option<BulkSendState>,
@@ -1053,6 +1057,7 @@ impl FsWriteSink {
                 wait_for_ok_frame_response(&mut rx).await
             }
         };
+        let owned_handle = self.close_handle.is_some();
         let close_result = if let Some(handle) = self.close_handle.take() {
             agent::close_handle(&self.client, handle).await
         } else {
@@ -1061,7 +1066,11 @@ impl FsWriteSink {
         self.finished = true;
         self.bulk_active = false;
         result?;
-        close_result
+        close_result?;
+        if owned_handle {
+            self.client.finish();
+        }
+        Ok(())
     }
 }
 
@@ -1130,7 +1139,7 @@ impl Drop for FsWriteSink {
 
 fn spawn_fs_cleanup(
     id: u32,
-    client: Arc<AgentClient>,
+    client: Arc<AgentConnection>,
     close_handle: Option<AgentFsHandle>,
     bulk: bool,
     runtime: Option<Arc<RuntimeSession>>,
@@ -1407,7 +1416,7 @@ pub(crate) mod agent {
 
     use crate::{
         MicrosandboxError, MicrosandboxResult,
-        agent::{AGENT_CONNECT_TIMEOUT, AgentClient},
+        agent::{AGENT_CONNECT_TIMEOUT, AgentClient, AgentConnection},
         context::Context,
     };
 
@@ -1497,20 +1506,38 @@ pub(crate) mod agent {
         check_response(resp_msg)
     }
 
-    pub(crate) async fn read_handle(
-        client: Arc<AgentClient>,
+    pub(crate) async fn read_handle_on(
+        client: Arc<AgentConnection>,
         handle: AgentFsHandle,
         offset: u64,
         len: Option<u64>,
     ) -> MicrosandboxResult<Bytes> {
-        read_handle_stream(client, handle, offset, len, None)
+        read_handle_stream_on(client, handle, offset, len, None)
             .await?
             .collect()
             .await
     }
 
+    #[cfg(feature = "ssh")]
     pub(crate) async fn read_handle_stream(
         client: Arc<AgentClient>,
+        handle: AgentFsHandle,
+        offset: u64,
+        len: Option<u64>,
+        close_handle: Option<AgentFsHandle>,
+    ) -> MicrosandboxResult<FsReadStream> {
+        read_handle_stream_on(
+            Arc::new(AgentConnection::shared(client)),
+            handle,
+            offset,
+            len,
+            close_handle,
+        )
+        .await
+    }
+
+    pub(crate) async fn read_handle_stream_on(
+        client: Arc<AgentConnection>,
         handle: AgentFsHandle,
         offset: u64,
         len: Option<u64>,
@@ -1552,7 +1579,7 @@ pub(crate) mod agent {
 
         // The stream must retain the same relay client while the handle is in
         // use; agentd rejects handle operations from a different client range.
-        Ok(FsReadStream::with_client_and_close(
+        Ok(FsReadStream::with_connection_and_close(
             id,
             rx,
             client,
@@ -1561,22 +1588,43 @@ pub(crate) mod agent {
         ))
     }
 
-    pub(crate) async fn write_handle(
-        client: Arc<AgentClient>,
+    pub(crate) async fn write_handle_on(
+        client: Arc<AgentConnection>,
         handle: AgentFsHandle,
         offset: u64,
         data: &[u8],
     ) -> MicrosandboxResult<()> {
-        let sink = write_handle_stream(client, handle, offset, Some(data.len() as u64), None, true)
-            .await?;
+        let sink =
+            write_handle_stream_on(client, handle, offset, Some(data.len() as u64), None, true)
+                .await?;
         for chunk in data.chunks(FS_CHUNK_SIZE) {
             sink.write(chunk).await?;
         }
         sink.close().await
     }
 
+    #[cfg(feature = "ssh")]
     pub(crate) async fn write_handle_stream(
         client: Arc<AgentClient>,
+        handle: AgentFsHandle,
+        offset: u64,
+        len: Option<u64>,
+        close_handle: Option<AgentFsHandle>,
+        exact_owned_payload: bool,
+    ) -> MicrosandboxResult<FsWriteSink> {
+        write_handle_stream_on(
+            Arc::new(AgentConnection::shared(client)),
+            handle,
+            offset,
+            len,
+            close_handle,
+            exact_owned_payload,
+        )
+        .await
+    }
+
+    pub(crate) async fn write_handle_stream_on(
+        client: Arc<AgentConnection>,
         handle: AgentFsHandle,
         offset: u64,
         len: Option<u64>,
@@ -1698,7 +1746,7 @@ pub(crate) mod agent {
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<FsReadStream> {
-        let client = backend.fs_agent(name).await?.into_client();
+        let client = Arc::new(backend.fs_agent(name).await?);
         let guard = super::FsHandle::open(
             client.clone(),
             path.to_owned(),
@@ -1707,7 +1755,7 @@ pub(crate) mod agent {
         )
         .await?;
         let handle = guard.raw();
-        let mut stream = read_handle_stream(client, handle, 0, None, Some(handle)).await?;
+        let mut stream = read_handle_stream_on(client, handle, 0, None, Some(handle)).await?;
         stream.runtime = backend.retained_runtime();
         guard.transfer_close();
         Ok(stream)
@@ -1741,7 +1789,7 @@ pub(crate) mod agent {
         len: Option<u64>,
         prefer_inline: bool,
     ) -> MicrosandboxResult<FsWriteSink> {
-        let client = backend.fs_agent(name).await?.into_client();
+        let client = Arc::new(backend.fs_agent(name).await?);
         let guard = super::FsHandle::open(
             client.clone(),
             path.to_owned(),
@@ -1751,7 +1799,7 @@ pub(crate) mod agent {
         .await?;
         let handle = guard.raw();
         let mut sink =
-            write_handle_stream(client, handle, 0, len, Some(handle), prefer_inline).await?;
+            write_handle_stream_on(client, handle, 0, len, Some(handle), prefer_inline).await?;
         sink.retention
             .get_mut()
             .unwrap_or_else(|error| error.into_inner())
@@ -2453,7 +2501,13 @@ mod tests {
         // A peer ending the credit stream is a terminal write failure.
         let (tx, rx) = mpsc::channel(1);
         drop(tx);
-        let mut sink = FsWriteSink::new(900, client, rx, Some(73), Some(bulk));
+        let mut sink = FsWriteSink::new(
+            900,
+            Arc::new(AgentConnection::shared(client)),
+            rx,
+            Some(73),
+            Some(bulk),
+        );
         sink.retention.get_mut().unwrap().runtime = Some(runtime);
         drop(sb);
         assert!(sink.write(b"hello").await.is_err());

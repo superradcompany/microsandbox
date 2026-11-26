@@ -13,7 +13,7 @@ use microsandbox_protocol::{
     codec,
     core::Ready,
     exec::{ExecExited, ExecRequest, ExecSignal, ExecStarted, ExecStdout},
-    fs::FsResponse,
+    fs::{FsData, FsOp, FsRequest, FsResponse, FsResponseData},
     message::{Message, MessageType},
 };
 use microsandbox_types::CloudCreateSandboxResponse;
@@ -272,7 +272,11 @@ where
 {
     stream.write_all(&1u32.to_be_bytes()).await.unwrap();
     stream.write_all(&1024u32.to_be_bytes()).await.unwrap();
-    let ready = Message::with_payload(MessageType::Ready, 0, &hello).unwrap();
+    let mut ready = Message::with_payload(MessageType::Ready, 0, &hello).unwrap();
+    if hello.exec_limits.is_none() {
+        // Speak generation 6 (inline CBOR FsData) in this lightweight test guest.
+        ready.v = 6;
+    }
     codec::write_message(&mut stream, &ready).await.unwrap();
 
     while let Ok(message) = codec::read_message(&mut stream).await {
@@ -309,13 +313,56 @@ where
                 )]
             }
             MessageType::FsRequest => {
-                let done = FsResponse {
-                    ok: true,
-                    error: None,
-                    data: None,
-                };
-
-                vec![Message::with_payload(MessageType::FsResponse, id, &done)]
+                let request = message.payload::<FsRequest>().unwrap();
+                match request.op {
+                    FsOp::OpenFile { .. } => {
+                        let opened = FsResponse {
+                            ok: true,
+                            error: None,
+                            data: Some(FsResponseData::Handle(1)),
+                        };
+                        vec![Message::with_payload(MessageType::FsResponse, id, &opened)]
+                    }
+                    FsOp::Read { .. } => {
+                        let chunk = FsData {
+                            data: b"file-contents".to_vec(),
+                        };
+                        let done = FsResponse {
+                            ok: true,
+                            error: None,
+                            data: None,
+                        };
+                        vec![
+                            Message::with_payload(MessageType::FsData, id, &chunk),
+                            Message::with_payload(MessageType::FsResponse, id, &done),
+                        ]
+                    }
+                    FsOp::Write { .. } => {
+                        // Wait for empty FsData EOF frame before acknowledging.
+                        Vec::new()
+                    }
+                    _ => {
+                        let done = FsResponse {
+                            ok: true,
+                            error: None,
+                            data: None,
+                        };
+                        vec![Message::with_payload(MessageType::FsResponse, id, &done)]
+                    }
+                }
+            }
+            MessageType::FsData => {
+                let chunk = message.payload::<FsData>().unwrap();
+                if chunk.data.is_empty() {
+                    let done = FsResponse {
+                        ok: true,
+                        error: None,
+                        data: None,
+                    };
+                    vec![Message::with_payload(MessageType::FsResponse, id, &done)]
+                } else {
+                    Vec::new()
+                }
             }
             _ => Vec::new(),
         };
@@ -390,7 +437,13 @@ async fn file_requests_and_commands_take_turns_on_one_websocket() {
     let sandbox = gateway.sandbox();
 
     sandbox.fs().mkdir("/work").await.unwrap();
+    sandbox
+        .fs()
+        .write("/work/app.py", b"print(1)")
+        .await
+        .unwrap();
     let output = sandbox.exec("true", Vec::<String>::new()).await.unwrap();
+    let content = sandbox.fs().read("/work/app.py").await.unwrap();
     sandbox.fs().mkdir("/work/out").await.unwrap();
     sandbox
         .fs()
@@ -399,7 +452,23 @@ async fn file_requests_and_commands_take_turns_on_one_websocket() {
         .unwrap();
 
     assert!(output.status().success);
+    assert_eq!(content.as_ref(), b"file-contents");
     assert_eq!(gateway.upgrades(), 1);
+}
+
+#[tokio::test]
+async fn abandoned_write_stream_closes_its_websocket() {
+    let mut gateway = FakeGateway::start().await;
+    let sandbox = gateway.sandbox();
+
+    let sink = sandbox.fs().write_stream("/work/partial").await.unwrap();
+    sink.write(b"partial").await.unwrap();
+    drop(sink);
+    gateway.expect_close().await;
+
+    let output = sandbox.exec("true", Vec::<String>::new()).await.unwrap();
+    assert!(output.status().success);
+    assert_eq!(gateway.upgrades(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
