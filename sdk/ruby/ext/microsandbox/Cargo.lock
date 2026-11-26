@@ -3101,9 +3101,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de005c30d19ab61cf00c25c2ff188e3640d21a374f452b7f1b972483078b5515"
+checksum = "a2c21dc89f4fae5f8bfe1d30eba356806c477d64b9ef3a61593c88c3173e0da7"
 dependencies = [
  "age",
  "anyhow",
@@ -3167,9 +3167,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agent-client"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "526a0b945ba639735c54482b710b809b34d9655c7408f41363e45bcf60e6be08"
+checksum = "b6d3d139da62afb7de3d4ef78519eaef7b7591e1dcae2e0a838ab6f3aaf00d4b"
 dependencies = [
  "bytes",
  "ciborium",
@@ -3188,9 +3188,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-control-client"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "285e8cc2d0a10e95157bb5bbcea816641d1cd409378e96a4231e3e0730c18809"
+checksum = "c95228d6ca927331a8d747e184033e768ce8d446cf9e1aaee636b98d799bad8f"
 dependencies = [
  "microsandbox-protocol",
  "microsandbox-protocol-client",
@@ -3205,9 +3205,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-db"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f5d152acefa54ec81b7c1e91369a4185566e450f10056cd507c75bbdb4d5b32"
+checksum = "915dd5814a39f85a4bc5fd2da70bc2b62134491ad59f4a8ac4dc98209952ff54"
 dependencies = [
  "async-trait",
  "libc",
@@ -3224,9 +3224,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a989cde840e250b798d92b0923522a47a401070257c75499085028f12211179a"
+checksum = "65cdfb28f93473389470ad241f46f61159ede906a4d33582c566bc1391b333fe"
 dependencies = [
  "bincode",
  "cap-primitives",
@@ -3249,9 +3249,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1011e631e92bdb2714b24f71c95784d57980ca3d89526109c64d719601a1e47"
+checksum = "7ab04524d73fc01b87115e397721830608359af751ad641ccb0416a2e798f4f8"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -3282,9 +3282,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "458cda6b32dc2efaca24e94d1bf7c9d86f416dc0d40416b0ff422ea358524adb"
+checksum = "cfa66887398f864280237748e90b0cdae5e9dfcf1f6de02928a247d3610adc28"
 dependencies = [
  "chrono",
  "libc",
@@ -3294,9 +3294,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c17245f86f3d1009d82e3e20386da9ca4ff9ca6b1555489bb3d3fa3e38626645"
+checksum = "27d801695d1b4e54ed229230c4c02208c36e41312e2c25c81ddfabbb045ba3c7"
 dependencies = [
  "microsandbox-db",
  "sea-orm-migration",
@@ -3305,9 +3305,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-network"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faabee571574f6ec6b75ee1f140812edcd4bc6bdfbca77d4b5532434fe781960"
+checksum = "c8275e6d19a327130cdd51f5744e2fb974bcb96981aa51bc71c508c6d4278b34"
 dependencies = [
  "hex",
  "hickory-proto",
@@ -3327,9 +3327,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ebbb1aa4fc60aff104f51798c535332bdd22ed0d8e91c00bc89959ad3e2c043"
+checksum = "1f9a872fadfc80325768520a0a1a5d09b6f7a84672f7661639dcc120f4f054ed"
 dependencies = [
  "bytes",
  "chrono",
@@ -3346,9 +3346,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol-client"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d5aa49ff8dbc7262eb203b81f90ca482294d69c976ff2e794c4ce633624dd5a"
+checksum = "d1248777b8c052b81d4581e86846653b10cf9112668a4d686defea08575f0475"
 dependencies = [
  "microsandbox-protocol",
  "serde",
@@ -3359,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-ruby"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "futures",
  "magnus",
@@ -3371,9 +3371,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ad0b146ec2dd4e835e266406fdb5e09a3d6c6f876f23dbda0af60903140e618"
+checksum = "5eca86e407ef17730ac43173e93de4c4aaca83738326ff0e33f57683ba92c793"
 dependencies = [
  "age",
  "base64 0.23.1",
@@ -3381,6 +3381,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "ciborium-ll",
+ "dirs",
  "hex",
  "libc",
  "microsandbox-db",
@@ -3407,9 +3408,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78d5b3ff24f1b65d552475bf7cd2272fe5878fef6e4b16d30c4814b350a1b4ac"
+checksum = "aded3565f0b1a84fee1c741789af14864be175637dec0fb0d239b8871d8af4e6"
 dependencies = [
  "chrono",
  "hex",
@@ -3426,9 +3427,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types-macros"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b7af3d623b526a5186c9d4d22d8c273ca077ac1e59b607060e96780d51da44f"
+checksum = "481373fff26cfbedab8ea6b9b7a0212342b653663f31dec200221e938418556c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3437,9 +3438,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e5ecfaf743f2e66c7fa746d78e842db35b030ab1bcb56a8dfb5f7fae2d9d7bf"
+checksum = "d9b7ff5a5a6bf7c93fa002c039d4f3b3c478a2b4f7e7e634ffb6273076904b42"
 dependencies = [
  "dirs",
  "libc",
