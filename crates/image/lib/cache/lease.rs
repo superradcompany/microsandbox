@@ -188,6 +188,19 @@ mod tests {
         );
     }
 
+    fn assert_lease_released(path: &Path) {
+        // A concurrent fork can retain a closed reader's descriptor until exec.
+        // Poll the OS lock, while still failing if our operation actually leaks a pin.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while StorageLease::try_exclusive(path).unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lease remained busy: {path:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn scope_reuses_pins_across_calls() {
         let home = tempfile::tempdir().unwrap();
@@ -199,7 +212,7 @@ mod tests {
         assert_eq!(cache.operation.as_ref().unwrap().lock().unwrap().len(), 1);
         assert!(StorageLease::try_exclusive(&path).unwrap().is_none());
         drop(cache);
-        assert!(StorageLease::try_exclusive(&path).unwrap().is_some());
+        assert_lease_released(&path);
     }
 
     #[test]
@@ -227,7 +240,7 @@ mod tests {
         }
         drop(reader);
         for path in cache.metadata_paths(&original).unwrap() {
-            assert!(StorageLease::try_exclusive(&path).unwrap().is_some());
+            assert_lease_released(&path);
         }
     }
 

@@ -1271,6 +1271,29 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn endpoint_probe_bounds_a_full_listener_queue() {
+        // A parallel test's fork can retain the listener after drop, making the final
+        // liveness result correctly remain true. Keep this close-sensitive fixture in
+        // its own process, as with the current/legacy endpoint test above.
+        const ISOLATED: &str = "MSB_TEST_ISOLATED_FULL_LISTENER_PROBE";
+        if std::env::var_os(ISOLATED).is_none() {
+            let name = std::thread::current()
+                .name()
+                .expect("named test thread")
+                .to_owned();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "isolated full-listener test failed: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let paths = SandboxSocketPaths::new(home.path(), home.path(), "worker");
         let path = &paths.runtime.legacy_agent;
