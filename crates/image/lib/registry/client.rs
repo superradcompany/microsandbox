@@ -367,8 +367,15 @@ impl Registry {
         metadata: &CachedImageMetadata,
         force: bool,
     ) -> ImageResult<PullResult> {
-        self.materialize_cached_layers_inner(reference, metadata, force, None, None)
-            .await
+        self.materialize_cached_rootfs(
+            reference,
+            metadata,
+            force,
+            RootfsMaterialization::Layered,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Materialize a reusable flat ext4 rootfs from already cached EROFS layers.
@@ -434,29 +441,12 @@ impl Registry {
         .map_err(|error| ImageError::Io(io::Error::other(error)))?
     }
 
-    pub(crate) async fn materialize_cached_layers_from_paths(
+    pub(crate) async fn materialize_cached_rootfs(
         &self,
         reference: &oci_client::Reference,
         metadata: &CachedImageMetadata,
         force: bool,
-        staged_layers: Arc<crate::archive::StagedLayerGuard>,
-        progress: Option<PullProgressSender>,
-    ) -> ImageResult<PullResult> {
-        self.materialize_cached_layers_inner(
-            reference,
-            metadata,
-            force,
-            Some(staged_layers),
-            progress,
-        )
-        .await
-    }
-
-    async fn materialize_cached_layers_inner(
-        &self,
-        reference: &oci_client::Reference,
-        metadata: &CachedImageMetadata,
-        force: bool,
+        materialization: RootfsMaterialization,
         staged_layers: Option<Arc<crate::archive::StagedLayerGuard>>,
         progress: Option<PullProgressSender>,
     ) -> ImageResult<PullResult> {
@@ -484,7 +474,7 @@ impl Registry {
             layer_descriptors: &layer_descriptors,
             diff_ids: &diff_ids,
             force,
-            materialization: RootfsMaterialization::Layered,
+            materialization,
             progress,
             staged_layers,
         })
@@ -494,6 +484,11 @@ impl Registry {
             .iter()
             .map(|diff_id| diff_id.parse())
             .collect::<ImageResult<Vec<Digest>>>()?;
+
+        if materialization.includes_flat() {
+            self.materialize_flat_rootfs(&manifest_digest, &layer_diff_ids, force)
+                .await?;
+        }
 
         Ok(PullResult {
             layer_diff_ids,

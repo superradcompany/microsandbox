@@ -39,7 +39,7 @@ pub struct PullArgs {
     pub materialize: Option<PullMaterialization>,
 }
 
-/// Rootfs representation prepared by `msb pull`.
+/// Rootfs representation prepared by `msb pull` or `msb load`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum PullMaterialization {
     /// Prepare the existing stitched layered rootfs.

@@ -53,6 +53,15 @@ msb load --input my-image.tar
 ```
 </CodeGroup>
 
+For a flat root disk, prepare the flat image when you load the archive. Use `--materialize all` if you want to create both layered and flat sandboxes from this image.
+
+<CodeGroup>
+```bash Shell
+msb load --input my-image.tar --materialize flat
+msb create my-image:latest --root-disk flat:2G --pull never
+```
+</CodeGroup>
+
 If the archive has no useful tag, or you want a different local alias, pass one:
 
 <CodeGroup>

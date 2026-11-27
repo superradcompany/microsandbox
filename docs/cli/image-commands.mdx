@@ -61,7 +61,10 @@ Expanded form: `msb image load`.
 |------|-------------|
 | `-i`, `--input <PATH>` | Read archive from a tar file instead of stdin |
 | `-t`, `--tag <REF>` | Add a local image reference to the first imported image |
+| `--materialize <MODE>` | Override the configured layout with `layered`, `flat`, or `all` |
 | `-q`, `--quiet` | Suppress output |
+
+Plain `msb load` prepares a flat root when `sandbox_defaults.oci.root_disk.kind` is `flat`. Otherwise it prepares a layered root.
 
 ## msb save
 

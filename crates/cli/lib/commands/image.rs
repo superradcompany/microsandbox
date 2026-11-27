@@ -84,6 +84,13 @@ pub struct ImageLoadArgs {
     #[arg(short, long, value_name = "PATH")]
     pub input: Option<PathBuf>,
 
+    /// Rootfs representations to prepare from the archive.
+    ///
+    /// When omitted, a configured flat OCI root disk selects flat materialization.
+    /// Otherwise the default is layered.
+    #[arg(long, value_enum)]
+    pub materialize: Option<pull::PullMaterialization>,
+
     /// Add a local image reference to the first imported image.
     #[arg(short, long, value_name = "REF")]
     pub tag: Vec<String>,
@@ -234,7 +241,7 @@ async fn run_pull_inner(
     let backend = crate::commands::common::local_backend_ref(&backend)?;
     let backend_config = backend.config();
     let oci_defaults = &backend_config.sandbox_defaults.oci;
-    let materialization = resolve_pull_materialization(materialization, oci_defaults)?;
+    let materialization = resolve_materialization(materialization, oci_defaults)?;
     let cache = microsandbox_image::GlobalCache::new(&backend.cache_dir())?.operation();
     let platform = microsandbox_image::Platform::host_linux();
     let image_ref: microsandbox_image::Reference = reference
@@ -691,6 +698,8 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
 pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
+    let materialization =
+        resolve_materialization(args.materialize, &local.config().sandbox_defaults.oci)?;
     let cache_dir = local.cache_dir();
     // Start the progress display before reading the archive, so a piped
     // `docker save | msb load` shows activity while stdin is consumed.
@@ -733,13 +742,14 @@ pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
     };
 
     let cache_operation = microsandbox_image::GlobalCache::new(&cache_dir)?;
-    let loaded = microsandbox_image::load_archive_with(
+    let loaded = microsandbox_image::load_archive_with_materialization(
         &cache_operation,
         input_path,
         ImageLoadOptions {
             tags: args.tag.clone(),
             progress: Some(sender),
         },
+        materialization.image_materialization(),
         |image| async move {
             Image::persist(local, &image.reference, image.metadata)
                 .await
@@ -933,7 +943,7 @@ fn pull_failure_line(quiet: bool, reference: &str) {
     }
 }
 
-fn resolve_pull_materialization(
+fn resolve_materialization(
     requested: Option<pull::PullMaterialization>,
     defaults: &microsandbox::config::OciSandboxDefaults,
 ) -> anyhow::Result<pull::PullMaterialization> {
@@ -1018,7 +1028,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pull_materialization_inherits_flat_only_when_not_explicit() {
+    fn materialization_inherits_flat_only_when_not_explicit() {
         let defaults = microsandbox::config::OciSandboxDefaults {
             upper_size_mib: None,
             root_disk: Some(microsandbox::sandbox::RootDisk::Flat {
@@ -1029,12 +1039,11 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_pull_materialization(None, &defaults).unwrap(),
+            resolve_materialization(None, &defaults).unwrap(),
             pull::PullMaterialization::Flat
         );
         assert_eq!(
-            resolve_pull_materialization(Some(pull::PullMaterialization::Layered), &defaults)
-                .unwrap(),
+            resolve_materialization(Some(pull::PullMaterialization::Layered), &defaults).unwrap(),
             pull::PullMaterialization::Layered
         );
     }
