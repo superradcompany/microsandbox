@@ -231,7 +231,7 @@ impl PassthroughFs {
         }
     }
 
-    fn finish_removed_alias(&self, inodes: &mut InodeTable, data: &Arc<InodeData>) {
+    pub(super) fn finish_removed_alias(&self, inodes: &mut InodeTable, data: &Arc<InodeData>) {
         if let Some(path) = inodes
             .by_path
             .iter()
