@@ -319,7 +319,7 @@ User OCI defaults apply to local creation. Managed root-disk settings also apply
 
 `root_disk` and `upper_size_mib` are mutually exclusive. For a portable flat default, use `clone: "auto"`; it attempts a native reflink and safely falls back to a sparse copy. Use `clone: "reflink"` only when failure is preferable to copying on a host filesystem without reflink support.
 
-When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reusable flat artifact. An explicit `msb pull IMAGE --materialize layered|flat|all` always wins.
+When the root-disk default is flat, both `msb pull IMAGE` and `msb load` prepare a reusable flat root. Pass `--materialize layered|flat|all` to either command to override the configured layout.
 
 ## `runtime`
 
