@@ -709,6 +709,28 @@ mod linux {
         Ok(())
     }
 
+    /// Creates an empty file at `guest_path` for a file bind mount to cover.
+    ///
+    /// An existing file is left alone: it may sit inside a read-only mount
+    /// (covering one file of a read-only share), where opening it for writing
+    /// would fail with EROFS although the bind mount itself works.
+    pub(super) fn ensure_file_bind_target(guest_path: &str) -> AgentdResult<()> {
+        if Path::new(guest_path).is_file() {
+            return Ok(());
+        }
+
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(guest_path)
+            .map_err(|e| {
+                AgentdError::Init(format!("failed to create bind target {guest_path}: {e}"))
+            })?;
+
+        Ok(())
+    }
+
     /// Mounts a single file from a virtiofs share via bind mount.
     fn mount_file(spec: &FileMountSpec) -> AgentdResult<()> {
         let staging_path = format!("{}/{}", microsandbox_protocol::FILE_MOUNTS_DIR, spec.tag);
@@ -760,17 +782,7 @@ mod linux {
             }
 
             // 4. Create the target file (touch) as a bind mount target.
-            fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&spec.guest_path)
-                .map_err(|e| {
-                    AgentdError::Init(format!(
-                        "failed to create bind target {}: {e}",
-                        spec.guest_path
-                    ))
-                })?;
+            ensure_file_bind_target(&spec.guest_path)?;
 
             // 5. Bind mount the file from staging to the guest path.
             let source_path = format!("{staging_path}/{}", spec.filename);
@@ -1189,5 +1201,40 @@ mod tests {
         let error = linux::planned_user_mounts_for_test(&dirs, &files, &[], &[]).unwrap_err();
 
         assert!(error.to_string().contains("file mount cannot contain"));
+    }
+
+    #[test]
+    fn test_file_bind_target_existing_file_is_not_opened_for_writing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A file that can't be opened for writing, like one inside a read-only mount.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("secret.txt");
+        std::fs::write(&target, "hidden").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        // Root can open a 0o444 file for writing, so the file wouldn't reproduce the bug.
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .is_ok()
+        {
+            eprintln!("skipping: this user can write to read-only files (root?)");
+            return;
+        }
+
+        linux::ensure_file_bind_target(target.to_str().unwrap()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hidden");
+    }
+
+    #[test]
+    fn test_file_bind_target_missing_file_is_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app.toml");
+
+        linux::ensure_file_bind_target(target.to_str().unwrap()).unwrap();
+
+        assert!(target.is_file());
     }
 }
