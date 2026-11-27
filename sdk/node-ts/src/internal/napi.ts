@@ -253,6 +253,13 @@ export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
 
 /** Restore exposes destination controls, never image or startup-command selection. */
 export interface NapiRestoreBuilderSetters {
+  /** Grow only the child root before disk boot; full snapshots require diskOnly(). */
+  rootDisk(mib: number): this;
+  /** Bind destination secrets and enable TLS interception as at creation. */
+  secret(configure: (b: NapiSecretBuilder) => NapiSecretBuilder): this;
+  secretViolationAction(action: string): this;
+  /** Full resume requires the CA already trusted by the captured guest. */
+  tlsInterceptCa(cert: string, key: string): this;
   /** Control retrieval of the snapshot's pinned base image. */
   pullPolicy(policy: string): this;
   /** Select the destination proxy before disk boot or full resume. */

@@ -856,6 +856,12 @@ export declare class RestoreBuilder {
   pullPolicy(policy: string): this
   /** Set the destination proxy before boot or resume, preserving captured guest identity. */
   proxy(configure: (arg: OutboundProxyBuilder) => HttpConnectProxyBuilder | Socks4ProxyBuilder | Socks5ProxyBuilder): this
+  /** Bind a destination secret using the same policy and TLS behavior as creation. */
+  secret(configure: (arg: SecretBuilder) => SecretBuilder): this
+  /** Set the destination's default action for blocked secret placeholders. */
+  secretViolationAction(action: string): this
+  /** Select an interception CA; full resume must retain the source guest's trusted CA. */
+  tlsInterceptCa(cert: string, key: string): this
   /** Default guest directory for new commands. */
   workdir(value: string): this
   /** Default shell for new commands; never executed by restoration. */
@@ -872,6 +878,8 @@ export declare class RestoreBuilder {
   cpus(count: number): this
   /** Set destination memory in MiB; full execution restore requires captured geometry. */
   memory(mib: number): this
+  /** Grow the private ext4 root disk before disk boot; never changes the source snapshot. */
+  rootDisk(mib: number): this
   /** Set the CPU ceiling for disk boot; full resume requires the captured ceiling. */
   maxCpus(count: number): this
   /** Set the memory ceiling in MiB; full resume requires the captured ceiling. */
@@ -1729,7 +1737,7 @@ export type JsSftpClient = SftpClient
 
 /** A backend-neutral snapshot artifact. */
 export declare class Snapshot {
-  /** Whether this native library enforces import byte limits. */
+  /** Advertise support before an older provider can ignore the requested limit. */
   static supportsImportBudget(): boolean
   /**
    * Consume destination options; the receiver always selects the source and backend.
@@ -2320,8 +2328,8 @@ export interface LoadOpts {
   group?: string
   /** Select the unique imported tip even when it is not a fast-forward. */
   setHead?: boolean
-  /** Maximum logical bytes imported; omit for unlimited. */
-  maximumDiskBytes?: number;
+  /** Maximum logical bytes imported. */
+  maximumDiskBytes?: number
 }
 
 /** One captured log entry from `exec.log`. */

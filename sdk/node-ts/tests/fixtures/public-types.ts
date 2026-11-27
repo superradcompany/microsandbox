@@ -1,5 +1,5 @@
 // Compiled by npm run typecheck. Exercise the same fluent types consumers import.
-import { Sandbox, Volume, type JobOutputSource, type LogLevel, type PullPolicy, type VolumeKind } from "../../src/index.js";
+import { GiB, Sandbox, Volume, type JobOutputSource, type LogLevel, type PullPolicy, type VolumeKind } from "../../src/index.js";
 
 export async function publicTypes(filters: JobOutputSource[]) {
   const volume = await Volume.get("cache");
@@ -14,6 +14,14 @@ export async function publicTypes(filters: JobOutputSource[]) {
   builder.pullPolicy("if-mising");
   // @ts-expect-error The callback receives a network builder.
   builder.network(network => network.nonexistentMethod());
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) throw new Error("API_KEY is required");
+  Sandbox.restore("prepared")
+    .name("child")
+    .rootDisk(GiB(8))
+    .secret(secret => secret.env("API_KEY").value(apiKey).allow("api.example.com"))
+    .secretViolationAction("block-and-log")
+    .tlsInterceptCa("source-ca.pem", "source-ca-key.pem");
   const sandbox = await builder.create();
   await sandbox.exec("echo", new Set(["hello"]));
   await sandbox.attach("echo", ["hello"] as const);

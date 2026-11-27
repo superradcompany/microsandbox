@@ -65,7 +65,7 @@ describe("restore resource ceiling capabilities", () => {
 
 
 describe("restore destination policy capabilities", () => {
-  for (const option of ["label", "labels", "workdir", "shell", "entrypoint", "cmd", "env", "envs", "proxy", "pullPolicy"] as const) {
+  for (const option of ["label", "labels", "workdir", "shell", "entrypoint", "cmd", "env", "envs", "proxy", "pullPolicy", "rootDisk", "secret", "secretViolationAction", "tlsInterceptCa"] as const) {
     it(`refuses missing ${option} before dispatch and preserves recognized setters`, () => {
       delete native[option];
       const restore = vi.fn();

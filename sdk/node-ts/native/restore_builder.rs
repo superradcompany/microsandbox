@@ -14,6 +14,7 @@ use crate::outbound_proxy_builder::{JsOutboundProxyBuilder, take_selected_proxy}
 use crate::pull_progress::JsPullProgressStream;
 use crate::sandbox::Sandbox;
 use crate::sandbox_builder::{JsPullProgressCreate, parse_bind_addr};
+use crate::secret_builder::{JsSecretBuilder, parse_violation_action};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -100,6 +101,35 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Bind a destination secret using the same policy and TLS behavior as creation.
+    #[napi(ts_args_type = "configure: (arg: SecretBuilder) => SecretBuilder")]
+    pub fn secret(
+        &mut self,
+        env: &Env,
+        configure: Function<ClassInstance<JsSecretBuilder>, ClassInstance<JsSecretBuilder>>,
+    ) -> Result<&Self> {
+        let initial = JsSecretBuilder::new().into_instance(env)?;
+        let mut returned = configure.call(initial)?;
+        let entry = returned.take_built()?;
+        self.inner = Some(self.take_inner()?.secret_entry(entry));
+        Ok(self)
+    }
+
+    /// Set the destination's default action for blocked secret placeholders.
+    #[napi(js_name = "secretViolationAction")]
+    pub fn secret_violation_action(&mut self, action: String) -> Result<&Self> {
+        let action = parse_violation_action(&action)?;
+        self.inner = Some(self.take_inner()?.secret_violation_action(action));
+        Ok(self)
+    }
+
+    /// Select an interception CA; full resume must retain the source guest's trusted CA.
+    #[napi(js_name = "tlsInterceptCa")]
+    pub fn tls_intercept_ca(&mut self, cert: String, key: String) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.tls_intercept_ca(cert, key));
+        Ok(self)
+    }
+
     /// Default guest directory for new commands.
     #[napi]
     pub fn workdir(&mut self, value: String) -> Result<&Self> {
@@ -157,6 +187,14 @@ impl JsRestoreBuilder {
     pub fn memory(&mut self, mib: f64) -> Result<&Self> {
         let mib = crate::numeric::uint32(mib, "mib")?;
         self.inner = Some(self.take_inner()?.memory(Mebibytes::from(mib)));
+        Ok(self)
+    }
+
+    /// Grow the private ext4 root disk before disk boot; never changes the source snapshot.
+    #[napi(js_name = "rootDisk")]
+    pub fn root_disk(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
+        self.inner = Some(self.take_inner()?.root_disk(Mebibytes::from(mib)));
         Ok(self)
     }
 

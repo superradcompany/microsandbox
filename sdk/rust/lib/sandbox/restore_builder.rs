@@ -3,9 +3,16 @@
 use std::time::Duration;
 
 #[cfg(feature = "net")]
+use std::path::PathBuf;
+
+#[cfg(feature = "net")]
+use microsandbox_network::builder::SecretBuilder;
+#[cfg(feature = "net")]
 use microsandbox_network::policy::NetworkPolicy;
 #[cfg(feature = "net")]
 use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
+#[cfg(feature = "net")]
+use microsandbox_types::{SecretEntry, SecretViolationAction};
 
 use super::config::SnapshotRestoreMode;
 use super::{
@@ -96,6 +103,11 @@ impl super::SandboxConfigPatch {
         }
         if let Some(boot) = self.restore_boot_overrides {
             boot.validate_scope(scope, mode)?;
+        }
+        if self.snapshot_root_growth_mib.is_some() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "changing a full snapshot root capacity requires disk-only mode".into(),
+            ));
         }
         if self.spec.security_profile.is_some() {
             return Err(MicrosandboxError::unsupported(
@@ -216,6 +228,21 @@ impl RestoreBuilder {
         self
     }
 
+    /// Grow the destination's private ext4 root disk before its first boot.
+    ///
+    /// Local contexts only. The capacity is in MiB. Shrinking and replacing the captured layout are unsupported.
+    /// Full snapshots require disk-only mode; the source snapshot is never modified.
+    pub fn root_disk(mut self, size: impl Into<Mebibytes>) -> Self {
+        if self.inner.context().kind() != crate::ContextKind::Local {
+            self.inner = self
+                .inner
+                .config_error("snapshot root disk growth requires a local context");
+            return self;
+        }
+        self.inner.config.snapshot_root_growth_mib = Some(size.into().as_u32());
+        self
+    }
+
     /// Set the CPU ceiling for disk boot. Full resume requires the captured ceiling.
     pub fn max_cpus(mut self, count: u8) -> Self {
         self.inner = self.inner.max_cpus(count);
@@ -309,6 +336,52 @@ impl RestoreBuilder {
         P: OutboundProxyConfig,
     {
         self.inner = self.inner.proxy(configure);
+        self
+    }
+
+    /// Bind a protected secret in the destination, as [`SandboxBuilder::secret`] does at creation.
+    ///
+    /// The value is resolved on the destination host; snapshots never store it. A full restore
+    /// resumes a guest that already holds its placeholders, so bind the same name and placeholder
+    /// the source used. Enables TLS interception, which a sandbox started with secrets relied on;
+    /// see [`Self::tls_intercept_ca`] when the source's interception CA is not the destination's default.
+    #[cfg(feature = "net")]
+    pub fn secret(mut self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
+        self.inner = self.inner.secret(f);
+        self
+    }
+
+    /// Bind a materialized secret entry in the destination; see [`Self::secret`].
+    #[cfg(feature = "net")]
+    pub fn secret_entry(mut self, entry: SecretEntry) -> Self {
+        self.inner = self.inner.secret_entry(entry);
+        self
+    }
+
+    /// Intercept TLS with this CA certificate and key (PEM files) in the destination.
+    ///
+    /// A full restore resumes a guest that trusts only the CA it installed at boot, and does not
+    /// rerun that setup. When the source used a custom CA, or the destination's default CA differs
+    /// from the source's, pass the source's CA here; otherwise intercepted HTTPS fails the guest's
+    /// certificate checks.
+    #[cfg(feature = "net")]
+    pub fn tls_intercept_ca(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
+        let cert = cert.into();
+        let key = key.into();
+        self.inner = self.inner.network(|network| {
+            network.tls_overlay(|tls| {
+                tls.enabled(true)
+                    .intercept_ca_cert(cert)
+                    .intercept_ca_key(key)
+            })
+        });
+        self
+    }
+
+    /// Set the destination's default action for blocked secret placeholders.
+    #[cfg(feature = "net")]
+    pub fn secret_violation_action(mut self, action: SecretViolationAction) -> Self {
+        self.inner = self.inner.secret_violation_action(action);
         self
     }
 
@@ -535,6 +608,58 @@ mod tests {
 
     fn config(builder: &RestoreBuilder) -> crate::SandboxConfig {
         builder.inner.config.clone().into_config()
+    }
+
+    #[test]
+    fn root_capacity_requires_a_fresh_disk_boot() {
+        use crate::snapshot::SnapshotScope;
+
+        let builder = Sandbox::restore("saved").root_disk(512_u32);
+        assert_eq!(config(&builder).snapshot_root_growth_mib, Some(512));
+        assert!(
+            builder
+                .inner
+                .config
+                .validate_for_restore(SnapshotScope::Disk, SnapshotRestoreMode::Full,)
+                .is_ok()
+        );
+        assert!(
+            builder
+                .inner
+                .config
+                .validate_for_restore(SnapshotScope::Full, SnapshotRestoreMode::DiskOnly,)
+                .is_ok()
+        );
+        let error = builder
+            .inner
+            .config
+            .validate_for_restore(SnapshotScope::Full, SnapshotRestoreMode::Full)
+            .unwrap_err();
+        assert!(error.to_string().contains("disk-only"));
+    }
+
+    #[cfg(feature = "cloud")]
+    #[tokio::test]
+    async fn root_capacity_rejects_remote_before_resolving_the_source() {
+        let context = crate::RemoteContext::builder()
+            .url("http://127.0.0.1:1")
+            .api_key("test-key")
+            .build()
+            .unwrap();
+        let builder = RestoreBuilder::for_context(
+            std::sync::Arc::new(context),
+            SnapshotReference::auto("saved"),
+        );
+        let result = builder
+            .name("destination")
+            .root_disk(512_u32)
+            .restore()
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("remote root capacity must be rejected"),
+        };
+        assert!(error.to_string().contains("requires a local context"));
     }
 
     #[test]
@@ -822,6 +947,60 @@ mod tests {
         assert_eq!(config(&restore).spec.lifecycle.max_duration_secs, Some(600));
         assert_eq!(config(&restore).spec.lifecycle.idle_timeout_secs, Some(120));
         assert!(restore.inner.config.spec.security_profile.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn destination_secrets_rebind_captured_placeholders_with_interception() {
+        let restore = Sandbox::restore("saved")
+            .name("child")
+            .secret(|s| {
+                s.env("GKEY")
+                    .source(crate::sandbox::SecretSource::Env { var: "GKEY".into() })
+                    .placeholder("captured-placeholder")
+                    .allow("gate.test")
+            })
+            .secret_violation_action(SecretViolationAction::BlockAndLog);
+
+        let network = config(&restore).local_network_config().unwrap();
+
+        assert!(network.tls.enabled);
+        assert_eq!(network.secrets.secrets.len(), 1);
+        let entry = &network.secrets.secrets[0];
+        assert_eq!(entry.env_var, "GKEY");
+        assert_eq!(entry.placeholder, "captured-placeholder");
+        assert!(entry.value.is_empty());
+        assert_eq!(
+            network.secrets.violation_action,
+            SecretViolationAction::BlockAndLog
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn destination_interception_ca_survives_secret_binding_in_either_order() {
+        let ca_first = Sandbox::restore("saved")
+            .name("child")
+            .tls_intercept_ca("/ca/source.pem", "/ca/source.key")
+            .secret(|s| s.env("GKEY").value("v").allow("gate.test"));
+        let secret_first = Sandbox::restore("saved")
+            .name("child")
+            .secret(|s| s.env("GKEY").value("v").allow("gate.test"))
+            .tls_intercept_ca("/ca/source.pem", "/ca/source.key");
+
+        for restore in [ca_first, secret_first] {
+            let network = config(&restore).local_network_config().unwrap();
+            assert!(network.tls.enabled);
+            assert_eq!(network.secrets.secrets.len(), 1);
+            assert_eq!(
+                network.tls.intercept_ca.cert_path.as_deref(),
+                Some(std::path::Path::new("/ca/source.pem"))
+            );
+            assert_eq!(
+                network.tls.intercept_ca.key_path.as_deref(),
+                Some(std::path::Path::new("/ca/source.key"))
+            );
+        }
     }
 
     #[cfg(feature = "net")]
