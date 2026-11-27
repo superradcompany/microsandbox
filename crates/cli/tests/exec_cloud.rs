@@ -48,6 +48,32 @@ fn agent_unavailable() -> Reply {
     }
 }
 
+fn agent_not_found() -> Reply {
+    Reply {
+        status: 404,
+        body: json!({
+            "error": {
+                "code": "sandbox_not_found",
+                "message": "sandbox not found"
+            }
+        })
+        .to_string(),
+    }
+}
+
+fn agent_not_running() -> Reply {
+    Reply {
+        status: 409,
+        body: json!({
+            "error": {
+                "code": "sandbox_not_running",
+                "message": "sandbox is not running"
+            }
+        })
+        .to_string(),
+    }
+}
+
 async fn cloud_cli(dir: &Path, api_url: &str, args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_msb"));
     for (key, _) in std::env::vars_os() {
@@ -113,6 +139,7 @@ async fn server(replies: Vec<Reply>) -> (String, JoinHandle<Vec<String>>) {
 
             let reason = match reply.status {
                 200 => "OK",
+                404 => "Not Found",
                 409 => "Conflict",
                 503 => "Service Unavailable",
                 status => panic!("unsupported test status {status}"),
@@ -137,14 +164,9 @@ async fn server(replies: Vec<Reply>) -> (String, JoinHandle<Vec<String>>) {
 //--------------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn explicit_exec_uses_two_observations_then_the_captured_uuid() {
+async fn explicit_exec_uses_one_observation_then_the_captured_uuid() {
     let dir = tempfile::tempdir().unwrap();
-    let (url, requests) = server(vec![
-        sandbox("original", "running"),
-        sandbox("original", "running"),
-        agent_unavailable(),
-    ])
-    .await;
+    let (url, requests) = server(vec![sandbox("original", "running"), agent_unavailable()]).await;
     let output = cloud_cli(
         dir.path(),
         &url,
@@ -155,7 +177,6 @@ async fn explicit_exec_uses_two_observations_then_the_captured_uuid() {
     assert_eq!(
         requests.await.unwrap(),
         [
-            "GET /v1/sandboxes/by-name/task HTTP/1.1",
             "GET /v1/sandboxes/by-name/task HTTP/1.1",
             "GET /v1/sandboxes/original/agent HTTP/1.1",
         ]
@@ -186,13 +207,9 @@ async fn omitted_command_still_reads_fresh_config() {
 }
 
 #[tokio::test]
-async fn explicit_exec_rejects_a_same_name_replacement_before_connecting() {
+async fn explicit_exec_targets_captured_uuid_without_following_replacement() {
     let dir = tempfile::tempdir().unwrap();
-    let (url, requests) = server(vec![
-        sandbox("original", "running"),
-        sandbox("replacement", "running"),
-    ])
-    .await;
+    let (url, requests) = server(vec![sandbox("original", "running"), agent_not_found()]).await;
     let output = cloud_cli(
         dir.path(),
         &url,
@@ -201,15 +218,22 @@ async fn explicit_exec_rejects_a_same_name_replacement_before_connecting() {
     .await;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
-    assert!(stderr.contains("replaced"), "{stderr}");
-    assert_eq!(requests.await.unwrap().len(), 2);
+    assert!(stderr.contains("not found"), "{stderr}");
+    assert_eq!(
+        requests.await.unwrap(),
+        [
+            "GET /v1/sandboxes/by-name/task HTTP/1.1",
+            "GET /v1/sandboxes/original/agent HTTP/1.1",
+        ]
+    );
 }
 
 #[tokio::test]
-async fn explicit_exec_rechecks_shutdown_before_connecting() {
+async fn explicit_exec_rechecks_shutdown_when_agent_reports_not_running() {
     let dir = tempfile::tempdir().unwrap();
     let (url, requests) = server(vec![
         sandbox("original", "running"),
+        agent_not_running(),
         sandbox("original", "stopping"),
     ])
     .await;
@@ -225,5 +249,12 @@ async fn explicit_exec_rechecks_shutdown_before_connecting() {
         stderr.contains("shutdown is already in progress"),
         "{stderr}"
     );
-    assert_eq!(requests.await.unwrap().len(), 2);
+    assert_eq!(
+        requests.await.unwrap(),
+        [
+            "GET /v1/sandboxes/by-name/task HTTP/1.1",
+            "GET /v1/sandboxes/original/agent HTTP/1.1",
+            "GET /v1/sandboxes/by-name/task HTTP/1.1",
+        ]
+    );
 }
