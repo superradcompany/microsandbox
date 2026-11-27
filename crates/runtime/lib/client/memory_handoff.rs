@@ -81,12 +81,12 @@ pub fn send_first(socket: RawFd, file: &File, byte: u8) -> io::Result<()> {
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as _;
     unsafe {
         let header = libc::CMSG_FIRSTHDR(&msg);
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as usize;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
         std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<RawFd>(), file.as_raw_fd());
     }
     loop {
@@ -118,7 +118,7 @@ pub fn receive_first(socket: RawFd) -> io::Result<Option<(u8, Option<File>)>> {
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
     loop {
-        msg.msg_controllen = std::mem::size_of_val(&control);
+        msg.msg_controllen = std::mem::size_of_val(&control) as _;
         msg.msg_flags = 0;
         let received = unsafe { libc::recvmsg(socket, &mut msg, libc::MSG_CMSG_CLOEXEC) };
         if received == 0 {
@@ -137,9 +137,8 @@ pub fn receive_first(socket: RawFd) -> io::Result<Option<(u8, Option<File>)>> {
         let mut header = libc::CMSG_FIRSTHDR(&msg);
         while !header.is_null() {
             if (*header).cmsg_level == libc::SOL_SOCKET && (*header).cmsg_type == libc::SCM_RIGHTS {
-                let bytes = (*header)
-                    .cmsg_len
-                    .saturating_sub(libc::CMSG_LEN(0) as usize);
+                let bytes =
+                    ((*header).cmsg_len as usize).saturating_sub(libc::CMSG_LEN(0) as usize);
                 for index in 0..bytes / std::mem::size_of::<RawFd>() {
                     let fd = std::ptr::read_unaligned(
                         libc::CMSG_DATA(header).cast::<RawFd>().add(index),
