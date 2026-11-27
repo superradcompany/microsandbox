@@ -226,7 +226,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 > Run:<br />
 > · `msb --help` for quick help menu. <br />
 > · `msb --tree` for the complete command hierarchy and descriptions. <br />
-> · `msb --tree -CbL 2` for a compact two-level view.
+> · `msb --tree -CL 2` for a compact two-level view.
 
 <br />
 
