@@ -598,10 +598,10 @@ async fn live_config_does_not_erase_launch_outcomes() {
     config.resumed_from_full_snapshot = true;
     owner
         .binding
-        .publish(Arc::new(crate::sandbox::state::RuntimeSession {
-            inner: crate::context::SandboxInner::Local(owner.local_state().unwrap()),
+        .publish(Arc::new(crate::sandbox::state::RuntimeSession::new(
+            crate::context::SandboxInner::Local(owner.local_state().unwrap()),
             config,
-        }));
+        )));
     let clone = owner.clone();
     let persisted = owner.config().await.unwrap();
     let json = serde_json::to_value(&persisted).unwrap();

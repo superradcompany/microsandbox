@@ -323,16 +323,12 @@ async fn concurrent_clone_preparation_publishes_one_shared_session() {
             200,
             sandbox("original", "running"),
         ),
-        (
-            "GET",
-            "/v1/sandboxes/by-name/task",
-            200,
-            sandbox("original", "running"),
-        ),
     ])
     .await;
     let resource = Sandbox::ctx(context.as_ref()).get("task").await.unwrap();
     let clone = resource.clone();
+    // The second waiter reuses the confirmed-running cloud session published by
+    // the first without issuing a redundant status lookup.
     let (first, second) = tokio::join!(resource.prepare_runtime(), clone.prepare_runtime());
     let first = first.unwrap();
     let second = second.unwrap();

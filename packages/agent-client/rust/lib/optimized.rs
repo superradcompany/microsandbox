@@ -456,6 +456,24 @@ impl AgentClient {
         self.pending.lock().await.clear();
     }
 
+    /// Whether the transport has stopped carrying frames.
+    ///
+    /// True once the peer closed the connection, an I/O error ended either transport task, or
+    /// [`abort`](Self::abort) was called. A closed client never recovers, so an owner that keeps
+    /// one across operations should replace it.
+    pub fn is_closed(&self) -> bool {
+        self.reader_handle.is_finished() || self.writer_handle.is_finished()
+    }
+
+    /// Whether this connection has exhausted its relay-assigned correlation ID range.
+    ///
+    /// Once true, every further request on this client will fail with
+    /// [`AgentClientError::IdRangeExhausted`], so a pool should drop it instead of reusing it.
+    pub fn is_exhausted(&self) -> bool {
+        let next = self.next_id.load(std::sync::atomic::Ordering::Relaxed);
+        next == 0 || next < self.id_min || next >= self.id_max
+    }
+
     /// Close the connection. Drops the writer and aborts the reader task;
     /// any in-flight requests resolve with [`AgentClientError::Closed`].
     pub async fn close(self) {
@@ -2437,5 +2455,106 @@ mod tests {
         );
         assert!(!client.pending.lock().await.contains_key(&id));
         server.await.unwrap();
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn is_closed_reflects_peer_close_and_abort() {
+        use tokio::io::AsyncWriteExt;
+
+        let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
+        let ready = Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+        let handshake = async {
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server_io, &ready).await.unwrap();
+            server_io
+        };
+        let (client, server_io) = tokio::join!(AgentClient::connect_stream(client_io), handshake);
+        let client = client.unwrap();
+
+        assert!(!client.is_closed());
+        drop(server_io);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !client.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("closing peer should mark client closed");
+        assert!(client.is_closed());
+
+        let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
+        let handshake = async {
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server_io, &ready).await.unwrap();
+            server_io
+        };
+        let (client, _server_io) = tokio::join!(AgentClient::connect_stream(client_io), handshake);
+        let client = client.unwrap();
+
+        assert!(!client.is_closed());
+        client.abort().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !client.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborting client should mark client closed");
+        assert!(client.is_closed());
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn is_exhausted_tracks_remaining_correlation_ids() {
+        use microsandbox_protocol::fs::{FsOp, FsRequest, FsResponse};
+        use tokio::io::AsyncWriteExt;
+
+        let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
+        let ready = Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+        let server = tokio::spawn(async move {
+            // Range [1, 2) provides exactly one usable correlation ID.
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&2u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server_io, &ready).await.unwrap();
+
+            let request = codec::read_message(&mut server_io).await.unwrap();
+            let response = Message::with_payload(
+                MessageType::FsResponse,
+                request.id,
+                &FsResponse {
+                    ok: true,
+                    error: None,
+                    data: None,
+                },
+            )
+            .unwrap();
+            codec::write_message(&mut server_io, &response)
+                .await
+                .unwrap();
+            server_io
+        });
+
+        let client = AgentClient::connect_stream(client_io).await.unwrap();
+        assert!(!client.is_exhausted());
+
+        let req = FsRequest {
+            op: FsOp::Stat {
+                path: "/tmp".into(),
+                follow_symlink: true,
+            },
+            bulk: None,
+        };
+        client.request(MessageType::FsRequest, &req).await.unwrap();
+
+        assert!(client.is_exhausted());
+        let err = client
+            .request(MessageType::FsRequest, &req)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentClientError::IdRangeExhausted));
+        let _server_io = server.await.unwrap();
     }
 }

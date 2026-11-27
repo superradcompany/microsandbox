@@ -3259,85 +3259,85 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
         let server = tokio::spawn(async move {
-            let mut requests = Vec::new();
-
-            while requests.len() < 2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut peeked = [0; 4096];
-                let request_len = tokio::time::timeout(Duration::from_secs(5), async {
-                    loop {
-                        let request_len = stream.peek(&mut peeked).await.unwrap();
-                        if peeked[..request_len].contains(&b'\n') {
-                            break request_len;
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let request_tx = request_tx.clone();
+                tokio::spawn(async move {
+                    let mut peeked = [0; 4096];
+                    let request_len = tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            let request_len = stream.peek(&mut peeked).await.unwrap();
+                            if peeked[..request_len].contains(&b'\n') {
+                                break request_len;
+                            }
+                            tokio::task::yield_now().await;
                         }
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .unwrap();
-                let request_line = std::str::from_utf8(&peeked[..request_len])
-                    .unwrap()
-                    .lines()
-                    .next()
+                    })
+                    .await
                     .unwrap();
+                    let request_line = std::str::from_utf8(&peeked[..request_len])
+                        .unwrap()
+                        .lines()
+                        .next()
+                        .unwrap();
 
-                if request_line == "GET /v1/sandboxes/by-name/spec-decode HTTP/1.1"
-                    || request_line
-                        == "GET /v1/sandboxes/00000000-0000-0000-0000-0000000000a1 HTTP/1.1"
-                {
-                    let mut request = Vec::new();
-                    while !request.ends_with(b"\r\n\r\n") {
-                        request.push(stream.read_u8().await.unwrap());
+                    if request_line == "GET /v1/sandboxes/by-name/spec-decode HTTP/1.1"
+                        || request_line
+                            == "GET /v1/sandboxes/00000000-0000-0000-0000-0000000000a1 HTTP/1.1"
+                    {
+                        let mut request = Vec::new();
+                        while !request.ends_with(b"\r\n\r\n") {
+                            request.push(stream.read_u8().await.unwrap());
+                        }
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            CLOUD_SANDBOX_RESPONSE_FIXTURE.len(),
+                            CLOUD_SANDBOX_RESPONSE_FIXTURE
+                        );
+                        stream.write_all(response.as_bytes()).await.unwrap();
+                        return;
                     }
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        CLOUD_SANDBOX_RESPONSE_FIXTURE.len(),
-                        CLOUD_SANDBOX_RESPONSE_FIXTURE
+
+                    assert_eq!(
+                        request_line,
+                        "GET /v1/sandboxes/00000000-0000-0000-0000-0000000000a1/agent HTTP/1.1"
                     );
-                    stream.write_all(response.as_bytes()).await.unwrap();
-                    continue;
-                }
+                    let websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let mut io = WsByteStream::new(websocket);
+                    io.write_all(&1u32.to_be_bytes()).await.unwrap();
+                    io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+                    let ready =
+                        Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+                    codec::write_message(&mut io, &ready).await.unwrap();
 
-                assert_eq!(
-                    request_line,
-                    "GET /v1/sandboxes/00000000-0000-0000-0000-0000000000a1/agent HTTP/1.1"
-                );
-                let websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
-                let mut io = WsByteStream::new(websocket);
-                io.write_all(&1u32.to_be_bytes()).await.unwrap();
-                io.write_all(&1024u32.to_be_bytes()).await.unwrap();
-                let ready =
-                    Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
-                codec::write_message(&mut io, &ready).await.unwrap();
-
-                let message = codec::read_message(&mut io).await.unwrap();
-                assert_eq!(message.t, MessageType::ExecRequest);
-                let request = message.payload::<ExecRequest>().unwrap();
-                let started = Message::with_payload(
-                    MessageType::ExecStarted,
-                    message.id,
-                    &ExecStarted { pid: 17 },
-                )
-                .unwrap();
-                codec::write_message(&mut io, &started).await.unwrap();
-                let exited = Message::with_payload(
-                    MessageType::ExecExited,
-                    message.id,
-                    &ExecExited { code: 0 },
-                )
-                .unwrap();
-                codec::write_message(&mut io, &exited).await.unwrap();
-                requests.push(request);
-
-                // Hold the connection until the client closes it. Closing with unread
-                // client frames resets the socket, which can discard the exit event
-                // before the client reads it.
-                let mut unread = Vec::new();
-                let _ = io.read_to_end(&mut unread).await;
+                    while let Ok(message) = codec::read_message(&mut io).await {
+                        if message.t != MessageType::ExecRequest {
+                            continue;
+                        }
+                        let request = message.payload::<ExecRequest>().unwrap();
+                        let started = Message::with_payload(
+                            MessageType::ExecStarted,
+                            message.id,
+                            &ExecStarted { pid: 17 },
+                        )
+                        .unwrap();
+                        if codec::write_message(&mut io, &started).await.is_err() {
+                            return;
+                        }
+                        let exited = Message::with_payload(
+                            MessageType::ExecExited,
+                            message.id,
+                            &ExecExited { code: 0 },
+                        )
+                        .unwrap();
+                        if codec::write_message(&mut io, &exited).await.is_err() {
+                            return;
+                        }
+                        let _ = request_tx.send(request);
+                    }
+                });
             }
-
-            requests
         });
 
         let backend =
@@ -3356,10 +3356,16 @@ mod tests {
         assert_eq!(default_status.code, 0);
         assert_eq!(shell_status.code, 0);
 
-        let requests = tokio::time::timeout(Duration::from_secs(10), server)
-            .await
-            .unwrap()
-            .unwrap();
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            requests.push(
+                tokio::time::timeout(Duration::from_secs(10), request_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        server.abort();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].cmd, "/bin/sh");
         assert_eq!(

@@ -744,7 +744,7 @@ impl SandboxRecord {
                         ))
                     })?;
 
-                    Ok(Sandbox::from_cloud_state(
+                    Ok(Sandbox::from_cloud_state_with_readiness(
                         self.backend.clone(),
                         SandboxRemoteState {
                             id: cloud.id.clone(),
@@ -753,6 +753,7 @@ impl SandboxRecord {
                         },
                         self.name.clone(),
                         config,
+                        self.status_snapshot() == SandboxStatus::Running,
                     ))
                 }
             }

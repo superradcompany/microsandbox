@@ -5,6 +5,9 @@
 //! methods (stop, kill, drain, wait) and access to the [`AgentClient`]
 //! for guest communication.
 
+mod agent_lease;
+#[cfg(feature = "cloud")]
+mod agent_pool;
 pub(crate) mod attach;
 pub(crate) mod branch;
 mod branch_batch;
@@ -626,10 +629,10 @@ impl Sandbox {
         config: SandboxConfig,
     ) -> Self {
         let identity = SandboxIdentity::Local(local.db_id);
-        let session = state::RuntimeSession {
-            inner: crate::context::SandboxInner::Local(Arc::new(local)),
-            config: config.clone(),
-        };
+        let session = state::RuntimeSession::new(
+            crate::context::SandboxInner::Local(Arc::new(local)),
+            config.clone(),
+        );
         Self {
             backend,
             identity,
@@ -938,6 +941,8 @@ impl Sandbox {
     /// Local completion includes release of runtime ownership for the targeted run.
     /// Cancelling this wait never requests force termination; use [`Self::kill`] explicitly.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
+        #[cfg(feature = "cloud")]
+        self.binding.invalidate_cloud_running();
         stop::stop(
             self.backend.clone(),
             &self.name,
@@ -956,6 +961,8 @@ impl Sandbox {
     /// error is returned without substituting process termination. On cloud
     /// this issues `POST /v1/sandboxes/by-name/:name/stop`.
     pub async fn request_stop(&self) -> MicrosandboxResult<()> {
+        #[cfg(feature = "cloud")]
+        self.binding.invalidate_cloud_running();
         tracing::debug!(sandbox = %self.name, "stop: dispatching");
         self.backend
             .sandbox_ops()
@@ -968,6 +975,10 @@ impl Sandbox {
     /// Expiry returns [`crate::MicrosandboxError::StopTimeout`] without killing. Zero has no
     /// dispatch budget. A delivered shutdown request may still complete after timeout.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
+        #[cfg(feature = "cloud")]
+        if !timeout.is_zero() {
+            self.binding.invalidate_cloud_running();
+        }
         stop::stop(
             self.backend.clone(),
             &self.name,
@@ -1065,6 +1076,8 @@ impl Sandbox {
 
     /// Stop and start this exact sandbox with explicit lifecycle options.
     pub async fn restart_with(&self, options: RestartOptions) -> MicrosandboxResult<Sandbox> {
+        #[cfg(feature = "cloud")]
+        self.binding.invalidate_cloud_running();
         self.refresh_handle().await?.restart_with(options).await
     }
 
@@ -1075,6 +1088,8 @@ impl Sandbox {
 
     /// Stop and remove this exact sandbox with explicit lifecycle options.
     pub async fn destroy_with(&self, options: DestroyOptions) -> MicrosandboxResult<()> {
+        #[cfg(feature = "cloud")]
+        self.binding.invalidate_cloud_running();
         self.refresh_handle().await?.destroy_with(options).await
     }
 

@@ -1,11 +1,14 @@
 //! Identity-bound agent connections for cloud sandbox objects.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::BoxFuture;
+use microsandbox_types::CloudErrorBody;
 use tokio_tungstenite::{
     connect_async_tls_with_config,
     tungstenite::{
+        Error as WsError,
         client::IntoClientRequest,
         http::{
             HeaderValue as WsHeaderValue,
@@ -14,7 +17,7 @@ use tokio_tungstenite::{
     },
 };
 
-use super::{RemoteContext, cloud_agent_tls_connector, default_user_agent};
+use super::{RemoteContext, cloud_agent_tls_connector, default_user_agent, http::cloud_http_error};
 use crate::context::{Context, ContextInfo, ContextKind, SandboxOps, ServiceOps, VolumeOps};
 use crate::{MicrosandboxError, MicrosandboxResult, timing};
 
@@ -31,7 +34,7 @@ impl Context for RemoteContext {
         ContextKind::Remote
     }
 
-    fn info(&self) -> crate::MicrosandboxResult<ContextInfo> {
+    fn info(&self) -> MicrosandboxResult<ContextInfo> {
         Ok(ContextInfo {
             kind: ContextKind::Remote,
             api_url: Some(self.inner.url.clone()),
@@ -67,19 +70,14 @@ impl Context for RemoteContext {
     }
 
     /// Open an agent connection over `GET /v1/sandboxes/:id/agent`.
-    ///
-    /// The route upgrades to a WebSocket that pipes bytes to and from the
-    /// sandbox's agent, so the standard agent client runs over it unchanged.
     fn dial_agent<'a>(
         &'a self,
         name: &'a str,
-        timeout: std::time::Duration,
+        timeout: Duration,
     ) -> BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
         Box::pin(async move {
-            // Treat the caller's timeout as one budget for lookup, WebSocket
-            // establishment, and the agent handshake. In particular, a peer
-            // that accepts TCP but never completes TLS/HTTP upgrade must not
-            // leave exec, filesystem, or attach calls hanging indefinitely.
+            // Treat the caller's timeout as one budget for lookup, WebSocket upgrade, and
+            // agent handshake so a stalled peer never hangs exec, fs, or attach calls.
             let mut timing = timing::ConnectionTiming::new(name);
             let result = tokio::time::timeout(timeout, async {
                 timing.stage("identity");
@@ -88,8 +86,12 @@ impl Context for RemoteContext {
                     Some((bound_name, id)) if bound_name == name => id.clone(),
                     _ => self.get_sandbox(name).await?.id,
                 };
-                tracing::trace!(target: timing::TARGET, sandbox_id = %id, elapsed_seconds = lookup_started.elapsed().as_secs_f64(),
-                    "cloud agent identity resolved");
+                tracing::trace!(
+                    target: timing::TARGET,
+                    sandbox_id = %id,
+                    elapsed_seconds = lookup_started.elapsed().as_secs_f64(),
+                    "cloud agent identity resolved"
+                );
                 timing.identity(&id);
                 let url = self.agent_ws_url(&id)?;
                 let mut request = url
@@ -115,11 +117,23 @@ impl Context for RemoteContext {
                     connect_async_tls_with_config(request, None, false, Some(connector))
                         .await
                         .map_err(|e| {
-                            tracing::trace!(target: timing::TARGET, sandbox_id = %id, elapsed_seconds = websocket_started.elapsed().as_secs_f64(), success = false, "cloud agent websocket finished");
-                            MicrosandboxError::Runtime(format!("cloud agent websocket: {e}"))
+                            tracing::trace!(
+                                target: timing::TARGET,
+                                sandbox_id = %id,
+                                elapsed_seconds = websocket_started.elapsed().as_secs_f64(),
+                                success = false,
+                                "cloud agent websocket finished"
+                            );
+                            cloud_agent_ws_error(&id, e)
                         })?;
 
-                tracing::trace!(target: timing::TARGET, sandbox_id = %id, elapsed_seconds = websocket_started.elapsed().as_secs_f64(), success = true, "cloud agent websocket finished");
+                tracing::trace!(
+                    target: timing::TARGET,
+                    sandbox_id = %id,
+                    elapsed_seconds = websocket_started.elapsed().as_secs_f64(),
+                    success = true,
+                    "cloud agent websocket finished"
+                );
                 timing.stage("handshake");
                 let handshake_started = std::time::Instant::now();
                 let client = crate::agent::AgentClient::connect_stream_with_timeout(
@@ -127,7 +141,13 @@ impl Context for RemoteContext {
                     timeout,
                 )
                 .await;
-                tracing::trace!(target: timing::TARGET, sandbox_id = %id, elapsed_seconds = handshake_started.elapsed().as_secs_f64(), success = client.is_ok(), "cloud agent handshake finished");
+                tracing::trace!(
+                    target: timing::TARGET,
+                    sandbox_id = %id,
+                    elapsed_seconds = handshake_started.elapsed().as_secs_f64(),
+                    success = client.is_ok(),
+                    "cloud agent handshake finished"
+                );
                 client.map_err(Into::into)
             })
             .await;
@@ -147,239 +167,26 @@ impl Context for RemoteContext {
         })
     }
 }
+
 //--------------------------------------------------------------------------------------------------
-// Tests
+// Functions
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn unbound_and_other_name_dials_still_resolve_by_name() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        for bound in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let backend = crate::test_support::cloud_backend(
-                format!("http://{}", listener.local_addr().unwrap()),
-                "test-key",
-            )
-            .unwrap();
-            let backend: Arc<dyn Context> = if bound {
-                backend
-                    .with_agent_identity("original-name", "original-id")
-                    .unwrap()
-            } else {
-                Arc::new(backend)
-            };
-            let server = tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                while !request.ends_with(b"\r\n\r\n") {
-                    request.push(stream.read_u8().await.unwrap());
-                    assert!(request.len() < 16_384);
-                }
-                stream
-                    .write_all(
-                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    )
-                    .await
-                    .unwrap();
-                String::from_utf8(request)
-                    .unwrap()
-                    .lines()
-                    .next()
-                    .unwrap()
-                    .to_owned()
-            });
-            assert!(
-                backend
-                    .dial_agent("current-name", Duration::from_secs(2))
-                    .await
-                    .is_err()
-            );
-            assert_eq!(
-                server.await.unwrap(),
-                "GET /v1/sandboxes/by-name/current-name HTTP/1.1"
-            );
+/// Preserve structured control-plane HTTP rejections (such as `409 sandbox_not_running` and
+/// `404 sandbox_not_found`) returned during WebSocket upgrade.
+fn cloud_agent_ws_error(sandbox_id: &str, error: WsError) -> MicrosandboxError {
+    match error {
+        WsError::Http(response) => {
+            let status = response.status().as_u16();
+            let body_text = response
+                .body()
+                .as_deref()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                .unwrap_or_default();
+            let typed: Option<CloudErrorBody> = serde_json::from_str(&body_text).ok();
+            let op = format!("GET /v1/sandboxes/{sandbox_id}/agent");
+            cloud_http_error(status, typed.as_ref(), &body_text, &op)
         }
-    }
-
-    #[tokio::test]
-    async fn stalled_cloud_upgrade_timeout_and_cancellation_close_transport() {
-        use tokio::io::AsyncReadExt;
-
-        for cancel in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let backend = crate::test_support::cloud_backend(
-                format!("http://{}", listener.local_addr().unwrap()),
-                "test-key",
-            )
-            .unwrap()
-            .with_agent_identity("sandbox", "captured-id")
-            .unwrap();
-            let (accepted, ready) = tokio::sync::oneshot::channel();
-            let server = tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                while !request.ends_with(b"\r\n\r\n") {
-                    request.push(stream.read_u8().await.unwrap());
-                    assert!(request.len() < 16_384);
-                }
-                accepted.send(()).unwrap();
-                // Deliberately never send the WebSocket upgrade response.
-                // Both timeout and caller cancellation must close this socket.
-                stream.read(&mut [0u8; 1]).await.unwrap()
-            });
-            let mut dial = backend.dial_agent("sandbox", Duration::from_millis(500));
-            tokio::select! {
-                result = &mut dial => panic!("dial ended before upgrade stall: {:?}", result.err()),
-                result = ready => result.unwrap(),
-            }
-            if cancel {
-                drop(dial);
-            } else {
-                let error = dial.await.err().expect("stalled upgrade must time out");
-                assert!(
-                    error
-                        .to_string()
-                        .contains("timed out connecting to cloud sandbox agent")
-                );
-                assert!(error.to_string().contains("stage: websocket"));
-            }
-            assert_eq!(
-                tokio::time::timeout(Duration::from_secs(2), server)
-                    .await
-                    .unwrap()
-                    .unwrap(),
-                0,
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn stalled_agent_handshake_reports_phase_and_closes_transport() {
-        use futures::StreamExt;
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let backend = crate::test_support::cloud_backend(
-            format!("http://{}", listener.local_addr().unwrap()),
-            "test-key",
-        )
-        .unwrap()
-        .with_agent_identity("sandbox", "captured-id")
-        .unwrap();
-        let (upgraded, ready) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            upgraded.send(()).unwrap();
-            // The upgrade succeeds but the peer never replies to the agent
-            // handshake. Drain until the timed-out client closes its transport.
-            while let Some(message) = socket.next().await {
-                if message.is_err() {
-                    break;
-                }
-            }
-        });
-        let mut dial = backend.dial_agent("sandbox", Duration::from_millis(500));
-        tokio::select! {
-            result = &mut dial => panic!("dial ended before handshake stall: {:?}", result.err()),
-            result = ready => result.unwrap(),
-        }
-        let error = dial.await.err().expect("silent agent must time out");
-        // Both the connection budget and the agent's handshake read can expire
-        // on the same poll. Either diagnostic must identify the timed-out phase.
-        let message = error.to_string();
-        assert!(
-            message.contains("handshake") && message.contains("timed out"),
-            "{error}"
-        );
-        tokio::time::timeout(Duration::from_secs(2), server)
-            .await
-            .unwrap()
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn prepared_agent_calls_keep_captured_identity_after_live_lookup() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let mut paths = Vec::new();
-            for request_index in 0..6 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let byte = stream.read_u8().await.unwrap();
-                    request.push(byte);
-                    if request.ends_with(b"\r\n\r\n") {
-                        break;
-                    }
-                    assert!(request.len() < 16_384);
-                }
-                let request = String::from_utf8(request).unwrap();
-                paths.push(request.lines().next().unwrap().to_owned());
-                if request_index % 2 == 0 {
-                    let id = if request_index == 2 {
-                        "replacement-id"
-                    } else {
-                        "original-id"
-                    };
-                    let body = serde_json::json!({
-                        "id":id,"org_id":"test-org","name":"reused-name","slug":"reused-name",
-                        "status":"running","ephemeral":false,"created_at":"2026-11-15T00:00:00Z"
-                    })
-                    .to_string();
-                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
-                } else {
-                    // Readiness observes live status first. A missing agent UUID must then fail
-                    // without retrying by name and reaching a replacement sandbox's agent.
-                    stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
-                }
-            }
-            paths
-        });
-        let backend: Arc<dyn Context> =
-            Arc::new(crate::test_support::cloud_backend(url, "test-key").unwrap());
-        let make_handle = |backend, id: &str| {
-            crate::sandbox::Sandbox::from_cloud_state(
-                backend,
-                crate::context::SandboxRemoteState {
-                    id: id.to_owned(),
-                    org_id: "test-org".to_owned(),
-                    created_at: chrono::Utc::now(),
-                },
-                "reused-name".to_owned(),
-                crate::sandbox::SandboxConfig::default(),
-            )
-        };
-        let original = make_handle(backend, "original-id");
-        // Lifecycle factories can receive a previously bound backend. The new
-        // handle must capture its own identity without mutating the old one.
-        let replacement = make_handle(original.backend().clone(), "replacement-id");
-        assert!(original.exec("node", ["-v"]).await.is_err());
-        assert!(replacement.exec("node", ["-v"]).await.is_err());
-        assert!(original.fs().stat("/tmp").await.is_err());
-        let paths = tokio::time::timeout(Duration::from_secs(2), server)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            paths,
-            [
-                "GET /v1/sandboxes/by-name/reused-name HTTP/1.1",
-                "GET /v1/sandboxes/original-id/agent HTTP/1.1",
-                "GET /v1/sandboxes/by-name/reused-name HTTP/1.1",
-                "GET /v1/sandboxes/replacement-id/agent HTTP/1.1",
-                "GET /v1/sandboxes/by-name/reused-name HTTP/1.1",
-                "GET /v1/sandboxes/original-id/agent HTTP/1.1",
-            ]
-        );
+        other => MicrosandboxError::Runtime(format!("cloud agent websocket: {other}")),
     }
 }

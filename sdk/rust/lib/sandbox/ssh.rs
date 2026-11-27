@@ -490,7 +490,7 @@ impl SandboxSshOps {
             ..Default::default()
         });
         // A prepared endpoint is active and run-bound; an idle ssh() facade is not.
-        let runtime = sandbox.prepare_runtime().await?;
+        let runtime = sandbox.refresh_runtime().await?;
         let settings = SshSettings {
             sandbox: sandbox.observer(),
             runtime,

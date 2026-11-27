@@ -11,6 +11,8 @@
 //! No OAuth or session credentials are honored here.
 
 mod agent;
+#[cfg(test)]
+mod agent_tests;
 mod constructors;
 mod http;
 mod modify;

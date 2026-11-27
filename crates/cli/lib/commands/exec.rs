@@ -211,9 +211,9 @@ async fn run_started(
     // Resolve the command with exec semantics: an explicit command runs
     // directly, while omitted commands can still fall back to the sandbox's
     // configured image command/default shell.
-    // An explicit command does not use the image defaults. Avoid a remote
-    // config request here, but keep execution's identity/status revalidation
-    // in prepare_runtime: skipping that check could target a replaced sandbox.
+    // An explicit command does not use the image defaults, so avoid an extra
+    // remote config request; the captured sandbox UUID stays bound on the agent
+    // route and 409 sandbox_not_running triggers a live status recheck.
     let inherited = args.command.is_empty();
     let resolved = if inherited {
         super::common::resolve_exec_command(

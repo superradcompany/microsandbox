@@ -1,13 +1,65 @@
 //! Guest execution prepares a resource once and pins the selected runtime.
 
-use std::sync::Arc;
-
 use super::{
     AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput, Sandbox,
+    agent_lease::PreparedAgent,
     exec::{ExecHandle, ExecOptions, agent},
     state::RuntimeSession,
 };
 use crate::MicrosandboxResult;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+enum ExecCommand {
+    Explicit {
+        program: String,
+        explicit_argv: bool,
+    },
+    Default,
+    Shell,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: ExecCommand
+//--------------------------------------------------------------------------------------------------
+
+impl ExecCommand {
+    fn resolve(
+        self,
+        session: &RuntimeSession,
+        args: &mut Vec<String>,
+    ) -> MicrosandboxResult<(String, bool)> {
+        match self {
+            Self::Explicit {
+                program,
+                explicit_argv,
+            } => Ok((program, explicit_argv)),
+            Self::Default => {
+                let resolved = session.default_command()?;
+                args.splice(0..0, resolved.args);
+                Ok((resolved.program, false))
+            }
+            Self::Shell => Ok((session.shell(), true)),
+        }
+    }
+
+    fn resolve_attach(
+        self,
+        session: &RuntimeSession,
+        options: AttachOptionsBuilder,
+    ) -> MicrosandboxResult<(String, AttachOptionsBuilder)> {
+        match self {
+            Self::Explicit { program, .. } => Ok((program, options)),
+            Self::Default => {
+                let resolved = session.default_command()?;
+                Ok((resolved.program, options.prepend_args(resolved.args)))
+            }
+            Self::Shell => Ok((session.shell(), options)),
+        }
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods: Execution
@@ -27,17 +79,8 @@ impl Sandbox {
         &self,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
-        let session = self.prepare_runtime().await?;
-        let command = microsandbox_types::resolve_default_command(
-            session.config.spec.runtime.entrypoint.as_deref(),
-            session.config.spec.runtime.cmd.as_deref(),
-            None,
-        )?;
-        let opts = f(ExecOptionsBuilder::default())
-            .prepend_args(command.args)
-            .build()?;
-        self.execute_stream_prepared(session, command.program, opts, false)
-            .await
+        let opts = f(ExecOptionsBuilder::default()).build()?;
+        self.execute_stream(ExecCommand::Default, opts).await
     }
 
     /// Execute the sandbox's effective OCI entrypoint and CMD and wait for completion.
@@ -53,17 +96,8 @@ impl Sandbox {
         &self,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let session = self.prepare_runtime().await?;
-        let command = microsandbox_types::resolve_default_command(
-            session.config.spec.runtime.entrypoint.as_deref(),
-            session.config.spec.runtime.cmd.as_deref(),
-            None,
-        )?;
-        let opts = f(ExecOptionsBuilder::default())
-            .prepend_args(command.args)
-            .build()?;
-        self.execute_prepared(session, command.program, opts, false)
-            .await
+        let opts = f(ExecOptionsBuilder::default()).build()?;
+        self.execute_buffered(ExecCommand::Default, opts).await
     }
 
     /// Execute a command and return a streaming handle.
@@ -76,13 +110,18 @@ impl Sandbox {
         cmd: impl Into<String>,
         args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<ExecHandle> {
-        let session = self.prepare_runtime().await?;
         let opts = ExecOptions {
             args: args.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
-        self.execute_stream_prepared(session, cmd.into(), opts, true)
-            .await
+        self.execute_stream(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv: true,
+            },
+            opts,
+        )
+        .await
     }
 
     /// Execute a command with full options and return a streaming handle.
@@ -98,9 +137,14 @@ impl Sandbox {
         let builder = f(ExecOptionsBuilder::default());
         let explicit_argv = builder.explicit_argv();
         let opts = builder.build()?;
-        let session = self.prepare_runtime().await?;
-        self.execute_stream_prepared(session, cmd.into(), opts, explicit_argv)
-            .await
+        self.execute_stream(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv,
+            },
+            opts,
+        )
+        .await
     }
 
     /// Execute a command and wait for completion.
@@ -113,12 +157,18 @@ impl Sandbox {
         cmd: impl Into<String>,
         args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<ExecOutput> {
-        let session = self.prepare_runtime().await?;
         let opts = ExecOptions {
             args: args.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
-        self.execute_prepared(session, cmd.into(), opts, true).await
+        self.execute_buffered(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv: true,
+            },
+            opts,
+        )
+        .await
     }
 
     /// Execute a command with full options and wait for completion.
@@ -134,9 +184,14 @@ impl Sandbox {
         let builder = f(ExecOptionsBuilder::default());
         let explicit_argv = builder.explicit_argv();
         let opts = builder.build()?;
-        let session = self.prepare_runtime().await?;
-        self.execute_prepared(session, cmd.into(), opts, explicit_argv)
-            .await
+        self.execute_buffered(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv,
+            },
+            opts,
+        )
+        .await
     }
 
     /// Run a shell command and wait for completion.
@@ -147,20 +202,11 @@ impl Sandbox {
     /// - `sandbox.shell("echo hello")`
     /// - `sandbox.shell("ENV=val cmd | other_cmd")`
     pub async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput> {
-        let session = self.prepare_runtime().await?;
-        let shell = session
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
         let opts = ExecOptions {
             args: vec!["-c".to_string(), script.into()],
             ..Default::default()
         };
-        self.execute_prepared(session, shell, opts, true).await
+        self.execute_buffered(ExecCommand::Shell, opts).await
     }
 
     /// Run a shell command with full options and wait for completion.
@@ -169,18 +215,9 @@ impl Sandbox {
         script: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let session = self.prepare_runtime().await?;
-        let shell = session
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
         let mut opts = f(ExecOptionsBuilder::default()).build()?;
         opts.args.splice(0..0, ["-c".to_string(), script.into()]);
-        self.execute_prepared(session, shell, opts, true).await
+        self.execute_buffered(ExecCommand::Shell, opts).await
     }
 
     /// Run a shell command with streaming I/O.
@@ -188,21 +225,11 @@ impl Sandbox {
     /// Like [`shell`](Self::shell) but returns a streaming [`ExecHandle`]
     /// instead of waiting for completion.
     pub async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle> {
-        let session = self.prepare_runtime().await?;
-        let shell = session
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
         let opts = ExecOptions {
             args: vec!["-c".to_string(), script.into()],
             ..Default::default()
         };
-        self.execute_stream_prepared(session, shell, opts, true)
-            .await
+        self.execute_stream(ExecCommand::Shell, opts).await
     }
 
     /// Run a shell command with full options and streaming I/O.
@@ -211,86 +238,91 @@ impl Sandbox {
         script: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
-        let session = self.prepare_runtime().await?;
-        let shell = session
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
         let mut opts = f(ExecOptionsBuilder::default()).build()?;
         opts.args.splice(0..0, ["-c".to_string(), script.into()]);
-        self.execute_stream_prepared(session, shell, opts, true)
-            .await
+        self.execute_stream(ExecCommand::Shell, opts).await
     }
 }
 
 impl Sandbox {
-    async fn execute_stream_prepared(
+    async fn execute_stream(
         &self,
-        session: Arc<RuntimeSession>,
-        command: String,
-        options: ExecOptions,
-        explicit_argv: bool,
+        command: ExecCommand,
+        mut options: ExecOptions,
     ) -> MicrosandboxResult<ExecHandle> {
-        #[cfg(feature = "local")]
-        if let crate::context::SandboxInner::Local(local) = &session.inner {
-            let mut execution = agent::exec_stream_on_client(
-                local.client.clone(),
-                &self.name,
-                &session.config,
-                command,
-                options,
-                (24, 80),
-                explicit_argv,
-            )
-            .await?;
-            execution.retain_runtime(session);
-            return Ok(execution);
+        match self.open_agent().await? {
+            PreparedAgent::Direct(lease) => {
+                let (program, explicit_argv) =
+                    command.resolve(&lease.session, &mut options.args)?;
+                let mut execution = agent::exec_stream_on_connection(
+                    lease.connection,
+                    &self.name,
+                    &lease.session.config,
+                    program,
+                    options,
+                    (24, 80),
+                    explicit_argv,
+                )
+                .await?;
+                execution.retain_runtime(lease.session);
+                Ok(execution)
+            }
+            PreparedAgent::Fallback(session) => {
+                let (program, _) = command.resolve(&session, &mut options.args)?;
+                let mut execution = self
+                    .backend
+                    .sandbox_ops()
+                    .exec_stream(
+                        self.backend.clone(),
+                        &self.name,
+                        &session.config,
+                        program,
+                        options,
+                    )
+                    .await?;
+                execution.retain_runtime(session);
+                Ok(execution)
+            }
         }
-        let mut execution = self
-            .backend
-            .sandbox_ops()
-            .exec_stream(
-                self.backend.clone(),
-                &self.name,
-                &session.config,
-                command,
-                options,
-            )
-            .await?;
-        execution.retain_runtime(session);
-        Ok(execution)
     }
 
-    async fn execute_prepared(
+    async fn execute_buffered(
         &self,
-        session: Arc<RuntimeSession>,
-        command: String,
+        command: ExecCommand,
         mut options: ExecOptions,
-        explicit_argv: bool,
     ) -> MicrosandboxResult<ExecOutput> {
-        #[cfg(feature = "local")]
-        if matches!(&session.inner, crate::context::SandboxInner::Local(_)) {
-            // Preserve buffered execution's existing deadline/kill contract.
-            let timeout = options.timeout.take();
-            let execution = self
-                .execute_stream_prepared(session, command, options, explicit_argv)
+        match self.open_agent().await? {
+            PreparedAgent::Direct(lease) => {
+                let timeout = options.timeout.take();
+                let (program, explicit_argv) =
+                    command.resolve(&lease.session, &mut options.args)?;
+                let mut execution = agent::exec_stream_on_connection(
+                    lease.connection,
+                    &self.name,
+                    &lease.session.config,
+                    program,
+                    options,
+                    (24, 80),
+                    explicit_argv,
+                )
                 .await?;
-            return agent::collect_buffered(execution, timeout).await;
+                execution.retain_runtime(lease.session);
+                agent::collect_buffered(execution, timeout).await
+            }
+            PreparedAgent::Fallback(session) => {
+                let (program, _) = command.resolve(&session, &mut options.args)?;
+                self.backend
+                    .sandbox_ops()
+                    .exec(
+                        self.backend.clone(),
+                        &self.name,
+                        &session.config,
+                        program,
+                        options,
+                    )
+                    .await
+            }
         }
-        self.backend
-            .sandbox_ops()
-            .exec(
-                self.backend.clone(),
-                &self.name,
-                &session.config,
-                command,
-                options,
-            )
-            .await
     }
 }
 
@@ -312,17 +344,8 @@ impl Sandbox {
         &self,
         f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        let session = self.prepare_runtime().await?;
-        let command = microsandbox_types::resolve_default_command(
-            session.config.spec.runtime.entrypoint.as_deref(),
-            session.config.spec.runtime.cmd.as_deref(),
-            None,
-        )?;
-        let builder = f(AttachOptionsBuilder::default())
-            .prepend_args(command.args)
-            .with_inherited_command(true);
-        self.attach_prepared(session, command.program, builder)
-            .await
+        let builder = f(AttachOptionsBuilder::default()).with_inherited_command(true);
+        self.attach_command(ExecCommand::Default, builder).await
     }
 
     /// Attach to the sandbox with an interactive terminal session.
@@ -335,12 +358,18 @@ impl Sandbox {
         cmd: impl Into<String>,
         args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<i32> {
-        let session = self.prepare_runtime().await?;
         let mut builder = AttachOptionsBuilder::default();
         for arg in args {
             builder = builder.arg(arg);
         }
-        self.attach_prepared(session, cmd.into(), builder).await
+        self.attach_command(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv: true,
+            },
+            builder,
+        )
+        .await
     }
 
     /// Attach to the sandbox with full options.
@@ -354,54 +383,55 @@ impl Sandbox {
         f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
         let builder = f(AttachOptionsBuilder::default());
-        let session = self.prepare_runtime().await?;
-        self.attach_prepared(session, cmd.into(), builder).await
+        self.attach_command(
+            ExecCommand::Explicit {
+                program: cmd.into(),
+                explicit_argv: true,
+            },
+            builder,
+        )
+        .await
     }
 
     /// Attach to the sandbox's default shell.
     ///
     /// Uses the sandbox's configured shell (default: `/bin/sh`).
     pub async fn attach_shell(&self) -> MicrosandboxResult<i32> {
-        let session = self.prepare_runtime().await?;
-        let shell = session
-            .config
-            .spec
-            .runtime
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
-        self.attach_prepared(session, shell, AttachOptionsBuilder::default())
+        self.attach_command(ExecCommand::Shell, AttachOptionsBuilder::default())
             .await
     }
 }
 
 impl Sandbox {
-    async fn attach_prepared(
+    async fn attach_command(
         &self,
-        session: Arc<RuntimeSession>,
-        command: String,
+        command: ExecCommand,
         options: AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        #[cfg(feature = "local")]
-        if let crate::context::SandboxInner::Local(local) = &session.inner {
-            return super::attach::agent::attach_on_client(
-                local.client.clone(),
-                &session.config,
-                command,
-                options,
-            )
-            .await;
+        match self.open_agent().await? {
+            PreparedAgent::Direct(lease) => {
+                let (program, options) = command.resolve_attach(&lease.session, options)?;
+                super::attach::agent::attach_on_client(
+                    lease.connection.into_client(),
+                    &lease.session.config,
+                    program,
+                    options,
+                )
+                .await
+            }
+            PreparedAgent::Fallback(session) => {
+                let (program, options) = command.resolve_attach(&session, options)?;
+                self.backend
+                    .sandbox_ops()
+                    .attach(
+                        self.backend.clone(),
+                        &self.name,
+                        &session.config,
+                        program,
+                        options,
+                    )
+                    .await
+            }
         }
-        self.backend
-            .sandbox_ops()
-            .attach(
-                self.backend.clone(),
-                &self.name,
-                &session.config,
-                command,
-                options,
-            )
-            .await
     }
 }

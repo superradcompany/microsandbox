@@ -1,9 +1,14 @@
 //! Receiver-shared preparation state, separate from stable resource identity.
 
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{
+    Arc, RwLock, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tokio::sync::Mutex;
 
+#[cfg(feature = "cloud")]
+use super::agent_pool::AgentPool;
 use super::{Sandbox, SandboxConfig, SandboxIdentity};
 use crate::context::SandboxInner;
 use crate::{Context, MicrosandboxError, MicrosandboxResult};
@@ -35,11 +40,78 @@ pub(super) struct WeakSandbox {
 pub(crate) struct RuntimeSession {
     pub(crate) inner: SandboxInner,
     pub(crate) config: SandboxConfig,
+    /// Whether this cloud session was built from an observed `Running` state and
+    /// has not been invalidated by a lifecycle change or stale-connection signal.
+    #[cfg(feature = "cloud")]
+    cloud_confirmed_running: AtomicBool,
+    /// Idle cloud agent WebSockets for this run; cleared when the run is invalidated or dropped.
+    #[cfg(feature = "cloud")]
+    pub(super) agents: Arc<AgentPool>,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl RuntimeSession {
+    pub(crate) fn new(inner: SandboxInner, config: SandboxConfig) -> Self {
+        Self {
+            inner,
+            config,
+            #[cfg(feature = "cloud")]
+            cloud_confirmed_running: AtomicBool::new(false),
+            #[cfg(feature = "cloud")]
+            agents: Arc::new(AgentPool::new()),
+        }
+    }
+
+    #[cfg(feature = "cloud")]
+    pub(crate) fn cloud(
+        inner: SandboxInner,
+        config: SandboxConfig,
+        confirmed_running: bool,
+    ) -> Self {
+        Self {
+            inner,
+            config,
+            cloud_confirmed_running: AtomicBool::new(confirmed_running),
+            agents: Arc::new(AgentPool::new()),
+        }
+    }
+
+    pub(crate) fn shell(&self) -> String {
+        self.config
+            .spec
+            .runtime
+            .shell
+            .as_deref()
+            .unwrap_or("/bin/sh")
+            .to_string()
+    }
+
+    pub(crate) fn default_command(
+        &self,
+    ) -> MicrosandboxResult<microsandbox_types::ResolvedCommand> {
+        microsandbox_types::resolve_default_command(
+            self.config.spec.runtime.entrypoint.as_deref(),
+            self.config.spec.runtime.cmd.as_deref(),
+            None,
+        )
+        .map_err(Into::into)
+    }
+
+    #[cfg(feature = "cloud")]
+    pub(crate) fn is_cloud_confirmed_running(&self) -> bool {
+        matches!(self.inner, SandboxInner::Cloud(_))
+            && self.cloud_confirmed_running.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "cloud")]
+    pub(crate) fn invalidate_cloud_running(&self) {
+        self.cloud_confirmed_running.store(false, Ordering::Release);
+        self.agents.evict();
+    }
+}
 
 impl SandboxBinding {
     pub(super) fn new(session: Option<Arc<RuntimeSession>>) -> Self {
@@ -54,6 +126,19 @@ impl SandboxBinding {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    #[cfg(feature = "cloud")]
+    pub(super) fn confirmed_cloud_session(&self) -> Option<Arc<RuntimeSession>> {
+        let session = self.current()?;
+        session.is_cloud_confirmed_running().then_some(session)
+    }
+
+    #[cfg(feature = "cloud")]
+    pub(super) fn invalidate_cloud_running(&self) {
+        if let Some(session) = self.current() {
+            session.invalidate_cloud_running();
+        }
     }
 
     pub(super) fn publish(&self, session: Arc<RuntimeSession>) {

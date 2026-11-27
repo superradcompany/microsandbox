@@ -1088,6 +1088,21 @@ impl std::fmt::Display for SnapshotSourceRecoveryError {
     }
 }
 
+impl MicrosandboxError {
+    /// Whether this error is a definitive `409 sandbox_not_running` rejection from the cloud API.
+    #[cfg(feature = "cloud")]
+    pub(crate) fn is_sandbox_not_running(&self) -> bool {
+        matches!(
+            self,
+            Self::CloudHttp {
+                status: 409,
+                code: Some(code),
+                ..
+            } if code == "sandbox_not_running"
+        )
+    }
+}
+
 impl From<microsandbox_types::TypesError> for MicrosandboxError {
     fn from(value: microsandbox_types::TypesError) -> Self {
         match value {
