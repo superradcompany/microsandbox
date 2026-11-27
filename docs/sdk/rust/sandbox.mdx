@@ -66,6 +66,91 @@ Create a builder for configuring a new sandbox. The builder lets you set the ima
   </div>
 </div>
 
+#### <span className="msb-recv">Sandbox::</span><span className="msb-hn">create_with_progress()</span>
+
+<Tooltip tip="Our managed cloud completes image preparation and boot without streaming local progress events."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+fn create_with_progress(
+    config: SandboxConfig,
+) -> MicrosandboxResult<(
+    CreationProgressHandle,
+    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+)>
+```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::{CreationProgress, Sandbox};
+
+let config = Sandbox::builder("api").image("python").build().await?;
+let (mut progress, task) = Sandbox::create_with_progress(config)?;
+
+while let Some(event) = progress.recv().await {
+    if let CreationProgress::Startup(startup) = event {
+        println!("phase: {:?}", startup.phase);
+    }
+}
+
+let sb = task.await??;
+```
+
+</Accordion>
+
+Create a sandbox from a built [`SandboxConfig`](#sandboxconfig) while streaming [`CreationProgress`](#creationprogress) events on the configured context. `CreationProgressHandle` emits best-effort image-pull and local startup events; dropping the handle does not cancel creation. Await the returned `JoinHandle` for the authoritative sandbox or creation error, and abort the task handle to cancel. `Sandbox::create_with_pull_progress()` is deprecated in favor of this method.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>config</code><a className="msb-type" href="#sandboxconfig">SandboxConfig</a></div>
+    <div className="msb-param-desc">Complete sandbox configuration.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#creationprogresshandle">(CreationProgressHandle, JoinHandle&lt;MicrosandboxResult&lt;Sandbox&gt;&gt;)</a></div>
+    <div className="msb-param-desc">Progress event receiver and spawned creation task.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Sandbox::</span><span className="msb-hn">create_detached_with_progress()</span>
+
+<Tooltip tip="Our managed cloud completes image preparation and boot without streaming local progress events."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+fn create_detached_with_progress(
+    config: SandboxConfig,
+) -> MicrosandboxResult<(
+    CreationProgressHandle,
+    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+)>
+```
+
+Create a detached sandbox from a [`SandboxConfig`](#sandboxconfig) using the same [`CreationProgress`](#creationprogress) stream as [`Sandbox::create_with_progress()`](#sandboxcreate_with_progress). The sandbox survives after the creating process exits. `Sandbox::create_detached_with_pull_progress()` is deprecated in favor of this method.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>config</code><a className="msb-type" href="#sandboxconfig">SandboxConfig</a></div>
+    <div className="msb-param-desc">Complete sandbox configuration.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#creationprogresshandle">(CreationProgressHandle, JoinHandle&lt;MicrosandboxResult&lt;Sandbox&gt;&gt;)</a></div>
+    <div className="msb-param-desc">Progress event receiver and spawned creation task.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">get_running()</span>
 
 ```rust
@@ -1204,6 +1289,100 @@ Boot the sandbox in detached mode. This is a compatibility helper for `.detached
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#instance-methods">Sandbox</a></div>
     <div className="msb-param-desc">Running sandbox.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">create_with_progress()</span>
+
+<Tooltip tip="Our managed cloud completes image preparation and boot without streaming local progress events."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+fn create_with_progress(
+    self,
+) -> MicrosandboxResult<(
+    CreationProgressHandle,
+    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+)>
+```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::{CreationProgress, Sandbox, sandbox::PullProgress};
+
+let (mut progress, task) = Sandbox::builder("worker")
+    .image("python")
+    .create_with_progress()?;
+
+while let Some(event) = progress.recv().await {
+    match event {
+        CreationProgress::Pull(PullProgress::LayerDownloadProgress {
+            layer_index,
+            downloaded_bytes,
+            total_bytes,
+            ..
+        }) => {
+            println!("layer {layer_index}: {downloaded_bytes}/{total_bytes:?}");
+        }
+        CreationProgress::Startup(startup) => {
+            println!("startup phase: {:?}", startup.phase);
+        }
+        _ => {}
+    }
+}
+
+let sb = task.await??;
+```
+
+</Accordion>
+
+Spawn sandbox creation while streaming best-effort image-pull, snapshot-preparation, and local VM-activation progress through [`CreationProgressHandle`](#creationprogresshandle). Dropping the progress receiver does not cancel or block creation, and stream EOF is not a success signal; await the returned `JoinHandle` for the authoritative `Sandbox` or error, or call `abort()` on the task handle to cancel. Set [`detached(true)`](#sandbox-detached) before calling this method for detached creation. `create_with_pull_progress()` is deprecated in favor of this method.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#creationprogresshandle">(CreationProgressHandle, JoinHandle&lt;MicrosandboxResult&lt;Sandbox&gt;&gt;)</a></div>
+    <div className="msb-param-desc">Progress event receiver and spawned creation task.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">create_detached_with_progress()</span>
+
+<Tooltip tip="Our managed cloud completes image preparation and boot without streaming local progress events."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+fn create_detached_with_progress(
+    self,
+) -> MicrosandboxResult<(
+    CreationProgressHandle,
+    tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+)>
+```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::Sandbox;
+
+let (mut progress, task) = Sandbox::builder("worker")
+    .image("python")
+    .create_detached_with_progress()?;
+
+while let Some(_event) = progress.recv().await {}
+let sb = task.await??;
+```
+
+</Accordion>
+
+Equivalent to `.detached(true).create_with_progress()`: boots the sandbox in detached mode so it survives after the creating process exits while streaming [`CreationProgress`](#creationprogress) events. `create_detached_with_pull_progress()` is deprecated in favor of this method.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#creationprogresshandle">(CreationProgressHandle, JoinHandle&lt;MicrosandboxResult&lt;Sandbox&gt;&gt;)</a></div>
+    <div className="msb-param-desc">Progress event receiver and spawned creation task.</div>
   </div>
 </div>
 
@@ -2802,6 +2981,138 @@ Result of an explicit idle-timer refresh.
 |-------|------|-------------|
 | name | `String` | Sandbox name that was touched |
 | activity_seq | `u64` | Agent activity sequence after the touch was recorded |
+
+### CreationProgressHandle
+
+#### <span className="msb-recv">progress.</span><span className="msb-hn">recv()</span>
+
+```rust
+async fn recv(&mut self) -> Option<CreationProgress>
+```
+
+Receive the next [`CreationProgress`](#creationprogress) event, or `None` when the progress channel closes. Delivery is best-effort and slow consumers may observe coalesced or omitted events; dropping this handle never cancels or blocks creation, so await the accompanying `JoinHandle` for the final creation outcome.
+
+### CreationProgress
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Pull</code><a className="msb-type" href="#pullprogress">PullProgress</a></div>
+    <div className="msb-param-desc">Per-layer OCI image resolution, download, materialization, and rootfs stitching progress.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Startup</code><a className="msb-type" href="#startupprogress">StartupProgress</a></div>
+    <div className="msb-param-desc">Local runtime preparation and VM activation progress.</div>
+  </div>
+</div>
+
+### StartupProgress
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>phase</code><a className="msb-type" href="#startupphase">StartupPhase</a></div>
+    <div className="msb-param-desc">Startup phase currently executing.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>completed_bytes</code><span className="msb-type">u64</span></div>
+    <div className="msb-param-desc">Cumulative RAM bytes verified and written in this phase.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>total_bytes</code><span className="msb-type">Option&lt;u64&gt;</span></div>
+    <div className="msb-param-desc">Required RAM bytes to materialize when measurable; <code>None</code> for unmeasured phases.</div>
+  </div>
+</div>
+
+### StartupPhase
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>PreparingSnapshot</code></div>
+    <div className="msb-param-desc">Resolving a snapshot, preparing artifacts, or loading eager guest RAM.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>WaitingForMemoryBacking</code></div>
+    <div className="msb-param-desc">Waiting for another process constructing the shared RAM cache entry.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>PreparingMemoryBacking</code></div>
+    <div className="msb-param-desc">Verifying objects and writing required RAM slices.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ReusingMemoryBacking</code></div>
+    <div className="msb-param-desc">Reusing an immutable prepared memory backing without materialization.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>SyncingMemoryBacking</code></div>
+    <div className="msb-param-desc">Persisting the prepared backing before making it reusable.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Activating</code></div>
+    <div className="msb-param-desc">Preparation is complete and the bounded VM activation phase has begun.</div>
+  </div>
+</div>
+
+### PullProgress
+
+Import path: `microsandbox::sandbox::PullProgress`.
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Resolving</code></div>
+    <div className="msb-param-desc">Resolving <code>reference</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Resolved</code></div>
+    <div className="msb-param-desc">Manifest parsed with <code>reference</code>, <code>manifest_digest</code>, <code>layer_count</code>, and optional <code>total_download_bytes</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>LayerDownloadProgress</code></div>
+    <div className="msb-param-desc">Byte-level download update with <code>layer_index</code>, <code>digest</code>, <code>downloaded_bytes</code>, and optional <code>total_bytes</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>LayerDownloadVerifying</code></div>
+    <div className="msb-param-desc">Verifying downloaded blob digest for <code>layer_index</code> and <code>digest</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>LayerDownloadComplete</code></div>
+    <div className="msb-param-desc">Layer download finished with <code>layer_index</code>, <code>digest</code>, and <code>downloaded_bytes</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>LayerMaterializeStarted</code></div>
+    <div className="msb-param-desc">Started materializing <code>layer_index</code> with <code>diff_id</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>LayerMaterializeProgress</code></div>
+    <div className="msb-param-desc">Materialization progress with <code>layer_index</code>, <code>bytes_read</code>, and <code>total_bytes</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>LayerMaterializeWriting</code></div>
+    <div className="msb-param-desc">Writing EROFS image for <code>layer_index</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>LayerMaterializeComplete</code></div>
+    <div className="msb-param-desc">Finished materializing <code>layer_index</code> with <code>diff_id</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StitchMergingTrees</code></div>
+    <div className="msb-param-desc">Merging <code>layer_count</code> layer trees into the unified rootfs view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StitchWritingFsmeta</code></div>
+    <div className="msb-param-desc">Writing the metadata-only merged fsmeta image.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StitchWritingVmdk</code></div>
+    <div className="msb-param-desc">Writing the VMDK descriptor stitching fsmeta and layer images.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StitchComplete</code></div>
+    <div className="msb-param-desc">Rootfs stitching finished on disk.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Complete</code></div>
+    <div className="msb-param-desc">Image pull completed for <code>reference</code> with <code>layer_count</code>.</div>
+  </div>
+</div>
 
 ### PullPolicy
 

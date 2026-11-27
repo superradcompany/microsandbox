@@ -26,6 +26,7 @@ mod compact;
 pub(crate) mod config;
 #[cfg(test)]
 mod control_pipe;
+mod creation;
 #[cfg(feature = "local")]
 mod creation_cleanup;
 mod environment_provenance;
@@ -416,13 +417,9 @@ impl Sandbox {
             .await
     }
 
-    /// Create a sandbox with pull progress reporting.
-    ///
-    /// Returns a progress handle for per-layer pull events and a task handle
-    /// for the sandbox creation result. The caller should consume progress
-    /// events until the channel closes, then await the task. This entry point uses
-    /// the configured context.
+    /// Deprecated spelling for [`Self::create_with_progress`].
     #[cfg(feature = "local")]
+    #[deprecated(note = "use create_with_progress instead")]
     pub fn create_with_pull_progress(
         config: SandboxConfig,
     ) -> (
@@ -432,11 +429,9 @@ impl Sandbox {
         Self::create_with_pull_progress_and_mode(config, SpawnMode::Attached)
     }
 
-    /// Create a detached sandbox with pull progress reporting.
-    ///
-    /// Like `create_with_pull_progress` but spawns the sandbox process in detached
-    /// mode so the sandbox survives after the creating process exits.
+    /// Deprecated spelling for [`Self::create_detached_with_progress`].
     #[cfg(feature = "local")]
+    #[deprecated(note = "use create_detached_with_progress instead")]
     pub fn create_detached_with_pull_progress(
         config: SandboxConfig,
     ) -> (

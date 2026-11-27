@@ -465,6 +465,7 @@ fn persisted_sources_survive_a_different_restart_directory() {
                 for mode in 0..3 {
                     let mut builder = destination.sandboxes().builder("unresolved-progress");
                     builder.config = config_with_host_inputs(None).into();
+                    #[allow(deprecated)]
                     let failed = match mode {
                         0 => builder.create_with_progress().is_err(),
                         1 => builder.create_with_pull_progress().is_err(),
@@ -475,11 +476,35 @@ fn persisted_sources_survive_a_different_restart_directory() {
                 assert!(
                     destination
                         .sandboxes()
+                        .create_with_progress(config_with_host_inputs(None))
+                        .is_err(),
+                    "Sandboxes::create_with_progress deferred path resolution"
+                );
+                assert!(
+                    destination
+                        .sandboxes()
+                        .create_detached_with_progress(config_with_host_inputs(None))
+                        .is_err(),
+                    "Sandboxes::create_detached_with_progress deferred path resolution"
+                );
+                assert!(
+                    crate::Sandbox::create_with_progress(config_with_host_inputs(None)).is_err(),
+                    "Sandbox::create_with_progress deferred path resolution"
+                );
+                assert!(
+                    crate::Sandbox::create_detached_with_progress(config_with_host_inputs(None))
+                        .is_err(),
+                    "Sandbox::create_detached_with_progress deferred path resolution"
+                );
+                assert!(
+                    destination
+                        .sandboxes()
                         .restore("./snapshot")
                         .name("unresolved-restore")
                         .restore_with_progress()
                         .is_err()
                 );
+                #[allow(deprecated)]
                 let (_, task) =
                     crate::Sandbox::create_with_pull_progress(config_with_host_inputs(None));
                 // If resolution waited for the task, this valid cwd would hide the error.

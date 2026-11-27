@@ -865,6 +865,7 @@ impl JsSandboxBuilder {
             .inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
+        #[allow(deprecated)]
         let (handle, task) = b.create_with_pull_progress().map_err(to_napi_error)?;
         Ok(JsPullProgressCreate {
             stream: JsPullProgressStream::from_handle(handle),
