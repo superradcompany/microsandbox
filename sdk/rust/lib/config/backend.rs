@@ -170,7 +170,7 @@ impl BackendSelection {
                 overrides.set_backend_mut(None);
             }
             if named || overrides.backend.is_none() {
-                overrides.source_mut(ContextSelectionSource::ActiveProfile);
+                overrides.source_mut(ContextSelectionSource::Managed);
             }
         }
 
@@ -674,7 +674,7 @@ mod tests {
                 selection,
                 BackendSelection::Local { profile: None }
             ));
-            assert_eq!(source, ContextSelectionSource::ActiveProfile);
+            assert_eq!(source, ContextSelectionSource::Managed);
             assert!(
                 BackendSelection::resolve_from(
                     Path::new("config.json"),
@@ -753,7 +753,7 @@ mod tests {
             selection,
             BackendSelection::Local { profile: Some(name) } if name == "work"
         ));
-        assert_eq!(source, ContextSelectionSource::ActiveProfile);
+        assert_eq!(source, ContextSelectionSource::Managed);
         assert_eq!(
             global.resolved_config().profiles["work"].kind,
             ProfileKind::Local

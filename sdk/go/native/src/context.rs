@@ -91,13 +91,14 @@ pub unsafe extern "C" fn msb_context_create(
                 microsandbox::ContextKind::Local => "local",
                 microsandbox::ContextKind::Remote => "remote",
             };
+            let info = context.info()?;
             let handle = NEXT.fetch_add(1, Ordering::Relaxed);
             registry()
                 .write()
                 .map_err(|_| FfiError::internal("context registry lock poisoned"))?
                 .insert(handle, context);
             publication.store(handle, Ordering::Release);
-            Ok(serde_json::json!({"handle":handle,"kind":kind}).to_string())
+            Ok(serde_json::json!({"handle":handle,"kind":kind,"info":info}).to_string())
         }))
     });
     if !result.is_null() {

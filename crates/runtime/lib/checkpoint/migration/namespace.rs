@@ -20,6 +20,15 @@ pub(in crate::checkpoint) struct Guard {
     private_boundaries: Vec<PathBuf>,
 }
 
+/// Retains the configured path and its resolved destination while publishing
+/// host-owned files. Both guards must live until publication completes.
+#[cfg(any(windows, feature = "net", feature = "client"))]
+pub(in crate::checkpoint) struct ConfigurationHome {
+    pub(in crate::checkpoint) path: PathBuf,
+    _lexical: Guard,
+    _target: Guard,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -54,14 +63,71 @@ pub(super) fn acquire(
 
 /// A configured storage home may itself be an administrator-selected alias.
 /// Check its lexical ancestry and pin the canonical directory for publication.
-#[cfg(any(feature = "net", feature = "client"))]
-pub(in crate::checkpoint) fn configuration_home(
-    home: &Path,
-) -> Result<(PathBuf, Guard, Guard), String> {
+#[cfg(any(windows, feature = "net", feature = "client"))]
+pub(in crate::checkpoint) fn configuration_home(home: &Path) -> Result<ConfigurationHome, String> {
     let lexical = acquire_parents(vec![home.to_owned()], true, false)?;
     let path = fs::canonicalize(home).map_err(|e| failure(home, &e))?;
     let target = acquire_parents(vec![path.clone()], true, true)?;
-    Ok((path, lexical, target))
+    Ok(ConfigurationHome {
+        path,
+        _lexical: lexical,
+        _target: target,
+    })
+}
+
+/// Bind credentials to the actual home and catalog directories. Pin each
+/// component while descending so an intermediate junction cannot select some
+/// other home's credential store. Only the new profile path holds key material.
+#[cfg(windows)]
+pub(in crate::checkpoint) fn windows_catalog_scope(catalog: &Path) -> Result<String, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, VOLUME_NAME_GUID};
+
+    let absolute = std::path::absolute(catalog).map_err(|e| failure(catalog, &e))?;
+    let mut chain = absolute.ancestors().collect::<Vec<_>>();
+    chain.reverse();
+    let pins = chain
+        .into_iter()
+        .map(|path| open_directory(path, true))
+        .collect::<Result<Vec<_>, _>>()?;
+    let [.., home, directory] = pins.as_slice() else {
+        return Err("TLS storage has no owning home directory".into());
+    };
+    // A network server supplies its own file IDs. Require a local volume
+    // GUID so a remote catalog cannot select a local user's credential store.
+    let mut name = [0u16; 32768];
+    let len = unsafe {
+        GetFinalPathNameByHandleW(
+            directory.as_raw_handle(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+            VOLUME_NAME_GUID,
+        )
+    } as usize;
+    let path = name
+        .get(..len)
+        .and_then(|value| String::from_utf16(value).ok());
+    let guid = path
+        .as_deref()
+        .and_then(|value| value.strip_prefix(r"\\?\Volume{"))
+        .and_then(|value| value.split_once(r"}\"))
+        .map(|(guid, _)| guid)
+        .filter(|guid| guid.len() == 36 && guid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+        .ok_or("shared TLS storage requires stable local Windows volume and folder identities")?;
+    let identity = |file| {
+        let (_, high, low) = super::super::memory_cache::windows_file_identity(file)
+            .map_err(|e| failure(catalog, &e))?;
+        if high == 0 && low == 0 {
+            return Err("shared TLS storage requires stable folder identities".to_owned());
+        }
+        Ok(format!("{high:08x}{low:08x}"))
+    };
+    Ok(format!(
+        "{}-{}-{}",
+        guid.to_ascii_lowercase(),
+        identity(home)?,
+        identity(directory)?
+    ))
 }
 
 pub(super) fn private_parent(path: &Path) -> Result<Guard, String> {

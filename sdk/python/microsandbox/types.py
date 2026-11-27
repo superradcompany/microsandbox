@@ -113,6 +113,16 @@ class ServiceTarget:
     port: int
 
 
+@dataclass(frozen=True)
+class ContextInfo:
+    """Captured destination metadata. Credentials are never included."""
+
+    kind: ContextKind
+    source: str
+    profile: str | None = None
+    api_url: str | None = None
+
+
 class ContextKind(StrEnum):
     LOCAL = "local"
     REMOTE = "remote"
