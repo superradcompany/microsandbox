@@ -14,7 +14,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 
 use crate::{
     CacheAuthProvenance, CachedImageMetadata, CachedLayerMetadata, Digest, GlobalCache,
-    ImageConfig, ImageError, ImageResult, Platform, Reference, Registry,
+    ImageConfig, ImageError, ImageResult, Platform, Reference, Registry, RootfsMaterialization,
     erofs::{ErofsEntryKind, ErofsReader},
     path_bytes::{os_str_bytes, os_string_from_vec, path_bytes},
     tar::Compression,
@@ -354,6 +354,29 @@ pub async fn load_archive_with<F, Fut>(
     cache: &GlobalCache,
     input: &Path,
     options: ImageLoadOptions,
+    publish: F,
+) -> ImageResult<Vec<LoadedImage>>
+where
+    F: FnMut(LoadedImage) -> Fut,
+    Fut: std::future::Future<Output = ImageResult<()>>,
+{
+    load_archive_with_materialization(
+        cache,
+        input,
+        options,
+        RootfsMaterialization::Layered,
+        publish,
+    )
+    .await
+}
+
+/// Import an archive and prepare the requested rootfs representations before publishing each reference.
+/// Uses the same per-reference cache protection as [`load_archive_with`].
+pub async fn load_archive_with_materialization<F, Fut>(
+    cache: &GlobalCache,
+    input: &Path,
+    options: ImageLoadOptions,
+    materialization: RootfsMaterialization,
     mut publish: F,
 ) -> ImageResult<Vec<LoadedImage>>
 where
@@ -427,11 +450,12 @@ where
         }
         let registry = Registry::new(Platform::host_linux(), operation.clone())?;
         registry
-            .materialize_cached_layers_from_paths(
+            .materialize_cached_rootfs(
                 &reference,
                 &image.metadata,
                 false,
-                staged_layers.clone(),
+                materialization,
+                Some(staged_layers.clone()),
                 progress.clone(),
             )
             .await?;
@@ -752,10 +776,8 @@ fn prepare_docker_archive(
         .flat_map(|image| image.layers.iter().cloned())
         .collect::<HashSet<_>>();
 
-    // Early cache gate: when this exact image is already materialized, skip staging (and re-hashing) every layer blob. `docker save` names images via RepoTags, so we look up
-    // the cached metadata by reference, confirm the archive's content still matches it (diff_ids -- guards against a rebuilt tag reusing the name), and verify the EROFS/VMDK
-    // artifacts survive. On a hit the cached metadata is reused verbatim, which also keys fsmeta/VMDK by the manifest digest recorded at materialization time -- so a `pull`
-    // followed by a `load` of the same image still hits. Only the small config blob is read (seekably, via `read_archive_entries`); layer bytes are never touched.
+    // A known reference with matching config and ordered diff IDs can reuse its verified
+    // EROFS layers. The materializer builds any missing outputs for the requested layout.
     'early_gate: {
         if !use_cache {
             break 'early_gate;
@@ -817,12 +839,11 @@ fn prepare_docker_archive(
                     warm: true,
                 });
             }
-            let Ok(manifest_digest) = cached[0].metadata.manifest_digest.parse::<crate::Digest>()
-            else {
-                break 'early_gate;
-            };
-            if !crate::cache::is_valid_erofs_artifact(&cache.fsmeta_erofs_path(&manifest_digest))
-                || !cache.vmdk_path(&manifest_digest).exists()
+            if cached[0]
+                .metadata
+                .manifest_digest
+                .parse::<Digest>()
+                .is_err()
             {
                 break 'early_gate;
             }
@@ -1040,7 +1061,7 @@ fn prepare_oci_archive(
         manifests.push((candidate, manifest, manifest_bytes.clone()));
     }
 
-    // Fast path: skip re-importing an image that is already fully materialized.
+    // Skip staging layer blobs when the verified EROFS inputs are already cached.
     //
     // A warm load only reuses already accessible references. Check the small
     // manifest and config blobs and leave existing metadata and provenance intact.
@@ -1062,15 +1083,6 @@ fn prepare_oci_archive(
                 break 'early_gate;
             }
             let manifest_digest_str = format!("sha256:{}", sha256_hex(manifest_bytes));
-            let Ok(manifest_digest) = manifest_digest_str.parse::<crate::Digest>() else {
-                break 'early_gate;
-            };
-            if !crate::cache::is_valid_erofs_artifact(&cache.fsmeta_erofs_path(&manifest_digest))
-                || !cache.vmdk_path(&manifest_digest).exists()
-            {
-                break 'early_gate;
-            }
-
             for diff_id in diff_ids {
                 let Ok(diff_id) = diff_id.parse::<Digest>() else {
                     break 'early_gate;
@@ -2014,6 +2026,73 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn archive_load_prepares_requested_roots_for_offline_use() {
+        use crate::RootfsMaterialization::{All, Flat, Layered};
+        use crate::{PullOptions, PullPolicy};
+
+        let temp = tempdir().unwrap();
+        let tag = "flatrepro:dev";
+        let reference: Reference = tag.parse().unwrap();
+        for format in [ImageArchiveFormat::Docker, ImageArchiveFormat::Oci] {
+            let input = temp.path().join("image.tar");
+            match format {
+                ImageArchiveFormat::Docker => write_test_docker_archive(&input, tag),
+                ImageArchiveFormat::Oci => {
+                    write_test_oci_archive_from_layer(&input, tag, simple_layer_tar());
+                }
+            }
+
+            for first_mode in [Layered, Flat, All] {
+                let directory = tempdir().unwrap();
+                let cache = GlobalCache::new(directory.path()).unwrap();
+                let registry = Registry::new(Platform::host_linux(), cache.clone()).unwrap();
+                // A second load can add the missing layout using only the same archive and cache.
+                for mode in [first_mode, All] {
+                    load_archive_with_materialization(
+                        &cache,
+                        &input,
+                        ImageLoadOptions::default(),
+                        mode,
+                        |_| async { Ok(()) },
+                    )
+                    .await
+                    .unwrap();
+
+                    for (layout, expected) in [
+                        (Flat, mode.includes_flat()),
+                        (Layered, mode.includes_layered()),
+                    ] {
+                        let result = registry
+                            .pull(
+                                &reference,
+                                &PullOptions {
+                                    materialization: layout,
+                                    pull_policy: PullPolicy::Never,
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        if expected {
+                            assert!(result.unwrap().cached);
+                        } else {
+                            assert!(matches!(result, Err(ImageError::NotCached { .. })));
+                        }
+                    }
+
+                    // Flat-only loads have no fsmeta/VMDK, but still have reusable EROFS inputs.
+                    let prepared = load_archive_blocking(
+                        directory.path(),
+                        &input,
+                        ImageLoadOptions::default(),
+                    )
+                    .unwrap();
+                    assert!(prepared.staged_layers.is_empty());
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn warm_import_restages_evicted_layers_from_the_archive() {

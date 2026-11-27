@@ -84,6 +84,10 @@ pub struct ImageLoadArgs {
     #[arg(short, long, value_name = "PATH")]
     pub input: Option<PathBuf>,
 
+    /// Rootfs representations to prepare from the archive.
+    #[arg(long, value_enum, default_value = "layered")]
+    pub materialize: pull::PullMaterialization,
+
     /// Add a local image reference to the first imported image.
     #[arg(short, long, value_name = "REF")]
     pub tag: Vec<String>,
@@ -733,13 +737,14 @@ pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
     };
 
     let cache_operation = microsandbox_image::GlobalCache::new(&cache_dir)?;
-    let loaded = microsandbox_image::load_archive_with(
+    let loaded = microsandbox_image::load_archive_with_materialization(
         &cache_operation,
         input_path,
         ImageLoadOptions {
             tags: args.tag.clone(),
             progress: Some(sender),
         },
+        args.materialize.image_materialization(),
         |image| async move {
             Image::persist(local, &image.reference, image.metadata)
                 .await
